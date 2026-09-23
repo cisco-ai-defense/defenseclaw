@@ -1,12 +1,14 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
+ACP_GUARD   := defenseclaw-acp
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.6
+VERSION     := 0.8.10
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
+EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
 # The race-enabled gateway package can exceed the default test deadline on
@@ -94,18 +96,18 @@ endef
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
-        security-suite-test security-suite-eval \
+        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
         grpo-engine \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -307,6 +309,7 @@ build: pycli gateway plugin
 	@echo "All components built:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw"
 	@echo "  • Go gateway   → ./$(GATEWAY)"
+	@echo "  • ACP guard    → ./$(ACP_GUARD)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
 	@echo "Build only: checkout artifacts were not published and managed install state was not changed."
@@ -322,6 +325,7 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -403,7 +407,7 @@ PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
-proto-tools:
+proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
@@ -429,10 +433,13 @@ proto-check: proto
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go
 
-gateway: sync-openclaw-extension
+gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	go build $(GOFLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
+	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
+	@echo "Built $(ACP_GUARD)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 ifeq ($(OS),Windows_NT)
@@ -459,7 +466,7 @@ endif
 # detects the placeholder at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
-sync-openclaw-extension:
+sync-openclaw-extension: _checkout-write-preflight
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
@@ -514,9 +521,13 @@ gateway-cross: sync-openclaw-extension
 		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
 	fi
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
 	@if [ "$(GOOS)" = "windows" ]; then \
 		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(ACP_GUARD)-$(GOOS)-$(GOARCH).exe -component acp-guard -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
 			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
@@ -526,6 +537,7 @@ gateway-cross: sync-openclaw-extension
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
+	@echo "Built $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,)"
 
 gateway-run: gateway
 	./$(GATEWAY)$(EXE)
@@ -533,7 +545,7 @@ gateway-run: gateway
 start: gateway
 	@./scripts/start.sh $(ARGS)
 
-plugin:
+plugin: _checkout-write-preflight
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
@@ -541,7 +553,7 @@ plugin:
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo "  Install with: make plugin-install"
 
-amp-plugin-typecheck:
+amp-plugin-typecheck: _checkout-write-preflight
 	cd scripts/amp-plugin-typecheck && npm ci --ignore-scripts --no-audit --no-fund
 	cd scripts/amp-plugin-typecheck && npm test
 
@@ -554,6 +566,9 @@ amp-plugin-typecheck:
 # installed entry point or gateway can be replaced.  A marker makes subsequent
 # rebuilds from this exact checkout idempotent; the legacy exact CLI symlink
 # check admits same-checkout installs made before the marker existed.
+_checkout-write-preflight:
+	@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"
+
 _source-install-preflight:
 	@./scripts/source-install-preflight.sh check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -598,6 +613,9 @@ _source-dev-install: _source-install-dev-preflight
 	@./scripts/source-install-preflight.sh dev-publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-publish-acp \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@./scripts/source-install-preflight.sh dev-claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
@@ -606,6 +624,7 @@ _source-dev-install: _source-install-dev-preflight
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -654,6 +673,9 @@ gateway-install: _source-install-preflight cli-install
 		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
 	fi
 	@./scripts/source-install-preflight.sh publish-gateway \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@./scripts/source-install-preflight.sh claim \
@@ -796,6 +818,85 @@ packaging-macos-bundle:
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
 
+# The managed-enterprise Windows build is split so a macOS release box (which
+# has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway
+# zip, and a Windows tester (which typically does not) only runs the OSS
+# installer flow against that zip.
+#
+# packaging-windows-managed-gateway-zip (macOS / Linux / Windows-with-bash):
+#   Clones ai-common at $(WINDOWS_MANAGED_REF), applies the cloudreg overlay,
+#   pins the ai-common/cmid pseudo-version, cross-builds defenseclaw.exe +
+#   defenseclaw-hook.exe with -tags cmid, stamps VERSIONINFO / icon on both,
+#   and packages them into $(DIST_DIR)/defenseclaw_$(VERSION)_windows_amd64.zip
+#   alongside a gateway-source-commit.txt sidecar. Restores the OSS working
+#   tree on exit.
+#
+# The prior name was `packaging-managed-windows-bundle`, which differed from
+# `packaging-windows-managed-bundle` (the Windows-only enterprise-installer
+# build) only by word order — an operator transposing the words ran the
+# wrong step, and the mistake only surfaced after the script started.
+# The prior name is retained below as a deprecated alias.
+WINDOWS_MANAGED_REF ?= develop
+packaging-windows-managed-gateway-zip:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)"
+
+# Deprecated alias — remove in a future cleanup pass once release runbooks
+# are updated. Use `packaging-windows-managed-gateway-zip` instead.
+packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
+	@echo 'note: `packaging-managed-windows-bundle` is deprecated; use `packaging-windows-managed-gateway-zip`.'
+
+# packaging-windows-enterprise-installer:
+#   Local self-serve unsigned developer build. Under the AVC-approved
+#   Windows managed_enterprise handoff (spec 002:
+#   docs/specs/002-windows-avc-packaging), a signed Setup EXE is
+#   produced only by AVC's pipeline consuming a build kit; DefenseClaw-
+#   side runs are always unsigned. This target invokes the extended
+#   bundler with --allow-unsigned, which emits the kit AND runs
+#   assemble.sh inline to produce a runnable
+#   DefenseClawSetup-Enterprise-x64.exe under
+#   dist/windows-enterprise-buildkit-<version>-unsigned/out/.
+#
+# Prereqs (macOS/Linux — the retired on-Windows-box flow no longer
+# runs; AVC does the signing round trips):
+#   - bash, git, go, zip on PATH.
+#   - Access to cisco-aispg/ai-common at $WINDOWS_MANAGED_REF for the
+#     private CMID overlay (or --ai-common-dir pointing at an existing
+#     checkout).
+#   - Local git HEAD == the DefenseClaw commit whose bytes you want
+#     stamped into the artefact (the bundler embeds HEAD as
+#     main.commit and refuses drift).
+#
+# For a signed release artefact, use `packaging-windows-avc-buildkit`
+# below to emit the kit and hand it to AVC.
+packaging-windows-enterprise-installer:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)" \
+	    --allow-unsigned
+
+# packaging-windows-avc-buildkit:
+#   Alias for `packaging-windows-managed-gateway-zip` — both invoke the
+#   same bundler, which emits BOTH the legacy gateway zip AND the
+#   AVC-facing build kit at
+#   $(DIST_DIR)/windows-enterprise-buildkit-<version>/ on the same run.
+#   The alias exists so release runbooks that grep for the intent
+#   ("build the AVC kit") find a matching target. Hand the kit to AVC
+#   per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the inner
+#   payload, runs the shipped assemble.sh, and signs the outer Setup
+#   EXE. See CR spec-002:PRRT_kwDORuAK-s6af8ii.
+packaging-windows-avc-buildkit: packaging-windows-managed-gateway-zip
+
+# Deprecated alias — remove once release runbooks are updated to use
+# `packaging-windows-avc-buildkit` (the AVC-facing kit target) or
+# `packaging-windows-enterprise-installer` (the local unsigned dev
+# build). See CR spec-002:PRRT_kwDORuAK-s6af8ie.
+packaging-windows-managed-bundle: packaging-windows-avc-buildkit
+	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-avc-buildkit` (for the AVC kit) or `packaging-windows-enterprise-installer` (for a local unsigned dev build).'
+
 # Native SwiftUI companion-app checks and release packaging. The release target
 # builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
 # zip. Both are ad-hoc signed by default; scripts/build-macos-app-release.sh
@@ -822,6 +923,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
+	macos/DefenseClawMac/script/test_ai_runtime_models.sh
+	macos/DefenseClawMac/script/test_panel_registry.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
@@ -851,6 +954,14 @@ security-suite-test:
 # the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
 security-suite-eval:
 	GUARDRAIL_BENCHMARK_LLM=1 go test ./internal/gateway/ -run '^(TestSecuritySuiteJudge|TestEvalInjectionJudge|TestEvalPIIJudge|TestEvalExfilJudge|TestEvalToolInjectionJudge)$$' -count=1 -timeout 120m -v
+
+# contextual-judge-test validates sampling and value-free combined scoring.
+# Live production-path model runs remain opt-in; see benchmarks/llm_judge/.
+contextual-judge-test:
+	python3 -m unittest \
+		benchmarks.scripts.test_benchmark_prepare_contextual_judge \
+		benchmarks.scripts.test_benchmark_add_terminalbench_context \
+		benchmarks.scripts.test_benchmark_score_contextual_judge
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
@@ -997,8 +1108,30 @@ upgrade-signed-protocol-matrix:
 # Lint targets
 # ---------------------------------------------------------------------------
 
-lint: py-lint go-lint
+lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
+
+# go-mod-no-toolchain refuses a `toolchain` directive in go.mod so the
+# managed-enterprise / AVC reproducibility pin (GOTOOLCHAIN in
+# packaging/scripts/lib/repro-flags.{sh,ps1}) cannot silently leak into
+# OSS builds. See docs/specs/001-windows-deterministic-build/design.md.
+go-mod-no-toolchain:
+	@scripts/check-go-mod-no-toolchain.sh
+
+# repro-flags-parity refuses drift between the bash and pwsh copies of
+# repro-flags.* — both files must ship the same fixed env exports and
+# the same required-env list, or the byte-identical outer Setup EXE
+# contract that Workstream A depends on quietly breaks.
+repro-flags-parity:
+	@scripts/check-repro-flags-parity.sh
+
+# assemble-parity refuses drift between the bash and pwsh copies of
+# assemble.* — both files must ship the same stage sequence, expected
+# payload filenames, and emitter subcommand set, or a kit built with
+# --script-host pwsh could silently diverge from --script-host bash.
+# See docs/specs/002-windows-avc-packaging/design.md § Risks.
+assemble-parity:
+	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
 	$(RUFF) check cli/defenseclaw/
@@ -1038,6 +1171,7 @@ go-lint: sync-openclaw-extension
 # ---------------------------------------------------------------------------
 
 dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
+	@$(MAKE) --no-print-directory dist-extension-contract
 	@echo ""
 	@echo "Unsigned release-build inputs:"
 	@ls -lh $(DIST_DIR)/
@@ -1054,13 +1188,19 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
 	@echo "  resolve artifacts under https://github.com/.../releases/tag/X.Y.Z"
 
-dist-cli: _bundle-data
+_stage-extension-fingerprint: plugin
+	@mkdir -p $(dir $(EXTENSION_FINGERPRINT))
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py stage \
+		--source $(PLUGIN_DIR) \
+		--output $(EXTENSION_FINGERPRINT)
+
+dist-cli: _bundle-data _stage-extension-fingerprint
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
-_bundle-data:
+_bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
@@ -1121,17 +1261,32 @@ _bundle-data:
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \
-	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    if [ "$$d" = "local_observability_stack" ]; then \
+	      rsync -a --delete --delete-excluded --inplace \
+	        --exclude='/.grafana-admin-password' \
+	        --exclude='/..grafana-admin-password.*.tmp' \
+	        --exclude='/.grafana-access-mode' \
+	        --exclude='/..grafana-access-mode.*.tmp' \
+	        "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    else \
+	      rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    fi; \
 	  else \
 	    rm -rf "cli/defenseclaw/_data/$$d"; \
 	    mkdir -p "cli/defenseclaw/_data/$$d"; \
 	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
 	  fi; \
+	  if [ "$$d" = "local_observability_stack" ]; then \
+	    rm -rf "cli/defenseclaw/_data/$$d/.grafana-admin-password" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-admin-password.*.tmp \
+	      "cli/defenseclaw/_data/$$d/.grafana-access-mode" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp; \
+	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
-dist-gateway:
+dist-gateway: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)
 	@for pair in linux/amd64 linux/arm64 darwin/arm64; do \
 		goos=$${pair%%/*}; goarch=$${pair##*/}; \
@@ -1140,20 +1295,35 @@ dist-gateway:
 			-ldflags "-s -w -X main.version=$(VERSION)" \
 			-o $(DIST_DIR)/$(GATEWAY)-$${goos}-$${goarch} \
 			./cmd/defenseclaw; \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build \
+			-ldflags "-s -w -X main.version=$(VERSION)" \
+			-o $(DIST_DIR)/$(ACP_GUARD)-$${goos}-$${goarch} \
+			./cmd/defenseclaw-acp; \
 	done
-	@echo "Gateway binaries built for all platforms"
+	@echo "Gateway and ACP guard binaries built for all platforms"
 
-dist-plugin: plugin
+dist-plugin: _stage-extension-fingerprint
 	@mkdir -p $(DIST_DIR)
-	tar -czf $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
+	COPYFILE_DISABLE=1 tar -czf $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
 		-C $(PLUGIN_DIR) \
 		package.json openclaw.plugin.json dist/ \
 		$$(cd $(PLUGIN_DIR) && for dep in js-yaml argparse; do \
 			[ -d "node_modules/$$dep" ] && echo "node_modules/$$dep"; \
 		done)
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py verify-archive \
+		--source $(PLUGIN_DIR) \
+		--reference $(EXTENSION_FINGERPRINT) \
+		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz
 	@echo "Plugin tarball built"
 
-dist-sandbox:
+dist-extension-contract:
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py verify-contract \
+		--source $(PLUGIN_DIR) \
+		--reference $(EXTENSION_FINGERPRINT) \
+		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
+		--wheel $(DIST_DIR)/defenseclaw-$(VERSION)-py3-none-any.whl
+
+dist-sandbox: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts
 	cp policies/openshell/*.rego $(DIST_DIR)/sandbox/policies/
 	cp policies/openshell/*.yaml $(DIST_DIR)/sandbox/policies/
@@ -1161,7 +1331,7 @@ dist-sandbox:
 	chmod +x $(DIST_DIR)/sandbox/scripts/install-openshell-sandbox.sh
 	@echo "Sandbox artifacts copied to $(DIST_DIR)/sandbox/"
 
-dist-test:
+dist-test: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/test
 	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
 	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
@@ -1173,22 +1343,22 @@ dist-test:
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
-dist-upgrade-manifest:
+dist-upgrade-manifest: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)
 	python3 scripts/generate-upgrade-manifest.py --out $(DIST_DIR)/upgrade-manifest.json
 
-dist-checksums:
+dist-checksums: _checkout-write-preflight
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
 	cd $(DIST_DIR) && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
-dist-clean:
+dist-clean: _checkout-write-preflight
 	rm -rf $(DIST_DIR)
 	rm -rf cli/defenseclaw/_data
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

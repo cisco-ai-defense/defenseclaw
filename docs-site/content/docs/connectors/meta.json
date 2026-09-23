@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "compatibility",
+    "kiro",
     "claudecode",
     "codex",
     "openclaw",
@@ -11,11 +12,10 @@
     "opencode",
     "amp",
     "omnigent",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",
-    "windsurf",
+    "devin",
     "zeptoclaw"
   ]
 }

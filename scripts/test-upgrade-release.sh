@@ -134,6 +134,62 @@ if versions != [expected]:
 PY
 }
 
+seed_stale_skill_scanner_launcher() {
+    local launcher="${SMOKE_HOME}/.local/bin/skill-scanner"
+    local expected="${WORKDIR}/stale-skill-scanner-${FROM_VERSION}.expected"
+    python3 - "${launcher}" <<'PY'
+from pathlib import Path
+import sys
+
+launcher = Path(sys.argv[1])
+launcher.unlink(missing_ok=True)
+launcher.write_bytes(
+    b"#!/nonexistent/defenseclaw-fixture/python3\n"
+    b"# -*- coding: utf-8 -*-\n"
+    b"import sys\n"
+    b"from skill_scanner.cli.cli import main\n"
+    b"if __name__ == \"__main__\":\n"
+    b"    sys.exit(main())\n"
+)
+launcher.chmod(0o755)
+PY
+    cp "${launcher}" "${expected}"
+    if "${launcher}" --version >/dev/null 2>&1; then
+        die "stale skill-scanner fixture unexpectedly started"
+    fi
+}
+
+assert_repaired_skill_scanner_launcher() {
+    local launcher="${SMOKE_HOME}/.local/bin/skill-scanner"
+    local managed="${SMOKE_HOME}/.defenseclaw/.venv/bin/skill-scanner"
+    local expected="${WORKDIR}/stale-skill-scanner-${FROM_VERSION}.expected"
+    local output
+    [[ -L "${launcher}" ]] || die "upgraded skill-scanner launcher is not a symlink"
+    [[ "$(readlink "${launcher}")" == "${managed}" ]] \
+        || die "upgraded skill-scanner launcher does not target the managed environment"
+    output="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        "${launcher}" --version 2>&1)" \
+        || die "upgraded skill-scanner launcher failed"
+    python3 - "${output}" "${expected}" "${SMOKE_HOME}/.defenseclaw-install-custody" <<'PY' \
+        || die "upgraded skill-scanner launcher or retirement custody is invalid"
+from pathlib import Path
+import re
+import sys
+
+output, expected_path, custody_path = sys.argv[1:]
+if re.fullmatch(r"skill-scanner (?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", output) is None:
+    raise SystemExit(f"unexpected skill-scanner version output: {output!r}")
+expected = Path(expected_path).read_bytes()
+retired = [
+    path
+    for path in Path(custody_path).glob("retired-*")
+    if path.is_file() and path.read_bytes() == expected
+]
+if len(retired) != 1:
+    raise SystemExit(f"expected one retired stale skill-scanner launcher, found {len(retired)}")
+PY
+}
+
 cleanup() {
     local status=$?
     stop_smoke_gateway
@@ -626,30 +682,41 @@ PY
         # architecture inside every protected gateway. Cross-build all six
         # payloads so prepare-only cannot report green with placeholder bytes
         # that the release workflow's verify-runtime gate would reject.
-        local fixture_os fixture_arch fixture_stage canonical_archive
+        local fixture_os fixture_arch fixture_stage canonical_archive gateway_name acp_name
         for fixture_os in darwin linux windows; do
             for fixture_arch in amd64 arm64; do
                 fixture_stage="${WORKDIR}/gateway-${fixture_os}-${fixture_arch}"
                 mkdir -p "${fixture_stage}"
+                gateway_name="defenseclaw"
+                acp_name="defenseclaw-acp"
+                if [[ "${fixture_os}" == "windows" ]]; then
+                    gateway_name="defenseclaw.exe"
+                    acp_name="defenseclaw-acp.exe"
+                fi
                 (
                     cd "${build_root}"
                     CGO_ENABLED=0 GOOS="${fixture_os}" GOARCH="${fixture_arch}" \
                         go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
-                        -o "${fixture_stage}/defenseclaw" ./cmd/defenseclaw
+                        -o "${fixture_stage}/${gateway_name}" ./cmd/defenseclaw
+                    CGO_ENABLED=0 GOOS="${fixture_os}" GOARCH="${fixture_arch}" \
+                        go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
+                        -o "${fixture_stage}/${acp_name}" ./cmd/defenseclaw-acp
                 )
                 if [[ "${fixture_os}" == "windows" ]]; then
                     canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_windows_${fixture_arch}.zip"
-                    python3 - "${fixture_stage}/defenseclaw" "${canonical_archive}" <<'PY'
+                    python3 - "${fixture_stage}/${gateway_name}" "${fixture_stage}/${acp_name}" "${canonical_archive}" <<'PY'
 import sys
 import zipfile
 
-source, destination = sys.argv[1:]
+gateway, acp, destination = sys.argv[1:]
 with zipfile.ZipFile(destination, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-    archive.write(source, arcname="defenseclaw.exe")
+    archive.write(gateway, arcname="defenseclaw.exe")
+    archive.write(acp, arcname="defenseclaw-acp.exe")
 PY
                 else
                     canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_${fixture_os}_${fixture_arch}.tar.gz"
-                    tar -czf "${canonical_archive}" -C "${fixture_stage}" defenseclaw
+                    tar -czf "${canonical_archive}" -C "${fixture_stage}" \
+                        defenseclaw defenseclaw-acp
                 fi
                 printf '%s\n' '{}' > "${canonical_archive}.sbom.json"
             done
@@ -1189,6 +1256,7 @@ download_old_asset() {
         upgrade-manifest.json) max_bytes=4194304 ;;
     esac
     if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+        --retry 3 --retry-delay 1 --retry-all-errors \
         --max-filesize "${max_bytes}" "${url}" -o "${temporary}"; then
         rm -f "${temporary}"
         return 1
@@ -2387,8 +2455,23 @@ if (config.get("ai_discovery") or {}).get("emit_otel") is not None:
     raise SystemExit("legacy ai_discovery.emit_otel remains in v8 config")
 
 observability = config.get("observability") or {}
-if (observability.get("defaults") or {}).get("redaction_profile") != "legacy-v7":
-    raise SystemExit("legacy-v7 compatibility redaction was not materialized")
+# The compatibility profile is now an explicit custom profile named
+# v7-compatible: the legacy-v7 built-in was removed, and the compiler refuses
+# a custom profile that tries to reclaim the retired name.
+if (observability.get("defaults") or {}).get("redaction_profile") != "v7-compatible":
+    raise SystemExit("v7-compatible redaction was not materialized")
+profiles = observability.get("redaction_profiles") or {}
+if "v7-compatible" not in profiles:
+    raise SystemExit("the v7-compatible profile was not written into redaction_profiles")
+classes = (profiles["v7-compatible"] or {}).get("field_classes") or {}
+# Every class v7 redacted must still be redacted. Identifiers are the one
+# departure and are preserved by design: no v8 profile redacts the class
+# records join on.
+for field_class in ("content", "reason", "evidence", "error", "path", "credential"):
+    if classes.get(field_class) != "whole":
+        raise SystemExit(
+            f"v7-compatible no longer redacts {field_class}; the upgrade would reveal it"
+        )
 if (observability.get("trace_policy") or {}).get("sampler") != "always_on":
     raise SystemExit("trace sampler was not preserved")
 if observability.get("metric_policy") != {
@@ -2490,7 +2573,7 @@ for destination_name in required_destinations:
         if not isinstance(route, dict) or route.get("action", "send") != "send":
             continue
         signals = set(route.get("signals", []))
-        if signals.intersection({"logs", "traces"}) and route.get("redaction_profile") != "legacy-v7":
+        if signals.intersection({"logs", "traces"}) and route.get("redaction_profile") != "v7-compatible":
             raise SystemExit(f"compatibility redaction missing from {destination_name}")
 
 if destinations["splunk-protected"].get("kind") != "splunk_hec":
@@ -2657,8 +2740,8 @@ manifest_path = stack / ".defenseclaw-bundle-manifest.json"
 bundle_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if bundle_manifest.get("bundle_version") != target_version:
     raise SystemExit("local bundle manifest is not stamped with the target version")
-if len(bundle_manifest.get("dashboard_uids", [])) != 14:
-    raise SystemExit("local bundle manifest does not contain all fourteen dashboards")
+if len(bundle_manifest.get("dashboard_uids", [])) != 16:
+    raise SystemExit("local bundle manifest does not contain all sixteen dashboards")
 if set(bundle_manifest.get("named_volumes", [])) != {
     "grafana-data",
     "loki-data",
@@ -2961,12 +3044,14 @@ run_one_upgrade_smoke() {
     mkdir -p "${SMOKE_HOME}"
 
     install_baseline
+    seed_stale_skill_scanner_launcher
     seed_upgrade_fixture
     start_source_gateway_canary
     assert_source_gateway_canary_preserved_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade
+    assert_repaired_skill_scanner_launcher
     stop_smoke_gateway
 
     ok "Upgrade smoke passed: ${FROM_VERSION} -> ${TARGET_VERSION} (${OS_NAME}/${ARCH_NAME})"

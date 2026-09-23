@@ -16,6 +16,8 @@
 
 """Tests for 'defenseclaw init' command."""
 
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -23,8 +25,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+import click
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -37,8 +41,11 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
+
+from tests.helpers import record_test_setup_agent_selections
 
 
 def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
@@ -51,7 +58,7 @@ def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
 
 class TestInitCommand(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-test-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-test-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -205,11 +212,14 @@ class TestInitFirstRunBackend(unittest.TestCase):
     """Tests for the new canonical first-run backend behind init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
+        # macOS exposes /var through /private/var. Device-identity setup
+        # intentionally rejects an indirect data-dir path, so tests must pass
+        # the canonical path just as the CLI persists it.
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-first-run-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            side_effect=record_test_setup_agent_selections,
         )
         self.selection_mock = self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -280,6 +290,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         )
 
     def test_explicit_connector_requires_protected_executable_selection(self):
+        self.selection_mock.side_effect = None
         self.selection_mock.return_value = ({}, {"codex": "untrusted executable"})
 
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
@@ -301,8 +312,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("untrusted executable", result.output)
 
     def test_non_windows_codex_init_does_not_require_windows_policy_receipt(self):
-        self.selection_mock.return_value = ({}, {"codex": "must not be consulted"})
-
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="linux"):
             result = self._invoke([
                 "--non-interactive",
@@ -321,8 +330,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.selection_mock.assert_not_called()
 
     def test_windows_claude_init_does_not_require_unused_codex_policy_receipt(self):
-        self.selection_mock.return_value = ({}, {"claudecode": "must not be consulted"})
-
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
             result = self._invoke([
                 "--non-interactive",
@@ -338,7 +345,612 @@ class TestInitFirstRunBackend(unittest.TestCase):
             ])
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.selection_mock.assert_not_called()
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("claudecode",))
+
+    def test_windows_omnigent_init_records_required_executable_receipt(self):
+        self.selection_patcher.stop()
+        trusted = Path(self.tmp_dir) / "trusted"
+        trusted.mkdir()
+        executable = trusted / "omnigent.exe"
+        executable.write_bytes(b"native omnigent fixture")
+
+        with (
+            patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
+                return_value=(str(trusted),),
+            ),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._binary_candidates_for_agent",
+                return_value=(),
+            ),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._version_for_agent_binary",
+                return_value=("omnigent 0.7.0", ""),
+            ),
+        ):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "omnigent",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        with open(os.path.join(self.tmp_dir, "agent_selection.json"), encoding="utf-8") as fh:
+            receipt = json.load(fh)
+        selection = receipt["selections"]["omnigent"]
+        self.assertEqual(selection["connector"], "omnigent")
+        self.assertEqual(selection["source"], "setup-selected")
+        self.assertEqual(selection["executable"], str(executable.resolve()))
+        self.assertEqual(selection["raw_version"], "omnigent 0.7.0")
+        self.assertEqual(selection["normalized_version"], "0.7.0")
+        self.assertEqual(
+            selection["sha256"],
+            hashlib.sha256(executable.read_bytes()).hexdigest(),
+        )
+
+    def test_windows_copilot_is_available_through_ordinary_init(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "copilot")
+
+    def test_noninteractive_opencode_primary_records_complete_roster_once(self):
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "opencode",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+            {
+                "connector": "amp",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+        ]
+        self.selection_mock.reset_mock()
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_build_noninteractive_connector_settings", return_value=settings),
+            patch.object(
+                cmd_init,
+                "_activate_additional_connectors",
+                return_value=(["opencode", "amp"], None),
+            ),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke(
+                [
+                    "--non-interactive",
+                    "--yes",
+                    "--skip-install",
+                    "--no-start-gateway",
+                    "--no-verify",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
+
+    def test_guided_opencode_primary_records_complete_roster_once(self):
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "opencode",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+            {
+                "connector": "amp",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+        ]
+        self.selection_mock.reset_mock()
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+            patch.object(
+                cmd_init,
+                "_prompt_first_run",
+                return_value=(settings, "local", False, None, False, False),
+            ),
+            patch.object(
+                cmd_init,
+                "_activate_additional_connectors",
+                return_value=(["opencode", "amp"], None),
+            ),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke([])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
+
+    def test_windows_opencode_is_provisional_in_noninteractive_action_filter(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._discovery({"amp", "opencode"})
+        forbidden = AssertionError("generic OpenCode 1.18.20 must not downgrade exact SST 1.18.19")
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+        ):
+            settings = cmd_init._build_noninteractive_connector_settings(
+                connector=None,
+                profile=None,
+                observe_all=True,
+                action_connectors="opencode",
+                fail_mode="closed",
+                human_approval=False,
+                hilt_min_severity="HIGH",
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        by_name = {item["connector"]: item for item in settings}
+        self.assertEqual(by_name["opencode"]["profile"], "action")
+        generic.assert_not_called()
+
+    def test_windows_guided_opencode_action_skips_generic_filter(self):
+        from defenseclaw.commands import cmd_init
+
+        checked: list[str] = []
+
+        def generic(connector, **_kwargs):
+            checked.append(connector)
+            if connector == "opencode":
+                raise AssertionError("guided PATH/configured OpenCode cannot decide action mode")
+            return True
+
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_prompt_connector_selection", return_value=["amp", "opencode"]),
+            patch.object(
+                cmd_init,
+                "_prompt_checkbox_selection",
+                side_effect=[["amp", "opencode"], []],
+            ),
+            patch.object(cmd_init.click, "prompt", return_value="local"),
+            patch.object(cmd_init.click, "confirm", side_effect=[False, False]),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=generic,
+            ),
+        ):
+            settings, *_rest = cmd_init._prompt_first_run(
+                connector=None,
+                profile=None,
+                scanner_mode="local",
+                with_judge=False,
+                fail_mode="open",
+                human_approval=False,
+                hilt_min_severity="HIGH",
+                start_gateway=False,
+                verify=False,
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        by_name = {item["connector"]: item for item in settings}
+        self.assertEqual(by_name["opencode"]["profile"], "action")
+        self.assertEqual(checked, ["amp"])
+
+    def test_windows_explicit_opencode_roster_skips_preselection_discovery(self):
+        from defenseclaw.commands import cmd_init
+
+        forbidden = AssertionError("generic discovery must follow exact SST selection")
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(
+                cmd_init.agent_discovery,
+                "discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch.object(
+                cmd_init,
+                "_prompt_trust_discovery_prefixes",
+                side_effect=forbidden,
+            ) as trust,
+        ):
+            selected = cmd_init._prompt_connector_selection(
+                "amp,opencode",
+                False,
+                data_dir=self.tmp_dir,
+            )
+
+        self.assertEqual(selected, ["amp", "opencode"])
+        discover.assert_not_called()
+        trust.assert_not_called()
+
+    def test_windows_opencode_trust_remediation_ignores_generic_signal(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = SimpleNamespace(
+            agents={
+                "opencode": SimpleNamespace(
+                    error=agent_discovery.UNTRUSTED_PREFIX_ERROR,
+                    binary_path=r"D:\decoy\opencode.exe",
+                ),
+                "amp": SimpleNamespace(
+                    error=agent_discovery.UNTRUSTED_PREFIX_ERROR,
+                    binary_path=r"D:\amp\amp.exe",
+                ),
+            }
+        )
+        with patch.object(cmd_init.platform_support, "host_os", return_value="windows"):
+            rows = cmd_init._untrusted_discovery_prefixes(disc)
+
+        self.assertEqual([name for name, _binary, _parent in rows], ["amp"])
+
+    def test_windows_opencode_extra_uses_concrete_receipt_bound_selection(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _validate_setup_agent_selection_receipt,
+        )
+
+        primary = {
+            "connector": "amp",
+            "profile": "observe",
+            "fail_mode": None,
+            "human_approval": None,
+            "hilt_min_severity": None,
+        }
+        extras = [
+            {
+                "connector": "opencode",
+                "profile": "action",
+                "fail_mode": "closed",
+                "human_approval": False,
+                "hilt_min_severity": "HIGH",
+            }
+        ]
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+            cfg = cfg_mod.default_config()
+            cfg_mod.prepare_fresh_v8_config(cfg)
+            cfg.guardrail.connector = "amp"
+            cfg.claw.mode = "amp"
+            cfg.save()
+            setup_snapshot = _capture_setup_config_snapshot(cfg)
+            records, _errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("amp", "opencode"),
+            )
+            protected_selection = _validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("amp", "opencode"),
+                records,
+                prior_generation=setup_snapshot.agent_selection_generation,
+            )
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=AssertionError("extra OpenCode must use the exact selection result"),
+                ) as generic,
+            ):
+                active, sidecar = cmd_init._activate_additional_connectors(
+                    primary,
+                    extras,
+                    start_gateway=False,
+                    quiet=True,
+                    protected_selection=protected_selection,
+                )
+
+            reloaded = cfg_mod.load()
+
+        self.assertIsNone(sidecar)
+        self.assertEqual(active, ["amp", "opencode"])
+        self.assertEqual(reloaded.guardrail.effective_mode("opencode"), "action")
+        generic.assert_not_called()
+
+    def test_windows_opencode_extra_reselection_failure_restores_authority(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _validate_setup_agent_selection_receipt,
+        )
+
+        primary = {
+            "connector": "amp",
+            "profile": "observe",
+            "fail_mode": None,
+            "human_approval": None,
+            "hilt_min_severity": None,
+        }
+        extras = [
+            {
+                "connector": "opencode",
+                "profile": "action",
+                "fail_mode": "closed",
+                "human_approval": False,
+                "hilt_min_severity": "HIGH",
+            }
+        ]
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+            cfg = cfg_mod.default_config()
+            cfg_mod.prepare_fresh_v8_config(cfg)
+            cfg.guardrail.connector = "amp"
+            cfg.claw.mode = "amp"
+            cfg.save()
+            setup_snapshot = _capture_setup_config_snapshot(cfg)
+            records, _errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("amp", "opencode"),
+            )
+            protected_selection = _validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("amp", "opencode"),
+                records,
+                prior_generation=setup_snapshot.agent_selection_generation,
+            )
+            receipt = Path(self.tmp_dir, "agent_selection.json")
+            lock = Path(self.tmp_dir, "hook_contract_lock.json")
+            prior_receipt = receipt.read_bytes() + b" "
+            prior_lock = b'{"prior":"extra-lock"}\n'
+            atomic_write_private_bytes(str(receipt), prior_receipt)
+            atomic_write_private_bytes(str(lock), prior_lock)
+            config_before = Path(self.tmp_dir, "config.yaml").read_bytes()
+
+            def fail_reselection(_data_dir, connectors, **_kwargs):
+                self.assertEqual(tuple(connectors), ("amp", "opencode"))
+                atomic_write_private_bytes(str(receipt), b"failed replacement\n")
+                atomic_write_private_bytes(str(lock), b"failed lock replacement\n")
+                raise OSError("exact reselection failed")
+
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+                patch(
+                    "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                    side_effect=fail_reselection,
+                ) as reselect,
+                self.assertRaisesRegex(OSError, "exact reselection failed"),
+            ):
+                cmd_init._activate_additional_connectors(
+                    primary,
+                    extras,
+                    start_gateway=False,
+                    quiet=True,
+                    protected_selection=protected_selection,
+                )
+
+        reselect.assert_called_once()
+        self.assertEqual(receipt.read_bytes(), prior_receipt)
+        self.assertEqual(lock.read_bytes(), prior_lock)
+        self.assertEqual(Path(self.tmp_dir, "config.yaml").read_bytes(), config_before)
+
+    def test_native_setup_copilot_bootstrap_remains_compatible(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-copilot",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "copilot")
+
+    def test_native_setup_copilot_bootstrap_rejects_non_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--connector",
+                "copilot",
+                "--native-setup-copilot",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("reserved for the exact non-interactive native Windows Setup invocation", result.output)
+
+    def test_windows_antigravity_is_available_through_ordinary_init(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "antigravity")
+
+    def test_ordinary_antigravity_init_seeds_canonical_config(self):
+        with patch(
+            "defenseclaw.commands.cmd_init.platform_support.host_os",
+            return_value="windows",
+        ):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "antigravity")
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["claw"]["mode"], "antigravity")
+        self.assertEqual(cfg["guardrail"]["connector"], "antigravity")
+
+    def test_removed_antigravity_bootstrap_flag_is_rejected_even_with_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-antigravity",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("No such option", result.output)
+        self.assertIn("--native-setup-antigravity", result.output)
+
+    def test_internal_antigravity_bootstrap_requires_actual_setup_parent(self):
+        from defenseclaw.commands import cmd_init
+
+        expected = os.path.join(self.tmp_dir, "DefenseClawSetup-x64.exe")
+        install_root = os.path.join(self.tmp_dir, "installed")
+        launcher = os.path.join(install_root, "bin", "defenseclaw.exe")
+        launcher_pid = 101
+        setup_pid = 202
+        setup_args = [
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "antigravity",
+            "--profile",
+            "observe",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ]
+        environment = {
+            cmd_init._INTERNAL_SETUP_CONNECTOR_ENV: "antigravity",
+            cmd_init._INTERNAL_SETUP_PARENT_ENV: expected,
+            cmd_init._INSTALL_ROOT_ENV: install_root,
+        }
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {launcher_pid: launcher, setup_pid: expected}.get(pid),
+        ):
+            self.assertTrue(cmd_init._internal_antigravity_setup_parent_matches())
+            with patch(
+                "defenseclaw.commands.cmd_init.platform_support.host_os",
+                return_value="windows",
+            ):
+                result = self.runner.invoke(
+                    init_cmd,
+                    setup_args,
+                    obj=AppContext(),
+                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
+                )
+            self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+            self.assertEqual(json.loads(result.output)["connector"], "antigravity")
+
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {
+                launcher_pid: launcher,
+                setup_pid: os.path.join(self.tmp_dir, "powershell.exe"),
+            }.get(pid),
+        ):
+            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
+            with patch(
+                "defenseclaw.commands.cmd_init.platform_support.host_os",
+                return_value="windows",
+            ):
+                result = self.runner.invoke(
+                    init_cmd,
+                    setup_args,
+                    obj=AppContext(),
+                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
+                )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("internal Antigravity Setup binding is invalid", result.output)
+
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {
+                launcher_pid: os.path.join(self.tmp_dir, "attacker", "defenseclaw.exe"),
+                setup_pid: expected,
+            }.get(pid),
+        ):
+            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
     def test_sandbox_flag_reports_explicit_scope(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
@@ -420,22 +1032,43 @@ class TestInitFirstRunBackend(unittest.TestCase):
         key_env.assert_called_once()
         save_secret.assert_called_once_with("OPENAI_API_KEY", "sk-test", self.tmp_dir)
 
+    def test_interactive_judge_llm_config_polls_local_runtime(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch("defenseclaw.commands._llm_picker.pick_provider", return_value="ollama"), \
+                patch(
+                    "defenseclaw.commands._llm_picker.pick_local_runtime",
+                    return_value=("qwen3.5:9b-mlx", "http://127.0.0.1:11434"),
+                ) as local_runtime:
+            got = cmd_init._prompt_first_run_judge_llm_config(
+                data_dir=self.tmp_dir,
+                llm_provider="",
+                llm_model="",
+                llm_api_key="",
+                llm_api_key_env="",
+                llm_base_url="",
+            )
+
+        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434"))
+        local_runtime.assert_called_once()
+
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
-        Path(self.tmp_dir, "config.yaml").write_text(
-            "config_version: 8\n"
-            "observability: {}\n"
-            "claw:\n"
-            "  mode: codex\n"
-            "guardrail:\n"
-            "  enabled: true\n"
-            "  connector: codex\n"
-            "  mode: observe\n"
-            "  scanner_mode: local\n"
-            "  connectors:\n"
-            "    hermes:\n"
-            "      mode: observe\n",
-            encoding="utf-8",
+        atomic_write_private_bytes(
+            Path(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: codex\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: codex\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: observe\n",
         )
 
         result = self._invoke([
@@ -734,7 +1367,7 @@ class TestInitVersionDisplay(unittest.TestCase):
     """Tests for version info in init Environment section."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-ver-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-ver-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -789,7 +1422,7 @@ class TestInitPreservesExistingConfig(unittest.TestCase):
     """Regression tests for P5 fix: init must not overwrite existing config."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-preserve-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-preserve-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -859,7 +1492,7 @@ class TestInitDoesNotCreateExternalDirs(unittest.TestCase):
     """Regression tests for P3 fix: init must not create dirs outside data_dir."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-scope-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-scope-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -912,7 +1545,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
     """Verify that init displays scanner defaults to the user."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-scandef-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-scandef-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1000,7 +1633,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     """Verify that init displays gateway defaults."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-gwdef-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-gwdef-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1263,6 +1896,488 @@ class TestValidateGatewayToken(unittest.TestCase):
         self.assertNotEqual(os.environ.get("OPENCLAW_GATEWAY_TOKEN"), malicious_token)
 
 
+class TestDeviceIdentityInitialization(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="dclaw-device-identity-")
+        self.addCleanup(self._tmp.cleanup)
+        # macOS exposes /var through /private/var. Custody intentionally rejects
+        # indirect production paths, so make only this test fixture canonical.
+        self.data_dir = os.path.realpath(self._tmp.name)
+        from defenseclaw.file_permissions import make_private_directory
+
+        make_private_directory(self.data_dir)
+        self.key_path = os.path.join(self.data_dir, "device.key")
+
+    def test_fresh_init_creates_bound_triplet_and_restart_preserves_bytes(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            inspect_device_key,
+        )
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+        paths = (
+            self.key_path,
+            os.path.join(self.data_dir, "device.provenance.secret"),
+            self.key_path + ".provenance",
+        )
+        before = tuple(Path(path).read_bytes() for path in paths)
+        key_data, secret, provenance = before
+        self.assertEqual(len(secret), 32)
+        expected = (
+            b"defenseclaw-device-provenance-v1:"
+            + hmac.new(secret, key_data, hashlib.sha256).hexdigest().encode("ascii")
+            + b"\n"
+        )
+        self.assertEqual(provenance, expected)
+        health = inspect_device_key(self.key_path, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+        after = tuple(Path(path).read_bytes() for path in paths)
+        self.assertEqual(after, before)
+
+    def test_existing_unprovenanced_key_remains_legacy(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            _new_device_key_pem,
+            inspect_device_key,
+        )
+        from defenseclaw.file_permissions import protect_private_file
+
+        Path(self.key_path).write_bytes(_new_device_key_pem())
+        protect_private_file(self.key_path)
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(self.key_path + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        health = inspect_device_key(self.key_path, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.LEGACY_UNPROVENANCED)
+        self.assertEqual(health.reason_code, "device-key-provenance-absent")
+
+    def test_existing_relative_unprovenanced_key_loads_without_blessing(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            _new_device_key_pem,
+            inspect_device_key,
+        )
+        from defenseclaw.file_permissions import (
+            make_private_directory,
+            protect_private_file,
+        )
+
+        relative_key = os.path.join("~", "device.key")
+        absolute_key = os.path.join(self.data_dir, relative_key)
+        make_private_directory(os.path.dirname(absolute_key))
+        Path(absolute_key).write_bytes(_new_device_key_pem())
+        protect_private_file(absolute_key)
+        working_dir = tempfile.TemporaryDirectory(prefix="dclaw-relative-cwd-")
+        self.addCleanup(working_dir.cleanup)
+        prior_cwd = os.getcwd()
+        self.addCleanup(os.chdir, prior_cwd)
+        os.chdir(working_dir.name)
+
+        _ensure_device_key(relative_key, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(absolute_key + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        health = inspect_device_key(relative_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.LEGACY_UNPROVENANCED)
+        self.assertEqual(health.reason_code, "device-key-provenance-absent")
+        self.assertFalse(os.path.lexists(os.path.join(working_dir.name, "~")))
+
+    def test_missing_key_outside_data_dir_is_refused_without_parent_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-outside-")
+        self.addCleanup(outside.cleanup)
+        target_parent = os.path.join(os.path.realpath(outside.name), "operator-selected")
+        target = os.path.join(target_parent, "device.key")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertIn("target-outside-data-dir", str(ctx.exception))
+        self.assertFalse(os.path.lexists(target_parent))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_nested_private_parent_is_created_one_component_at_a_time(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
+
+        nested_key = os.path.join(self.data_dir, "identity", "nested", "device.key")
+        _ensure_device_key(nested_key, data_dir=self.data_dir)
+
+        self.assertTrue(os.path.isfile(nested_key))
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        self.assertFalse(
+            os.path.lexists(
+                os.path.join(
+                    os.path.dirname(nested_key),
+                    "device.provenance.secret",
+                )
+            )
+        )
+        health = inspect_device_key(nested_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+    def test_nested_private_parent_syncs_each_new_directory_entry(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        target_parent = os.path.join(self.data_dir, "identity", "nested")
+        synced = []
+        _prepare_device_identity_directories(
+            self.data_dir,
+            target_parent,
+            protect_directory=make_private_directory,
+            sync_directory=synced.append,
+        )
+
+        self.assertEqual(
+            synced,
+            [self.data_dir, os.path.join(self.data_dir, "identity")],
+        )
+
+    def test_nested_private_parent_sync_failure_stops_before_deeper_creation(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        first = os.path.join(self.data_dir, "identity")
+        second = os.path.join(first, "nested")
+
+        def fail_sync(_path):
+            raise OSError("injected directory sync failure")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _prepare_device_identity_directories(
+                self.data_dir,
+                second,
+                protect_directory=make_private_directory,
+                sync_directory=fail_sync,
+            )
+
+        self.assertIn("directory-sync-failed", str(ctx.exception))
+        self.assertTrue(os.path.isdir(first))
+        self.assertFalse(os.path.lexists(second))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_nested_private_parent_retry_resyncs_existing_entries(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        first = os.path.join(self.data_dir, "identity")
+        second = os.path.join(first, "nested")
+        sync_calls = []
+
+        def fail_intermediate_sync(path):
+            sync_calls.append(path)
+            if len(sync_calls) == 2:
+                raise OSError("injected intermediate sync failure")
+
+        with self.assertRaises(click.ClickException):
+            _prepare_device_identity_directories(
+                self.data_dir,
+                second,
+                protect_directory=make_private_directory,
+                sync_directory=fail_intermediate_sync,
+            )
+
+        retried = []
+        _prepare_device_identity_directories(
+            self.data_dir,
+            second,
+            protect_directory=make_private_directory,
+            sync_directory=retried.append,
+        )
+        self.assertEqual(retried, [self.data_dir, first])
+
+    def test_nested_symlink_is_refused_without_outside_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-symlink-outside-")
+        self.addCleanup(outside.cleanup)
+        outside_root = os.path.realpath(outside.name)
+        jump = os.path.join(self.data_dir, "jump")
+        try:
+            os.symlink(outside_root, jump, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        target = os.path.join(jump, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(os.path.join(outside_root, "deeper")))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX canonical-path regression")
+    def test_indirect_data_dir_is_refused_without_outside_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.file_permissions import make_private_directory
+
+        alias_root = tempfile.TemporaryDirectory(prefix="dclaw-device-alias-root-")
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-real-root-")
+        self.addCleanup(alias_root.cleanup)
+        self.addCleanup(outside.cleanup)
+        alias_root_path = os.path.realpath(alias_root.name)
+        outside_path = os.path.realpath(outside.name)
+        make_private_directory(alias_root_path)
+        managed = os.path.join(outside_path, "outer", "managed")
+        make_private_directory(managed)
+        jump = os.path.join(alias_root_path, "jump")
+        try:
+            os.symlink(outside_path, jump, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        indirect_data_dir = os.path.join(jump, "outer", "managed")
+        target = os.path.join(indirect_data_dir, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(target, data_dir=indirect_data_dir)
+
+        self.assertIn("data-dir-path-is-indirect", str(ctx.exception))
+        self.assertFalse(os.path.lexists(os.path.join(managed, "deeper")))
+        self.assertFalse(
+            os.path.lexists(os.path.join(managed, "device.provenance.secret"))
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX canonical-path regression")
+    def test_existing_indirect_key_remains_load_only_and_unblessed(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import _new_device_key_pem
+        from defenseclaw.file_permissions import make_private_directory, protect_private_file
+
+        alias_root = tempfile.TemporaryDirectory(prefix="dclaw-device-existing-alias-")
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-existing-real-")
+        self.addCleanup(alias_root.cleanup)
+        self.addCleanup(outside.cleanup)
+        alias_root_path = os.path.realpath(alias_root.name)
+        outside_path = os.path.realpath(outside.name)
+        make_private_directory(alias_root_path)
+        managed = os.path.join(outside_path, "outer", "managed")
+        make_private_directory(managed)
+        jump = os.path.join(alias_root_path, "jump")
+        try:
+            os.symlink(outside_path, jump, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        real_key = os.path.join(managed, "device.key")
+        Path(real_key).write_bytes(_new_device_key_pem())
+        protect_private_file(real_key)
+        indirect_data_dir = os.path.join(jump, "outer", "managed")
+        indirect_key = os.path.join(indirect_data_dir, "device.key")
+
+        _ensure_device_key(indirect_key, data_dir=indirect_data_dir)
+
+        self.assertFalse(os.path.lexists(real_key + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(managed, "device.provenance.secret"))
+        )
+
+    def test_nested_non_directory_is_refused(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        blocked = os.path.join(self.data_dir, "blocked")
+        Path(blocked).write_bytes(b"not-a-directory")
+        target = os.path.join(blocked, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_relative_key_is_resolved_under_data_dir_before_existing_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
+
+        working_dir = tempfile.TemporaryDirectory(prefix="dclaw-relative-cwd-")
+        self.addCleanup(working_dir.cleanup)
+        prior_cwd = os.getcwd()
+        self.addCleanup(os.chdir, prior_cwd)
+        os.chdir(working_dir.name)
+        relative_key = os.path.join("relative", "device.key")
+        target = os.path.join(self.data_dir, relative_key)
+
+        _ensure_device_key(relative_key, data_dir=self.data_dir)
+
+        self.assertTrue(os.path.isfile(target))
+        self.assertFalse(os.path.lexists(os.path.join(working_dir.name, "relative")))
+        health = inspect_device_key(relative_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+    def test_relative_key_escape_is_rejected_before_existing_path_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        with patch(
+            "defenseclaw.commands.cmd_init.os.path.lexists",
+            return_value=True,
+        ) as lexists:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key("../outside.key", data_dir=self.data_dir)
+
+        self.assertIn("device-key-path-not-local-to-data-dir", str(ctx.exception))
+        lexists.assert_not_called()
+
+    def test_relative_data_dir_is_rejected_before_existing_path_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        with patch(
+            "defenseclaw.commands.cmd_init.os.path.lexists",
+            return_value=True,
+        ) as lexists:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key(self.key_path, data_dir="relative-data-dir")
+
+        self.assertIn("data-dir-path-not-absolute", str(ctx.exception))
+        lexists.assert_not_called()
+
+    def test_filesystem_root_data_dir_is_rejected_before_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        filesystem_root = os.path.abspath(os.sep)
+        target = os.path.join(filesystem_root, "defenseclaw-root-device.key")
+        with patch("defenseclaw.file_permissions.make_private_directory") as mkdir:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key(target, data_dir=filesystem_root)
+
+        self.assertIn("data-dir-too-broad", str(ctx.exception))
+        mkdir.assert_not_called()
+
+    def test_reserved_artifact_paths_are_rejected_before_data_dir_creation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        root = tempfile.TemporaryDirectory(prefix="dclaw-device-alias-")
+        self.addCleanup(root.cleanup)
+        variants = [
+            "device.provenance.secret",
+            os.path.join("device.provenance.secret", "nested", "device.key"),
+            "DEVICE.PROVENANCE.SECRET",
+            os.path.join("DEVICE.PROVENANCE.SECRET", "nested", "device.key"),
+        ]
+        for index, relative_key in enumerate(variants):
+            with self.subTest(relative_key=relative_key):
+                data_dir = os.path.join(os.path.realpath(root.name), f"missing-{index}")
+                target = os.path.join(data_dir, relative_key)
+                with self.assertRaises(click.ClickException):
+                    _ensure_device_key(target, data_dir=data_dir)
+                self.assertFalse(os.path.lexists(data_dir))
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-preservation regression")
+    def test_broad_existing_data_dir_is_refused_without_chmod(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        os.chmod(self.data_dir, 0o755)
+        try:
+            with self.assertRaises(click.ClickException):
+                _ensure_device_key(self.key_path, data_dir=self.data_dir)
+            self.assertEqual(os.stat(self.data_dir).st_mode & 0o777, 0o755)
+        finally:
+            os.chmod(self.data_dir, 0o700)
+
+    def test_missing_data_dir_is_refused_without_creation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        root = tempfile.TemporaryDirectory(prefix="dclaw-device-missing-root-")
+        self.addCleanup(root.cleanup)
+        data_dir = os.path.join(os.path.realpath(root.name), "missing-data")
+        target = os.path.join(data_dir, "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=data_dir)
+
+        self.assertFalse(os.path.lexists(data_dir))
+
+    def test_windows_ads_classifier_preserves_volume_prefixes(self):
+        from defenseclaw.doctor_recovery import (
+            _windows_path_has_alternate_data_stream,
+        )
+
+        allowed = (
+            r"C:\DefenseClaw\device.key",
+            r"\\server\share\DefenseClaw\device.key",
+            r"\\?\C:\DefenseClaw\device.key",
+            r"\\?\UNC\server\share\DefenseClaw\device.key",
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\DefenseClaw\device.key",
+        )
+        rejected = (
+            r"C:\DefenseClaw\device.key:stream",
+            r"C:\DefenseClaw:identity\device.key",
+            r"C:\DefenseClaw\device.provenance.secret:KEY",
+            r"\\server\share\DefenseClaw\device.key:stream",
+            r"\\?\C:\DefenseClaw\DEVICE.PROVENANCE.SECRET:key",
+        )
+        for path in allowed:
+            with self.subTest(path=path):
+                self.assertFalse(_windows_path_has_alternate_data_stream(path))
+        for path in rejected:
+            with self.subTest(path=path):
+                self.assertTrue(_windows_path_has_alternate_data_stream(path))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ADS regression")
+    def test_windows_ads_paths_are_refused_without_publication(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        variants = (
+            "device.key:stream",
+            "device.provenance.secret:key",
+            "DEVICE.PROVENANCE.SECRET:KEY",
+            os.path.join("missing", "nested", "device.key:stream"),
+        )
+        for relative_target in variants:
+            with self.subTest(relative_target=relative_target):
+                target = os.path.join(self.data_dir, relative_target)
+                with self.assertRaises(click.ClickException) as ctx:
+                    _ensure_device_key(target, data_dir=self.data_dir)
+                self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+                for path in (
+                    os.path.join(self.data_dir, "device.key"),
+                    os.path.join(self.data_dir, "device.provenance.secret"),
+                    os.path.join(self.data_dir, "device.key.provenance"),
+                    os.path.join(self.data_dir, "missing"),
+                ):
+                    self.assertFalse(os.path.lexists(path))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ADS regression")
+    def test_windows_ads_data_dir_and_existing_identity_are_refused(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        stream_data_dir = self.data_dir + ":identity"
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(
+                os.path.join(stream_data_dir, "device.key"),
+                data_dir=stream_data_dir,
+            )
+        self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+
+        base = os.path.join(self.data_dir, "existing-holder")
+        Path(base).write_bytes(b"base-preserved")
+        stream = base + ":device-key"
+        Path(stream).write_bytes(b"existing-stream")
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(stream, data_dir=self.data_dir)
+        self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+        self.assertEqual(Path(base).read_bytes(), b"base-preserved")
+        self.assertFalse(os.path.lexists(stream + ".provenance"))
+
+
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
     def test_prefers_maintained_bundle_in_source_checkout(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
@@ -1279,7 +2394,7 @@ class TestResolveSplunkBridgeBundle(unittest.TestCase):
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-splunk-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-splunk-"))
         self.bundle_dir = tempfile.mkdtemp(prefix="dclaw-bundle-splunk-")
         self.runner = CliRunner()
 
@@ -1528,7 +2643,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     """Tests for the --enable-guardrail flag during init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-guardrail-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-guardrail-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1648,7 +2763,7 @@ class TestInitStartsGateway(unittest.TestCase):
     """Tests for the sidecar start during init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-sidecar-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -2098,11 +3213,11 @@ class TestInitFailModeFlag(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-failmode-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-failmode-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -2230,11 +3345,11 @@ class TestInitHITLFlags(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-hilt-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-hilt-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -2552,6 +3667,50 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(verify)
         self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
 
+    def test_prompt_first_run_judge_lists_requested_action_after_downgrade(self):
+        """A hook-contract downgrade must not hide a requested action connector
+        from the optional LLM judge checkbox."""
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"claudecode", "cursor"})
+        prompts = iter(["local", "open", "HIGH"])
+        confirms = iter([True, False, True])  # HITL, start_gateway, verify
+        checkbox_returns = iter([["claudecode", "cursor"], ["claudecode", "cursor"], ["claudecode"]])
+        checkbox_calls: list[tuple[list[str], str]] = []
+
+        def checkbox(options, **kwargs):
+            checkbox_calls.append((list(options), kwargs.get("title", "")))
+            return next(checkbox_returns)
+
+        def gate(name, **_kwargs):
+            return name == "claudecode"
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=gate,
+                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
+                patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+            settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
+                connector=None, profile=None, scanner_mode="local", with_judge=False,
+                fail_mode=None, human_approval=None, hilt_min_severity=None,
+                start_gateway=False, verify=None, rescan_agents=False,
+            )
+
+        by_name = {s["connector"]: s for s in settings}
+        self.assertEqual(by_name["claudecode"]["profile"], "action")
+        self.assertEqual(by_name["cursor"]["profile"], "observe")
+        self.assertIsNotNone(by_name["cursor"]["mode_warning"])
+        self.assertTrue(with_judge)
+        self.assertEqual(judge_connectors, ["claudecode"])
+        self.assertEqual(
+            checkbox_calls[2],
+            (["claudecode", "cursor"], "Select action connector(s) for LLM judge."),
+        )
+
     def test_prompt_first_run_blank_action_keeps_all_observe(self):
         """Pressing Enter at the action prompt keeps every connector observe
         and never asks the action-only fail-mode/HITL questions."""
@@ -2866,12 +4025,15 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-observe-all-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-observe-all-"))
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=(
+                {name: object() for name in ("amp", "claudecode", "codex", "hermes", "omnigent", "opencode")},
+                {},
+            ),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)

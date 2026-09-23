@@ -40,7 +40,7 @@ from defenseclaw.observability.v8_config import BUCKETS, SIGNALS
 
 SCHEMA_VERSION: Final = 1
 SOURCE_CONFIG_VERSION: Final = 7
-PROJECTION_PROFILE: Final = "legacy-v7"
+PROJECTION_PROFILE: Final = "v7-compatible"
 LOCAL_OBSERVABILITY_PROFILE: Final = "local-observability-v1"
 
 COLLECTION_CONDITIONS: Final = ("always", "otel.logs", "otel.traces", "otel.metrics")

@@ -318,11 +318,14 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
       } else {
         seenIds.add(rule.id);
       }
-      if (!/^[A-Z][A-Z0-9_-]{2,63}$/.test(rule.id)) {
+      const conventionalRuleId = /^(?:[A-Z][A-Z0-9_-]{2,63}|[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)$/.test(
+        rule.id,
+      );
+      if (!conventionalRuleId) {
         findings.push({
           level: 'warning',
           code: 'ID_FORMAT',
-          message: `Rule id "${rule.id}" should be UPPER_SNAKE_OR_DASH (e.g. SEC-AWS-KEY).`,
+          message: `Rule id "${rule.id}" should use catalog form (for example SEC-AWS-KEY or impact.fork_bomb).`,
           location: `rules.${file.filename}.${rule.id}`,
         });
       }

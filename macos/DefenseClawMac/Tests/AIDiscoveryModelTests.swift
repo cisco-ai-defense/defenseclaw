@@ -28,6 +28,7 @@ struct AIDiscoveryModelTests {
         partitionsModelsFromProductsAndAggregatesSources()
         searchesModelLineageMetadata()
         appliesFocusedAndExplicitModelFilters()
+        rendersCanonicalDevinConnectorName()
         guard failureCount == 0 else {
             fputs("AI discovery model provenance tests failed: \(failureCount)\n", stderr)
             exit(1)
@@ -72,6 +73,11 @@ struct AIDiscoveryModelTests {
             model?.provenance?.derivationDisplay == "quantized · 4-bit",
             "derivation and quantization are displayable"
         )
+    }
+
+    private static func rendersCanonicalDevinConnectorName() {
+        expect(friendlyConnectorName("devin") == "Devin", "Devin connector name is canonical")
+        expect(friendlyConnectorName("windsurf") == "Windsurf", "legacy name has no special public label")
     }
 
     private static func preservesUnknownLineageBooleansAndRejectsInvalidCountries() {

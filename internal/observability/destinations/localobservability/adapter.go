@@ -207,7 +207,9 @@ func (wire projectedWire) otlp(destination string) (
 	if !ok {
 		return nil, nil, nil, "", "", false
 	}
-	resourceAttributes, ok := requiredResourceAttributes(observability.EventName(wire.Family), wire.Body.Resource.Attributes)
+	resourceAttributes, ok := requiredResourceAttributes(
+		observability.EventName(wire.Family), wire.Body.Resource.Attributes,
+	)
 	if !ok {
 		return nil, nil, nil, "", "", false
 	}
@@ -256,9 +258,12 @@ func (wire projectedWire) otlp(destination string) (
 }
 
 func canonicalEndedIdentity(wire projectedWire) bool {
-	if stringMap(wire.Body.Attributes, "defenseclaw.bucket") != wire.Bucket ||
-		stringMap(wire.Body.Attributes, "defenseclaw.span.family") != wire.Family ||
-		stringMap(wire.Body.Attributes, "defenseclaw.source") != wire.Source {
+	if stringMap(wire.Body.Attributes, "defenseclaw.bucket") != wire.Bucket {
+		return false
+	}
+	family := stringMap(wire.Body.Attributes, "defenseclaw.span.family")
+	source := stringMap(wire.Body.Attributes, "defenseclaw.source")
+	if family != wire.Family || source != wire.Source {
 		return false
 	}
 	familyVersion, ok := unsignedNumber(wire.Body.Attributes["defenseclaw.span.family_schema_version"], 32)
@@ -293,12 +298,17 @@ func generatedCanary(wire projectedWire, destination string) (present, valid boo
 	markerValue, markerOK := marker.(bool)
 	operationValue, operationOK := operation.(string)
 	targetValue, targetOK := target.(string)
+	expectedTarget := destination
+	validDestination := observability.IsStableToken(destination)
 	return true, markerOK && markerValue && operationOK && operationValue == canaryOperationTag &&
-		targetOK && targetValue == destination && observability.IsStableToken(targetValue) &&
+		targetOK && targetValue == expectedTarget && validDestination &&
 		stringMap(wire.Body.Attributes, "gen_ai.operation.name") == expectedOperation && wire.Bucket == expectedBucket
 }
 
-func requiredResourceAttributes(family observability.EventName, input map[string]any) ([]*commonpb.KeyValue, bool) {
+func requiredResourceAttributes(
+	family observability.EventName,
+	input map[string]any,
+) ([]*commonpb.KeyValue, bool) {
 	if observability.ValidateTelemetryResourceAttributes(input) != nil {
 		return nil, false
 	}

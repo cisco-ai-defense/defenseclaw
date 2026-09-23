@@ -551,6 +551,159 @@ func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		apiBind       string
+		guardrailHost string
+		guardrail     bool
+		wantErr       string
+		wantAPIBind   string
+	}{
+		{
+			name:          "normal mode preserves explicit remote binds",
+			mode:          string(DeploymentModeUnmanagedBYOD),
+			apiBind:       "0.0.0.0",
+			guardrailHost: "192.0.2.10",
+			guardrail:     true,
+			wantAPIBind:   "0.0.0.0",
+		},
+		{
+			name:          "managed defaults stay loopback",
+			mode:          string(DeploymentModeManagedEnterprise),
+			guardrailHost: "127.0.0.1",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:          "managed API remains IPv4 with independent IPv6 guardrail",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "[::1]",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:    "managed API IPv6 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "::1",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API localhost rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "localhost",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API alternate IPv4 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "127.99.1.2",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API whitespace spelling rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: " 127.0.0.1 ",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API wildcard rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "0.0.0.0",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:          "managed proxy wildcard rejected",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "0.0.0.0",
+			guardrail:     true,
+			wantErr:       "guardrail proxy must bind to loopback",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = test.mode
+			cfg.Gateway.APIBind = test.apiBind
+			cfg.Guardrail.Host = test.guardrailHost
+			cfg.Guardrail.Enabled = test.guardrail
+			err := validateManagedEnterpriseListenerBindings(cfg)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("validateManagedEnterpriseListenerBindings: %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+			if test.wantErr == "" && cfg.Gateway.APIBind != test.wantAPIBind {
+				t.Fatalf(
+					"Gateway.APIBind = %q, want %q",
+					cfg.Gateway.APIBind,
+					test.wantAPIBind,
+				)
+			}
+		})
+	}
+}
+
+func TestManagedEnterpriseWindowsPeerAuthKnobsAreRejected(t *testing.T) {
+	// Runs on all platforms via the same predicate; validator's
+	// runtime.GOOS check means only the Windows branch enforces
+	// rejection. On non-Windows we still exercise the happy path.
+	cases := []struct {
+		name          string
+		mode          string
+		team, sig, id []string
+		wantOnWindows string // substring that must appear on Windows
+	}{
+		{name: "unmanaged_allows_anything", mode: "", team: []string{"team"}, wantOnWindows: ""},
+		{name: "managed_empty_allowed", mode: "managed_enterprise", wantOnWindows: ""},
+		{name: "managed_team_ids_windows_rejects", mode: "managed_enterprise", team: []string{"team"}, wantOnWindows: "managed.allowed_team_ids"},
+		{name: "managed_signing_ids_windows_rejects", mode: "managed_enterprise", sig: []string{"sig"}, wantOnWindows: "managed.allowed_signing_ids"},
+		{name: "managed_bundle_ids_windows_rejects", mode: "managed_enterprise", id: []string{"bundle"}, wantOnWindows: "managed.allowed_bundle_ids"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = c.mode
+			cfg.Managed.AllowedTeamIDs = c.team
+			cfg.Managed.AllowedSigningIDs = c.sig
+			cfg.Managed.AllowedBundleIDs = c.id
+			err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
+			if runtime.GOOS != "windows" {
+				if err != nil {
+					t.Fatalf("non-windows: got err=%v, want nil (validator scoped to windows)", err)
+				}
+				return
+			}
+			if c.wantOnWindows == "" {
+				if err != nil {
+					t.Fatalf("windows: got err=%v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantOnWindows) {
+				t.Fatalf("windows: err = %v, want substring %q", err, c.wantOnWindows)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackListenerHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "127.99.1.2", "::1", "[::1]", "localhost", " LOCALHOST "} {
+		if !isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"", "0.0.0.0", "::", "192.0.2.10", "example.test", "localhost.example"} {
+		if isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = true, want false", host)
+		}
+	}
+}
+
 func TestValidateGatewayConfigReloadMode(t *testing.T) {
 	for _, mode := range []string{"", "hot", "restart", "HOT", " Restart "} {
 		t.Run(mode, func(t *testing.T) {

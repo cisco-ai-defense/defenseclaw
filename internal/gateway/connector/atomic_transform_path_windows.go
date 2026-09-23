@@ -164,27 +164,49 @@ func atomicTransformValidateNoReparsePathPlatform(path string) error {
 func atomicTransformValidateStableVolumeLocatorPlatform(
 	locator string, boundParent *atomicTransformBoundDirectory,
 ) error {
+	return atomicTransformValidateStableVolumeLocatorWindows(
+		locator, boundParent, windows.QueryDosDevice,
+	)
+}
+
+func atomicTransformValidateStableVolumeLocatorWindows(
+	locator string,
+	boundParent *atomicTransformBoundDirectory,
+	queryDosDevice func(*uint16, *uint16, uint32) (uint32, error),
+) error {
 	absolute, err := filepath.Abs(locator)
 	if err != nil {
 		return err
 	}
 	volume := filepath.VolumeName(absolute)
-	if len(volume) == 2 && volume[1] == ':' {
-		device, pointerErr := windows.UTF16PtrFromString(volume)
+	drive, isDOSDrive := atomicTransformWindowsDOSDrive(volume)
+	if isDOSDrive {
+		if queryDosDevice == nil {
+			return fmt.Errorf("query Windows DOS-device mapping for %s: unavailable", drive)
+		}
+		device, pointerErr := windows.UTF16PtrFromString(drive)
 		if pointerErr != nil {
 			return pointerErr
 		}
 		buffer := make([]uint16, 32768)
-		length, queryErr := windows.QueryDosDevice(device, &buffer[0], uint32(len(buffer)))
-		if queryErr != nil {
-			return fmt.Errorf("query Windows DOS-device mapping for %s: %w", volume, queryErr)
+		length, queryErr := queryDosDevice(device, &buffer[0], uint32(len(buffer)))
+		// A restricted standard-user token can be denied access to the DOS-device
+		// object namespace. Only that denial may fall through to the independent,
+		// positive Mount Manager and bound-handle proof below.
+		if queryErr != nil && !errors.Is(queryErr, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("query Windows DOS-device mapping for %s: %w", drive, queryErr)
 		}
-		target := windows.UTF16ToString(buffer[:length])
-		if strings.HasPrefix(strings.ToLower(target), `\??\`) {
-			return fmt.Errorf("retargetable Windows DOS-device/SUBST locator is unsupported: %s", volume)
+		if queryErr == nil {
+			if length == 0 || length > uint32(len(buffer)) {
+				return fmt.Errorf("query Windows DOS-device mapping for %s returned an invalid result", drive)
+			}
+			target := windows.UTF16ToString(buffer[:length])
+			if strings.HasPrefix(strings.ToLower(target), `\??\`) {
+				return fmt.Errorf("retargetable Windows DOS-device/SUBST locator is unsupported: %s", drive)
+			}
 		}
 	}
-	logicalVolume, err := atomicTransformWindowsVolumeGUIDForPath(absolute)
+	logicalVolume, logicalMount, err := atomicTransformWindowsVolumeGUIDForPath(absolute)
 	if err != nil {
 		return fmt.Errorf("resolve Windows locator through Mount Manager: %w", err)
 	}
@@ -198,26 +220,155 @@ func atomicTransformValidateStableVolumeLocatorPlatform(
 			logicalVolume, boundVolume,
 		)
 	}
+	if isDOSDrive {
+		// Prefix plus registered-membership proof rejects both forms exposed by a
+		// retargetable alias: an unregistered X:\ mount and a followed C:\ mount
+		// whose spelling is no longer a prefix of the caller's X:\ locator.
+		if !atomicTransformWindowsMountContainsLocator(logicalMount, absolute) {
+			return fmt.Errorf(
+				"Windows Mount Manager path is not a stable prefix of its locator: %s is not within %s",
+				absolute, logicalMount,
+			)
+		}
+		registeredPaths, pathsErr := atomicTransformWindowsVolumePaths(boundVolume)
+		if pathsErr != nil {
+			return fmt.Errorf("enumerate bound Windows volume paths through Mount Manager: %w", pathsErr)
+		}
+		if !atomicTransformWindowsMountIsRegistered(logicalMount, registeredPaths) {
+			return fmt.Errorf(
+				"Windows Mount Manager path is not registered for its bound physical volume: %s",
+				logicalMount,
+			)
+		}
+	}
 	return nil
 }
 
-func atomicTransformWindowsVolumeGUIDForPath(path string) (string, error) {
+func atomicTransformWindowsDOSDrive(volume string) (string, bool) {
+	if len(volume) == 6 && strings.EqualFold(volume[:4], `\\?\`) {
+		volume = volume[4:]
+	}
+	if len(volume) != 2 || volume[1] != ':' ||
+		!((volume[0] >= 'a' && volume[0] <= 'z') || (volume[0] >= 'A' && volume[0] <= 'Z')) {
+		return "", false
+	}
+	return strings.ToUpper(volume), true
+}
+
+func atomicTransformWindowsVolumeGUIDForPath(path string) (string, string, error) {
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	mount := make([]uint16, 32768)
 	if err := windows.GetVolumePathName(pointer, &mount[0], uint32(len(mount))); err != nil {
-		return "", err
+		return "", "", err
+	}
+	mountPath := windows.UTF16ToString(mount)
+	if mountPath == "" {
+		return "", "", fmt.Errorf("Mount Manager returned an empty volume path")
 	}
 	mountPointer := &mount[0]
 	volume := make([]uint16, 128)
 	if err := windows.GetVolumeNameForVolumeMountPoint(
 		mountPointer, &volume[0], uint32(len(volume)),
 	); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimRight(windows.UTF16ToString(volume), `\`), nil
+	volumeGUID := strings.TrimRight(windows.UTF16ToString(volume), `\`)
+	if volumeGUID == "" {
+		return "", "", fmt.Errorf("Mount Manager returned an empty volume identity")
+	}
+	return volumeGUID, mountPath, nil
+}
+
+func atomicTransformWindowsMountContainsLocator(mount, locator string) bool {
+	mount = atomicTransformNormalizeWindowsDrivePath(mount)
+	locator = atomicTransformNormalizeWindowsDrivePath(locator)
+	relative, err := filepath.Rel(mount, locator)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, `..\`)
+}
+
+func atomicTransformNormalizeWindowsDrivePath(path string) string {
+	path = filepath.Clean(path)
+	volume := filepath.VolumeName(path)
+	if len(volume) == 6 && strings.EqualFold(volume[:4], `\\?\`) {
+		return filepath.Clean(volume[4:] + strings.TrimPrefix(path, volume))
+	}
+	return path
+}
+
+func atomicTransformWindowsMountIsRegistered(mount string, registered []string) bool {
+	mount = atomicTransformNormalizeWindowsDrivePath(mount)
+	for _, candidate := range registered {
+		if atomicTransformPathsEqualPlatform(
+			mount, atomicTransformNormalizeWindowsDrivePath(candidate),
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func atomicTransformWindowsVolumePaths(volumeGUID string) ([]string, error) {
+	volumeGUID = strings.TrimRight(volumeGUID, `\`) + `\`
+	pointer, err := windows.UTF16PtrFromString(volumeGUID)
+	if err != nil {
+		return nil, err
+	}
+	const maxVolumePathUnits = 32768
+	bufferLength := uint32(512)
+	for {
+		buffer := make([]uint16, bufferLength)
+		var required uint32
+		err = windows.GetVolumePathNamesForVolumeName(
+			pointer, &buffer[0], bufferLength, &required,
+		)
+		if err == nil {
+			if required < 2 || required > bufferLength {
+				return nil, fmt.Errorf("Mount Manager returned invalid volume-path length %d", required)
+			}
+			return atomicTransformParseWindowsMultiString(buffer[:required])
+		}
+		if !errors.Is(err, windows.ERROR_MORE_DATA) {
+			return nil, err
+		}
+		if required <= bufferLength || required > maxVolumePathUnits {
+			return nil, fmt.Errorf(
+				"Mount Manager volume-path list requires invalid length %d", required,
+			)
+		}
+		bufferLength = required
+	}
+}
+
+func atomicTransformParseWindowsMultiString(buffer []uint16) ([]string, error) {
+	if len(buffer) < 2 || buffer[len(buffer)-1] != 0 || buffer[len(buffer)-2] != 0 {
+		return nil, fmt.Errorf("Mount Manager returned a malformed volume-path list")
+	}
+	paths := make([]string, 0, 2)
+	start := 0
+	for index := 0; index < len(buffer)-1; index++ {
+		if buffer[index] != 0 {
+			continue
+		}
+		if index == start {
+			return nil, fmt.Errorf("Mount Manager returned an empty volume path")
+		}
+		path := windows.UTF16ToString(buffer[start:index])
+		if !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("Mount Manager returned a non-absolute volume path %q", path)
+		}
+		paths = append(paths, path)
+		start = index + 1
+	}
+	if start != len(buffer)-1 || len(paths) == 0 {
+		return nil, fmt.Errorf("Mount Manager returned a malformed volume-path list")
+	}
+	return paths, nil
 }
 
 func atomicTransformWindowsVolumeGUIDForHandle(handle windows.Handle) (string, error) {

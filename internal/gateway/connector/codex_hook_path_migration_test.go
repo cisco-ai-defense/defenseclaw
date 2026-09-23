@@ -140,18 +140,38 @@ func TestPatchCodexConfigReplacesTrustedMatrixAfterDataDirChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve expected Codex hook contract: %v", err)
 	}
-	if err := verifyTrustedCodexHookMatrixForGroups(
+	firstContract, err := codexHookContractForSetup(first)
+	if err != nil {
+		t.Fatalf("resolve predecessor Codex hook contract: %v", err)
+	}
+	secondContract, err := codexHookContractForSetup(second)
+	if err != nil {
+		t.Fatalf("resolve replacement Codex hook contract: %v", err)
+	}
+	if err := verifyTrustedCodexHookMatrix(
 		hooks,
 		configPath,
 		filepath.Join(dataDirB, "hooks"),
-		expectedGroups,
+		second,
 	); err != nil {
 		t.Fatalf("replacement matrix is not trusted: %v", err)
 	}
 
 	for _, group := range expectedGroups {
-		oldCount := codexTestCommandCount(hooks[group.eventType], hookScriptA)
-		newCount := codexTestCommandCount(hooks[group.eventType], hookScriptB)
+		oldCommand := codexHookCommandForPlatform(
+			runtime.GOOS,
+			group.eventType,
+			firstContract.ContractID,
+			hookScriptA,
+		)
+		newCommand := codexHookCommandForPlatform(
+			runtime.GOOS,
+			group.eventType,
+			secondContract.ContractID,
+			hookScriptB,
+		)
+		oldCount := codexTestCommandCount(hooks[group.eventType], oldCommand)
+		newCount := codexTestCommandCount(hooks[group.eventType], newCommand)
 		if oldCount != 0 || newCount != 1 {
 			t.Errorf(
 				"%s handler counts: predecessor=%d replacement=%d, want 0 and 1",
@@ -181,6 +201,54 @@ func TestPatchCodexConfigReplacesTrustedMatrixAfterDataDirChange(t *testing.T) {
 		map[string]interface{}{"keep": "verbatim"},
 	) {
 		t.Fatalf("unrelated operator state changed: %#v", state["operator-unrelated"])
+	}
+}
+
+func TestParseCodexManagedCommandIdentityKeepsEventBoundMatrixTogether(t *testing.T) {
+	script := filepath.ToSlash(filepath.Join(t.TempDir(), ".defenseclaw", "hooks", "codex-hook.sh"))
+	command := codexHookCommandForPlatform(
+		"linux",
+		"SessionStart",
+		"codex-hooks-v4",
+		script,
+	)
+	identity, event, ok := parseCodexManagedCommandIdentityForPlatform("linux", command)
+	if !ok {
+		t.Fatalf("event-bound command was not recognized: %q", command)
+	}
+	if identity.script != script || identity.contractID != "codex-hooks-v4" || event != "SessionStart" {
+		t.Fatalf("parsed identity = %#v, event %q", identity, event)
+	}
+
+	var tenEventProfile, elevenEventProfile []codexHookGroup
+	for _, profile := range codexShippedManagedHookProfiles() {
+		switch len(profile) {
+		case 10:
+			if tenEventProfile == nil {
+				tenEventProfile = profile
+			}
+		case 11:
+			if profile[len(profile)-1].timeout == codexSessionEndHookGroup.timeout {
+				elevenEventProfile = profile
+			}
+		}
+	}
+	if !codexManagedCommandIdentityMatchesProfile(identity, elevenEventProfile) {
+		t.Fatal("v4 command identity did not match its eleven-event profile")
+	}
+	if codexManagedCommandIdentityMatchesProfile(identity, tenEventProfile) {
+		t.Fatal("v4 command identity matched a truncated ten-event profile")
+	}
+
+	legacyIdentity, legacyEvent, ok := parseCodexManagedCommandIdentityForPlatform("linux", script)
+	if !ok || legacyIdentity.script != script || legacyIdentity.contractID != "" || legacyEvent != "" {
+		t.Fatalf("legacy identity = %#v, event %q, ok=%v", legacyIdentity, legacyEvent, ok)
+	}
+	if _, _, ok := parseCodexManagedCommandIdentityForPlatform(
+		"linux",
+		script+" --event SessionStart --hook-contract third-party-v1",
+	); ok {
+		t.Fatal("unregistered hook contract was accepted")
 	}
 }
 
@@ -290,24 +358,24 @@ func TestMergeOwnedCodexHooksCollapsesAccumulatedTrustedMatrices(t *testing.T) {
 	}
 	profiles := codexShippedManagedHookProfiles()
 	profilesBySize := make(map[int][]codexHookGroup, len(profiles))
-	var legacyElevenEvents, currentElevenEvents []codexHookGroup
+	var currentElevenEvents, preClampElevenEvents []codexHookGroup
 	for _, profile := range profiles {
 		if len(profile) == 11 {
 			switch profile[len(profile)-1].timeout {
 			case 3:
-				legacyElevenEvents = profile
-			case 60:
 				currentElevenEvents = profile
+			case 60:
+				preClampElevenEvents = profile
 			}
 			continue
 		}
 		profilesBySize[len(profile)] = profile
 	}
-	if legacyElevenEvents == nil || currentElevenEvents == nil {
+	if currentElevenEvents == nil || preClampElevenEvents == nil {
 		t.Fatalf(
-			"SessionEnd profiles: legacy=%v current=%v, want both shipped timeout variants",
-			legacyElevenEvents,
+			"SessionEnd profiles: current=%v pre-clamp=%v, want both shipped timeout variants",
 			currentElevenEvents,
+			preClampElevenEvents,
 		)
 	}
 	for _, size := range []int{5, 6, 8, 10} {
@@ -336,8 +404,8 @@ func TestMergeOwnedCodexHooksCollapsesAccumulatedTrustedMatrices(t *testing.T) {
 			groups:  profilesBySize[10],
 		},
 		{
-			command: filepath.Join(root, "dc-connector-upgrade.unit-eleven-legacy", "hooks", "codex-hook.sh"),
-			groups:  legacyElevenEvents,
+			command: filepath.Join(root, "dc-connector-upgrade.unit-eleven-pre-clamp", "hooks", "codex-hook.sh"),
+			groups:  preClampElevenEvents,
 		},
 		{
 			command: filepath.Join(root, "dc-connector-upgrade.unit-eleven-current", "hooks", "codex-hook.sh"),

@@ -152,6 +152,144 @@ func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T
 	}
 }
 
+func TestScanV8RepeatedAssetFindingOnlyEmitsLifecycleChanges(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	base := time.Date(2026, 8, 7, 10, 0, 0, 0, time.UTC)
+	newResult := func(at time.Time, findings ...scanner.Finding) *scanner.ScanResult {
+		return &scanner.ScanResult{
+			Scanner: "codeguard", Target: "asset/distinct", TargetType: "code",
+			Timestamp: at, Duration: time.Millisecond, Findings: findings,
+		}
+	}
+	newFinding := func() scanner.Finding {
+		return scanner.Finding{
+			Scanner: "codeguard", RuleID: "CG-DISTINCT", Severity: scanner.SeverityHigh,
+			Title: "Distinct finding", Description: "same matched source", Location: "main.go:7",
+		}
+	}
+
+	first := newResult(base, newFinding())
+	if err := logger.LogScan(first); err != nil {
+		t.Fatal(err)
+	}
+	_, firstRecords := runtime.snapshot()
+	firstMetrics := runtime.metricSnapshot()
+	if len(firstRecords) != 2 || firstRecords[0].EventName() != observability.EventName(observability.TelemetryEventFindingObserved) {
+		t.Fatalf("first records=%#v", firstRecords)
+	}
+
+	second := newResult(base.Add(time.Minute), newFinding())
+	if err := logger.LogScan(second); err != nil {
+		t.Fatal(err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != len(firstRecords)+1 ||
+		records[len(records)-1].EventName() != observability.EventName(observability.TelemetryEventScanCompleted) {
+		t.Fatalf("repeat emitted finding instead of summary only: before=%d after=%d", len(firstRecords), len(records))
+	}
+	repeatMetrics := runtime.metricSnapshot()[len(firstMetrics):]
+	for _, metric := range repeatMetrics {
+		switch metric.EventName() {
+		case observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindings),
+			observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsGauge),
+			observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsByRule):
+			t.Fatalf("repeat emitted finding metric %s value=%v", metric.EventName(), metricValue(t, metric))
+		}
+	}
+	events, err := logger.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findingEvents := 0
+	for _, event := range events {
+		if event.Action == string(ActionScanFinding) {
+			findingEvents++
+		}
+	}
+	if findingEvents != 1 {
+		t.Fatalf("default event history has %d repeated finding events, want 1", findingEvents)
+	}
+	firstRows, listErr := logger.store.ListScanFindings(first.ScanID)
+	if listErr != nil || len(firstRows) != 1 {
+		t.Fatalf("first static transition %s=%+v err=%v", first.ScanID, firstRows, listErr)
+	}
+	repeatRows, listErr := logger.store.ListScanFindings(second.ScanID)
+	if listErr != nil || len(repeatRows) != 0 {
+		t.Fatalf("repeated static detail storage %s=%+v err=%v", second.ScanID, repeatRows, listErr)
+	}
+
+	beforeResolutionMetrics := len(runtime.metricSnapshot())
+	empty := newResult(base.Add(2 * time.Minute))
+	if err := logger.LogScan(empty); err != nil {
+		t.Fatal(err)
+	}
+	resolutionMetrics := runtime.metricSnapshot()[beforeResolutionMetrics:]
+	resolvedGauge := false
+	for _, metric := range resolutionMetrics {
+		switch metric.EventName() {
+		case observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindings),
+			observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsByRule):
+			t.Fatalf("resolution invented a finding counter %s", metric.EventName())
+		case observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsGauge):
+			if fmt.Sprint(metricValue(t, metric)) != "-1" {
+				t.Fatalf("resolution gauge=%v, want -1", metricValue(t, metric))
+			}
+			resolvedGauge = true
+		}
+	}
+	if !resolvedGauge {
+		t.Fatal("empty successful scan omitted current-state resolution gauge")
+	}
+}
+
+func TestScanV8RebuildsCurrentFindingGaugeAfterRuntimeRebind(t *testing.T) {
+	logger := newTestLogger(t)
+	firstRuntime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(firstRuntime)
+	base := time.Date(2026, 8, 7, 11, 0, 0, 0, time.UTC)
+	newResult := func(at time.Time) *scanner.ScanResult {
+		return &scanner.ScanResult{
+			Scanner: "codeguard", Target: "asset/rebind", TargetType: "code",
+			Timestamp: at, Duration: time.Millisecond,
+			Findings: []scanner.Finding{{
+				Scanner: "codeguard", RuleID: "CG-REBIND", Severity: scanner.SeverityHigh,
+				Description: "same matched source", Location: "main.go:9",
+			}},
+		}
+	}
+	if err := logger.LogScan(newResult(base)); err != nil {
+		t.Fatal(err)
+	}
+
+	secondRuntime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(secondRuntime)
+	if err := logger.LogScan(newResult(base.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	_, records := secondRuntime.snapshot()
+	if len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventScanCompleted) {
+		t.Fatalf("runtime rebind replayed repeated finding logs: %#v", records)
+	}
+	foundBaseline := false
+	for _, metric := range secondRuntime.metricSnapshot() {
+		switch metric.EventName() {
+		case observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindings),
+			observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsByRule):
+			t.Fatalf("runtime rebind replayed finding counter %s", metric.EventName())
+		case observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsGauge):
+			if fmt.Sprint(metricValue(t, metric)) != "1" {
+				t.Fatalf("rebuilt finding gauge=%v, want 1", metricValue(t, metric))
+			}
+			foundBaseline = true
+		}
+	}
+	if !foundBaseline {
+		t.Fatal("runtime rebind did not rebuild the current distinct finding gauge")
+	}
+}
+
 func TestScanV8DerivedEvidenceMatchesForensicAndCanonicalRecords(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)

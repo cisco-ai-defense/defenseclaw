@@ -57,6 +57,7 @@ DEFAULT_ENV="prod"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
 BINARY_SRC=""
+ACP_BINARY_SRC=""
 # Plist lookup order:
 #   1. --plist / DEFENSECLAW_PLIST_SRC  (explicit override)
 #   2. next to the script            (standalone-bundle layout)
@@ -185,6 +186,7 @@ GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
 ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
+ACP_GUARD_BIN="${INSTALL_PREFIX}/bin/defenseclaw-acp"
 RENDER_TARGETS_BIN="${INSTALL_PREFIX}/lib/render-targets.sh"
 INSTALLER_LIB_DST="${INSTALL_PREFIX}/lib/installer_lib.sh"
 GUARDIAN_MANIFEST_DIR="${INSTALL_PREFIX}/hook-guardian"
@@ -331,7 +333,7 @@ Usage: sudo $0 [options]
 Gateway options:
   --mode {observe|action}   Guardrail + asset_policy mode (default: ${DEFAULT_MODE})
   --connector LIST          Hook connector(s), comma-separated (default: ${DEFAULT_CONNECTOR})
-                            Supported: amp, codex, claudecode, cursor
+                            Supported: amp, codex, claudecode, cursor, opencode
                             Examples: --connector amp
                                       --connector amp,cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
@@ -431,7 +433,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor|opencode); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 
@@ -526,7 +528,7 @@ _existing_install_markers=(
   "${LEGACY_GUARDIAN_PLIST_DST}"
 )
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
-  for _installed_command in defenseclaw defenseclaw-gateway; do
+  for _installed_command in defenseclaw defenseclaw-gateway defenseclaw-acp; do
     _installed_command_path="$(command -v "${_installed_command}" 2>/dev/null || true)"
     [[ -n "${_installed_command_path}" ]] \
       && _existing_install_markers+=("${_installed_command_path}")
@@ -537,6 +539,7 @@ if [[ -n "${TARGET_HOME}" ]]; then
     "${TARGET_HOME}/.defenseclaw"
     "${TARGET_HOME}/.local/bin/defenseclaw"
     "${TARGET_HOME}/.local/bin/defenseclaw-gateway"
+    "${TARGET_HOME}/.local/bin/defenseclaw-acp"
   )
 fi
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
@@ -554,6 +557,7 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
       "${_candidate_home}/.defenseclaw"
       "${_candidate_home}/.local/bin/defenseclaw"
       "${_candidate_home}/.local/bin/defenseclaw-gateway"
+      "${_candidate_home}/.local/bin/defenseclaw-acp"
     )
   done <<< "${_local_users}"
 fi
@@ -606,6 +610,20 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
+if [[ -x "${SCRIPT_DIR}/defenseclaw-acp" ]]; then
+  ACP_BINARY_SRC="${SCRIPT_DIR}/defenseclaw-acp"
+elif [[ -x "${REPO_ROOT}/defenseclaw-acp" ]]; then
+  ACP_BINARY_SRC="${REPO_ROOT}/defenseclaw-acp"
+elif [[ -d "${REPO_ROOT}/cmd/defenseclaw-acp" ]]; then
+  command -v go >/dev/null 2>&1 || die "go not in PATH; the ACP guard is required"
+  ACP_BINARY_SRC="${REPO_ROOT}/defenseclaw-acp"
+  log "building ACP guard from ${REPO_ROOT}/cmd/defenseclaw-acp"
+  ( cd "${REPO_ROOT}" && go build -o defenseclaw-acp ./cmd/defenseclaw-acp )
+else
+  die "required ACP guard is missing; ship defenseclaw-acp next to install.sh"
+fi
+[[ -x "${ACP_BINARY_SRC}" ]] || die "ACP guard not found or not executable: ${ACP_BINARY_SRC}"
+
 # Repeat the launchd/path boundary immediately before mutation. A deployment
 # that appears after the first preflight belongs to the concurrent installer;
 # never boot it out or remove its plist.
@@ -640,6 +658,7 @@ done
 create_install_directory_no_replace "${INSTALL_PREFIX}" root wheel 0755
 create_install_directory_no_replace "${INSTALL_PREFIX}/bin" root wheel 0755
 install_file_no_replace "${BINARY_SRC}" "${GATEWAY_BIN}" root wheel 0755
+install_file_no_replace "${ACP_BINARY_SRC}" "${ACP_GUARD_BIN}" root wheel 0755
 
 log "creating support dirs under ${SUPPORT_DIR}"
 # SUPPORT_DIR (= INSTALL_PREFIX) is root:wheel 0755. The
@@ -932,10 +951,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
 
   # A user_lines-non-empty × connector-non-empty cross product that
   # still resolves to zero targets means either (a) every requested
-  # connector is unsupported (not in amp/codex/claudecode/cursor) or
+  # connector is unsupported (not in amp/codex/claudecode/cursor/opencode) or
   # (b) no eligible user has any of the requested connector CLIs
   # installed yet (AIFW-31486: the AVC-shipped .pkg lands on boxes
-  # where amp/Codex/ClaudeCode/Cursor haven't been installed yet).
+  # where Amp/Codex/ClaudeCode/Cursor/OpenCode haven't been installed yet).
   #
   # We do NOT fail the install here — bootstrapping the daemons with
   # an empty manifest is still useful: the hook-enumerator LaunchDaemon
@@ -957,7 +976,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
     case "${ZERO_TARGET_REASON}" in
       all-unsupported)
-        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor; got connectors=${CONNECTOR})"
+        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor|opencode; got connectors=${CONNECTOR})"
         warn "  proceeding anyway — the hook-enumerator's tick will NOT fix this on its own; rerun the installer with --connector picking a supported entry"
         ;;
       *)

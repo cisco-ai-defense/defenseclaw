@@ -9,14 +9,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# Live driver for Cursor Agent (cursor-agent CLI).
+# Live driver for Cursor Agent (`agent` primary CLI).
 #   - install:  curl https://cursor.com/install -fsS | bash
-#   - headless: cursor-agent -p "<prompt>" --output-format json --force
+#   - headless: agent -p "<prompt>" --output-format json --force
 #   - auth:     CURSOR_API_KEY
 #   - hooks:    beforeShellExecution can deny (can_ask_native), so block is
 #               testable headless.
 #
-# GATING: live Cursor coverage is only meaningful if headless `cursor-agent -p`
+# GATING: live Cursor coverage is only meaningful if headless `agent -p`
 # actually fires ~/.cursor/hooks.json. Run cursor-validation.sh first; the
 # workflow gates this driver on its result.
 
@@ -32,18 +32,25 @@ DC_DRIVER_SUPPORTS_BLOCK=1
 DC_DRIVER_SUPPORTS_OTLP=0
 
 agent_install() {
-  if ! command -v cursor-agent >/dev/null 2>&1; then
+  if ! command -v agent >/dev/null 2>&1 && ! command -v cursor-agent >/dev/null 2>&1; then
     curl https://cursor.com/install -fsS | bash || return 1
     export PATH="${HOME}/.local/bin:${PATH}"
   fi
-  DC_E2E_AGENT_VERSION="$(dc_capture_version cursor cursor-agent --version)"
+  if command -v agent >/dev/null 2>&1; then
+    CURSOR_AGENT_BIN="$(command -v agent)"
+  else
+    # Cursor documents cursor-agent as a compatibility alias.
+    CURSOR_AGENT_BIN="$(command -v cursor-agent)"
+  fi
+  export CURSOR_AGENT_BIN
+  DC_E2E_AGENT_VERSION="$(dc_capture_version cursor "${CURSOR_AGENT_BIN}" --version)"
   export DC_E2E_AGENT_VERSION
   dc_write_env_key CURSOR_API_KEY "${CURSOR_API_KEY:-}"
 }
 
 agent_run() {
   local prompt="$1"
-  dc_timeout 180 cursor-agent -p "${prompt}" --output-format json --force
+  dc_timeout 180 "${CURSOR_AGENT_BIN}" -p "${prompt}" --output-format json --force
 }
 
 dc_driver_main cursor

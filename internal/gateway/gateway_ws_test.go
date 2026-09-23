@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -182,7 +183,7 @@ func clientForServer(t *testing.T, srv *httptest.Server) *Client {
 	cfg := &config.GatewayConfig{
 		Host:          host,
 		Port:          port,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(testenv.PrivateTempDir(t), "device.key"),
 	}
 	client, err := NewClient(cfg)
 	if err != nil {
@@ -747,7 +748,7 @@ func TestPublicRequestMethod(t *testing.T) {
 // EventRouter approval handling tests
 // ---------------------------------------------------------------------------
 
-func TestRouteApprovalDangerousCommand(t *testing.T) {
+func TestRouteApprovalDownloadExecuteAwaitsManualReview(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
@@ -767,17 +768,11 @@ func TestRouteApprovalDangerousCommand(t *testing.T) {
 		Payload: payload,
 	})
 
-	rpc := drainRPC(t, received)
-	if rpc.Method != "exec.approval.resolve" {
-		t.Errorf("Method = %q, want exec.approval.resolve", rpc.Method)
-	}
-	var params ApprovalResolveParams
-	json.Unmarshal(rpc.Params, &params)
-	if params.ID != "approval-1" {
-		t.Errorf("ID = %q, want approval-1", params.ID)
-	}
-	if params.Decision != "deny" {
-		t.Errorf("Decision = %q, want deny", params.Decision)
+	select {
+	case rpc := <-received:
+		t.Errorf("download-and-execute is detection-only; unexpected automatic resolution %s", rpc.Method)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the runtime's approval remains pending for human review.
 	}
 }
 
@@ -932,7 +927,7 @@ func TestRouteApprovalEmptyContextDenied(t *testing.T) {
 	}
 }
 
-func TestRouteApprovalDangerousCommandNestedRequest(t *testing.T) {
+func TestRouteApprovalNestedDownloadExecuteAwaitsManualReview(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
@@ -955,17 +950,11 @@ func TestRouteApprovalDangerousCommandNestedRequest(t *testing.T) {
 		Payload: payload,
 	})
 
-	rpc := drainRPC(t, received)
-	if rpc.Method != "exec.approval.resolve" {
-		t.Errorf("Method = %q, want exec.approval.resolve", rpc.Method)
-	}
-	var params ApprovalResolveParams
-	json.Unmarshal(rpc.Params, &params)
-	if params.ID != "approval-5" {
-		t.Errorf("ID = %q, want approval-5", params.ID)
-	}
-	if params.Decision != "deny" {
-		t.Errorf("Decision = %q, want deny", params.Decision)
+	select {
+	case rpc := <-received:
+		t.Errorf("download-and-execute is detection-only; unexpected automatic resolution %s", rpc.Method)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: nested command context follows the same pending policy.
 	}
 }
 

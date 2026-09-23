@@ -91,7 +91,7 @@ type ConfigManager struct {
 	observabilityV8 hookLifecycleMetricV8Runtime
 
 	// envConfigPath is the AVC-authored env_config.json (see
-	// config.DefaultEnvConfigPath). When set, Reload overlays
+	// config.ResolveDefaultEnvConfigPath). When set, Reload overlays
 	// cisco_ai_defense_endpoint from that file on top of the
 	// config.yaml value before diffing, and Run adds the file's parent
 	// directory to the fsnotify watch set so a late-arriving
@@ -924,6 +924,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("llm", oldCfg.LLM, newCfg.LLM)
 	add("claw", oldCfg.Claw, newCfg.Claw)
 	add("agent", oldCfg.Agent, newCfg.Agent)
+	add("acp", oldCfg.ACP, newCfg.ACP)
 	add("cisco_ai_defense", oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
 	add("scanners", oldCfg.Scanners, newCfg.Scanners)
 	add("watch", oldCfg.Watch, newCfg.Watch)
@@ -944,6 +945,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("ai_discovery", oldCfg.AIDiscovery, newCfg.AIDiscovery)
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
+	add("routing", oldCfg.Routing, newCfg.Routing)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -955,6 +957,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
+		"acp":              {},
 		"guardrail":        {},
 		"webhooks":         {},
 		"observability":    {},

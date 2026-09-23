@@ -16,11 +16,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,21 +349,64 @@ func (adapter *Adapter) post(ctx context.Context, body []byte, token string) (in
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
 		WroteRequest: func(httptrace.WroteRequestInfo) { wrote.Store(true) },
 	}))
+	postStart := time.Now()
 	response, err := adapter.client.Do(request)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
+		// Transport-level failure info line so an operator tailing
+		// gateway.err.log / gateway.log can see when the AI Defense POST
+		// couldn't complete at all (DNS, TCP, TLS, cancel, deadline).
+		// One line per attempt; low-frequency at the 5 min publish cadence.
+		// The endpoint URL is deliberately redacted to "AI DEFENSE" — the
+		// configured host is release-owned and static across a deployment
+		// so operators don't need it in every log line, and omitting it
+		// keeps regionalized endpoint labels out of log-forwarder pipelines
+		// that may not be scoped to the DefenseClaw tenant.
+		//
+		// `err` is unwrapped via sanitizeTransportError before formatting:
+		// net/http.Client.Do returns transport failures as *url.Error, and
+		// (*url.Error).Error() prints the full request URL, which would
+		// leak the endpoint we just redacted from the same log line.
+		// Unwrapping to url.Error.Err preserves the diagnostic (e.g.
+		// "dial tcp: connection refused", "context deadline exceeded")
+		// without exposing the URL.
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s err=%v\n",
+			len(body), time.Since(postStart), sanitizeTransportError(err))
 		return 0, classifyTransportError(err, wrote.Load())
 	}
 	if response == nil {
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=nil\n",
+			len(body), time.Since(postStart))
 		return 0, delivery.OutcomeAmbiguous
 	}
 	defer response.Body.Close()
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if readErr != nil || len(responseBody) > maxResponseBytes {
+	if readErr != nil {
+		// Genuine read/network failure while draining the response body.
+		// Same *url.Error-unwrap treatment as the transport branch above:
+		// io.ReadAll on response.Body can surface transport errors that
+		// still carry the request URL when wrapped by net/http internals.
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d body-read-err=%v\n",
+			len(body), time.Since(postStart), response.StatusCode, sanitizeTransportError(readErr))
 		return 0, delivery.OutcomeAmbiguous
 	}
+	if len(responseBody) > maxResponseBytes {
+		// io.LimitReader was set to maxResponseBytes+1 exactly to detect
+		// this — a response body larger than the cap. Distinct from a
+		// read error so operators can tell "AI Defense returned a huge
+		// payload" from "the connection was cut mid-body".
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d body-too-large=%d\n",
+			len(body), time.Since(postStart), response.StatusCode, len(responseBody))
+		return 0, delivery.OutcomeAmbiguous
+	}
+	// Success (or well-formed error response) info line — status + latency
+	// only. Full response body is deliberately NOT logged here; operators
+	// can enable the delivery-diagnostics destination or inspect
+	// gateway.jsonl for per-event `inserted`/`rejectCode` details.
+	fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d resp_bytes=%d\n",
+		len(body), time.Since(postStart), response.StatusCode, len(responseBody))
 	return response.StatusCode, ""
 }
 
@@ -412,6 +457,70 @@ func classifyStatus(status int) delivery.DeliveryOutcome {
 	default:
 		return delivery.OutcomePermanentPayload
 	}
+}
+
+// sanitizeTransportError returns an error safe to include in stderr
+// log lines that deliberately redact the AI Defense endpoint URL and
+// resolved socket address. net/http.Client.Do wraps transport
+// failures in *url.Error whose Error() method prints the request URL
+// verbatim (documented in net/url; format is
+// `<Op> "<URL>": <inner>`). Formatting that raw error with %v
+// defeats the URL redaction on the `[managedaid] POST AI DEFENSE
+// ...` info lines. But the wrapped inner cause is often itself a
+// *net.OpError whose Error() includes the resolved remote Addr
+// (source [-> ]addr) — logging that verbatim would leak the same
+// endpoint we deliberately redacted at the URL layer. Map the error
+// to a short, address-free category label so the operator still
+// gets diagnostic signal (dial vs. read vs. TLS vs. context) without
+// disclosing endpoint or address details. A nil error passes
+// through unchanged.
+func sanitizeTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	inner := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		inner = urlErr.Err
+	}
+	return errors.New(transportErrorCategory(inner))
+}
+
+// transportErrorCategory maps a transport error to a short label
+// safe to log. The label is chosen from a fixed set — none of them
+// contain the endpoint URL, resolved address, or SNI hostname.
+func transportErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context deadline exceeded"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		// opErr.Op describes the operation (dial/read/write/tls) and is
+		// a fixed set of Go-emitted strings; it never contains the
+		// remote address. Combine it with the closest safe classifier
+		// we can extract without falling back to opErr.Error() (which
+		// would re-inject the address).
+		op := opErr.Op
+		switch {
+		case opErr.Timeout():
+			return op + " timeout"
+		case op != "":
+			return op + " error"
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "network timeout"
+		}
+		return "network error"
+	}
+	return "transport error"
 }
 
 func classifyTransportError(err error, wrote bool) delivery.DeliveryOutcome {

@@ -23,7 +23,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -36,9 +39,15 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
 )
+from defenseclaw.file_permissions import atomic_write_private_bytes
+
+from tests.helpers import record_test_setup_agent_selections
 
 
 def _cfg_for(tmp: str) -> Config:
+    # macOS exposes /var through /private/var. Production custody correctly
+    # rejects indirect paths, so canonicalize only the test-owned temp root.
+    tmp = os.path.realpath(tmp)
     return Config(
         data_dir=tmp,
         audit_db=os.path.join(tmp, "audit.db"),
@@ -91,12 +100,14 @@ class BootstrapEnvTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(d), f"expected {d} to be created")
 
     def test_first_run_uses_private_directory_creation_for_owned_state(self):
+        from defenseclaw.file_permissions import make_private_directory
+
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         created: list[str] = []
 
         def record_private_directory(path):
             created.append(os.path.abspath(os.fspath(path)))
-            os.makedirs(path, exist_ok=True)
+            make_private_directory(path)
 
         with patch(
             "defenseclaw.file_permissions.make_private_directory",
@@ -115,7 +126,7 @@ class BootstrapEnvTests(unittest.TestCase):
 
         with (
             patch(
-                "defenseclaw.file_permissions.open_regular_file_no_follow",
+                "defenseclaw.bootstrap.open_regular_file_no_follow",
                 return_value=17,
             ),
             patch.object(bootstrap.os, "name", "nt"),
@@ -181,6 +192,20 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
 
+    def test_opencode_readiness_honors_custom_config_dir(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "opencode-config")
+        plugin_dir = os.path.join(config_home, "plugins")
+        os.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, "defenseclaw.js"), "w", encoding="utf-8") as fh:
+            fh.write("// defenseclaw-managed-plugin v6\n")
+
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": config_home}):
+            result = _connector_readiness(cfg, "opencode")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("OpenCode bridge plugin found", result.detail)
+
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "omnigent-config")
@@ -190,8 +215,9 @@ class BootstrapEnvTests(unittest.TestCase):
         with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
             result = _connector_readiness(cfg, "omnigent")
 
-        self.assertEqual(result.status, "pass")
-        self.assertIn("custom policy", result.detail)
+        self.assertEqual(result.status, "warn")
+        self.assertIn("custom policy configured", result.detail)
+        self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
         self.assertIn(config_home, result.detail)
 
     def test_omnigent_readiness_rejects_partial_registration(self):
@@ -238,12 +264,317 @@ class BootstrapEnvTests(unittest.TestCase):
                 self.assertIn(str(plugin), result.detail)
 
 
+class FirstRunProtectedSelectionTests(unittest.TestCase):
+    """Protected Windows selection is the first first-run state transition."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _seed_prior_state(self, label: str) -> tuple[str, dict[str, bytes]]:
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, label)
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.guardrail.connector = "opencode"
+            cfg.guardrail.connectors = {
+                "opencode": PerConnectorGuardrailConfig(mode="observe"),
+                "amp": PerConnectorGuardrailConfig(mode="observe"),
+            }
+            cfg.save()
+
+        sentinels = {
+            "config.yaml": Path(data_dir, "config.yaml").read_bytes(),
+            "agent_selection.json": b'{"prior":"selection"}\n',
+            "hook_contract_lock.json": b'{"prior":"sealed-lock"}\n',
+        }
+        for name, payload in sentinels.items():
+            if name != "config.yaml":
+                atomic_write_private_bytes(Path(data_dir, name), payload)
+        return data_dir, sentinels
+
+    def test_opencode_selection_failure_preserves_state_before_every_first_run_mutation(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import Config
+
+        settings = [
+            {"connector": "opencode", "profile": "observe"},
+            {"connector": "amp", "profile": "observe"},
+        ]
+        for profile in ("observe", "action"):
+            with self.subTest(profile=profile):
+                data_dir, prior = self._seed_prior_state(profile)
+                options = FirstRunOptions(
+                    connector="opencode",
+                    connector_settings=settings,
+                    profile=profile,
+                    llm_api_key="must-not-be-written",
+                    human_approval=True,
+                    skip_install=True,
+                    start_gateway=True,
+                    verify=False,
+                )
+                forbidden = AssertionError("selection failure must precede first-run mutation")
+                with (
+                    patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
+                    patch(
+                        "defenseclaw.agent_selection.setup_agent_selection_connectors",
+                        return_value=("opencode", "amp"),
+                    ) as setup_selection,
+                    patch(
+                        "defenseclaw.agent_selection.record_setup_agent_selections",
+                        return_value=({}, {"opencode": "exact SST package image is missing"}),
+                    ) as record_selection,
+                    patch("defenseclaw.bootstrap.repair_pending_first_run_config", side_effect=forbidden),
+                    patch.object(Config, "save", side_effect=forbidden) as save_config,
+                    patch("defenseclaw.db.Store", side_effect=forbidden) as store,
+                    patch("defenseclaw.bootstrap.bootstrap_env", side_effect=forbidden) as bootstrap,
+                    patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=forbidden) as secrets,
+                    patch("defenseclaw.bootstrap._apply_first_run_choices", side_effect=forbidden) as choices,
+                    patch("defenseclaw.bootstrap._quiet_guardrail_setup", side_effect=forbidden) as setup,
+                    patch("defenseclaw.bootstrap._start_gateway_structured", side_effect=forbidden) as gateway,
+                    patch(
+                        "defenseclaw.bootstrap.agent_discovery.discover_agents",
+                        side_effect=forbidden,
+                    ) as discovery,
+                ):
+                    report = run_first_run(options)
+
+                self.assertEqual(report.status, "needs_attention")
+                self.assertEqual(report.setup[0].name, "Agent Selection")
+                self.assertIn("exact SST package image is missing", report.setup[0].detail)
+                setup_selection.assert_called_once_with(("opencode", "amp"))
+                record_selection.assert_called_once_with(data_dir, ("opencode", "amp"))
+                for blocked in (save_config, store, bootstrap, secrets, choices, setup, gateway, discovery):
+                    blocked.assert_not_called()
+                for name, payload in prior.items():
+                    self.assertEqual(Path(data_dir, name).read_bytes(), payload)
+
+    def test_every_late_first_run_failure_restores_exact_protected_snapshot(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.bootstrap import (
+            FirstRunOptions,
+            FreshMigrationStateError,
+            StepResult,
+            run_first_run,
+        )
+        from defenseclaw.commands import cmd_setup
+        from defenseclaw.config import Config
+
+        stages = (
+            "migration",
+            "config-save",
+            "store-create",
+            "store-init",
+            "bootstrap",
+            "secrets-hilt",
+            "connector-setup",
+            "gateway",
+            "readiness",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage):
+                data_dir, prior = self._seed_prior_state(f"late-{stage}")
+                with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+                    expected = cfg_mod.load()
+                expected_connector = expected.guardrail.connector
+                expected_roster = expected.guardrail.connectors
+                restored_configs = []
+                restore_in_memory = cmd_setup._restore_setup_config_in_memory
+
+                def observe_restore(app, snapshot):
+                    restored = restore_in_memory(app, snapshot)
+                    restored_configs.append(restored)
+                    return restored
+
+                def persist(_cfg, _options, steps):
+                    if stage == "secrets-hilt":
+                        steps.append(StepResult("Secrets", "fail", "injected late failure"))
+
+                def select_and_change_lock(selected_data_dir, connectors):
+                    result = record_test_setup_agent_selections(selected_data_dir, connectors)
+                    Path(selected_data_dir, "hook_contract_lock.json").write_bytes(b'{"changed":"after-selection"}\n')
+                    return result
+
+                store = MagicMock()
+                if stage == "store-init":
+                    store.init.side_effect = OSError("injected store init failure")
+                logger = MagicMock()
+                bootstrap_errors = ["injected bootstrap failure"] if stage == "bootstrap" else []
+                connector_step = StepResult(
+                    "Guardrail",
+                    "fail" if stage == "connector-setup" else "pass",
+                    "injected" if stage == "connector-setup" else "test",
+                )
+                gateway_step = StepResult(
+                    "Sidecar",
+                    "fail" if stage == "gateway" else "pass",
+                    "injected" if stage == "gateway" else "test",
+                )
+                readiness = [
+                    StepResult(
+                        "Readiness",
+                        "fail" if stage == "readiness" else "pass",
+                        "injected" if stage == "readiness" else "test",
+                    )
+                ]
+                migration_effect = (
+                    FreshMigrationStateError("injected migration failure")
+                    if stage == "migration"
+                    else lambda _cfg: False
+                )
+                store_effect = (
+                    OSError("injected store creation failure") if stage == "store-create" else lambda _path: store
+                )
+
+                def save_effect(_cfg):
+                    Path(data_dir, "config.yaml").write_bytes(b"changed after selection\n")
+                    if stage == "config-save":
+                        raise OSError("injected config save failure")
+
+                options = FirstRunOptions(
+                    connector="opencode",
+                    connector_settings=[
+                        {"connector": "opencode", "profile": "action"},
+                        {"connector": "amp", "profile": "observe"},
+                    ],
+                    profile="action",
+                    skip_install=True,
+                    start_gateway=True,
+                    verify=True,
+                )
+                with (
+                    patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
+                    patch(
+                        "defenseclaw.agent_selection.setup_agent_selection_connectors",
+                        return_value=("opencode", "amp"),
+                    ),
+                    patch(
+                        "defenseclaw.agent_selection.record_setup_agent_selections",
+                        side_effect=select_and_change_lock,
+                    ) as record_selection,
+                    patch(
+                        "defenseclaw.bootstrap.repair_pending_first_run_config",
+                        side_effect=migration_effect,
+                    ),
+                    patch.object(Config, "save", side_effect=save_effect, autospec=True),
+                    patch("defenseclaw.db.Store", side_effect=store_effect),
+                    patch("defenseclaw.logger.Logger.from_config", return_value=logger),
+                    patch("defenseclaw.bootstrap.bootstrap_env", return_value=SimpleNamespace(errors=bootstrap_errors)),
+                    patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=persist),
+                    patch("defenseclaw.bootstrap._quiet_guardrail_setup", return_value=connector_step),
+                    patch("defenseclaw.bootstrap._start_gateway_structured", return_value=gateway_step),
+                    patch("defenseclaw.bootstrap.finalize_first_run_config"),
+                    patch("defenseclaw.bootstrap.targeted_readiness", return_value=readiness),
+                    patch(
+                        "defenseclaw.commands.cmd_setup._restore_setup_config_in_memory",
+                        side_effect=observe_restore,
+                    ),
+                ):
+                    if stage == "store-create":
+                        with self.assertRaisesRegex(OSError, "store creation"):
+                            run_first_run(options)
+                    else:
+                        report = run_first_run(options)
+                        self.assertEqual(report.status, "needs_attention")
+                        self.assertIsNone(report._protected_selection)
+
+                record_selection.assert_called_once_with(data_dir, ("opencode", "amp"))
+                self.assertTrue(restored_configs)
+                self.assertEqual(restored_configs[-1].guardrail.connector, expected_connector)
+                self.assertEqual(restored_configs[-1].guardrail.connectors, expected_roster)
+                for name, payload in prior.items():
+                    self.assertEqual(Path(data_dir, name).read_bytes(), payload)
+
+    def test_tampered_first_run_extra_receipt_reselects_complete_roster(self):
+        from defenseclaw.bootstrap import FirstRunOptions, StepResult, run_first_run
+        from defenseclaw.config import Config
+
+        data_dir, _prior = self._seed_prior_state("tampered-extra")
+        store = MagicMock()
+        logger = MagicMock()
+        repair_calls = 0
+
+        def tamper_after_initial_selection(_cfg):
+            nonlocal repair_calls
+            repair_calls += 1
+            receipt = Path(data_dir, "agent_selection.json")
+            atomic = receipt.read_bytes() + b" "
+            from defenseclaw.file_permissions import atomic_write_private_bytes
+
+            atomic_write_private_bytes(str(receipt), atomic)
+            return False
+
+        options = FirstRunOptions(
+            connector="opencode",
+            connector_settings=[
+                {"connector": "opencode", "profile": "action"},
+                {"connector": "amp", "profile": "observe"},
+            ],
+            profile="action",
+            skip_install=True,
+            start_gateway=False,
+            verify=True,
+        )
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.setup_agent_selection_connectors",
+                return_value=("opencode", "amp"),
+            ),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=record_test_setup_agent_selections,
+            ) as record_selection,
+            patch(
+                "defenseclaw.bootstrap.repair_pending_first_run_config",
+                side_effect=tamper_after_initial_selection,
+            ),
+            patch.object(Config, "save", autospec=True),
+            patch("defenseclaw.db.Store", return_value=store),
+            patch("defenseclaw.logger.Logger.from_config", return_value=logger),
+            patch("defenseclaw.bootstrap.bootstrap_env", return_value=SimpleNamespace(errors=[])),
+            patch("defenseclaw.bootstrap._persist_first_run_secrets"),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+            patch("defenseclaw.bootstrap.finalize_first_run_config"),
+            patch(
+                "defenseclaw.bootstrap.targeted_readiness",
+                return_value=[StepResult("Readiness", "pass", "test")],
+            ),
+        ):
+            report = run_first_run(options)
+
+        self.assertEqual(report.status, "ready")
+        self.assertIsNotNone(report._protected_selection)
+        self.assertEqual(repair_calls, 1)
+        self.assertEqual(record_selection.call_count, 2)
+        self.assertEqual(
+            [call.args for call in record_selection.call_args_list],
+            [(data_dir, ("opencode", "amp")), (data_dir, ("opencode", "amp"))],
+        )
+
+
 class FreshMigrationCursorTests(unittest.TestCase):
     """Fresh v8 publication seeds one non-clobbering migration cursor."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        self._selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=record_test_setup_agent_selections,
+        )
+        self._selection_patcher.start()
+        self.addCleanup(self._selection_patcher.stop)
+        self._tmp_root = os.path.realpath(self._tmp.name)
 
     def _pending_config(self, label: str):
         from defenseclaw.bootstrap import (
@@ -252,7 +583,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, label)
+        data_dir = os.path.join(self._tmp_root, label)
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -288,7 +619,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import __version__, migration_state
         from defenseclaw.migrations import MIGRATIONS, _ver_tuple
 
-        data_dir = os.path.join(self._tmp.name, "fresh")
+        data_dir = os.path.join(self._tmp_root, "fresh")
         report = self._run_first_run(data_dir)
 
         self.assertNotEqual(report.status, "needs_attention")
@@ -309,7 +640,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 
-        data_dir = os.path.join(self._tmp.name, "none")
+        data_dir = os.path.join(self._tmp_root, "none")
         with (
             patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
             patch("defenseclaw.bootstrap._quiet_guardrail_setup") as connector_setup,
@@ -336,7 +667,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
         from defenseclaw.config import default_config, load, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "none-existing")
+        data_dir = os.path.join(self._tmp_root, "none-existing")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -364,7 +695,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 
-        data_dir = os.path.join(self._tmp.name, "none-unloadable")
+        data_dir = os.path.join(self._tmp_root, "none-unloadable")
         config_path = os.path.join(data_dir, "config.yaml")
         os.makedirs(data_dir)
         original = b"config_version: 8\noperator_extension: preserve-me\n"
@@ -392,7 +723,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
         from defenseclaw import migration_state
 
-        data_dir = os.path.join(self._tmp.name, "rerun")
+        data_dir = os.path.join(self._tmp_root, "rerun")
         self._run_first_run(data_dir)
         cursor_path = migration_state.state_path(data_dir)
         with open(cursor_path, "rb") as stream:
@@ -414,7 +745,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         }
         for label, payload in payloads.items():
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, label)
+                data_dir = os.path.join(self._tmp_root, label)
                 os.makedirs(data_dir)
                 cursor_path = migration_state.state_path(data_dir)
                 with open(cursor_path, "wb") as stream:
@@ -429,29 +760,36 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.config import Config
 
-        data_dir = os.path.join(self._tmp.name, "save-failure")
-        original_save = Config.save
-        save_calls = 0
+        for host_os in ("linux", "windows"):
+            with self.subTest(host_os=host_os):
+                data_dir = os.path.join(self._tmp_root, f"save-failure-{host_os}")
+                original_save = Config.save
+                save_calls = 0
 
-        def fail_final_save(cfg):
-            nonlocal save_calls
-            save_calls += 1
-            if save_calls == 1:
-                return original_save(cfg)
-            raise OSError("injected final config save failure")
+                def fail_final_save(cfg):
+                    nonlocal save_calls
+                    save_calls += 1
+                    if save_calls == 1:
+                        return original_save(cfg)
+                    raise OSError("injected final config save failure")
 
-        with patch.object(Config, "save", new=fail_final_save):
-            report = self._run_first_run(data_dir)
+                with (
+                    patch.object(Config, "save", new=fail_final_save),
+                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value=host_os),
+                ):
+                    report = self._run_first_run(data_dir)
 
-        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        self.assertTrue(any(step.name == "Config Save" and step.status == "fail" for step in report.setup))
+                self.assertFalse(os.path.lexists(os.path.join(data_dir, "config.yaml")))
+                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+                self.assertTrue(
+                    any(step.name == "Config Save" and step.status == "fail" for step in report.setup)
+                )
 
     def test_unmarked_existing_v8_config_never_infers_a_fresh_cursor(self):
         from defenseclaw import migration_state
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "unmarked-existing")
+        data_dir = os.path.join(self._tmp_root, "unmarked-existing")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -469,7 +807,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
         from defenseclaw.db import Store
 
-        data_dir = os.path.join(self._tmp.name, "setup-failure")
+        data_dir = os.path.join(self._tmp_root, "setup-failure")
         stores = []
 
         def track_store(path):
@@ -512,7 +850,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "version-mismatch")
+        data_dir = os.path.join(self._tmp_root, "version-mismatch")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -547,7 +885,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
             ("changed", {}, "evidence changed during publication"),
         ):
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, f"marker-readback-{label}")
+                data_dir = os.path.join(self._tmp_root, f"marker-readback-{label}")
                 with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
                     cfg = default_config()
                     prepare_fresh_v8_config(cfg)
@@ -571,11 +909,11 @@ class FreshMigrationCursorTests(unittest.TestCase):
 
         for label in ("malformed", "public", "symlink"):
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, f"unsafe-{label}")
+                data_dir = os.path.join(self._tmp_root, f"unsafe-{label}")
                 os.makedirs(data_dir)
                 marker = fresh_migration_pending_path(data_dir)
                 if label == "symlink":
-                    target = os.path.join(self._tmp.name, "attacker-marker")
+                    target = os.path.join(self._tmp_root, "attacker-marker")
                     with open(target, "w", encoding="utf-8") as stream:
                         stream.write("{}\n")
                     os.symlink(target, marker)
@@ -598,7 +936,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "corrupt-existing-cursor")
+        data_dir = os.path.join(self._tmp_root, "corrupt-existing-cursor")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -620,7 +958,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import _fresh_migration_pending_path
 
-        data_dir = os.path.join(self._tmp.name, "cursor-retry")
+        data_dir = os.path.join(self._tmp_root, "cursor-retry")
         with patch.object(
             migration_state,
             "save_if_absent",
@@ -659,7 +997,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "cursor-readback-failure")
+        data_dir = os.path.join(self._tmp_root, "cursor-readback-failure")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -683,7 +1021,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import _fresh_migration_pending_path
 
-        data_dir = os.path.join(self._tmp.name, "cursor-retry-tampered")
+        data_dir = os.path.join(self._tmp_root, "cursor-retry-tampered")
         with patch.object(
             migration_state,
             "save_if_absent",
@@ -1471,9 +1809,10 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
 
     def test_hook_only_install_does_not_pin_openclaw_token(self):
         from defenseclaw.bootstrap import _apply_gateway_defaults
+        from defenseclaw.file_permissions import make_private_directory
 
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        os.makedirs(cfg.data_dir, exist_ok=True)
+        make_private_directory(cfg.data_dir)
         # Hook-only: codex is the active connector, openclaw is NOT.
         cfg.claw.mode = "codex"
         cfg.guardrail.connector = "codex"
@@ -1490,9 +1829,10 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
 
     def test_openclaw_install_still_pins_openclaw_token(self):
         from defenseclaw.bootstrap import _apply_gateway_defaults
+        from defenseclaw.file_permissions import make_private_directory
 
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        os.makedirs(cfg.data_dir, exist_ok=True)
+        make_private_directory(cfg.data_dir)
         cfg.claw.mode = "openclaw"
         cfg.guardrail.connector = "openclaw"
         cfg.claw.config_file = self._stray_openclaw_json("legit-openclaw-secret")
@@ -1500,6 +1840,50 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
         _apply_gateway_defaults(cfg, is_new_config=True)
 
         self.assertEqual(cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
+
+
+def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ambient = tmp_path / "ambient-profile"
+    workspace = tmp_path / "workspace"
+    hooks = workspace / ".devin" / "hooks.v1.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: ambient)
+
+    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=str(workspace)))
+    result = _connector_readiness(cfg, "devin")
+
+    assert result.status == "pass"
+
+
+def test_gemini_readiness_reports_deprecation_and_safe_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound = tmp_path / "authenticated" / ".gemini"
+    hostile = tmp_path / "hostile"
+    settings = bound / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{}", encoding="utf-8")
+    hostile_settings = hostile / ".gemini" / "settings.json"
+    hostile_settings.parent.mkdir(parents=True)
+    hostile_settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(hostile))
+    monkeypatch.setenv("USERPROFILE", str(hostile))
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(hostile / "vendor-override"))
+    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(bound))
+    monkeypatch.setattr(Path, "home", lambda: hostile)
+
+    result = _connector_readiness(SimpleNamespace(), "geminicli")
+    assert result.status == "warn"
+    assert "deprecated" in result.detail.lower()
+    assert result.next_command == "defenseclaw setup remove geminicli --yes"
+
+    settings.unlink()
+    result = _connector_readiness(SimpleNamespace(), "geminicli")
+    assert result.status == "warn"
+    assert result.next_command == "defenseclaw setup antigravity"
 
 
 if __name__ == "__main__":

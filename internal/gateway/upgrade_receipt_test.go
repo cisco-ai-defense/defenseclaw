@@ -615,7 +615,10 @@ func upgradeReceiptFixture(t *testing.T) sidecarV8BootstrapFixture {
 }
 
 func validUpgradeReceipt(status string) upgradeReceipt {
-	created := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	// Relative to now: an absolute date drifts out of the local store's
+	// rolling retention window as time passes, which made this fixture depend
+	// on whatever the default happened to be.
+	created := time.Now().UTC().Add(-time.Hour)
 	completed := created.Add(time.Minute)
 	receipt := upgradeReceipt{
 		SchemaVersion: 1, ReceiptID: uuid.NewString(), CreatedAt: created,

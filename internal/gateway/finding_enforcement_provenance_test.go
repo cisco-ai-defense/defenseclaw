@@ -32,7 +32,7 @@ func TestRuleFindingsToInspectPreservesDetectionOnlyProvenance(t *testing.T) {
 		},
 	}
 
-	got := ruleFindingsToInspect(input)
+	got := ruleFindingsToInspect(input, "claudecode:PostToolUse")
 	if len(got) != len(input) {
 		t.Fatalf("adapted findings=%d, want %d", len(got), len(input))
 	}

@@ -1,0 +1,29 @@
+{
+  "adapter_statistics": {
+    "defenseclaw-kubernetes-production-conformance-v1": {
+      "rows_emitted": 13,
+      "rows_read": 13
+    }
+  },
+  "cases": 13,
+  "counts": {
+    "defenseclaw-kubernetes-production-conformance-v1": 13
+  },
+  "datasets": [
+    "defenseclaw-kubernetes-production-conformance-v1"
+  ],
+  "exact_payload_duplicates_removed": 0,
+  "label_conflicts_excluded": 0,
+  "output_sha256": "e1991b040f8e81015d7d79067612cc0162e792b5dd3e6ba93fd2d4b01c177a02",
+  "schema_version": "1",
+  "source": {
+    "bytes": 7796,
+    "dataset": "defenseclaw-kubernetes-production-conformance-v1",
+    "license": "Apache-2.0",
+    "path": "benchmarks/fixtures/kubernetes-production-conformance-v1.jsonl",
+    "redistribution": "vendored",
+    "revision": "1",
+    "rows": 13,
+    "sha256": "e1991b040f8e81015d7d79067612cc0162e792b5dd3e6ba93fd2d4b01c177a02"
+  }
+}

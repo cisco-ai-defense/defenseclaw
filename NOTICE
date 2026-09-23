@@ -15,6 +15,36 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+DERIVED WORK: SHADOWCLAW
+
+The AI Discovery runtime planes (internal/sensor/) are a derivative work of
+ShadowClaw -- Universal Shadow AI Detector.
+
+    Copyright (c) 2026 Mike Storm. All rights reserved.
+    Author: Mike Storm, Distinguished Engineer, CCIE Security 13847
+    https://github.com/gatekeeper454/ShadowClaw
+    Licensed under the Apache License, Version 2.0
+    Upstream revision: 16eac806b3bdfc6ca32252b840284646cb7a3c59 (v1.4.1, 2026-09-09)
+
+Material modifications made by Cisco Systems, Inc.:
+
+  - The detection engine was reimplemented in Go and absorbed into the
+    DefenseClaw gateway sidecar. It is no longer a standalone Python sensor,
+    a separate process, or a separately installed service.
+  - The upstream official-build identity block -- the authorship module, the
+    attribution digest and its verification, the CLI banner, and the
+    "shadowclaw.*" telemetry resource attributes -- was removed. This build
+    does not assert ShadowClaw project provenance and is not an official
+    ShadowClaw release.
+  - The Kinetic Trust Protocol (KTP) implementation, the KTP oracle sidecar,
+    the hand-written OTLP exporter, the standalone tamper-evident ledger
+    store, the redaction layer, and the macOS/Linux/Windows installer
+    packaging were removed in favor of the existing DefenseClaw equivalents.
+  - Cross-product corroboration against DefenseClaw's inventory JSON file was
+    replaced by an in-process correlation join.
+
+This NOTICE preserves the attribution required by Apache License 2.0 section 4.
+
 Declared third-party dependencies are listed in go.mod/go.sum (Go) and
 pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built
 from extensions/defenseclaw/package.json and

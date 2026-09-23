@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type judgeBodyPathHooks struct {
@@ -68,9 +70,46 @@ func prepareJudgeBodyDatabasePath(path string, hooks judgeBodyPathHooks) (*prepa
 		prepared.close()
 		return nil, err
 	}
-	if created {
+	needsPlatformHardening := created
+	if !created {
+		needsPlatformHardening, err = judgeBodyPlatformPathNeedsHardening(absolute)
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: inspect database platform ACL: %w", err))
+		}
+	}
+	if needsPlatformHardening {
+		pinnedBefore, err := pinned.Stat()
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: inspect pinned database before platform hardening: %w", err))
+		}
+		pathBefore, err := os.Lstat(absolute)
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: inspect database path before platform hardening: %w", err))
+		}
+		if !os.SameFile(pinnedBefore, pathBefore) {
+			return fail(errors.New("judge_body: database file changed before platform hardening"))
+		}
 		if err := secureJudgeBodyPlatformPath(absolute, false); err != nil {
 			return fail(err)
+		}
+		pinnedAfter, err := pinned.Stat()
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: inspect pinned database after platform hardening: %w", err))
+		}
+		pathAfter, err := os.Lstat(absolute)
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: inspect database path after platform hardening: %w", err))
+		}
+		if !os.SameFile(pinnedBefore, pinnedAfter) ||
+			!os.SameFile(pinnedAfter, pathAfter) {
+			return fail(errors.New("judge_body: database file changed during platform hardening"))
+		}
+		stillNeedsHardening, err := judgeBodyPlatformPathNeedsHardening(absolute)
+		if err != nil {
+			return fail(fmt.Errorf("judge_body: verify database platform ACL: %w", err))
+		}
+		if stillNeedsHardening {
+			return fail(errors.New("judge_body: database platform ACL remains noncanonical after hardening"))
 		}
 	}
 
@@ -94,6 +133,9 @@ func prepareJudgeBodyDatabasePath(path string, hooks judgeBodyPathHooks) (*prepa
 		if err := hooks.chmodFile(pinned, targetMode); err != nil {
 			return fail(fmt.Errorf("judge_body: secure database file permissions: %w", err))
 		}
+	}
+	if err := safefile.ReclaimToDirectoryOwner(absolute); err != nil {
+		return fail(fmt.Errorf("judge_body: reclaim database ownership: %w", err))
 	}
 	if err := validatePinnedJudgeBodyLeaf(absolute, pinned); err != nil {
 		return fail(err)
@@ -138,8 +180,22 @@ func secureJudgeBodySQLiteSidecars(databasePath string, hooks judgeBodyPathHooks
 				return fmt.Errorf("judge_body: secure SQLite sidecar %s permissions: %w", suffix, err)
 			}
 		}
-		if err := secureJudgeBodyPlatformPath(path, false); err != nil {
-			return fmt.Errorf("judge_body: secure SQLite sidecar %s platform ACL: %w", suffix, err)
+		needsPlatformHardening, err := judgeBodyPlatformPathNeedsHardening(path)
+		if err != nil {
+			return fmt.Errorf("judge_body: inspect SQLite sidecar %s platform ACL: %w", suffix, err)
+		}
+		if needsPlatformHardening {
+			if err := secureJudgeBodyPlatformPath(path, false); err != nil {
+				return fmt.Errorf("judge_body: secure SQLite sidecar %s platform ACL: %w", suffix, err)
+			}
+			if stillNeedsHardening, err := judgeBodyPlatformPathNeedsHardening(path); err != nil {
+				return fmt.Errorf("judge_body: verify SQLite sidecar %s platform ACL: %w", suffix, err)
+			} else if stillNeedsHardening {
+				return fmt.Errorf("judge_body: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
+			}
+		}
+		if err := safefile.ReclaimToDirectoryOwner(path); err != nil {
+			return fmt.Errorf("judge_body: reclaim SQLite sidecar %s ownership: %w", suffix, err)
 		}
 		after, err := os.Lstat(path)
 		if err != nil {

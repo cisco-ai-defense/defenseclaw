@@ -19,6 +19,7 @@ package gateway
 import (
 	"net/netip"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -35,6 +36,8 @@ type semanticOwner struct {
 	unmatchedClaims        []string
 	prerequisite           semanticOwnerPrerequisite
 	suppressFallback       semanticOwnerPrerequisite
+	detectionOnly          bool
+	alertOnly              bool
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
@@ -62,18 +65,29 @@ type compiledSemanticRule struct {
 
 var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"PATH-ENV-FILE": {
-		prerequisite:     pathOwnerPrerequisite(pathValueMatcher(matchesEnvironmentFile)),
-		suppressFallback: pathOwnerSafeNegative(matchesEnvironmentFile, pathValueMatcher(matchesEnvironmentFile)),
+		prerequisite: pathOwnerPrerequisite(
+			matchesContextualEnvironmentFile,
+		),
+		suppressFallback: sensitivePathSafeNegativePreservingWrites(
+			matchesEnvironmentFile,
+			matchesContextualEnvironmentFile,
+		),
 	},
 	"PATH-SSH-KEY": {
 		equivalentAliases: []string{"PATH-WIN-SSH-KEY"},
-		prerequisite:      pathOwnerPrerequisite(matchesActiveSSHPrivateKey),
-		suppressFallback:  pathOwnerSafeNegative(matchesSSHPrivateKey, matchesActiveSSHPrivateKey),
+		prerequisite:      sshPrivateKeyContentReadPrerequisite,
+		suppressFallback:  sshPrivateKeyContentReadSafeNegative,
 	},
 	"PATH-AWS-CREDS": {
 		equivalentAliases: []string{"PATH-WIN-AWS-CREDS"},
 		prerequisite:      pathOwnerPrerequisite(matchesActiveAWSCredentials),
 		suppressFallback:  pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
+	},
+	"PATH-PASSWORD-CRACKER-POTFILE": {
+		prerequisite: passwordCrackerPotfileReadPrerequisite,
+		// Reading a recovered-password store is high-confidence credential
+		// access, but is legitimate during an authorized assessment.
+		detectionOnly: true,
 	},
 	"PATH-KUBE": {
 		equivalentAliases: []string{"PATH-WIN-KUBE-CONFIG"},
@@ -104,21 +118,35 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback:   environmentDumpSafeNegative,
 	},
 	"CMD-CURL-UPLOAD": {
-		prerequisite:     sensitiveFileUploadPrerequisite,
+		prerequisite:     externalFileUploadPrerequisite,
 		suppressFallback: fileUploadSafeNegative,
 	},
 	"CMD-PIPE-CURL": {
-		equivalentAliases: []string{"CMD-WIN-IWR-IEX"},
-		prerequisite:      curlDownloadExecPrerequisite,
-		suppressFallback:  authoritativeSemanticSafeNegative,
+		prerequisite:     curlDownloadExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Download-and-execute is a strong risk signal, but a known installer
+		// has the same observable shape. Keep the generic POSIX compatibility
+		// rule detection-only. Native PowerShell download-and-execute retains
+		// its distinct CMD-WIN-IWR-IEX proof and enforcement contract.
+		detectionOnly: true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
 	},
 	"CMD-PIPE-BASE64": {
 		prerequisite:     base64DecodeExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
+	},
+	"exec.remote_ip_download_execute_same_artifact": {
+		prerequisite:     remoteIPStagedExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The exact source and executed path are static, but shell control flow
+		// may still be conditional at pre-execution time. Preserve the finding
+		// for policy/correlation without authorizing a synchronous deny.
+		detectionOnly: true,
 	},
 	"CMD-REVSHELL-BASH": {
 		equivalentAliases: []string{"CMD-REVSHELL-NC", "CMD-SOCAT-EXEC"},
@@ -138,6 +166,28 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		prerequisite:     pathOwnerPrerequisite(matchesContextualCloudCredentialFile),
 		suppressFallback: pathOwnerSafeNegative(matchesCloudCredentialFallbackCandidate, matchesContextualCloudCredentialFile),
 	},
+	"secrets.cloud_metadata_credential_read": {
+		prerequisite: func(facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactCloudMetadataCredentialRead(facts)
+			return ok
+		},
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Metadata credentials are highly sensitive, but fetching them is a
+		// normal part of some cloud workloads. Keep this exact atomic event as
+		// an alert-only signal for later egress or destructive-action joins.
+		alertOnly: true,
+	},
+	"secrets.structured_credential_extract": {
+		prerequisite: func(facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactStructuredCredentialRead(facts)
+			return ok
+		},
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Credential extraction tools are dual-use in authorized response and
+		// assessment workflows. Retain the exact capability signal for bounded
+		// use/egress joins without making the atomic event a universal block.
+		alertOnly: true,
+	},
 	"secrets.browser_session_store_read": {
 		prerequisite:     pathOwnerPrerequisite(matchesContextualBrowserSessionStore),
 		suppressFallback: pathOwnerSafeNegative(matchesBrowserSessionFallbackCandidate, matchesContextualBrowserSessionStore),
@@ -149,16 +199,116 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"secrets.cloud_secret_manager_read": {
 		prerequisite:     cloudSecretManagerPrerequisite,
 		suppressFallback: cloudSecretManagerPreviewSafeNegative,
+		// A value read can be ordinary deployment or debugging work. Keep the
+		// signal for correlation; do not infer exfiltration from the read alone.
+		detectionOnly: true,
 	},
 	"exfil.secret_read_and_egress_oneliner": {
 		prerequisite:     sensitiveReadAndEgressPrerequisite,
 		suppressFallback: readAndEgressSafeNegative,
 	},
+	"impact.credential_file_secure_delete": {
+		prerequisite:     secureCredentialFileDeletePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Secure deletion is irreversible and valuable security telemetry, but
+		// credential rotation and incident response can legitimately perform it.
+		// Keep the global rule detection-only until deployment policy identifies
+		// protected paths whose deletion is forbidden.
+		detectionOnly: true,
+	},
+	"exfil.literal_sensitive_json_upload": {
+		prerequisite:     literalSensitiveExternalUploadPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Literal credential-shaped JSON uploads can be legitimate API calls.
+		// Strict retains the exact signal for policy/correlation without making
+		// an unknown external destination a universal synchronous deny.
+		detectionOnly: true,
+	},
+	"exfil.credential_file_external_upload": {
+		prerequisite: func(facts actionfacts.Facts) bool {
+			return credentialFileExternalUploadPrerequisite(
+				facts, actionfacts.CredentialFileUploadStrong,
+			)
+		},
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The exact file grammar proves credential material is being uploaded,
+		// but an unknown external host may still be an authorized destination.
+		// Keep the global signal nonblocking and let deployment policy promote it.
+		detectionOnly: true,
+	},
+	"exfil.source_archive_external_transfer": {
+		prerequisite: func(facts actionfacts.Facts) bool {
+			return len(actionfacts.ExactSourceArchiveUploads(facts)) != 0
+		},
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Whole-repository export can be an authorized backup. Strict surfaces
+		// the exact bounded flow without assuming an unknown host is forbidden.
+		detectionOnly: true,
+	},
+	"chain.compromised_credential_then_successful_authentication": {
+		prerequisite:     compromisedCredentialAuthenticationCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this success-gated
+		// account-and-credential chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
+	"chain.adcs_certificate_request_then_pfx_authentication": {
+		prerequisite:     adcsCertificateImpersonationCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this result-gated
+		// PFX artifact chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
+	"chain.s4u_ticket_then_kerberos_secretsdump_same_cache": {
+		prerequisite:     s4uTicketSecretsDumpCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this result-gated
+		// exact-cache chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
+	"chain.file_read_then_email_same_artifact": {
+		prerequisite:     fileReadEmailArtifactCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this success-gated
+		// same-file chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
+	"exfiltration.recursive_model_artifact_external_multipart": {
+		prerequisite:     recursiveModelArtifactEgressCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The CEL expression is only a catalog anchor. The code-owned bounded
+		// Python parser must prove recursive opened-file-to-multipart lineage.
+	},
 })
+
+func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func fileReadEmailArtifactCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func adcsCertificateImpersonationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func s4uTicketSecretsDumpCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func recursiveModelArtifactEgressCatalogPrerequisite(facts actionfacts.Facts) bool {
+	_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(facts)
+	return ok
+}
 
 func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwner {
 	registerSemanticOwners(owners, semanticReconImpactOwners)
+	registerSemanticOwners(owners, semanticCloudIAMOwners)
 	registerSemanticOwners(owners, semanticIntegrityPersistenceOwners)
+	registerSemanticOwners(owners, semanticProtectiveProfileOwners)
+	registerSemanticOwners(owners, semanticDatabaseOwners)
+	registerSemanticOwners(owners, semanticKubernetesOwners)
 	for ownerID, aliases := range semanticIntegrityPersistenceFallbackAliasesOnMatch {
 		owner, ok := owners[ownerID]
 		if !ok {
@@ -259,15 +409,61 @@ func powerShellDownloadExecSafeNegative(facts actionfacts.Facts) bool {
 }
 
 func staticReverseShellPrerequisite(facts actionfacts.Facts) bool {
+	if actionfacts.ExactPOSIXFIFOReverseShell(facts) {
+		return true
+	}
 	for _, command := range facts.Commands {
-		if command.ArgvComplete &&
-			oneOfFold(command.Program, "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "socat") &&
-			hasExternalNetworkAction(
+		if !command.ArgvComplete ||
+			!oneOfFold(command.Program, "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "socat") {
+			continue
+		}
+		if oneOfFold(command.Program, "nc", "nc.exe", "ncat", "ncat.exe", "netcat") &&
+			hasNetcatExecutedShell(facts, command.ID) &&
+			hasNetworkAction(
 				facts,
 				command.ID,
 				actionfacts.NetworkConnect,
 				actionfacts.NetworkListen,
 			) {
+			return true
+		}
+		if oneOfFold(command.Program, "socat") && hasExternalNetworkAction(
+			facts,
+			command.ID,
+			actionfacts.NetworkConnect,
+			actionfacts.NetworkListen,
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNetcatExecutedShell(facts actionfacts.Facts, commandID int64) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID ||
+			candidate.Access != actionfacts.PathAccessExecute {
+			continue
+		}
+		executable := strings.ToLower(path.Base(strings.ReplaceAll(
+			firstNonEmpty(candidate.Resolved, candidate.Normalized, candidate.Value),
+			`\`,
+			"/",
+		)))
+		if executable == "sh" || executable == "bash" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNetworkAction(
+	facts actionfacts.Facts,
+	commandID int64,
+	actions ...actionfacts.NetworkAction,
+) bool {
+	for _, network := range facts.Network {
+		if network.CommandID == commandID && slices.Contains(actions, network.Action) {
 			return true
 		}
 	}
@@ -352,8 +548,14 @@ func reverseTunnelNonExternalPrerequisite(facts actionfacts.Facts) bool {
 
 func agentRuntimeBypassPrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if command.Effect == actionfacts.EffectExecute &&
-			hasOperation(command, actionfacts.OperationPolicyBypass) {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationPolicyBypass) {
+			continue
+		}
+		switch command.Program {
+		case "codex", "codex.exe", "claude", "claude.exe",
+			"gemini", "gemini.exe", "opencode", "opencode.exe",
+			"npx", "pnpm", "bunx":
 			return true
 		}
 	}
@@ -386,6 +588,189 @@ func pathOwnerPrerequisite(matches semanticPathMatcher) semanticOwnerPrerequisit
 	}
 }
 
+func sshPrivateKeyContentReadPrerequisite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessRead ||
+			!matchesContextualSSHPrivateKey(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute ||
+			sshIdentityConsumer(command) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func sshPrivateKeyContentReadSafeNegative(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessRead ||
+			!matchesContextualSSHPrivateKey(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok && command.Effect == actionfacts.EffectExecute &&
+			sshIdentityConsumer(command) {
+			return true
+		}
+	}
+	return sensitivePathSafeNegativePreservingWrites(
+		matchesSSHPrivateKey,
+		matchesActiveSSHPrivateKey,
+	)(facts)
+}
+
+func matchesContextualSSHPrivateKey(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesActiveSSHPrivateKey(facts, candidate) {
+		return true
+	}
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if value == "" || integrityPathHasFixtureSegment(value) ||
+		!matchesSSHPrivateKey(value) {
+		return false
+	}
+	if strings.HasPrefix(value, "~/.ssh/") || strings.HasPrefix(value, "/root/.ssh/") {
+		return true
+	}
+	for _, root := range []string{"/home/", "/users/"} {
+		if !strings.HasPrefix(value, root) {
+			continue
+		}
+		relative := strings.TrimPrefix(value, root)
+		parts := strings.Split(relative, "/")
+		return len(parts) == 3 && parts[0] != "" && parts[1] == ".ssh"
+	}
+	return false
+}
+
+func sshIdentityConsumer(command actionfacts.CommandFact) bool {
+	switch strings.ToLower(path.Base(strings.ReplaceAll(command.Program, `\`, "/"))) {
+	case "ssh", "ssh.exe", "scp", "scp.exe", "sftp", "sftp.exe", "rsync":
+		return true
+	default:
+		return false
+	}
+}
+
+func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute {
+			continue
+		}
+		if integrityCommandMutatesPath(command, candidate) {
+			return true
+		}
+		if candidate.Access == actionfacts.PathAccessRead &&
+			!exactTargetedShadowAccountLookup(command) {
+			return true
+		}
+	}
+	return false
+}
+
+func shadowContentAccessSafeNegative(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" ||
+			candidate.Access != actionfacts.PathAccessRead {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok && command.Effect == actionfacts.EffectExecute &&
+			exactTargetedShadowAccountLookup(command) {
+			return true
+		}
+	}
+	return pathOwnerSafeNegative(
+		func(value string) bool { return canonicalSemanticPath(value) == "/etc/shadow" },
+		func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
+			return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/shadow"
+		},
+	)(facts)
+}
+
+func exactTargetedShadowAccountLookup(command actionfacts.CommandFact) bool {
+	switch strings.ToLower(path.Base(strings.ReplaceAll(command.Program, `\`, "/"))) {
+	case "grep", "egrep", "fgrep":
+	default:
+		return false
+	}
+	if len(command.Argv) < 3 {
+		return false
+	}
+	var patternValue string
+	shadowOperands := 0
+	for _, argument := range command.Argv[1:] {
+		value := strings.Trim(strings.TrimSpace(argument), `"'`)
+		if canonicalSemanticPath(value) == "/etc/shadow" {
+			shadowOperands++
+			continue
+		}
+		if strings.HasPrefix(value, "-") {
+			if !simpleGrepFlag(value) {
+				return false
+			}
+			continue
+		}
+		if patternValue != "" {
+			return false
+		}
+		patternValue = value
+	}
+	return shadowOperands == 1 && literalAccountPattern(patternValue)
+}
+
+func simpleGrepFlag(value string) bool {
+	if value == "--fixed-strings" || value == "--line-regexp" ||
+		value == "--word-regexp" || value == "--quiet" ||
+		value == "--silent" {
+		return true
+	}
+	if len(value) < 2 || value[0] != '-' || value[1] == '-' {
+		return false
+	}
+	for _, flag := range value[1:] {
+		if !strings.ContainsRune("Fqxw", flag) {
+			return false
+		}
+	}
+	return true
+}
+
+func literalAccountPattern(value string) bool {
+	value = strings.TrimPrefix(value, "^")
+	value = strings.TrimSuffix(value, "$")
+	value = strings.TrimSuffix(value, ":")
+	if value == "" || len(value) > 32 {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character == '_' ||
+			index > 0 && character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func pathValueMatcher(matches semanticPathCandidate) semanticPathMatcher {
 	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
 		return matches(semanticPathValue(candidate))
@@ -415,6 +800,35 @@ func pathOwnerSafeNegative(
 			return false
 		}
 		return sawCandidate
+	}
+}
+
+// sensitivePathSafeNegativePreservingWrites distinguishes a proven sensitive
+// file mutation from a read or inert filename reference. Read expressions keep
+// their semantic owner, fixture/reference-only inputs are safe negatives, and
+// a live write deliberately retains the compatibility lane until a dedicated
+// write expression owns it.
+func sensitivePathSafeNegativePreservingWrites(
+	isCandidate semanticPathCandidate,
+	isActive semanticPathMatcher,
+) semanticOwnerPrerequisite {
+	baseSafeNegative := pathOwnerSafeNegative(isCandidate, isActive)
+	return func(facts actionfacts.Facts) bool {
+		if !facts.Authoritative() {
+			return false
+		}
+		for _, candidate := range facts.Paths {
+			if !isCandidate(semanticPathValue(candidate)) ||
+				!isActive(facts, candidate) ||
+				integrityPathHasFixtureSegment(semanticPathValue(candidate)) {
+				continue
+			}
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if ok && integrityCommandMutatesPath(command, candidate) {
+				return false
+			}
+		}
+		return baseSafeNegative(facts)
 	}
 }
 
@@ -615,14 +1029,38 @@ func readAndEgressPrerequisite(
 	return false
 }
 
-func sensitiveFileUploadPrerequisite(facts actionfacts.Facts) bool {
-	return fileUploadPrerequisite(facts, true, hasExternalUpload)
+func externalFileUploadPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete ||
+			!curlProgram(command.Program) ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
+			!hasReadPath(facts, command.ID, true) ||
+			!hasExternalUpload(facts, command.ID) ||
+			!hasDataFlowTo(
+				facts,
+				command.ID,
+				actionfacts.DataFile,
+				actionfacts.DataProcess,
+			) ||
+			!hasDataFlowFrom(
+				facts,
+				command.ID,
+				"",
+				actionfacts.DataNetwork,
+			) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func fileUploadSafeNegative(facts actionfacts.Facts) bool {
 	sawRelevantUpload := false
 	for _, command := range facts.Commands {
-		if !hasOperation(command, actionfacts.OperationUpload) ||
+		if !curlProgram(command.Program) ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
 			!hasDataFlowTo(
 				facts,
 				command.ID,
@@ -674,21 +1112,9 @@ func allReadPathsDefinitelyNonSensitive(
 	return sawReadPath, sawReadPath
 }
 
-func fileUploadPrerequisite(
-	facts actionfacts.Facts,
-	sensitiveOnly bool,
-	networkMatches commandNetworkPredicate,
-) bool {
-	for _, command := range facts.Commands {
-		if hasOperation(command, actionfacts.OperationUpload) &&
-			hasReadPath(facts, command.ID, sensitiveOnly) &&
-			networkMatches(facts, command.ID) &&
-			hasDataFlowTo(facts, command.ID, actionfacts.DataFile, actionfacts.DataProcess) &&
-			hasDataFlowFrom(facts, command.ID, "", actionfacts.DataNetwork) {
-			return true
-		}
-	}
-	return false
+func curlProgram(program string) bool {
+	base := strings.ToLower(path.Base(strings.ReplaceAll(program, `\`, "/")))
+	return base == "curl" || base == "curl.exe"
 }
 
 func cloudSecretManagerPrerequisite(facts actionfacts.Facts) bool {
@@ -858,7 +1284,8 @@ func isDefinitelyNonSensitivePath(
 }
 
 func matchesAnySensitivePathCandidate(value string) bool {
-	return matchesEnvironmentFile(value) ||
+	return canonicalSemanticPath(value) == "/etc/shadow" ||
+		matchesEnvironmentFile(value) ||
 		matchesSSHPrivateKey(value) ||
 		matchesAWSCredentials(value) ||
 		matchesKubeConfig(value) ||
@@ -877,6 +1304,24 @@ func hasExternalUpload(facts actionfacts.Facts, commandID int64) bool {
 		isExternalNetwork,
 		actionfacts.NetworkUpload,
 	)
+}
+
+func literalSensitiveExternalUploadPrerequisite(facts actionfacts.Facts) bool {
+	for _, upload := range actionfacts.ExactLiteralSensitiveUploads(facts) {
+		if hasExternalUpload(facts, upload.CommandID) {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialFileExternalUploadPrerequisite(facts actionfacts.Facts, class string) bool {
+	for _, upload := range actionfacts.ExactCredentialFileUploads(facts) {
+		if upload.Class == class && hasExternalUpload(facts, upload.CommandID) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasDeterminateNonExternalUpload(
@@ -1038,7 +1483,7 @@ func matchesActiveSensitivePath(
 	candidate actionfacts.PathFact,
 ) bool {
 	value := semanticPathValue(candidate)
-	return matchesEnvironmentFile(value) ||
+	return matchesContextualEnvironmentFile(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
 		matchesActiveAWSCredentials(facts, candidate) ||
 		matchesActiveKubeConfig(facts, candidate) ||
@@ -1058,6 +1503,15 @@ func matchesEnvironmentFile(value string) bool {
 	default:
 		return false
 	}
+}
+
+func matchesContextualEnvironmentFile(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := semanticPathValue(candidate)
+	return matchesEnvironmentFile(value) &&
+		!integrityPathHasFixtureSegment(value)
 }
 
 func matchesSSHPrivateKey(value string) bool {
@@ -1089,6 +1543,56 @@ func matchesActiveAWSCredentials(
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	return ok && relative == ".aws/credentials"
+}
+
+func passwordCrackerPotfileReadPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !hasOperation(command, actionfacts.OperationCredentialRead) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessRead &&
+				matchesPasswordCrackerPotfile(facts, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchesPasswordCrackerPotfile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	if candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+		integrityPathHasFixtureSegment(candidate.Value) {
+		return false
+	}
+	for _, segment := range strings.Split(candidate.Value, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	resolved := strings.TrimSpace(candidate.Resolved)
+	if resolved == "" {
+		resolved = strings.TrimSpace(candidate.Normalized)
+	}
+	for _, relative := range []string{
+		".john/john.pot",
+		".local/share/hashcat/hashcat.potfile",
+		".hashcat/hashcat.potfile",
+	} {
+		if resolved == "/root/"+relative {
+			return true
+		}
+		home := strings.TrimRight(strings.TrimSpace(facts.ActiveHome), "/")
+		if home != "" && strings.HasPrefix(home, "/") &&
+			resolved == home+"/"+relative {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesKubeConfig(value string) bool {
@@ -1220,6 +1724,7 @@ func matchesCloudCredentialRelative(relative string) bool {
 		".config/gcloud/credentials.db",
 		".config/gcloud/access_tokens.db",
 		".config/gh/hosts.yml",
+		".config/anthropic/keys.json",
 		"appdata/roaming/gcloud/application_default_credentials.json",
 		"appdata/roaming/gcloud/credentials.db",
 		"appdata/roaming/gcloud/access_tokens.db",

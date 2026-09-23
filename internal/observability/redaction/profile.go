@@ -22,7 +22,6 @@ const (
 	ProfileSensitive ProfileName = "sensitive"
 	ProfileContent   ProfileName = "content"
 	ProfileStrict    ProfileName = "strict"
-	ProfileLegacyV7  ProfileName = "legacy-v7"
 )
 
 // TransformationMode is one field-class projection operation.
@@ -92,7 +91,6 @@ func BuiltInProfiles() []Profile {
 		definitions[ProfileSensitive],
 		definitions[ProfileContent],
 		definitions[ProfileStrict],
-		definitions[ProfileLegacyV7],
 	}
 }
 
@@ -207,13 +205,9 @@ func builtInProfiles() map[ProfileName]Profile {
 		ModePreserve, ModePreserve, ModeRemove, ModeRemove,
 		ModeRemove, ModeRemove, ModeRemove, ModeRemove,
 	}, true)
-	legacyV7 := resolvedBuiltIn(ProfileLegacyV7, [fieldClassCount]TransformationMode{
-		ModePreserve, ModeWhole, ModeWhole, ModeWhole,
-		ModeWhole, ModeWhole, ModeWhole, ModeWhole,
-	}, false)
 	return map[ProfileName]Profile{
 		ProfileNone: none, ProfileSensitive: sensitive,
-		ProfileContent: content, ProfileStrict: strict, ProfileLegacyV7: legacyV7,
+		ProfileContent: content, ProfileStrict: strict,
 	}
 }
 

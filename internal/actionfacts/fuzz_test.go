@@ -172,13 +172,15 @@ func FuzzAnalyzeNeverPanicsAndAuthorityMatchesStatus(f *testing.F) {
 			len(facts.Paths) > maxPathFacts ||
 			len(facts.Network) > maxNetworkFacts ||
 			len(facts.DataFlows) > maxDataFlowFacts ||
+			len(facts.Artifacts) > maxArtifactFacts ||
 			len(facts.Parse.Issues) > maxIssues {
 			t.Fatalf(
-				"unbounded result: commands=%d paths=%d network=%d flows=%d issues=%d",
+				"unbounded result: commands=%d paths=%d network=%d flows=%d artifacts=%d issues=%d",
 				len(facts.Commands),
 				len(facts.Paths),
 				len(facts.Network),
 				len(facts.DataFlows),
+				len(facts.Artifacts),
 				len(facts.Parse.Issues),
 			)
 		}
@@ -189,13 +191,15 @@ func FuzzAnalyzeNeverPanicsAndAuthorityMatchesStatus(f *testing.F) {
 			len(projected.Paths) > maxPathFacts ||
 			len(projected.Network) > maxNetworkFacts ||
 			len(projected.DataFlows) > maxDataFlowFacts ||
+			len(projected.Artifacts) > maxArtifactFacts ||
 			len(projected.Parse.Issues) > maxIssues {
 			t.Fatalf(
-				"unbounded projection: commands=%d paths=%d network=%d flows=%d issues=%d",
+				"unbounded projection: commands=%d paths=%d network=%d flows=%d artifacts=%d issues=%d",
 				len(projected.Commands),
 				len(projected.Paths),
 				len(projected.Network),
 				len(projected.DataFlows),
+				len(projected.Artifacts),
 				len(projected.Parse.Issues),
 			)
 		}

@@ -14,13 +14,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 type engineOrigin struct{ identity byte }
 
 // Engine owns one immutable cloned correlation key and projection origin.
-// A keyless engine supports none and the fixed unkeyed legacy-v7 compatibility
+// A keyless engine supports the none profile and the unkeyed compatibility
 // profile; keyed redacting profiles fail affected fields closed.
 type Engine struct {
 	origin       *engineOrigin
@@ -39,7 +38,7 @@ func NewEngine(key []byte) (*Engine, error) {
 }
 
 // NewEngineWithCorrelationKey is the key-custody integration boundary. A zero
-// key creates a keyless engine so none and legacy-v7 remain available while
+// key creates a keyless engine so the none profile remains available while
 // keyed redacting profiles fail affected fields closed.
 func NewEngineWithCorrelationKey(key CorrelationKey) (*Engine, error) {
 	material, available := key.Material()
@@ -289,9 +288,6 @@ func (state *projectionWalkState) transformString(
 	class observability.FieldClass,
 	mode TransformationMode,
 ) (any, bool, error) {
-	if state.profile.name == ProfileLegacyV7 {
-		return state.transformLegacyV7(input, class), false, nil
-	}
 	switch mode {
 	case ModePreserve:
 		return strings.Clone(input), false, nil
@@ -331,32 +327,6 @@ func (state *projectionWalkState) transformString(
 	default:
 		return nil, false, &ProjectionError{Code: ProjectionFailureContext}
 	}
-}
-
-func (state *projectionWalkState) transformLegacyV7(input string, class observability.FieldClass) string {
-	var output string
-	switch class {
-	case observability.FieldClassMetadata:
-		return strings.Clone(input)
-	case observability.FieldClassIdentifier:
-		output = legacyredaction.LegacyV7Entity(input)
-	case observability.FieldClassContent:
-		output = legacyredaction.LegacyV7MessageContent(input)
-	case observability.FieldClassReason:
-		output = legacyredaction.LegacyV7Reason(input)
-	case observability.FieldClassEvidence:
-		output = legacyredaction.LegacyV7Evidence(input, -1, -1)
-	case observability.FieldClassError, observability.FieldClassPath, observability.FieldClassCredential:
-		output = legacyredaction.LegacyV7String(input)
-	default:
-		// Complete class-map preflight makes this unreachable. Retain a safe
-		// defensive whole-field placeholder without exposing the input.
-		output = legacyredaction.LegacyV7String(input)
-	}
-	if output != input {
-		state.report.transformed(false)
-	}
-	return output
 }
 
 func (state *projectionWalkState) failedScalar(

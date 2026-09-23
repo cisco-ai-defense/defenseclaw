@@ -75,7 +75,7 @@
             "codex",
             "hermes",
             "cursor",
-            "windsurf",
+            "devin",
             "geminicli",
             "copilot",
             "openhands",
@@ -83,6 +83,7 @@
             "opencode",
             "amp",
             "omnigent",
+            "kiro",
             "unknown"
           ],
           "description": "Connector that produced the event. `unknown` is used when an older client omits the source header."

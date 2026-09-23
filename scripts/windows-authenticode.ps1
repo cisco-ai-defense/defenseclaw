@@ -447,7 +447,8 @@ function Get-DefenseClawAuthenticodeEvidence(
     }
 
     if ($Policy -notin @(
-        'defenseclaw-product-publisher', 'pinned-input-observation', 'digest-only-upstream'
+        'defenseclaw-product-publisher', 'pinned-input-observation',
+        'pinned-microsoft-vc-runtime', 'digest-only-upstream'
     )) {
         throw "Authenticode policy is unsupported: $Policy"
     }
@@ -463,9 +464,11 @@ function Get-DefenseClawAuthenticodeEvidence(
             $false
         )
     } else { '' }
-    $signatureType = [string]$signature.SignatureType
+    $platformSignatureType = [string]$signature.SignatureType
+    $signatureType = $platformSignatureType
     $timestampPresent = $null -ne $signature.TimeStamperCertificate
-    $signerEvidence = Get-DefenseClawCertificateEvidence $signature.SignerCertificate
+    $selectedSignerCertificate = $signature.SignerCertificate
+    $signerEvidence = Get-DefenseClawCertificateEvidence $selectedSignerCertificate
     $embeddedCms = Get-DefenseClawEmbeddedAuthenticodeCms $Path
     $embeddedSignatures = @(
         if ($null -ne $embeddedCms) {
@@ -473,7 +476,28 @@ function Get-DefenseClawAuthenticodeEvidence(
         }
     )
     $selectedEmbeddedSignature = $null
-    if ($signatureType -eq 'Authenticode') {
+    if ($Policy -eq 'pinned-microsoft-vc-runtime') {
+        # Windows may prefer a machine-local catalog signature for the exact
+        # Microsoft runtime bytes. Keep the platform Valid decision mandatory,
+        # but make the portable embedded signature the stable publisher and
+        # timestamp identity recorded in provenance and checked after install.
+        if ($platformSignatureType -notin @('Authenticode', 'Catalog')) {
+            throw "Pinned Microsoft VC++ runtime has an unsupported Windows trust source: $Path"
+        }
+        $matches = @($embeddedSignatures | Where-Object {
+            [int]$_.depth -eq 0 -and [string]$_.scope -ceq 'top-level/0'
+        })
+        if ($matches.Count -ne 1 -or $null -eq $embeddedCms -or
+            $embeddedCms.SignerInfos.Count -ne 1) {
+            throw "Pinned Microsoft VC++ runtime has no unique portable primary signer: $Path"
+        }
+        $selectedEmbeddedSignature = $matches[0]
+        $selectedSignerCertificate = $embeddedCms.SignerInfos[0].Certificate
+        $signerEvidence = $selectedEmbeddedSignature.signer
+        $publisher = [string]$selectedEmbeddedSignature.publisher
+        $signatureType = 'Authenticode'
+        $timestampPresent = [bool]$selectedEmbeddedSignature.timestamp.present
+    } elseif ($signatureType -eq 'Authenticode') {
         $platformSignerThumbprint = [string]$signerEvidence.thumbprint_sha256
         $matches = @($embeddedSignatures | Where-Object {
             [string]$_.signer.thumbprint_sha256 -ceq $platformSignerThumbprint
@@ -483,7 +507,10 @@ function Get-DefenseClawAuthenticodeEvidence(
         }
         $selectedEmbeddedSignature = $matches[0]
     }
-    $timestampEvidence = if ($timestampPresent -and $null -ne $selectedEmbeddedSignature) {
+    $timestampEvidence = if ($Policy -eq 'pinned-microsoft-vc-runtime' -and
+        $null -ne $selectedEmbeddedSignature) {
+        $selectedEmbeddedSignature.timestamp
+    } elseif ($timestampPresent -and $null -ne $selectedEmbeddedSignature) {
         $selectedTimestamp = $selectedEmbeddedSignature.timestamp
         if (-not [bool]$selectedTimestamp.present -or
             [string]$selectedTimestamp.certificate.thumbprint_sha256 -cne
@@ -571,6 +598,12 @@ function Get-DefenseClawAuthenticodeEvidence(
         if ($status -eq 'Valid' -and $embeddedSignatures.Count -eq 0) {
             throw "Signed pinned input has no portable embedded signature: $Path"
         }
+    } elseif ($Policy -eq 'pinned-microsoft-vc-runtime') {
+        if ($status -ne 'Valid' -or
+            $publisher -ne 'Microsoft Windows Software Compatibility Publisher' -or
+            $signatureType -ne 'Authenticode' -or $embeddedSignatures.Count -ne 2) {
+            throw "Pinned Microsoft VC++ runtime requires the exact dual portable Microsoft signatures: $Path"
+        }
     } elseif ($status -ne 'NotSigned' -or $signatureType -ne 'None' -or $embeddedSignatures.Count -ne 0) {
         throw "Digest-only upstream policy requires an unsigned portable executable: $Path"
     }
@@ -623,7 +656,7 @@ function Get-DefenseClawAuthenticodeEvidence(
             publisher = $publisher
             signature_type = $signatureType
             signer = $signerEvidence
-            chain = Get-DefenseClawCertificateChainEvidence $signature.SignerCertificate
+            chain = Get-DefenseClawCertificateChainEvidence $selectedSignerCertificate
             timestamp = $timestampEvidence
             embedded_signatures = $embeddedSignatures
         }

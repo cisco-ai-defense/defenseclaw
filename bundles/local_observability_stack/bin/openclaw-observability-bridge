@@ -239,7 +239,7 @@ EOF
 print_text_banner() {
   cat <<'EOF'
 DefenseClaw local observability stack is up.
-  Grafana:    http://localhost:3000  (admin / admin)
+  Grafana:    http://localhost:3000  (user: admin; password: .grafana-admin-password)
   Prometheus: http://localhost:9090
   Tempo API:  http://localhost:3200
   Loki API:   http://localhost:3100
@@ -247,6 +247,69 @@ DefenseClaw local observability stack is up.
   OTLP HTTP:  127.0.0.1:4318
 EOF
 }
+
+resolve_native_controller() {
+  local requested="${DEFENSECLAW_OBSERVABILITY_BIN:-}"
+  if [[ -n "${requested}" ]]; then
+    if [[ "${requested}" == */* ]]; then
+      [[ -x "${requested}" ]] || fail "DEFENSECLAW_OBSERVABILITY_BIN is not executable: ${requested}"
+      printf '%s' "${requested}"
+      return
+    fi
+    command -v "${requested}" >/dev/null 2>&1 \
+      || fail "DEFENSECLAW_OBSERVABILITY_BIN was not found on PATH: ${requested}"
+    command -v "${requested}"
+    return
+  fi
+  if command -v defenseclaw-observability >/dev/null 2>&1; then
+    command -v defenseclaw-observability
+    return
+  fi
+  # Installed bundles live at ~/.defenseclaw/observability-stack, alongside
+  # the managed venv. Prefer that topology before falling back to a source
+  # checkout two directories above bundles/local_observability_stack.
+  local installed_controller="${ROOT_DIR}/../.venv/bin/defenseclaw-observability"
+  if [[ -x "${installed_controller}" ]]; then
+    printf '%s' "${installed_controller}"
+    return
+  fi
+  local source_controller="${ROOT_DIR}/../../.venv/bin/defenseclaw-observability"
+  if [[ -x "${source_controller}" ]]; then
+    printf '%s' "${source_controller}"
+    return
+  fi
+  fail "native lifecycle controller not found; install DefenseClaw or set DEFENSECLAW_OBSERVABILITY_BIN"
+}
+
+run_native_controller() {
+  [[ ${#PASSTHROUGH[@]} -eq 0 ]] \
+    || fail "raw Compose pass-through is not supported for managed lifecycle actions"
+  local controller
+  controller="$(resolve_native_controller)"
+  local args=("${ACTION}" --stack-dir "${ROOT_DIR}" --output "${OUTPUT}" --timeout "${WAIT_BUDGET}")
+  if [[ "${DO_WAIT}" != "true" ]]; then
+    args+=(--no-wait)
+  fi
+  if [[ -n "${SERVICE}" ]]; then
+    args+=(--service "${SERVICE}")
+  fi
+  if [[ "${FOLLOW}" == "true" ]]; then
+    args+=(--follow)
+  fi
+  if [[ "${ACTION}" == "reset" ]]; then
+    args+=(--yes)
+  fi
+  exec "${controller}" "${args[@]}"
+}
+
+# Every supported lifecycle action goes through the cross-platform Python
+# controller so credential creation, legacy-volume migration, ownership
+# checks, and authenticated readiness cannot drift between entry points.
+case "${ACTION}" in
+  up|down|reset|status|logs|url|env)
+    run_native_controller
+    ;;
+esac
 
 case "${ACTION}" in
   up)

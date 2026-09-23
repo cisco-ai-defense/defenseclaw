@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // currentProcessRunID snapshots the per-process run id once per
@@ -367,15 +368,24 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				// X-DefenseClaw-Session-Id values.
 				id := registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
 				if connector.IsLoopback(r) {
-					if userID := sanitizeLLMEventUser(firstNonEmpty(
-						r.Header.Get(llmEventUserIDHeader), r.Header.Get("X-User-Id"), r.Header.Get("X-User-ID"), r.Header.Get("X-User"),
-					)); userID != "" {
-						id.UserID = userID
-					}
-					if userName := sanitizeLLMEventUser(firstNonEmpty(
-						r.Header.Get(llmEventUserNameHeader), r.Header.Get("X-User-Name"), r.Header.Get("X-Username"),
-					)); userName != "" {
-						id.UserName = userName
+					trustedID := sanitizeLLMEventUser(r.Header.Get(llmEventUserIDHeader))
+					trustedName := sanitizeLLMEventUser(r.Header.Get(llmEventUserNameHeader))
+					if trustedID != "" || trustedName != "" {
+						id.UserID = trustedID
+						id.UserIDKind = useridentity.KindForID(trustedID)
+						id.UserName = trustedName
+					} else {
+						genericID := sanitizeLLMEventUser(firstNonEmpty(
+							r.Header.Get("X-User-Id"), r.Header.Get("X-User-ID"), r.Header.Get("X-User"),
+						))
+						genericName := sanitizeLLMEventUser(firstNonEmpty(
+							r.Header.Get("X-User-Name"), r.Header.Get("X-Username"),
+						))
+						if genericID != "" || genericName != "" {
+							id.UserID = genericID
+							id.UserIDKind = ""
+							id.UserName = genericName
+						}
 					}
 				}
 				ctx = ContextWithAgentIdentity(ctx, id)

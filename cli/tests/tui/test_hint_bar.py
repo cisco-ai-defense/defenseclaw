@@ -58,6 +58,19 @@ def test_new_panel_filter_hints_keep_generic_filter_style() -> None:
     assert hint == "Filtered to: provider=openai. Esc clears the filter, / changes it."
 
 
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    (
+        (1, "1 recent critical/high alert event needs review. Press 2 for Alerts."),
+        (461, "461 recent critical/high alert events need review. Press 2 for Alerts."),
+    ),
+)
+def test_overview_hint_describes_combined_critical_and_high_history(count: int, expected: str) -> None:
+    hint = HintEngine().hint_for(HintState(active_panel="overview", critical_alerts=count))
+
+    assert hint == expected
+
+
 def test_activity_command_running_hint_is_preserved() -> None:
     hint = HintEngine().hint_for(HintState(active_panel="activity", command_running=True))
 

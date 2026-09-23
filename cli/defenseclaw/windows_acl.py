@@ -1043,6 +1043,29 @@ class _CtypesWindowsApi:
             self.close_handle(int(handle))
             raise
 
+    def _open_regular_execution_reader(self, path: str) -> int:
+        """Claim one executable while permitting only concurrent readers."""
+
+        handle = self._create_file(
+            path,
+            _GENERIC_READ,
+            _FILE_SHARE_READ,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if handle == _INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateFileW(exclusive regular-file reader)")
+        try:
+            attributes = self._file_information(int(handle)).file_attributes
+            if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+                raise WindowsAclError("Windows executable claim is not a real regular file")
+            return int(handle)
+        except BaseException:
+            self.close_handle(int(handle))
+            raise
+
     def _open_regular_security_mutator_exclusive(self, path: str) -> int:
         """Claim one real file for identity-bound security repair and flush."""
 
@@ -1243,6 +1266,23 @@ def open_regular_mutation_fd(path: str) -> int:
 
     api = _get_api()
     handle = api._open_regular_mutator_exclusive(path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        api.close_handle(handle)
+        raise
+
+
+def open_regular_execution_fd(path: str) -> int:
+    """Claim one executable against writes/replacement while allowing launch."""
+
+    if os.name != "nt":
+        raise WindowsAclError("exclusive CRT execution handles require Windows")
+    import msvcrt
+
+    api = _get_api()
+    handle = api._open_regular_execution_reader(path)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
     try:
         return msvcrt.open_osfhandle(handle, flags)
@@ -1505,14 +1545,14 @@ def hold_directory(path: str, *, protect_name: bool = True) -> Iterator[None]:
 
 
 @contextmanager
-def hold_directory_chain(path: str) -> Iterator[None]:
-    """Prevent every absolute-path ancestor from being renamed or replaced."""
+def hold_directory_chain(path: str, *, protect_name: bool = True) -> Iterator[None]:
+    """Hold an absolute directory chain, optionally binding its final name."""
 
     prefixes = _windows_directory_prefixes(path)
     with ExitStack() as held:
         for prefix in prefixes[:-1]:
             held.enter_context(hold_directory(prefix, protect_name=False))
-        held.enter_context(hold_directory(prefixes[-1], protect_name=True))
+        held.enter_context(hold_directory(prefixes[-1], protect_name=protect_name))
         yield
 
 

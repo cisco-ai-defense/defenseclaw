@@ -1,0 +1,6 @@
+Environment ready.
+{"type":"step_start","sessionID":"session-1","timestamp":1780000000000,"part":{"id":"step-1","messageID":"message-1","sessionID":"session-1","snapshot":"snapshot-1","type":"step-start"}}
+{"type":"tool_use","sessionID":"session-1","timestamp":1780000001000,"part":{"callID":"call-1","id":"part-1","messageID":"message-1","sessionID":"session-1","tool":"read","type":"tool","state":{"input":{"filePath":"/home/user/task/train.py"},"metadata":{},"output":"excluded read output","status":"completed","time":{"start":1780000000500,"end":1780000000900},"title":"train.py"}}}
+{"type":"tool_use","sessionID":"session-1","timestamp":1780000003000,"part":{"callID":"call-2","id":"part-2","messageID":"message-2","sessionID":"session-1","tool":"bash","type":"tool","state":{"error":"excluded command error","input":{"command":"python train.py","description":"run training"},"status":"error","time":{"start":1780000002000,"end":1780000002900}}}}
+{"type":"text","sessionID":"session-1","timestamp":1780000004000,"part":{"id":"text-1","messageID":"message-2","sessionID":"session-1","text":"excluded model prose","type":"text"}}
+{"type":"step_finish","sessionID":"session-1","timestamp":1780000005000,"part":{"id":"step-2","messageID":"message-2","sessionID":"session-1","reason":"stop","snapshot":"snapshot-2","tokens":{},"type":"step-finish"}}

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -973,6 +974,119 @@ func TestScrubClaudeCode_PreservesHTMLBytesInStringValues(t *testing.T) {
 	}
 }
 
+type cursorScrubIndirectionHop struct {
+	path   string
+	target string
+}
+
+type cursorScrubIndirectionFixture struct {
+	input  string
+	target string
+	hops   []cursorScrubIndirectionHop
+}
+
+func newCursorScrubIndirectionFixture(t *testing.T, dir, content string, chained bool) cursorScrubIndirectionFixture {
+	t.Helper()
+	targetName := "dotfiles-cursor-hooks.json"
+	if chained {
+		targetName = "final-target.json"
+	}
+	target := filepath.Join(dir, targetName)
+	writeFile(t, target, content)
+	link := filepath.Join(dir, "hooks.json")
+	hops := []cursorScrubIndirectionHop{{path: link, target: target}}
+	if chained {
+		mid := filepath.Join(dir, "mid.json")
+		hops = []cursorScrubIndirectionHop{
+			{path: mid, target: target},
+			{path: link, target: mid},
+		}
+	}
+	symlinkErr := createCursorScrubSymlinkChain(hops)
+	if symlinkErr == nil {
+		return cursorScrubIndirectionFixture{input: link, target: target, hops: hops}
+	}
+	if runtime.GOOS != "windows" {
+		t.Fatalf("create symlink fixture: %v", symlinkErr)
+	}
+
+	// Creating file symlinks on Windows requires Developer Mode or
+	// SeCreateSymbolicLinkPrivilege. Directory junctions need neither and
+	// preserve the observable contract: the atomic rewrite crosses every
+	// reparse hop while the indirection itself remains intact.
+	concreteDir := filepath.Join(dir, "junction-target")
+	if err := os.Mkdir(concreteDir, 0o755); err != nil {
+		t.Fatalf("mkdir junction target after symlink error %v: %v", symlinkErr, err)
+	}
+	target = filepath.Join(concreteDir, "hooks.json")
+	writeFile(t, target, content)
+	linkDir := filepath.Join(dir, "junction-hooks")
+	hops = []cursorScrubIndirectionHop{{path: linkDir, target: concreteDir}}
+	if chained {
+		midDir := filepath.Join(dir, "junction-mid")
+		hops = []cursorScrubIndirectionHop{
+			{path: midDir, target: concreteDir},
+			{path: linkDir, target: midDir},
+		}
+	}
+	for _, hop := range hops {
+		output, junctionErr := exec.Command(
+			"cmd.exe", "/d", "/c", "mklink", "/J", hop.path, hop.target,
+		).CombinedOutput()
+		if junctionErr != nil {
+			t.Fatalf(
+				"create junction fixture after symlink error %v: %v: %s",
+				symlinkErr, junctionErr, output,
+			)
+		}
+	}
+	return cursorScrubIndirectionFixture{
+		input:  filepath.Join(linkDir, "hooks.json"),
+		target: target,
+		hops:   hops,
+	}
+}
+
+func createCursorScrubSymlinkChain(hops []cursorScrubIndirectionHop) error {
+	created := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		if err := os.Symlink(hop.target, hop.path); err != nil {
+			for index := len(created) - 1; index >= 0; index-- {
+				_ = os.Remove(created[index])
+			}
+			return fmt.Errorf("symlink %s -> %s: %w", hop.path, hop.target, err)
+		}
+		created = append(created, hop.path)
+	}
+	return nil
+}
+
+func assertCursorScrubIndirectionPreserved(t *testing.T, fixture cursorScrubIndirectionFixture) {
+	t.Helper()
+	for _, hop := range fixture.hops {
+		if _, err := os.Lstat(hop.path); err != nil {
+			t.Fatalf("lstat indirection %s after scrub: %v", hop.path, err)
+		}
+		got, err := os.Readlink(hop.path)
+		if err != nil {
+			t.Errorf("indirection hop %s was replaced or became unreadable: %v", hop.path, err)
+			continue
+		}
+		if !sameCursorScrubFixturePath(got, hop.target) {
+			t.Errorf("indirection target changed: got %q want %q", got, hop.target)
+		}
+	}
+}
+
+func sameCursorScrubFixturePath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
 // TestScrubCursor_ThroughSymlinkPreservesLink is a regression guard
 // for chezmoi / GNU stow / homeshick / vcsh users whose agent config
 // lives symlinked into a ~/.dotfiles/... tree. The scrub must:
@@ -987,9 +1101,7 @@ func TestScrubClaudeCode_PreservesHTMLBytesInStringValues(t *testing.T) {
 // delete ~/.defenseclaw → uninstall exited 1 on every chezmoi user.
 func TestScrubCursor_ThroughSymlinkPreservesLink(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "dotfiles-cursor-hooks.json")
-	link := filepath.Join(dir, "hooks.json")
-	writeFile(t, target, `{
+	fixture := newCursorScrubIndirectionFixture(t, dir, `{
   "version": 1,
   "hooks": {
     "preToolUse": [
@@ -998,27 +1110,15 @@ func TestScrubCursor_ThroughSymlinkPreservesLink(t *testing.T) {
     ]
   }
 }
-`)
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	if _, err := scrubCursorFile(link, scrubDefaultMarkers); err != nil {
+`, false)
+	if _, err := scrubCursorFile(fixture.input, scrubDefaultMarkers); err != nil {
 		t.Fatalf("scrubCursorFile through symlink: %v", err)
 	}
-	// The symlink itself must survive.
-	linkInfo, err := os.Lstat(link)
-	if err != nil {
-		t.Fatalf("lstat symlink after scrub: %v", err)
-	}
-	if linkInfo.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("symlink was replaced with a regular file — dotfiles workflow broken")
-	}
-	// And it must still point at the same target.
-	if p, err := os.Readlink(link); err != nil || p != target {
-		t.Errorf("symlink target changed: got %q want %q (err=%v)", p, target, err)
-	}
+	// The symlink, or the unprivileged Windows junction fallback, must survive
+	// and still point at the same concrete target.
+	assertCursorScrubIndirectionPreserved(t, fixture)
 	// The scrubbed content must land in the concrete target file.
-	out := readFile(t, target)
+	out := readFile(t, fixture.target)
 	if strings.Contains(out, "defenseclaw") {
 		t.Errorf("DC entry survived scrub through symlink:\n%s", out)
 	}
@@ -1036,10 +1136,7 @@ func TestScrubCursor_ThroughSymlinkPreservesLink(t *testing.T) {
 // concrete target.
 func TestScrubCursor_ChainedSymlinksResolveToConcreteTarget(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "final-target.json")
-	mid := filepath.Join(dir, "mid.json")
-	link := filepath.Join(dir, "hooks.json")
-	writeFile(t, target, `{
+	fixture := newCursorScrubIndirectionFixture(t, dir, `{
   "hooks": {
     "preToolUse": [
       {"type":"command","command":"/Users/u/.defenseclaw/hooks/cursor-hook.sh"},
@@ -1047,28 +1144,14 @@ func TestScrubCursor_ChainedSymlinksResolveToConcreteTarget(t *testing.T) {
     ]
   }
 }
-`)
-	if err := os.Symlink(target, mid); err != nil {
-		t.Fatalf("symlink mid: %v", err)
-	}
-	if err := os.Symlink(mid, link); err != nil {
-		t.Fatalf("symlink link: %v", err)
-	}
-	if _, err := scrubCursorFile(link, scrubDefaultMarkers); err != nil {
+`, true)
+	if _, err := scrubCursorFile(fixture.input, scrubDefaultMarkers); err != nil {
 		t.Fatalf("scrubCursorFile through chained symlinks: %v", err)
 	}
-	// Both symlinks must survive.
-	for _, p := range []string{link, mid} {
-		info, err := os.Lstat(p)
-		if err != nil {
-			t.Fatalf("lstat %s after scrub: %v", p, err)
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("chained-symlink hop %s was replaced with a regular file", p)
-		}
-	}
+	// Both symlinks (or unprivileged Windows junctions) must survive.
+	assertCursorScrubIndirectionPreserved(t, fixture)
 	// Concrete target has the scrubbed content.
-	out := readFile(t, target)
+	out := readFile(t, fixture.target)
 	if strings.Contains(out, "defenseclaw") {
 		t.Errorf("DC entry survived scrub through chained symlinks:\n%s", out)
 	}

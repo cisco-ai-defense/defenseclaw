@@ -1,0 +1,26 @@
+{
+  "accepted": [
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/2fb64f57af0196ab4c1c10d4"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/3a7c01a3c6da1c87e5519c3a"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/50911a8d681e4fe8fb8683b9"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/757358a3ea77f11e35867355"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/7743fcbb14aa4a01527bd225"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/898f121f8ea83528833b265f"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/b748b326eca281f88aaac004"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/bba3ef6dd6be3fff05a90871"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/e7ca899bbe8404f63dc6b7ce"}
+  ],
+  "candidate_labels_sha256": "20684fcb79f29cf1a8e0bb226342a8bba640cee38146f8fc43da2bc612c41d76",
+  "default_decision": "contextual_or_dual_use",
+  "notes": [
+    "Candidate generation used only GPT-OSS 20B labels; the second GPT-OSS pass was advisory triage.",
+    "Acceptance never uses source provenance as proof: every accepted command contains the complete remote-download, executable-permission, execution, and broad-cleanup chain.",
+    "Public benign-source commands remain negatives even when they perform risky administration or bulk deletion.",
+    "Unknown payloads and generic download-and-execute remain contextual unless the same literal command also grants execution, runs the exact artifact, and performs broad wildcard cleanup or history clearing.",
+    "No bind-shell, reverse-shell, sensitive-exfiltration, or defense-disable candidate in this split met the literal-proof rubric without relying on a placeholder, unknown artifact, or inferred payload behavior."
+  ],
+  "protocol": "explicit-command-proof-review-v1",
+  "reviewed_candidate_count": 663,
+  "schema_version": "1",
+  "unresolved": []
+}

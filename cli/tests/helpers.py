@@ -18,16 +18,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+from defenseclaw.agent_selection import SELECTION_LIFETIME, SetupAgentSelection
 from defenseclaw.config import (
     ClawConfig,
     Config,
@@ -42,7 +45,50 @@ from defenseclaw.config import (
 )
 from defenseclaw.context import AppContext
 from defenseclaw.db import Store
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.models import Event, ScanResult
+
+
+def record_test_setup_agent_selections(data_dir, connectors):
+    """Publish a structurally real protected selection receipt for CLI tests."""
+
+    os.makedirs(os.fspath(data_dir), exist_ok=True)
+    now = datetime.now(timezone.utc)
+    expires = now + SELECTION_LIFETIME
+    stamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+    expires_stamp = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+    records = {
+        name: SetupAgentSelection(
+            connector=name,
+            executable=os.path.join(os.fspath(data_dir), "test-agents", f"{name}.exe"),
+            raw_version="1.18.11" if name == "opencode" else "test-version",
+            normalized_version="1.18.11" if name == "opencode" else "test-version",
+            sha256=hashlib.sha256(name.encode()).hexdigest(),
+        )
+        for name in dict.fromkeys(connectors)
+    }
+    payload = {
+        "schema_version": 1,
+        "updated_at": stamp,
+        "selections": {
+            name: {
+                "connector": record.connector,
+                "source": "setup-selected",
+                "executable": record.executable,
+                "raw_version": record.raw_version,
+                "normalized_version": record.normalized_version,
+                "sha256": record.sha256,
+                "selected_at": stamp,
+                "expires_at": expires_stamp,
+            }
+            for name, record in sorted(records.items())
+        },
+    }
+    atomic_write_private_bytes(
+        os.path.join(os.fspath(data_dir), "agent_selection.json"),
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    return records, {}
 
 
 class _CommandReadModelFixture:

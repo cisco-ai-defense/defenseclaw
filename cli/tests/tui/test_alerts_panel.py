@@ -494,7 +494,8 @@ def test_alerts_connector_column_and_shared_filter() -> None:
                 severity="HIGH",
                 action="connector-hook",
                 target="preToolUse",
-                details="connector=codex action=block",
+                connector="codex",
+                details="action=block",
             ),
             AlertEvent(
                 id="a2",

@@ -13,7 +13,7 @@ stack gives you a loopback-only environment for development and evaluation.
 
 <Video
   src="local-observability"
-  caption="Quick tour: defenseclaw setup local-observability up → containers warm up → the named destination is written → restart the gateway → Grafana populates with live events."
+  caption="Quick tour: defenseclaw setup local-observability up → containers warm up → the named destination is written and hot-reloaded → Grafana populates with live events."
 />
 
 For the full deep-dive on flags, dashboards, and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
@@ -54,16 +54,15 @@ The Compose file binds all published ports to loopback by default.
 
 <Step>
 
-### Reload the gateway configuration
-
-```bash
-defenseclaw-gateway restart
-```
+### Verify the hot-reloaded destination
 
 Unless `up` was run with `--no-config`, it already created or updated
 `observability.destinations[local-observability]` with the selected
-logs/metrics/traces signals and the collector endpoint. Restart the gateway so
-the new destination takes effect. No connector setup command is required.
+logs/metrics/traces signals and the collector endpoint. A running gateway
+hot-reloads that destination without changing its PID or interrupting active
+agent sessions—even when `gateway.config_reload.mode` is `restart`. If the
+gateway is stopped, the destination takes effect on its next normal start. No
+connector setup command or manual gateway restart is required.
 
 </Step>
 
@@ -71,10 +70,15 @@ the new destination takes effect. No connector setup command is required.
 
 ### Open Grafana
 
-Visit [http://localhost:3000](http://localhost:3000). The bundled Compose
-configuration disables the login form and grants anonymous Admin access
-because Grafana is loopback-only by default. If you change `HOST_BIND`, secure
-Grafana before exposing it.
+Visit [http://localhost:3000](http://localhost:3000). New managed stacks use
+the `admin` login; read the generated password from
+`~/.defenseclaw/observability-stack/.grafana-admin-password`. Existing
+anonymous stacks remain no-password after upgrade. Pass `--password` to move
+one to login mode, or explicitly choose `--no-password` for anonymous Admin on
+the managed loopback bind. The setup summary reports the effective mode and
+warns whenever no-password access is active. The Loki, Tempo, and Prometheus
+developer APIs are still separately loopback-only; do not expose them through
+`HOST_BIND` without an external access-control layer.
 
 Fourteen dashboards are provisioned, including Overview, Traffic, Security,
 Findings, Policy Decisions, HITL, Connectors, Connector Detail, Activity,

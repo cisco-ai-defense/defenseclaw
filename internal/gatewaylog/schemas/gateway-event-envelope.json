@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "hook_decision", "ai_discovery", "connector_inventory", "mcp_inventory", "agent_inventory"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "hook_decision", "connector_inventory", "mcp_inventory", "agent_inventory"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -84,7 +84,6 @@
     "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
     "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
     "hook_decision":   { "$ref": "#/$defs/HookDecisionPayload" },
-    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" },
     "connector_inventory": { "$ref": "#/$defs/ConnectorInventoryPayload" },
     "mcp_inventory":       { "$ref": "#/$defs/MCPInventoryPayload" },
     "agent_inventory":     { "$ref": "#/$defs/AgentInventoryPayload" }
@@ -103,7 +102,6 @@
     { "properties": { "event_type": { "const": "llm_response" } },    "required": ["event_type", "llm_response"] },
     { "properties": { "event_type": { "const": "tool_invocation" } }, "required": ["event_type", "tool_invocation"] },
     { "properties": { "event_type": { "const": "hook_decision" } },   "required": ["event_type", "hook_decision"] },
-    { "properties": { "event_type": { "const": "ai_discovery" } },    "required": ["event_type", "ai_discovery"] },
     { "properties": { "event_type": { "const": "connector_inventory" } }, "required": ["event_type", "connector_inventory"] },
     { "properties": { "event_type": { "const": "mcp_inventory" } },       "required": ["event_type", "mcp_inventory"] },
     { "properties": { "event_type": { "const": "agent_inventory" } },     "required": ["event_type", "agent_inventory"] }
@@ -245,134 +243,6 @@
         "exit_code":          { "type": ["integer", "null"] },
         "reply_to_prompt_id": { "type": ["string", "null"] },
         "source":             { "type": ["string", "null"] }
-      }
-    },
-    "AIDiscoveryPayload": {
-      "type": "object",
-      "required": ["scan_id", "signal_id", "category", "state"],
-      "properties": {
-        "scan_id":        { "type": "string", "maxLength": 128 },
-        "signal_id":      { "type": "string", "maxLength": 128 },
-        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint", "local_model"] },
-        "vendor":         { "type": ["string", "null"], "maxLength": 128 },
-        "product":        { "type": ["string", "null"], "maxLength": 128 },
-        "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "state":          { "type": "string", "enum": ["new", "seen", "changed", "gone"] },
-        "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
-        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^(sha256|hmac-sha256):[0-9a-f]{64}$" }, "maxItems": 16 },
-        "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
-        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
-        "last_seen":      { "type": ["string", "null"], "format": "date-time" },
-        "detector":       { "type": ["string", "null"], "maxLength": 64,
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "component":      { "type": ["object", "null"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
-          "properties": {
-            "ecosystem": { "type": ["string", "null"], "maxLength": 64 },
-            "name":      { "type": ["string", "null"], "maxLength": 256 },
-            "version":   { "type": ["string", "null"], "maxLength": 64 },
-            "framework": { "type": ["string", "null"], "maxLength": 256 }
-          }
-        },
-        "model":          { "type": ["object", "null"],
-          "description": "Historical pre-v8 local-model field; canonical v8 producers do not populate it.",
-          "required": ["id", "status"],
-          "properties": {
-            "id":         { "type": "string", "minLength": 1, "maxLength": 512 },
-            "status":     { "type": "string", "enum": ["installed", "loaded"] },
-            "format":     { "type": ["string", "null"], "maxLength": 64 },
-            "provider":   { "type": ["string", "null"], "maxLength": 96 },
-            "recipe":     { "type": ["string", "null"], "maxLength": 128 },
-            "modality":   { "type": ["string", "null"], "maxLength": 64 },
-            "device":     { "type": ["string", "null"], "maxLength": 128 },
-            "owner_application": { "type": ["string", "null"], "maxLength": 96, "pattern": "^[^/\\\\]*$" },
-            "relevance": { "type": ["string", "null"], "enum": ["primary", "supporting", "embedded", "unknown", null] },
-            "discovery_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-            "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
-            "pinned":     { "type": ["boolean", "null"] },
-            "provenance": { "type": ["object", "null"],
-              "properties": {
-                "publisher":    { "type": ["string", "null"], "maxLength": 128 },
-                "country_code": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" },
-                "root_model":   { "type": ["string", "null"], "maxLength": 512 },
-                "base_models":  { "type": ["array", "null"], "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 8, "uniqueItems": true },
-                "quantized":    { "type": ["boolean", "null"], "description": "Authoritative when non-null: true means the artifact is quantized, false means it is positively identified as not quantized, and null means unknown." },
-                "quantization": { "type": ["string", "null"], "maxLength": 64 },
-                "distilled":    { "type": ["boolean", "null"], "description": "Authoritative when non-null: true means the artifact is distilled, false means it is positively identified as not distilled, and null means unknown." },
-                "derivation":   { "type": ["string", "null"], "enum": ["distilled", "quantized", "distilled+quantized", null], "description": "Normalized summary of the authoritative flags: distilled means distilled=true and quantized is not true; quantized means quantized=true and distilled is not true; distilled+quantized means both are true. null means neither flag is true (each may be false or unknown/null), and consumers must not infer false from null." },
-                "source":       { "type": ["string", "null"], "maxLength": 64 },
-                "confidence":   { "type": ["string", "null"], "enum": ["high", "medium", "low", null] }
-              }
-            }
-          }
-        },
-        "runtime":        { "type": ["object", "null"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
-          "properties": {
-            "pid":        { "type": ["integer", "null"], "minimum": 0 },
-            "ppid":       { "type": ["integer", "null"], "minimum": 0 },
-            "started_at": { "type": ["string", "null"], "format": "date-time" },
-            "uptime_sec": { "type": ["integer", "null"] },
-            "user":       { "type": ["string", "null"], "maxLength": 64 },
-            "comm":       { "type": ["string", "null"], "maxLength": 256 }
-          }
-        },
-        "last_active_at": { "type": ["string", "null"], "format": "date-time",
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "identity_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "identity_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "presence_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "presence_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "identity_factors": { "type": ["array", "null"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
-          "maxItems": 64,
-          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
-        },
-        "presence_factors": { "type": ["array", "null"],
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
-          "maxItems": 64,
-          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
-        },
-        "detectors":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16,
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it." },
-        "evidence":       { "type": ["array", "null"], "maxItems": 32,
-          "description": "Historical pre-v8 envelope field; canonical v8 producers do not populate it.",
-          "items": { "$ref": "#/$defs/AIDiscoveryEvidence" }
-        },
-        "raw_paths":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32,
-          "description": "Historical pre-v8 raw-path field; canonical v8 producers never populate it." }
-      }
-    },
-    "AIDiscoveryFactor": {
-      "type": "object",
-      "required": ["detector", "logit_delta"],
-      "properties": {
-        "detector":   { "type": "string", "maxLength": 64 },
-        "evidence_id": { "type": ["string", "null"], "maxLength": 256 },
-        "match_kind": { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] },
-        "quality":    { "type": ["number", "null"] },
-        "specificity": { "type": ["number", "null"] },
-        "lr":         { "type": ["number", "null"] },
-        "logit_delta": { "type": "number" }
-      }
-    },
-    "AIDiscoveryEvidence": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type":          { "type": "string", "maxLength": 64 },
-        "basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
-        "path_hash":     { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
-        "value_hash":    { "type": ["string", "null"], "maxLength": 256 },
-        "workspace_hash": { "type": ["string", "null"], "pattern": "^((sha256|hmac-sha256):[0-9a-f]{64})?$" },
-        "raw_path":      { "type": ["string", "null"], "maxLength": 4096,
-          "description": "Historical pre-v8 raw-path field; canonical v8 producers never populate it." },
-        "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "match_kind":    { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] }
       }
     },
     "ConnectorInventoryPayload": {

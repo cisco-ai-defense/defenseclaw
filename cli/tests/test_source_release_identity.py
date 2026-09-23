@@ -99,10 +99,11 @@ def _preflight(
 
 
 def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
+    source_release = source_release_identity.validate_source_tree(repo)["source_release"]
     return {
         "schema_version": 2,
         "checkout_root": str(repo.resolve()),
-        "source_release": "0.8.6",
+        "source_release": source_release,
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
         "gateway_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
@@ -112,20 +113,20 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.6",
+        expected_release="0.8.10",
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.6",
+        "source_release": "0.8.10",
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.6"}
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.10"}
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
-    assert release_candidate._reviewed_source_install_identity("0.8.6") == identity
+    assert release_candidate._reviewed_source_install_identity("0.8.10") == identity
 
 
 def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
@@ -169,7 +170,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        [BASH, str(stamp), "0.8.6"],
+        [BASH, str(stamp), "0.8.10"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -255,7 +256,7 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
     path.write_text(source.replace(old, new), encoding="utf-8")
 
     with pytest.raises(source_release_identity.SourceIdentityError, match=message):
-        source_release_identity.validate_source_tree(repo, expected_release="0.8.6")
+        source_release_identity.validate_source_tree(repo, expected_release="0.8.10")
 
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
@@ -629,6 +630,66 @@ def test_same_source_identity_allows_rebuild_and_refreshes_marker(tmp_path: Path
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_same_source_identity_allows_acp_rebuild(tmp_path: Path) -> None:
+    repo, install_dir, _source_gateway, _installed_gateway = _source_install_fixture(tmp_path)
+    source_acp = repo / "defenseclaw-acp"
+    installed_acp = install_dir / "defenseclaw-acp"
+    _write_executable(source_acp, b"acp-v1\n")
+    _write_executable(installed_acp, b"acp-v1\n")
+
+    claimed = _preflight(tmp_path, repo, install_dir, "claim")
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    source_acp.write_bytes(b"acp-v2\n")
+    source_acp.chmod(0o755)
+
+    published = _preflight(tmp_path, repo, install_dir, "publish-acp")
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_acp.read_bytes() == b"acp-v2\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    _write_executable(repo / "defenseclaw-acp", b"source acp\n")
+    installed_acp = install_dir / "defenseclaw-acp"
+    _write_executable(installed_acp, b"foreign acp\n")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-acp")
+
+    assert completed.returncode != 0
+    assert "unowned ACP guard already exists" in completed.stdout + completed.stderr
+    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert installed_acp.read_bytes() == b"foreign acp\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    source_acp = repo / "defenseclaw-acp"
+    installed_acp = install_dir / "defenseclaw-acp"
+    source_gateway.write_bytes(b"gateway-v2\n")
+    source_gateway.chmod(0o755)
+    _write_executable(source_acp, b"acp-v2\n")
+    _write_executable(installed_acp, b"acp-v1\n")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    published = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-acp",
+        dev_reclaim=True,
+    )
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_acp.read_bytes() == b"acp-v2\n"
+    assert installed_gateway.read_bytes() == b"gateway-v1\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_source_checkout_alias_claims_the_canonical_root(tmp_path: Path) -> None:
     repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
     alias = tmp_path / "checkout-alias"
@@ -823,8 +884,19 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
     assert "all: _source-install-dev-preflight" in makefile
     assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
+    assert "_bundle-data: _checkout-write-preflight" in makefile
+    assert "gateway: _checkout-write-preflight sync-openclaw-extension" in makefile
+    assert "proto-tools: _checkout-write-preflight" in makefile
+    assert (
+        '_checkout-write-preflight:\n'
+        '\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"' in makefile
+    )
+    assert "sudo/root source-install is not supported" in (
+        ROOT / "scripts/source-install-preflight.sh"
+    ).read_text(encoding="utf-8")
     assert "source-install-preflight.sh dev-check" in makefile
     assert "source-install-preflight.sh dev-publish-gateway" in makefile
+    assert "source-install-preflight.sh dev-publish-acp" in makefile
     assert "source-install-preflight.sh dev-claim" in makefile
     assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
@@ -836,7 +908,9 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert "$(MAKE) --no-print-directory pycli" in cli_install
     assert gateway_install.startswith("gateway-install: _source-install-preflight cli-install\n")
     assert "$(MAKE) --no-print-directory gateway" in gateway_install
+    assert "source-install-preflight.sh publish-acp" in gateway_install
     assert "source-install-preflight.sh claim" in gateway_install
+    assert 'source-install-publish.py regular \\\n\t\t"$(CURDIR)/$(ACP_GUARD)$(EXE)"' not in makefile
     assert "plugin-install: _source-install-preflight gateway-install" in makefile
     assert "SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install" in makefile
 
@@ -917,3 +991,79 @@ def test_parallel_make_install_refuses_before_dependency_or_build_commands(
     assert not build_log.exists()
     assert (install_dir / "defenseclaw").readlink() == release_cli
     assert (install_dir / "defenseclaw-gateway").read_bytes() == b"release gateway\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_refuse_sudo_user_checkout_allows_unprivileged_caller(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [BASH, str(ROOT / "scripts/refuse-sudo-user-checkout.sh"), str(tmp_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_refuse_sudo_user_checkout_blocks_root_against_user_tree(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    _write_executable(fake_bin / "stat", b"#!/bin/sh\necho 501\n")
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "OS": "",
+    }
+
+    completed = subprocess.run(
+        [BASH, str(ROOT / "scripts/refuse-sudo-user-checkout.sh"), str(tmp_path)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 1
+    assert "do not run this as root/sudo" in completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_source_preflight_refuses_root_against_user_checkout(tmp_path: Path) -> None:
+    repo, install_dir, _source_gateway, _installed = _source_install_fixture(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    _write_executable(fake_bin / "stat", b"#!/bin/sh\necho 501\n")
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "OS": "",
+    }
+
+    completed = subprocess.run(
+        [
+            BASH,
+            str(ROOT / "scripts/source-install-preflight.sh"),
+            "dev-check",
+            str(repo),
+            str(install_dir),
+            ".venv/bin",
+            "defenseclaw",
+            "defenseclaw-gateway",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode != 0
+    assert "sudo/root source-install is not supported" in completed.stderr
+    assert "No installed files or services were changed" in completed.stderr

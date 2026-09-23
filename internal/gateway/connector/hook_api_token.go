@@ -519,6 +519,46 @@ func syncHookAPITokenParent(tokenPath string) error {
 	return nil
 }
 
+// RemoveHookAPIToken revokes one connector-scoped hook API credential.
+// Callers must remove and verify the connector's managed hook registration
+// first so a teardown failure cannot strand a live hook with no credential.
+// Removal shares the publication lock so rotation and teardown cannot race
+// across guardian processes.
+func RemoveHookAPIToken(dataDir, connectorName string) error {
+	if dataDir == "" {
+		return fmt.Errorf("RemoveHookAPIToken: empty dataDir")
+	}
+	if err := hookAPIValidateDirectory(dataDir); err != nil {
+		return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	lockPath := hookAPITokenPublishLockPath(dataDir)
+	return withOwnedFileLock(lockPath, func() error {
+		hookAPITokenMu.Lock()
+		defer hookAPITokenMu.Unlock()
+
+		hooksDir := filepath.Dir(tokenPath)
+		if _, err := os.Lstat(hooksDir); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("inspect hook API token directory: %w", err)
+		}
+		if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+			return err
+		}
+		for _, path := range []string{tokenPath + ".tmp", tokenPath} {
+			if err := removeOwnedOTLPPathTokenFile(path); err != nil {
+				return fmt.Errorf("remove hook API token %s: %w", path, err)
+			}
+		}
+		return syncHookAPITokenParent(tokenPath)
+	})
+}
+
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
 // names. Missing tokens are omitted.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {

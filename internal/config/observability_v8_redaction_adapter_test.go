@@ -7,6 +7,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -22,7 +23,6 @@ func TestObservabilityV8RedactionProfileCatalogDefaultParity(t *testing.T) {
 
 	wantNames := []observabilityredaction.ProfileName{
 		observabilityredaction.ProfileContent,
-		observabilityredaction.ProfileLegacyV7,
 		observabilityredaction.ProfileNone,
 		observabilityredaction.ProfileSensitive,
 		observabilityredaction.ProfileStrict,
@@ -43,23 +43,6 @@ func TestObservabilityV8RedactionProfileCatalogDefaultParity(t *testing.T) {
 		assertEffectiveProfileParity(t, effective, profile)
 	}
 
-	legacy, ok := catalog.Resolve(observabilityredaction.ProfileLegacyV7)
-	if !ok {
-		t.Fatal("legacy-v7 is missing")
-	}
-	if got := legacy.DetectorGroups(); len(got) != 0 {
-		t.Fatalf("legacy-v7 detector groups = %v, want none", got)
-	}
-	for _, class := range observability.FieldClasses() {
-		mode, _ := legacy.Mode(class)
-		want := observabilityredaction.ModeWhole
-		if class == observability.FieldClassMetadata {
-			want = observabilityredaction.ModePreserve
-		}
-		if mode != want {
-			t.Fatalf("legacy-v7 %s mode = %q, want %q", class, mode, want)
-		}
-	}
 }
 
 func TestObservabilityV8PlanResolvesImmutableLocalProfiles(t *testing.T) {
@@ -110,7 +93,6 @@ func TestObservabilityV8RedactionProfileCatalogCustomParityAndCopySafety(t *test
 	wantNames := []observabilityredaction.ProfileName{
 		"alpha",
 		observabilityredaction.ProfileContent,
-		observabilityredaction.ProfileLegacyV7,
 		observabilityredaction.ProfileNone,
 		observabilityredaction.ProfileSensitive,
 		observabilityredaction.ProfileStrict,
@@ -179,7 +161,6 @@ func TestObservabilityV8RedactionAdapterMapsCompleteVocabulary(t *testing.T) {
 		"sensitive": observabilityredaction.ProfileSensitive,
 		"content":   observabilityredaction.ProfileContent,
 		"strict":    observabilityredaction.ProfileStrict,
-		"legacy-v7": observabilityredaction.ProfileLegacyV7,
 	}
 	if got := len(observabilityredaction.BuiltInProfiles()); len(profileNames) != got {
 		t.Fatalf("profile-name adapter covers %d built-ins, runtime exposes %d", len(profileNames), got)
@@ -452,4 +433,92 @@ func effectiveProfilePointerByName(t *testing.T, profiles []ObservabilityV8Effec
 	}
 	t.Fatalf("effective profile %q is missing", name)
 	return nil
+}
+
+// TestV7CompatibleUpgradeProfileCompiles pins the exact profile the v7->v8
+// upgrade emits, mirroring V7_COMPATIBLE_FIELD_CLASSES in
+// cli/defenseclaw/observability/v8_migration.py.
+//
+// The two live in different languages and only meet during an upgrade, on a
+// user's machine, at gateway start. The JSON schema constrains the mode
+// vocabulary but not the per-class rules, so a profile that every Python gate
+// accepts can still be refused here -- which is what happened: the migration
+// asked for identifier "whole", reproducing what the retired legacy-v7
+// built-in did, and custom profiles may not touch the class records join on.
+// The upgrade then failed after mutating the target. Pin it on this side too.
+func TestV7CompatibleUpgradeProfileCompiles(t *testing.T) {
+	emitted := map[ObservabilityV8FieldClass]ObservabilityV8FieldMode{
+		"metadata": "preserve", "identifier": "preserve",
+		"content": "whole", "reason": "whole",
+		"evidence": "whole", "error": "whole",
+		"path": "whole", "credential": "whole",
+	}
+
+	plan, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"v7-compatible": {Extends: "strict", FieldClasses: emitted},
+		},
+	})
+	if err != nil {
+		t.Fatalf("the upgrade's v7-compatible profile no longer compiles: %v", err)
+	}
+	catalog, err := plan.RedactionProfileCatalog()
+	if err != nil {
+		t.Fatalf("the upgrade's v7-compatible profile is not loadable: %v", err)
+	}
+	profile, ok := catalog.Resolve("v7-compatible")
+	if !ok {
+		t.Fatal("the upgrade's v7-compatible profile is missing from the catalog")
+	}
+
+	// Every class v7 redacted stays redacted. A future edit that relaxes one
+	// of these silently reveals, on upgrade, data the source config hid.
+	for class, want := range map[observability.FieldClass]observabilityredaction.TransformationMode{
+		observability.FieldClassContent:    observabilityredaction.ModeWhole,
+		observability.FieldClassReason:     observabilityredaction.ModeWhole,
+		observability.FieldClassEvidence:   observabilityredaction.ModeWhole,
+		observability.FieldClassError:      observabilityredaction.ModeWhole,
+		observability.FieldClassPath:       observabilityredaction.ModeWhole,
+		observability.FieldClassCredential: observabilityredaction.ModeWhole,
+	} {
+		got, ok := profile.Mode(class)
+		if !ok {
+			t.Fatalf("%s has no resolved mode", class)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q -- the upgrade would reveal what v7 redacted", class, got, want)
+		}
+	}
+}
+
+// TestRetiredLegacyV7ProfileNameCannotBeReclaimed keeps the removed built-in's
+// name from coming back as a custom profile.
+//
+// Nothing else stops it: the name would compile, bucket policies could select
+// it, and the audit writer would store it -- but the lifecycle decoder rejects
+// that stored name, so the projection is dropped in silence instead of the
+// configuration being refused. Refusing at compile time puts the error in
+// front of the operator who wrote it.
+func TestRetiredLegacyV7ProfileNameCannotBeReclaimed(t *testing.T) {
+	_, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"legacy-v7": {Extends: "sensitive"},
+		},
+	})
+	if err == nil {
+		t.Fatal("a custom profile reclaimed the retired legacy-v7 name")
+	}
+	if !strings.Contains(err.Error(), "retired") {
+		t.Errorf("error = %q, want it to say the name is retired", err)
+	}
+
+	// An ordinary custom name still works, so this is a reservation and not a
+	// blanket refusal of custom profiles.
+	if _, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"v7-compatible": {Extends: "strict"},
+		},
+	}); err != nil {
+		t.Fatalf("an ordinary custom profile was refused: %v", err)
+	}
 }

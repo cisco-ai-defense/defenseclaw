@@ -19,6 +19,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/url"
@@ -26,14 +27,32 @@ import (
 	"strings"
 )
 
-// DefaultEnvConfigPath is the canonical location AVC drops the DefenseClaw
-// env config on macOS installs. The file is authored (and re-authored, on
-// upgrades and region changes) by the Cisco Secure Client AVC packaging
-// pipeline. The installer at packaging/macos/install.sh reads it at
-// install time; the gateway sidecar's ConfigManager re-reads it at every
-// wake so region changes that arrive AFTER install take effect without a
-// process restart.
-const DefaultEnvConfigPath = "/opt/cisco/secureclient/defenseclaw/env_config.json"
+// envConfigSkipTrustEnv gates fail-closed trust validation for
+// LoadEnvConfigEndpoint. It is honored only under a test binary, so a
+// production gateway that inherits the variable can never disable trust:
+// only `go test` (via testing.Init) registers the `test.v` flag.
+const envConfigSkipTrustEnv = "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST"
+
+// envConfigTrustWaived reports whether the caller opted out of trust
+// validation. The waiver is intentionally test-binary-only.
+func envConfigTrustWaived() bool {
+	if os.Getenv(envConfigSkipTrustEnv) != "1" {
+		return false
+	}
+	return flag.Lookup("test.v") != nil
+}
+
+// ResolveDefaultEnvConfigPath returns the canonical location AVC drops the
+// DefenseClaw env config for each managed install. The file is authored (and re-
+// authored, on upgrades and region changes) by the Cisco Secure Client
+// AVC packaging pipeline. The installer reads it at install time; the
+// gateway sidecar's ConfigManager re-reads it at every wake so region
+// changes that arrive AFTER install take effect without a process
+// restart.
+//
+// The implementation is defined per-platform in env_config_unix.go and
+// env_config_windows.go. Windows resolves the protected ProgramData machine
+// registration at runtime rather than assuming the system drive.
 
 // envConfigEndpointKey is the JSON key that carries the AI Defense inspect
 // origin. Kept in one place so it stays aligned with the shell installer's
@@ -206,7 +225,7 @@ func trustEnvConfigFile(info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("must be a regular file")
 	}
-	if os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") == "1" {
+	if envConfigTrustWaived() {
 		return nil
 	}
 	return trustEnvConfigFilePlatform(info)

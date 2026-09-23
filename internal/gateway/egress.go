@@ -118,12 +118,15 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 	}
 
 	p.emitEgress(r.Context(), payload)
+	if p.health != nil && payload.Branch == "selftest" {
+		p.health.RecordInterceptionResult(payload.Decision == "intercept" && payload.Reason == "interception-self-test")
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func validEgressBranch(b string) bool {
 	switch b {
-	case "known", "shape", "passthrough":
+	case "known", "shape", "passthrough", "undici", "selftest":
 		return true
 	default:
 		return false
@@ -132,7 +135,7 @@ func validEgressBranch(b string) bool {
 
 func validEgressDecision(d string) bool {
 	switch d {
-	case "allow", "block":
+	case "allow", "block", "intercept":
 		return true
 	default:
 		return false

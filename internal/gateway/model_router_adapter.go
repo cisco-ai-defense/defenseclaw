@@ -3,18 +3,8 @@
 
 package gateway
 
-import (
-	"github.com/defenseclaw/defenseclaw/internal/config"
-)
-
-// NewSemanticModelRouter is called by the sidecar at startup.
-// Returns nil — routing is handled entirely by the managed SR sidecar
-// via RemoteRouterClient (wired in sidecar.go via the orchestrator).
-func NewSemanticModelRouter(cfg config.RoutingConfig) (ModelRouter, error) {
-	return nil, nil
-}
-
-// NewRemoteModelRouter creates a ModelRouter pointing at the given SR endpoint.
-func NewRemoteModelRouter(endpoint string, timeoutMs int) ModelRouter {
-	return NewRemoteRouterClient(endpoint, timeoutMs)
+// NewRemoteModelRouter creates a ModelRouter pointing at the given SR endpoint
+// and resolves classifier aliases against gateway-owned backend configuration.
+func NewRemoteModelRouter(endpoint string, timeoutMs int, backends []ModelRouterBackend, dotenvPath string) ModelRouter {
+	return NewConfiguredRemoteRouterClient(endpoint, timeoutMs, backends, dotenvPath)
 }

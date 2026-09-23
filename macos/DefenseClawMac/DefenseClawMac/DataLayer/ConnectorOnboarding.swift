@@ -17,6 +17,10 @@
 import Foundation
 
 enum ConnectorOnboarding {
+    // First Run is hook-only. Explicit proxy setup and cleanup remain in the
+    // general Setup/command surfaces; they must never enter this init plan.
+    private static let proxyConnectors: Set<String> = ["openclaw", "zeptoclaw"]
+
     static func installedConnectors(from discoveryOutput: String, supportedOrder: [String]) -> [String] {
         guard let start = discoveryOutput.firstIndex(of: "{"),
               let end = discoveryOutput.lastIndex(of: "}"),
@@ -36,7 +40,10 @@ enum ConnectorOnboarding {
             let raw = candidate.isEmpty ? key : candidate
             return normalizedConnector(raw)
         })
-        return supportedOrder.filter { installed.contains(normalizedConnector($0)) }
+        return supportedOrder.filter {
+            let normalized = normalizedConnector($0)
+            return !proxyConnectors.contains(normalized) && installed.contains(normalized)
+        }
     }
 
     /// `defenseclaw setup` subcommand for a hook connector — only Claude Code
@@ -65,7 +72,9 @@ enum ConnectorOnboarding {
         startGateway: Bool,
         verify: Bool
     ) -> [[String]] {
-        let detected = detectedConnectors.map(normalizedConnector)
+        let detected = detectedConnectors
+            .map(normalizedConnector)
+            .filter { !proxyConnectors.contains($0) }
         let registered = Set(registeredConnectors.map(normalizedConnector))
         var selected = detected.filter { registered.contains($0) }
         // The UI requires >=1 registered connector; if a caller ever passes an
@@ -78,7 +87,12 @@ enum ConnectorOnboarding {
         var followUps: [[String]] = []
 
         if detected.isEmpty {
-            head += ["--connector", normalizedConnector(fallbackConnector), "--profile", profile]
+            let fallback = normalizedConnector(fallbackConnector)
+            head += [
+                "--connector",
+                proxyConnectors.contains(fallback) ? "codex" : fallback,
+                "--profile", profile,
+            ]
         } else if selected.count == detected.count {
             head.append("--observe-all")
             if profile == "action" {

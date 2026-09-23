@@ -100,6 +100,16 @@ func projectedPayload(t *testing.T, recordID, projected string) delivery.Payload
 }
 
 func deliverBatch(t *testing.T, name string, adapter delivery.Adapter, projected ...string) delivery.Counters {
+	counters, _ := deliverBatchHealth(t, name, adapter, projected...)
+	return counters
+}
+
+func deliverBatchHealth(
+	t *testing.T,
+	name string,
+	adapter delivery.Adapter,
+	projected ...string,
+) (delivery.Counters, delivery.HealthSnapshot) {
 	t.Helper()
 	dispatcher, err := delivery.NewDispatcher(delivery.Config{
 		Destination: name, Enabled: true,
@@ -124,10 +134,11 @@ func deliverBatch(t *testing.T, name string, adapter delivery.Adapter, projected
 		t.Fatalf("drain: %v", err)
 	}
 	counters := dispatcher.Counters()
+	health := dispatcher.DeliveryHealthSnapshot()
 	if err := dispatcher.Close(ctx); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	return counters
+	return counters, health
 }
 
 func TestHTTPJSONLExactWireAndResolvedAuthorization(t *testing.T) {
@@ -211,7 +222,13 @@ func TestProjectedAliasesPreserveCanonicalOccurrenceCorrelation(t *testing.T) {
 
 func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 	capture := &requestCapture{status: http.StatusOK, body: `{"text":"Success","code":0,"ackId":7}`}
-	server := httptest.NewServer(capture)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(capture)
+	server.Listener = listener
+	server.Start()
 	defer server.Close()
 	adapter, err := NewSplunkHEC(context.Background(), SplunkHECConfig{
 		Destination: "splunk", Endpoint: server.URL, Token: "resolved-hec-token",
@@ -254,6 +271,44 @@ func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 	}
 	if size, ok := adapter.EncodedSize([]int{len(projected)}); !ok || len(request.payload) > size {
 		t.Fatalf("encoded size=(%d,%t) wire=%d", size, ok, len(request.payload))
+	}
+}
+
+func TestSplunkHECPreSocketProjectionFailureHasClosedCode(t *testing.T) {
+	capture := &requestCapture{status: http.StatusOK, body: `{"code":0}`}
+	server := httptest.NewServer(capture)
+	defer server.Close()
+	adapter, err := NewSplunkHEC(context.Background(), SplunkHECConfig{
+		Destination: "splunk", Endpoint: server.URL, Token: "resolved-hec-token",
+		Network: NetworkOptions{AllowPrivateNetworks: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sensitiveProjection = "not-json secret-token-value"
+	counters, health := deliverBatchHealth(t, "splunk", adapter, sensitiveProjection)
+	if counters.Rejected != 1 || counters.Delivered != 0 || len(capture.snapshot()) != 0 {
+		t.Fatalf("counters=%+v requests=%d", counters, len(capture.snapshot()))
+	}
+	if health.LastFailureCode != delivery.FailureCodeProjectionInvalid ||
+		strings.Contains(string(health.LastFailureCode), sensitiveProjection) {
+		t.Fatalf("failure code=%q", health.LastFailureCode)
+	}
+}
+
+func TestSplunkHECRequestBuildFailureHasClosedCode(t *testing.T) {
+	const sensitiveEndpoint = "://collector-secret-token-value"
+	adapter := &SplunkHEC{endpoint: sensitiveEndpoint, token: "resolved-hec-token"}
+	counters, health := deliverBatchHealth(
+		t,
+		"splunk-request-build",
+		adapter,
+		`{"record_id":"one","bucket":"diagnostic","event_name":"diagnostic.message"}`,
+	)
+	if counters.Rejected != 1 || counters.Delivered != 0 ||
+		health.LastFailureCode != delivery.FailureCodeRequestBuildFailed ||
+		strings.Contains(string(health.LastFailureCode), sensitiveEndpoint) {
+		t.Fatalf("counters=%+v failure_code=%q", counters, health.LastFailureCode)
 	}
 }
 
@@ -315,36 +370,43 @@ func TestSplunkHECMultiRecordWireStaysWithinConservativeEstimate(t *testing.T) {
 }
 
 func TestStatusAndHECAcknowledgementClassifications(t *testing.T) {
-	statusTests := map[int]delivery.DeliveryOutcome{
-		200: delivery.OutcomeDelivered, 204: delivery.OutcomeDelivered,
-		400: delivery.OutcomePermanentPayload, 401: delivery.OutcomeAuthentication,
-		403: delivery.OutcomeAuthentication, 408: delivery.OutcomeTransient,
-		425: delivery.OutcomeTransient, 429: delivery.OutcomeTransient,
-		500: delivery.OutcomeTransient, 599: delivery.OutcomeTransient,
-		600: delivery.OutcomePermanentPayload,
+	statusTests := map[int]delivery.DeliveryResult{
+		200: {Outcome: delivery.OutcomeDelivered},
+		204: {Outcome: delivery.OutcomeDelivered},
+		400: {Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeHTTPRejected},
+		401: {Outcome: delivery.OutcomeAuthentication, FailureCode: delivery.FailureCodeHTTPAuthentication},
+		403: {Outcome: delivery.OutcomeAuthentication, FailureCode: delivery.FailureCodeHTTPAuthentication},
+		408: {Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable},
+		425: {Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable},
+		429: {Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable},
+		500: {Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable},
+		599: {Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable},
+		600: {Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeHTTPRejected},
 	}
 	for status, want := range statusTests {
-		if got := classifyHTTPStatus(status); got != want {
-			t.Errorf("status %d=%s want=%s", status, got, want)
+		if got := classifyHTTPResult(status); got != want {
+			t.Errorf("status %d=%+v want=%+v", status, got, want)
 		}
 	}
 	ackTests := []struct {
-		body string
-		want delivery.DeliveryOutcome
+		body     string
+		want     delivery.DeliveryOutcome
+		wantCode delivery.FailureCode
 	}{
-		{`{"code":0}`, delivery.OutcomeDelivered},
-		{`{"code":0,"text":"Success","ackId":9}`, delivery.OutcomeDelivered},
-		{`{"code":4}`, delivery.OutcomeAuthentication},
-		{`{"code":8}`, delivery.OutcomeTransient},
-		{`{"code":12}`, delivery.OutcomePermanentPayload},
-		{`{}`, delivery.OutcomeAmbiguous},
-		{`not-json`, delivery.OutcomeAmbiguous},
-		{"", delivery.OutcomeAmbiguous},
-		{strings.Repeat("x", maxHECResponseBytes+1), delivery.OutcomeAmbiguous},
+		{`{"code":0}`, delivery.OutcomeDelivered, ""},
+		{`{"code":0,"text":"Success","ackId":9}`, delivery.OutcomeDelivered, ""},
+		{`{"code":4}`, delivery.OutcomeAuthentication, delivery.FailureCodeHECAckAuthentication},
+		{`{"code":8}`, delivery.OutcomeTransient, delivery.FailureCodeHECAckRetryable},
+		{`{"code":12}`, delivery.OutcomePermanentPayload, delivery.FailureCodeHECAckRejected},
+		{`{}`, delivery.OutcomeAmbiguous, delivery.FailureCodeHECAckInvalid},
+		{`not-json`, delivery.OutcomeAmbiguous, delivery.FailureCodeHECAckInvalid},
+		{"", delivery.OutcomeAmbiguous, delivery.FailureCodeHECAckInvalid},
+		{strings.Repeat("x", maxHECResponseBytes+1), delivery.OutcomeAmbiguous, delivery.FailureCodeHECAckInvalid},
 	}
 	for _, test := range ackTests {
-		if got := classifyHECAcknowledgement(strings.NewReader(test.body)); got != test.want {
-			t.Errorf("ack len=%d got=%s want=%s", len(test.body), got, test.want)
+		got := classifyHECAcknowledgementResult(strings.NewReader(test.body))
+		if got.Outcome != test.want || got.FailureCode != test.wantCode {
+			t.Errorf("ack len=%d got=%+v want=(%s,%s)", len(test.body), got, test.want, test.wantCode)
 		}
 	}
 }
@@ -374,11 +436,12 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 		body      string
 		delivered uint64
 		rejected  uint64
+		wantCode  delivery.FailureCode
 	}{
-		{"http success", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 204, "ignored", 1, 0},
-		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 1},
-		{"hec success", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 200, `{"code":0}`, 1, 0},
-		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 1},
+		{"http success", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 204, "ignored", 1, 0, ""},
+		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
+		{"hec success", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 200, `{"code":0}`, 1, 0, ""},
+		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -389,9 +452,14 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 					StatusCode: test.status, Header: make(http.Header), Body: responseBody, Request: request,
 				}, nil
 			})})
-			counters := deliverBatch(t, "body-close-"+string(rune('a'+index)), test.adapter, `{"record_id":"one"}`)
+			counters, health := deliverBatchHealth(
+				t, "body-close-"+string(rune('a'+index)), test.adapter, `{"record_id":"one"}`,
+			)
 			if counters.Delivered != test.delivered || counters.Rejected != test.rejected {
 				t.Fatalf("counters=%+v", counters)
+			}
+			if health.LastFailureCode != test.wantCode {
+				t.Fatalf("failure code=%q want=%q", health.LastFailureCode, test.wantCode)
 			}
 			if !responseBody.closed.Load() {
 				t.Fatal("response body was not closed")
@@ -793,24 +861,31 @@ func TestWorstCaseHECCompatibilityWrapperFitsAllowance(t *testing.T) {
 
 func TestTransportClassificationIsBounded(t *testing.T) {
 	for _, test := range []struct {
-		err  error
-		want delivery.DeliveryOutcome
+		err      error
+		want     delivery.DeliveryOutcome
+		wantCode delivery.FailureCode
 	}{
-		{netguard.ErrV8AddressProhibited, delivery.OutcomeUnsafeEndpoint},
-		{netguard.ErrV8RedirectBlocked, delivery.OutcomeUnsafeEndpoint},
-		{netguard.ErrV8ResolutionFailed, delivery.OutcomeTransient},
-		{netguard.ErrV8ConnectionFailed, delivery.OutcomeTransient},
-		{context.DeadlineExceeded, delivery.OutcomeTransient},
-		{errors.New("acknowledgement lost"), delivery.OutcomeAmbiguous},
+		{nil, delivery.OutcomeDelivered, ""},
+		{netguard.ErrV8AddressProhibited, delivery.OutcomeUnsafeEndpoint, delivery.FailureCodeEndpointProhibited},
+		{netguard.ErrV8RedirectBlocked, delivery.OutcomeUnsafeEndpoint, delivery.FailureCodeEndpointProhibited},
+		{netguard.ErrV8ResolutionFailed, delivery.OutcomeTransient, delivery.FailureCodeResolutionFailed},
+		{netguard.ErrV8ConnectionFailed, delivery.OutcomeTransient, delivery.FailureCodeConnectionFailed},
+		{context.Canceled, delivery.OutcomeTransient, delivery.FailureCodeRequestCanceled},
+		{context.DeadlineExceeded, delivery.OutcomeTransient, delivery.FailureCodeRequestTimeout},
+		{&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("secret transport detail")},
+			delivery.OutcomeTransient, delivery.FailureCodeTransportFailed},
+		{errors.New("acknowledgement lost"), delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost},
 	} {
-		if got := classifyTransportError(test.err, false); got != test.want {
-			t.Errorf("error=%v got=%s want=%s", test.err, got, test.want)
+		if got := classifyTransportResult(test.err, false); got.Outcome != test.want || got.FailureCode != test.wantCode {
+			t.Errorf("error=%v got=%+v want=(%s,%s)", test.err, got, test.want, test.wantCode)
 		}
 	}
-	if got := classifyTransportError(context.DeadlineExceeded, true); got != delivery.OutcomeAmbiguous {
-		t.Fatalf("post-write deadline=%s want=%s", got, delivery.OutcomeAmbiguous)
+	if got := classifyTransportResult(context.DeadlineExceeded, true); got.Outcome != delivery.OutcomeAmbiguous ||
+		got.FailureCode != delivery.FailureCodeAcknowledgementLost {
+		t.Fatalf("post-write deadline=%+v", got)
 	}
-	if got := classifyTransportError(netguard.ErrV8AddressProhibited, true); got != delivery.OutcomeUnsafeEndpoint {
-		t.Fatalf("post-write unsafe=%s want=%s", got, delivery.OutcomeUnsafeEndpoint)
+	if got := classifyTransportResult(netguard.ErrV8AddressProhibited, true); got.Outcome != delivery.OutcomeUnsafeEndpoint ||
+		got.FailureCode != delivery.FailureCodeEndpointProhibited {
+		t.Fatalf("post-write unsafe=%+v", got)
 	}
 }

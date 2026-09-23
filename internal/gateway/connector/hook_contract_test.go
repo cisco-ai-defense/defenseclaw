@@ -17,12 +17,39 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestCursorContractSeparatesAgentAndDesktopEvidence(t *testing.T) {
+	contract := KnownHookContracts("cursor")[0]
+	if !stringInSlice(contract.Events, "subagentStart") {
+		t.Fatalf("Cursor event roster omitted subagentStart: %v", contract.Events)
+	}
+	if !contract.Capabilities.CanBlock || contract.Capabilities.CanAskNative || !contract.Capabilities.SupportsFailClosed {
+		t.Fatalf("Cursor user-hook action contract is inconsistent: %+v", contract.Capabilities)
+	}
+	wantBlockEvents := []string{
+		"preToolUse", "subagentStart", "beforeShellExecution", "beforeMCPExecution",
+		"beforeReadFile", "beforeTabFileRead", "beforeSubmitPrompt",
+	}
+	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, wantBlockEvents) {
+		t.Fatalf("Cursor block events = %v, want %v", contract.Capabilities.BlockEvents, wantBlockEvents)
+	}
+	joined := strings.Join(contract.Notes, " ")
+	for _, want := range []string{
+		"cursor_version", "application/Desktop", "Agent CLI", "Enterprise > Team > Project > User",
+		"no safe API", "failClosed=true", "does not emit Cursor's native ask",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Cursor evidence notes missing %q: %s", want, joined)
+		}
+	}
+}
 
 func TestAntigravityDefaultCapabilitiesMatchResolvedContract(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir()}
@@ -31,6 +58,96 @@ func TestAntigravityDefaultCapabilitiesMatchResolvedContract(t *testing.T) {
 	resolved := conn.HookProfile(opts).Capabilities
 	if !reflect.DeepEqual(direct, resolved) {
 		t.Fatalf("HookCapabilities()=%+v, default resolved contract=%+v", direct, resolved)
+	}
+}
+
+func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
+	type contractBand struct {
+		id             string
+		min            string
+		max            string
+		defaultVersion bool
+		scriptVersion  string
+		events         int
+	}
+	want := map[string][]contractBand{
+		"codex": {
+			{"codex-hooks-v1", "0.124.0", "0.129.0", false, "v6", 6},
+			{"codex-hooks-v2", "0.129.0", "0.133.0", false, "v6", 8},
+			{"codex-hooks-v3", "0.133.0", "0.135.0", false, "v6", 10},
+			{"codex-hooks-v3-generic", "0.135.0", "0.145.0", false, "v6", 10},
+			{"codex-hooks-v4", "0.145.0", "", true, "v6", 11},
+		},
+		"claudecode": {
+			{"claudecode-hooks-v1", "2.1.154", "2.1.219", true, "v7", 28},
+			{"claudecode-hooks-v2", "2.1.219", "", false, "v7", 29},
+		},
+		"copilot": {
+			{"copilot-hooks-v1", "1.0.18", "1.0.76", false, "v7", 13},
+			{"copilot-hooks-v2", "1.0.76", "", true, "v7", 14},
+		},
+		"hermes": {
+			{"hermes-hooks-v1", "0.19.0", "0.21.0", false, "v6", 23},
+			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
+		},
+		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
+		"openhands":   {{"openhands-hooks-v1", "1.12.0", "", true, "v6", 6}},
+		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}},
+		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
+		"geminicli":   {{"geminicli-hooks-v1", "0.26.0", "", true, "v6", 11}},
+	}
+
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		for connectorName, wantBands := range want {
+			t.Run(goos+"/"+connectorName, func(t *testing.T) {
+				contracts := hookContractsForOS(connectorName, goos)
+				if len(contracts) != len(wantBands) {
+					t.Fatalf("contract count=%d want %d", len(contracts), len(wantBands))
+				}
+				for i, contract := range contracts {
+					wantBand := wantBands[i]
+					if goos == "windows" && connectorName == "openhands" {
+						wantBand.min = "0.0.0"
+					}
+					got := contractBand{
+						id:             contract.ContractID,
+						min:            contract.MinAgentVersion,
+						max:            contract.MaxAgentVersion,
+						defaultVersion: contract.DefaultForUnversioned,
+						scriptVersion:  contract.HookScriptVersion,
+						events:         len(contract.Events),
+					}
+					if got != wantBand {
+						t.Errorf("contract[%d]=%+v want %+v", i, got, wantBand)
+					}
+				}
+			})
+		}
+	}
+
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		resolution := resolveHookContractForOS("copilot", "GitHub Copilot CLI 1.0.76", goos)
+		if resolution.Status != HookCompatibilityKnown || resolution.Contract.ContractID != "copilot-hooks-v2" {
+			t.Fatalf("Copilot %s resolution=%+v", goos, resolution)
+		}
+		if resolution.Contract.NativeOTLP {
+			t.Errorf("Copilot %s advertised an exporter DefenseClaw does not integrate", goos)
+		}
+	}
+
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		openHands := hookContractsForOS("openhands", goos)[0]
+		wantNativeOTLP := goos == "darwin"
+		if openHands.NativeOTLP != wantNativeOTLP {
+			t.Errorf("OpenHands %s native OTLP=%v want %v", goos, openHands.NativeOTLP, wantNativeOTLP)
+		}
+		wantMinimum := "1.12.0"
+		if goos == "windows" {
+			wantMinimum = "0.0.0"
+		}
+		if openHands.MinAgentVersion != wantMinimum {
+			t.Errorf("OpenHands %s minimum=%q want %q", goos, openHands.MinAgentVersion, wantMinimum)
+		}
 	}
 }
 
@@ -69,13 +186,37 @@ func TestHookContractResolution(t *testing.T) {
 		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v4", ""},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
 		{"claude_before_message_display", "claude-code", "Claude Code v2.1.151", HookCompatibilityUnknown, "", "2.1.151"},
-		{"claude_alias_known", "claude-code", "Claude Code v2.1.152", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.152"},
-		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
-		{"antigravity_before_reliable_post", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityUnknown, "", "1.1.8"},
-		{"antigravity_reliable_post_minimum", "antigravity", "Antigravity CLI v1.1.9", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.9"},
+		{"claude_alias_known", "claude-code", "Claude Code v2.1.154", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.154"},
+		{"claude_v1_upper_boundary", "claude-code", "Claude Code v2.1.218", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.218"},
+		{"claude_directory_added_minimum", "claude-code", "Claude Code v2.1.219", HookCompatibilityKnown, "claudecode-hooks-v2", "2.1.219"},
+		{"claude_directory_added_current", "claude-code", "Claude Code v2.1.220", HookCompatibilityKnown, "claudecode-hooks-v2", "2.1.220"},
+		{"openhands_alias_known", "open-hands", "OpenHands 1.12.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.12.0"},
+		{"cursor_exact_agent_preview_pin", "cursor", "2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
+		{"cursor_exact_agent_preview_command_prefix", "cursor", "agent v2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
+		{"cursor_other_agent_build_unknown", "cursor", "cursor-agent 2026.07.23-deadbee", HookCompatibilityUnknown, "", "2026.7.23"},
+		{"cursor_later_agent_build_unknown", "cursor", "2026.08.31-4057e58", HookCompatibilityUnknown, "", "2026.8.31"},
+		{"cursor_desktop_reviewed_range", "cursor", "cursor 3.13.21", HookCompatibilityKnown, "cursor-hooks-v1", "3.13.21"},
+		{"cursor_desktop_current", "cursor", "3.19.13", HookCompatibilityKnown, "cursor-hooks-v1", "3.19.13"},
+		{"cursor_desktop_before_floor", "cursor", "cursor 2.3.99", HookCompatibilityUnknown, "", "2.3.99"},
+		{"cursor_desktop_at_ceiling", "cursor", "cursor 4.0.0", HookCompatibilityUnknown, "", "4.0.0"},
+		{"omnigent_before_proven_floor", "omnigent", "omnigent 0.6.99", HookCompatibilityUnknown, "", "0.6.99"},
+		{"omnigent_proven_floor", "omnigent", "omnigent 0.7.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.7.0"},
+		{"omnigent_reviewed_mid_range", "omnigent", "omnigent 0.8.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.8.0"},
+		{"omnigent_current_pin", "omnigent", "omnigent 0.13.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.13.0"},
+		{"omnigent_after_reviewed_range", "omnigent", "omnigent 0.14.0", HookCompatibilityUnknown, "", "0.14.0"},
+		{"omnigent_unversioned_requires_override", "omnigent", "", HookCompatibilityUnversioned, "omnigent-custom-policy-v1", ""},
+		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
+		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
+		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
+		{"opencode_current_pin", "opencode", "opencode 1.18.31", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.31"},
+		{"opencode_next_minor_unknown", "opencode", "opencode 1.19.0", HookCompatibilityUnknown, "", "1.19.0"},
+		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v1", ""},
+		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},
+		{"antigravity_documented_minimum", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.8"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
+		{"kiro_cataloged_hooks_not_gated", "kiro", "kiro-cli 2.22.0", HookCompatibilityNotGated, "", "2.22.0"},
 		{"bad_version_unknown", "codex", "codex nightly", HookCompatibilityUnknown, "", ""},
 	}
 	for _, tc := range cases {
@@ -89,6 +230,68 @@ func TestHookContractResolution(t *testing.T) {
 			}
 			if got.NormalizedVersion != tc.wantNorm {
 				t.Fatalf("NormalizedVersion=%q want %q", got.NormalizedVersion, tc.wantNorm)
+			}
+		})
+	}
+}
+
+func TestOpenHandsPOSIXContractFloorAndWindowsCompatibilityOverride(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		before := resolveHookContractForOS("openhands", "OpenHands 1.11.99", goos)
+		if before.Status != HookCompatibilityUnknown {
+			t.Fatalf("OpenHands %s before-floor status=%q want %q", goos, before.Status, HookCompatibilityUnknown)
+		}
+		floor := resolveHookContractForOS("openhands", "OpenHands 1.12.0", goos)
+		if floor.Status != HookCompatibilityKnown || floor.Contract.ContractID != "openhands-hooks-v1" {
+			t.Fatalf("OpenHands %s floor resolution=%+v", goos, floor)
+		}
+	}
+	windows := resolveHookContractForOS("openhands", "OpenHands 1.11.99", "windows")
+	if windows.Status != HookCompatibilityKnown || windows.Contract.MinAgentVersion != "0.0.0" || windows.Contract.NativeOTLP {
+		t.Fatalf("OpenHands Windows compatibility override=%+v", windows)
+	}
+}
+
+func TestClaudeCodeHookContractDirectoryAddedIsObservationOnly(t *testing.T) {
+	tests := []struct {
+		version       string
+		wantID        string
+		wantEvents    int
+		wantDirectory bool
+	}{
+		{"Claude Code 2.1.218", "claudecode-hooks-v1", 28, false},
+		{"Claude Code 2.1.219", "claudecode-hooks-v2", 29, true},
+		{"Claude Code 2.1.220", "claudecode-hooks-v2", 29, true},
+	}
+	for _, test := range tests {
+		t.Run(test.version, func(t *testing.T) {
+			contract := ResolveHookContract("claudecode", test.version).Contract
+			if contract.ContractID != test.wantID || len(contract.Events) != test.wantEvents {
+				t.Fatalf("contract=%s events=%d, want %s/%d", contract.ContractID, len(contract.Events), test.wantID, test.wantEvents)
+			}
+			hasDirectory := false
+			for _, event := range contract.Events {
+				hasDirectory = hasDirectory || event == "DirectoryAdded"
+			}
+			if hasDirectory != test.wantDirectory {
+				t.Fatalf("DirectoryAdded present=%v, want %v", hasDirectory, test.wantDirectory)
+			}
+			for _, event := range append(append([]string{}, contract.Capabilities.BlockEvents...), contract.Capabilities.AskEvents...) {
+				if event == "DirectoryAdded" {
+					t.Fatal("DirectoryAdded must not have block or ask authority")
+				}
+			}
+			groups, err := claudeCodeHookGroupsForSetup(SetupOpts{AgentVersion: test.version})
+			if err != nil {
+				t.Fatalf("version-selected registration groups: %v", err)
+			}
+			if len(groups) != test.wantEvents {
+				t.Fatalf("registration groups=%d, want %d", len(groups), test.wantEvents)
+			}
+			for _, group := range groups {
+				if group.eventType == "DirectoryAdded" && (group.matcher != "" || group.async || group.timeout != 30) {
+					t.Fatalf("DirectoryAdded registration=%+v, want matcherless synchronous 30-second hook", group)
+				}
 			}
 		})
 	}
@@ -162,6 +365,32 @@ func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 	}
 }
 
+func TestCodexHookContractPinsLifecycleControlsToV3AndV4(t *testing.T) {
+	for _, version := range []string{"0.133.0", "0.135.0", "0.144.0", "0.145.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		for _, event := range []string{"SessionStart", "SubagentStop", "PreCompact", "PostCompact"} {
+			if !stringInSlice(contract.Capabilities.BlockEvents, event) {
+				t.Errorf("%s %s does not own official %s control: %v",
+					version, contract.ContractID, event, contract.Capabilities.BlockEvents)
+			}
+		}
+		if stringInSlice(contract.Capabilities.BlockEvents, "SessionEnd") {
+			t.Errorf("%s %s incorrectly treats advisory SessionEnd as control", version, contract.ContractID)
+		}
+		if contract.Capabilities.CanAskNative || len(contract.Capabilities.AskEvents) != 0 {
+			t.Errorf("%s %s fabricated native ask: %+v", version, contract.ContractID, contract.Capabilities)
+		}
+	}
+	for _, version := range []string{"0.124.0", "0.129.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		for _, event := range []string{"SessionStart", "SubagentStop", "PreCompact", "PostCompact"} {
+			if stringInSlice(contract.Capabilities.BlockEvents, event) {
+				t.Errorf("%s %s backfilled uncertified %s control", version, contract.ContractID, event)
+			}
+		}
+	}
+}
+
 func TestCodexHookContractToolSurfaceBands(t *testing.T) {
 	selective := []ToolSurface{
 		ToolSurfaceShell, ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
@@ -220,7 +449,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -256,27 +485,95 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	}
 }
 
-// TestContentEnvelopeKeyDeclarations pins which connectors declare a
-// content envelope: hermes nests inspectable content under the
-// per-event "extra" object; every other contract is flat (and must
-// stay declared-empty so the generic decoder never opens an undeclared
-// sub-object). ApplyHookContract must copy the declaration onto the
-// resolved profile so the gateway decoder can read it.
+func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlockSurfaces(t *testing.T) {
+	if got := ResolveHookContract("hermes", "0.18.99").Status; got != HookCompatibilityUnknown {
+		t.Fatalf("Hermes 0.18 compatibility = %q, want unknown for the v0.19 event contract", got)
+	}
+	resolution := ResolveHookContract("hermes", "0.19.0")
+	if resolution.Status != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.19 compatibility = %q, want known", resolution.Status)
+	}
+	contract := resolution.Contract
+	if got := ResolveHookContract("hermes", "Hermes Agent v0.20.0 (2026.8.3)").Status; got != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.20 compatibility = %q, want known", got)
+	}
+	if got := ResolveHookContract("hermes", "0.21.0").Status; got != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.21 compatibility = %q, want known for hermes-hooks-v2", got)
+	}
+	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.3 (2026.9.14)").Contract.ContractID; got != "hermes-hooks-v2" {
+		t.Fatalf("Hermes 0.21.3 contract = %q, want hermes-hooks-v2", got)
+	}
+	if got := ResolveHookContract("hermes", "0.22.0").Status; got != HookCompatibilityUnknown {
+		t.Fatalf("Hermes 0.22 compatibility = %q, want unknown beyond source-reviewed ceiling", got)
+	}
+	if len(contract.Events) != 23 {
+		t.Fatalf("Hermes event count = %d, want 23: %v", len(contract.Events), contract.Events)
+	}
+	seen := make(map[string]struct{}, len(contract.Events))
+	for _, event := range contract.Events {
+		if _, exists := seen[event]; exists {
+			t.Fatalf("Hermes event %q appears more than once", event)
+		}
+		seen[event] = struct{}{}
+	}
+	for _, event := range []string{
+		"pre_tool_call", "pre_llm_call", "pre_verify",
+		"transform_terminal_output", "pre_gateway_dispatch",
+		"pre_approval_request", "api_request_error", "kanban_task_blocked",
+	} {
+		if _, ok := seen[event]; !ok {
+			t.Errorf("Hermes v0.19 contract missing classified event %q", event)
+		}
+	}
+	if got := contract.Capabilities.BlockEvents; !reflect.DeepEqual(got, []string{"pre_tool_call"}) {
+		t.Fatalf("Hermes block events = %v, want only pre_tool_call", got)
+	}
+	if contract.Capabilities.CanAskNative || contract.Capabilities.SupportsFailClosed {
+		t.Fatalf("Hermes contract invented ask/fail-closed support: %+v", contract.Capabilities)
+	}
+}
+
+func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testing.T) {
+	resolution := ResolveHookContract("omnigent", "omnigent 0.7.0")
+	if resolution.Status != HookCompatibilityKnown {
+		t.Fatalf("OmniGent v0.7.0 compatibility = %q, want known", resolution.Status)
+	}
+	contract := resolution.Contract
+	if contract.MinAgentVersion != "0.7.0" {
+		t.Fatalf("OmniGent minimum version = %q, want 0.7.0", contract.MinAgentVersion)
+	}
+	if contract.MaxAgentVersion != "0.14.0" {
+		t.Fatalf("OmniGent maximum version = %q, want exclusive 0.14.0", contract.MaxAgentVersion)
+	}
+	if got, want := contract.Events, []string{
+		"UserPromptSubmit", "PreToolUse", "PostToolUse",
+		"AfterAgentResponse", "BeforeModel", "AfterModel",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OmniGent events = %v, want %v", got, want)
+	}
+	wantPre := []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"}
+	if !reflect.DeepEqual(contract.Capabilities.AskEvents, wantPre) {
+		t.Fatalf("OmniGent ASK events = %v, want %v", contract.Capabilities.AskEvents, wantPre)
+	}
+	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, contract.Events) {
+		t.Fatalf("OmniGent DENY events = %v, want all six %v", contract.Capabilities.BlockEvents, contract.Events)
+	}
+}
+
+// TestContentEnvelopeKeyDeclarations pins every connector to the official
+// top-level payload shape. The generic decoder must never open an undeclared
+// sub-object, including an inferred Hermes extra envelope.
 func TestContentEnvelopeKeyDeclarations(t *testing.T) {
 	for name, contracts := range builtinHookContracts {
 		for _, contract := range contracts {
-			want := ""
-			if name == "hermes" {
-				want = "extra"
-			}
-			if contract.ContentEnvelopeKey != want {
-				t.Errorf("%s %s ContentEnvelopeKey=%q want %q", name, contract.ContractID, contract.ContentEnvelopeKey, want)
+			if contract.ContentEnvelopeKey != "" {
+				t.Errorf("%s %s ContentEnvelopeKey=%q want empty", name, contract.ContractID, contract.ContentEnvelopeKey)
 			}
 		}
 	}
 	hermes := NewHermesConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
-	if hermes.ContentEnvelopeKey != "extra" {
-		t.Fatalf("hermes profile ContentEnvelopeKey=%q want %q", hermes.ContentEnvelopeKey, "extra")
+	if hermes.ContentEnvelopeKey != "" {
+		t.Fatalf("hermes profile ContentEnvelopeKey=%q want empty", hermes.ContentEnvelopeKey)
 	}
 	cursor := NewCursorConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
 	if cursor.ContentEnvelopeKey != "" {
@@ -285,22 +582,38 @@ func TestContentEnvelopeKeyDeclarations(t *testing.T) {
 }
 
 func TestHookContractsManifestMatchesRuntime(t *testing.T) {
+	type manifestAgentVersion struct {
+		Exact        []string `json:"exact"`
+		MinInclusive string   `json:"min_inclusive"`
+		MaxExclusive string   `json:"max_exclusive"`
+	}
+	type manifestAgentVersionOverride struct {
+		Exact        *[]string `json:"exact"`
+		MinInclusive *string   `json:"min_inclusive"`
+		MaxExclusive *string   `json:"max_exclusive"`
+	}
+	type manifestContractOverride struct {
+		AgentVersion          *manifestAgentVersionOverride `json:"agent_version"`
+		DefaultForUnversioned *bool                         `json:"default_for_unversioned"`
+		HookScriptVersion     *string                       `json:"hook_script_version"`
+		Events                *[]string                     `json:"events"`
+		AIDSurfaces           *[]string                     `json:"aid_surfaces"`
+		NativeOTLP            *bool                         `json:"native_otlp"`
+	}
 	type manifestContract struct {
-		ContractID   string `json:"contract_id"`
-		AgentVersion struct {
-			MinInclusive string `json:"min_inclusive"`
-			MaxExclusive string `json:"max_exclusive"`
-		} `json:"agent_version"`
-		DefaultForUnversioned   bool                      `json:"default_for_unversioned"`
-		HookScriptVersion       string                    `json:"hook_script_version"`
-		HookConfigPathTemplates []string                  `json:"hook_config_path_templates"`
-		ResponseField           string                    `json:"response_field"`
-		Events                  []string                  `json:"events"`
-		AIDSurfaces             []string                  `json:"aid_surfaces"`
-		SupportsTraceparent     bool                      `json:"supports_traceparent"`
-		NativeOTLP              bool                      `json:"native_otlp"`
-		ContentEnvelopeKey      string                    `json:"content_envelope_key"`
-		ToolCallLifecycle       ToolCallLifecycleContract `json:"tool_call_lifecycle"`
+		ContractID              string                              `json:"contract_id"`
+		AgentVersion            manifestAgentVersion                `json:"agent_version"`
+		PlatformOverrides       map[string]manifestContractOverride `json:"platform_overrides"`
+		DefaultForUnversioned   bool                                `json:"default_for_unversioned"`
+		HookScriptVersion       string                              `json:"hook_script_version"`
+		HookConfigPathTemplates []string                            `json:"hook_config_path_templates"`
+		ResponseField           string                              `json:"response_field"`
+		Events                  []string                            `json:"events"`
+		AIDSurfaces             []string                            `json:"aid_surfaces"`
+		SupportsTraceparent     bool                                `json:"supports_traceparent"`
+		NativeOTLP              bool                                `json:"native_otlp"`
+		ContentEnvelopeKey      string                              `json:"content_envelope_key"`
+		ToolCallLifecycle       ToolCallLifecycleContract           `json:"tool_call_lifecycle"`
 		Capabilities            struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
@@ -316,7 +629,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		Contracts         []manifestContract `json:"contracts"`
 	}
 	type manifest struct {
-		Connectors map[string]manifestConnector `json:"connectors"`
+		SchemaVersion int                          `json:"schema_version"`
+		Connectors    map[string]manifestConnector `json:"connectors"`
 	}
 
 	path := filepath.Join("..", "..", "..", "cli", "defenseclaw", "inventory", "hook_contracts.json")
@@ -328,28 +642,91 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	if err := json.Unmarshal(payload, &gotManifest); err != nil {
 		t.Fatalf("unmarshal hook contract manifest: %v", err)
 	}
+	if gotManifest.SchemaVersion != 2 {
+		t.Fatalf("hook contract manifest schema_version=%d want 2", gotManifest.SchemaVersion)
+	}
 
-	for _, proxy := range []string{"openclaw", "zeptoclaw"} {
-		spec, ok := gotManifest.Connectors[proxy]
+	contractForOS := func(contract manifestContract, goos string) manifestContract {
+		override, ok := contract.PlatformOverrides[goos]
 		if !ok {
-			t.Fatalf("manifest missing proxy connector %s", proxy)
+			return contract
 		}
-		if spec.CompatibilityGate != "not-gated" {
-			t.Fatalf("%s compatibility_gate=%q want not-gated", proxy, spec.CompatibilityGate)
+		if override.AgentVersion != nil {
+			if override.AgentVersion.Exact != nil {
+				contract.AgentVersion.Exact = append([]string(nil), (*override.AgentVersion.Exact)...)
+			}
+			if override.AgentVersion.MinInclusive != nil {
+				contract.AgentVersion.MinInclusive = *override.AgentVersion.MinInclusive
+			}
+			if override.AgentVersion.MaxExclusive != nil {
+				contract.AgentVersion.MaxExclusive = *override.AgentVersion.MaxExclusive
+			}
 		}
-		if len(spec.Contracts) != 0 {
-			t.Fatalf("%s should not publish hook contracts in manifest", proxy)
+		if override.DefaultForUnversioned != nil {
+			contract.DefaultForUnversioned = *override.DefaultForUnversioned
 		}
-		resolution := ResolveHookContract(proxy, "")
-		if resolution.Status != HookCompatibilityNotGated {
-			t.Fatalf("%s runtime status=%q want %q", proxy, resolution.Status, HookCompatibilityNotGated)
+		if override.HookScriptVersion != nil {
+			contract.HookScriptVersion = *override.HookScriptVersion
 		}
-		if resolution.Contract.ContractID != "" {
-			t.Fatalf("%s should not resolve a runtime hook contract", proxy)
+		if override.Events != nil {
+			contract.Events = append([]string(nil), (*override.Events)...)
+		}
+		if override.AIDSurfaces != nil {
+			contract.AIDSurfaces = append([]string(nil), (*override.AIDSurfaces)...)
+		}
+		if override.NativeOTLP != nil {
+			contract.NativeOTLP = *override.NativeOTLP
+		}
+		return contract
+	}
+	for name, spec := range gotManifest.Connectors {
+		for _, contract := range spec.Contracts {
+			for platformName := range contract.PlatformOverrides {
+				if platformName != "darwin" && platformName != "linux" && platformName != "windows" {
+					t.Fatalf("%s/%s has unknown platform override %q", name, contract.ContractID, platformName)
+				}
+			}
 		}
 	}
 
-	for name, runtimeContracts := range builtinHookContracts {
+	for _, ungated := range []string{"openclaw", "zeptoclaw", "kiro"} {
+		spec, ok := gotManifest.Connectors[ungated]
+		if !ok {
+			t.Fatalf("manifest missing not-gated connector %s", ungated)
+		}
+		if spec.CompatibilityGate != "not-gated" {
+			t.Fatalf("%s compatibility_gate=%q want not-gated", ungated, spec.CompatibilityGate)
+		}
+		if len(spec.Contracts) != 0 {
+			t.Fatalf("%s should not publish hook contracts in manifest", ungated)
+		}
+		resolution := ResolveHookContract(ungated, "")
+		if resolution.Status != HookCompatibilityNotGated {
+			t.Fatalf("%s runtime status=%q want %q", ungated, resolution.Status, HookCompatibilityNotGated)
+		}
+		if resolution.Contract.ContractID != "" {
+			t.Fatalf("%s should not resolve a runtime hook contract", ungated)
+		}
+	}
+
+	type runtimeCase struct {
+		goos      string
+		name      string
+		contracts []HookContract
+	}
+	runtimeCases := []runtimeCase{}
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		for name := range builtinHookContracts {
+			runtimeCases = append(runtimeCases, runtimeCase{
+				goos:      goos,
+				name:      name,
+				contracts: hookContractsForOS(name, goos),
+			})
+		}
+	}
+	for _, runtimeCase := range runtimeCases {
+		name := runtimeCase.name
+		runtimeContracts := runtimeCase.contracts
 		spec, ok := gotManifest.Connectors[name]
 		if !ok {
 			t.Fatalf("manifest missing hook connector %s", name)
@@ -369,11 +746,15 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s manifest missing contract %s", name, runtime.ContractID)
 			}
+			manifestContract = contractForOS(manifestContract, runtimeCase.goos)
 			if manifestContract.AgentVersion.MinInclusive != runtime.MinAgentVersion {
 				t.Fatalf("%s min version=%q want %q", runtime.ContractID, manifestContract.AgentVersion.MinInclusive, runtime.MinAgentVersion)
 			}
 			if manifestContract.AgentVersion.MaxExclusive != runtime.MaxAgentVersion {
 				t.Fatalf("%s max version=%q want %q", runtime.ContractID, manifestContract.AgentVersion.MaxExclusive, runtime.MaxAgentVersion)
+			}
+			if !sameStrings(manifestContract.AgentVersion.Exact, runtime.ExactAgentVersions) {
+				t.Fatalf("%s exact versions=%v want %v", runtime.ContractID, manifestContract.AgentVersion.Exact, runtime.ExactAgentVersions)
 			}
 			if manifestContract.DefaultForUnversioned != runtime.DefaultForUnversioned {
 				t.Fatalf("%s default_for_unversioned=%v want %v", runtime.ContractID, manifestContract.DefaultForUnversioned, runtime.DefaultForUnversioned)
@@ -481,7 +862,7 @@ func stringInSlice(values []string, want string) bool {
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Claude Code v2.1.152",
+		AgentVersion: "Claude Code v2.1.154",
 	})
 	if profile.ContractID != "claudecode-hooks-v1" {
 		t.Fatalf("ContractID=%q", profile.ContractID)
@@ -499,14 +880,14 @@ func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 		t.Fatalf("Claude Code lifecycle contract was not resolved: %+v", profile.ToolCallLifecycle)
 	}
 	profile.ToolCallLifecycle.PreProposalEvents[0] = "mutated"
-	resolved := ResolveHookContract("claudecode", "2.1.152")
+	resolved := ResolveHookContract("claudecode", "2.1.154")
 	if resolved.Contract.ToolCallLifecycle.PreProposalEvents[0] != "PreToolUse" {
 		t.Fatal("resolved HookProfile aliases the built-in lifecycle contract")
 	}
 }
 
 func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
-	claude := ResolveHookContract("claudecode", "2.1.152").Contract.ToolCallLifecycle
+	claude := ResolveHookContract("claudecode", "2.1.154").Contract.ToolCallLifecycle
 	if got := claude.RouteForEvent("PreToolUse"); got != ToolEventRouteStructuredAction {
 		t.Fatalf("Claude PreToolUse route=%q", got)
 	}
@@ -836,19 +1217,17 @@ func TestToolCallLifecycleTerminalResetEventsAreSessionScoped(t *testing.T) {
 	}{
 		{connector: "codex", version: "0.146.0", event: "Stop", discardPending: true},
 		{connector: "codex", version: "0.146.0", event: "SessionEnd", terminal: true},
-		{connector: "claudecode", version: "2.1.152", event: "Stop", discardPending: true},
-		{connector: "claudecode", version: "2.1.152", event: "StopFailure", discardPending: true},
-		{connector: "claudecode", version: "2.1.152", event: "SessionEnd", terminal: true},
+		{connector: "claudecode", version: "2.1.154", event: "Stop", discardPending: true},
+		{connector: "claudecode", version: "2.1.154", event: "StopFailure", discardPending: true},
+		{connector: "claudecode", version: "2.1.154", event: "SessionEnd", terminal: true},
 		{connector: "hermes", event: "subagent_stop"},
 		{connector: "hermes", event: "on_session_end", terminal: true},
 		{connector: "hermes", event: "on_session_finalize", terminal: true},
 		{connector: "hermes", event: "on_session_reset", terminal: true},
 		{connector: "cursor", event: "stop", discardPending: true},
 		{connector: "cursor", event: "sessionEnd", terminal: true},
-		{connector: "windsurf", event: "post_cascade_response", discardPending: true},
-		{connector: "windsurf", event: "post_cascade_response_with_transcript", discardPending: true},
-		{connector: "geminicli", event: "AfterAgent", discardPending: true},
-		{connector: "geminicli", event: "SessionEnd", terminal: true},
+		{connector: "devin", version: "3000.4.25", event: "Stop", discardPending: true},
+		{connector: "devin", version: "3000.4.25", event: "SessionEnd", terminal: true},
 		{connector: "copilot", event: "agentStop", discardPending: true},
 		{connector: "copilot", event: "sessionEnd", terminal: true},
 		{connector: "openhands", event: "stop", discardPending: true},
@@ -892,7 +1271,7 @@ func TestToolCallLifecycleStateTransitionRouteIsReservedAndEmpty(t *testing.T) {
 		}
 	}
 
-	synthetic := ResolveHookContract("claudecode", "2.1.152").Contract
+	synthetic := ResolveHookContract("claudecode", "2.1.154").Contract
 	synthetic.ToolCallLifecycle.Routing.StateTransitionEvents = []string{"ConfigChange"}
 	if got := synthetic.ToolCallLifecycle.RouteForEvent("ConfigChange"); got != ToolEventRouteStateTransition {
 		t.Fatalf("reserved state-transition route=%q", got)
@@ -949,9 +1328,14 @@ func TestApplyHookContractUsesPinnedContractForUnknownVersion(t *testing.T) {
 }
 
 func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	conn := NewHermesConnector()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{
+		DataDir:      dir,
+		APIAddr:      "127.0.0.1:18970",
+		AgentVersion: "Hermes Agent v0.20.0 (2026.8.3)",
+	}
+	opts = prepareHermesSetupAdmissionFixture(t, opts)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dir, "hooks"), opts, conn); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
@@ -973,6 +1357,30 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	changed.ContractID = "hermes-hooks-v0-other"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
+	}
+}
+
+func TestWindowsHermesLockSealsManagedExecutableVersionEvidence(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Hermes executable evidence is native-Windows-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{DataDir: dir})
+	executable := opts.AgentExecutable
+	entry := NewHookContractLockEntry(opts, NewHermesConnector(), "test-build")
+	if !validSetupSelectedAgentExecutableEvidence(entry, "hermes") ||
+		entry.AgentExecutableSource != "setup-selected" ||
+		entry.NormalizedAgentVersion != "0.20.0" {
+		t.Fatalf("Hermes protected lock evidence = %+v", entry)
+	}
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "hermes"); got != opts.AgentVersion {
+		t.Fatalf("locked Hermes version = %q, want %q", got, opts.AgentVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "hermes"); !strings.EqualFold(got, executable) {
+		t.Fatalf("locked Hermes executable = %q, want %q", got, executable)
 	}
 }
 
@@ -1006,6 +1414,151 @@ func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T)
 	}
 	if info.ModTime().Equal(old) {
 		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
+	}
+}
+
+func TestManagedHookContractLockRecoveryReproducesProtectedBytes(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	if err := ReconcileManagedNativeHookRuntime(
+		dir,
+		"127.0.0.1:18970",
+		"codex",
+		"scoped-test-token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	const lockUpdatedAt = "2026-08-16T12:34:56.987654321Z"
+	const entryUpdatedAt = "2026-08-16T12:34:55.123456789Z"
+	entry := HookContractLockEntry{
+		Connector:    "codex",
+		ContractID:   "codex-hooks-v1",
+		HookFailMode: "closed",
+	}
+	if err := SaveRecoveredHookContractLockEntryForMode(
+		dir,
+		entry,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, hookContractLockFile)
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLockTime, gotEntryTime, err := ManagedHookContractTimestamps(dir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLockTime != lockUpdatedAt || gotEntryTime != entryUpdatedAt {
+		t.Fatalf("recovery timestamps = %q, %q", gotLockTime, gotEntryTime)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRecoveredHookContractLockEntryForMode(
+		dir,
+		entry,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("recovered contract bytes changed\nwant: %s\n got: %s", want, got)
+	}
+}
+
+func TestManagedHookContractLockRecoveryRejectsUnauthenticatedTimestampPair(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{Connector: "codex", HookFailMode: "closed"}
+	for _, test := range []struct {
+		name      string
+		lockTime  string
+		entryTime string
+	}{
+		{name: "missing entry timestamp", lockTime: "2026-08-16T12:34:56Z"},
+		{name: "entry after lock", lockTime: "2026-08-16T12:34:56Z", entryTime: "2026-08-16T12:34:57Z"},
+		{name: "malformed", lockTime: "not-a-time", entryTime: "also-not-a-time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := SaveRecoveredHookContractLockEntryForMode(
+				dir,
+				entry,
+				test.lockTime,
+				test.entryTime,
+			); err == nil || !strings.Contains(err.Error(), "invalid protected") {
+				t.Fatalf("recovery error = %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedHookContractLockRejectsOversizedSparseFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookContractLockFile)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookContractLockMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadHookContractLockEntryForMode(dir, "claudecode", true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract load error = %v, want bounded rejection", err)
+	}
+	entry := HookContractLockEntry{Connector: "claudecode"}
+	if err := SaveHookContractLockEntryForMode(dir, entry, true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract update error = %v, want bounded rejection", err)
+	}
+}
+
+func TestManagedHookScriptDigestsRejectSparseArtifactWithoutChangingUnmanagedMode(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hookDir, "_hardening.sh")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookRuntimeArtifactMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:      dir,
+		AgentVersion: "2.1.152",
+	}
+	conn := NewClaudeCodeConnector()
+	if _, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		"test-build",
+		true,
+	); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed digest error = %v, want bounded rejection", err)
+	}
+	unmanaged := NewHookContractLockEntry(opts, conn, "test-build")
+	if unmanaged.HookScriptDigests["_hardening.sh"] == "" {
+		t.Fatal("unmanaged digest behavior changed for an ordinary regular file")
 	}
 }
 
@@ -1089,6 +1642,67 @@ func TestHookContractLockStoresSharedScriptsOnce(t *testing.T) {
 		if entry.HookScriptDigests[owned] == "" {
 			t.Fatalf("%s owned digest missing: %v", tc.conn.Name(), entry.HookScriptDigests)
 		}
+	}
+}
+
+func TestVerifyManagedSharedHookScriptDigestsRejectsManagedTamperAndIgnoresUserHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows owner/DACL enforcement is covered by the native enterprise-hooks fixture")
+	}
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:           dir,
+		APIAddr:           "127.0.0.1:18970",
+		HookFailMode:      "closed",
+		ManagedEnterprise: true,
+	}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatalf("write canonical hooks: %v", err)
+	}
+	if err := SaveHookContractLockEntry(
+		dir,
+		NewHookContractLockEntry(opts, conn, "test-build"),
+	); err != nil {
+		t.Fatalf("save canonical contract: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err != nil {
+		t.Fatalf("verify canonical shared hooks: %v", err)
+	}
+
+	// User-owned hooks are outside the exact five-name contract and must not
+	// become part of Guardian's repair authority.
+	if err := os.WriteFile(
+		filepath.Join(hookDir, "my-user-hook.sh"),
+		[]byte("#!/bin/sh\nexit 0\n"),
+		0o700,
+	); err != nil {
+		t.Fatalf("write user hook: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err != nil {
+		t.Fatalf("user hook affected managed verification: %v", err)
+	}
+
+	lockPath := filepath.Join(dir, hookContractLockFile)
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read contract before tamper: %v", err)
+	}
+	managedPath := filepath.Join(hookDir, "inspect-request.sh")
+	if err := os.WriteFile(managedPath, []byte("tampered\n"), 0o700); err != nil {
+		t.Fatalf("tamper managed hook: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err == nil ||
+		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
+		t.Fatalf("managed tamper verification = %v, want digest mismatch", err)
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read contract after tamper: %v", err)
+	}
+	if !bytes.Equal(lockAfter, lockBefore) {
+		t.Fatal("verification blessed modified bytes by changing the contract lock")
 	}
 }
 
@@ -1213,32 +1827,189 @@ func TestHookContractLockRejectsPartialSharedDigestSet(t *testing.T) {
 	}
 }
 
-func TestHookContractLockNormalizesSharedLauncherDigestAcrossPeers(t *testing.T) {
+func TestHookContractLockKeepsLauncherEvidenceConnectorScoped(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
-	legacy := hookContractLock{
-		Version: 1,
+	const oldTimestamp = "2026-08-24T10:00:00Z"
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: oldTimestamp,
 		Connectors: map[string]HookContractLockEntry{
-			"claudecode": {Connector: "claudecode", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"}},
-			"codex":      {Connector: "codex", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"}},
+			"claudecode": {
+				Connector:         "claudecode",
+				HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"},
+				UpdatedAt:         oldTimestamp,
+			},
+			"codex": {
+				Connector:         "codex",
+				HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"},
+				UpdatedAt:         oldTimestamp,
+			},
+			"cursor": {
+				Connector: "cursor",
+				UpdatedAt: oldTimestamp,
+			},
+			"amp": {
+				Connector:         "amp",
+				HookScriptDigests: map[string]string{"defenseclaw.ts": "sha256:amp-plugin"},
+				UpdatedAt:         oldTimestamp,
+			},
 		},
 	}
-	body, err := json.Marshal(legacy)
+	body, err := json.Marshal(existing)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	selected := legacy.Connectors["claudecode"]
-	selected.HookScriptDigests[windowsHookBinaryName] = "sha256:current-launcher"
+	selected := HookContractLockEntry{
+		Connector: "claudecode",
+		HookScriptDigests: map[string]string{
+			windowsHookBinaryName: "sha256:current-launcher",
+		},
+	}
 	if err := SaveHookContractLockEntry(dir, selected); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"claudecode", "codex"} {
-		entry := LoadHookContractLockEntry(dir, name)
-		if got := entry.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
-			t.Fatalf("%s launcher digest=%q", name, got)
-		}
+	claude := LoadHookContractLockEntry(dir, "claudecode")
+	if got := claude.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
+		t.Fatalf("Claude launcher digest=%q", got)
+	}
+	if claude.UpdatedAt == oldTimestamp {
+		t.Fatal("Claude launcher change did not advance its connector timestamp")
+	}
+	codex := LoadHookContractLockEntry(dir, "codex")
+	if got := codex.HookScriptDigests[windowsHookBinaryName]; got != "sha256:old-codex" {
+		t.Fatalf("Claude save rewrote Codex-owned launcher evidence: %q", got)
+	}
+	if codex.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude save advanced Codex timestamp to %q", codex.UpdatedAt)
+	}
+	cursor := LoadHookContractLockEntry(dir, "cursor")
+	if len(cursor.HookScriptDigests) != 0 {
+		t.Fatalf("Claude save populated sparse Cursor digests: %v", cursor.HookScriptDigests)
+	}
+	if cursor.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude save advanced Cursor timestamp to %q", cursor.UpdatedAt)
+	}
+
+	if err := SaveHookContractLockEntry(
+		dir,
+		HookContractLockEntry{Connector: "claudecode"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	claude = LoadHookContractLockEntry(dir, "claudecode")
+	if len(claude.HookScriptDigests) != 0 {
+		t.Fatalf("Claude launcher removal retained stale evidence: %v", claude.HookScriptDigests)
+	}
+	codex = LoadHookContractLockEntry(dir, "codex")
+	if got := codex.HookScriptDigests[windowsHookBinaryName]; got != "sha256:old-codex" {
+		t.Fatalf("Claude launcher removal rewrote Codex-owned evidence: %q", got)
+	}
+	if codex.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude launcher removal advanced Codex timestamp to %q", codex.UpdatedAt)
+	}
+}
+
+func TestHookContractLockChangedEntryTimestampIsStrictlyMonotonic(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: future,
+		Connectors: map[string]HookContractLockEntry{
+			"cursor": {
+				Connector:    "cursor",
+				ContractID:   "cursor-hooks-v1",
+				HookFailMode: "open",
+				UpdatedAt:    future,
+			},
+		},
+	}
+	body, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := existing.Connectors["cursor"]
+	changed.HookFailMode = "closed"
+	if err := SaveHookContractLockEntry(dir, changed); err != nil {
+		t.Fatal(err)
+	}
+	stored := loadHookContractLock(dir)
+	got := stored.Connectors["cursor"].UpdatedAt
+	oldTime, err := time.Parse(time.RFC3339Nano, future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTime, err := time.Parse(time.RFC3339Nano, got)
+	if err != nil {
+		t.Fatalf("changed entry timestamp %q is invalid: %v", got, err)
+	}
+	if !gotTime.After(oldTime) {
+		t.Fatalf("changed entry timestamp %q is not newer than %q", got, future)
+	}
+	lockTime, err := time.Parse(time.RFC3339Nano, stored.UpdatedAt)
+	if err != nil || lockTime.Before(gotTime) {
+		t.Fatalf("lock timestamp %q does not cover entry timestamp %q", stored.UpdatedAt, got)
+	}
+}
+
+func TestHookContractLockClearKeepsGlobalTimestampAfterSurvivingPeer(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: future,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {
+				Connector: "claudecode",
+				UpdatedAt: future,
+			},
+			"cursor": {
+				Connector: "cursor",
+				UpdatedAt: future,
+			},
+		},
+	}
+	body, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearHookContractLockEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	stored := loadHookContractLock(dir)
+	if _, exists := stored.Connectors["claudecode"]; exists {
+		t.Fatal("cleared connector remains in contract lock")
+	}
+	peer, exists := stored.Connectors["cursor"]
+	if !exists || peer.UpdatedAt != future {
+		t.Fatalf("surviving peer changed during clear: %+v", peer)
+	}
+	lockTime, err := time.Parse(time.RFC3339Nano, stored.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerTime, err := time.Parse(time.RFC3339Nano, peer.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockTime.After(peerTime) {
+		t.Fatalf("clear timestamp %q is not after surviving peer %q", stored.UpdatedAt, peer.UpdatedAt)
+	}
+	if _, _, err := ManagedHookContractTimestamps(dir, "cursor"); err != nil {
+		t.Fatalf("surviving managed timestamp pair is invalid after clear: %v", err)
+	}
+	amp := LoadHookContractLockEntry(dir, "amp")
+	if got := amp.HookScriptDigests[windowsHookBinaryName]; got != "" {
+		t.Fatalf("amp inherited unrelated launcher digest %q", got)
 	}
 }
 
@@ -1375,6 +2146,31 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	if !HookContractCompatibilityDrifted(previous, current) {
 		t.Fatal("agent version changes must remain compatibility drift")
 	}
+
+	t.Run("Cursor desktop and agent CLI share cursor-hooks-v1", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "2026.08.11-e8db854",
+			NormalizedAgentVersion: "2026.8.11",
+			ContractID:             "cursor-hooks-v1",
+		}
+		current := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "3.19.13",
+			NormalizedAgentVersion: "3.19.13",
+			ContractID:             "cursor-hooks-v1",
+		}
+		if HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Cursor Desktop vs Agent CLI must not count as contract drift when the contract id is unchanged")
+		}
+		if HookContractLockDrifted(previous, current) {
+			t.Fatal("Cursor Desktop vs Agent CLI must not count as lock drift when the contract id is unchanged")
+		}
+		current.ContractID = "cursor-hooks-v2"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("a real Cursor contract identity change must remain drift")
+		}
+	})
 	if !HookContractLockDrifted(previous, current) {
 		t.Fatal("agent version changes must remain lock drift")
 	}
@@ -1567,6 +2363,394 @@ func TestCodexSetupSelectionReceiptIsBoundAndSealed(t *testing.T) {
 		!sameCodexExecutablePath(entry.AgentExecutable, executable) ||
 		entry.AgentExecutableSHA256 != digest {
 		t.Fatalf("sealed executable evidence = %+v", entry)
+	}
+}
+
+func TestSetupSelectionReceiptCarriesProtectedAgentsForGatewayConsumption(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"codex": {
+				Connector:         "codex",
+				Source:            "setup-selected",
+				Executable:        filepath.Join(dir, "codex.exe"),
+				RawVersion:        "codex 0.144.3",
+				NormalizedVersion: "0.144.3",
+				SHA256:            strings.Repeat("a", 64),
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+			"hermes": {
+				Connector:         "hermes",
+				Source:            "setup-selected",
+				Executable:        filepath.Join(dir, "hermes.exe"),
+				RawVersion:        "Hermes Agent v0.20.0",
+				NormalizedVersion: "0.20.0",
+				SHA256:            strings.Repeat("b", 64),
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+			"opencode": {
+				Connector:         "opencode",
+				Source:            "setup-selected",
+				Executable:        filepath.Join(dir, "opencode.exe"),
+				RawVersion:        "opencode 1.18.11",
+				NormalizedVersion: "1.18.11",
+				SHA256:            strings.Repeat("c", 64),
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+			"amp": {
+				Connector:         "amp",
+				Source:            "setup-selected",
+				Executable:        filepath.Join(dir, "amp.exe"),
+				RawVersion:        "0.0.1785875347-gbc402f",
+				NormalizedVersion: "0.0.1785875347",
+				SHA256:            strings.Repeat("d", 64),
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	codexSelection, ok := loadSetupAgentSelection(dir, "codex")
+	if !ok || codexSelection.Executable != filepath.Join(dir, "codex.exe") {
+		t.Fatalf("Codex selection = %+v, %t", codexSelection, ok)
+	}
+	hermesSelection, ok := loadSetupAgentSelection(dir, "hermes")
+	if !ok || hermesSelection.Executable != filepath.Join(dir, "hermes.exe") {
+		t.Fatalf("Hermes selection = %+v, %t", hermesSelection, ok)
+	}
+	opencodeSelection, ok := loadSetupAgentSelection(dir, "opencode")
+	if !ok || opencodeSelection.Executable != filepath.Join(dir, "opencode.exe") {
+		t.Fatalf("OpenCode selection = %+v, %t", opencodeSelection, ok)
+	}
+	if got := LoadCachedAgentVersion(dir, "opencode"); got != "opencode 1.18.11" {
+		t.Fatalf("OpenCode selected version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "opencode"); got != filepath.Join(dir, "opencode.exe") {
+		t.Fatalf("OpenCode selected executable = %q", got)
+	}
+	ampSelection, ok := loadSetupAgentSelection(dir, "amp")
+	if !ok || ampSelection.Executable != filepath.Join(dir, "amp.exe") {
+		t.Fatalf("Amp selection = %+v, %t", ampSelection, ok)
+	}
+	if got := LoadCachedAgentVersion(dir, "amp"); got != "0.0.1785875347-gbc402f" {
+		t.Fatalf("Amp selected version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "amp"); got != filepath.Join(dir, "amp.exe") {
+		t.Fatalf("Amp selected executable = %q", got)
+	}
+}
+
+func writeAmpSetupSelectionForTest(
+	t *testing.T,
+	dir string,
+	executable string,
+	rawVersion string,
+	normalizedVersion string,
+	selectedAt time.Time,
+	expiresAt time.Time,
+) agentSelectionEvidence {
+	t.Helper()
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not hash fixture Amp executable")
+	}
+	selection := agentSelectionEvidence{
+		Connector:         "amp",
+		Source:            "setup-selected",
+		Executable:        executable,
+		RawVersion:        rawVersion,
+		NormalizedVersion: normalizedVersion,
+		SHA256:            digest,
+		SelectedAt:        selectedAt.Format(time.RFC3339),
+		ExpiresAt:         expiresAt.Format(time.RFC3339),
+	}
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     selectedAt.Format(time.RFC3339),
+		Selections:    map[string]agentSelectionEvidence{"amp": selection},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func writeAmpContractLockForTest(t *testing.T, dir string, entry HookContractLockEntry, updatedAt time.Time) {
+	t.Helper()
+	entry.UpdatedAt = updatedAt.Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  updatedAt.Format(time.RFC3339),
+		Connectors: map[string]HookContractLockEntry{"amp": entry},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAmpSetupSelectionRejectsUnsupportedOrForeignEvidence(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Amp setup selections are native-Windows authority")
+	}
+	for _, test := range []struct {
+		name       string
+		raw        string
+		normalized string
+	}{
+		{name: "fake", raw: "not-an-amp-version", normalized: "0.0.1785875347"},
+		{name: "unsupported", raw: "amp 0.0.1", normalized: "0.0.1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			executable := filepath.Join(dir, "amp.exe")
+			if err := atomicWriteFile(executable, []byte("fixture Amp"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			writeAmpSetupSelectionForTest(
+				t, dir, executable, test.raw, test.normalized, now, now.Add(agentSelectionMaxLifetime),
+			)
+			if resolution := ResolveHookContract("amp", test.raw); resolution.Status == HookCompatibilityKnown {
+				t.Fatalf("test version unexpectedly resolved known: %+v", resolution)
+			}
+			if selection, ok := loadSetupAgentSelection(dir, "amp"); ok {
+				t.Fatalf("unsupported Amp evidence loaded: %+v", selection)
+			}
+		})
+	}
+}
+
+func TestAmpExpiredOrOlderMatchingReceiptCannotSupersedeSealedLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Amp setup selections are native-Windows authority")
+	}
+	for _, test := range []struct {
+		name       string
+		selectedAt func(time.Time) time.Time
+		expiresAt  func(time.Time) time.Time
+	}{
+		{
+			name:       "expired",
+			selectedAt: func(now time.Time) time.Time { return now.Add(-20 * time.Minute) },
+			expiresAt:  func(now time.Time) time.Time { return now.Add(-5 * time.Minute) },
+		},
+		{
+			name:       "older-matching",
+			selectedAt: func(now time.Time) time.Time { return now.Add(-2 * time.Minute) },
+			expiresAt:  func(now time.Time) time.Time { return now.Add(5 * time.Minute) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			executable := filepath.Join(dir, "amp.exe")
+			if err := atomicWriteFile(executable, []byte("sealed Amp"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			locked := NewHookContractLockEntry(
+				SetupOpts{DataDir: dir, AgentVersion: "0.0.1785875347-gbc402f", AgentExecutable: executable},
+				NewAMPConnector(),
+				"test-build",
+			)
+			if !validSetupSelectedAgentExecutableEvidence(locked, "amp") {
+				t.Fatalf("Amp lock lacks sealed executable evidence: %+v", locked)
+			}
+			writeAmpContractLockForTest(t, dir, locked, now.Add(-time.Minute))
+			writeAmpSetupSelectionForTest(
+				t,
+				dir,
+				executable,
+				locked.RawAgentVersion,
+				locked.NormalizedAgentVersion,
+				test.selectedAt(now),
+				test.expiresAt(now),
+			)
+
+			if selection, supersedes := supersedingProtectedSetupSelection(dir, "amp", locked); supersedes {
+				t.Fatalf("%s Amp receipt superseded sealed lock: %+v", test.name, selection)
+			}
+			if got := LoadHookContractLockEntry(dir, "amp"); !validSetupSelectedAgentExecutableEvidence(got, "amp") {
+				t.Fatalf("%s Amp receipt hid sealed lock: %+v", test.name, got)
+			}
+		})
+	}
+}
+
+func TestNewerDifferentAmpReceiptSupersedesThenFreshSealRegainsAuthority(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Amp setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	oldExecutable := filepath.Join(dir, "old", "amp.exe")
+	if err := os.MkdirAll(filepath.Dir(oldExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(oldExecutable, []byte("old Amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldEntry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "0.0.1785875347-gbc402f", AgentExecutable: oldExecutable},
+		NewAMPConnector(),
+		"old-build",
+	)
+	writeAmpContractLockForTest(t, dir, oldEntry, now.Add(-2*time.Minute))
+
+	newExecutable := filepath.Join(dir, "current", "amp.exe")
+	if err := os.MkdirAll(filepath.Dir(newExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(newExecutable, []byte("current Amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	selection := writeAmpSetupSelectionForTest(
+		t,
+		dir,
+		newExecutable,
+		"0.0.1785875347-gbc402f",
+		"0.0.1785875347",
+		now,
+		now.Add(agentSelectionMaxLifetime),
+	)
+	if previous := LoadHookContractLockEntry(dir, "amp"); previous.Connector != "" {
+		t.Fatalf("newer different Amp receipt did not supersede old lock: %+v", previous)
+	}
+	if got := LoadCachedAgentExecutable(dir, "amp"); !strings.EqualFold(got, newExecutable) {
+		t.Fatalf("Amp repair executable = %q, want %q", got, newExecutable)
+	}
+
+	newEntry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: selection.RawVersion, AgentExecutable: newExecutable},
+		NewAMPConnector(),
+		"new-build",
+	)
+	if err := SaveFreshHookContractLockEntry(dir, newEntry); err != nil {
+		t.Fatalf("persist repaired Amp lock: %v", err)
+	}
+	sealed := LoadHookContractLockEntry(dir, "amp")
+	if !validSetupSelectedAgentExecutableEvidence(sealed, "amp") ||
+		!protectedSelectionMatchesLock(selection, sealed) {
+		t.Fatalf("fresh Amp seal did not regain authority: %+v", sealed)
+	}
+	if receipt, supersedes := supersedingProtectedSetupSelection(dir, "amp", sealed); supersedes {
+		t.Fatalf("matching receipt displaced fresh Amp seal: %+v", receipt)
+	}
+}
+
+func TestDifferentAmpReceiptInSameSerializedSecondSupersedesLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Amp setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	oldExecutable := filepath.Join(dir, "old", "amp.exe")
+	if err := os.MkdirAll(filepath.Dir(oldExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(oldExecutable, []byte("same-tick old Amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldEntry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "0.0.1785875347-gbc402f", AgentExecutable: oldExecutable},
+		NewAMPConnector(),
+		"old-build",
+	)
+	// Locks retain nanoseconds while receipts are serialized at whole-second
+	// precision. Different evidence in that same serialized tick is an explicit
+	// repair and must not be misclassified as older passive evidence.
+	writeAmpContractLockForTest(t, dir, oldEntry, now.Add(750*time.Millisecond))
+
+	newExecutable := filepath.Join(dir, "current", "amp.exe")
+	if err := os.MkdirAll(filepath.Dir(newExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(newExecutable, []byte("same-tick current Amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	selection := writeAmpSetupSelectionForTest(
+		t,
+		dir,
+		newExecutable,
+		"0.0.1785875347-gbc402f",
+		"0.0.1785875347",
+		now,
+		now.Add(agentSelectionMaxLifetime),
+	)
+
+	if previous := LoadHookContractLockEntry(dir, "amp"); previous.Connector != "" {
+		t.Fatalf("same-tick explicit Amp selection did not supersede old lock: %+v", previous)
+	}
+	if got := LoadCachedAgentVersion(dir, "amp"); got != selection.RawVersion {
+		t.Fatalf("same-tick selected version = %q, want %q", got, selection.RawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "amp"); !sameCodexExecutablePath(got, newExecutable) {
+		t.Fatalf("same-tick selected executable = %q, want %q", got, newExecutable)
+	}
+}
+
+func TestAmpAuthorityNeverFallsBackToAnotherConnectorCacheOrReceipt(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Amp setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	foreignExecutable := filepath.Join(dir, "opencode.exe")
+	if err := atomicWriteFile(foreignExecutable, []byte("foreign connector"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, ok := setupSelectedAgentExecutableEvidence(foreignExecutable)
+	if !ok {
+		t.Fatal("could not hash foreign connector fixture")
+	}
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"opencode": {
+				Connector: "opencode", Source: "setup-selected", Executable: foreignExecutable,
+				RawVersion: "opencode 1.18.11", NormalizedVersion: "1.18.11", SHA256: digest,
+				SelectedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+		},
+	}
+	receiptBody, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), receiptBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheBody := []byte(`{"agents":{"copilot":{"version":"1.0.78","binary_path":"C:\\stale\\copilot.exe"}}}`)
+	if err := atomicWriteFile(filepath.Join(dir, "agent_discovery.json"), cacheBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := LoadCachedAgentVersion(dir, "amp"); got != "" {
+		t.Fatalf("Amp consumed foreign cached version %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "amp"); got != "" {
+		t.Fatalf("Amp consumed foreign cached executable %q", got)
 	}
 }
 

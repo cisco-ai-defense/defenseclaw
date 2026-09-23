@@ -45,8 +45,11 @@ func (dispatcher *Dispatcher) transitionHealth(state HealthState, reason HealthR
 	transition := HealthTransition{
 		Destination: dispatcher.config.Destination,
 		Generation:  dispatcher.config.Generation,
+		Signal:      dispatcher.config.Signal,
 		Previous:    previous, Current: state, Reason: reason,
-		Counters: dispatcher.Counters(), OccurredAt: now,
+		FailureClass: dispatcher.lastFailureClass,
+		FailureCode:  dispatcher.lastFailureCode,
+		Counters:     dispatcher.Counters(), OccurredAt: now,
 		sequence: dispatcher.healthSequence,
 	}
 	dispatcher.pendingTransition = &transition

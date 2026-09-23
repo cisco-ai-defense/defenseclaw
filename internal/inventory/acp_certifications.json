@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "certification_levels": {
+    "cataloged": "Entry point verified from primary documentation; no runtime claim.",
+    "tested": "Protocol handshake and guard conformance fixtures pass on supported platforms.",
+    "certified": "Official client plus agent action/observe E2E evidence is required for release."
+  },
+  "required_evidence": [
+    "initialize and capability negotiation",
+    "session creation and prompt streaming",
+    "client filesystem request",
+    "client terminal request",
+    "permission request",
+    "tool-call update",
+    "cancellation",
+    "malformed, oversized, duplicate-ID, and batch rejection",
+    "observe pass-through and action block",
+    "client config rollback and scoped-token isolation",
+    "managed enroll, verify, live revoke, and rotated re-enrollment",
+    "managed service-record and per-user credential custody"
+  ],
+  "certifications": [
+    {
+      "client_id": "zed",
+      "agent_id": "kiro",
+      "level": "tested",
+      "protocol_release": "schema-v1.21.0",
+      "evidence": [
+        "Automated protocol parser and proxy conformance: internal/acp tests cover initialize-compatible extensions, prompt and output streaming, filesystem, terminal, permission, malformed, oversized, duplicate-field, observe, action-block, and buffered-output non-leak behavior.",
+        "Automated client lifecycle conformance: cli/tests/test_cmd_acp.py covers JSONC-preserving Zed setup, least-privilege token creation, per-client contract locks, executable digest verification, surgical removal, and transaction rollback.",
+        "Manual macOS live agent test on 2026-09-11: Kiro CLI 2.21.3 completed initialize, session/new, session/prompt, streaming session/update, and Kiro extension messages through defenseclaw-acp in observe mode.",
+        "Manual macOS official-client test on 2026-09-11: isolated Zed discovered DefenseClaw · Kiro, launched the guarded entry, received the expected ACP success marker, and produced v8 audit records for zed/kiro prompt and output surfaces.",
+        "Manual deterministic action test on 2026-09-11: a blocked fs/write_text_file request produced JSON-RPC -32001, discarded buffered session output, and emitted no post-block frames.",
+        "Manual Linux managed-enterprise E2E on 2026-09-11: root-owned config and service credentials plus a mode-0600 target-user token completed action and observe runs; the gateway rejected the master bearer on ACP, rejected the ACP bearer on management routes, revoked a live bearer with HTTP 401, and rotated it on re-enrollment.",
+        "Manual native Windows managed-enterprise E2E on 2026-09-11: a dedicated NT SERVICE identity completed action and observe runs with service-SID-owned protected record/index DACLs and a target-SID-owned protected token; live revoke returned HTTP 401 and protected-directory re-enrollment rotated the credential.",
+        "Linux and Windows managed v8 evidence records client zed, agent kiro, profile managed, filesystem/terminal/permission surfaces, and distinct raw_action, effective_action, and would_block values for observe versus action."
+      ]
+    }
+  ]
+}

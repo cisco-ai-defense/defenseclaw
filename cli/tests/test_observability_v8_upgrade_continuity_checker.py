@@ -16,6 +16,46 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
 
+def _main_args() -> list[str]:
+    return [
+        "--pre-stamp",
+        "100",
+        "--post-stamp",
+        "200",
+        "--metric-cutover-seconds",
+        "150",
+    ]
+
+
+def test_main_supports_anonymous_grafana_without_a_password_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configured: list[Path | None] = []
+    monkeypatch.setattr(checker.dashboards, "configure_grafana_auth", configured.append)
+    monkeypatch.setattr(checker, "verify", lambda *_args, **_kwargs: {"ok": True})
+
+    assert checker.main(_main_args()) == 0
+
+    assert configured == [None]
+    assert capsys.readouterr().out == '{"ok": true}\n'
+
+
+def test_main_honors_persisted_no_password_mode_with_the_legacy_file_argument(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    password_file = tmp_path / ".grafana-admin-password"
+    password_file.with_name(".grafana-access-mode").write_text("no-password\n", encoding="ascii")
+    configured: list[Path | None] = []
+    monkeypatch.setattr(checker.dashboards, "configure_grafana_auth", configured.append)
+    monkeypatch.setattr(checker, "verify", lambda *_args, **_kwargs: {"ok": True})
+
+    assert checker.main([*_main_args(), "--grafana-password-file", str(password_file)]) == 0
+
+    assert configured == [None]
+
+
 def _series(values: dict[str, float]) -> list[dict[str, object]]:
     return [
         {

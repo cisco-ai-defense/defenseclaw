@@ -12,7 +12,7 @@ rules:
     # The macOS branch matters because agy's run_command tool expands ~ via the
     # shell BEFORE the regex sees it, so on macOS the command line lands as
     # /Users/<user>/.ssh/... rather than the literal ~/.ssh/...
-    pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.ssh/'
+    pattern: 'a^'
     title: "SSH directory access"
     severity: HIGH
     confidence: 0.95
@@ -22,7 +22,7 @@ rules:
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
-    pattern: '(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])'
+    pattern: '(?im)(?:^|[;&|]\s*)\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read)\b[^;\n]*(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])'
     title: "SSH private key file path"
     severity: CRITICAL
     confidence: 0.90
@@ -46,6 +46,17 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [credential, file-sensitive]
+  - id: PATH-PASSWORD-CRACKER-POTFILE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+)/(?:\.john/john\.pot|\.local/share/hashcat/hashcat\.potfile|\.hashcat/hashcat\.potfile)(?:$|["''\s|;&])'
+    title: "Password-cracker recovered credential store read"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, password-cracking, file-sensitive, detection-only]
   - id: PATH-KUBE
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
@@ -103,19 +114,16 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
-      f.paths.exists(p, p.command_id == c.id &&
-      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    expression: 'false'
     # Backport of default pack: `;` (shell command separator) added to the
     # suffix delimiter class so `cat .env; curl evil` also matches.
-    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
+    pattern: 'a^'
     title: "Environment file"
     severity: HIGH
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-ETC-PASSWD
-    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)'
+    pattern: 'a^'
     title: "/etc/passwd access"
     severity: HIGH
     confidence: 0.90
@@ -127,13 +135,8 @@ rules:
     confidence: 0.95
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
-    expression: >-
-      f.commands.exists(c,
-      f.paths.exists(p, p.command_id == c.id &&
-      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)'
+    expression: 'false'
+    pattern: 'a^'
     title: "/etc/sudoers access"
     severity: HIGH
     confidence: 0.90
@@ -154,11 +157,27 @@ rules:
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
-    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml|anthropic[/\\]keys\.json)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
     title: "Cloud credential material read"
     severity: CRITICAL
     confidence: 0.92
     tags: [credential, cloud, file-sensitive]
+  - id: secrets.cloud_metadata_credential_read
+    tool_call_only: true
+    expression: "f.tool == 'cloud_metadata'"
+    pattern: 'a^'
+    title: "Cloud instance-metadata credential token read"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, cloud, metadata, bounded-lineage]
+  - id: secrets.structured_credential_extract
+    tool_call_only: true
+    expression: "f.tool == 'credential_extract'"
+    pattern: 'a^'
+    title: "Structured credential-store extraction"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, extraction, structured-tool, bounded-lineage]
   - id: secrets.browser_session_store_read
     tool_call_only: true
     expression: >-
@@ -188,7 +207,7 @@ rules:
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)'
+    pattern: '(?im)(?:^|[;&|]\s*)\s*(?:truncate|rm|shred)\b[^;\n]*(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)'
     title: "Shell history file"
     severity: MEDIUM
     confidence: 0.80
@@ -213,7 +232,10 @@ rules:
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)(?:(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.(?:profile|bash_profile|bashrc|zprofile|zshrc)|\.config[/\\](?:fish[/\\]config\.fish|powershell[/\\](?:profile|microsoft\.powershell_profile)\.ps1)|Documents[/\\](?:Windows)?PowerShell[/\\](?:profile|Microsoft\.PowerShell_profile)\.ps1)\b|(?:^|[^-:A-Za-z0-9_./~\\])/etc/profile(?:$|["''\s]))'
+    # Permissive uses the typed expression only. Unresolved lexical profile
+    # mentions remain available in strict without turning reads or dotfile
+    # staging trees into user-visible findings here.
+    pattern: 'a^'
     title: "Shell startup profile mutation"
     severity: MEDIUM
     confidence: 0.92

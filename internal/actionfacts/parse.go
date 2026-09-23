@@ -17,14 +17,16 @@
 package actionfacts
 
 type parseOutput struct {
-	status    ParseStatus
-	dialect   Dialect
-	issues    []IssueCode
-	commands  []CommandFact
-	paths     []PathFact
-	network   []NetworkFact
-	dataFlows []DataFlowFact
-	nextID    int64
+	status           ParseStatus
+	dialect          Dialect
+	issues           []IssueCode
+	commands         []CommandFact
+	paths            []PathFact
+	network          []NetworkFact
+	dataFlows        []DataFlowFact
+	artifacts        []ArtifactFact
+	nextID           int64
+	curlCapabilities []CurlCapability
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {
@@ -100,7 +102,8 @@ func (o *parseOutput) hasFacts() bool {
 	return len(o.commands) > 0 ||
 		len(o.paths) > 0 ||
 		len(o.network) > 0 ||
-		len(o.dataFlows) > 0
+		len(o.dataFlows) > 0 ||
+		len(o.artifacts) > 0
 }
 
 func (o *parseOutput) appendCommand(command CommandFact) bool {
@@ -218,6 +221,16 @@ func (o *parseOutput) merge(other parseOutput) {
 			break
 		}
 	}
+	for _, fact := range other.artifacts {
+		if fact.CommandID != 0 {
+			if _, ok := validCommandIDs[fact.CommandID]; !ok {
+				continue
+			}
+		}
+		if !o.appendArtifact(fact) {
+			break
+		}
+	}
 	if other.nextID > o.nextID {
 		o.nextID = other.nextID
 	}
@@ -282,6 +295,8 @@ func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
 	reconcileNormalizedDeviceWrites(commands, paths)
 	network := cloneSlice(o.network)
 	normalizeNetworkFacts(network)
+	artifacts := cloneSlice(o.artifacts)
+	normalizeArtifactFactsForCommands(artifacts, cwd, activeHome, commands)
 	return Facts{
 		Tool:       tool,
 		CWD:        cwd,
@@ -291,6 +306,7 @@ func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
 		Paths:      paths,
 		Network:    network,
 		DataFlows:  cloneSlice(o.dataFlows),
+		Artifacts:  artifacts,
 	}
 }
 

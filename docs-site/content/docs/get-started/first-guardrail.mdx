@@ -12,6 +12,15 @@ This walkthrough ends with DefenseClaw refusing to remove a disposable
 directory under `/var/tmp`. The example is intentionally harmless even if the
 guardrail is misconfigured.
 
+<Callout type="info" title="macOS/Linux walkthrough">
+This fixture intentionally exercises the POSIX-specific `CMD-RM-RF` rule and
+requires a POSIX shell plus `jq`; it is not a native Windows command example.
+On Windows, complete the connector page's Windows setup tab and use the
+[native Windows post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist)
+to verify the gateway, connector hook, audit, and repair path without inventing
+a Windows policy rule that the default pack does not ship.
+</Callout>
+
 <Steps>
 
 <Step>

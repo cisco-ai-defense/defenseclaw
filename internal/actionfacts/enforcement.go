@@ -28,14 +28,55 @@ package actionfacts
 // is in a preview mode.
 func (f Facts) EnforcementProjection() Facts {
 	projected := Facts{
-		Tool:       f.Tool,
-		CWD:        f.CWD,
-		ActiveHome: f.ActiveHome,
+		Tool:                                     f.Tool,
+		CWD:                                      f.CWD,
+		ActiveHome:                               f.ActiveHome,
+		ActiveAgentFiles:                         cloneSlice(f.ActiveAgentFiles),
+		ActiveAgentFilesCaseInsensitive:          cloneSlice(f.ActiveAgentFilesCaseInsensitive),
+		ActiveAgentFilesCaseInsensitiveUncertain: f.ActiveAgentFilesCaseInsensitiveUncertain,
+		ActiveAgentFilesUncertain:                f.ActiveAgentFilesUncertain,
+		CloudIAMPrincipalOperations: append(
+			[]CloudIAMPrincipalOperationFact(nil),
+			f.CloudIAMPrincipalOperations...,
+		),
+		AWSBulkEC2Terminations: append(
+			[]AWSBulkEC2TerminationFact(nil),
+			f.AWSBulkEC2Terminations...,
+		),
+		KubernetesPodRuns: append(
+			[]KubernetesPodRunFact(nil),
+			f.KubernetesPodRuns...,
+		),
+		StructuredPortForwards: append(
+			[]StructuredPortForwardFact(nil),
+			f.StructuredPortForwards...,
+		),
+		POSIXNonRootUIDZeroAccountWrites: append(
+			[]POSIXNonRootUIDZeroAccountWriteFact(nil),
+			f.POSIXNonRootUIDZeroAccountWrites...,
+		),
+		POSIXUnrestrictedSudoersGrantWrites: append(
+			[]POSIXUnrestrictedSudoersGrantWriteFact(nil),
+			f.POSIXUnrestrictedSudoersGrantWrites...,
+		),
+		SQLMutations: append(
+			[]SQLMutationFact(nil),
+			f.SQLMutations...,
+		),
+		SQLDirectExternalEgresses: append(
+			[]SQLDirectExternalEgressFact(nil),
+			f.SQLDirectExternalEgresses...,
+		),
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,
 			Issues:  cloneSlice(f.Parse.Issues),
 		},
+	}
+	for _, mutation := range f.CloudResourceMutations {
+		if !mutation.Observed {
+			projected.CloudResourceMutations = append(projected.CloudResourceMutations, mutation)
+		}
 	}
 
 	executing := make(map[int64]struct{}, len(f.Commands))
@@ -106,6 +147,19 @@ func (f Facts) EnforcementProjection() Facts {
 	for _, fact := range f.DataFlows {
 		if retainedFlow(fact, executing) {
 			appendProjectionDataFlows(&projected, []DataFlowFact{fact})
+		}
+	}
+	for _, fact := range f.Artifacts {
+		if ownsCommand(fact.CommandID, executing) {
+			appendProjectionArtifacts(&projected, []ArtifactFact{fact})
+		}
+	}
+	for _, fact := range f.SQLClientShellEscapes {
+		if ownsCommand(fact.CommandID, executing) {
+			projected.SQLClientShellEscapes = append(
+				projected.SQLClientShellEscapes,
+				fact,
+			)
 		}
 	}
 
@@ -191,6 +245,16 @@ func appendProjectionDataFlows(projected *Facts, facts []DataFlowFact) {
 			return
 		}
 		projected.DataFlows = append(projected.DataFlows, fact)
+	}
+}
+
+func appendProjectionArtifacts(projected *Facts, facts []ArtifactFact) {
+	for _, fact := range facts {
+		if len(projected.Artifacts) >= maxArtifactFacts {
+			markProjectionFactLimit(projected)
+			return
+		}
+		projected.Artifacts = append(projected.Artifacts, fact)
 	}
 }
 

@@ -74,6 +74,7 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         "codex_backup.json",
         "codex_config_backup.json",
         os.path.join("connector_backups", "codex", "config.toml.json"),
+        os.path.join("connector_backups", "codex", "managed_config.toml.json"),
     ),
     "claudecode": (
         "claudecode_backup.json",
@@ -82,6 +83,30 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "amp": (
         os.path.join("connector_backups", "amp", "config.json"),
     ),
+    "antigravity": (
+        os.path.join("connector_backups", "antigravity", "hooks.json.json"),
+        os.path.join("connector_backups", "antigravity", "config.json"),
+    ),
+    "copilot": (os.path.join("connector_backups", "copilot", "config.json"),),
+    "cursor": (
+        os.path.join("connector_backups", "cursor", "config.json"),
+        os.path.join("connector_backups", "cursor", "hooks.json.json"),
+    ),
+    "geminicli": (os.path.join("connector_backups", "geminicli", "config.json"),),
+    "hermes": (
+        os.path.join("connector_backups", "hermes", "config.yaml.json"),
+        os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
+        os.path.join("connector_backups", "hermes", "config.json"),
+    ),
+    "omnigent": (
+        os.path.join("connector_backups", "omnigent", "config.json"),
+        os.path.join("connector_backups", "omnigent", "module.json"),
+        os.path.join("connector_backups", "omnigent", "pth.json"),
+    ),
+    "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
+    "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
+    "devin": (os.path.join("connector_backups", "devin", "config.json"),),
+    "windsurf": (os.path.join("connector_backups", "windsurf", "config.json"),),
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
@@ -156,7 +181,7 @@ class _WindowsProcessWaiter:
 @click.option(
     "--binaries",
     is_flag=True,
-    help="Additionally remove the defenseclaw + defenseclaw-gateway binaries from ~/.local/bin.",
+    help="Additionally remove DefenseClaw CLI, gateway, ACP guard, and helper binaries from ~/.local/bin.",
 )
 @click.option(
     "--keep-openclaw",
@@ -432,12 +457,14 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         names = (
             "defenseclaw.cmd",
             "defenseclaw-gateway.exe",
+            "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
         )
     else:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
         names = (
             "defenseclaw-gateway",
+            "defenseclaw-acp",
             "defenseclaw",
             "skill-scanner",
             "skill-scanner-api",
@@ -777,10 +804,16 @@ def _validate_plan(plan: UninstallPlan) -> None:
         if plan.platform_name == "win32":
             _validate_windows_ancestor_chain(plan.install_root, "binary install root")
         allowed_names = (
-            {"defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"}
+            {
+                "defenseclaw.cmd",
+                "defenseclaw-gateway.exe",
+                "defenseclaw-acp.exe",
+                "defenseclaw-hook.exe",
+            }
             if plan.platform_name == "win32"
             else {
                 "defenseclaw-gateway",
+                "defenseclaw-acp",
                 "defenseclaw",
                 "skill-scanner",
                 "skill-scanner-api",

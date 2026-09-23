@@ -11,12 +11,14 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from defenseclaw import file_permissions
 from defenseclaw.observability.v8_config import V8ConfigError
 from defenseclaw.observability.v8_status import (
     V8BucketStatus,
@@ -487,6 +489,80 @@ def test_inspect_status_preserves_effective_judge_capture_default_and_override(t
 
         path.write_text("config_version: 8\nguardrail:\n  retain_judge_bodies: false\nobservability: {}\n")
         assert inspect_v8_operator_status(path).judge_bodies_enabled is False
+
+
+def test_inspect_status_protects_snapshot_before_first_write(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    source = b"config_version: 8\nobservability: {}\n"
+    path.write_bytes(source)
+    protected: list[Path] = []
+
+    def protect_snapshot(descriptor: int, snapshot: str, mode: int, *, set_owner: bool) -> None:
+        assert os.fstat(descriptor).st_size == 0
+        assert Path(snapshot).read_bytes() == b""
+        assert mode == 0o600
+        assert set_owner is True
+        file_permissions.set_file_mode(descriptor, snapshot, mode, set_owner=set_owner)
+        if os.name == "nt":
+            assert file_permissions.windows_acl_confidentiality_error(snapshot) is None
+        else:
+            assert os.fstat(descriptor).st_mode & 0o777 == 0o600
+        protected.append(Path(snapshot))
+
+    def inspect_snapshot(_operation: str, *, config_path: str, **_kwargs):
+        assert protected == [Path(config_path)]
+        assert Path(config_path).read_bytes() == source
+        return SimpleNamespace(
+            effective=_effective(),
+            source=config_path,
+            data_dir=str(tmp_path),
+            plan_digest="e" * 64,
+        )
+
+    with (
+        patch(
+            "defenseclaw.observability.v8_status.set_file_mode",
+            side_effect=protect_snapshot,
+        ),
+        patch(
+            "defenseclaw.observability.v8_status.inspect_v8_config",
+            side_effect=inspect_snapshot,
+        ),
+    ):
+        inspect_v8_operator_status(path)
+
+    assert all(not snapshot.exists() for snapshot in protected)
+
+
+def test_inspect_status_removes_snapshot_when_protection_fails(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 8\nobservability: {}\n")
+    snapshots: list[Path] = []
+    descriptors: list[int] = []
+
+    def fail_protection(descriptor: int, snapshot: str, _mode: int, *, set_owner: bool) -> None:
+        snapshots.append(Path(snapshot))
+        descriptors.append(descriptor)
+        assert os.fstat(descriptor).st_size == 0
+        assert set_owner is True
+        raise OSError("injected snapshot protection failure")
+
+    with (
+        patch(
+            "defenseclaw.observability.v8_status.set_file_mode",
+            side_effect=fail_protection,
+        ),
+        patch("defenseclaw.observability.v8_status.inspect_v8_config") as inspect,
+        pytest.raises(OSError, match="injected snapshot protection failure"),
+    ):
+        inspect_v8_operator_status(path)
+
+    inspect.assert_not_called()
+    assert snapshots
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert all(not snapshot.exists() for snapshot in snapshots)
 
 
 def test_inspect_status_compiles_exact_snapshot_across_concurrent_atomic_replace(tmp_path: Path) -> None:

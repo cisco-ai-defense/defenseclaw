@@ -109,7 +109,7 @@ func buildHookModelResponseLogRecord(
 	content string,
 	finishReasons []string,
 ) (observability.Record, error) {
-	finishReasons = uniqueNonEmpty(finishReasons)
+	finishReasons = hookModelV8FinishReasons(finishReasons)
 	messages, originalBytes, reported, state, structured := hookModelV8OutputMessages(content, finishReasons)
 	outcome, _, _ := hookModelV8TerminalResult(meta)
 	severity := observability.SeverityInfo
@@ -249,7 +249,9 @@ func applyHookModelRequestLogIdentity(input *observability.LogModelRequestInput,
 	input.DefenseClawOperationID = hookModelV8OptionalID(meta.OperationID)
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
+	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
 	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(meta.SessionID)
@@ -280,7 +282,7 @@ func applyHookModelRequestLogIdentity(input *observability.LogModelRequestInput,
 	input.DefenseClawSessionResumed = observability.Present(meta.SessionResumed)
 	input.GenAIProviderName = hookModelV8OptionalText(meta.Provider)
 	input.GenAIRequestModel = hookModelV8OptionalID(meta.Model)
-	input.GenAIResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
 }
@@ -296,7 +298,9 @@ func applyHookModelResponseLogIdentity(input *observability.LogModelResponseInpu
 	input.DefenseClawOperationID = request.DefenseClawOperationID
 	input.DefenseClawRunID = request.DefenseClawRunID
 	input.UserID = request.UserID
+	input.DefenseClawUserIDKind = request.DefenseClawUserIDKind
 	input.DefenseClawUserName = request.DefenseClawUserName
+	input.DefenseClawUserEmail = request.DefenseClawUserEmail
 	input.DefenseClawPolicyID = request.DefenseClawPolicyID
 	input.DefenseClawDestinationApp = request.DefenseClawDestinationApp
 	input.GenAIConversationID = request.GenAIConversationID
@@ -321,7 +325,7 @@ func applyHookModelResponseLogIdentity(input *observability.LogModelResponseInpu
 	input.DefenseClawSessionResumed = request.DefenseClawSessionResumed
 	input.GenAIProviderName = request.GenAIProviderName
 	input.GenAIRequestModel = request.GenAIRequestModel
-	input.GenAIResponseModel = hookModelV8OptionalID(meta.Model)
+	input.GenAIResponseModel = hookModelV8OptionalID(meta.ResponseModel)
 	input.GenAIResponseID = request.GenAIResponseID
 	input.DefenseClawModelRequestID = request.DefenseClawModelRequestID
 	input.DefenseClawModelResponseID = request.DefenseClawModelResponseID

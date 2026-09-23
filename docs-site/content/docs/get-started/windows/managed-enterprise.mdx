@@ -1,0 +1,19 @@
+---
+title: Windows managed enterprise guidance moved
+description: The complete Windows managed-enterprise lifecycle now lives in the cross-platform enterprise deployment guide.
+---
+
+The complete Windows service, guardian, policy, repair, upgrade, and removal
+lifecycle lives in [Enterprise hardening and deployment](/docs/setup/enterprise-deployment#windows-system-service-layout).
+This route remains as a compatibility pointer for existing bookmarks.
+
+<Cards>
+  <Card title="Windows system-service layout" href="/docs/setup/enterprise-deployment#windows-system-service-layout" description="Start with the Windows architecture, qualified connectors, policy, and target manifest." />
+  <Card title="Install Windows services" href="/docs/setup/enterprise-deployment#install-the-windows-services" description="Run the administrator-owned installer and verify all four SCM services." />
+  <Card title="Reconcile and verify targets" href="/docs/setup/enterprise-deployment#reconcile-and-verify-windows-targets" description="Repair enrolled per-user connector hooks and read back readiness." />
+  <Card title="Repair, upgrade, and remove" href="/docs/setup/enterprise-deployment#windows-repair-upgrade-and-removal" description="Use the transactional managed lifecycle rather than the per-user Setup." />
+</Cards>
+
+The ordinary per-user Windows package remains separate and never installs a
+service. Use [Install and maintain](/docs/get-started/windows/install-lifecycle)
+for that package.

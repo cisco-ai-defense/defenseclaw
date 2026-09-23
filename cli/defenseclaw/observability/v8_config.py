@@ -109,7 +109,7 @@ FIELD_CLASSES = (
     "credential",
 )
 FIELD_MODES = ("preserve", "detect", "whole", "hash", "remove")
-BUILT_IN_PROFILES = ("none", "sensitive", "content", "strict", "legacy-v7")
+BUILT_IN_PROFILES = ("none", "sensitive", "content", "strict")
 ROUTE_ACTIONS = ("send", "drop")
 SELECTOR_FIELDS = ("buckets", "sources", "connectors", "actions", "event_names", "min_severity")
 DESTINATION_CAPABILITIES: dict[str, tuple[str, ...]] = {
@@ -412,7 +412,7 @@ def observability_v8_parity_contract() -> dict[str, Any]:
         "catalog_defaults": {
             "collect": {"logs": True, "traces": True, "metrics": True},
             "redaction_profile": "none",
-            "local_retention_days": 90,
+            "local_retention_days": 7,
             "trace_sampler": "parentbased_always_on",
             "metric_export_interval_seconds": 60,
             "metric_temporality": "delta",
@@ -767,7 +767,7 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
         (defs["tracePolicy"]["properties"]["sampler"]["default"], "parentbased_always_on"),
         (defs["metricPolicy"]["properties"]["export_interval_seconds"]["default"], 60),
         (defs["metricPolicy"]["properties"]["temporality"]["default"], "delta"),
-        (defs["localStore"]["properties"]["retention_days"]["default"], 90),
+        (defs["localStore"]["properties"]["retention_days"]["default"], 7),
     )
     if any(actual != expected for actual, expected in default_checks):
         raise RuntimeError("Python v8 default policy drifted from the canonical schema")
@@ -1394,16 +1394,6 @@ def _built_in_field_modes() -> dict[str, dict[str, str]]:
             "error": "remove",
             "path": "remove",
             "credential": "remove",
-        },
-        "legacy-v7": {
-            "metadata": "preserve",
-            "identifier": "whole",
-            "content": "whole",
-            "reason": "whole",
-            "evidence": "whole",
-            "error": "whole",
-            "path": "whole",
-            "credential": "whole",
         },
     }
 

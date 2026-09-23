@@ -5,11 +5,6 @@ package gateway
 
 import "encoding/json"
 
-// loadGlobalModelRouter returns the globally registered ModelRouter (or nil).
-func loadGlobalModelRouter() ModelRouter {
-	return globalModelRouter
-}
-
 // patchModelInBody replaces the "model" field in the JSON body with the given value.
 func patchModelInBody(body []byte, model string) []byte {
 	var raw map[string]json.RawMessage

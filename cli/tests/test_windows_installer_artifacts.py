@@ -204,13 +204,22 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     payload.mkdir()
 
     stdlib = _zip_bytes({"json/__init__.py": b"# stdlib\n"})
-    python_name = "python-3.13.14-embed-amd64.zip"
+    python_name = "python-3.13.15-embed-amd64.zip"
     _write_zip(payload / python_name, {"python.exe": b"python", "python313.zip": stdlib})
+    vc_runtime_name = "microsoft-vc-runtime-14.42.34438-x64.zip"
+    _write_zip(
+        payload / vc_runtime_name,
+        {"msvcp140.dll": b"msvcp140", "msvcp140_1.dll": b"msvcp140_1"},
+    )
 
     gateway_name = f"defenseclaw_{version}_windows_amd64.zip"
     _write_zip(
         payload / gateway_name,
-        {"defenseclaw.exe": b"gateway", "defenseclaw-hook.exe": b"hook"},
+        {
+            "defenseclaw.exe": b"gateway",
+            "defenseclaw-hook.exe": b"hook",
+            "defenseclaw-acp.exe": b"acp guard",
+        },
     )
 
     wheel_name = f"defenseclaw-{version}-py3-none-any.whl"
@@ -262,10 +271,11 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "version": version,
         "source_commit": source_commit,
         "distribution_flavor": "oss",
-        "python_version": "3.13.14",
+        "python_version": "3.13.15",
         "gateway_archive": gateway_name,
         "wheel": wheel_name,
         "python_embed": python_name,
+        "vc_runtime": vc_runtime_name,
         "yara_compat_wheel": compat_name,
         "upgrade_manifest": "upgrade-manifest.json",
         "site_packages": "site-packages.zip",
@@ -279,12 +289,14 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     with zipfile.ZipFile(payload / gateway_name) as gateway:
         gateway_sha256 = hashlib.sha256(gateway.read("defenseclaw.exe")).hexdigest()
         hook_sha256 = hashlib.sha256(gateway.read("defenseclaw-hook.exe")).hexdigest()
+        acp_sha256 = hashlib.sha256(gateway.read("defenseclaw-acp.exe")).hexdigest()
     module_sum = "h1:" + base64.b64encode(b"\x01" * 32).decode()
     dependency = {"path": "example.com/security/module", "version": "v1.2.3", "sum": module_sum}
     component_hashes = {
         "setup": _sha256(setup),
         "gateway": gateway_sha256,
         "hook": hook_sha256,
+        "acp-guard": acp_sha256,
         "hook-launcher": _sha256(payload / "defenseclaw-hook-launcher.exe"),
         "launcher": _sha256(payload / "defenseclaw-launcher.exe"),
         "startup-launcher": _sha256(payload / "defenseclaw-startup.exe"),
@@ -317,6 +329,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     )
     add_evidence("bin/defenseclaw-gateway.exe", "./expanded/gateway/defenseclaw.exe", gateway_sha256)
     add_evidence("bin/defenseclaw-hook.exe", "./expanded/gateway/defenseclaw-hook.exe", hook_sha256)
+    add_evidence("bin/defenseclaw-acp.exe", "./expanded/gateway/defenseclaw-acp.exe", acp_sha256)
     add_evidence(
         "bin/defenseclaw-hook-launcher.exe",
         "./payload/defenseclaw-hook-launcher.exe",
@@ -364,7 +377,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         version=version,
         source_commit=source_commit,
         source_epoch=1_700_000_000,
-        python_version="3.13.14",
+        python_version="3.13.15",
         cosign_version="2.6.2",
         go_inventory=go_inventory,
         authenticode_inventory=authenticode_inventory,
@@ -436,7 +449,9 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
     helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")
     assert ". $WindowsAuthenticodeHelper" in build
     assert "Get-DefenseClawAuthenticodeEvidence" in build
-    assert build.index(". $WindowsAuthenticodeHelper") < build.index("Get-DefenseClawAuthenticodeEvidence")
+    assert build.index(". $WindowsAuthenticodeHelper") < build.index(
+        "Expand-PinnedVCRuntime $vcRuntimeSource"
+    )
     assert "schema_version = 2" in build
     assert "authenticode = $releaseAuthenticode" in build
     assert "'--authenticode-inventory', $authenticodeInventoryPath" in build
@@ -446,12 +461,30 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
 
 def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
-    assert '$PythonVersion = "3.13.14"' in build
+    assert '$PythonVersion = "3.13.15"' in build
     assert '$PythonTargetVersion = "3.13"' in build
-    assert '$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"' in build
+    assert '$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"' in build
     assert "dist.metadata.get('Requires-Python')" in build
     assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
+
+
+def test_builder_pins_and_app_locally_loads_exact_microsoft_vc_runtime() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")
+    assert "$VCRuntimeVersion = '14.42.34438'" in build
+    assert "$VCRuntimeSourceLength = 3222320L" in build
+    assert "$VCRuntimeSourceSha256 = '49D70DB282F1C74D456206501120134F021C2BC3AAABB41577FE18DEA35D1454'" in build
+    assert "$VCRuntimeClosureFiles = @('msvcp140.dll', 'msvcp140_1.dll')" in build
+    assert "$VCRuntimeSignerThumbprintSha256 = '7698e1de0131245a5ef86a3df9bc7c4de048b4684bdd0bc7891c3643d7f8b52e'" in build
+    assert "$VCRuntimeTimestampSignerThumbprintSha256 = '8d2e0d6834085b1e2b12b7035ea5d70ac8c2bb120eb5d9eb149fd05e316cca39'" in build
+    assert "Pinned VC++ runtime source retail x64 member set drifted" in build
+    assert "Pinned VC++ runtime identity or Authenticode validation failed" in build
+    assert "-Policy 'pinned-microsoft-vc-runtime'" in build
+    assert "-ExpectedSignatureType 'Authenticode'" in build
+    assert "$platformSignatureType -notin @('Authenticode', 'Catalog')" in helper
+    assert "Windows CPython dependency probe escaped app-local VC++ runtime" in build
+    assert "vc_runtime_source_sha256 = $VCRuntimeSourceSha256.ToLowerInvariant()" in build
 
 
 def test_v8_config_sources_are_pinned_to_cross_platform_lf_bytes() -> None:
@@ -720,47 +753,64 @@ def test_hook_launcher_size_signing_and_inventory_order_is_fail_closed() -> None
     assert "hook_launcher_sha256 = Get-FileHashHex $hookLauncher" in build
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell file semantics")
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell 7 file semantics")
 def test_hook_launcher_size_gate_rejects_oversized_artifact(tmp_path: Path) -> None:
-    powershell = shutil.which("powershell")
-    if powershell is None:
-        pytest.skip("Windows PowerShell is required for the launcher size-gate fixture")
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is required for the launcher size-gate fixture")
     launcher = tmp_path / "defenseclaw-hook-launcher.exe"
-    launcher.write_bytes(b"\0" * (8 * 1024 * 1024))
+    launcher.write_bytes(b"\0" * 8)
     harness = tmp_path / "hook-launcher-size.ps1"
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         "$HookLauncherName = 'defenseclaw-hook-launcher.exe'\n"
-        "$HookLauncherMaxUnsignedBytes = 8MB\n"
+        "$HookLauncherMaxUnsignedBytes = 8\n"
         f"{_builder_function('Assert-HookLauncherArtifact')}\n"
-        "Assert-HookLauncherArtifact $env:DC_TEST_HOOK_LAUNCHER\n",
+        "Assert-HookLauncherArtifact $env:DC_TEST_HOOK_LAUNCHER\n"
+        "$stream = [IO.File]::Open(\n"
+        "    $env:DC_TEST_HOOK_LAUNCHER,\n"
+        "    [IO.FileMode]::Append,\n"
+        "    [IO.FileAccess]::Write,\n"
+        "    [IO.FileShare]::None\n"
+        ")\n"
+        "try {\n"
+        "    $stream.WriteByte(0)\n"
+        "} finally {\n"
+        "    $stream.Dispose()\n"
+        "}\n"
+        '$expected = "HookRuntime launcher must be a regular canonical '
+        "$HookLauncherName no larger than $HookLauncherMaxUnsignedBytes bytes "
+        'before signing: $env:DC_TEST_HOOK_LAUNCHER"\n'
+        "$rejected = $false\n"
+        "try {\n"
+        "    Assert-HookLauncherArtifact $env:DC_TEST_HOOK_LAUNCHER\n"
+        "} catch {\n"
+        "    if (-not [string]::Equals(\n"
+        "        [string]$_.Exception.Message, $expected, [StringComparison]::Ordinal\n"
+        "    )) {\n"
+        "        throw\n"
+        "    }\n"
+        "    $rejected = $true\n"
+        "}\n"
+        "if (-not $rejected) {\n"
+        "    throw 'HookRuntime launcher size gate accepted an oversized artifact'\n"
+        "}\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
     env["DC_TEST_HOOK_LAUNCHER"] = str(launcher)
-    accepted = subprocess.run(
-        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
-
-    with launcher.open("ab") as stream:
-        stream.write(b"\0")
-    rejected = subprocess.run(
-        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-    assert rejected.returncode != 0
-    assert "no larger than 8388608 bytes before" in rejected.stderr
-    assert "signing" in rejected.stderr
+    output = tmp_path / "hook-launcher-size.log"
+    with output.open("wb") as output_stream:
+        result = subprocess.run(
+            [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+            stdout=output_stream,
+            stderr=subprocess.STDOUT,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+    assert result.returncode == 0, output.read_bytes().decode("utf-8", errors="replace")
+    assert launcher.stat().st_size == 9
 
 
 def test_native_windows_workflow_builds_distinct_hook_launcher() -> None:
@@ -768,6 +818,12 @@ def test_native_windows_workflow_builds_distinct_hook_launcher() -> None:
     assert "./cmd/defenseclaw-hook-launcher" in workflow
     assert "defenseclaw-hook-launcher.exe" in workflow
     assert "HookRuntime launcher exceeds the unsigned 8 MiB size ceiling" in workflow
+
+
+def test_native_windows_artifact_builder_supports_acp_resource_component() -> None:
+    harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8-sig")
+    assert "[ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')]" in harness
+    assert "@('defenseclaw-acp.exe', './cmd/defenseclaw-acp'" in harness
 
 
 def test_native_lifecycle_ci_binds_stable_launcher_to_installed_source() -> None:
@@ -898,7 +954,7 @@ def test_binary_identity_output_drain_shares_the_process_deadline(tmp_path: Path
         "package main\n"
         'import ("encoding/json"; "os"; "os/exec")\n'
         "func main() {\n"
-        ' child := exec.Command("cmd.exe", "/d", "/c", "ping -n 6 127.0.0.1 >nul")\n'
+        ' child := exec.Command("cmd.exe", "/d", "/c", "ping -n 31 127.0.0.1 >nul")\n'
         " child.Stdout = os.Stdout; child.Stderr = os.Stderr; _ = child.Start()\n"
         ' _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"schema_version":1,'
         '"name":"defenseclaw-gateway","version":"1.2.3",'
@@ -933,12 +989,18 @@ def test_binary_identity_output_drain_shares_the_process_deadline(tmp_path: Path
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,
+        timeout=90,
     )
     elapsed = time.monotonic() - started
     assert result.returncode != 0
     assert "identity output streams did not close within 1 seconds" in result.stdout + result.stderr
-    assert elapsed < 5
+    # elapsed also covers pwsh start-up, which costs several seconds on a cold
+    # hosted Windows runner. The previous bound was 5s against a child that
+    # itself lived ~5s, so start-up alone could exhaust the margin and the test
+    # flaked. The grandchild now lives ~30s, which separates the two outcomes
+    # unambiguously: honouring the 1s deadline finishes well inside 15s, while
+    # waiting on the inherited handle cannot finish before ~30s.
+    assert elapsed < 15
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")
@@ -997,14 +1059,16 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert document["comment"] == f"DefenseClaw source commit: {args.source_commit}"
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
-    assert summary["payload_digests"] == 11
-    assert summary["authenticode_files"] == 11
+    assert summary["payload_digests"] == 12
+    assert summary["authenticode_files"] == 12
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
         "CPython embeddable runtime",
+        "Microsoft Visual C++ app-local runtime",
         "DefenseClaw gateway executable",
         "DefenseClaw hook executable",
+        "DefenseClaw ACP guard executable",
         "DefenseClaw stable HookRuntime launcher",
         "DefenseClaw native CLI launcher",
         "DefenseClaw native startup launcher",
@@ -1016,8 +1080,11 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     }
     file_names = {file["fileName"] for file in document["files"]}
     assert "./expanded/python/stdlib/json/__init__.py" in file_names
+    assert "./expanded/vc-runtime/msvcp140.dll" in file_names
+    assert "./expanded/vc-runtime/msvcp140_1.dll" in file_names
     assert "./expanded/site-packages/defenseclaw/__init__.py" in file_names
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
+    assert "./expanded/gateway/defenseclaw-acp.exe" in file_names
     assert "./payload/defenseclaw-hook-launcher.exe" in file_names
     setup_package = next(package for package in document["packages"] if package["name"] == "DefenseClaw Windows Setup")
     assert setup_package["checksums"][0]["checksumValue"] == _sha256(args.setup)
@@ -1074,6 +1141,26 @@ def test_sbom_rejects_unexpected_extra_payload_artifact(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     (args.payload_root / "unexpected-launcher.exe").write_bytes(b"unexpected")
     with pytest.raises(artifacts.ArtifactError, match="Payload digest coverage mismatch"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_unexpected_vc_runtime_member(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    runtime = args.payload_root / manifest["vc_runtime"]
+    _write_zip(
+        runtime,
+        {
+            "msvcp140.dll": b"msvcp140",
+            "msvcp140_1.dll": b"msvcp140_1",
+            "debug/msvcp140d.dll": b"debug",
+        },
+    )
+    manifest["files"][runtime.name] = _sha256(runtime)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+    with pytest.raises(artifacts.ArtifactError, match="runtime archive has unexpected members"):
         artifacts.build_sbom(args)
 
 

@@ -16,6 +16,16 @@ func platformDiscoveryHomeDir() (string, error) {
 	return os.UserHomeDir()
 }
 
+// platformDiscoveryHomeDirs enumerates additional user profile roots the scan
+// should walk. On macOS/Linux the process user's `$HOME` already resolves to
+// the right place (launchd agents run per-user; systemd/systemd-user likewise),
+// so this returns nil and the single HomeDir path drives the scan. The Windows
+// override enumerates HKLM\...\ProfileList so a service-context scan sees each
+// real interactive user's home rather than its own virtual ServiceProfiles dir.
+func platformDiscoveryHomeDirs() []string {
+	return nil
+}
+
 func platformDiscoveryVariable(name, _ string) (string, bool) {
 	return os.LookupEnv(name)
 }

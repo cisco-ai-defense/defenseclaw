@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -32,7 +31,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 var defaultEnabledRules = []map[string]string{
@@ -198,11 +196,28 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 			return nil
 		}
 
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		respBody, responseTruncated, readErr := readCiscoInspectResponseBody(resp.Body)
 		_ = resp.Body.Close()
 		elapsed := time.Since(start)
 		if readErr != nil {
-			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "response body read failed")
+			emitCiscoInspectFailure(ctx, gatewaylog.ErrCodeInvalidResponse, ciscoInspectFailureDiagnostic{
+				stage:             ciscoInspectStageResponseBody,
+				classification:    classifyCiscoInspectBodyReadError(readErr),
+				httpStatus:        resp.StatusCode,
+				responseBody:      respBody,
+				responseTruncated: responseTruncated,
+			})
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			return nil
+		}
+		if responseTruncated && resp.StatusCode == http.StatusOK {
+			emitCiscoInspectFailure(ctx, gatewaylog.ErrCodeInvalidResponse, ciscoInspectFailureDiagnostic{
+				stage:             ciscoInspectStageResponseBody,
+				classification:    ciscoInspectClassResponseBodyTooLarge,
+				httpStatus:        resp.StatusCode,
+				responseBody:      respBody,
+				responseTruncated: true,
+			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
@@ -245,18 +260,26 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
-			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP %d: %s\n",
-				resp.StatusCode, redaction.MessageContent(bodySnippet))
-			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
-				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, redaction.MessageContent(bodySnippet)))
+			emitCiscoInspectFailure(ctx, gatewaylog.ErrCodeInvalidResponse, ciscoInspectFailureDiagnostic{
+				stage:             ciscoInspectStageResponseStatus,
+				classification:    classifyCiscoInspectErrorResponse(respBody, resp.StatusCode),
+				httpStatus:        resp.StatusCode,
+				responseBody:      respBody,
+				responseTruncated: responseTruncated,
+			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
 
 		var data map[string]interface{}
 		if err := json.Unmarshal(respBody, &data); err != nil {
-			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "json: "+err.Error())
+			emitCiscoInspectFailure(ctx, gatewaylog.ErrCodeInvalidResponse, ciscoInspectFailureDiagnostic{
+				stage:          ciscoInspectStageResponseDecode,
+				classification: classifyCiscoInspectJSONError(err),
+				httpStatus:     resp.StatusCode,
+				responseBody:   respBody,
+				parseOffset:    ciscoInspectJSONErrorOffset(err),
+			})
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}

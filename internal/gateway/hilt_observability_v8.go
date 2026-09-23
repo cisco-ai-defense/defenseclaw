@@ -76,6 +76,17 @@ func (m *HILTApprovalManager) startHILTApprovalV8(
 	evaluation HILTApprovalContext,
 	started time.Time,
 ) (*hiltV8Operation, error) {
+	identity := AgentIdentityFromContext(ctx)
+	if evaluation.UserID == "" && evaluation.UserName == "" {
+		evaluation.UserID = identity.UserID
+		evaluation.UserIDKind = identity.UserIDKind
+		evaluation.UserName = identity.UserName
+	} else if evaluation.UserID == identity.UserID {
+		evaluation.UserIDKind = firstNonEmpty(evaluation.UserIDKind, identity.UserIDKind)
+		evaluation.UserName = firstNonEmpty(evaluation.UserName, identity.UserName)
+	} else {
+		evaluation.UserIDKind = ""
+	}
 	runtime, authoritative := m.observabilityV8Snapshot()
 	if !authoritative {
 		// Isolated unit users do not own process observability. Production binds
@@ -148,6 +159,7 @@ func (m *HILTApprovalManager) startHILTApprovalV8(
 		DefenseClawRequestID:              proxyV8OptionalID(correlation.RequestID),
 		DefenseClawTurnID:                 proxyV8OptionalID(correlation.TurnID),
 		UserID:                            proxyV8OptionalID(evaluation.UserID),
+		DefenseClawUserIDKind:             v8UserIDKind(evaluation.UserIDKind),
 		DefenseClawUserName:               proxyV8OptionalID(evaluation.UserName),
 		DefenseClawEvaluationID:           optionalJudgeMetricText(correlation.EvaluationID),
 		DefenseClawPolicyID:               optionalJudgeMetricText(correlation.PolicyID),
@@ -342,7 +354,8 @@ func (operation *hiltV8Operation) emitLog(
 				DefenseClawAgentPhaseCode: input.DefenseClawAgentPhaseCode, DefenseClawAgentSequence: input.DefenseClawAgentSequence,
 				DefenseClawRequestID: input.DefenseClawRequestID, DefenseClawTurnID: input.DefenseClawTurnID,
 				DefenseClawOperationID: input.DefenseClawOperationID, DefenseClawRunID: input.DefenseClawRunID,
-				UserID: input.UserID, DefenseClawUserName: input.DefenseClawUserName,
+				UserID: input.UserID, DefenseClawUserIDKind: input.DefenseClawUserIDKind,
+				DefenseClawUserName:     input.DefenseClawUserName,
 				DefenseClawEvaluationID: input.DefenseClawEvaluationID, DefenseClawPolicyID: input.DefenseClawPolicyID,
 				DefenseClawPolicyVersion: input.DefenseClawPolicyVersion, DefenseClawDestinationApp: input.DefenseClawDestinationApp,
 				DefenseClawToolID: input.DefenseClawToolID, GenAIToolName: input.GenAIToolName,
@@ -368,7 +381,8 @@ func (operation *hiltV8Operation) emitLog(
 			DefenseClawAgentPhaseCode: input.DefenseClawAgentPhaseCode, DefenseClawAgentSequence: input.DefenseClawAgentSequence,
 			DefenseClawRequestID: input.DefenseClawRequestID, DefenseClawTurnID: input.DefenseClawTurnID,
 			DefenseClawOperationID: input.DefenseClawOperationID, DefenseClawRunID: input.DefenseClawRunID,
-			UserID: input.UserID, DefenseClawUserName: input.DefenseClawUserName,
+			UserID: input.UserID, DefenseClawUserIDKind: input.DefenseClawUserIDKind,
+			DefenseClawUserName:     input.DefenseClawUserName,
 			DefenseClawEvaluationID: input.DefenseClawEvaluationID, DefenseClawPolicyID: input.DefenseClawPolicyID,
 			DefenseClawPolicyVersion: input.DefenseClawPolicyVersion, DefenseClawDestinationApp: input.DefenseClawDestinationApp,
 			DefenseClawToolID: input.DefenseClawToolID, GenAIToolName: input.GenAIToolName,

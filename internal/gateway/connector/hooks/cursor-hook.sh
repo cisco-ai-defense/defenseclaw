@@ -32,13 +32,36 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 
-# Cursor treats a failClosed:true hook that produces empty stdout as a
-# hook failure and blocks the tool. Every allow / observe / fail-open
-# path below therefore emits an explicit allow envelope rather than
-# exiting silently; block paths emit an explicit deny. This keeps a
-# deliberate fail-OPEN (gateway outage, missing token, disabled install)
-# from being silently inverted into a fail-closed block.
-emit_cursor_allow() { printf '{"continue":true,"permission":"allow"}\n'; }
+# Cursor requires one JSON object on stdout. Its accepted fields differ by
+# event, so local fallbacks must never combine prompt `continue` with tool
+# `permission` fields. CURSOR_EVENT is populated after the capped stdin read;
+# pre-read and malformed/oversized paths use the exact no-fields object.
+CURSOR_EVENT=""
+emit_cursor_allow() {
+  case "$CURSOR_EVENT" in
+    beforeSubmitPrompt) printf '{"continue":true}\n' ;;
+    preToolUse|subagentStart|beforeShellExecution|beforeMCPExecution|beforeReadFile|beforeTabFileRead)
+      printf '{"permission":"allow"}\n'
+      ;;
+    *) printf '{}\n' ;;
+  esac
+}
+emit_cursor_deny() {
+  MESSAGE="$1"
+  case "$CURSOR_EVENT" in
+    beforeSubmitPrompt)
+      printf '{"continue":false,"user_message":"%s"}\n' "$MESSAGE"
+      ;;
+    preToolUse|beforeShellExecution|beforeMCPExecution)
+      printf '{"permission":"deny","user_message":"%s","agent_message":"%s"}\n' "$MESSAGE" "$MESSAGE"
+      ;;
+    subagentStart|beforeReadFile)
+      printf '{"permission":"deny","user_message":"%s"}\n' "$MESSAGE"
+      ;;
+    beforeTabFileRead) printf '{"permission":"deny"}\n' ;;
+    *) printf '{}\n' ;;
+  esac
+}
 
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
@@ -73,30 +96,31 @@ DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
+# Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
+# the hook process before the gateway sees the payload.
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: cursor hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    emit_cursor_deny "DefenseClaw hook payload too large"
+    exit 2
+  fi
+  emit_cursor_allow
+  exit 0
+}
+CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
+
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
-    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    emit_cursor_deny "DefenseClaw hook failed closed"
     exit 2
   fi
   echo "defenseclaw: ${MISSING_TOKEN_REASON}, allowing cursor tool" >&2
   emit_cursor_allow
   exit 0
 fi
-
-# Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
-# the hook process before the gateway sees the payload.
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
-  echo "defenseclaw: cursor hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
-    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
-    exit 2
-  fi
-  emit_cursor_allow
-  exit 0
-}
 API_ADDR="{{.APIAddr}}"
 if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   DEFENSECLAW_GATEWAY_TOKEN=
@@ -114,7 +138,7 @@ fail_unreachable() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+    emit_cursor_deny "DefenseClaw hook failed closed"
     exit 2
   fi
   emit_cursor_allow
@@ -128,7 +152,7 @@ fail_response() {
     emit_cursor_allow
     exit 0
   fi
-  printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
+  emit_cursor_deny "DefenseClaw hook failed closed"
   exit 0
 }
 
@@ -143,11 +167,24 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+# Per-user attribution: the gateway cannot read the real user's identity from
+# its own service-account process, so the hook reports it.
+# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+IDENTITY_HEADER_ARGS=()
+if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: cursor-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

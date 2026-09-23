@@ -102,6 +102,103 @@ class ConnectorCustodyReport:
         }
 
 
+@dataclass(frozen=True)
+class NativeDeliveryStatus:
+    """One path-free native OTLP delivery summary for operator surfaces."""
+
+    connector: str
+    default: bool
+    state: str
+    normalized_batches: int
+    drop_only_batches: int
+    detail: str
+
+    def as_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class NativeDeliverySummary:
+    """Bounded, redacted native-delivery truth shared by Doctor/Status/TUI."""
+
+    state: str
+    reason: str
+    observation_window_hours: int
+    connectors: tuple[NativeDeliveryStatus, ...] = ()
+    event_rows_truncated: bool = False
+
+    @property
+    def evidence_scope(self) -> str:
+        return "truncated" if self.event_rows_truncated else "bounded"
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "reason": self.reason,
+            "observation_window_hours": self.observation_window_hours,
+            "evidence_scope": self.evidence_scope,
+            "connectors": [item.as_json() for item in self.connectors],
+            "event_rows_truncated": self.event_rows_truncated,
+        }
+
+
+def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliverySummary:
+    """Classify accepted versus drop-only native OTLP evidence.
+
+    The summary intentionally contains no timestamps, paths, endpoints,
+    credentials, profile values, or connector-instance identifiers.  A
+    missing ledger remains a bounded no-evidence state rather than a health
+    failure, while a truncated ledger makes every rendered count explicitly
+    partial.
+    """
+
+    if report.state != "available":
+        return NativeDeliverySummary(
+            state="no_evidence",
+            reason=report.reason,
+            observation_window_hours=report.observation_window_hours,
+        )
+
+    connectors: list[NativeDeliveryStatus] = []
+    for item in report.instances:
+        if item.custody == "hook_only":
+            continue
+        normalized = max(item.normalized_batches, 0)
+        drop_only = min(max(item.drop_only_batches, 0), normalized)
+        if normalized == 0:
+            state = "no_evidence"
+            detail = "no recent native delivery evidence"
+        elif drop_only == normalized:
+            state = "all_drop_only"
+            detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
+        elif drop_only:
+            state = "partial_drop_only"
+            detail = (
+                f"partial drop-only evidence ({drop_only}/{normalized} batches); "
+                "accepted native delivery observed in remaining batches"
+            )
+        else:
+            state = "accepted"
+            detail = f"accepted native delivery observed ({normalized} batches)"
+        connectors.append(
+            NativeDeliveryStatus(
+                connector=item.connector,
+                default=item.default,
+                state=state,
+                normalized_batches=normalized,
+                drop_only_batches=drop_only,
+                detail=detail,
+            )
+        )
+    return NativeDeliverySummary(
+        state="available" if connectors else "no_evidence",
+        reason="",
+        observation_window_hours=report.observation_window_hours,
+        connectors=tuple(connectors),
+        event_rows_truncated=report.event_rows_truncated,
+    )
+
+
 @dataclass
 class _Evidence:
     normalized: dict[tuple[str, str, str], int]
@@ -457,5 +554,8 @@ def _utc(value: datetime) -> datetime:
 __all__ = [
     "ConnectorCustodyReport",
     "ConnectorCustodyStatus",
+    "NativeDeliveryStatus",
+    "NativeDeliverySummary",
     "inspect_connector_custody",
+    "summarize_native_delivery",
 ]

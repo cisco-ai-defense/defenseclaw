@@ -1,0 +1,28 @@
+{
+  "schema_version": "1",
+  "frozen_at": "2026-09-07",
+  "datasets": [
+    {
+      "id": "neur26anonsub/ctrldataset2026",
+      "purpose": ["stateful", "environment-verified", "real-arguments", "public-trace-derived"],
+      "source_url": "https://huggingface.co/datasets/neur26anonsub/ctrldataset2026",
+      "revision": "6c72cf19883376b921a94a0dd17dc8ab6b25e52f",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-firewall-trust-chain-v1",
+      "purpose": ["stateful", "actionfacts", "identity-continuity", "hard-negative"],
+      "source_url": "benchmarks/fixtures/firewall-trust-expansion-chain-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    }
+  ]
+}

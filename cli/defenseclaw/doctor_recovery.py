@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ntpath
 import os
 import sqlite3
 import stat
@@ -40,6 +41,9 @@ from pathlib import Path
 _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
+# PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
+# Skip that btree walk once the database is larger than a local diagnostic.
+_AUDIT_FULL_INTEGRITY_MAX_BYTES = 64 * 1024 * 1024
 
 
 class RecoveryKind(str, Enum):
@@ -67,6 +71,7 @@ class DeviceKeyHealthStatus(str, Enum):
 
 class AuditDBHealthStatus(str, Enum):
     VALID = "valid"
+    INTEGRITY_UNVERIFIED = "integrity-unverified"
     MISSING = "missing"
     INVALID = "invalid"
 
@@ -75,6 +80,10 @@ class AuditDBHealthStatus(str, Enum):
 class AuditDBHealth:
     status: AuditDBHealthStatus
     reason_code: str
+    integrity_scanned: bool = False
+    file_bytes: int = 0
+    freelist_bytes: int = 0
+    oldest_retention_unix_nano: int | None = None
 
 
 @dataclass(frozen=True)
@@ -174,7 +183,15 @@ def inspect_audit_db(
         connection = sqlite3.connect(uri, uri=True, timeout=0.1)
         try:
             connection.execute("PRAGMA query_only=ON")
-            quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0] or 0)
+            freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            file_bytes = page_count * page_size
+            freelist_bytes = freelist * page_size
+            integrity_scanned = file_bytes <= _AUDIT_FULL_INTEGRITY_MAX_BYTES
+            quick_check = ("ok",)
+            if integrity_scanned:
+                quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
             tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -182,18 +199,46 @@ def inspect_audit_db(
                     "WHERE type='table' AND name IN ('audit_events', 'scan_results', 'findings')"
                 )
             }
+            oldest_retention: int | None = None
+            if "audit_events" in tables:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(audit_events)")
+                }
+                if "retention_timestamp_unix_nano" in columns:
+                    oldest = connection.execute(
+                        "SELECT MIN(retention_timestamp_unix_nano) FROM audit_events"
+                    ).fetchone()[0]
+                    if oldest is not None:
+                        oldest_retention = int(oldest)
         finally:
             connection.close()
         if not os.path.samestat(inspected, os.lstat(plan.target)):
             return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-changed-during-inspection")
-    except (OSError, sqlite3.Error, ValueError):
+    except (OSError, sqlite3.Error, ValueError, TypeError):
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-integrity-unavailable")
 
     if quick_check != ("ok",):
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-corrupt")
     if tables != _AUDIT_REQUIRED_TABLES:
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-schema-incomplete")
-    return AuditDBHealth(AuditDBHealthStatus.VALID, "audit-db-valid")
+    if not integrity_scanned:
+        return AuditDBHealth(
+            AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
+            "audit-db-integrity-unverified",
+            integrity_scanned=False,
+            file_bytes=file_bytes,
+            freelist_bytes=freelist_bytes,
+            oldest_retention_unix_nano=oldest_retention,
+        )
+    return AuditDBHealth(
+        AuditDBHealthStatus.VALID,
+        "audit-db-valid",
+        integrity_scanned=integrity_scanned,
+        file_bytes=file_bytes,
+        freelist_bytes=freelist_bytes,
+        oldest_retention_unix_nano=oldest_retention,
+    )
 
 
 def inspect_device_key(
@@ -303,9 +348,22 @@ def plan_missing_device_key(
     credentials.
     """
 
-    normalized_target = _normalize_disk_path(target)
-    normalized_data = _normalize_disk_path(data_dir)
+    normalized_target, normalized_data = _normalize_device_identity_disk_paths(
+        target,
+        data_dir,
+    )
     if normalized_target and normalized_data:
+        alias_reason = _device_identity_artifact_alias_reason(
+            normalized_target,
+            normalized_data,
+        )
+        if alias_reason is not None:
+            return _blocked_plan(
+                RecoveryKind.DEVICE_KEY,
+                normalized_target,
+                normalized_data,
+                alias_reason,
+            )
         markers = (
             normalized_target + ".provenance",
             os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET),
@@ -319,6 +377,48 @@ def plan_missing_device_key(
         normalized_data,
         markers,
         unattended_allowed=False,
+    )
+
+
+def _device_identity_artifact_alias_reason(target: str, data_dir: str) -> str | None:
+    """Reject device identity layouts whose publications can alias each other."""
+
+    if os.name == "nt" and any(
+        _windows_path_has_alternate_data_stream(path) for path in (target, data_dir)
+    ):
+        return "windows-alternate-data-stream-path"
+    secret_target = os.path.join(data_dir, _DEVICE_PROVENANCE_SECRET)
+    provenance_target = target + ".provenance"
+    normalized = tuple(
+        _normalize_device_identity_path(candidate)
+        for candidate in (target, secret_target, provenance_target)
+    )
+    if len(set(normalized)) != len(normalized):
+        return "identity-artifact-alias"
+    folded_target = _normalize_device_identity_path(target)
+    folded_secret = _normalize_device_identity_path(secret_target)
+    if folded_target.startswith(folded_secret + os.sep):
+        return "reserved-provenance-secret-path"
+    return None
+
+
+def _windows_path_has_alternate_data_stream(path: str | os.PathLike[str]) -> bool:
+    _volume, remainder = ntpath.splitdrive(os.fspath(path))
+    return ":" in remainder
+
+
+def _normalize_device_identity_path(path: str | os.PathLike[str]) -> str:
+    """Return the conservative comparison spelling for identity artifacts."""
+
+    return os.path.normpath(os.fspath(path)).casefold()
+
+
+def _device_identity_paths_equal(
+    left: str | os.PathLike[str],
+    right: str | os.PathLike[str],
+) -> bool:
+    return _normalize_device_identity_path(left) == _normalize_device_identity_path(
+        right
     )
 
 
@@ -455,6 +555,12 @@ def apply_device_key_recovery(
             (provenance_stage, provenance_target, "device-provenance"),
             (key_stage, plan.target, "device-key"),
         ):
+            # The data root is owner-private before staging, but a same-user
+            # concurrent actor can still replace a nested component. Re-bind
+            # the entire captured directory chain before every publication;
+            # Windows additionally holds the destination chain lease inside
+            # its CREATE_NEW adapter.
+            _revalidate_directory_custody(plan)
             if plan.custody.platform == "windows":
                 payload = _read_private_regular_file(source, max_bytes=4096, platform="windows")
                 try:
@@ -521,25 +627,47 @@ def _plan_missing_target(
 
     try:
         common = os.path.commonpath((target, data_dir))
-        if os.path.normcase(common) != os.path.normcase(data_dir) or os.path.normcase(target) == os.path.normcase(
-            data_dir
-        ):
+        if not _device_identity_paths_equal(
+            common, data_dir
+        ) or _device_identity_paths_equal(target, data_dir):
             return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
     except ValueError:
         return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
 
     parent = os.path.dirname(target)
-    try:
-        custody = _custody_snapshot(data_dir, parent)
-    except RecoveryRefusedError as exc:
-        return _blocked_plan(kind, target, data_dir, exc.code)
+    if _platform_name() == "windows":
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError:
+            return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
 
-    try:
-        target_stat = os.lstat(target)
-    except FileNotFoundError:
-        target_stat = None
-    except OSError:
-        return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
+        try:
+            custody = _custody_snapshot(
+                data_dir,
+                parent,
+                # Missing-target recovery must bind the parent namespace until
+                # its CREATE_NEW publication. Existing-target Doctor inspection
+                # does not mutate that namespace and must coexist with the
+                # gateway's own name-protecting lease on the data directory.
+                protect_name=target_stat is None,
+            )
+        except RecoveryRefusedError as exc:
+            return _blocked_plan(kind, target, data_dir, exc.code)
+    else:
+        # Preserve the original POSIX/Darwin custody-before-target ordering.
+        try:
+            custody = _custody_snapshot(data_dir, parent)
+        except RecoveryRefusedError as exc:
+            return _blocked_plan(kind, target, data_dir, exc.code)
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError:
+            return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
+
     if target_stat is not None:
         target_attributes = int(getattr(target_stat, "st_file_attributes", 0))
         if (
@@ -637,15 +765,60 @@ def _normalize_disk_path(value: str | os.PathLike[str]) -> str:
     return os.path.normpath(os.path.abspath(expanded))
 
 
+def _normalize_device_identity_disk_paths(
+    target: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, str]:
+    """Resolve one portable relative key beneath an explicit absolute data root."""
+
+    try:
+        raw_target = os.fspath(target)
+        raw_data = os.fspath(data_dir)
+    except TypeError:
+        return "", ""
+    normalized_data = (
+        _normalize_disk_path(raw_data)
+        if isinstance(raw_data, str) and os.path.isabs(raw_data)
+        else ""
+    )
+    if not isinstance(raw_target, str) or not raw_target or "\x00" in raw_target:
+        return "", normalized_data
+
+    if os.path.isabs(raw_target):
+        normalized_target = _normalize_disk_path(raw_target)
+        target_volume = ntpath.splitdrive(raw_target)[0]
+        if (
+            os.name == "nt"
+            and raw_target.startswith(("/", "\\"))
+            and not target_volume
+        ):
+            return "", normalized_data
+        return normalized_target, normalized_data
+
+    from defenseclaw.config import _resolve_relative_gateway_device_key_file
+
+    resolved = _resolve_relative_gateway_device_key_file(raw_target, normalized_data)
+    return (resolved or ""), normalized_data
+
+
 def _platform_name() -> str:
     return "windows" if os.name == "nt" else "posix"
 
 
-def _custody_snapshot(data_dir: str, parent: str) -> CustodySnapshot:
+def _custody_snapshot(
+    data_dir: str,
+    parent: str,
+    *,
+    protect_name: bool = True,
+) -> CustodySnapshot:
     if _platform_name() == "windows":
         return CustodySnapshot(
             platform="windows",
-            windows_directories=_windows_directory_custody(data_dir, parent),
+            windows_directories=_windows_directory_custody(
+                data_dir,
+                parent,
+                protect_name=protect_name,
+            ),
         )
     return CustodySnapshot(
         platform="posix",
@@ -658,7 +831,10 @@ def _directory_identity_chain(data_dir: str, parent: str) -> tuple[DirectoryIden
         raise RecoveryRefusedError("data-dir-path-is-indirect")
     paths = _controlled_directory_paths(data_dir, parent)
 
-    from defenseclaw.file_permissions import darwin_acl_write_error
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        darwin_acl_write_error,
+    )
 
     identities: list[DirectoryIdentity] = []
     running_uid = os.geteuid()
@@ -678,6 +854,8 @@ def _directory_identity_chain(data_dir: str, parent: str) -> tuple[DirectoryIden
             raise RecoveryRefusedError("directory-chain-is-writable-by-others")
         if darwin_acl_write_error(path) is not None:
             raise RecoveryRefusedError("directory-chain-has-untrusted-writer")
+        if darwin_acl_confidentiality_error(path) is not None:
+            raise RecoveryRefusedError("directory-chain-has-untrusted-reader")
         if os.path.realpath(path) != path:
             raise RecoveryRefusedError("directory-chain-is-indirect")
         identities.append(
@@ -712,6 +890,8 @@ def _controlled_directory_paths(data_dir: str, parent: str) -> tuple[str, ...]:
 def _windows_directory_custody(
     data_dir: str,
     parent: str,
+    *,
+    protect_name: bool = True,
 ) -> tuple[WindowsDirectoryIdentity, ...]:
     """Capture exact private Windows directory descriptors under name leases."""
 
@@ -730,7 +910,7 @@ def _windows_directory_custody(
     paths = _controlled_directory_paths(data_dir, parent)
     identities: list[WindowsDirectoryIdentity] = []
     try:
-        with hold_directory_chain(parent):
+        with hold_directory_chain(parent, protect_name=protect_name):
             for path in paths:
                 reject_reparse_path(path)
                 info = os.lstat(path)
@@ -801,6 +981,17 @@ def _revalidate_plan(plan: RecoveryPlan) -> None:
         or fresh.data_dir != plan.data_dir
         or fresh.custody != plan.custody
     ):
+        raise RecoveryRefusedError("recovery-plan-stale")
+
+
+def _revalidate_directory_custody(plan: RecoveryPlan) -> None:
+    if plan.custody is None:
+        raise RecoveryRefusedError("recovery-plan-stale")
+    try:
+        current = _custody_snapshot(plan.data_dir, os.path.dirname(plan.target))
+    except RecoveryRefusedError as exc:
+        raise RecoveryRefusedError("recovery-plan-stale") from exc
+    if current != plan.custody:
         raise RecoveryRefusedError("recovery-plan-stale")
 
 

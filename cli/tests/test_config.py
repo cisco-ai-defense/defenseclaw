@@ -40,8 +40,10 @@ from defenseclaw.config import (
     CiscoAIDefenseConfig,
     ClawConfig,
     Config,
+    ConfigVersionError,
     GatewayConfig,
     GatewayConfigReloadConfig,
+    GatewayWatchdogConfig,
     GatewayWatcherPluginConfig,
     GuardrailConfig,
     InspectLLMConfig,
@@ -49,6 +51,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
+    PerConnectorGuardrailConfig,
     PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
@@ -57,7 +60,9 @@ from defenseclaw.config import (
     WebhookConfig,
     _dedup,
     _expand,
+    _merge_acp,
     _merge_cisco_ai_defense,
+    _merge_gateway_watchdog,
     _merge_gateway_watcher,
     _merge_guardrail,
     _merge_inspect_llm,
@@ -86,6 +91,10 @@ class TestHelpers(unittest.TestCase):
     def test_expand_non_tilde(self):
         self.assertEqual(_expand("/abs/path"), "/abs/path")
         self.assertEqual(_expand("relative"), "relative")
+
+    def test_merge_acp_rejects_non_mapping_profiles(self):
+        with self.assertRaisesRegex(ConfigVersionError, "acp.profiles must be a mapping"):
+            _merge_acp({"profiles": ["not-a-profile"]})
 
     def test_dedup_preserves_order(self):
         self.assertEqual(_dedup(["a", "b", "a", "c", "b"]), ["a", "b", "c"])
@@ -671,6 +680,13 @@ class TestMergeFunctions(unittest.TestCase):
         gw_no_plugin = _merge_gateway_watcher({"enabled": True})
         self.assertEqual(gw_no_plugin.plugin, GatewayWatcherPluginConfig())
 
+    def test_merge_gateway_watchdog_defaults_and_explicit_disable(self):
+        self.assertEqual(_merge_gateway_watchdog(None).enabled, True)
+        watchdog = _merge_gateway_watchdog({"enabled": False, "interval": 17, "debounce": 4})
+        self.assertFalse(watchdog.enabled)
+        self.assertEqual(watchdog.interval, 17)
+        self.assertEqual(watchdog.debounce, 4)
+
 
 class TestDefaultConfig(unittest.TestCase):
     def test_default_config_structure(self):
@@ -687,6 +703,9 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
         self.assertFalse(cfg.gateway.watcher.skill.take_action)
+        self.assertTrue(cfg.gateway.watchdog.enabled)
+        self.assertEqual(cfg.gateway.watchdog.interval, 30)
+        self.assertEqual(cfg.gateway.watchdog.debounce, 2)
 
     def test_default_skill_scanner_config(self):
         cfg = default_config()
@@ -717,6 +736,16 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(cfg.asset_policy.skill.runtime_detection.enabled)
         self.assertFalse(cfg.asset_policy.plugin.runtime_detection.enabled)
 
+    def test_claude_alias_roster_dedupes_and_validation_rejects_duplicates(self):
+        cfg = default_config()
+        cfg.guardrail.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(),
+            "claude-code": PerConnectorGuardrailConfig(),
+        }
+        self.assertEqual(cfg.active_connectors(), ["claudecode"])
+        with self.assertRaisesRegex(ValueError, "refer to the same connector"):
+            cfg.guardrail.validate()
+
 
 class TestConfigLoadSave(unittest.TestCase):
     def test_load_missing_config_returns_defaults(self):
@@ -739,6 +768,48 @@ class TestConfigLoadSave(unittest.TestCase):
                 cfg = load()
         self.assertEqual(cfg.guardrail.connector, "")
         self.assertEqual(cfg.active_connector(), "codex")
+
+    def test_load_resolves_relative_device_key_beneath_configured_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            Path(data_dir, "config.yaml").write_text(
+                "config_version: 8\n"
+                f"data_dir: {data_dir}\n"
+                "gateway:\n"
+                "  device_key_file: identity/device.key\n",
+                encoding="utf-8",
+            )
+
+            cfg = load(data_dir=data_dir)
+
+        self.assertEqual(
+            cfg.gateway.device_key_file,
+            os.path.join(data_dir, "identity", "device.key"),
+        )
+
+    def test_relative_device_key_resolver_rejects_nonlocal_spellings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            self.assertEqual(
+                config_mod._resolve_relative_gateway_device_key_file(
+                    os.path.join("~", "device.key"),
+                    data_dir,
+                ),
+                os.path.join(data_dir, "~", "device.key"),
+            )
+            for key_file in (
+                "../outside/device.key",
+                r"C:device.key",
+                r"\device.key",
+                "device.key:stream",
+            ):
+                with self.subTest(key_file=key_file):
+                    self.assertIsNone(
+                        config_mod._resolve_relative_gateway_device_key_file(
+                            key_file,
+                            data_dir,
+                        )
+                    )
 
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -787,6 +858,25 @@ class TestConfigLoadSave(unittest.TestCase):
             with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
                 reloaded = load()
             self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
+
+    def test_gateway_watchdog_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    watchdog=GatewayWatchdogConfig(enabled=False, interval=17, debounce=4),
+                ),
+            )
+            cfg.save()
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertFalse(reloaded.gateway.watchdog.enabled)
+            self.assertEqual(reloaded.gateway.watchdog.interval, 17)
+            self.assertEqual(reloaded.gateway.watchdog.debounce, 4)
 
     def test_gateway_config_reload_mode_is_normalized(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -78,6 +78,15 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 			},
 			want: []string{"openhands"},
 		},
+		{
+			name: "dedupes_claude_aliases",
+			connectors: map[string]PerConnectorGuardrailConfig{
+				"claudecode":  {},
+				"claude-code": {},
+				"claude_code": {},
+			},
+			want: []string{"claudecode"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -398,6 +407,14 @@ func TestGuardrailValidate(t *testing.T) {
 			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{
 				"codex": {Mode: "action"},
 				"Codex": {Mode: "observe"},
+			}},
+			wantErr: "refer to the same connector",
+		},
+		{
+			name: "duplicate_claude_alias",
+			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{
+				"claudecode":  {Mode: "action"},
+				"claude-code": {Mode: "observe"},
 			}},
 			wantErr: "refer to the same connector",
 		},

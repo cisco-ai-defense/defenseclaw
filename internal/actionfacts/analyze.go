@@ -45,10 +45,27 @@ func Analyze(input Input) (facts Facts) {
 func analyze(input Input) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
+	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
+		input.ActiveAgentFiles,
+	)
+	activeAgentFilesCaseInsensitive, activeAgentFilesCaseInsensitiveIssue :=
+		normalizeCaseInsensitiveActiveAgentFiles(
+			input.ActiveAgentFilesCaseInsensitive,
+			activeAgentFiles,
+		)
+	activeAgentFilesCaseInsensitiveUncertainIssue := IssueCode("")
+	if input.ActiveAgentFilesCaseInsensitiveUncertain &&
+		!input.ActiveAgentFilesUncertain {
+		activeAgentFilesCaseInsensitiveUncertainIssue = IssueInvalidSyntax
+	}
 	for _, issue := range []IssueCode{
 		validateToolName(input.Tool),
 		validateScalar(input.CWD, maxScalarBytes),
+		validateTrustedToolResourceIdentity(input.ToolResourceIdentity),
 		validateActiveHome(input.ActiveHome),
+		activeAgentFilesIssue,
+		activeAgentFilesCaseInsensitiveIssue,
+		activeAgentFilesCaseInsensitiveUncertainIssue,
 	} {
 		if issue == "" {
 			continue
@@ -60,11 +77,18 @@ func analyze(input Input) Facts {
 		}
 	}
 	if base.status == StatusInvalid || base.status == StatusLimitExceeded {
-		return base.factsWithContext(
+		facts := base.factsWithContext(
 			safeToolName(input.Tool),
 			safeScalar(input.CWD, maxScalarBytes),
 			"",
 		)
+		facts.ActiveAgentFiles = nil
+		facts.ActiveAgentFilesCaseInsensitive = nil
+		facts.ActiveAgentFilesCaseInsensitiveUncertain =
+			input.ActiveAgentFilesCaseInsensitiveUncertain &&
+				input.ActiveAgentFilesUncertain
+		facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+		return facts
 	}
 
 	extracted := extractArgsForTool(input.Args, input.Tool)
@@ -82,7 +106,8 @@ func analyze(input Input) Facts {
 	}
 
 	command := input.Command
-	if command != "" && extracted.command != "" && command != extracted.command {
+	if command != "" && extracted.command != "" &&
+		!equivalentExtractedCommand(input.Tool, command, extracted.command) {
 		base.markAmbiguous(IssueConflictingSources)
 	} else if command == "" {
 		command = extracted.command
@@ -148,6 +173,7 @@ func analyze(input Input) Facts {
 			dialect = DialectArgv
 		}
 		parsed := analyzeStructuredArgv(argv, startID, 0, dialect)
+		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
@@ -164,24 +190,154 @@ func analyze(input Input) Facts {
 			base.markAmbiguous(IssueConflictingSources)
 		}
 		parsed := parseCommandAs(command, dialect, startID, 0)
+		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
 	}
+	if extracted.policyBypass {
+		for index := range base.commands {
+			if base.commands[index].Effect == EffectExecute {
+				addOperation(&base.commands[index], OperationPolicyBypass)
+			}
+		}
+	}
 
+	activeHome, _ := normalizeActiveHome(input.ActiveHome)
+	projectTrustedPOSIXHomeCatRead(&base, activeHome)
 	addToolArgumentFacts(&base, input.Tool, extracted)
 	if base.hasFacts() && base.status == StatusNotApplicable {
 		base.status = StatusComplete
 	}
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
-	activeHome, _ := normalizeActiveHome(input.ActiveHome)
-	return base.factsWithContext(
+	facts := base.factsWithContext(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
 	)
+	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
+	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
+		activeAgentFilesCaseInsensitive,
+	)
+	facts.ActiveAgentFilesCaseInsensitiveUncertain =
+		input.ActiveAgentFilesCaseInsensitiveUncertain
+	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	classifyCanonicalPasswordCrackerPotfileRead(&facts)
+	facts.SensitiveEgressArtifactWrites =
+		projectSensitiveEgressArtifactWrites(input)
+	facts.StructuredTextReplacements =
+		projectStructuredTextReplacements(input)
+	facts.SQLServerCommandExecutions =
+		projectSQLServerCommandExecutions(input)
+	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
+	facts.SQLSensitiveServerFileReads =
+		projectSQLSensitiveServerFileReads(input)
+	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
+	facts.SQLDirectExternalEgresses = projectSQLDirectExternalEgresses(input)
+	facts.StructuredLiteralPersistences =
+		projectStructuredLiteralPersistences(input)
+	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
+	facts.SQLMutations = projectSQLMutations(input, facts)
+	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
+	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
+	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)
+	facts.PrivilegedKubernetesOperations =
+		projectPrivilegedKubernetesOperations(input, facts)
+	facts.KubernetesCronJobOperations =
+		projectKubernetesCronJobOperations(input, facts)
+	facts.KubernetesPodRuns = projectKubernetesPodRuns(input, facts)
+	facts.KubernetesCronJobReverseShells =
+		projectKubernetesCronJobReverseShells(input, facts)
+	facts.KubernetesSensitiveAccesses =
+		projectKubernetesSensitiveAccesses(input, facts)
+	facts.StructuredPortForwards = projectStructuredPortForwards(input)
+	facts.WirelessCaptureDeauthOperations =
+		projectWirelessCaptureDeauthOperations(input)
+	facts.CloudIAMPrincipalOperations =
+		projectCloudIAMPrincipalOperations(input, facts)
+	facts.CloudResourceMutations = projectCloudResourceMutations(input, facts)
+	facts.AWSBulkEC2Terminations = projectAWSBulkEC2Terminations(input)
+	facts.CloudAuditSecurityOperations = projectCloudAuditSecurityOperations(input)
+	facts.EndpointSecurityControlMutations = projectEndpointSecurityControlMutations(input)
+	facts.WindowsSecurityControlMutations = projectWindowsSecurityControlMutations(facts)
+	facts.CredentialRemoteExecutionOperations =
+		projectCredentialRemoteExecutionOperations(input)
+	facts.CompromisedCredentialAuthentications =
+		projectCompromisedCredentialAuthentications(input, facts)
+	facts.DirectoryCredentialAcquisitions =
+		projectDirectoryCredentialAcquisitions(input, &facts)
+	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input)
+	facts.StagedPayloadPersistenceOperations =
+		projectStagedPayloadPersistenceOperations(input)
+	facts.CloudMetadataCredentialReads =
+		projectCloudMetadataCredentialReads(input)
+	facts.StructuredCredentialReads =
+		projectStructuredCredentialReads(input)
+	facts.LiteralSensitiveUploads = projectLiteralSensitiveUploads(facts)
+	facts.CredentialFileUploads = projectCredentialFileUploads(facts)
+	facts.SourceArchiveUploads = projectSourceArchiveUploads(facts)
+	facts.PowerShellTCPCommandLoops = projectPowerShellTCPCommandLoops(input, facts)
+	facts.MaliciousPersistencePayloads = projectMaliciousPersistencePayloads(input)
+	facts.CustomRootSUIDImplants = projectCustomRootSUIDImplants(input)
+	facts.POSIXSystemInterpreterWrappers =
+		projectPOSIXSystemInterpreterWrappers(facts)
+	facts.PKRootSetuidShells = projectPKRootSetuidShells(input)
+	facts.ResourceReads, facts.ArtifactTransfers =
+		projectStructuredResourceArtifactFacts(input)
+	facts.ResourceMutations = projectStructuredResourceMutations(input)
+	facts.POSIXNonRootUIDZeroAccountWrites =
+		projectPOSIXNonRootUIDZeroAccountWrites(input)
+	facts.POSIXUnrestrictedSudoersGrantWrites =
+		projectPOSIXUnrestrictedSudoersGrantWrites(input)
+	return facts
+}
+
+func equivalentExtractedCommand(tool, direct, extracted string) bool {
+	if direct == extracted {
+		return true
+	}
+	if !exactTerminalKeystrokesTool(tool) {
+		return false
+	}
+	trimmed := ""
+	switch {
+	case strings.HasSuffix(direct, "\r\n"):
+		trimmed = strings.TrimSuffix(direct, "\r\n")
+	case strings.HasSuffix(direct, "\n"):
+		trimmed = strings.TrimSuffix(direct, "\n")
+	default:
+		return false
+	}
+	return !strings.ContainsAny(trimmed, "\r\n") && trimmed == extracted
+}
+
+// projectTrustedPOSIXHomeCatRead retains a narrow exact path fact when the
+// shell parser correctly marks an unquoted leading tilde as an expansion. A
+// trusted active-home context makes this one expansion deterministic, but the
+// command remains non-authoritative so no unrelated dynamic syntax is
+// promoted. This fact is useful to prove a sensitive source in a typed
+// read-to-upload pipeline.
+func projectTrustedPOSIXHomeCatRead(out *parseOutput, activeHome string) {
+	if out == nil || !strings.HasPrefix(activeHome, "/") {
+		return
+	}
+	for index := range out.commands {
+		command := &out.commands[index]
+		if command.Dialect != DialectPOSIX || command.Program != "cat" ||
+			len(command.Arguments) != 2 ||
+			!hasFactOperation(*command, OperationRead) {
+			continue
+		}
+		target := command.Arguments[1]
+		if target.Value != "" || !target.Expands || target.Quote != QuoteNone ||
+			!strings.HasPrefix(target.StaticGlob, "~/") ||
+			strings.ContainsAny(target.StaticGlob, "*?[") {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, target.StaticGlob)
+	}
 }
 
 func analyzeStructuredArgv(
@@ -193,6 +349,11 @@ func analyzeStructuredArgv(
 	if !validDialect(dialect) {
 		out := newParseOutput(DialectNone, startID)
 		out.markAmbiguous(IssueConflictingSources)
+		return out
+	}
+	if dialect == DialectPython {
+		out := newParseOutput(DialectPython, startID)
+		out.markUnsupported(IssueUnsupportedConstruct)
 		return out
 	}
 	if dialect == "" || dialect == DialectNone {
@@ -245,6 +406,22 @@ func analyzeStructuredArgv(
 			wrapperDepth+1,
 			DialectPOSIX,
 		)
+	case "su":
+		nested, ok := exactRootSuCommand(command)
+		if !ok {
+			return out
+		}
+		// A generic structured exec schema authenticates argv boundaries, but
+		// `su -c` introduces a second shell-language string that the tool owner
+		// did not type separately. Retain its useful nested facts for fallback
+		// detection without promoting the whole action to enforcement authority.
+		out.markPartial(IssueUnsupportedConstruct)
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
@@ -464,9 +641,19 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if out == nil || command == nil {
 		return false
 	}
-	commandsByID := make(map[int64]*CommandFact, len(out.commands))
-	for index := range out.commands {
-		candidate := &out.commands[index]
+	return isolatedPOSIXCommandFacts(out.commands, command)
+}
+
+func isolatedPOSIXCommandFacts(
+	commands []CommandFact,
+	command *CommandFact,
+) bool {
+	if command == nil {
+		return false
+	}
+	commandsByID := make(map[int64]*CommandFact, len(commands))
+	for index := range commands {
+		candidate := &commands[index]
 		if candidate.ID == 0 {
 			return false
 		}
@@ -479,7 +666,7 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if !ok {
 		return false
 	}
-	visited := make(map[int64]struct{}, len(out.commands))
+	visited := make(map[int64]struct{}, len(commands))
 	for {
 		if current.ID == 0 {
 			return false
@@ -985,6 +1172,10 @@ func parseCommandAs(source string, dialect Dialect, startID int64, wrapperDepth 
 		return parseCMD(source, startID, wrapperDepth)
 	case DialectPOSIX, DialectNone:
 		return parsePOSIX(source, startID, wrapperDepth)
+	case DialectPython:
+		out := newParseOutput(DialectPython, startID)
+		out.markUnsupported(IssueUnsupportedConstruct)
+		return out
 	default:
 		out := newParseOutput(dialect, startID)
 		out.markUnsupported(IssueUnsupportedConstruct)
@@ -1001,9 +1192,12 @@ func argsExecutionTool(tool string) bool {
 		return true
 	}
 	switch name {
+	case "aws_cli", "kubectl", "bash_command":
+		return true
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe",
 		"cmd", "cmd.exe",
-		"bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
+		"bash", "sh", "zsh", "dash", "ksh", "mksh", "fish",
+		"persist":
 		return true
 	default:
 		return false
@@ -1163,6 +1357,7 @@ type toolPathShape uint8
 const (
 	toolPathNone toolPathShape = iota
 	toolPathInput
+	toolPathBatchInput
 	toolPathOutput
 	toolPathTarget
 	toolPathCopy
@@ -1233,15 +1428,25 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 	case "listfiles", "list_files", "list-files",
 		"listdirectory", "list_directory", "list-directory":
 		return pathToolSemantics(PathAccessList, OperationList), true
+	case "get_file_info":
+		return pathToolSemantics(PathAccessMetadata, OperationList), true
 	case "search",
 		"searchfiles", "search_files", "search-files",
 		"filesearch", "file_search", "file-search",
+		"grep", "search_code",
 		"glob", "globfiles", "glob_files", "glob-files":
 		return pathToolSemantics(PathAccessRead, OperationSearch), true
 	case "copyfile", "copy_file", "copy-file":
 		return transferPathToolSemantics(OperationCopy, toolPathCopy), true
 	case "movefile", "move_file", "move-file":
 		return transferPathToolSemantics(OperationMove, toolPathMove), true
+	case "decodefile", "decode_file", "decode-file":
+		// This schema is deliberately byte-to-byte, with one exact input and
+		// one exact output. Archive extraction is excluded because a destination
+		// directory does not prove any member's derived identity.
+		return transferPathToolSemantics(OperationDecode, toolPathCopy), true
+	case "executefile", "execute_file", "execute-file":
+		return pathToolSemantics(PathAccessExecute, OperationExecute), true
 	case "webfetch", "web_fetch", "web-fetch",
 		"httpfetch", "http_fetch", "http-fetch",
 		"fetch",
@@ -1256,7 +1461,7 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		return semantics, true
 	case "webupload", "web_upload", "web-upload",
 		"uploadurl", "upload_url", "upload-url",
-		"httppost", "http_post", "http-post":
+		"httppost", "http_post", "http-post", "http.post":
 		semantics := networkToolSemantics(NetworkUpload, OperationUpload)
 		semantics.acceptsMethod = true
 		semantics.acceptsHTTPPayload = true
@@ -1287,6 +1492,14 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 			requiresPaths:    true,
 			requiresURLs:     true,
 			flow:             toolFlowDownload,
+		}, true
+	case "fs.read_batch":
+		return toolArgumentSemantics{
+			acceptsPaths:  true,
+			pathAccess:    PathAccessRead,
+			pathOperation: OperationRead,
+			pathShape:     toolPathBatchInput,
+			requiresPaths: true,
 		}, true
 	default:
 		return toolArgumentSemantics{}, false
@@ -1394,6 +1607,21 @@ func projectToolPaths(
 			return nil, false
 		}
 		return []projectedToolPath{{access: semantics.pathAccess, value: path.value}}, true
+	case toolPathBatchInput:
+		if len(extracted.paths) == 0 {
+			return nil, false
+		}
+		paths := make([]projectedToolPath, 0, len(extracted.paths))
+		for _, path := range extracted.paths {
+			if path.key != "path" || path.value == "" {
+				return nil, false
+			}
+			paths = append(paths, projectedToolPath{
+				access: semantics.pathAccess,
+				value:  path.value,
+			})
+		}
+		return paths, true
 	case toolPathOutput:
 		path, ok := extracted.singlePathArgument("path", "filepath", "target", "destination")
 		if !ok {
@@ -1687,7 +1915,8 @@ func equivalentCommandStructure(left, right parseOutput) bool {
 	if len(left.commands) != len(right.commands) ||
 		!equalComparableSlices(left.paths, right.paths) ||
 		!equalComparableSlices(left.network, right.network) ||
-		!equalComparableSlices(left.dataFlows, right.dataFlows) {
+		!equalComparableSlices(left.dataFlows, right.dataFlows) ||
+		!equalComparableSlices(left.artifacts, right.artifacts) {
 		return false
 	}
 	for index := range left.commands {
@@ -1712,6 +1941,9 @@ func equivalentCommandFact(left, right CommandFact) bool {
 		) ||
 		left.Program != right.Program ||
 		left.ArgvComplete != right.ArgvComplete ||
+		left.LiteralStdin != right.LiteralStdin ||
+		left.LiteralStdinComplete != right.LiteralStdinComplete ||
+		left.LiteralStdinAmbiguous != right.LiteralStdinAmbiguous ||
 		!equivalentCommandArgv(left.Argv, right.Argv, left.Dialect) ||
 		!equalComparableSlices(left.Operations, right.Operations) ||
 		!equalComparableSlices(left.Redirects, right.Redirects) ||
@@ -1798,6 +2030,9 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 		case "source", ".":
 			out.markPartial(IssueOpaqueArtifact)
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
+			if exactPOSIXLiteralPasswordChangeTrailingShell(out, command) {
+				continue
+			}
 			if exactPOSIXPipelineStdinInterpreter(out, command) ||
 				exactPOSIXShellPreviewInvocation(command) {
 				continue
@@ -1845,7 +2080,8 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 
 func validDialect(dialect Dialect) bool {
 	switch dialect {
-	case "", DialectNone, DialectArgv, DialectPOSIX, DialectPowerShell, DialectCMD:
+	case "", DialectNone, DialectArgv, DialectPOSIX, DialectPowerShell,
+		DialectCMD, DialectPython:
 		return true
 	default:
 		return false

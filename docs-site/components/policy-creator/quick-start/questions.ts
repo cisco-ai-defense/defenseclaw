@@ -1,8 +1,8 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Question library for the Quick Start interview. Five logical groups
-// cover the high-traffic policy decisions; the apply.ts mapper turns
+// Question library for the Quick Start interview. The interview groups
+// high-traffic policy decisions; the apply.ts mapper turns
 // answers into a fully-realized `Policy` on every change.
 //
 // We deliberately keep this file pure data + simple types so it can be
@@ -115,7 +115,7 @@ export const BLOCK_CARDS: BlockCard[] = [
       'SEC-JWT',
       'SEC-SLACK-WEBHOOK',
       'SEC-STRIPE',
-      'SEC-GCP',
+      'SEC-GOOGLE',
     ],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
@@ -126,10 +126,10 @@ export const BLOCK_CARDS: BlockCard[] = [
     description:
       'System-prompt overrides, role overrides, jailbreak chains. Detects user input attempting to bypass guardrails or escalate the agent\u2019s capabilities.',
     ruleIds: [
-      'INJ-SYS-OVERRIDE',
-      'INJ-ROLE-OVERRIDE',
-      'INJ-IGNORE-PREV',
-      'INJ-JAILBREAK',
+      'TRUST-OVERRIDE-INSTRUCT',
+      'TRUST-PERSONA',
+      'TRUST-IGNORE-PREVIOUS',
+      'TRUST-JAILBREAK',
     ],
     guardrailPatterns: [
       {
@@ -150,7 +150,7 @@ export const BLOCK_CARDS: BlockCard[] = [
     title: 'Exfiltration to known leak sinks',
     description:
       'RequestBin, HookBin, Burp Collaborator, ngrok, webhook.site. The most common destinations for exfiltrated data when an attacker doesn\u2019t bother hiding.',
-    ruleIds: ['C2-REQUESTBIN', 'C2-HOOKBIN', 'C2-BURP', 'C2-NGROK', 'C2-WEBHOOKSITE'],
+    ruleIds: ['C2-REQUESTBIN', 'C2-HOOKBIN', 'C2-BURP', 'C2-NGROK', 'C2-WEBHOOK-SITE'],
     destinations: [
       'requestbin.com',
       'hookbin.com',
@@ -179,8 +179,8 @@ export const BLOCK_CARDS: BlockCard[] = [
     category: 'code',
     title: 'Destructive shell commands',
     description:
-      'rm -rf /, dd if=, mkfs, fdisk, shred, :(){:|:&};:. Catches the canonical "make the disk dance" patterns before they hit a sandbox.',
-    ruleIds: ['CMD-RM-RF', 'CMD-DD', 'CMD-MKFS', 'CMD-FORK-BOMB', 'CMD-SHRED'],
+      'Recursive root deletion, raw-device writes, filesystem formatting, device wiping, and fork bombs. Exact atomic proofs stay narrow enough for deterministic enforcement.',
+    ruleIds: ['CMD-RM-RF', 'CMD-DD-IF', 'CMD-MKFS', 'CMD-DEVICE-WIPE', 'impact.fork_bomb'],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
   {
@@ -189,7 +189,7 @@ export const BLOCK_CARDS: BlockCard[] = [
     title: 'Sensitive file paths',
     description:
       '~/.ssh, ~/.aws, ~/.kube, /etc/shadow, .env files, gh-cli config. Prevents the agent from reading or writing config that leaks long-lived credentials.',
-    ruleIds: ['PATH-SSH', 'PATH-AWS', 'PATH-KUBE', 'PATH-SHADOW', 'PATH-DOTENV'],
+    ruleIds: ['PATH-SSH-DIR', 'PATH-SSH-KEY', 'PATH-AWS-CREDS', 'PATH-KUBE', 'PATH-ETC-SHADOW', 'PATH-ENV-FILE'],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
   {
@@ -197,8 +197,8 @@ export const BLOCK_CARDS: BlockCard[] = [
     category: 'data',
     title: 'PII / enterprise data leakage',
     description:
-      'SSN, internal hostnames, employee IDs, financial routing numbers. Most useful when the agent talks to public LLM providers.',
-    ruleIds: ['PII-SSN', 'ENT-INTERNAL-HOST', 'ENT-EMP-ID', 'PII-ROUTING'],
+      'Bulk SSNs, payment-card numbers, IBANs, medical records, and structured PII exports. Most useful when agents handle regulated or customer data.',
+    ruleIds: ['ENT-BULK-SSN', 'ENT-CC-VISA', 'ENT-CC-MC', 'ENT-CC-AMEX', 'ENT-IBAN', 'ENT-MEDICAL-RECORD', 'ENT-BULK-CSV-PII', 'ENT-BULK-JSON-PII'],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
   {
@@ -206,17 +206,17 @@ export const BLOCK_CARDS: BlockCard[] = [
     category: 'llm',
     title: 'Trust / impersonation exploits',
     description:
-      'Role overrides, fake function-call results, "you are an admin" prompts. Catches the social-engineering vector against agents.',
-    ruleIds: ['TRUST-ROLE-OVERRIDE', 'TRUST-FAKE-RESULT', 'TRUST-ADMIN-CLAIM'],
+      'Authority claims, tool-result manipulation, and attempts to replace or constrain the governing instructions. Catches social-engineering against agents.',
+    ruleIds: ['TRUST-AUTHORITY', 'TRUST-TOOL-MANIP', 'TRUST-NEW-INSTRUCTIONS', 'TRUST-OUTPUT-CONSTRAINT'],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
   {
     id: 'cognitive',
     category: 'llm',
-    title: 'Cognitive / manipulation patterns',
+    title: 'Agent identity and memory tampering',
     description:
-      'Authority-claim, urgency, fake citations, false consensus. Lower-confidence patterns that flag suspicious narrative shape rather than concrete payloads.',
-    ruleIds: ['COG-AUTHORITY', 'COG-URGENCY', 'COG-FAKE-CITE'],
+      'Writes to agent identity, memory, instruction, gateway, and detector-state files. These rules focus on concrete persistence targets rather than narrative tone.',
+    ruleIds: ['COG-SOUL', 'COG-IDENTITY', 'COG-MEMORY', 'COG-CLAUDE-MD', 'COG-TOOLS-MD', 'COG-AGENTS-MD', 'tamper.detector_state_write'],
     cookbookHref: '/docs/policies/regex-cookbook',
   },
   {

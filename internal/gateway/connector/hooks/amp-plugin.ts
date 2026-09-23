@@ -16,6 +16,7 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { userInfo } from 'node:os'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
@@ -26,6 +27,36 @@ const DC_MAX_TOKEN_FILE_BYTES = 4096
 // Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
+
+// identityHeaders reports which end user this plugin runs as.
+//
+// Under a managed install the gateway runs as a service account, so it cannot
+// see whose session a request belongs to; the plugin is in-session and can.
+// A value that is not a safe header field is dropped rather than sanitized, so
+// a hostile account name cannot smuggle a second header into every hook call.
+function identityHeaders(): Record<string, string> {
+	const headers: Record<string, string> = {}
+	let info: ReturnType<typeof userInfo>
+	try {
+		info = userInfo()
+	} catch (_) {
+		// No identity is a supported outcome: the record is emitted
+		// unattributed rather than wrongly attributed.
+		return headers
+	}
+	// uid is -1 on Windows, where no POSIX uid exists. Reporting it would put
+	// a value in user.id that belongs to neither identifier namespace.
+	if (typeof info.uid === "number" && info.uid >= 0) {
+		headers["X-DefenseClaw-User-Id"] = String(info.uid)
+	}
+	// Mirrors the account-name allowlist the POSIX hooks apply in their
+	// shared hardening helper.
+	if (typeof info.username === "string" && info.username.length > 0 &&
+		info.username.length <= 256 && /^[A-Za-z0-9._-]+$/.test(info.username)) {
+		headers["X-DefenseClaw-User-Name"] = info.username
+	}
+	return headers
+}
 
 type GatewayResponse = {
 	action?: string
@@ -245,6 +276,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
+			...identityHeaders(),
 		}
 		headers.Authorization = `Bearer ${token}`
 

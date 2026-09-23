@@ -8,10 +8,27 @@ package connector
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-func TestClaudeCodeManagedSettingsRootUsesProgramFilesKnownFolder(t *testing.T) {
+func TestClaudeCodeDefaultProgramFilesResolverIsMachineScoped(t *testing.T) {
+	want, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := claudeCodeWindowsProgramFilesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		t.Fatalf("Program Files root = %q, want trusted machine root %q", got, want)
+	}
+}
+
+func TestClaudeCodeManagedSettingsRootUsesTrustedProgramFiles(t *testing.T) {
 	previous := claudeCodeWindowsProgramFilesRoot
 	t.Cleanup(func() { claudeCodeWindowsProgramFilesRoot = previous })
 
@@ -25,11 +42,11 @@ func TestClaudeCodeManagedSettingsRootUsesProgramFilesKnownFolder(t *testing.T) 
 	}
 	want := filepath.Join(knownRoot, "ClaudeCode")
 	if got != want {
-		t.Fatalf("managed settings root = %q, want trusted Known Folder path %q", got, want)
+		t.Fatalf("managed settings root = %q, want trusted machine path %q", got, want)
 	}
 }
 
-func TestClaudeCodeManagedSettingsRootFailsClosedOnKnownFolderError(t *testing.T) {
+func TestClaudeCodeManagedSettingsRootFailsClosedOnMachineRootError(t *testing.T) {
 	previous := claudeCodeWindowsProgramFilesRoot
 	t.Cleanup(func() { claudeCodeWindowsProgramFilesRoot = previous })
 	claudeCodeWindowsProgramFilesRoot = func() (string, error) {

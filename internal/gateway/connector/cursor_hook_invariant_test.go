@@ -81,7 +81,7 @@ func TestCursorHook_GatewayAllowEnvelopePassedThrough(t *testing.T) {
 		t.Skip("shell scripts not supported on windows")
 	}
 	addr := stubGatewayAddr(t, http.StatusOK,
-		`{"hook_output":{"continue":true,"permission":"allow"}}`)
+		`{"hook_output":{"permission":"allow"}}`)
 	stdout, stderr, err := runCursorHookAgainst(
 		t,
 		addr,
@@ -100,7 +100,7 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 	}
 	// A real block decision must still reach Cursor verbatim — the
 	// fail-open hardening must not swallow deny verdicts.
-	want := `{"continue":false,"permission":"deny","user_message":"blocked by policy"}`
+	want := `{"permission":"deny","user_message":"blocked by policy","agent_message":"blocked by policy"}`
 	addr := stubGatewayAddr(t, http.StatusOK, `{"hook_output":`+want+`}`)
 	stdout, _, err := runCursorHookAgainst(
 		t,
@@ -119,7 +119,7 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 
 // TestCursorHook_NeverEmptyStdout is the umbrella guard: across every
 // scenario a Cursor agent can drive, stdout is a valid, non-empty JSON
-// object carrying a permission. Empty stdout on any of these would let
+// object carrying only fields documented for that event. Empty stdout would let
 // Cursor's failClosed:true guard block the tool.
 func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -169,14 +169,14 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
 		}
-		assertAllowEnvelope(t, stdout)
+		assertJSONEnvelope(t, stdout)
 	})
 }
 
 // TestCursorHooks_ObserveModeWritesFailClosedFalse pins the config
 // side: a default / observe (non-closed) install must write
 // failClosed:false so an empty or slow hook can never be misread as a
-// fail-closed block. Paired with TestCursorHooks_FailClosedOnlyWhenExplicit.
+// fail-closed block.
 func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
@@ -203,5 +203,36 @@ func TestCursorHooks_ObserveModeWritesFailClosedFalse(t *testing.T) {
 	}
 	if strings.Contains(string(data), `"failClosed": true`) {
 		t.Fatalf("observe-mode cursor hooks must not write failClosed:true, got:\n%s", string(data))
+	}
+}
+
+func TestCursorHooks_ActionWritesFailClosedTrueAndContractLockClosed(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	previous := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = previous })
+
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir:       filepath.Join(dir, "dc"),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "tok-test",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read Cursor hooks: %v", err)
+	}
+	if !strings.Contains(string(body), `"failClosed": true`) || strings.Contains(string(body), `"failClosed": false`) {
+		t.Fatalf("Cursor action hook did not write an exact fail-closed contract:\n%s", body)
+	}
+	entry := NewHookContractLockEntry(opts, conn, "test")
+	if entry.HookFailMode != "closed" {
+		t.Fatalf("Cursor lock hook_fail_mode = %q, want closed", entry.HookFailMode)
 	}
 }

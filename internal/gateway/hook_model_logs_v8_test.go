@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -139,6 +140,45 @@ func TestCodexNotifyEmitsCanonicalV8ModelLogsWithSourceFacts(t *testing.T) {
 		if !bytes.Contains(wire, []byte(fact)) {
 			t.Fatalf("notify canonical logs missing source fact %q", fact)
 		}
+	}
+}
+
+func TestClaudeMessageDisplayPreservesReportedV8ResponseIdentity(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	api.emitClaudeCodeHookLLMEvent(t.Context(), claudeCodeHookRequest{
+		HookEventName: "MessageDisplay", SessionID: "claude-session", TurnID: "claude-turn",
+		MessageID: "msg-provider-123", Model: "claude-sonnet-4", Delta: "reported response",
+		DisplayFinal: true,
+	}, nil, []byte(`{"message_id":"msg-provider-123"}`))
+
+	var bodyAttributes map[string]interface{}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
+			if logStringAttribute(record.Attributes, "defenseclaw.event.name") == observability.TelemetryEventModelResponse {
+				var wire struct {
+					Body map[string]interface{} `json:"body"`
+				}
+				if err := json.Unmarshal([]byte(record.Body.GetStringValue()), &wire); err != nil {
+					t.Fatal(err)
+				}
+				bodyAttributes = wire.Body
+				break
+			}
+		}
+		if len(bodyAttributes) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := bodyAttributes["gen_ai.response.id"]; got != "msg-provider-123" {
+		t.Fatalf("reported Claude response ID=%q", got)
+	}
+	if got := bodyAttributes["gen_ai.response.model"]; got != "claude-sonnet-4" {
+		t.Fatalf("reported Claude response model=%q", got)
+	}
+	if got := bodyAttributes["defenseclaw.model.response.id"]; got != "msg-provider-123" {
+		t.Fatalf("internal Claude response ID=%q", got)
 	}
 }
 

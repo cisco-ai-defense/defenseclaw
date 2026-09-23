@@ -26,7 +26,16 @@ from defenseclaw.commands.cmd_doctor import (
     _fix_stale_pid,
     _trusted_gateway_listener,
 )
-from defenseclaw.doctor_gateway import ListenerEvidence, PIDRecord, ProcessEvidence
+from defenseclaw.doctor_gateway import (
+    ListenerEvidence,
+    PIDRecord,
+    ProcessEvidence,
+    WatchdogOwnershipEvidence,
+    WatchdogStateEvidence,
+    inspect_watchdog_ownership,
+    read_watchdog_pid_record,
+    read_watchdog_state,
+)
 
 
 class FakeEvidence:
@@ -73,7 +82,7 @@ def make_cfg(data_dir: str, token: str, *, token_env: str = ""):
     return SimpleNamespace(data_dir=data_dir, gateway=gateway)
 
 
-def status_response(data_dir: str, *, pid: int = 4242):
+def status_response(data_dir: str, *, pid: object = 4242):
     return 200, json.dumps({"runtime": {"pid": pid, "data_dir": data_dir}})
 
 
@@ -111,6 +120,28 @@ class WindowsGatewayDoctorTests(unittest.TestCase):
             [row["label"] for row in result.checks],
             ["Gateway PID identity", "Gateway listener owner", "Gateway token drift", "Gateway home"],
         )
+
+    def test_authenticated_listener_owner_rejects_noncanonical_runtime_pid(self):
+        for runtime_pid in (
+            4242.9,
+            4242.0,
+            True,
+            None,
+            {},
+            [],
+            "not-a-pid",
+            0,
+            -1,
+            "4242",
+            "004242",
+            "+4242",
+            " 4242 ",
+        ):
+            with self.subTest(runtime_pid=runtime_pid):
+                result = self.run_check(response=status_response(self.home, pid=runtime_pid))
+                row = next(row for row in result.checks if row["label"] == "Gateway listener owner")
+                self.assertEqual(row["status"], "fail")
+                self.assertIn("runtime PID is unavailable", row["detail"])
 
     def test_missing_process_is_stale_and_listener_cannot_mask_it(self):
         evidence = FakeEvidence(process=ProcessEvidence("missing", pid=4242))
@@ -391,8 +422,534 @@ class WindowsGatewayDoctorTests(unittest.TestCase):
         lifecycle.assert_not_called()
 
 
+class FakeWatchdogEvidence:
+    def __init__(self, *, record=None, process=None, state=None, ownership=None):
+        executable = os.path.abspath("defenseclaw-gateway.exe")
+        self.record_result = record or PIDRecord(
+            "ok",
+            pid=4242,
+            executable=executable,
+            start_identity="start-1",
+        )
+        self.process_result = process or ProcessEvidence(
+            "ok",
+            pid=4242,
+            executable=executable,
+            start_identity="start-1",
+        )
+        self.state_result = state or WatchdogStateEvidence("ok", state="healthy")
+        self.ownership_result = ownership or WatchdogOwnershipEvidence(
+            "held",
+            source="stable",
+            reason="ownership lock is held",
+        )
+
+    def pid_record(self, _path):
+        return self.record_result
+
+    def watchdog_pid_record(self, _path):
+        return self.record_result
+
+    def process(self, _pid):
+        return self.process_result
+
+    def watchdog_state(self, _path):
+        return self.state_result
+
+    def watchdog_ownership(self, _stable_path, _legacy_pid_path):
+        return self.ownership_result
+
+
+def make_watchdog_cfg(data_dir: str, *, enabled: bool = True):
+    return SimpleNamespace(
+        data_dir=data_dir,
+        gateway=SimpleNamespace(watchdog=SimpleNamespace(enabled=enabled)),
+    )
+
+
+class WindowsWatchdogDoctorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-watchdog-")
+        self.cfg = make_watchdog_cfg(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_check(self, evidence: FakeWatchdogEvidence) -> _DoctorResult:
+        result = _DoctorResult()
+        applicable = cmd_doctor._check_windows_watchdog_diagnostics(
+            self.cfg,
+            result,
+            evidence=evidence,
+            platform_name="win32",
+        )
+        self.assertTrue(applicable)
+        return result
+
+    def test_real_gateway_evidence_exposes_watchdog_runtime_collectors(self):
+        executable = os.path.abspath("defenseclaw-gateway.exe")
+        record = PIDRecord(
+            "ok",
+            pid=4242,
+            executable=executable,
+            start_identity="start-1",
+        )
+        process = ProcessEvidence(
+            "ok",
+            pid=4242,
+            executable=executable,
+            start_identity="start-1",
+        )
+        ownership = WatchdogOwnershipEvidence("held", source="stable", reason="ownership lock is held")
+        state = WatchdogStateEvidence("ok", state="healthy")
+        evidence = cmd_doctor.GatewayEvidence(platform_name="win32")
+
+        with (
+            patch("defenseclaw.doctor_gateway.read_watchdog_pid_record", return_value=record) as pid_reader,
+            patch("defenseclaw.doctor_gateway._windows_process_evidence", return_value=process) as process_reader,
+            patch("defenseclaw.doctor_gateway.inspect_watchdog_ownership", return_value=ownership) as ownership_reader,
+            patch("defenseclaw.doctor_gateway.read_watchdog_state", return_value=state) as state_reader,
+        ):
+            posture, detail, observed_state = cmd_doctor._inspect_windows_watchdog_runtime(self.cfg, evidence)
+
+        pid_path = os.path.join(self.temp.name, "watchdog.pid")
+        ownership_path = os.path.join(self.temp.name, ".watchdog.lock")
+        state_path = os.path.join(self.temp.name, "watchdog.state")
+        self.assertEqual(posture, "running")
+        self.assertIn("stable .watchdog.lock", detail)
+        self.assertEqual(observed_state, state)
+        pid_reader.assert_called_once_with(pid_path, platform_name="win32")
+        process_reader.assert_called_once_with(4242)
+        ownership_reader.assert_called_once_with(ownership_path, pid_path, platform_name="win32")
+        state_reader.assert_called_once_with(state_path)
+
+    def test_enabled_missing_zero_byte_and_stale_are_exact_failures(self):
+        cases = (
+            (PIDRecord("missing", reason="PID file is missing"), ProcessEvidence("missing"), "missing"),
+            (PIDRecord("malformed", reason="PID file is empty"), ProcessEvidence("missing"), "empty"),
+            (
+                PIDRecord(
+                    "ok",
+                    pid=4242,
+                    executable=os.path.abspath("defenseclaw-gateway.exe"),
+                    start_identity="start-1",
+                ),
+                ProcessEvidence("missing", pid=4242),
+                "does not exist",
+            ),
+        )
+        for record, process, expected in cases:
+            with self.subTest(expected=expected):
+                result = self.run_check(
+                    FakeWatchdogEvidence(
+                        record=record,
+                        process=process,
+                        ownership=WatchdogOwnershipEvidence("unlocked", source="stable"),
+                    )
+                )
+                runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                state = next(row for row in result.checks if row["label"] == "Watchdog last-known state")
+                self.assertEqual(runtime["status"], "fail")
+                self.assertIn("enabled but not running", runtime["detail"])
+                self.assertIn(expected, runtime["detail"])
+                self.assertEqual(state["status"], "skip")
+
+    def test_reparse_and_live_foreign_identity_fail_without_trust(self):
+        reparse = self.run_check(
+            FakeWatchdogEvidence(record=PIDRecord("malformed", reason="PID file is a symbolic link or reparse point"))
+        )
+        reparse_runtime = next(row for row in reparse.checks if row["label"] == "Watchdog runtime")
+        self.assertEqual(reparse_runtime["status"], "fail")
+        self.assertIn("unsafe", reparse_runtime["detail"])
+
+        foreign = self.run_check(
+            FakeWatchdogEvidence(
+                process=ProcessEvidence(
+                    "ok",
+                    pid=4242,
+                    executable=os.path.abspath("unrelated.exe"),
+                    start_identity="start-1",
+                )
+            )
+        )
+        foreign_runtime = next(row for row in foreign.checks if row["label"] == "Watchdog runtime")
+        self.assertEqual(foreign_runtime["status"], "fail")
+        self.assertIn("foreign", foreign_runtime["detail"])
+
+    def test_running_healthy_degraded_and_down_have_distinct_severity(self):
+        cases = (
+            ("healthy", "pass"),
+            ("degraded", "warn"),
+            ("down", "fail"),
+        )
+        for state_name, status in cases:
+            with self.subTest(state=state_name):
+                result = self.run_check(FakeWatchdogEvidence(state=WatchdogStateEvidence("ok", state=state_name)))
+                runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                state = next(row for row in result.checks if row["label"] == "Watchdog last-known state")
+                self.assertEqual(runtime["status"], "pass")
+                self.assertEqual(state["status"], status)
+                if state_name == "degraded":
+                    self.assertIn("downstream connector", state["detail"])
+                    self.assertIn("restarting the watchdog is not a repair", state["detail"])
+
+    def test_matching_live_process_without_ownership_lock_is_not_healthy(self):
+        result = self.run_check(
+            FakeWatchdogEvidence(
+                ownership=WatchdogOwnershipEvidence("unlocked", source="stable", reason="lock is free")
+            )
+        )
+        runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+        state = next(row for row in result.checks if row["label"] == "Watchdog last-known state")
+        self.assertEqual(runtime["status"], "fail")
+        self.assertIn("unowned", runtime["detail"])
+        self.assertIn("no held stable or legacy", runtime["detail"])
+        self.assertEqual(state["status"], "skip")
+
+    def test_stable_and_legacy_held_ownership_are_reported_truthfully(self):
+        for source, expected in (("stable", ".watchdog.lock"), ("legacy", "legacy canonical PID")):
+            with self.subTest(source=source):
+                result = self.run_check(
+                    FakeWatchdogEvidence(
+                        ownership=WatchdogOwnershipEvidence("held", source=source, reason="lock is held")
+                    )
+                )
+                runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                self.assertEqual(runtime["status"], "pass")
+                self.assertIn(expected, runtime["detail"])
+
+    def test_held_ownership_never_overrides_unsafe_canonical_pid_custody(self):
+        custody_failures = (
+            "watchdog PID file DACL grants broad read access",
+            "watchdog PID file DACL grants broad write access",
+            "watchdog PID file owner is not trusted",
+        )
+        for source in ("stable", "legacy"):
+            for reason in custody_failures:
+                with self.subTest(source=source, reason=reason):
+                    result = self.run_check(
+                        FakeWatchdogEvidence(
+                            record=PIDRecord("malformed", reason=reason),
+                            ownership=WatchdogOwnershipEvidence("held", source=source, reason="lock is held"),
+                        )
+                    )
+                    runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                    state = next(row for row in result.checks if row["label"] == "Watchdog last-known state")
+                    self.assertEqual(runtime["status"], "fail")
+                    self.assertIn("unsafe", runtime["detail"])
+                    self.assertEqual(state["status"], "skip")
+
+    def test_held_ownership_never_overrides_denied_canonical_pid_custody(self):
+        for source in ("stable", "legacy"):
+            with self.subTest(source=source):
+                result = self.run_check(
+                    FakeWatchdogEvidence(
+                        record=PIDRecord("denied", reason="watchdog PID custody inspection access denied"),
+                        ownership=WatchdogOwnershipEvidence("held", source=source, reason="lock is held"),
+                    )
+                )
+                runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                self.assertEqual(runtime["status"], "warn")
+                self.assertNotEqual(runtime["status"], "pass")
+
+    def test_uninspectable_or_incomplete_held_ownership_never_passes(self):
+        cases = (
+            FakeWatchdogEvidence(
+                ownership=WatchdogOwnershipEvidence("denied", source="stable", reason="access denied")
+            ),
+            FakeWatchdogEvidence(
+                record=PIDRecord("missing"),
+                ownership=WatchdogOwnershipEvidence("held", source="stable", reason="lock is held"),
+            ),
+        )
+        for evidence in cases:
+            with self.subTest(ownership=evidence.ownership_result, record=evidence.record_result):
+                result = self.run_check(evidence)
+                runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+                self.assertEqual(runtime["status"], "warn")
+                self.assertNotIn("running", runtime["detail"])
+
+    def test_disabled_missing_is_explicit_skip(self):
+        self.cfg = make_watchdog_cfg(self.temp.name, enabled=False)
+        result = self.run_check(
+            FakeWatchdogEvidence(
+                record=PIDRecord("missing"),
+                ownership=WatchdogOwnershipEvidence("missing"),
+            )
+        )
+        runtime = next(row for row in result.checks if row["label"] == "Watchdog runtime")
+        self.assertEqual(runtime["status"], "skip")
+        self.assertIn("disabled", runtime["detail"])
+
+    def test_state_reader_refuses_reparse_and_bounds_content(self):
+        state_path = os.path.join(self.temp.name, "watchdog.state")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            handle.write("degraded")
+        self.assertEqual(read_watchdog_state(state_path), WatchdogStateEvidence("ok", state="degraded"))
+        with patch("defenseclaw.doctor_gateway.is_symlink", return_value=True):
+            self.assertEqual(read_watchdog_state(state_path).status, "malformed")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            handle.write("x" * 65)
+        self.assertEqual(read_watchdog_state(state_path).status, "malformed")
+
+
+class WindowsWatchdogOwnershipEvidenceTests(unittest.TestCase):
+    def test_stable_held_is_authoritative_without_legacy_probe(self):
+        stable = WatchdogOwnershipEvidence("held", source="stable", reason="lock is held")
+        with patch(
+            "defenseclaw.doctor_gateway._windows_watchdog_file_lock_evidence",
+            return_value=stable,
+        ) as probe:
+            result = inspect_watchdog_ownership("stable.lock", "watchdog.pid", platform_name="win32")
+        self.assertEqual(result, stable)
+        probe.assert_called_once_with("stable.lock", source="stable")
+
+    def test_legacy_held_is_bounded_compatibility_when_stable_is_not_held(self):
+        for stable in (
+            WatchdogOwnershipEvidence("missing", source="stable"),
+            WatchdogOwnershipEvidence("unlocked", source="stable"),
+        ):
+            with self.subTest(stable=stable.status):
+                legacy = WatchdogOwnershipEvidence("held", source="legacy", reason="legacy lock is held")
+                with patch(
+                    "defenseclaw.doctor_gateway._windows_watchdog_file_lock_evidence",
+                    side_effect=[stable, legacy],
+                ) as probe:
+                    result = inspect_watchdog_ownership("stable.lock", "watchdog.pid", platform_name="win32")
+                self.assertEqual(result, legacy)
+                self.assertEqual(probe.call_count, 2)
+
+    def test_uninspectable_stable_ownership_fails_closed_without_legacy_probe(self):
+        denied = WatchdogOwnershipEvidence("denied", source="stable", reason="access denied")
+        with patch(
+            "defenseclaw.doctor_gateway._windows_watchdog_file_lock_evidence",
+            return_value=denied,
+        ) as probe:
+            result = inspect_watchdog_ownership("stable.lock", "watchdog.pid", platform_name="win32")
+        self.assertEqual(result, denied)
+        probe.assert_called_once_with("stable.lock", source="stable")
+
+
+class WindowsWatchdogFixTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-watchdog-fix-")
+        self.cfg = make_watchdog_cfg(self.temp.name)
+        self.pid_path = os.path.join(self.temp.name, "watchdog.pid")
+        with open(self.pid_path, "wb") as handle:
+            handle.write(b"")
+        self.empty = FakeWatchdogEvidence(
+            record=PIDRecord("malformed", reason="PID file is empty"),
+            ownership=WatchdogOwnershipEvidence("unlocked", source="stable"),
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_dry_run_shows_guarded_start_and_does_not_mutate(self):
+        with open(self.pid_path, "rb") as handle:
+            before = handle.read()
+        with (
+            patch.object(cmd_doctor.sys, "platform", "win32"),
+            patch.object(cmd_doctor, "GatewayEvidence", return_value=self.empty),
+            patch.object(cmd_doctor.shutil, "which", return_value=r"D:\bin\defenseclaw-gateway.exe"),
+            patch.object(cmd_doctor.subprocess, "run") as run_mock,
+        ):
+            outcome = cmd_doctor._preview_watchdog_runtime_fix(self.cfg)
+        self.assertEqual(outcome[0], "skip")
+        self.assertIn("defenseclaw-gateway watchdog start", outcome[1])
+        self.assertIn("dry-run; no changes made", outcome[1])
+        run_mock.assert_not_called()
+        with open(self.pid_path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_actual_fix_uses_gateway_start_without_manual_deletion(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="started", stderr="")
+        with (
+            patch.object(cmd_doctor.sys, "platform", "win32"),
+            patch.object(cmd_doctor, "GatewayEvidence", return_value=self.empty),
+            patch.object(cmd_doctor.shutil, "which", return_value=r"D:\bin\defenseclaw-gateway.exe"),
+            patch.object(cmd_doctor.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            outcome = cmd_doctor._fix_watchdog_runtime(self.cfg, assume_yes=True)
+        self.assertEqual(outcome[0], "pass")
+        run_mock.assert_called_once_with(
+            [r"D:\bin\defenseclaw-gateway.exe", "watchdog", "start"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertTrue(os.path.exists(self.pid_path))
+        self.assertEqual(os.path.getsize(self.pid_path), 0)
+
+    def test_repair_is_supported_only_for_unlocked_stopped_invalid_or_stale(self):
+        unlocked = WatchdogOwnershipEvidence("unlocked", source="stable", reason="lock is free")
+        cases = (
+            FakeWatchdogEvidence(
+                record=PIDRecord("missing"),
+                ownership=WatchdogOwnershipEvidence("missing"),
+            ),
+            self.empty,
+            FakeWatchdogEvidence(
+                process=ProcessEvidence("missing", pid=4242),
+                ownership=unlocked,
+            ),
+        )
+        for evidence in cases:
+            with self.subTest(record=evidence.record_result, process=evidence.process_result):
+                with (
+                    patch.object(cmd_doctor.sys, "platform", "win32"),
+                    patch.object(cmd_doctor, "GatewayEvidence", return_value=evidence),
+                ):
+                    repair, _detail = cmd_doctor._watchdog_repair_posture(self.cfg)
+                self.assertTrue(repair)
+
+    def test_unsafe_foreign_and_degraded_postures_refuse_restart(self):
+        cases = (
+            FakeWatchdogEvidence(record=PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")),
+            FakeWatchdogEvidence(
+                record=PIDRecord("malformed", reason="watchdog PID file DACL grants broad write access")
+            ),
+            FakeWatchdogEvidence(record=PIDRecord("denied", reason="watchdog PID custody inspection access denied")),
+            FakeWatchdogEvidence(
+                record=PIDRecord("malformed", reason="PID file is empty"),
+                ownership=WatchdogOwnershipEvidence("held", source="stable", reason="lock is held"),
+            ),
+            FakeWatchdogEvidence(
+                process=ProcessEvidence(
+                    "ok",
+                    pid=4242,
+                    executable=os.path.abspath("unrelated.exe"),
+                    start_identity="start-1",
+                )
+            ),
+            FakeWatchdogEvidence(state=WatchdogStateEvidence("ok", state="degraded")),
+            FakeWatchdogEvidence(
+                ownership=WatchdogOwnershipEvidence("unlocked", source="stable", reason="lock is free")
+            ),
+        )
+        for evidence in cases:
+            with self.subTest(record=evidence.record_result, state=evidence.state_result):
+                with (
+                    patch.object(cmd_doctor.sys, "platform", "win32"),
+                    patch.object(cmd_doctor, "GatewayEvidence", return_value=evidence),
+                    patch.object(cmd_doctor.subprocess, "run") as run_mock,
+                ):
+                    outcome = cmd_doctor._fix_watchdog_runtime(self.cfg, assume_yes=True)
+                self.assertIn(outcome[0], {"skip", "warn"})
+                run_mock.assert_not_called()
+
+
 @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
 class NativeWindowsGatewayDoctorSmokeTests(unittest.TestCase):
+    def test_watchdog_pid_reader_binds_private_custody_and_decode_to_one_handle(self):
+        from defenseclaw import windows_acl
+
+        with tempfile.TemporaryDirectory(prefix="doctor-watchdog-pid-") as home:
+            pid_path = os.path.join(home, "watchdog.pid")
+            payload = {
+                "pid": 4242,
+                "executable": os.path.abspath("defenseclaw-gateway.exe"),
+                "start_identity": "start-1",
+            }
+            with open(pid_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            windows_acl.apply_path(
+                pid_path,
+                windows_acl.private_security_for_directory(home),
+            )
+
+            valid = read_watchdog_pid_record(pid_path, platform_name="win32")
+            self.assertEqual(valid.status, "ok")
+            self.assertEqual(valid.pid, 4242)
+
+            custody_failures = (
+                ("assert_not_broadly_readable", "DACL grants broad read access"),
+                ("assert_not_broadly_writable", "DACL grants broad write access"),
+                ("assert_trusted_owner", "file owner is not trusted"),
+            )
+            for assertion, reason in custody_failures:
+                with self.subTest(assertion=assertion):
+                    with patch(
+                        f"defenseclaw.windows_acl.{assertion}",
+                        side_effect=windows_acl.WindowsAclError(reason),
+                    ):
+                        refused = read_watchdog_pid_record(pid_path, platform_name="win32")
+                    self.assertEqual(refused.status, "malformed")
+                    self.assertIn("owner or DACL", refused.reason)
+
+            with patch("defenseclaw.doctor_gateway.os.path.samestat", return_value=False):
+                changed = read_watchdog_pid_record(pid_path, platform_name="win32")
+            self.assertEqual(changed.status, "unavailable")
+
+            with patch(
+                "defenseclaw.windows_acl.open_regular_read_fd_shared_delete",
+                side_effect=windows_acl.WindowsAclError(5, "access denied"),
+            ):
+                denied = read_watchdog_pid_record(pid_path, platform_name="win32")
+            self.assertEqual(denied.status, "denied")
+
+    def test_watchdog_ownership_probe_observes_exact_stable_lock(self):
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        from defenseclaw import windows_acl
+        from defenseclaw.doctor_gateway import _windows_watchdog_file_lock_evidence
+
+        with tempfile.TemporaryDirectory(prefix="doctor-watchdog-lock-") as home:
+            ownership_path = os.path.join(home, ".watchdog.lock")
+            with open(ownership_path, "wb") as handle:
+                handle.write(b"DefenseClaw watchdog ownership v1\n")
+            windows_acl.apply_path(
+                ownership_path,
+                windows_acl.private_security_for_directory(home),
+            )
+            self.assertEqual(
+                _windows_watchdog_file_lock_evidence(ownership_path, source="stable").status,
+                "unlocked",
+            )
+
+            class OVERLAPPED(ctypes.Structure):
+                _fields_ = [
+                    ("Internal", ctypes.c_size_t),
+                    ("InternalHigh", ctypes.c_size_t),
+                    ("Offset", wintypes.DWORD),
+                    ("OffsetHigh", wintypes.DWORD),
+                    ("hEvent", wintypes.HANDLE),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            lock_file = kernel32.LockFileEx
+            lock_file.argtypes = (
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.POINTER(OVERLAPPED),
+            )
+            lock_file.restype = wintypes.BOOL
+            unlock_file = kernel32.UnlockFileEx
+            unlock_file.argtypes = (
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.POINTER(OVERLAPPED),
+            )
+            unlock_file.restype = wintypes.BOOL
+
+            with open(ownership_path, "r+b") as holder:
+                overlapped = OVERLAPPED(OffsetHigh=0x4000_0000)
+                native_handle = wintypes.HANDLE(msvcrt.get_osfhandle(holder.fileno()))
+                self.assertTrue(lock_file(native_handle, 0x3, 0, 1, 0, ctypes.byref(overlapped)))
+                try:
+                    evidence = _windows_watchdog_file_lock_evidence(ownership_path, source="stable")
+                    self.assertEqual(evidence.status, "held")
+                finally:
+                    self.assertTrue(unlock_file(native_handle, 0, 1, 0, ctypes.byref(overlapped)))
+
     def test_stale_pid_repair_serializes_replacement_through_verified_handle(self):
         with tempfile.TemporaryDirectory(prefix="doctor-native-pid-race-") as home:
             pid_path = os.path.join(home, "gateway.pid")

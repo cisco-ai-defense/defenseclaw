@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -30,6 +31,15 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+// daemonStartDir keeps the detached gateway out of the protected data
+// directory. Windows pins a process working directory against rename/delete,
+// which would otherwise make concurrent custody checks (including Doctor)
+// fail while the gateway is healthy. The executable directory is already the
+// trusted launch boundary and remains stable for the process lifetime.
+func daemonStartDir(executable, _ string) string {
+	return filepath.Dir(filepath.Clean(executable))
+}
 
 func processExecutableWindows(pid int) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))

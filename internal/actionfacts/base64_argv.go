@@ -18,6 +18,47 @@ package actionfacts
 
 import "strings"
 
+// StaticPOSIXBase64EncodeStdinSource returns the one static path whose bytes a
+// trusted no-argument POSIX base64 invocation reads from stdin before emitting
+// encoded bytes on stdout. It deliberately excludes wrappers, nested commands,
+// options and operands, multiple stdin sources, and stdout redirection so a
+// caller can bind the path to an exact structural pipeline flow.
+func StaticPOSIXBase64EncodeStdinSource(
+	command CommandFact,
+) (string, bool) {
+	if command.Dialect != DialectPOSIX ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		command.ParentCommandID != 0 || len(command.Wrappers) != 0 ||
+		command.Program != "base64" || len(command.Argv) != 1 ||
+		command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "base64") ||
+		len(command.Arguments) != len(command.Argv) {
+		return "", false
+	}
+	for index, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == QuoteMixed ||
+			argument.Value != command.Argv[index] {
+			return "", false
+		}
+	}
+
+	stdinSource := ""
+	for _, redirect := range command.Redirects {
+		if redirect.FD == 1 || redirect.FD == -1 {
+			return "", false
+		}
+		if redirect.FD != 0 {
+			continue
+		}
+		if stdinSource != "" || redirect.Access != PathAccessRead ||
+			redirect.Target == "" || redirect.Expands {
+			return "", false
+		}
+		stdinSource = redirect.Target
+	}
+	return stdinSource, stdinSource != ""
+}
+
 // portableBase64DecodeArgvParse describes the argv subset whose input and
 // decoded-stdout behavior agree between GNU coreutils and BSD/macOS base64.
 // GNU treats -i as ignore-garbage while BSD/macOS treats it as an input-file

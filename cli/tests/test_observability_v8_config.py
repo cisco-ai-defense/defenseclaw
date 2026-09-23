@@ -72,7 +72,7 @@ def test_minimal_source_and_parity_contract_are_deterministic() -> None:
     assert contract["push_batch_defaults"] == PUSH_BATCH_DEFAULTS
     assert contract["queue_bounds"] == {name: list(bounds) for name, bounds in QUEUE_BOUNDS.items()}
     assert contract["push_batch_bounds"] == {name: list(bounds) for name, bounds in PUSH_BATCH_BOUNDS.items()}
-    assert contract["profiles"] == ["none", "sensitive", "content", "strict", "legacy-v7"]
+    assert contract["profiles"] == ["none", "sensitive", "content", "strict"]
 
 
 def test_extreme_yaml_depth_is_rejected_before_recursion_escapes() -> None:
@@ -699,10 +699,10 @@ observability:
     assert captured.value.path.endswith("signal_overrides.logs.path")
 
 
-def test_legacy_v7_profile_and_adapter_compatibility_fields_validate() -> None:
+def test_adapter_compatibility_fields_validate() -> None:
     source = """config_version: 8
 observability:
-  defaults: {redaction_profile: legacy-v7}
+  defaults: {redaction_profile: strict}
   destinations:
     - name: splunk
       kind: splunk_hec
@@ -719,18 +719,20 @@ observability:
 """
     validated = load_validate_v8(source)
 
-    assert validated.source["observability"]["defaults"]["redaction_profile"] == "legacy-v7"
+    assert validated.source["observability"]["defaults"]["redaction_profile"] == "strict"
     assert validated.source["observability"]["destinations"][1]["logger_name"] == "defenseclaw.audit"
 
 
 @pytest.mark.parametrize(
     "profile",
     [
-        "redaction_profiles: {legacy-v7: {extends: strict}}",
+        "defaults: {redaction_profile: legacy-v7}",
         "redaction_profiles: {compat: {extends: legacy-v7}}",
     ],
 )
-def test_legacy_v7_is_reserved_and_not_extendable(profile: str) -> None:
+def test_retired_legacy_v7_profile_is_not_selectable(profile: str) -> None:
+    # legacy-v7 was a built-in until it was retired. Neither selecting it nor
+    # extending it may quietly succeed against a config that predates removal.
     with pytest.raises(V8ConfigError):
         load_validate_v8(f"config_version: 8\nobservability:\n  {profile}\n")
 

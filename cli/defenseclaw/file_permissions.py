@@ -63,6 +63,127 @@ class UnsafePathError(OSError):
 
 MAX_DOTENV_BYTES = 1024 * 1024
 
+
+def trusted_runtime_owner(st_uid: int, *, current_uid: int | None = None) -> bool:
+    """True when *st_uid* may hold a self-managed ~/.defenseclaw runtime file.
+
+    Root may access root-owned files and files owned by the validated sudo
+    invoker. Merely running as root never makes an arbitrary UID trusted.
+    Group/other-writable bits are a separate check.
+    """
+
+    if current_uid is None:
+        geteuid = getattr(os, "geteuid", None)
+        current_uid = geteuid() if callable(geteuid) else st_uid
+    if st_uid in {0, current_uid}:
+        return True
+    if current_uid != 0:
+        return False
+    getuid = getattr(os, "getuid", None)
+    real_uid = getuid() if callable(getuid) else 0
+    if real_uid > 0 and st_uid == real_uid:
+        return True
+    sudo_uid = _validated_sudo_uid()
+    return sudo_uid is not None and st_uid == sudo_uid
+
+
+def _validated_sudo_uid() -> int | None:
+    """Return the sudo invoker UID only when account identity agrees."""
+
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return None
+    raw_uid = os.environ.get("SUDO_UID", "")
+    raw_gid = os.environ.get("SUDO_GID", "")
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if not raw_uid.isdecimal() or not raw_gid.isdecimal() or not sudo_user:
+        return None
+    uid = int(raw_uid)
+    gid = int(raw_gid)
+    if str(uid) != raw_uid or str(gid) != raw_gid or uid == 0:
+        return None
+    try:
+        import pwd
+
+        account = pwd.getpwnam(sudo_user)
+    except (ImportError, KeyError, OSError):
+        return None
+    if account.pw_uid != uid or account.pw_gid != gid:
+        return None
+    return uid
+
+
+def root_owned_private_regular_file(path: str | os.PathLike[str]) -> bool:
+    """True when *path* is a private regular file owned by root.
+
+    ``lstat`` works without read access, so first-run and Doctor can name a
+    sudo leftover instead of calling the file unavailable.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid"):
+        return False
+    try:
+        current_uid = os.geteuid()
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if current_uid == 0 or info.st_uid != 0:
+        return False
+    return bool(stat.S_ISREG(info.st_mode) and not (stat.S_IMODE(info.st_mode) & 0o077))
+
+
+# Files a sudo-started self-managed gateway writes into ~/.defenseclaw.
+# Doctor and first-run name these leftovers instead of calling them unavailable.
+SUDO_RUNTIME_LEFTOVER_NAMES: tuple[str, ...] = (
+    "gateway.pid",
+    "watchdog.pid",
+    "hook_contract_lock.json",
+    "active_connector.json",
+    "ai_discovery_state.json",
+    "application_protection_state.json",
+    "redaction-correlation.key",
+    "device.key",
+    "device.key.provenance",
+)
+
+
+def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
+    """Return relative paths of private root-owned leftovers under *data_dir*."""
+
+    if os.name == "nt" or not hasattr(os, "geteuid"):
+        return []
+    root = os.fspath(data_dir)
+    leftovers: list[str] = []
+    for name in SUDO_RUNTIME_LEFTOVER_NAMES:
+        if root_owned_private_regular_file(os.path.join(root, name)):
+            leftovers.append(name)
+
+    hooks_dir = os.path.join(root, "hooks")
+    try:
+        info = os.lstat(hooks_dir)
+    except OSError:
+        return leftovers
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return leftovers
+    current_uid = os.geteuid()
+    if (
+        current_uid != 0
+        and info.st_uid == 0
+        and not (stat.S_IMODE(info.st_mode) & 0o022)
+    ):
+        leftovers.append("hooks/")
+    try:
+        names = os.listdir(hooks_dir)
+    except OSError:
+        return leftovers
+    for name in sorted(names):
+        if not (name.startswith(".hook-") and name.endswith(".token")):
+            continue
+        rel = f"hooks/{name}"
+        if root_owned_private_regular_file(os.path.join(hooks_dir, name)):
+            leftovers.append(rel)
+    return leftovers
+
+
 _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
     {
         "S-1-5-18",  # LocalSystem
@@ -1145,6 +1266,7 @@ def atomic_write_private(
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
+    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1164,9 +1286,19 @@ def atomic_write_private(
     A rollback may provide its previously captured ``windows_managed_security``
     so the exact accepted descriptor, rather than generation B's descriptor,
     is applied to the staged replacement before publication.
+
+    ``allow_windows_system_controllers_in_parent`` applies only when an
+    operator-selected parent is preserved. It admits the Windows system
+    controller SIDs already trusted by the custody policy while still
+    requiring current-user ownership and rejecting every other writer. The
+    staged and published file retains the stricter owner/SYSTEM-only policy.
     """
     if windows_managed_security is not None and not windows_managed_custody:
         raise ValueError("managed Windows security requires managed-custody mode")
+    if allow_windows_system_controllers_in_parent and protect_parent:
+        raise ValueError("trusted Windows parent custody requires protect_parent=False")
+    if allow_windows_system_controllers_in_parent and windows_managed_custody:
+        raise ValueError("trusted Windows parent custody and managed-custody mode are mutually exclusive")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
@@ -1184,7 +1316,10 @@ def atomic_write_private(
         elif protect_parent:
             _protect_private_directory(parent)
         else:
-            _validate_unmodified_parent(parent)
+            _validate_unmodified_parent(
+                parent,
+                allow_windows_system_controllers=allow_windows_system_controllers_in_parent,
+            )
         _reject_reparse_path(target, allow_missing=True)
 
         managed_security = windows_managed_security
@@ -1259,6 +1394,7 @@ def atomic_write_private_bytes(
     data: bytes,
     *,
     protect_parent: bool = True,
+    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1276,6 +1412,7 @@ def atomic_write_private_bytes(
         path,
         _write,
         protect_parent=protect_parent,
+        allow_windows_system_controllers_in_parent=allow_windows_system_controllers_in_parent,
         windows_managed_custody=windows_managed_custody,
         windows_managed_security=windows_managed_security,
     )
@@ -1319,6 +1456,7 @@ def windows_acl_custody_write_error(
     *,
     allow_current_user: bool,
     require_current_user_owner: bool = False,
+    ancestor_replace_only: bool = False,
 ) -> str | None:
     """Return why a path is outside trusted Windows write custody.
 
@@ -1364,8 +1502,16 @@ def windows_acl_custody_write_error(
     if trust_current_user:
         trusted_writers.add(current_sid)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    ancestor_replace_mask = 0x10000000 | 0x40000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x40
     for permissions, access_mode, inheritance, sid in entries:
-        if access_mode not in (1, 2) or not permissions & write_mask:
+        if access_mode not in (1, 2):
+            continue
+        effective_write_mask = write_mask
+        if ancestor_replace_only and inheritance & 0x08:
+            continue  # INHERIT_ONLY_ACE does not apply to this directory.
+        if ancestor_replace_only and sid != "S-1-1-0":
+            effective_write_mask = ancestor_replace_mask
+        if not permissions & effective_write_mask:
             continue
         if sid in trusted_writers:
             continue
@@ -1502,10 +1648,21 @@ def _protect_private_directory(path: str) -> None:
         copy_windows_dacl(path, path)
 
 
-def _validate_unmodified_parent(path: str) -> None:
+def _validate_unmodified_parent(
+    path: str,
+    *,
+    allow_windows_system_controllers: bool = False,
+) -> None:
     """Fail closed when an operator-selected parent is replaceable by others."""
     if os.name == "nt":
-        problem = windows_acl_write_error(path)
+        if allow_windows_system_controllers:
+            problem = windows_acl_custody_write_error(
+                path,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            )
+        else:
+            problem = windows_acl_write_error(path)
         if problem is not None:
             raise OSError(f"unsafe export parent {path}: {problem}")
         return
@@ -1731,14 +1888,14 @@ def _windows_current_user_sid() -> str:
 
 
 def _reject_reparse_chain(path: str) -> None:
-    current = Path(os.path.abspath(path))
     if os.name != "nt":
         # POSIX systems intentionally ship symlinked system ancestors (for
         # example macOS /tmp -> /private/tmp). The caller-owned leaf must not
         # itself be a symlink, while Windows requires checking every ancestor
         # because a junction is transparent to ordinary path operations.
-        _reject_reparse_path(os.fspath(current), allow_missing=True)
+        _reject_reparse_path(os.path.abspath(path), allow_missing=True)
         return
+    current = Path(os.path.abspath(path))
     while True:
         _reject_reparse_path(os.fspath(current), allow_missing=True)
         if current.parent == current:

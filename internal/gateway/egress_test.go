@@ -94,6 +94,60 @@ func TestHandleEgressEvent_RejectsOversizeBody(t *testing.T) {
 	}
 }
 
+func TestHandleEgressEvent_AcceptsUndiciAndSelfTest(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.gatewayToken = "test-token"
+	proxy.skipAuthForTest = false
+
+	cases := []struct {
+		name       string
+		body       string
+		wantVerify *bool
+	}{
+		{
+			name: "undici intercept is a valid enum",
+			body: `{"target_host":"api.openai.com","branch":"undici","decision":"intercept","reason":"undici-dispatcher"}`,
+		},
+		{
+			name:       "self-test miss records unverified",
+			body:       `{"target_host":"api.openai.com","branch":"selftest","decision":"allow","reason":"interception-self-test-miss"}`,
+			wantVerify: interceptionBool(false),
+		},
+		{
+			name:       "self-test hit records verified",
+			body:       `{"target_host":"api.openai.com","branch":"selftest","decision":"intercept","reason":"interception-self-test"}`,
+			wantVerify: interceptionBool(true),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/events/egress", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Auth", "Bearer test-token")
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+			proxy.handleEgressEvent(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204; body=%q", rec.Code, rec.Body.String())
+			}
+			if tc.wantVerify == nil {
+				return
+			}
+			snap := proxy.health.Snapshot()
+			if snap.Interception == nil {
+				t.Fatal("expected interception document after self-test egress")
+			}
+			if snap.Interception.Verified != *tc.wantVerify {
+				t.Fatalf("verified = %t, want %t", snap.Interception.Verified, *tc.wantVerify)
+			}
+		})
+	}
+}
+
+func interceptionBool(v bool) *bool { return &v }
+
 // TestHandleEgressEvent_RejectsNonPOST locks in the method allow-list.
 func TestHandleEgressEvent_RejectsNonPOST(t *testing.T) {
 	prov := &mockProvider{}

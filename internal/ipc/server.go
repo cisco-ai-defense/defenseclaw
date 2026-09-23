@@ -13,10 +13,8 @@ package ipc
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"time"
@@ -43,6 +41,39 @@ type ServerOptions struct {
 	// Logf is called for structured startup / accept-time log lines.
 	// Defaults to fmt.Fprintln(os.Stderr, …) when nil.
 	Logf func(format string, args ...any)
+}
+
+// codesign_peer_auth log-field values. The literals are stable
+// contract with any log-aggregation rule watching for the beta
+// posture — do not rename without coordinating with the release
+// monitoring path referenced in spec 004 REQ-09.
+const (
+	codesignStateDisabled        = "disabled"
+	codesignStateEnabled         = "enabled"
+	codesignStateDeferredWindows = "deferred_windows"
+)
+
+// codesignStateLabel picks the codesign_peer_auth log-field value
+// based on (a) the runtime OS and (b) whether the operator has any
+// non-empty allowlist / require flag configured. Split from Run so
+// unit tests can drive every combination without booting a server.
+//
+//   - Windows managed_enterprise ⇒ "deferred_windows" regardless of
+//     allowlist state. The accept-time codesign validator is a
+//     Windows-side no-op today (peerauth_windows.go returns
+//     KindUnixPeerUnauthenticated unconditionally); reporting
+//     "enabled" would be a lie. Spec 004 REQ-09.
+//   - Any non-empty require-flag OR allowlist on linux/darwin
+//     ⇒ "enabled".
+//   - Otherwise ⇒ "disabled" (dev / unmanaged path).
+func codesignStateLabel(goos string, requireUnixPeer, requireSigningMetadata bool, allowlistTotal int) string {
+	if goos == "windows" {
+		return codesignStateDeferredWindows
+	}
+	if requireUnixPeer || requireSigningMetadata || allowlistTotal > 0 {
+		return codesignStateEnabled
+	}
+	return codesignStateDisabled
 }
 
 // Server owns the UDS listener, the gRPC server, and the
@@ -106,13 +137,19 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	}
 
 	// Best-effort staff GID lookup for macOS managed_enterprise
-	// socket ownership. On non-macOS or when the group is missing
-	// we leave the gid at 0 and skip the chown; the rest of the
-	// server continues normally.
+	// socket ownership. Gated on GOOS=="darwin" because Debian /
+	// Ubuntu ship an UNRELATED `staff` group at gid 50 with different
+	// membership — resolving it on Linux would silently widen the
+	// IPC surface to every Linux staff-group member. bindListenerForOS
+	// in server_unix.go has a defense-in-depth GOOS check before
+	// using staffGID, but skipping the lookup entirely on non-darwin
+	// is the cleanest posture. See CR spec-004:PRRT_kwDORuAK-s6ankzw.
 	var staffGID uint32
-	if g, err := user.LookupGroup("staff"); err == nil {
-		if gid, convErr := strconv.ParseUint(g.Gid, 10, 32); convErr == nil {
-			staffGID = uint32(gid)
+	if runtime.GOOS == "darwin" {
+		if g, err := user.LookupGroup("staff"); err == nil {
+			if gid, convErr := strconv.ParseUint(g.Gid, 10, 32); convErr == nil {
+				staffGID = uint32(gid)
+			}
 		}
 	}
 
@@ -185,83 +222,17 @@ func NewServer(opts ServerOptions) (*Server, error) {
 // the server and removes the socket file. Returns nil on clean
 // shutdown, or an error on bind / permission / peer-auth failure.
 func (s *Server) Run(ctx context.Context) error {
-	if runtime.GOOS == "windows" {
-		s.setHealth(gateway.StateDisabled, "ipc unsupported on windows")
-		<-ctx.Done()
-		return nil
-	}
-
 	s.setHealth(gateway.StateStarting, "")
 
-	// Directory permissions track the socket's principal-visibility
-	// contract: managed_enterprise creates the parent as root:staff
-	// 0750 (traverse for the console user via the staff group;
-	// installer normally creates this, we MkdirAll as fallback).
-	// Everything else keeps the parent owner-only.
-	dir := filepath.Dir(s.socketPath)
-	dirMode := os.FileMode(0o700)
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) {
-		dirMode = 0o750
-	}
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		wrapped := fmt.Errorf("ipc: mkdir %s: %w", dir, err)
-		s.setHealth(gateway.StateError, wrapped.Error())
-		return wrapped
-	}
-	// MkdirAll respects the process umask (launchd sets 022 or
-	// stricter, so a mode-0750 request lands as 0700). Force the
-	// intended mode explicitly so the staff group actually gets its
-	// traverse bit. Also idempotent when the installer pre-created
-	// the dir with a laxer mode.
-	if err := os.Chmod(dir, dirMode); err != nil {
-		wrapped := fmt.Errorf("ipc: chmod %s: %w", dir, err)
-		s.setHealth(gateway.StateError, wrapped.Error())
-		return wrapped
-	}
-	// Best-effort chown to root:staff on darwin managed_enterprise.
-	// Fails silently on non-root dev runs; a real install runs as
-	// root and the chown succeeds. We rely on os.Chown returning
-	// EPERM for the unprivileged case and only treat other errors
-	// as fatal.
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
-		if err := os.Chown(dir, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
-			wrapped := fmt.Errorf("ipc: chown %s to root:staff: %w", dir, err)
-			s.setHealth(gateway.StateError, wrapped.Error())
-			return wrapped
-		}
-	}
-
-	// Best-effort remove of a stale socket file from a previous run.
-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-		wrapped := fmt.Errorf("ipc: remove stale socket %s: %w", s.socketPath, err)
-		s.setHealth(gateway.StateError, wrapped.Error())
-		return wrapped
-	}
-
-	lc := &net.ListenConfig{}
-	inner, err := lc.Listen(ctx, "unix", s.socketPath)
+	// Bind the listener with per-OS bind-and-ACL discipline. Windows
+	// applies a four-ACE DACL via applyBaselineIPCACL (spec 004);
+	// linux/darwin apply chmod + chown-to-root:staff. The two paths
+	// share every subsequent step (grpc.NewServer, Serve, teardown)
+	// so the code below is OS-agnostic once `lis` is set.
+	inner, err := s.bindListenerForOS(ctx)
 	if err != nil {
-		wrapped := fmt.Errorf("ipc: listen unix %s: %w", s.socketPath, err)
-		s.setHealth(gateway.StateError, wrapped.Error())
-		return wrapped
-	}
-
-	if err := os.Chmod(s.socketPath, s.socketMode); err != nil {
-		_ = inner.Close()
-		wrapped := fmt.Errorf("ipc: chmod socket %s: %w", s.socketPath, err)
-		s.setHealth(gateway.StateError, wrapped.Error())
-		return wrapped
-	}
-	// Chown the socket itself to root:staff in managed_enterprise so
-	// the group-based fs filter is real. Same permission-error
-	// tolerance as the dir chown above.
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
-		if err := os.Chown(s.socketPath, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
-			_ = inner.Close()
-			wrapped := fmt.Errorf("ipc: chown %s to root:staff: %w", s.socketPath, err)
-			s.setHealth(gateway.StateError, wrapped.Error())
-			return wrapped
-		}
+		s.setHealth(gateway.StateError, err.Error())
+		return err
 	}
 
 	lis := newCodesignValidatingListener(inner,
@@ -275,10 +246,28 @@ func (s *Server) Run(ctx context.Context) error {
 	s.grpcSrv = grpc.NewServer()
 	pb.RegisterDefenseClawSecureClientServiceServer(s.grpcSrv, s.svc)
 
-	codesignState := "disabled"
-	if s.requireUnixPeer || s.requireSigningMetadata ||
-		len(s.allowedTeamIDs) > 0 || len(s.allowedSigningIDs) > 0 || len(s.allowedBundleIDs) > 0 {
-		codesignState = "enabled"
+	codesignState := codesignStateLabel(
+		runtime.GOOS,
+		s.requireUnixPeer,
+		s.requireSigningMetadata,
+		len(s.allowedTeamIDs)+len(s.allowedSigningIDs)+len(s.allowedBundleIDs),
+	)
+	// Spec 004 REQ-08: emit the deferred-auth warning line ONCE at
+	// startup, BEFORE the "listening on ..." line, so any log
+	// aggregator has a clear ordering signal for the beta posture.
+	// The warning fires on EVERY Windows build (managed or
+	// unmanaged) because codesignStateLabel returns
+	// `deferred_windows` unconditionally on GOOS=="windows" — the
+	// Windows accept-time codesign validator is a no-op regardless
+	// of deploy mode, so calling it anything else would be a lie.
+	// On non-managed Windows builds the IPC server itself never
+	// starts (ManagedIPCEnabled() gates the sidecar bootstrap in
+	// internal/cli/sidecar.go), so we never actually reach this
+	// branch on non-managed hosts — but the label + warning are
+	// wired identically for defense-in-depth. See CR
+	// spec-004:PRRT_kwDORuAK-s6ankzz.
+	if codesignState == codesignStateDeferredWindows {
+		s.opts.Logf("windows: peer-auth is deferred; UDS is DACL-permissive to Authenticated Users")
 	}
 	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s team_ids=%v signing_ids=%v bundle_ids=%v require_unix_peer=%v require_signing_metadata=%v version=%s)",
 		s.socketPath, s.socketMode, codesignState,

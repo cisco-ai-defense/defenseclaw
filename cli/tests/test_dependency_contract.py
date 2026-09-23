@@ -205,7 +205,7 @@ def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() ->
     """The embedded Python 3.13 runtime must select a compatible Windows ONNX wheel."""
     document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     project_python = SpecifierSet(document["project"]["requires-python"])
-    assert Version("3.13.14") in project_python
+    assert Version("3.13.15") in project_python
     assert Version("3.14.0") not in project_python
     direct = _requirements(document["project"]["dependencies"])
     magika_requirement = direct["magika"]
@@ -219,7 +219,7 @@ def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() ->
 
     windows_python_313_environment = {
         "python_version": "3.13",
-        "python_full_version": "3.13.14",
+        "python_full_version": "3.13.15",
         "sys_platform": "win32",
     }
     windows_python_313 = [

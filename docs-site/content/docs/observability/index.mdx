@@ -46,6 +46,10 @@ For Codex, setup writes a connector-scoped bearer and
 [Codex connector guide](/docs/connectors/codex) for credential, permission, and
 teardown behavior.
 
+End-user attribution is also part of the canonical v8 record. See
+[End-user identity](/docs/observability/end-user-identity) for the uid/SID trust
+boundary, per-profile inventory joins, and the opt-in plaintext email field.
+
 ## Full-fidelity defaults
 
 The minimal configuration is:
@@ -233,6 +237,11 @@ failures, bounded failure class, and open deadline. Transient-open and
 half-open states are warnings; an open authentication, permanent-payload, or
 unsafe-endpoint circuit is a failed Doctor check.
 
+Splunk local-mode operators additionally see circuit open and close
+transitions as durable health log events on the DefenseClaw Gateway Health
+dashboard, since these are logged once per transition rather than sampled as
+a point-in-time metric.
+
 The circuit is runtime suppression, not a silent policy edit. It does not
 rewrite `config.yaml` or permanently disable a route. Repair the destination
 credential or endpoint and reload the gateway. If export is no longer wanted,
@@ -323,12 +332,23 @@ observability:
   local:
     path: ~/.defenseclaw/audit.db
     judge_bodies_path: ~/.defenseclaw/judge_bodies.db
-    retention_days: 90
+    retention_days: 7
 ```
 
-`retention_days: 0` means retain indefinitely and produces a capacity warning.
-Raw judge-body capture is controlled separately by
-`guardrail.retain_judge_bodies`.
+Seven days is also the default when `retention_days` is omitted. The gateway
+runs the graph-aware SQLite reaper after startup readiness and every six hours;
+CLI-only writes are reaped the next time the gateway starts. Existing v8
+configurations that omitted the field therefore adopt seven days on their first
+start after upgrade. Set an explicit value before upgrading if the installation
+must preserve a longer local window. `retention_days: 0` retains indefinitely
+and produces a capacity warning.
+
+The reaper removes eligible event, evidence, judge-body, and correlation rows
+in dependency order. SQLite can reuse the freed pages, but the database file
+does not shrink automatically. Raw judge-body capture is
+controlled separately by `guardrail.retain_judge_bodies`; the OPA
+`audit.retention_days` input is a distinct policy and does not configure this
+SQLite reaper.
 
 ## Choose an operator view
 

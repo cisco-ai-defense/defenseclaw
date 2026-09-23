@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 )
 
@@ -92,6 +94,15 @@ type endpointInventoryComponent struct {
 	agentVersion                string
 	agentProbeStatus            string
 	agentScannedAt              string
+	// The owning end user, when the row came from a specific profile
+	// directory. Left empty for rows the scan cannot attribute — a
+	// process-wide surface, or a profile whose owner does not resolve —
+	// because a row attributed to the wrong person is worse than one
+	// attributed to nobody.
+	userID     string
+	userIDKind string
+	userName   string
+	userEmail  string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -217,6 +228,10 @@ func emitEndpointInventory(
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
 func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
+	return perConnectorMCPEntriesForOS(cfg, reg, runtime.GOOS)
+}
+
+func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, goos string) []endpointInventoryComponent {
 	if cfg == nil {
 		return nil
 	}
@@ -229,7 +244,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	var connectors []string
 	for _, name := range cfg.ActiveConnectors() {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" {
+		if key == "" || !inventoryConnectorAvailableOnOS(key, goos) {
 			continue
 		}
 		if _, ok := seenConnector[key]; ok {
@@ -241,7 +256,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	if reg != nil {
 		for _, info := range reg.Available() {
 			key := strings.ToLower(strings.TrimSpace(info.Name))
-			if key == "" {
+			if key == "" || !inventoryConnectorAvailableOnOS(key, goos) {
 				continue
 			}
 			if _, ok := seenConnector[key]; ok {
@@ -260,8 +275,25 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	homes := cfg.AIDiscovery.HomeDirs
 	seenComponent := make(map[string]struct{})
 	components := make([]endpointInventoryComponent, 0, len(connectors)*(len(homes)+1))
-	appendServers := func(connectorName, homeScope string, servers []config.MCPServerEntry) {
+	// Owner lookups hit the passwd database or the ProfileList registry and
+	// read a credential file, so they are memoized for the scan: the loops
+	// below revisit the same home once per connector.
+	owners := map[string]llmEventUser{}
+	ownerFor := func(connectorName, home string) llmEventUser {
+		if home == "" {
+			return llmEventUser{}
+		}
+		key := connectorName + "\x00" + home
+		if cached, ok := owners[key]; ok {
+			return cached
+		}
+		owner := inventoryHomeOwner(connectorName, home)
+		owners[key] = owner
+		return owner
+	}
+	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
+		owner := ownerFor(connectorName, home)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			host := mcpURLHost(server.URL)
@@ -305,6 +337,10 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 				mcpDisabled:         &disabled,
 				agentConnector:      slug,
 				agentInstalled:      &installed,
+				userID:              owner.ID,
+				userIDKind:          owner.IDKind,
+				userName:            owner.Name,
+				userEmail:           owner.Email,
 			})
 		}
 	}
@@ -321,7 +357,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 			continue
 		}
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
-			appendServers(connectorName, "", servers)
+			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
@@ -334,12 +370,64 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 		}
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
-			for _, servers := range readMCPServersUnderHome(connectorName, home) {
-				appendServers(connectorName, homeScope, servers)
+			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
+				appendServers(connectorName, homeScope, home, servers)
 			}
 		}
 	}
 	return components
+}
+
+// inventoryHomeOwner resolves who owns one profile directory, and which
+// account they are signed into the connector as.
+//
+// The sidecar cannot use its own process identity here. It walks every profile
+// root on the endpoint, and under a managed install it runs as a service
+// account, so "the current user" is either the wrong user or no user at all.
+func inventoryHomeOwner(connectorName, home string) llmEventUser {
+	identity := useridentity.ForHome(home)
+	ownerID := sanitizeLLMEventUser(identity.ID)
+	owner := llmEventUser{
+		ID:     ownerID,
+		IDKind: useridentity.KindForID(ownerID),
+		Name:   sanitizeLLMEventUser(identity.Name),
+	}
+	if owner.ID == "" {
+		// Without a resolvable owner there is nobody to attribute the
+		// address to, and emitting it alone would assert that someone on
+		// this endpoint uses it without saying who.
+		return llmEventUser{}
+	}
+	// This read is safe where the hook path's is not: home comes from the
+	// operator-configured profile roots and its owner was just resolved by
+	// stat'ing that directory, so no request influences whose file is opened.
+	// It is still gated, because collecting the address at all is a privacy
+	// decision independent of whether it can be attributed correctly.
+	if UserEmailCollectionEnabled() {
+		if email, err := useridentity.EmailForConnector(connectorName, home, nil); err == nil {
+			owner.Email = email
+		}
+	}
+	return owner
+}
+
+// daemonHomeForInventoryAttribution returns the profile the sidecar itself
+// runs under, but only when that profile belongs to a person.
+//
+// The first inventory pass reads the daemon's own HOME, which covers dev runs
+// and single-user installs where no profile roots are configured. Under a
+// managed install that home belongs to the service account, and attributing
+// its MCP configuration to that principal would put a row in the inventory
+// claiming a service account uses an agent.
+func daemonHomeForInventoryAttribution() string {
+	if ManagedEnterpriseActive() {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
 }
 
 // hasNativeMCPReader reports whether the given connector slug has a native
@@ -355,8 +443,7 @@ func hasNativeMCPReader(connectorName string) bool {
 		"zeptoclaw",
 		"hermes",
 		"cursor",
-		"windsurf",
-		"geminicli",
+		"devin",
 		"copilot",
 		"openhands",
 		"opencode",
@@ -372,6 +459,10 @@ func hasNativeMCPReader(connectorName string) bool {
 // per-source results so callers can label each individually if desired.
 // Missing/unparseable files yield nil entries (best-effort).
 func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEntry {
+	return readMCPServersUnderHomeForOS(connectorName, home, runtime.GOOS)
+}
+
+func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
 	if home == "" {
 		return nil
 	}
@@ -382,9 +473,14 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 			results = append(results, entries)
 		}
 	}
+	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
+		if entries, err := reader(home); err == nil && len(entries) > 0 {
+			results = append(results, entries)
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "codex":
-		tryFile(config.ReadMCPFromCodexConfigTOML, ".codex/config.toml")
+		tryFile(config.ReadMCPFromCodexUserConfigTOML, ".codex/config.toml")
 	case "claudecode":
 		// Honor CLAUDE_CONFIG_DIR the same way readMCPServersClaudeCode does:
 		// when the operator has redirected Claude Code to a custom directory,
@@ -404,12 +500,14 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
-	case "windsurf":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".codeium/windsurf/mcp_config.json")
+	case "devin":
+		if strings.EqualFold(strings.TrimSpace(goos), "windows") {
+			tryFile(config.ReadMCPFromDevinConfig, "AppData/Roaming/devin/mcp_config.json")
+		} else {
+			tryFile(config.ReadMCPFromDevinConfig, ".config/devin/mcp_config.json")
+		}
 	case "copilot":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".config/github-copilot/mcp.json")
-	case "geminicli":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/settings.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".copilot/mcp-config.json")
 	case "openhands":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
@@ -433,15 +531,9 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
 	case "opencode":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".config/opencode/opencode.json")
-		tryFile(config.ReadMCPFromDotMCPJSON, ".opencode/opencode.json")
+		tryHome(config.ReadMCPServersOpenCodeUnderHome)
 	case "amp":
-		// Amp's settings.json follows the Claude Code shape (top-level
-		// `mcpServers`), so the Claude Settings reader is the right
-		// dispatch; the generic DotMCPJSON reader also works but the
-		// Claude Settings one is stricter.
-		tryFile(config.ReadMCPFromClaudeSettings, ".config/amp/settings.json")
-		tryFile(config.ReadMCPFromClaudeSettings, ".amp/settings.json")
+		tryHome(config.ReadMCPServersAMPUnderHome)
 	}
 	return results
 }
@@ -479,6 +571,10 @@ func makeEndpointInventoryEmitter(
 }
 
 func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryComponent, bool) {
+	return endpointConnectorComponentsForOS(reg, runtime.GOOS)
+}
+
+func endpointConnectorComponentsForOS(reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
 	if reg == nil {
 		reg = getFallbackConnectorRegistry()
 	}
@@ -488,6 +584,9 @@ func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryCo
 	available := reg.Available()
 	components := make([]endpointInventoryComponent, 0, len(available))
 	for _, info := range available {
+		if !inventoryConnectorAvailableOnOS(info.Name, goos) {
+			continue
+		}
 		name := inventoryStableIdentifier(info.Name)
 		components = append(components, endpointInventoryComponent{
 			id:                          endpointInventoryComponentID("connector", info.Name),
@@ -503,6 +602,11 @@ func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryCo
 		})
 	}
 	return components, false
+}
+
+func inventoryConnectorAvailableOnOS(name, goos string) bool {
+	status := connector.ConnectorSupportOnOS(strings.ToLower(strings.TrimSpace(name)), goos).Status
+	return status == connector.PlatformSupported || status == connector.PlatformPreview
 }
 
 func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bool) {
@@ -851,6 +955,10 @@ func emitEndpointInventoryComponent(
 			DefenseClawAIComponentProduct:                   aiDiscoveryV8OptionalText(component.product),
 			DefenseClawInventoryItemName:                    aiDiscoveryV8OptionalText(component.itemName),
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
+			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
+			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
+			DefenseClawUserName:                             aiDiscoveryV8OptionalText(component.userName),
+			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
 			DefenseClawInventoryConnectorSubprocessPolicy:   aiDiscoveryV8OptionalText(component.connectorSubprocessPolicy),

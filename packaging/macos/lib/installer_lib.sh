@@ -57,7 +57,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    amp|codex|claudecode|cursor) return 0;;
+    amp|codex|claudecode|cursor|opencode) return 0;;
     *) return 1;;
   esac
 }
@@ -70,7 +70,7 @@ is_supported_connector() {
 # install.log can act on the right cause:
 #
 #   all-unsupported  Every requested connector is outside the auto-wire
-#                    allow-list (amp|codex|claudecode|cursor). The
+#                    allow-list (amp|codex|claudecode|cursor|opencode). The
 #                    hook-enumerator's tick will NOT fix this by itself
 #                    — the operator has to rerun with --connector picking
 #                    a supported entry.
@@ -133,7 +133,8 @@ home_perms_ok() {
 # Record layout: USER\tCONNECTOR\tREASON\tPATH\n
 #   USER      — DC_INSTALLER_TARGET_USER at the time of the failure
 #               (empty when the caller didn't scope to a user).
-#   CONNECTOR — connector token (amp / codex / claudecode / cursor).
+#   CONNECTOR — connector token (amp / codex / claudecode / cursor /
+#               opencode).
 #   REASON    — short machine-readable reason (e.g. "malformed-json").
 #   PATH      — absolute path of the metadata file that failed to
 #               parse; the operator can act on this directly.
@@ -183,14 +184,15 @@ _probe_json_version() {
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
-# Metadata-only: reads files under HOME or under signed system app bundles
-# and never executes user-installed agent binaries. install.sh runs as root,
-# so invoking $PATH-resolved `codex` / `claude` / etc. would be a
-# privilege-escalation surface — the caller must pass --agent-version
-# explicitly for connectors that don't ship a stable metadata file.
-# _read_codex_version_as_user USER -> echoes codex --version output (first line, ≤512 bytes) or "".
+# Prefer identified package/app metadata. The two binary fallbacks (Codex and
+# OpenCode's official standalone path) run with bounded output/time as the
+# enumerated target user, never as root; no PATH-resolved user binary runs
+# with installer privileges.
+# _read_agent_version_as_user USER BINARY [SUDO_BIN] -> echoes BINARY --version
+# output (first line, ≤512 bytes) or "". The installer omits SUDO_BIN and
+# uses Apple's fixed /usr/bin/sudo; the optional argument is a unit-test seam.
 #
-# Runs `sudo -n -u USER codex --version` with a bounded wall-clock
+# Runs `sudo -n -u USER -- BINARY --version` with a bounded wall-clock
 # limit (5 s) so a hung codex cannot stall the installer. Pure-bash
 # implementation: previously this shelled out to python3 for the
 # timeout + bounded-read logic, but that violated the "no python3
@@ -199,9 +201,11 @@ _probe_json_version() {
 # not ship `timeout(1)` so the timeout is implemented by
 # background-launching the child and killing it after the deadline;
 # the child's stdout is captured to a private temp file bounded at
-# 512 bytes via `head -c` so a chatty codex cannot fill the pipe.
-_read_codex_version_as_user() {
+# 512 bytes via `head -c` so a chatty agent cannot fill the pipe.
+_read_agent_version_as_user() {
   local user="$1"
+  local binary="$2"
+  local sudo_bin="${3:-/usr/bin/sudo}"
   local out_file rc=0
   # Fail closed on mktemp failure. The prior fallback
   # `/tmp/defenseclaw-codex-version.$$` was predictable — a
@@ -212,7 +216,7 @@ _read_codex_version_as_user() {
   # privesc surface. If mktemp fails, print nothing and return
   # non-zero so the caller falls through to alternative version
   # discovery paths.
-  out_file="$(mktemp -t defenseclaw-codex-version.XXXXXX 2>/dev/null)" || return 1
+  out_file="$(mktemp -t defenseclaw-agent-version.XXXXXX 2>/dev/null)" || return 1
   # Best-effort cleanup on any exit path.
   # shellcheck disable=SC2064
   trap "rm -f -- '${out_file}'" RETURN
@@ -222,7 +226,7 @@ _read_codex_version_as_user() {
   # macOS the child inherits the shell's session and $$ but exec's
   # `-a` and `sudo`'s `-b` do not give us a clean PGID, so we settle
   # for killing the immediate PID plus a wait.
-  ( sudo -n -u "${user}" codex --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  ( "${sudo_bin}" -n -u "${user}" -- "${binary}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
   local pid=$!
   # Poll for completion with a 5-second wall-clock budget. `wait -n`
   # would block indefinitely; a tight sleep+kill loop hits the
@@ -249,6 +253,10 @@ _read_codex_version_as_user() {
   # line (or empty on any failure).
   printf '%s' "${line}"
   return 0
+}
+
+_read_codex_version_as_user() {
+  _read_agent_version_as_user "$1" codex
 }
 
 
@@ -619,6 +627,159 @@ _read_json_version() {
   _read_json_field "${path}" "version"
 }
 
+# _is_valid_opencode_version VERSION -> exit 0 for a SemVer-shaped
+# metadata value. Compatibility remains the guardian hook-contract's job
+# (currently >=1.18.10,<1.18.20); discovery only rejects values that cannot be
+# a real agent version at all. Keeping that boundary here avoids silently
+# treating a future, well-formed OpenCode release as an absent installation.
+_is_valid_opencode_version() {
+  local version="$1"
+  local semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+  [[ "${version}" =~ ${semver_re} ]]
+}
+
+# _probe_opencode_json_version PATH -> echoes a validated opencode-ai package
+# version. The package-name check prevents a similarly placed, unrelated npm
+# package from becoming version authority. Malformed JSON and invalid version
+# strings feed the installer's existing discovery-error report.
+_probe_opencode_json_version() {
+  local path="$1"
+  local version
+  version="$(_probe_json_version "${path}" opencode "opencode-ai")"
+  [[ -n "${version}" ]] || return 0
+  if ! _is_valid_opencode_version "${version}"; then
+    _record_discovery_error opencode "${path}" "invalid-version"
+    return 0
+  fi
+  printf '%s' "${version}"
+}
+
+# _probe_opencode_app_version INFO_PLIST -> echoes the version only for the
+# official production desktop bundle. PlistBuddy is an Apple system metadata
+# reader; the OpenCode executable is never launched by this probe.
+_probe_opencode_app_version() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 0
+  local bundle_id version
+  bundle_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${plist}" 2>/dev/null || true)"
+  if [[ "${bundle_id}" != "ai.opencode.desktop" ]]; then
+    _record_discovery_error opencode "${plist}" "bundle-identity-mismatch"
+    return 0
+  fi
+  version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${plist}" 2>/dev/null || true)"
+  if ! _is_valid_opencode_version "${version}"; then
+    _record_discovery_error opencode "${plist}" "invalid-version"
+    return 0
+  fi
+  printf '%s' "${version}"
+}
+
+# _probe_opencode_homebrew_version PREFIX -> echoes the version carried by
+# Homebrew's active opt symlink (PREFIX/opt/opencode ->
+# ../Cellar/opencode/VERSION). Validate that exact formula layout and the
+# linked executable, but never execute brew or opencode.
+_probe_opencode_homebrew_version() {
+  local prefix="$1"
+  local opt_path="${prefix}/opt/opencode"
+  [[ -L "${opt_path}" ]] || return 0
+  local target version
+  target="$(readlink "${opt_path}" 2>/dev/null || true)"
+  case "${target}" in
+    ../Cellar/opencode/*) version="${target#../Cellar/opencode/}";;
+    "${prefix}"/Cellar/opencode/*) version="${target#"${prefix}"/Cellar/opencode/}";;
+    *) return 0;;
+  esac
+  version="${version%/}"
+  [[ "${version}" != */* ]] || return 0
+  _is_valid_opencode_version "${version}" || return 0
+  [[ -x "${opt_path}/bin/opencode" ]] || return 0
+  printf '%s' "${version}"
+}
+
+# _claude_desktop_embedded_version_from_home HOME -> echoes the highest
+# Claude Code version bundled inside Claude Desktop, or "".
+#
+# Claude Desktop bundles Claude Code per user under:
+#
+#   ~/Library/Application Support/Claude/claude-code/<X.Y.Z>/claude.app/
+#     Contents/MacOS/claude
+#
+# and drops a convenience shim at ~/.local/bin/claude pointing into that
+# tree. The shim-basename walk in the npm/PATH probe below stops at
+# "claude" / "MacOS" (neither is semver-shaped) so the version has to be
+# extracted from the parent-dir chain of the concrete binary — 4 hops
+# above the terminal binary. The Claude Desktop application version is
+# not the Claude Code version, so the version-labelled embedded bundle
+# directory is the authoritative metadata source.
+#
+# Metadata-only: readdir + basename, no exec of a desktop- or user-
+# bundled binary during installer discovery.
+#
+# Ported from PR #785 (release-26.7.3 backport of PR #798 / AIFW-32990,
+# author @rucpande) — the customer bundle 0827_0914 (jlunde) had
+# 2.1.219 embedded here and got silently dropped by the npm-only probe.
+# The consolidated Go implementation in
+# docs/PLAN-consolidate-hook-enumerator.md will supersede this bash
+# probe alongside the rest of `discover_agent_version` (Appendix B row 6).
+_claude_desktop_embedded_version_from_home() {
+  local home="$1"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  [[ -d "${root}" ]] || return 0
+  local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
+  local bin version_dir version best=""
+  for bin in "${root}"/*/claude.app/Contents/MacOS/claude; do
+    [[ -x "${bin}" ]] || continue
+    version_dir="$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "${bin}")")")")"
+    version="$(basename -- "${version_dir}")"
+    [[ "${version}" =~ ${semver_re} ]] || continue
+    if [[ -z "${best}" ]] || _semver_greater "${version}" "${best}"; then
+      best="${version}"
+    fi
+  done
+  [[ -n "${best}" ]] && echo "${best}"
+}
+
+# _semver_greater A B — exit 0 iff A > B when compared as
+# MAJOR.MINOR.PATCH numeric tuples. Only the numeric core is compared;
+# any pre-release / build suffix after PATCH is ignored. Callers must
+# have already validated shape against the semver-ish regex
+# `^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$` before invoking this helper.
+# Implemented without `sort -V` so it does not depend on GNU
+# coreutils; older BSD `sort` (pre-Sequoia) may reject `-V` and
+# silently fall through to lexicographic ordering, which mis-ranks
+# e.g. `2.1.219` below `2.1.9` — the exact customer symptom PR #785
+# fixed. Bash regex + arithmetic on the fields is portable to BSD
+# userland and short enough to keep inline here rather than growing a
+# new dependency.
+_semver_greater() {
+  local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+  local a_major=0 a_minor=0 a_patch=0
+  local b_major=0 b_minor=0 b_patch=0
+  if [[ "$1" =~ ${core_re} ]]; then
+    a_major="${BASH_REMATCH[1]}"
+    a_minor="${BASH_REMATCH[2]}"
+    a_patch="${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+  if [[ "$2" =~ ${core_re} ]]; then
+    b_major="${BASH_REMATCH[1]}"
+    b_minor="${BASH_REMATCH[2]}"
+    b_patch="${BASH_REMATCH[3]}"
+  else
+    return 0
+  fi
+  if (( 10#${a_major} != 10#${b_major} )); then
+    (( 10#${a_major} > 10#${b_major} ))
+    return
+  fi
+  if (( 10#${a_minor} != 10#${b_minor} )); then
+    (( 10#${a_minor} > 10#${b_minor} ))
+    return
+  fi
+  (( 10#${a_patch} > 10#${b_patch} ))
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -728,7 +889,23 @@ discover_agent_version() {
       ;;
     claudecode)
       # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension.
+      # package.json we can read) and as a Cursor / VS Code extension,
+      # AND as a per-user Claude Desktop-bundled binary.
+      #
+      # Probe order:
+      #   1. Claude Desktop-bundled — ~/Library/Application Support/Claude/
+      #      claude-code/<X.Y.Z>/claude.app/... — the shim at
+      #      ~/.local/bin/claude points here on newer Claude Desktop
+      #      builds and the shim-basename walk yields "claude"/"MacOS"
+      #      which fails the semver regex. Consulting the version-labelled
+      #      parent directory is the only way to recover the version.
+      #      Regression on customer bundle 0827_0914 (jlunde, AIFW-32990).
+      #   2. npm-global / Cursor / VS Code extension package.json
+      #      (historical baseline).
+      local v
+      v="$(_claude_desktop_embedded_version_from_home "${home}")"
+      if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
@@ -737,7 +914,7 @@ discover_agent_version() {
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
         "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_probe_json_version "${pkg}" claudecode)"
+        v="$(_probe_json_version "${pkg}" claudecode)"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
@@ -748,6 +925,47 @@ discover_agent_version() {
         /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
           /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true
       fi
+      ;;
+    opencode)
+      # OpenCode is distributed as an official desktop app, Homebrew formula,
+      # npm package, and standalone ~/.opencode/bin install. Prefer identified
+      # metadata; because the official standalone installer leaves no version
+      # metadata, its exact binary path is the sole executable fallback and is
+      # run through the bounded target-user helper above, never as root.
+      local plist version
+      plist=/Applications/OpenCode.app/Contents/Info.plist
+      if [[ -f "${plist}" ]]; then
+        version="$(_probe_opencode_app_version "${plist}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      fi
+
+      local prefix
+      for prefix in /opt/homebrew /usr/local; do
+        version="$(_probe_opencode_homebrew_version "${prefix}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      done
+
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/opencode-ai/package.json \
+        "${home}"/.local/lib/node_modules/opencode-ai/package.json \
+        /usr/local/lib/node_modules/opencode-ai/package.json \
+        /opt/homebrew/lib/node_modules/opencode-ai/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        version="$(_probe_opencode_json_version "${pkg}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      done
+
+      local standalone="${home}/.opencode/bin/opencode"
+      if [[ -n "${DC_INSTALLER_TARGET_USER:-}" && -f "${standalone}" && -x "${standalone}" ]]; then
+        version="$(_read_agent_version_as_user "${DC_INSTALLER_TARGET_USER}" "${standalone}" || true)"
+        if _is_valid_opencode_version "${version}"; then
+          echo "${version}"
+          return
+        fi
+        _record_discovery_error opencode "${standalone}" "version-probe-failed"
+      fi
+
       ;;
   esac
 }
@@ -940,6 +1158,10 @@ prepare_userspace_for() {
     codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
     claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
     cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
+    # OpenCode Setup owns the complete defenseclaw.js bridge plugin and
+    # creates its parent directory as the target user. Packaging must not
+    # precreate a placeholder that could be mistaken for user state.
+    opencode)   : ;;
   esac
 }
 
@@ -1036,18 +1258,100 @@ enumerate_local_users() {
 #
 # Args:
 #   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
-#   CONNECTORS_CSV comma-separated list of connectors (e.g. amp,codex,claudecode,cursor)
+#   CONNECTORS_CSV comma-separated list of connectors
+#                  (e.g. amp,codex,claudecode,cursor,opencode)
 #   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
 #                  enumerate_local_users)
 #
 # One `- ` block per (user × supported-and-installed connector).
 # Unsupported connectors (not in is_supported_connector) are skipped: they
-# have no per-user setup path in the CLI. Connectors the caller asked for
-# but which discover_agent_version could not locate on THIS user's home
-# ARE ALSO skipped — no CLI/app/extension present means there is nothing
-# to hook, and emitting the row would just churn the guardian with a
-# permanent "agent_version empty" failure per tick. Users who install the
-# connector later are picked up by the hook-enumerator's next re-render.
+# have no per-user setup path in the CLI.
+#
+# Connectors the caller asked for but which discover_agent_version could
+# not locate on THIS user's home used to be skipped unconditionally. That
+# rule made an unrecoverable "silent drop" whenever the CLI was installed
+# via a channel discover_agent_version does not probe (Bun, pnpm, custom
+# PATH shim, Homebrew tap, etc.) — the row never appeared in
+# targets.yaml, the guardian never installed hooks, and the operator got
+# no diagnostic pointing at the discovery gap.
+#
+# Now: when the version probe returns empty, fall back to a cheap per-user
+# PRESENCE signal (connector_present_for_user). If the connector's user
+# config surface exists on this user, emit the row with an empty
+# agent_version and let the Go guardian handle it — the sidecar's
+# ResolveHookContract has an Unversioned branch that returns the
+# connector's DefaultForUnversioned contract. In `action` mode the Go
+# guardian's validateHookContract still fail-shuts per-target (unless
+# DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1), which surfaces the failure in
+# protected_targets.json — infinitely better than a silent drop. In
+# observability / audit modes the target wires end-to-end. If the presence
+# signal is also absent, the row is still skipped as before.
+
+# connector_present_for_user CONNECTOR HOME -> exit 0 iff there is a
+# per-user artifact on disk indicating the user has actually used this
+# connector's CLI, even when discover_agent_version could not resolve the
+# install path. Used as a fallback presence check in render_targets_manifest
+# so a CLI installed via a channel we don't probe still gets a manifest row.
+#
+# CRITICAL: none of the signals below may match a directory or file that
+# prepare_userspace_for (this same library, above) creates as part of
+# installer bootstrap. Otherwise every DefenseClaw pkg install would
+# create the presence marker itself, the fallback would fire for every
+# eligible user × connector, and the guardian would churn on connectors
+# the user has never touched.
+#
+# Blocked signals (DefenseClaw-authored — must NOT be checked here):
+#   claudecode: ~/.claude, ~/.claude/settings.json
+#   codex:      ~/.codex, ~/.codex/config.toml
+#   cursor:     ~/.cursor, ~/.cursor/hooks.json
+#
+# Allowed signals below are artifacts the connector's CLI itself
+# creates on first launch — never anything prepare_userspace_for nor
+# an unrelated app could scatter.
+connector_present_for_user() {
+  local connector="$1"
+  local home="$2"
+  [[ -n "${home}" ]] || return 1
+  case "${connector}" in
+    claudecode)
+      # ~/.claude.json is Claude Code CLI's project-trust file at the
+      # home root; DefenseClaw never touches it. The subdirs under
+      # ~/.claude below are CLI runtime state (sessions, per-project
+      # data, env snapshots per session) — the DART bundle from the
+      # customer that motivated this fix showed all three populated on
+      # a box where DefenseClaw's discover_agent_version came up empty.
+      # Claude Desktop uses ~/Library/Application Support/Claude/ and
+      # does NOT populate ~/.claude, so each of these is CLI-specific.
+      [[ -f "${home}/.claude.json" ]] && return 0
+      [[ -d "${home}/.claude/sessions" ]] && return 0
+      [[ -d "${home}/.claude/projects" ]] && return 0
+      [[ -d "${home}/.claude/session-env" ]] && return 0
+      ;;
+    codex)
+      # Codex CLI runtime artifacts. history.jsonl is written on every
+      # chat exchange; auth.json holds the OAuth cache after first
+      # login; log/ is created the first time codex boots. Any of them
+      # implies actual CLI use. DefenseClaw only writes config.toml.
+      [[ -d "${home}/.codex/log" ]] && return 0
+      [[ -f "${home}/.codex/history.jsonl" ]] && return 0
+      [[ -f "${home}/.codex/auth.json" ]] && return 0
+      ;;
+    cursor)
+      # Cursor IDE runtime artifacts. extensions/ is populated the
+      # first time the IDE launches (even with zero third-party
+      # extensions, a manifest file is written); argv.json is the
+      # editor's saved-startup-args file. DefenseClaw only writes
+      # hooks.json. The version probe already covers Cursor via the
+      # extension package.json path — this branch is a symmetry /
+      # robustness fallback for hosts whose extension dir metadata is
+      # transiently unreadable at enumeration time.
+      [[ -d "${home}/.cursor/extensions" ]] && return 0
+      [[ -f "${home}/.cursor/argv.json" ]] && return 0
+      ;;
+  esac
+  return 1
+}
+
 yaml_double_quoted_scalar() {
   local value="$1"
   case "${value}" in
@@ -1098,7 +1402,15 @@ render_targets_manifest() {
       is_supported_connector "${c}" || continue
       q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
-      [[ -n "${ver}" ]] || continue
+      if [[ -z "${ver}" ]]; then
+        # Version probe came up empty. Only emit a row when a cheap
+        # user-scoped presence signal proves the connector CLI has been
+        # used on this account — otherwise the guardian churns forever
+        # trying to install hooks for a CLI that doesn't exist here. See
+        # connector_present_for_user above and render_targets_manifest's
+        # header comment for the full rationale.
+        connector_present_for_user "${c}" "${home}" || continue
+      fi
       q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
       # data_dir is intentionally omitted from each target block: the
       # guardian's validateUserDataDir requires the data_dir to be inside

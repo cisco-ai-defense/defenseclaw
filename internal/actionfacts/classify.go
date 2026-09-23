@@ -26,6 +26,34 @@ import (
 	"strings"
 )
 
+var filesystemFormatterPrograms = []string{
+	"mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
+	"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
+	"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
+	"mkexfatfs",
+}
+
+var filesystemFormatterProgramSet = func() map[string]struct{} {
+	programs := make(map[string]struct{}, len(filesystemFormatterPrograms))
+	for _, program := range filesystemFormatterPrograms {
+		programs[program] = struct{}{}
+	}
+	return programs
+}()
+
+// FilesystemFormatterPrograms returns the one ordered formatter inventory used
+// by argv classification and the semantic destructive-command owners.
+func FilesystemFormatterPrograms() []string {
+	return append([]string(nil), filesystemFormatterPrograms...)
+}
+
+// FilesystemFormatterProgram reports whether program uses the closed formatter
+// grammar owned by classifyPOSIXFilesystemFormat.
+func FilesystemFormatterProgram(program string) bool {
+	_, ok := filesystemFormatterProgramSet[strings.ToLower(program)]
+	return ok
+}
+
 func classifyOutput(out *parseOutput) {
 	if out == nil {
 		return
@@ -35,6 +63,7 @@ func classifyOutput(out *parseOutput) {
 		invocation   posixShellInvocation
 	}
 	deferred := make([]deferredPOSIXNoExec, 0, len(out.commands))
+	preclassifyPOSIXLiteralPasswordChange(out)
 	for i := range out.commands {
 		if invocation, ok := validPOSIXNoExecCandidate(&out.commands[i]); ok {
 			deferred = append(deferred, deferredPOSIXNoExec{
@@ -44,6 +73,9 @@ func classifyOutput(out *parseOutput) {
 			continue
 		}
 		classifyCommand(out, &out.commands[i])
+		if out.commands[i].Program == "echo" {
+			classifyPAMPasswordCapture(out, &out.commands[i])
+		}
 		if out.status == StatusLimitExceeded {
 			return
 		}
@@ -243,6 +275,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	defer classifyArchiveArtifactConsumers(out, command)
 	if command.Effect == "" {
 		command.Effect = EffectExecute
 	}
@@ -265,8 +298,28 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyRedirects(out, command)
 		return
 	}
+	if FilesystemFormatterProgram(program) {
+		classifyPOSIXFilesystemFormat(out, command, program)
+		classifyRedirects(out, command)
+		return
+	}
 
 	switch program {
+	case "impacket-secretsdump", "secretsdump.py", "impacket-getuserspns",
+		"getuserspns.py", "impacket-getnpusers", "getnpusers.py", "hashcat",
+		"hashcat.exe":
+		if _, ok := exactDirectoryCredentialCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "impacket-ticketer", "ticketer.py":
+		if _, ok := exactKerberosTicketForgeryCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+			addOperation(command, OperationWrite)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
@@ -362,13 +415,65 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 				addOperation(command, OperationWrite)
 				out.markPartial(IssueUnknownOperandGrammar)
 			}
+		} else if command.Dialect == DialectCMD &&
+			classifyEndpointSecurityControl(out, command) {
+			// Bare sc is accepted only for the exact WinDefend sequence owned by
+			// ExactEndpointSecurityProductDisable. Other CMD sc grammars remain
+			// deliberately non-authoritative.
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 	case "sc.exe":
 		classifyWindowsServiceControl(out, command)
+		classifyEndpointSecurityControl(out, command)
+	case "sysmon", "sysmon.exe":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "mdatp":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "sentinelctl":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "auditpol", "auditpol.exe":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			if _, ok := exactWindowsAuditPolicyWipeStep(windowsWordsFromArguments(command.Arguments[1:])); ok {
+				addOperation(command, OperationConfigChange)
+				addOperation(command, OperationPolicyBypass)
+			} else {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
+		}
+	case "set-mppreference":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			_, disabled, ok := exactWindowsDefenderDisableSetting(
+				windowsWordsFromArguments(command.Arguments[1:]),
+			)
+			if !ok {
+				out.markPartial(IssueUnknownOperandGrammar)
+			} else {
+				addOperation(command, OperationConfigChange)
+				if disabled {
+					addOperation(command, OperationPolicyBypass)
+				}
+			}
+		}
+	case "add-mppreference":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "iptables":
+		if !classifyCompleteFirewallRelaxationStep(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "tee":
 		classifyTee(out, command)
+	case "sed":
+		classifyPOSIXSed(out, command)
+		classifyPOSIXLoggingHardeningControl(out, command)
 	case "add-content":
 		classifyStructuredPowerShellPathMutator(out, command, program)
 	case "ac":
@@ -475,6 +580,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySSH(out, command, program)
 	case "scp":
 		classifySCP(out, command)
+	case "tar", "tar.exe":
+		classifyTarArchiveProducer(out, command)
+	case "zip", "zip.exe":
+		classifyZipArchiveProducer(out, command)
+	case "compress-archive":
+		classifyCompressArchiveProducer(out, command)
 	case "nc", "ncat", "netcat", "socat":
 		classifySocketTool(out, command, program)
 	case "chisel", "ligolo-agent", "ligolo-ng-agent", "cloudflared", "ngrok":
@@ -485,15 +596,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyNaabu(out, command)
 	case "dd":
 		classifyDD(out, command)
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs":
-		classifyPOSIXFilesystemFormat(out, command, program)
 	case "wipefs":
 		classifyWipeFS(out, command)
 	case "sgdisk":
 		classifySGDisk(out, command)
-	case "shred", "blkdiscard", "cryptsetup", "hdparm", "nvme", "parted",
+	case "shred":
+		classifyShred(out, command)
+	case "blkdiscard", "cryptsetup", "hdparm", "nvme", "parted",
 		"diskutil":
 		classifyDestructiveDeviceTool(out, command, program)
 	case "format":
@@ -519,6 +628,22 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		)
 	case "sudo":
 		classifySudo(out, command)
+	case "log":
+		classifyMacOSUnifiedLog(out, command)
+	case "osascript":
+		classifyMacOSUpdateCredentialPrompt(out, command)
+	case "auditctl", "setenforce":
+		classifyLinuxSecurityControl(out, command)
+	case "service":
+		if !classifyPOSIXLoggingHardeningControl(out, command) {
+			classifyLinuxSecurityControl(out, command)
+		}
+	case "sysrc", "sysctl", "ufw":
+		if !classifyPOSIXLoggingHardeningControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "halt":
+		classifyPOSIXHostHalt(out, command)
 	case "doas", "su", "pkexec":
 		classifyPOSIXPrivilegeShell(out, command)
 	case "runas":
@@ -532,13 +657,36 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 			DialectCMD,
 			DialectPowerShell,
 		)
+	case "procdump", "procdump.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyLSASSDump,
+			DialectCMD,
+			DialectPowerShell,
+			DialectArgv,
+		)
+	case "ntdsutil", "ntdsutil.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyNTDSIFMDump,
+			DialectCMD,
+			DialectPowerShell,
+			DialectArgv,
+		)
 	case "crontab", "at", "schtasks", "launchctl", "systemctl":
 		classifySchedule(out, command, program)
+		if program == "launchctl" || program == "systemctl" {
+			classifyEndpointSecurityControl(out, command)
+		}
 	case "register-scheduledtask":
 		classifyStructuredPowerShellRegisterScheduledTask(out, command)
 	case "useradd", "usermod", "adduser", "net", "net1", "new-localuser", "gpasswd",
 		"groupmems", "dseditgroup", "dscl":
 		classifyAccount(out, command, program)
+	case "passwd", "chpasswd":
+		classifyPOSIXLiteralPasswordChange(out, command)
 	case "add-localgroupmember":
 		classifyStructuredPowerShellAddLocalGroupMember(out, command)
 	case "add-adgroupmember":
@@ -553,10 +701,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyContainer(out, command)
 	case "nsenter":
 		classifyNSEnter(out, command)
+	case "mount":
+		classifyExactPOSIXBindMount(out, command)
 	case "chroot":
 		classifyChroot(out, command)
 	case "kubectl", "oc":
 		classifyWorkload(out, command, program)
+	case "terraform", "tofu", "pulumi":
+		classifyInfrastructureAsCode(out, command, program)
 	case "git":
 		classifyGit(out, command)
 	case "codex", "claude", "gemini", "opencode":
@@ -565,6 +717,18 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyAgentPackageRunner(out, command, program)
 	case "aws", "gcloud", "az", "vault", "op", "pass", "security", "cmdkey":
 		classifyCredentialCLI(out, command, program)
+		classifyCloudAuditControlDestruction(command)
+		classifyCloudIAMPrincipalAdministration(command)
+	case "nxc", "netexec", "crackmapexec", "john", "john.exe":
+		if _, ok := exactDirectoryCredentialCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "psql", "mysql", "mariadb", "sqlcmd", "snowsql":
+		classifySQLClient(out, command, program)
+	case "sqlite3":
+		classifySQLiteClientShellEscape(out, command)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
 		classifyShellInvocation(out, command)
 	case "python", "python2", "python3", "perl", "ruby":
@@ -644,6 +808,9 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 	}
 	sawClear := false
 	allowsFile := false
+	lastClear := -1
+	lastRead := -1
+	operationIndex := 0
 	options := true
 	operands := 0
 	for _, argument := range argv[1:] {
@@ -659,11 +826,16 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 				switch option {
 				case 'c':
 					sawClear = true
+					lastClear = operationIndex
 				case 'a', 'n', 'r', 'w':
 					allowsFile = true
+					if option == 'r' {
+						lastRead = operationIndex
+					}
 				default:
 					return false
 				}
+				operationIndex++
 			}
 			continue
 		}
@@ -673,7 +845,10 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 			return false
 		}
 	}
-	return sawClear && (operands == 0 || allowsFile)
+	// A read after the final clear immediately repopulates the in-memory
+	// history list. Treat that closed reload form as maintenance rather than
+	// anti-forensic clearing. A later clear (history -rc) still proves tamper.
+	return sawClear && lastRead < lastClear && (operands == 0 || allowsFile)
 }
 
 func classifyPOSIXUnset(out *parseOutput, command *CommandFact) {
@@ -718,6 +893,11 @@ func commandProgram(executable string) string {
 		return ""
 	}
 	executable = strings.ReplaceAll(executable, `\`, "/")
+	if executable == "/opt/sentinelone/bin/sentinelctl" {
+		// Trust only the exact vendor-installed endpoint-control path. An
+		// arbitrary /opt basename must remain opaque.
+		return "sentinelctl"
+	}
 	if strings.Contains(executable, "/") && !trustedExecutablePath(executable) {
 		return ""
 	}
@@ -733,6 +913,12 @@ func commandProgramForDialect(executable string, dialect Dialect) string {
 		return program
 	}
 	program := commandProgram(executable)
+	// The Windows system formatter is format.com. Keep its explicit native
+	// executable name aligned with the existing bare format semantic owner.
+	if program == "format.com" && (dialect == DialectCMD ||
+		dialect == DialectPowerShell || dialect == DialectArgv) {
+		return "format"
+	}
 	if dialect != DialectCMD && dialect != DialectPowerShell {
 		return program
 	}
@@ -1008,6 +1194,25 @@ func powerShellParameter(arg string) (string, string, bool) {
 	return strings.ToLower(key), value, joined
 }
 
+// canonicalPowerShellPathMutatorParameter owns the narrow set of reviewed
+// PowerShell parameter abbreviations shared by the raw and structured
+// Remove-Item parsers. Do not infer arbitrary prefixes here: PowerShell's
+// abbreviation binding is cmdlet-specific, and accepting a prefix that is
+// ambiguous with an unmodeled parameter would manufacture typed proof.
+func canonicalPowerShellPathMutatorParameter(program, key string) string {
+	if program != "remove-item" {
+		return key
+	}
+	switch key {
+	case "-rec":
+		return "-recurse"
+	case "-fo":
+		return "-force"
+	default:
+		return key
+	}
+}
+
 type structuredPowerShellControlState struct {
 	whatIfSeen  bool
 	confirmSeen bool
@@ -1080,6 +1285,7 @@ func classifyStructuredPowerShellClearDisk(
 	}
 	controls := newStructuredPowerShellControlState()
 	targetSeen := false
+	targetNumber := ""
 	removeDataSeen := false
 	removeOEMSeen := false
 	passThruSeen := false
@@ -1099,11 +1305,13 @@ func classifyStructuredPowerShellClearDisk(
 				valid = false
 				continue
 			}
-			if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+			number, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
 				valid = false
 				continue
 			}
 			targetSeen = true
+			targetNumber = strconv.FormatUint(number, 10)
 		case "-inputobject":
 			_, ok := structuredPowerShellRequiredValue(command.Argv, &i)
 			// InputObject may carry a live PowerShell object or pipeline
@@ -1144,6 +1352,12 @@ func classifyStructuredPowerShellClearDisk(
 		return
 	}
 	addOperation(command, OperationDiskWrite)
+	appendCommandPath(
+		out,
+		command,
+		PathAccessWrite,
+		`\\.\PhysicalDrive`+targetNumber,
+	)
 }
 
 func classifyStructuredPowerShellStopProcess(
@@ -1538,8 +1752,19 @@ func classifyStructuredPowerShellNewItem(
 }
 
 func structuredPowerShellBooleanLiteral(value string) bool {
-	return strings.EqualFold(value, "$true") ||
-		strings.EqualFold(value, "$false")
+	_, ok := structuredPowerShellBooleanValue(value)
+	return ok
+}
+
+func structuredPowerShellBooleanValue(value string) (bool, bool) {
+	switch strings.ToLower(value) {
+	case "$true", "true", "1":
+		return true, true
+	case "$false", "false", "0":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func canonicalPowerShellNewItemParameter(key string) string {
@@ -1798,6 +2023,7 @@ func classifyStructuredPowerShellPathMutator(
 	controls := newStructuredPowerShellControlState()
 	seen := make(map[string]struct{})
 	var positional, sources, destinations []string
+	appendEnabled := false
 	valid := true
 	for index := 1; index < len(command.Argv); index++ {
 		arg := command.Argv[index]
@@ -1809,6 +2035,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
+		key = canonicalPowerShellPathMutatorParameter(program, key)
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false
@@ -1862,8 +2089,16 @@ func classifyStructuredPowerShellPathMutator(
 		case "-force", "-recurse", "-passthru", "-container",
 			"-nonewline", "-append", "-noclobber", "-debug", "-verbose":
 			if joined {
-				valid = false
-				continue
+				enabled, ok := structuredPowerShellBooleanValue(joinedValue)
+				if !ok {
+					valid = false
+					continue
+				}
+				if key == "-append" {
+					appendEnabled = enabled
+				}
+			} else if key == "-append" {
+				appendEnabled = true
 			}
 			if _, duplicate := seen[key]; duplicate {
 				valid = false
@@ -1899,7 +2134,7 @@ func classifyStructuredPowerShellPathMutator(
 		}
 		access := PathAccessWrite
 		operation := OperationWrite
-		if program == "add-content" {
+		if program == "add-content" || program == "out-file" && appendEnabled {
 			access = PathAccessAppend
 			operation = OperationAppend
 		}
@@ -1986,7 +2221,15 @@ func classifyStructuredPowerShellRegistryProperty(
 			continue
 		}
 		if arg == "" || !strings.HasPrefix(arg, "-") {
-			valid = false
+			// Path is positional parameter zero for the registry-property
+			// cmdlets. Accept only the first literal argv operand so later
+			// positionals cannot be misbound as Name or Value.
+			if index == 1 && pathValue == "" &&
+				structuredPowerShellStaticOperand(arg) {
+				pathValue = arg
+			} else {
+				valid = false
+			}
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
@@ -2022,7 +2265,7 @@ func classifyStructuredPowerShellRegistryProperty(
 			} else {
 				valueSeen = true
 			}
-		case "-type", "-credential", "-filter", "-include", "-exclude",
+		case "-type", "-propertytype", "-credential", "-filter", "-include", "-exclude",
 			"-erroraction", "-errorvariable", "-warningaction",
 			"-warningvariable":
 			if _, ok := consume(); !ok {
@@ -2071,6 +2314,16 @@ func classifyStructuredPowerShellRegistryProperty(
 		access = PathAccessDelete
 	}
 	appendCommandPath(out, command, access, pathValue)
+	if _, _, disabled, ok := exactWindowsRegistrySecuritySetting(*command); ok && disabled {
+		addOperation(command, OperationPolicyBypass)
+	}
+	if exactWindowsTelemetryMutation(*command) ||
+		exactWindowsAMSIRegistryDisable(*command) {
+		addOperation(command, OperationPolicyBypass)
+	}
+	if _, _, ok := exactWindowsCredentialProtectionMutation(*command); ok {
+		addOperation(command, OperationPolicyBypass)
+	}
 }
 
 func classifyStructuredPowerShellRegisterScheduledTask(
@@ -2234,7 +2487,10 @@ func classifyStructuredICACLS(
 	out *parseOutput,
 	command *CommandFact,
 ) {
-	if !requireCommandDialect(out, command, DialectCMD) {
+	// icacls is a native Windows executable with the same argv grammar when
+	// launched from cmd.exe or PowerShell. Shell quoting is resolved before
+	// this classifier receives the arguments.
+	if !requireCommandDialect(out, command, DialectCMD, DialectPowerShell) {
 		return
 	}
 	if len(command.Argv) < 2 {
@@ -2878,6 +3134,172 @@ func classifyTee(out *parseOutput, command *CommandFact) {
 	}
 }
 
+// StaticPOSIXSedInPlaceLiteralMutation returns the literal line and exact
+// target for the deliberately small sed -i grammar ActionFacts owns. The
+// grammar is limited to one static absolute target and either a literal final
+// line append or a literal substitution with no flags or escapes. This keeps
+// sed's command-execution, multi-file, backup-suffix, and dynamic forms outside
+// authoritative enforcement.
+func StaticPOSIXSedInPlaceLiteralMutation(
+	command CommandFact,
+) (line string, target string, ok bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!command.ArgvComplete || len(command.Argv) != 4 ||
+		len(command.Arguments) != len(command.Argv) ||
+		command.Program != "sed" ||
+		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Argv[1] != "-i" && command.Argv[1] != "--in-place") ||
+		!staticAbsolutePOSIXPath(command.Argv[3]) {
+		return "", "", false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == QuoteMixed {
+			return "", "", false
+		}
+	}
+
+	script := command.Argv[2]
+	if len(script) == 0 || len(script) > 4096 ||
+		strings.ContainsAny(script, "\x00\r\n") {
+		return "", "", false
+	}
+	switch {
+	case strings.HasPrefix(script, "$ a "):
+		line = script[len("$ a "):]
+	case strings.HasPrefix(script, "$a "):
+		line = script[len("$a "):]
+	case strings.HasPrefix(script, "s/") && strings.Count(script, "/") == 3:
+		parts := strings.Split(script, "/")
+		if len(parts) != 4 || parts[0] != "s" || parts[1] == "" ||
+			parts[2] == "" || parts[3] != "" ||
+			strings.ContainsAny(parts[1], "\\") ||
+			strings.ContainsAny(parts[2], "\\&") {
+			return "", "", false
+		}
+		line = parts[2]
+	default:
+		return "", "", false
+	}
+	if line == "" || strings.TrimSpace(line) != line {
+		return "", "", false
+	}
+	return line, command.Argv[3], true
+}
+
+// ApplyStaticPOSIXSedInPlaceLiteralMutation applies the same closed sed -i
+// grammar to bounded literal bytes. It is intended for private lineage proofs;
+// it never interprets general sed syntax. Substitution replaces the first
+// literal occurrence on each line, matching sed's default address behavior,
+// and requires at least one actual replacement.
+func ApplyStaticPOSIXSedInPlaceLiteralMutation(
+	command CommandFact,
+	content string,
+) (mutated string, target string, ok bool) {
+	const maximumLiteralMutationBytes = 4096
+	if len(content) > maximumLiteralMutationBytes || strings.ContainsRune(content, '\x00') {
+		return "", "", false
+	}
+	_, target, ok = StaticPOSIXSedInPlaceLiteralMutation(command)
+	if !ok {
+		return "", "", false
+	}
+	script := command.Argv[2]
+	switch {
+	case strings.HasPrefix(script, "$ a "):
+		line := script[len("$ a "):]
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return content + line + "\n", target, true
+	case strings.HasPrefix(script, "$a "):
+		line := script[len("$a "):]
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return content + line + "\n", target, true
+	default:
+		parts := strings.Split(script, "/")
+		if len(parts) != 4 || parts[0] != "s" {
+			return "", "", false
+		}
+		lines := strings.Split(content, "\n")
+		changed := false
+		for index, line := range lines {
+			replaced := strings.Replace(line, parts[1], parts[2], 1)
+			changed = changed || replaced != line
+			lines[index] = replaced
+		}
+		if !changed {
+			return "", "", false
+		}
+		return strings.Join(lines, "\n"), target, true
+	}
+}
+
+func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
+	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
+	if ok {
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, target)
+		return
+	}
+	if targets, readOnly := staticPOSIXSedNumericPrintTargets(*command); readOnly {
+		addOperation(command, OperationRead)
+		for _, pathValue := range targets {
+			appendCommandPath(out, command, PathAccessRead, pathValue)
+		}
+		return
+	}
+	out.markPartial(IssueUnknownOperandGrammar)
+}
+
+// staticPOSIXSedNumericPrintTargets owns the narrow read-only grammar used by
+// coding agents to inspect a bounded line or line range. General sed programs
+// remain non-authoritative because GNU/BSD extensions can execute commands or
+// read and write additional files.
+func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!command.ArgvComplete || len(command.Argv) < 4 ||
+		len(command.Arguments) != len(command.Argv) ||
+		command.Program != "sed" ||
+		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Argv[1] != "-n" && command.Argv[1] != "--quiet" &&
+			command.Argv[1] != "--silent") {
+		return nil, false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == QuoteMixed {
+			return nil, false
+		}
+	}
+	script := command.Argv[2]
+	if len(script) < 2 || script[len(script)-1] != 'p' {
+		return nil, false
+	}
+	address := script[:len(script)-1]
+	commaCount := 0
+	for _, character := range address {
+		switch {
+		case character >= '0' && character <= '9':
+		case character == ',' && commaCount == 0:
+			commaCount++
+		default:
+			return nil, false
+		}
+	}
+	parts := strings.Split(address, ",")
+	if len(parts) > 2 || parts[0] == "" || len(parts) == 2 && parts[1] == "" {
+		return nil, false
+	}
+	targets := command.Argv[3:]
+	for _, target := range targets {
+		if target == "" || target == "-" || strings.HasPrefix(target, "-") {
+			return nil, false
+		}
+	}
+	return targets, true
+}
+
 func classifyPOSIXPermissionChange(
 	out *parseOutput,
 	command *CommandFact,
@@ -3111,6 +3533,9 @@ func classifyStructuredGetACL(out *parseOutput, command *CommandFact) {
 }
 
 func classifyShellInvocation(out *parseOutput, command *CommandFact) {
+	if exactPOSIXLiteralPasswordChangeTrailingShell(out, command) {
+		return
+	}
 	if exactPOSIXPipelineStdinInterpreter(out, command) {
 		return
 	}
@@ -4280,11 +4705,13 @@ func webControlOptionConsumesValue(program, option string) bool {
 			"--data-ascii", "--data-binary", "--data-raw",
 			"--data-urlencode", "--referer", "--form", "--form-string",
 			"--header", "--config", "--output", "--upload-file", "--user",
-			"--proxy-user", "--write-out", "--request", "--proxy", "--cacert",
+			"--mail-auth", "--mail-from", "--mail-rcpt",
+			"--noproxy", "--proxy-header", "--proxy-user", "--write-out",
+			"--request", "--proxy", "--cacert",
 			"--cert", "--connect-to",
 			"--connect-timeout", "--dns-servers", "--interface", "--json",
 			"--key", "--max-time", "--output-dir", "--request-target",
-			"--resolve", "--unix-socket", "--url", "--doh-url",
+			"--resolve", "--unix-socket", "--url", "--url-query", "--doh-url",
 			"--preproxy", "--proxy1.0", "--socks4", "--socks4a",
 			"--socks5", "--socks5-hostname":
 			return true
@@ -4306,6 +4733,8 @@ func webControlOptionConsumesValue(program, option string) bool {
 		switch key {
 		case "--append-output", "--bind-address", "--body-data",
 			"--body-file", "--execute", "--header", "--input-file",
+			"--ftp-password", "--ftp-user", "--http-password", "--http-user",
+			"--method",
 			"--output-file", "--output-document", "--password", "--post-data",
 			"--post-file", "--directory-prefix", "--proxy-password", "--proxy-user",
 			"--referer", "--timeout", "--tries", "--user",
@@ -4526,7 +4955,19 @@ func webNoValueOption(program, arg string) bool {
 			"-S", "--show-error", "-L", "--location", "-l", "-i",
 			"--head", "-k", "--insecure", "-N", "--no-buffer", "-g",
 			"--globoff", "-4", "--ipv4", "-6", "--ipv6", "-q", "-v",
-			"--verbose", "--compressed", "--no-progress-meter", "--remote-name":
+			"--verbose", "--compressed", "--no-progress-meter", "--progress-bar",
+			"--remote-name", "--append", "--http1.0", "--junk-session-cookies",
+			"--list-only", "--parallel", "--remote-time", "--sslv2", "--sslv3",
+			"--tlsv1", "--use-ascii",
+			"--mail-rcpt-allowfails", "--no-mail-rcpt-allowfails":
+			return true
+		}
+		switch arg {
+		case "--no-append", "--buffer", "--no-compressed", "--no-globoff",
+			"--no-include", "--no-insecure", "--no-junk-session-cookies",
+			"--no-list-only", "--no-location", "--no-parallel",
+			"--no-progress-bar", "--progress-meter", "--no-remote-time",
+			"--no-show-error", "--no-silent", "--no-use-ascii", "--no-verbose":
 			return true
 		}
 		return curlNoValueShortOptionBundle(arg)
@@ -5049,8 +5490,13 @@ func validSSHUsername(value string) bool {
 	return true
 }
 
-func classifySCP(out *parseOutput, command *CommandFact) {
-	var operands []string
+func collectSCPOperands(
+	out *parseOutput,
+	command *CommandFact,
+) (operands []string, help bool) {
+	if command == nil {
+		return nil, false
+	}
 	options := true
 	for i := 1; i < len(command.Argv); i++ {
 		arg := command.Argv[i]
@@ -5061,17 +5507,20 @@ func classifySCP(out *parseOutput, command *CommandFact) {
 		if options && strings.HasPrefix(arg, "-") && arg != "-" {
 			if arg == "-h" || arg == "-?" ||
 				strings.EqualFold(arg, "--help") {
-				command.Effect = EffectPreview
-				return
+				return nil, true
 			}
 			consumes, joined, known := scpOptionGrammar(arg)
 			if !known {
-				out.markPartial(IssueUnknownOperandGrammar)
+				if out != nil {
+					out.markPartial(IssueUnknownOperandGrammar)
+				}
 				continue
 			}
 			if consumes && !joined {
 				if i+1 >= len(command.Argv) || command.Argv[i+1] == "" {
-					out.markPartial(IssueUnknownOperandGrammar)
+					if out != nil {
+						out.markPartial(IssueUnknownOperandGrammar)
+					}
 					continue
 				}
 				i++
@@ -5079,6 +5528,35 @@ func classifySCP(out *parseOutput, command *CommandFact) {
 			continue
 		}
 		operands = append(operands, arg)
+	}
+	return operands, false
+}
+
+func scpLocalUploadSourceOperands(command CommandFact) []string {
+	operands, help := collectSCPOperands(nil, &command)
+	if help || len(operands) < 2 {
+		return nil
+	}
+	_, firstRemote := scpRemoteHost(operands[0])
+	_, lastRemote := scpRemoteHost(operands[len(operands)-1])
+	if firstRemote || !lastRemote {
+		return nil
+	}
+	var sources []string
+	for _, source := range operands[:len(operands)-1] {
+		if _, remote := scpRemoteHost(source); remote {
+			continue
+		}
+		sources = append(sources, source)
+	}
+	return sources
+}
+
+func classifySCP(out *parseOutput, command *CommandFact) {
+	operands, help := collectSCPOperands(out, command)
+	if help {
+		command.Effect = EffectPreview
+		return
 	}
 	if len(operands) < 2 {
 		out.markPartial(IssueUnknownOperandGrammar)
@@ -7454,11 +7932,16 @@ func classifyPOSIXFilesystemFormat(
 	case "mkfs.ntfs", "mkntfs":
 		flags = exactOptionSet("-F")
 	}
+	previewOptions := exactOptionSet("--help", "--version")
+	if program == "mkfs.minix" {
+		previewOptions["-h"] = struct{}{}
+		previewOptions["-V"] = struct{}{}
+	}
 	parsed := parseOwnedPOSIXOptions(
 		command.Argv,
 		nil,
 		flags,
-		exactOptionSet("--help", "--version"),
+		previewOptions,
 	)
 	if parsed.preview {
 		command.Effect = EffectPreview
@@ -7470,7 +7953,18 @@ func classifyPOSIXFilesystemFormat(
 	if !parsed.complete {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
-	if len(parsed.positionals) != 1 || parsed.positionals[0] == "-" {
+	target := ""
+	switch {
+	case len(parsed.positionals) == 1:
+		target = parsed.positionals[0]
+	case program == "mkfs.minix" && len(parsed.positionals) == 2 &&
+		validMinixBlockCount(parsed.positionals[1]):
+		target = parsed.positionals[0]
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if target == "-" {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -7480,10 +7974,15 @@ func classifyPOSIXFilesystemFormat(
 		}
 	}
 	addOperation(command, OperationWrite)
-	if isRawBlockDeviceTarget(parsed.positionals[0]) {
+	if isRawBlockDeviceTarget(target) {
 		addOperation(command, OperationDiskWrite)
 	}
-	appendCommandPath(out, command, PathAccessWrite, parsed.positionals[0])
+	appendCommandPath(out, command, PathAccessWrite, target)
+}
+
+func validMinixBlockCount(value string) bool {
+	blocks, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && blocks > 10 && blocks < 65536
 }
 
 func classifyWipeFS(out *parseOutput, command *CommandFact) {
@@ -7599,18 +8098,6 @@ func classifyDestructiveDeviceTool(
 	destructive := false
 	complete := true
 	switch program {
-	case "shred":
-		parsed := parseOwnedPOSIXOptions(
-			command.Argv,
-			exactOptionSet("-n", "--iterations", "-s", "--size"),
-			exactOptionSet("-f", "--force", "-v", "--verbose", "-z", "--zero"),
-			exactOptionSet("--help", "--version"),
-		)
-		complete = parsed.complete && len(parsed.positionals) == 1
-		if len(parsed.positionals) == 1 {
-			target = parsed.positionals[0]
-			destructive = true
-		}
 	case "blkdiscard":
 		parsed := parseOwnedPOSIXOptions(
 			command.Argv,
@@ -7702,8 +8189,64 @@ func classifyDestructiveDeviceTool(
 	appendCommandPath(out, command, PathAccessWrite, target)
 }
 
+// classifyShred distinguishes ordinary file overwrite/removal from raw-device
+// destruction. GNU shred accepts more than one file operand; treating those
+// calls as opaque loses exact credential-file deletion evidence. Only the
+// closed option grammar below produces path facts, and --remove is represented
+// as a delete because the named files no longer exist after a successful call.
+func classifyShred(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	if len(command.Argv) == 2 &&
+		(command.Argv[1] == "--help" || command.Argv[1] == "--version") {
+		command.Effect = EffectPreview
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet("-n", "--iterations", "-s", "--size"),
+		exactOptionSet(
+			"-f", "--force", "-u", "--remove", "-v", "--verbose", "-z", "--zero",
+		),
+		exactOptionSet("--help", "--version"),
+	)
+	if !parsed.complete || len(parsed.positionals) == 0 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	remove := hasAnyArgument(command.Argv, "-u", "--remove")
+	if len(parsed.positionals) == 1 && isRawBlockDeviceTarget(parsed.positionals[0]) {
+		addOperation(command, OperationWrite)
+		addOperation(command, OperationDiskWrite)
+		appendCommandPath(out, command, PathAccessWrite, parsed.positionals[0])
+		return
+	}
+	addOperation(command, OperationWrite)
+	access := PathAccessWrite
+	if remove {
+		addOperation(command, OperationDelete)
+		access = PathAccessDelete
+	}
+	for _, target := range parsed.positionals {
+		if isRawBlockDeviceTarget(target) {
+			// Mixing device and file operands is not an enforcement-safe shape.
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		appendCommandPath(out, command, access, target)
+	}
+}
+
 func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
-	if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
+	if command.Dialect == DialectPowerShell {
+		// PowerShell may resolve a bare `format` through its own command table;
+		// only the explicit native formatter executable owns these semantics.
+		if windowsExecutable(command.Executable) != "format.com" {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+	} else if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
 		return
 	}
 	if len(command.Argv) == 2 &&
@@ -7723,7 +8266,21 @@ func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
 	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, command.Argv[1])
+	device, ok := windowsVolumeDeviceTarget(command.Argv[1])
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if command.Dialect == DialectArgv {
+		out.appendPath(PathFact{
+			CommandID: command.ID,
+			Access:    PathAccessWrite,
+			Flavor:    PathFlavorDevice,
+			Value:     device,
+		})
+		return
+	}
+	appendCommandPath(out, command, PathAccessWrite, device)
 }
 
 func classifyStructuredPowerShellFormatVolume(
@@ -7735,6 +8292,7 @@ func classifyStructuredPowerShellFormatVolume(
 	}
 	controls := newStructuredPowerShellControlState()
 	selector := ""
+	selectorKind := ""
 	complete := true
 	for index := 1; index < len(command.Argv); index++ {
 		if controls.consume(command, command.Argv[index]) {
@@ -7752,6 +8310,12 @@ func classifyStructuredPowerShellFormatVolume(
 				complete = false
 			}
 			selector = command.Argv[index]
+			selectorKind = argument
+			if argument == "-partition" || argument == "-inputobject" {
+				// These parameters carry PowerShell objects, not an exact device
+				// identity that can safely authorize a destructive action.
+				complete = false
+			}
 		case "-filesystem", "-newfilesystemlabel", "-allocationsize":
 			if index+1 >= len(command.Argv) {
 				complete = false
@@ -7771,9 +8335,31 @@ func classifyStructuredPowerShellFormatVolume(
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	device, ok := windowsVolumeDeviceTarget(selector)
+	if !ok || (selectorKind != "-driveletter" && selectorKind != "-path") {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, selector)
+	appendCommandPath(out, command, PathAccessWrite, device)
+}
+
+func windowsVolumeDeviceTarget(value string) (string, bool) {
+	if len(value) == 1 && isASCIILetter(value[0]) {
+		return "//./" + strings.ToUpper(value) + ":", true
+	}
+	if windowsDriveRoot(value) {
+		return "//./" + strings.ToUpper(value), true
+	}
+	if len(value) == 3 && isASCIILetter(value[0]) && value[1] == ':' &&
+		(value[2] == '\\' || value[2] == '/') {
+		return "//./" + strings.ToUpper(value[:2]), true
+	}
+	if windowsPathFlavor(value) == PathFlavorDevice {
+		return value, true
+	}
+	return "", false
 }
 
 func windowsDriveRoot(value string) bool {
@@ -8514,7 +9100,7 @@ var (
 		"-v", "--volume", "-w", "--workdir",
 	)
 	containerRunFlagOptions = optionValues(
-		"-d", "--detach", "--init", "-i", "--interactive",
+		"-d", "--detach", "--init", "-i", "-it", "-ti", "--interactive",
 		"--oom-kill-disable", "--privileged", "--read-only", "--rm",
 		"--tty", "-t",
 	)
@@ -8969,6 +9555,13 @@ func classifyWorkload(out *parseOutput, command *CommandFact, program string) {
 	switch subcommand {
 	case "exec", "debug", "attach":
 		addOperation(command, OperationWorkloadExec)
+		if subcommand == "exec" && (program == "kubectl" || program == "kubectl.exe") {
+			if cleaned, _, ok := stripExactKubectlNamespace(command.Argv, ""); ok &&
+				exactKubectlWorkloadIdentityTokenRead(cleaned) {
+				addOperation(command, OperationRead)
+				return
+			}
+		}
 		out.markPartial(IssueUnsupportedConstruct)
 	case "rsh":
 		if program == "oc" || program == "oc.exe" {
@@ -8988,9 +9581,212 @@ func classifyWorkload(out *parseOutput, command *CommandFact, program string) {
 		addOperation(command, OperationList)
 	case "logs":
 		addOperation(command, OperationRead)
+	case "delete":
+		parsed := parseOwnedPOSIXOptions(
+			command.Argv[index:],
+			exactOptionSet(
+				"-n", "--namespace", "--context", "--kubeconfig",
+				"-f", "--filename", "-l", "--selector", "--field-selector",
+				"--grace-period", "--timeout", "--cascade", "--dry-run",
+				"-o", "--output",
+			),
+			exactOptionSet(
+				"--all", "--force", "--now", "--ignore-not-found",
+				"--wait", "--raw", "--recursive",
+			),
+			exactOptionSet("-h", "--help"),
+		)
+		if dryRun, present := parsed.values["--dry-run"]; present &&
+			dryRun != "none" {
+			command.Effect = EffectPreview
+			return
+		}
+		if parsed.preview {
+			command.Effect = EffectPreview
+			return
+		}
+		if !parsed.complete || len(parsed.positionals) == 0 {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		addOperation(command, OperationDelete)
+	case "create":
+		if exactKubernetesClusterAdminBinding(command.Argv[index:]) {
+			addOperation(command, OperationPermissionChange)
+			addOperation(command, OperationPrivilege)
+			return
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func exactKubernetesClusterAdminBinding(argv []string) bool {
+	if len(argv) < 5 || argv[0] != "create" ||
+		(argv[1] != "rolebinding" && argv[1] != "clusterrolebinding") ||
+		!exactKubernetesIdentity(argv[2]) {
+		return false
+	}
+	clusterRole := ""
+	serviceAccount := ""
+	namespace := ""
+	for index := 3; index < len(argv); index++ {
+		key, joinedValue, joined := strings.Cut(argv[index], "=")
+		if key != "--clusterrole" && key != "--serviceaccount" &&
+			key != "-n" && key != "--namespace" {
+			return false
+		}
+		value, found := classifierOptionValue(argv, &index, joinedValue, joined)
+		if !found {
+			return false
+		}
+		switch key {
+		case "--clusterrole":
+			if clusterRole != "" {
+				return false
+			}
+			clusterRole = value
+		case "--serviceaccount":
+			if serviceAccount != "" {
+				return false
+			}
+			serviceAccount = value
+		case "-n", "--namespace":
+			if namespace != "" || !exactKubernetesIdentity(value) {
+				return false
+			}
+			namespace = value
+		}
+	}
+	principal := strings.Split(serviceAccount, ":")
+	return clusterRole == "cluster-admin" && len(principal) == 2 &&
+		exactKubernetesIdentity(principal[0]) && exactKubernetesIdentity(principal[1])
+}
+
+func classifyInfrastructureAsCode(
+	out *parseOutput,
+	command *CommandFact,
+	program string,
+) {
+	if informationalInvocation(command) {
+		command.Effect = EffectPreview
+		return
+	}
+	if program == "pulumi" {
+		classifyPulumi(out, command)
+		return
+	}
+	index := 1
+	for index < len(command.Argv) && strings.HasPrefix(command.Argv[index], "-") {
+		argument := command.Argv[index]
+		if strings.HasPrefix(argument, "-chdir=") &&
+			len(strings.TrimPrefix(argument, "-chdir=")) != 0 {
+			index++
+			continue
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if index >= len(command.Argv) {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	subcommand := strings.ToLower(command.Argv[index])
+	valid, destroy, preview := classifyTerraformArguments(
+		subcommand,
+		command.Argv[index+1:],
+	)
+	if preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !valid {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if destroy {
+		addOperation(command, OperationDelete)
+	} else if !preview {
+		addOperation(command, OperationConfigChange)
+	}
+}
+
+func classifyTerraformArguments(subcommand string, arguments []string) (bool, bool, bool) {
+	if subcommand != "destroy" && subcommand != "apply" && subcommand != "plan" {
+		return false, false, false
+	}
+	destroy := subcommand == "destroy"
+	for _, argument := range arguments {
+		switch {
+		case argument == "-destroy":
+			destroy = true
+		case argument == "-auto-approve", argument == "-compact-warnings",
+			argument == "-no-color", argument == "-input=false",
+			argument == "-input=true", argument == "-lock=false",
+			argument == "-lock=true", argument == "-refresh=false",
+			argument == "-refresh=true":
+		case strings.HasPrefix(argument, "-parallelism="),
+			strings.HasPrefix(argument, "-lock-timeout="),
+			strings.HasPrefix(argument, "-state="),
+			strings.HasPrefix(argument, "-target="),
+			strings.HasPrefix(argument, "-var="),
+			strings.HasPrefix(argument, "-var-file="):
+			if strings.HasSuffix(argument, "=") {
+				return false, false, false
+			}
+		case subcommand == "apply" && argument != "" &&
+			!strings.HasPrefix(argument, "-"):
+		default:
+			return false, false, false
+		}
+	}
+	return true, destroy, subcommand == "plan"
+}
+
+func classifyPulumi(out *parseOutput, command *CommandFact) {
+	if len(command.Argv) < 2 || strings.ToLower(command.Argv[1]) != "destroy" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	preview := false
+	for index := 2; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		switch argument {
+		case "--yes", "--skip-preview", "--refresh", "--continue-on-error",
+			"--remove", "--exclude-protected", "--suppress-outputs":
+		case "--preview-only":
+			preview = true
+		case "--stack", "--cwd", "--target", "--parallel", "--message",
+			"--exec-kind":
+			index++
+			if index >= len(command.Argv) || command.Argv[index] == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+		default:
+			key, value, joined := strings.Cut(argument, "=")
+			if !joined || value == "" ||
+				!hasString(key, "--stack", "--cwd", "--target", "--parallel", "--message", "--exec-kind") {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+		}
+	}
+	if preview {
+		command.Effect = EffectPreview
+		return
+	}
+	addOperation(command, OperationDelete)
+}
+
+func hasString(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyGit(out *parseOutput, command *CommandFact) {
@@ -9137,9 +9933,21 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		if !parsed.complete {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "bundle":
+		classifyGitBundleProducer(out, command, index)
+	case "archive":
+		classifyGitArchiveStdout(out, command, index)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func classifyGitArchiveStdout(out *parseOutput, command *CommandFact, index int) {
+	if index+2 != len(command.Argv) || command.Argv[index+1] != "HEAD" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationRead)
 }
 
 func classifyGitReadOutput(
@@ -9935,6 +10743,9 @@ func classifyCredentialCLI(
 	switch program {
 	case "aws", "aws.exe", "aws.cmd":
 		valueOptions := exactOptionSet(
+			"--bucket", "--key", "--db-instance-identifier", "--delete",
+			"--event-selectors", "--flow-log-ids", "--instance-ids",
+			"--resolver-query-log-config-id", "--stack-name", "--table-name",
 			"--ca-bundle", "--cli-connect-timeout", "--cli-read-timeout",
 			"--cli-binary-format", "--cli-input-json", "--cli-input-yaml",
 			"--color", "--endpoint-url", "--output", "--profile", "--query",
@@ -9945,6 +10756,9 @@ func classifyCredentialCLI(
 			"--role-session-name", "--secret-id", "--secret-id-list",
 			"--serial-number", "--source-identity", "--starting-token",
 			"--tags", "--token-code", "--transitive-tag-keys",
+			"--user-name", "--role-name", "--path", "--trail-name",
+			"--assume-role-policy-document", "--policy-arn", "--policy-name",
+			"--policy-document",
 			"--version-id", "--version-stage", "--web-identity-token",
 		)
 		parsed := parseOwnedPOSIXOptions(
@@ -9955,8 +10769,11 @@ func classifyCredentialCLI(
 				"--no-cli-auto-prompt", "--no-cli-pager",
 				"--no-include-planned-deletion", "--no-paginate",
 				"--no-recursive", "--no-sign-request",
+				"--no-retain-automated-backups", "--no-skip-final-snapshot",
 				"--no-verify-ssl", "--no-with-decryption",
-				"--recursive", "--with-decryption",
+				"--recursive", "--force", "--only-show-errors", "--quiet",
+				"--retain-automated-backups",
+				"--skip-final-snapshot", "--with-decryption",
 			),
 			exactOptionSet("--help", "--version"),
 		)
@@ -9988,6 +10805,10 @@ func classifyCredentialCLI(
 		}
 		if !complete {
 			out.markPartial(IssueUnknownOperandGrammar)
+		}
+		if _, ok := exactAWSCloudResourceMutation(command.Argv); ok {
+			addOperation(command, OperationDelete)
+			addOperation(command, OperationWrite)
 		}
 		match = positionalPrefixExact(positionals, "secretsmanager", "get-secret-value") ||
 			positionalPrefixExact(positionals, "secretsmanager", "batch-get-secret-value") ||
@@ -10070,6 +10891,11 @@ func classifyCredentialCLI(
 			match = true
 		}
 	case "security":
+		if exactMacOSLoginKeychainDumpArgv(command.Argv) &&
+			staticArguments(command.Arguments) {
+			addOperation(command, OperationCredentialRead)
+			break
+		}
 		consumes := optionValues(
 			"-a", "-c", "-d", "-j", "-l", "-p", "-s", "-t",
 		)
@@ -10094,6 +10920,121 @@ func classifyCredentialCLI(
 	}
 	if match {
 		addOperation(command, OperationCredentialRead)
+	}
+}
+
+// classifySQLClient admits only the closed command-line subset whose static
+// query operands are consumed by the high-assurance SQL semantic owners. A
+// client option that could redirect input, change parsing, or otherwise alter
+// execution remains partial instead of borrowing authority from the shell
+// parser alone.
+func classifySQLClient(out *parseOutput, command *CommandFact, program string) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	var valueOptions, joinedShort, flagOptions map[string]struct{}
+	maxPositionals := 0
+	switch program {
+	case "psql":
+		valueOptions = exactOptionSet(
+			"-c", "--command", "-d", "--dbname", "-h", "--host",
+			"-p", "--port", "-U", "--username", "-v", "--set",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet(
+			"-1", "--single-transaction", "-X", "--no-psqlrc", "-q", "--quiet",
+			"-w", "--no-password", "-W", "--password", "--no-readline",
+		)
+		maxPositionals = 2
+	case "mysql", "mariadb":
+		valueOptions = exactOptionSet(
+			"-e", "--execute", "-D", "--database", "-h", "--host", "-P", "--port",
+			"-u", "--user", "-p", "--password", "--protocol", "--socket",
+			"--ssl-mode",
+		)
+		// mysql documents -pPASSWORD as a single static argv operand. Retain
+		// authority for that exact source-observed form; bare -p remains a
+		// value option and every other joined short option stays unsupported.
+		joinedShort = exactOptionSet("-p")
+		flagOptions = exactOptionSet(
+			"-B", "--batch", "-N", "--skip-column-names", "-s", "--silent",
+			"--skip-ssl", "--compress",
+		)
+		maxPositionals = 1
+	case "sqlcmd":
+		valueOptions = exactOptionSet(
+			"-Q", "-q", "-S", "-d", "-U", "-P", "-l", "-t", "-v",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet("-b", "-C", "-E", "-N", "-X")
+	case "snowsql":
+		valueOptions = exactOptionSet(
+			"-q", "--query", "-a", "--accountname", "-u", "--username",
+			"-d", "--dbname", "-s", "--schemaname", "-w", "--warehouse",
+			"-r", "--rolename", "-c", "--connection", "-o", "--option",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet()
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+
+	positionals := 0
+	for index := 1; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		if argument == "--" {
+			positionals += len(command.Argv) - index - 1
+			break
+		}
+		if _, ok := flagOptions[argument]; ok {
+			continue
+		}
+		if _, ok := valueOptions[argument]; ok {
+			if index+1 >= len(command.Argv) || command.Argv[index+1] == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--") {
+			name, value, joined := strings.Cut(argument, "=")
+			if _, ok := valueOptions[name]; !ok || !joined || value == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			continue
+		}
+		joined := false
+		for option := range joinedShort {
+			if strings.HasPrefix(argument, option) && len(argument) > len(option) {
+				joined = true
+				break
+			}
+		}
+		if joined {
+			continue
+		}
+		if strings.HasPrefix(argument, "-") {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		positionals++
+	}
+	if positionals > maxPositionals {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+}
+
+func classifySQLiteClientShellEscape(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	if !command.ArgvComplete || !staticArguments(command.Arguments) ||
+		!exactCaseSensitivePOSIXProgram(command, "sqlite3") ||
+		!exactSQLiteShellEscapeArgv(command.Argv) {
+		out.markPartial(IssueUnknownOperandGrammar)
 	}
 }
 
@@ -10308,6 +11249,12 @@ func classifyOpenSSLDecode(out *parseOutput, command *CommandFact) {
 	}
 	switch command.Argv[1] {
 	case "base64", "enc":
+	case "pkcs12":
+		if classifyOpenSSLPKCS12PrivateKeyExtraction(out, command) {
+			return
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
@@ -10427,6 +11374,12 @@ func classifySudo(out *parseOutput, command *CommandFact) {
 	}
 	if len(command.Argv) > 1 {
 		addOperation(command, OperationPrivilege)
+		if len(command.Argv) == 4 && command.Argv[1] == "log" &&
+			exactMacOSUnifiedLogEraseArgv(command.Argv[1:]) &&
+			staticArguments(command.Arguments) {
+			addOperation(command, OperationDelete)
+			addOperation(command, OperationPolicyBypass)
+		}
 		return
 	}
 	out.markPartial(IssueUnknownOperandGrammar)
@@ -10449,6 +11402,9 @@ func classifyPOSIXPrivilegeShell(out *parseOutput, command *CommandFact) {
 				(command.Argv[1] == "-" || command.Argv[1] == "-l" ||
 					command.Argv[1] == "--login") &&
 				command.Argv[2] == "root"
+		if _, commandMode := exactRootSuCommand(*command); commandMode {
+			exact = true
+		}
 	case "pkexec":
 		exact = exactPrivilegeShellArgv(command.Argv[1:])
 	}
@@ -10570,7 +11526,7 @@ func classifySchedule(out *parseOutput, command *CommandFact, program string) {
 	case "systemctl":
 		valueOptions := exactOptionSet(
 			"-H", "--host", "-M", "--machine", "-n", "--lines", "-o", "--output",
-			"-p", "--property", "--root", "--runtime-scope", "--state",
+			"-p", "--property", "--job-mode", "--root", "--runtime-scope", "--state",
 			"-t", "--type",
 		)
 		parsed := parseOwnedPOSIXOptions(
@@ -10632,6 +11588,10 @@ func classifySchedule(out *parseOutput, command *CommandFact, program string) {
 					appendPath(out, command.ID, PathAccessRead, candidate)
 				}
 				appendFileToProcessFlow(out, command.ID)
+			}
+			if disabled, _, ok := exactLinuxSecurityControlState(command); ok && disabled {
+				addOperation(command, OperationConfigChange)
+				addOperation(command, OperationPolicyBypass)
 			}
 		case "status", "show", "list-units", "list-unit-files", "is-active",
 			"is-enabled", "cat":
@@ -11437,6 +12397,150 @@ func webTargetFact(commandID int64, raw string, action NetworkAction) (NetworkFa
 	}, true
 }
 
+func curlSMTPTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd <= 0 {
+		return NetworkFact{}, false
+	}
+	scheme := strings.ToLower(raw[:schemeEnd])
+	if scheme != "smtp" && scheme != "smtps" {
+		return NetworkFact{}, false
+	}
+	remainder := raw[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	rawUserinfo, hostPort, hasUserinfo := strings.Cut(authority, "@")
+	if !hasUserinfo {
+		hostPort = authority
+	} else {
+		if strings.Contains(hostPort, "@") {
+			return NetworkFact{}, false
+		}
+		user, password, _ := strings.Cut(rawUserinfo, ":")
+		if _, valid := curlDecodePercentBytes(user, true); !valid {
+			return NetworkFact{}, false
+		}
+		if _, valid := curlDecodePercentBytes(password, true); !valid {
+			return NetworkFact{}, false
+		}
+	}
+	peerURL := scheme + "://" + hostPort + remainder[authorityEnd:]
+	parsed, err := url.Parse(peerURL)
+	if err != nil || parsed.User != nil || parsed.Hostname() == "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    scheme,
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+// curlTelnetTargetFact is intentionally curl-local. Telnet is not part of the
+// generic web target grammar, and admitting it through networkURLFact would
+// incorrectly broaden wget and generic upload projections.
+func curlTelnetTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	hostPort, _, _, _, _, valid := curlTelnetURLParts(raw)
+	if !valid {
+		return NetworkFact{}, false
+	}
+	parsed, err := url.Parse("http://" + hostPort)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Hostname() == "" || parsed.Path != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    "telnet",
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+func curlTelnetURLParts(
+	raw string,
+) (
+	hostPort string,
+	user string,
+	userPresent bool,
+	password string,
+	passwordPresent bool,
+	valid bool,
+) {
+	canonical, valid := curlCanonicalTelnetURL(raw)
+	if !valid {
+		return "", "", false, "", false, false
+	}
+	remainder := strings.TrimPrefix(canonical, "telnet://")
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	if authority == "" || strings.Count(authority, "@") > 1 {
+		return "", "", false, "", false, false
+	}
+	rawUserinfo, hostPort, userPresent := strings.Cut(authority, "@")
+	if !userPresent {
+		hostPort = authority
+	} else {
+		rawUser, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
+		var decoded bool
+		user, decoded = curlDecodePercentBytes(rawUser, true)
+		if !decoded {
+			return "", "", false, "", false, false
+		}
+		if hasPassword {
+			password, decoded = curlDecodePercentBytes(rawPassword, true)
+			if !decoded {
+				return "", "", false, "", false, false
+			}
+			passwordPresent = true
+		}
+	}
+	if hostPort == "" || strings.Contains(hostPort, "@") {
+		return "", "", false, "", false, false
+	}
+	return hostPort, user, userPresent, password, passwordPresent, true
+}
+
 func splitHostPortLoose(value string) (string, int64) {
 	if value == "" || strings.TrimSpace(value) != value ||
 		strings.Contains(value, "://") || strings.ContainsAny(value, `/\`) {
@@ -11620,6 +12724,10 @@ func deduplicateFacts(out *parseOutput) {
 		return strconv.FormatInt(fact.FromCommandID, 10) + "\x00" +
 			strconv.FormatInt(fact.ToCommandID, 10) + "\x00" +
 			string(fact.From) + "\x00" + string(fact.To)
+	})
+	out.artifacts = deduplicate(out.artifacts, func(fact ArtifactFact) string {
+		return strconv.FormatInt(fact.CommandID, 10) + "\x00" +
+			string(fact.Role) + "\x00" + string(fact.Kind) + "\x00" + fact.Value
 	})
 }
 

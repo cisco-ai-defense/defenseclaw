@@ -72,6 +72,36 @@ LEGACY_CONFIG_BOUNDARIES = (
 
 RULES = (
     Rule(
+        "v7-redaction-profile",
+        re.compile(r"\bProfileLegacyV7\b|\bLegacyV7(?:String|Entity|MessageContent|Reason|Evidence)\b|[\"']legacy-v7[\"']"),
+        "the legacy-v7 redaction profile is retired; upgrades emit a v7-compatible "
+        "custom profile instead",
+        # Two files name the retired profile in order to reject it, which is
+        # the opposite of reintroducing it: internal/audit keeps rejecting rows
+        # persisted while it existed, and the config compiler keeps a custom
+        # profile from claiming the name -- without that, one could be defined
+        # and selected, and the audit reader would then drop the projection
+        # silently rather than the configuration being refused.
+        allowed_prefixes=(
+            "internal/audit/event_history_lifecycle_v8.go",
+            "internal/config/observability_v8_compile.go",
+        ),
+        include_tests=False,
+    ),
+    Rule(
+        "v7-ai-discovery-envelope",
+        re.compile(
+            r"\bAIDiscovery(?:Payload|Component|Model|ModelProvenance|Runtime|Factor|Evidence)\b",
+        ),
+        "the v7 gateway-event AI discovery payload and its envelope event_type "
+        "are retired; emit canonical v8 ai.discovery records instead. "
+        "EventAIDiscovery itself survives -- it is the classification key behind "
+        "ProducerGatewayEvent/\"ai_discovery\", pinned by "
+        "internal/observability/classification_test.go -- and is deliberately "
+        "not matched.",
+        include_tests=False,
+    ),
+    Rule(
         "gateway-writer",
         re.compile(
             r"\bgatewaylog\.(?:Writer|Config|New)\b|\b(?:SetEventWriter|EventWriter|withCapturedEvents)\b",

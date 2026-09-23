@@ -36,6 +36,13 @@ const (
 // plausibly hit multiple axes (e.g. "exec via network fetch"), we
 // list all of them so patterns see the full signal.
 func AxesForRuleID(ruleID string) []DataAxis {
+	// This fixed chain is assigned directly because its append-only catalog
+	// entry is intentionally scoped to the guardrail package. The public docs
+	// snapshot remains unchanged until the gateway integration is published.
+	if ruleID == ToolChainADCSCertificateRequestThenPFXAuth ||
+		ruleID == ToolChainS4UTicketThenKerberosSecretsdump {
+		return []DataAxis{AxisSensitiveAccess}
+	}
 	if axes, ok := ruleAxes[ruleID]; ok {
 		return axes
 	}
@@ -207,6 +214,9 @@ var ruleAxes = map[string][]DataAxis{
 	"impact.fork_bomb":                            nil,
 	"impact.mass_process_termination":             nil,
 	"source.git_remote_tamper":                    nil,
+	"impact.protected_access_control_change":      nil,
+	"impact.protected_filesystem_format":          nil,
+	"impact.protected_device_wipe":                nil,
 	"source.git_config_exec":                      nil,
 	"tamper.detector_state_write":                 nil,
 	"tamper.guardrails_off":                       nil,
@@ -225,7 +235,8 @@ var ruleAxes = map[string][]DataAxis{
 		AxisSensitiveAccess,
 		AxisEgressExternal,
 	},
-	"chain.workload_identity_then_lateral_execution": {AxisSensitiveAccess},
+	"chain.workload_identity_then_lateral_execution":              {AxisSensitiveAccess},
+	"chain.compromised_credential_then_successful_authentication": {AxisSensitiveAccess},
 
 	// Sensitive data access (credentials, PII, system secrets)
 	"CRED-AWS-FILE":       {AxisSensitiveAccess},

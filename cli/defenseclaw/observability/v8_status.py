@@ -36,6 +36,7 @@ from typing import Any
 
 from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
 from defenseclaw.config_inspect import inspect_v8_config
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
 
@@ -261,8 +262,9 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
     )
     snapshot_path = Path(snapshot_name)
     try:
-        if os.name != "nt":
-            os.fchmod(descriptor, 0o600)
+        # The snapshot contains the complete source configuration. Protect it
+        # before its first byte on POSIX and native Windows.
+        set_file_mode(descriptor, snapshot_name, 0o600, set_owner=True)
         stream = os.fdopen(descriptor, "wb")
         descriptor = -1
         with stream:
@@ -289,12 +291,14 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         if inspected_source != source:
             raise ValueError("canonical v8 status snapshot changed during inspection")
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
         try:
-            snapshot_path.unlink()
-        except FileNotFoundError:
-            pass
+            if descriptor >= 0:
+                os.close(descriptor)
+        finally:
+            try:
+                snapshot_path.unlink()
+            except FileNotFoundError:
+                pass
     if result.effective is None:  # defensive; the wire decoder already checks
         raise ValueError("canonical v8 effective plan is missing")
     return operator_status_from_effective(

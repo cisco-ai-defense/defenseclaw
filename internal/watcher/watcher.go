@@ -19,6 +19,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -105,13 +107,17 @@ type InstallWatcher struct {
 	cfg        *config.Config
 	skillDirs  []string
 	pluginDirs []string
-	store      *audit.Store
-	logger     *audit.Logger
-	shell      *sandbox.OpenShell
-	opa        *policy.Engine
-	webhooks   WebhookDispatcher
-	debounce   time.Duration
-	onAdmit    OnAdmission
+	// managedArtifacts are exact connector-owned plugin files. They remain
+	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
+	// not inspect or quarantine DefenseClaw's own bridge artifact.
+	managedArtifacts []string
+	store            *audit.Store
+	logger           *audit.Logger
+	shell            *sandbox.OpenShell
+	opa              *policy.Engine
+	webhooks         WebhookDispatcher
+	debounce         time.Duration
+	onAdmit          OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
@@ -162,6 +168,42 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 	}
 }
 
+// SetManagedArtifacts binds exact connector-owned plugin paths before Run.
+// Paths are matched exactly; parent directories and sibling plugins receive no
+// exemption.
+func (w *InstallWatcher) SetManagedArtifacts(paths []string) {
+	w.managedArtifacts = w.managedArtifacts[:0]
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(filepath.Clean(trimmed))
+		if err != nil {
+			continue
+		}
+		duplicate := false
+		for _, existing := range w.managedArtifacts {
+			if sameWatcherPath(existing, absolute) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			w.managedArtifacts = append(w.managedArtifacts, absolute)
+		}
+	}
+}
+
+func (w *InstallWatcher) isManagedArtifact(path string) bool {
+	for _, managedPath := range w.managedArtifacts {
+		if sameWatcherPath(path, managedPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetWebhookDispatcher attaches a webhook dispatcher for outbound notifications.
 func (w *InstallWatcher) SetWebhookDispatcher(d WebhookDispatcher) {
 	w.webhooks = d
@@ -176,21 +218,36 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	defer fsw.Close()
 
 	watched := 0
-	for _, dir := range w.skillDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
-			continue
+	watchedDirs := make(map[string]struct{})
+	watchOnce := func(dir, kind string) bool {
+		absolute, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			absolute = filepath.Clean(dir)
 		}
+		key := strings.ToLower(filepath.Clean(absolute))
+		if _, exists := watchedDirs[key]; exists {
+			return true
+		}
+		if err := ensureAndWatch(fsw, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
+			return false
+		}
+		watchedDirs[key] = struct{}{}
 		watched++
-		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
+		fmt.Printf("[watch] monitoring %s dir: %s\n", kind, dir)
+		return true
+	}
+	for _, dir := range w.skillDirs {
+		watchOnce(dir, "skill")
 	}
 	for _, dir := range w.pluginDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] plugin dir %s: %v (skipping)\n", dir, err)
+		if !watchOnce(dir, "plugin") {
 			continue
 		}
-		watched++
-		fmt.Printf("[watch] monitoring plugin dir: %s\n", dir)
+		if watcherConnectorName(w.cfg) == "claudecode" &&
+			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
+			addClaudeCacheWatches(fsw, dir, watchedDirs)
+		}
 	}
 
 	if watched == 0 {
@@ -220,6 +277,17 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
+			}
+			if watcherConnectorName(w.cfg) == "claudecode" {
+				if depth, inside := w.claudeCacheDepth(event.Name); inside {
+					if info, statErr := os.Stat(event.Name); statErr == nil &&
+						info.IsDir() && depth < 3 {
+						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+					}
+					if depth != 3 {
+						continue
+					}
+				}
 			}
 			if !w.isDirectChildDir(event.Name) {
 				continue
@@ -266,16 +334,65 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		evt := w.classifyEvent(path)
-		result := w.runAdmission(ctx, evt)
-		if w.onAdmit != nil {
-			w.onAdmit(result)
+		for _, evt := range w.pendingInstallEvents(path) {
+			result := w.runAdmission(ctx, evt)
+			if w.onAdmit != nil {
+				w.onAdmit(result)
+			}
 		}
 	}
 }
 
+// pendingInstallEvents expands a top-level Hermes category notification into
+// the actual nested SKILL.md identities. A provenance/discovery failure keeps
+// the original category event so it fails open to scanning.
+func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
+	fallback := w.classifyEvent(path)
+	for _, root := range w.skillDirs {
+		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
+			continue
+		}
+		entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+		if err != nil {
+			return []InstallEvent{fallback}
+		}
+		out := make([]InstallEvent, 0, len(entries))
+		for _, entry := range entries {
+			if !watcherPathAtOrBelow(entry.Path, path) {
+				continue
+			}
+			out = append(out, InstallEvent{
+				Type:      InstallSkill,
+				Name:      entry.Name,
+				Path:      entry.Path,
+				Connector: "hermes",
+				Timestamp: time.Now().UTC(),
+			})
+		}
+		if len(out) > 0 {
+			return out
+		}
+		return []InstallEvent{fallback}
+	}
+	return []InstallEvent{fallback}
+}
+
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
+	name := filepath.Base(path)
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
+			installType = InstallPlugin
+			name = pluginID
+		}
+		return InstallEvent{
+			Type:      installType,
+			Name:      name,
+			Path:      path,
+			Connector: "claudecode",
+			Timestamp: time.Now().UTC(),
+		}
+	}
 	pathAbs, _ := filepath.Abs(path)
 	for _, dir := range w.pluginDirs {
 		abs, _ := filepath.Abs(dir)
@@ -287,11 +404,40 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 
 	return InstallEvent{
 		Type:      installType,
-		Name:      filepath.Base(path),
+		Name:      name,
 		Path:      path,
 		Connector: watcherConnectorName(w.cfg),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		parts := strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		switch {
+		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
+			return parts[1] + "@" + parts[0], true
+		case strings.EqualFold(filepath.Base(rootAbs), "skills") &&
+			len(parts) == 1 && isClaudeSkillsPlugin(pathAbs):
+			return claudeSkillsPluginIdentity(pathAbs), true
+		}
+	}
+	return "", false
 }
 
 // eventConnector resolves the connector that owns an install event: the
@@ -310,6 +456,24 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // When the OPA engine is available it delegates the verdict decision to
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
+	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "connector-managed plugin is lifecycle-owned and discovery-only",
+		}
+	}
+	// Vendor-managed skills remain visible to inventory, but
+	// must never enter scanner or enforcement paths. Check both the lexical
+	// and resolved path so an alias outside a bundle cannot bypass the boundary.
+	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "vendor-bundled skill is discovery-only",
+		}
+	}
+
 	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
@@ -766,9 +930,15 @@ func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) 
 		return
 	}
 	connector := w.eventConnector(evt)
+	// The admission identity is connector-defined and may come from an asset
+	// manifest (for example a Hermes SKILL.md name or a Claude plugin ID).  The
+	// quarantine planner deliberately binds filesystem mutations to the exact
+	// source basename.  Keep those identities separate so a valid manifest name
+	// cannot weaken the path check or prevent an otherwise valid quarantine.
+	physicalName := filepath.Base(filepath.Clean(evt.Path))
 	plan, err := enforce.NewAssetQuarantinePlan(
 		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
-		evt.Name, connector, evt.Path,
+		physicalName, connector, evt.Path,
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt.Path, err)
@@ -870,7 +1040,8 @@ func (w *InstallWatcher) RestoreQuarantined(
 		return fmt.Errorf("watcher: journal quarantine restore: %w", err)
 	}
 	plan := enforce.AssetRestorePlan{
-		RecordID: record.ID, TargetType: record.TargetType, TargetName: record.TargetName,
+		RecordID: record.ID, TargetType: record.TargetType,
+		TargetName:     filepath.Base(filepath.Clean(record.QuarantinePath)),
 		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
 		RestorePath: restorePath, AllowedRoots: w.sourceRootsFor(InstallType(record.TargetType)),
 		ContentHash: record.ContentHash,
@@ -939,6 +1110,28 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 	return false
 }
 
+func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return len(strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})), true
+	}
+	return 0, false
+}
+
 func sameWatcherPath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(strings.TrimSpace(left))
 	rightAbs, rightErr := filepath.Abs(strings.TrimSpace(right))
@@ -951,6 +1144,20 @@ func sameWatcherPath(left, right string) bool {
 		return strings.EqualFold(leftAbs, rightAbs)
 	}
 	return leftAbs == rightAbs
+}
+
+func watcherPathAtOrBelow(path, root string) bool {
+	pathAbs, pathErr := filepath.Abs(filepath.Clean(path))
+	rootAbs, rootErr := filepath.Abs(filepath.Clean(root))
+	if pathErr != nil || rootErr != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {
@@ -1001,6 +1208,9 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.skillDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
+			if isBundledSkillWatchPath(path) {
+				return false
+			}
 			return true
 		}
 	}
@@ -1010,7 +1220,20 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 			return true
 		}
 	}
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if depth, inside := w.claudeCacheDepth(path); inside {
+			return depth == 3
+		}
+	}
 	return false
+}
+
+func isBundledSkillWatchPath(path string) bool {
+	if enforce.IsBundledSkillPath(path) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && enforce.IsBundledSkillPath(resolved)
 }
 
 func (w *InstallWatcher) recordAdmission(ctx context.Context, decision, targetType string) {
@@ -1140,4 +1363,47 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
 	}
 
 	return nil
+}
+
+func addClaudeCacheWatches(
+	fsw *fsnotify.Watcher,
+	root string,
+	watched map[string]struct{},
+) {
+	root = filepath.Clean(root)
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return fs.SkipAll
+			}
+			return fs.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fs.SkipDir
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fs.SkipDir
+		}
+		depth := 0
+		if relative != "." {
+			depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			}))
+		}
+		if depth > 2 {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, exists := watched[key]; !exists {
+			if addErr := fsw.Add(path); addErr == nil {
+				watched[key] = struct{}{}
+			}
+		}
+		return nil
+	})
 }

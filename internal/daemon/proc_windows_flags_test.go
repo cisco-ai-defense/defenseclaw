@@ -63,6 +63,18 @@ func TestManagedGatewayCreationFlagsHonorJobBreakawayPolicy(t *testing.T) {
 	}
 }
 
+func TestManagedGatewayWorkingDirectoryDoesNotPinDataRoot(t *testing.T) {
+	executable := filepath.Join(`C:\Program Files`, "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	dataRoot := filepath.Join(`C:\Users`, "operator", ".defenseclaw")
+	got := daemonStartDir(executable, dataRoot)
+	if want := filepath.Dir(executable); got != want {
+		t.Fatalf("gateway working directory = %q, want trusted executable directory %q", got, want)
+	}
+	if got == dataRoot {
+		t.Fatalf("gateway working directory pins protected data root %q", dataRoot)
+	}
+}
+
 func TestWindowsDaemonChildSelfRegistersStrongIdentity(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv(EnvDaemon, "1")
@@ -136,6 +148,25 @@ func TestWindowsDaemonStartWaitsForChildOwnedPIDRegistration(t *testing.T) {
 	if info.PID != pid || info.StartIdentity == "" || !d.verifyProcess(info) {
 		t.Fatalf("child-owned PID registration is not strong: %+v", info)
 	}
+	dataDirPtr, err := winpath.UTF16Ptr(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := windows.CreateFile(
+		dataDirPtr,
+		windows.FILE_READ_ATTRIBUTES|windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("live gateway pinned protected data root against custody lease: %v", err)
+	}
+	if err := windows.CloseHandle(lease); err != nil {
+		t.Fatal(err)
+	}
 	leftovers, err := filepath.Glob(filepath.Join(dataDir, "gateway.pid~RF*.TMP"))
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +176,38 @@ func TestWindowsDaemonStartWaitsForChildOwnedPIDRegistration(t *testing.T) {
 	}
 	if err := d.StopStarted(pid, 5*time.Second); err != nil {
 		t.Fatal(err)
+	}
+	stopped = true
+}
+
+func TestWindowsStopStartedDrainsAcceptedTerminationBeforeReportingSecondKill(t *testing.T) {
+	if IsDaemonChild() {
+		if err := RegisterCurrentProcess(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	t.Setenv(EnvDaemon, "")
+	d := New(t.TempDir())
+	pid, err := d.Start([]string{"-test.run=^TestWindowsStopStartedDrainsAcceptedTerminationBeforeReportingSecondKill$"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = d.StopStarted(pid, 5*time.Second)
+		}
+	})
+
+	// A zero first wait forces StopStarted through its second-kill boundary.
+	// Windows can reject that redundant TerminateProcess while the first
+	// accepted termination is still draining. The retained original handle is
+	// the authoritative completion signal in that race.
+	if err := d.StopStarted(pid, 0); err != nil {
+		t.Fatalf("StopStarted() after accepted termination = %v", err)
 	}
 	stopped = true
 }

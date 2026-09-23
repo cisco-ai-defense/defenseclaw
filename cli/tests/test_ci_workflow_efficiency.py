@@ -52,6 +52,32 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert 'name = "pytest-xdist"' in lock
 
 
+def test_windows_pr_keeps_native_telemetry_coverage_without_repeating_exhaustive_suites() -> None:
+    workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+
+    assert (
+        "WINDOWS_TELEMETRY_REGISTRY_MODE: ${{ github.event_name == 'pull_request' && 'focused' || 'full' }}"
+    ) in workflow
+    assert "$fullTelemetryRegistry = $env:WINDOWS_TELEMETRY_REGISTRY_MODE -eq 'full'" in workflow
+    for isolated in (
+        "test_telemetry_registry_generator.py",
+        "test_telemetry_registry_candidate_renderer.py",
+    ):
+        assert isolated in workflow
+    assert "-not $fullTelemetryRegistry -and $_.FullName -in $exhaustiveTelemetryPaths" in workflow
+    for native_test in (
+        "test_updater_help_imports_on_native_platform",
+        "test_updater_mid_publish_failure_restores_prior_bytes_and_inodes",
+        "test_updater_windows_failure_after_replace_restores_prior_file",
+        "test_updater_post_commit_cleanup_fsync_failure_reports_live_commit",
+        "test_updater_namespace_swap_cannot_publish_through_detached_parent",
+        "test_updater_transaction_bootstrap_failure_removes_exact_created_inode",
+    ):
+        assert native_test in workflow
+    assert "if (-not $fullTelemetryRegistry -and $shardIndex -eq 2)" in workflow
+    assert "$nativeTelemetryPytestArgs" in workflow
+
+
 def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
     workflow_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     jobs = yaml.safe_load(workflow_text)["jobs"]
@@ -89,8 +115,15 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
 
     assert "name: Go Gateway Test (shard ${{ matrix.shard }})" in workflow
     assert "python3 scripts/go_test_shards.py" in workflow
-    assert "name: Go Test (remaining packages)" in workflow
-    assert "needs: [go-test-gateway, go-test-other]" in workflow
+    assert "name: Go Audit Test (shard ${{ matrix.shard }})" in workflow
+    assert "--package-dir internal/audit" in workflow
+    assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
+    assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
+    assert "GO_PACKAGE_SHARDS: 8" in workflow
+    assert "internal/(audit|gateway)" in workflow
+    assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
+    assert "needs: [go-test-gateway, go-test-audit, go-test-other]" in workflow
+    assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
     assert "run: make go-test-cov" not in workflow

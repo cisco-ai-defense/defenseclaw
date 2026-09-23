@@ -23,6 +23,164 @@ const (
 	configMetricV8Producer   = "gateway.config_manager"
 )
 
+type routingHealthTransitionV8 uint8
+
+const (
+	routingHealthV8StartupFailed routingHealthTransitionV8 = iota + 1
+	routingHealthV8ProbeFailed
+	routingHealthV8Restored
+)
+
+const (
+	routingHealthV8Subsystem        = "routing"
+	routingHealthV8StartupErrorCode = "ROUTER_STARTUP_FAILED"
+	routingHealthV8ProbeErrorCode   = "ROUTER_HEALTH_PROBE_FAILED"
+)
+
+// recordRoutingHealthTransitionV8 projects only closed, content-free routing
+// health facts. Router responses, prompt-derived decisions, endpoint values,
+// model aliases, and health detail maps are deliberately outside this API.
+func recordRoutingHealthTransitionV8(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	metricRuntime hookLifecycleMetricV8Runtime,
+	transition routingHealthTransitionV8,
+) {
+	if ctx == nil {
+		return
+	}
+	if transition == routingHealthV8StartupFailed || transition == routingHealthV8ProbeFailed {
+		code := routingHealthV8StartupErrorCode
+		if transition == routingHealthV8ProbeFailed {
+			code = routingHealthV8ProbeErrorCode
+		}
+		recordGatewayErrorV8(ctx, metricRuntime, routingHealthV8Subsystem, code)
+	}
+	_ = emitRoutingHealthTransitionV8(ctx, emitter, transition, time.Now().UTC())
+}
+
+func emitRoutingHealthTransitionV8(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	transition routingHealthTransitionV8,
+	observedAt time.Time,
+) error {
+	if ctx == nil || emitter == nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
+	}
+
+	producerKey := observability.ProducerKey(gatewaylog.EventError)
+	eventName := observability.EventName(observability.TelemetryEventSubsystemDegraded)
+	rawSeverity := "ERROR"
+	phase := "startup"
+	errorCode := routingHealthV8StartupErrorCode
+	if transition == routingHealthV8ProbeFailed {
+		phase = "monitor"
+		errorCode = routingHealthV8ProbeErrorCode
+	} else if transition == routingHealthV8Restored {
+		producerKey = observability.ProducerKey(gatewaylog.EventLifecycle)
+		eventName = observability.EventName(observability.TelemetryEventSubsystemRestored)
+		rawSeverity = "INFO"
+		phase = "monitor"
+		errorCode = ""
+	} else if transition != routingHealthV8StartupFailed {
+		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+	}
+
+	classification := observability.ClassificationContext{
+		Bucket:      observability.BucketPlatformHealth,
+		EventName:   eventName,
+		RawSeverity: rawSeverity,
+		MandatoryFacts: observability.MandatoryFacts{
+			DurableHealthTransition: true,
+		},
+	}
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerGatewayEvent,
+		producerKey,
+		classification,
+		observability.SourceGateway,
+		"",
+		producerKey,
+	)
+	if err != nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+	}
+
+	_, err = emitter.Emit(ctx, metadata, func(
+		snapshot observabilityruntime.EmitContext,
+		admission router.Admission,
+	) (observability.Record, error) {
+		if snapshot.Generation() > math.MaxInt64 ||
+			(admission != router.AdmissionOrdinary && admission != router.AdmissionFloor) {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		if admission == router.AdmissionFloor {
+			builder, buildErr := observability.NewRecordBuilder(
+				observability.ClockFunc(func() time.Time { return observedAt }),
+				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			)
+			if buildErr != nil {
+				return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+			}
+			outcome := observability.OutcomeFailed
+			if transition == routingHealthV8Restored {
+				outcome = observability.OutcomeCompleted
+			}
+			return builder.BuildMandatoryFloorLog(observability.MandatoryFloorLogInput{
+				ProducerKind:          observability.ProducerGatewayEvent,
+				ProducerKey:           producerKey,
+				ClassificationContext: classification,
+				ObservedAt:            &observedAt,
+				Source:                observability.SourceGateway,
+				Action:                string(producerKey),
+				Phase:                 phase,
+				Outcome:               outcome,
+				Correlation:           gatewayGeneratedCorrelation(ctx, ""),
+				Provenance: observability.Provenance{
+					Producer: platformHealthV8Producer, BinaryVersion: version.Current().BinaryVersion,
+					RegistrySchemaVersion: observability.CurrentRecordSchemaVersion,
+					ConfigGeneration:      int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
+				},
+			})
+		}
+		builder, buildErr := observability.NewFamilyBuilder(
+			observability.ClockFunc(func() time.Time { return observedAt }),
+			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		)
+		if buildErr != nil {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		envelope := gatewayGeneratedEnvelope(
+			ctx, snapshot, observability.SourceGateway, "", platformHealthV8Producer,
+			string(producerKey), phase,
+		)
+		envelope.ObservedAt = observability.Present(observedAt)
+		if transition == routingHealthV8Restored {
+			return builder.BuildLogSubsystemRestored(observability.LogSubsystemRestoredInput{
+				Envelope:                         envelope,
+				Severity:                         observability.Present(observability.SeverityInfo),
+				LogLevel:                         observability.Present(observability.LogLevelInfo),
+				Outcome:                          observability.OutcomeCompleted,
+				DefenseClawHealthSubsystem:       routingHealthV8Subsystem,
+				DefenseClawHealthState:           "restored",
+				MandatoryDurableHealthTransition: true,
+			})
+		}
+		return builder.BuildLogSubsystemDegraded(observability.LogSubsystemDegradedInput{
+			Envelope:                         envelope,
+			Severity:                         observability.Present(observability.SeverityHigh),
+			LogLevel:                         observability.Present(observability.LogLevelError),
+			Outcome:                          observability.OutcomeFailed,
+			DefenseClawHealthSubsystem:       routingHealthV8Subsystem,
+			DefenseClawHealthState:           "degraded",
+			DefenseClawSchemaErrorCode:       observability.Present(errorCode),
+			MandatoryDurableHealthTransition: true,
+		})
+	})
+	return err
+}
+
 // recordGatewayPanicV8 preserves both halves of the recovered-panic contract:
 // a low-cardinality counter for alerting and a durable, content-free health
 // transition for forensic review. The recovered value and stack never enter

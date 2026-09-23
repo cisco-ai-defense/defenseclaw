@@ -62,6 +62,79 @@ def test_grafana_dashboard_catalog_requires_generated_mirror() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_grafana_live_auth_supports_anonymous_mode_and_rejects_bad_explicit_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    audit._GRAFANA_AUTHORIZATION = "stale credential"
+
+    audit.configure_grafana_auth(None)
+
+    assert audit._GRAFANA_AUTHORIZATION is None
+    with pytest.raises(audit.AuditError, match="unavailable or unsafe"):
+        audit.configure_grafana_auth(tmp_path / "missing-password")
+
+
+def test_default_grafana_auth_prefers_normalized_defenseclaw_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    profile = tmp_path / "profile"
+    normal = profile / ".defenseclaw" / "observability-stack" / ".grafana-admin-password"
+    normal.parent.mkdir(parents=True)
+    normal.write_bytes(b"A" * 32 + b"\n")
+    configured_root = tmp_path / "custom data"
+    configured = configured_root / "observability-stack" / ".grafana-admin-password"
+    configured.parent.mkdir(parents=True)
+    configured.write_bytes(b"B" * 32 + b"\n")
+    monkeypatch.setenv(
+        "DEFENSECLAW_HOME",
+        str(configured_root / ".." / configured_root.name),
+    )
+
+    assert audit._default_grafana_password_file(home=profile) == configured
+
+    monkeypatch.delenv("DEFENSECLAW_HOME")
+    assert audit._default_grafana_password_file(home=profile) == normal
+
+
+def test_grafana_auth_is_attached_only_to_exact_loopback_grafana_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    password = tmp_path / "grafana-password"
+    # Match the production credential writer exactly. Text-mode writes turn
+    # ``\n`` into CRLF on Windows, which this parser intentionally rejects.
+    password.write_bytes(b"A" * 32 + b"\n")
+    audit.configure_grafana_auth(password)
+    requests: list[object] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(audit.urllib.request, "urlopen", fake_urlopen)
+
+    assert audit.request_json("http://127.0.0.1:3000/api/search") == {}
+    assert audit.request_json("http://localhost:3000/api/search") == {}
+    assert isinstance(requests[0], audit.urllib.request.Request)
+    assert requests[0].get_header("Authorization", "").startswith("Basic ")
+    assert requests[1] == "http://localhost:3000/api/search"
+
+
 def test_prometheus_label_inventory_includes_unchanged_canonical_v8_fields() -> None:
     audit = _load_audit_module()
     labels = audit.compatibility_errors.__globals__["prometheus_label_inputs"]()
@@ -505,6 +578,17 @@ def test_source_audit_allows_missing_generated_mirror(
 
     assert not any("packaged Grafana dashboard directory is missing" in error for error in source_errors)
     assert any("packaged Grafana dashboard directory is missing" in error for error in ci_errors)
+
+
+def test_dashboard_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    audit = _load_audit_module()
+    (tmp_path / "duplicate.json").write_text(
+        '{"uid":"first","uid":"second","title":"Duplicate"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(audit.AuditError, match="duplicate JSON key 'uid'"):
+        audit.load_dashboards(tmp_path)
 
 
 def test_static_audit_checks_variable_datasources_and_over_time_stats(
@@ -3247,3 +3331,48 @@ def test_runtime_fd_history_excludes_unavailable_sentinel() -> None:
     assert current["fieldConfig"]["defaults"]["mappings"][0]["options"]["-1"]["text"] == ("Not supported")
     assert history["targets"][0]["expr"] == "max(defenseclaw_runtime_fd_in_use >= 0)"
     assert "-1" in history["description"]
+    assert history["fieldConfig"]["defaults"]["noValue"] == "Not supported on this platform"
+
+
+def test_runtime_dashboard_counts_cycles_and_planes_instead_of_log_samples() -> None:
+    dashboard = _dashboard("defenseclaw-ai-runtime.json")
+    missing = _panel(dashboard, "Planes not running")["targets"][0]["expr"]
+    partial = _panel(dashboard, "Partial poll cycles")["targets"][0]["expr"]
+    classified = _panel(dashboard, "Plane C events classified")
+    gated = _panel(dashboard, "Plane C events gated")
+
+    assert "count(sum by (body_defenseclaw_ai_runtime_plane)" in missing
+    assert "sum(count_over_time" not in missing
+    assert "max(count_over_time" in partial
+    assert "sum(count_over_time" not in partial
+    assert "body_defenseclaw_ai_runtime_host_plane_observations" in classified["targets"][0]["expr"]
+    assert "body_defenseclaw_ai_runtime_host_plane_gated" in gated["targets"][0]["expr"]
+    assert classified["fieldConfig"]["defaults"]["noValue"] == "No Plane C poll data"
+    assert gated["fieldConfig"]["defaults"]["noValue"] == "No Plane C poll data"
+
+
+def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
+    discovery = _dashboard("defenseclaw-ai-discovery.json")
+    for title in ("Detector errors / min", "Files scanned / min"):
+        assert "or vector(0)" in _panel(discovery, title)["targets"][0]["expr"]
+
+    runtime = _dashboard("defenseclaw-ai-runtime.json")
+    expected_runtime_empty_states = {
+        "Findings by severity": "No runtime findings in range",
+        "Inventory agreement": "No runtime findings to correlate",
+        "Runtime findings": "No runtime findings in range",
+        "Tactics by stage": "No Plane C tactics in range",
+        "Tactics by responsible agent": "No Plane C tactics in range",
+        "Agent activity — one record per tactic": "No Plane C tactics in range",
+    }
+    for title, expected in expected_runtime_empty_states.items():
+        assert _panel(runtime, title)["fieldConfig"]["defaults"]["noValue"] == expected
+
+    findings = _dashboard("defenseclaw-findings.json")
+    for title in (
+        "Top rule (1h)",
+        "Top 20 rules with sparklines (1h)",
+        "Findings rate for $rule_id by severity",
+        "Heatmap — rule_id (rows) × time (cols)",
+    ):
+        assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")

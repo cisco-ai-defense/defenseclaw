@@ -32,6 +32,10 @@ from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability.local_stack import (
     CONTRACT,
+    GRAFANA_ACCESS_NO_PASSWORD,
+    GRAFANA_ACCESS_PASSWORD,
+    GRAFANA_ADMIN_USER,
+    GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
     resolve_stack_dir,
@@ -93,6 +97,15 @@ def local_observability(ctx: click.Context) -> None:
     help="Skip the readiness wait (container ps only).",
 )
 @click.option(
+    "--password/--no-password",
+    "grafana_password",
+    default=None,
+    help=(
+        "Select Grafana access explicitly. New managed stacks default to a "
+        "password; existing anonymous stacks keep their current behavior."
+    ),
+)
+@click.option(
     "--no-config",
     is_flag=True,
     help=(
@@ -149,6 +162,7 @@ def up_cmd(
     app: AppContext,
     timeout: int,
     no_wait: bool,
+    grafana_password: bool | None,
     no_config: bool,
     endpoint: str | None,
     signals: str,
@@ -171,8 +185,19 @@ def up_cmd(
     # Bundle refresh may replace the controller's Compose file. Resolve a fresh
     # controller so every platform launches the verified active copy.
     controller = _resolve_controller(app.cfg.data_dir)
+    requested_access_mode = (
+        GRAFANA_ACCESS_PASSWORD
+        if grafana_password is True
+        else GRAFANA_ACCESS_NO_PASSWORD
+        if grafana_password is False
+        else None
+    )
     started = _run_native_controller(
-        lambda: controller.up(timeout=timeout, wait=not no_wait),
+        lambda: controller.up(
+            timeout=timeout,
+            wait=not no_wait,
+            grafana_access_mode=requested_access_mode,
+        ),
         "Docker Compose up",
     )
     contract = started.contract
@@ -209,13 +234,23 @@ def up_cmd(
 
         logs_enabled = "logs" in selected_signals
 
-    _print_stack_summary(contract, logs_enabled=logs_enabled, cfg=app.cfg)
+    _print_stack_summary(
+        contract,
+        logs_enabled=logs_enabled,
+        cfg=app.cfg,
+        grafana_access_mode=started.grafana_access_mode,
+        grafana_password_file=str(controller.grafana_password_file),
+    )
 
     if app.logger:
         app.logger.log_action(
             ACTION_SETUP_LOCAL_OBSERVABILITY,
             "stack",
-            (f"action=up endpoint={otlp_endpoint} protocol={otlp_protocol} logs={'true' if logs_enabled else 'false'}"),
+            (
+                f"action=up endpoint={otlp_endpoint} protocol={otlp_protocol} "
+                f"logs={'true' if logs_enabled else 'false'} "
+                f"grafana_access={started.grafana_access_mode}"
+            ),
         )
 
 
@@ -532,14 +567,32 @@ def _print_stack_summary(
     *,
     logs_enabled: bool = False,
     cfg: Any = None,
+    grafana_access_mode: str = GRAFANA_ACCESS_PASSWORD,
+    grafana_password_file: str | None = None,
 ) -> None:
+    password_file = grafana_password_file or os.path.join(
+        getattr(cfg, "data_dir", "~/.defenseclaw"),
+        "observability-stack",
+        GRAFANA_PASSWORD_FILE_NAME,
+    )
     click.echo()
     ux.section("Local observability stack is up")
-    click.echo(
-        f"    {ux.bold('Grafana:')}    "
-        f"{contract.get('grafana_url', 'http://localhost:3000')}  "
-        "(anonymous Admin; login disabled)"
-    )
+    if grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
+        click.echo(
+            f"    {ux.bold('Grafana:')}    "
+            f"{contract.get('grafana_url', 'http://localhost:3000')}  "
+            "(anonymous Admin; no password)"
+        )
+        click.echo(
+            "    warning: every local process can access Grafana as Admin; managed ports remain loopback-only",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"    {ux.bold('Grafana:')}    "
+            f"{contract.get('grafana_url', 'http://localhost:3000')}  "
+            f"(user: {GRAFANA_ADMIN_USER}; password file: {password_file})"
+        )
     click.echo(f"    {ux.bold('Prometheus:')} {contract.get('prometheus_url', 'http://localhost:9090')}")
     click.echo(f"    {ux.bold('Tempo API:')}  {contract.get('tempo_url', 'http://localhost:3200')}")
     click.echo(f"    {ux.bold('Loki API:')}   {contract.get('loki_url', 'http://localhost:3100')}")
@@ -557,7 +610,7 @@ def _print_stack_summary(
     print_redaction_status_hint(cfg)
     click.echo()
     ux.section("Next steps")
-    click.echo("    defenseclaw-gateway restart         # pick up the new config")
+    click.echo("    # The gateway hot-reloads the observability destination; no restart is needed.")
     click.echo("    defenseclaw setup local-observability status")
     click.echo("    defenseclaw setup local-observability down   # stop (keeps data)")
     click.echo("    defenseclaw setup local-observability reset  # stop + wipe data")

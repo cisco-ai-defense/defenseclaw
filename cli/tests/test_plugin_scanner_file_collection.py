@@ -260,7 +260,8 @@ class TestLoadManifestOpenClaw(unittest.TestCase):
 class TestLoadManifestCodexAndClaude(unittest.TestCase):
     """S2.3 / F8: _load_manifest must recognise the Codex per-plugin
     manifest at .codex-plugin/plugin.json (and the matching Claude
-    Code .claude-plugin/plugin.json layout) so non-OpenClaw plugins
+    Code .claude-plugin/plugin.json layout, plus Cursor's documented
+    .cursor-plugin/plugin.json layout) so non-OpenClaw plugins
     don't false-trigger MANIFEST-MISSING.
 
     The contract this class pins down:
@@ -302,6 +303,18 @@ class TestLoadManifestCodexAndClaude(unittest.TestCase):
                 f,
             )
 
+    def _write_cursor_plugin(self, root: str, name: str = "my-cursor-plugin"):
+        os.makedirs(os.path.join(root, ".cursor-plugin"))
+        with open(os.path.join(root, ".cursor-plugin", "plugin.json"), "w") as f:
+            json.dump(
+                {
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": "Cursor plugin under test",
+                },
+                f,
+            )
+
     def test_codex_plugin_manifest_is_loaded(self):
         plugin_dir = os.path.join(self.tmp, "cx_plugin")
         os.makedirs(plugin_dir)
@@ -321,6 +334,16 @@ class TestLoadManifestCodexAndClaude(unittest.TestCase):
         self.assertIsNotNone(manifest)
         self.assertEqual(manifest.name, "my-claude-plugin")
         self.assertEqual(manifest.source, "claude.plugin.json")
+
+    def test_cursor_plugin_manifest_is_loaded(self):
+        plugin_dir = os.path.join(self.tmp, "cursor_plugin")
+        os.makedirs(plugin_dir)
+        self._write_cursor_plugin(plugin_dir)
+
+        manifest = _load_manifest(plugin_dir)
+        self.assertIsNotNone(manifest)
+        self.assertEqual(manifest.name, "my-cursor-plugin")
+        self.assertEqual(manifest.source, "cursor.plugin.json")
 
     def test_package_json_still_wins_over_codex_plugin(self):
         plugin_dir = os.path.join(self.tmp, "dual_codex")
@@ -401,6 +424,7 @@ class TestStandardManifestDirectoryStructure(unittest.TestCase):
         for directory_name, source in (
             (".claude-plugin", "claude.plugin.json"),
             (".codex-plugin", "codex.plugin.json"),
+            (".cursor-plugin", "cursor.plugin.json"),
         ):
             with self.subTest(directory_name=directory_name):
                 root = os.path.join(self.tmp, directory_name.removeprefix("."))

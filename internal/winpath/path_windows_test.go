@@ -49,6 +49,23 @@ func TestCurrentUserKnownFolderPathIgnoresProcessEnvironmentOverrides(t *testing
 	}
 }
 
+func TestCurrentUserKnownFolderPathDisablesPackageRedirection(t *testing.T) {
+	want, err := CurrentUserKnownFolderPathWithFlags(
+		windows.FOLDERID_LocalAppData,
+		windows.KF_FLAG_NO_PACKAGE_REDIRECTION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		t.Fatalf("current-token LocalAppData = %q, want unredirected %q", got, want)
+	}
+}
+
 func TestExtendedLocalAndUNCPaths(t *testing.T) {
 	local, err := Extended(filepath.Join(t.TempDir(), "nested", "file"))
 	if err != nil {

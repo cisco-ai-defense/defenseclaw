@@ -85,7 +85,7 @@ printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 
 	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
 	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-	cmd := exec.Command("bash", hookPath)
+	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, hookPath, "PreToolUse")...)
 	cmd.Env = append(os.Environ(),
 		"DEFENSECLAW_HOME="+t.TempDir(),
 		"DEFENSECLAW_GATEWAY_TOKEN="+genericToken,
@@ -186,7 +186,7 @@ func TestCodexHookRejectsTokenLineBreakBeforeCurl(t *testing.T) {
 
 	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
 	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-	cmd := exec.Command("bash", hookPath)
+	cmd := exec.Command("bash", codexBoundShellHookArgsForTest(t, hookPath, "PreToolUse")...)
 	cmd.Env = append(os.Environ(),
 		"DEFENSECLAW_HOME="+t.TempDir(),
 		"CODEX_CURL_INVOKED="+invokedPath,
@@ -198,6 +198,19 @@ func TestCodexHookRejectsTokenLineBreakBeforeCurl(t *testing.T) {
 	}
 	if _, err := os.Stat(invokedPath); !os.IsNotExist(err) {
 		t.Fatalf("invalid token invoked curl: %v", err)
+	}
+}
+
+func codexBoundShellHookArgsForTest(t *testing.T, hookPath, event string) []string {
+	t.Helper()
+	contract, err := codexHookContractForSetup(SetupOpts{})
+	if err != nil {
+		t.Fatalf("resolve default Codex hook contract: %v", err)
+	}
+	return []string{
+		hookPath,
+		"--event", event,
+		"--hook-contract", contract.ContractID,
 	}
 }
 

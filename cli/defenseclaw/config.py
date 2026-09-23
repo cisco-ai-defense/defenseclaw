@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import ntpath
 import os
 import platform
 import stat
@@ -83,6 +84,33 @@ _untrusted_managed_config_warned_paths: set[str] = set()
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+
+
+def _resolve_relative_gateway_device_key_file(key_file: str, data_dir: str) -> str | None:
+    """Resolve one portable relative device-key path beneath an absolute data root."""
+
+    if (
+        not isinstance(key_file, str)
+        or not key_file
+        or "\x00" in key_file
+        or not os.path.isabs(data_dir)
+        or os.path.isabs(key_file)
+        or key_file.startswith(("/", "\\"))
+        or ntpath.splitdrive(key_file)[0]
+        or ":" in key_file
+    ):
+        return None
+    root = os.path.normpath(os.path.abspath(data_dir))
+    target = os.path.normpath(os.path.abspath(os.path.join(root, key_file)))
+    try:
+        common = os.path.commonpath((target, root))
+    except ValueError:
+        return None
+    if common.casefold() != root.casefold() or target.casefold() == root.casefold():
+        return None
+    return target
+
+
 CONFIG_PATH_ENV = "DEFENSECLAW_CONFIG"
 DEPLOYMENT_MODE_ENV = "DEFENSECLAW_DEPLOYMENT_MODE"
 VALID_DEPLOYMENT_MODES = {
@@ -523,6 +551,55 @@ class ClawConfig:
     config_file: str = "~/.openclaw/openclaw.json"
     workspace_dir: str = ""
     openclaw_home_original: str = ""
+
+
+@dataclass
+class ACPBinding:
+    enabled: bool = False
+    profile: str = ""
+
+
+@dataclass
+class ACPProfile:
+    mode: str = ""
+    fail_mode: str = ""
+    allowed_clients: list[str] = field(default_factory=list)
+    allowed_agents: list[str] = field(default_factory=list)
+    denied_methods: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ACPConfig:
+    """Local ACP guard configuration; executable argv and secrets are excluded."""
+
+    enabled: bool = False
+    mode: str = "observe"
+    default_profile: str = "default"
+    clients: dict[str, ACPBinding] = field(default_factory=dict)
+    agents: dict[str, ACPBinding] = field(default_factory=dict)
+    # Per-pair policy keyed "<client>/<agent>". Mirrors ACPConfig.Bindings in
+    # internal/config/config.go: a present entry decides the profile for that
+    # pair alone, so one editor can run one agent in action mode while another
+    # stays in observe. Absent, the clients/agents pins decide it as before.
+    bindings: dict[str, ACPBinding] = field(default_factory=dict)
+    profiles: dict[str, ACPProfile] = field(default_factory=dict)
+
+    def binding_key(self, client: str, agent: str) -> str:
+        return f"{client.strip().lower()}/{agent.strip().lower()}"
+
+    def profile_for_pair(self, client: str, agent: str) -> str:
+        """Most specific wins: pair, then agent pin, then client pin, then default."""
+
+        pair = self.bindings.get(self.binding_key(client, agent))
+        if pair is not None and pair.profile.strip():
+            return pair.profile.strip()
+        agent_binding = self.agents.get(agent)
+        if agent_binding is not None and agent_binding.profile.strip():
+            return agent_binding.profile.strip()
+        client_binding = self.clients.get(client)
+        if client_binding is not None and client_binding.profile.strip():
+            return client_binding.profile.strip()
+        return self.default_profile.strip()
 
 
 # Canonical LLM environment variables. Mirrors internal/config/config.go.
@@ -1112,6 +1189,13 @@ class GatewayWatcherConfig:
 
 
 @dataclass
+class GatewayWatchdogConfig:
+    enabled: bool = True
+    interval: int = 30
+    debounce: int = 2
+
+
+@dataclass
 class GatewayConfigReloadConfig:
     mode: str = "hot"
 
@@ -1132,6 +1216,7 @@ class GatewayConfig:
     api_port: int = 18970
     config_reload: GatewayConfigReloadConfig = field(default_factory=GatewayConfigReloadConfig)
     watcher: GatewayWatcherConfig = field(default_factory=GatewayWatcherConfig)
+    watchdog: GatewayWatchdogConfig = field(default_factory=GatewayWatchdogConfig)
 
     def resolved_token(self) -> str:
         """Return the gateway auth token, walking the precedence ladder.
@@ -2067,6 +2152,16 @@ class RoutingConfig:
     version: str = ""
     port: int = 0
     algorithm: str = ""
+    # Keep the nested routing graph as mappings/lists rather than duplicating
+    # the rapidly evolving Go DTO hierarchy here.  Python setup commands only
+    # toggle the lifecycle fields above, but these values must still be part of
+    # the modeled v8 snapshot: otherwise changing ``enabled`` on a disabled
+    # config replaces the entire routing block and silently drops the model
+    # catalog, signals, and decisions.
+    remote: dict[str, Any] = field(default_factory=dict)
+    models: list[dict[str, Any]] = field(default_factory=list)
+    signals: dict[str, Any] = field(default_factory=dict)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"enabled": self.enabled}
@@ -2076,17 +2171,15 @@ class RoutingConfig:
             d["port"] = self.port
         if self.algorithm:
             d["algorithm"] = self.algorithm
+        if self.remote:
+            d["remote"] = copy.deepcopy(self.remote)
+        if self.models:
+            d["models"] = copy.deepcopy(self.models)
+        if self.signals:
+            d["signals"] = copy.deepcopy(self.signals)
+        if self.decisions:
+            d["decisions"] = copy.deepcopy(self.decisions)
         return d
-
-
-@dataclass
-class TrainingConfig:
-    """Training pipeline configuration. Mirrors internal/config.TrainingConfig."""
-
-    enabled: bool = False
-    backend: str = ""
-    models_dir: str = ""
-    llama_server_port: int = 0
 
 
 @dataclass
@@ -2108,6 +2201,89 @@ class PrivacyConfig:
 
 
 @dataclass
+class AIRuntimeConfig:
+    """AI Discovery runtime planes -- what actually ran.
+
+    Mirrors internal/config.AIRuntimeConfig. Disabled by default. The planes
+    read process argv, which the inventory scanner deliberately does not
+    collect; argv is classified as content on the wire and governed by each
+    destination's redaction profile. Environment variable values are never
+    read on any of these paths.
+    """
+
+    enabled: bool = False
+    poll_interval_s: int = 0
+    min_risk_to_report: int = 0
+    planes: list[str] = field(default_factory=list)
+    enable_host_plane: bool = False
+    dns_capture: bool = False
+    chain_window_min: int = 0
+    # Where the privileged reads come from: "" (auto), "direct", or
+    # "helper". Mirrors Go's AIRuntimeConfig.Acquisition.
+    acquisition: str = ""
+    helper_socket: str = ""
+    sanctioned_endpoints: list[str] = field(default_factory=list)
+    # None means "not stated", which resolves to enabled. Distinguishing that
+    # from an explicit false matters: disabling correlation removes the
+    # inventory read, it does not make findings score as though the inventory
+    # disagreed.
+    correlate: bool | None = None
+
+
+FULL_RUNTIME_PLANES: tuple[str, ...] = ("a", "b", "c")
+USER_RUNTIME_PLANES: tuple[str, ...] = ("a", "b")
+
+
+def enable_user_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, object, object]]:
+    """Turn on the unprivileged runtime planes without opting into Plane C."""
+
+    desired: tuple[tuple[str, object], ...] = (
+        ("enabled", True),
+        ("planes", list(USER_RUNTIME_PLANES)),
+        ("enable_host_plane", False),
+    )
+    changes: list[tuple[str, object, object]] = []
+    for field_name, value in desired:
+        current = getattr(runtime, field_name)
+        if field_name == "planes":
+            current_planes = [str(item).strip().lower() for item in (current or [])]
+            if current_planes == list(USER_RUNTIME_PLANES):
+                continue
+        elif current == value:
+            continue
+        changes.append((field_name, current, value))
+        setattr(runtime, field_name, value)
+    return changes
+
+
+def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, object, object]]:
+    """Turn on every runtime plane, including the host plane.
+
+    Plane C only runs when both ``planes`` lists ``c`` and
+    ``enable_host_plane`` is true. Returns the fields that actually
+    changed so callers can preview the same diff they persist.
+    """
+
+    desired: tuple[tuple[str, object], ...] = (
+        ("enabled", True),
+        ("planes", list(FULL_RUNTIME_PLANES)),
+        ("enable_host_plane", True),
+    )
+    changes: list[tuple[str, object, object]] = []
+    for field_name, value in desired:
+        current = getattr(runtime, field_name)
+        if field_name == "planes":
+            current_planes = [str(item).strip().lower() for item in (current or [])]
+            if current_planes == list(FULL_RUNTIME_PLANES):
+                continue
+        elif current == value:
+            continue
+        changes.append((field_name, current, value))
+        setattr(runtime, field_name, value)
+    return changes
+
+
+@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2121,6 +2297,10 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    # Off by default, like the other opt-ins below it: the address identifies a
+    # person rather than an account on one endpoint, and it leaves the endpoint
+    # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
+    include_user_email: bool = False
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -2128,6 +2308,7 @@ class AIDiscoveryConfig:
     confidence_policy_path: str = ""
     require_trusted_binary_paths: bool = False
     trusted_binary_prefixes: list[str] = field(default_factory=list)
+    runtime: AIRuntimeConfig = field(default_factory=lambda: AIRuntimeConfig())
 
 
 @dataclass
@@ -2310,6 +2491,7 @@ class Config:
     deployment_mode: str = ""
     discovery_source: str = ""
     claw: ClawConfig = field(default_factory=ClawConfig)
+    acp: ACPConfig = field(default_factory=ACPConfig)
     inspect_llm: InspectLLMConfig = field(default_factory=InspectLLMConfig)
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
     scanners: ScannersConfig = field(default_factory=ScannersConfig)
@@ -2330,6 +2512,7 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -2347,7 +2530,6 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -2448,7 +2630,8 @@ class Config:
         """Return skill directories for a connector.
 
         Polymorphic — when ``guardrail.connector`` is set, the
-        connector-specific layout (e.g. ``~/.codex/skills``) is
+        connector-specific layout (for Codex, project and personal
+        ``.agents/skills`` layers) is
         returned; otherwise falls back to OpenClaw paths derived
         from ``claw.home_dir`` and ``claw.config_file``.
 
@@ -2491,7 +2674,13 @@ class Config:
             workspace_dir=self.connector_workspace_dir(),
         )
 
-    def mcp_servers(self, connector: str | None = None) -> list[MCPServerEntry]:
+    def mcp_servers(
+        self,
+        connector: str | None = None,
+        *,
+        infer_workspace_from_cwd: bool = False,
+        diagnostic_sink: list[connector_paths.MCPSourceDiagnostic] | None = None,
+    ) -> list[MCPServerEntry]:
         """Return MCP server registrations for a connector.
 
         For OpenClaw the lookup prefers ``openclaw config get
@@ -2502,6 +2691,11 @@ class Config:
         ``connector`` overrides the resolved connector (used by
         ``mcp list --connector <name>`` for multi-connector focus);
         defaults to :meth:`active_connector`.
+
+        ``infer_workspace_from_cwd`` lets an interactive command treat its
+        cwd as the project when ``claw.workspace_dir`` is unpinned. Off by
+        default so gateway/daemon callers keep reading only what an
+        operator explicitly pinned.
         """
         return connector_paths.mcp_servers(
             connector or self.active_connector(),
@@ -2509,6 +2703,23 @@ class Config:
             workspace_dir=self.connector_workspace_dir(),
             openclaw_bin_resolver=openclaw_bin,
             openclaw_cmd_prefix=openclaw_cmd_prefix(),
+            infer_workspace_from_cwd=infer_workspace_from_cwd,
+            diagnostic_sink=diagnostic_sink,
+        )
+
+    def mcp_source_locations(
+        self,
+        connector: str | None = None,
+        *,
+        infer_workspace_from_cwd: bool = False,
+    ) -> list[str]:
+        """Return the locations :meth:`mcp_servers` would consult."""
+
+        return connector_paths.mcp_source_locations(
+            connector or self.active_connector(),
+            openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
+            infer_workspace_from_cwd=infer_workspace_from_cwd,
         )
 
     def installed_skill_candidates(self, skill_name: str) -> list[str]:
@@ -2716,6 +2927,15 @@ class Config:
         merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
         merged["config_version"] = 8
         merged.setdefault("observability", {})
+        # The Go runtime requires an explicit profile selector whenever ACP is
+        # enabled. A literal ``default`` value otherwise looks unchanged from
+        # the Python dataclass baseline and can disappear during the modeled
+        # v8 merge even though enabling ACP changed the field's obligation.
+        if self.acp.enabled:
+            acp_document = merged.setdefault("acp", {})
+            if not isinstance(acp_document, dict):
+                raise ConfigVersionError("acp must be a mapping")
+            acp_document["default_profile"] = self.acp.default_profile
         from defenseclaw.observability.v8_config import load_validate_v8
 
         load_validate_v8(merged, source_name=path)
@@ -2920,6 +3140,27 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 gw.pop("config_reload", None)
             else:
                 config_reload["mode"] = mode
+    acp = d.get("acp")
+    if isinstance(acp, dict):
+        # Mirror Go's ``yaml:"profile,omitempty"``. An unset pin means "this
+        # half is enabled, the pair decides the profile", and the canonical
+        # schema's stable-name pattern rejects the empty string, so the key
+        # has to be absent rather than blank.
+        for section in ("clients", "agents", "bindings"):
+            entries = acp.get(section)
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if isinstance(entry, dict) and not str(entry.get("profile", "")).strip():
+                    entry.pop("profile", None)
+        if (
+            not acp.get("enabled")
+            and not acp.get("clients")
+            and not acp.get("agents")
+            and not acp.get("bindings")
+            and not acp.get("profiles")
+        ):
+            d.pop("acp", None)
     _strip_empty_llm(d, "llm")
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
@@ -2982,6 +3223,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # kept verbatim.
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
+    _prune_ai_runtime(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3014,7 +3256,46 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         sources = registries.get("sources") or []
         if not sources:
             d.pop("registries", None)
+    _serialize_routing(d)
     return d
+
+
+def _serialize_routing(d: dict[str, Any]) -> None:
+    """Compact the ``routing:`` block, omitting fields at their zero value.
+
+    Mirrors Go's ``yaml:",omitempty"`` so configs that never opt in stay
+    byte-identical after a load/save round-trip.
+    """
+    routing = d.get("routing")
+    if not isinstance(routing, dict):
+        return
+    nested_fields = (
+        "remote",
+        "models",
+        "signals",
+        "decisions",
+    )
+    has_value = any(
+        (
+            routing.get("enabled"),
+            routing.get("version"),
+            routing.get("port"),
+            routing.get("algorithm"),
+            *(routing.get(name) for name in nested_fields),
+        )
+    )
+    if not has_value:
+        d.pop("routing", None)
+        return
+    if not routing.get("version"):
+        routing.pop("version", None)
+    if not routing.get("port"):
+        routing.pop("port", None)
+    if not routing.get("algorithm"):
+        routing.pop("algorithm", None)
+    for name in nested_fields:
+        if not routing.get(name):
+            routing.pop(name, None)
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -3131,6 +3412,10 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         # and saving must propagate to disk rather than being rescued by the
         # non-authoritative merge from the prior file.
         "observability.connectors",
+        "acp.clients",
+        "acp.agents",
+        "acp.bindings",
+        "acp.profiles",
     }
 )
 
@@ -3385,10 +3670,77 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
         d.pop("observability", None)
 
 
+def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
+    """Drop the fields Go omits, without deciding whether the block survives."""
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    for field_name in ("poll_interval_s", "min_risk_to_report", "chain_window_min"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("planes", "sanctioned_endpoints"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("acquisition", "helper_socket"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    if runtime.get("correlate") is None:
+        runtime.pop("correlate", None)
+
+
+def _prune_ai_runtime(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on the runtime block.
+
+    The Go struct omits an unset interval, floor, or window so the effective
+    default applies; the Python dataclass represents "unset" as 0, which the
+    v8 schema rejects because 0 is outside every one of those ranges. Dropping
+    the zeros keeps the two sides byte-identical and keeps a config that never
+    touched the runtime planes from failing validation on save.
+
+    ``correlate`` is dropped only when None. An explicit false must survive:
+    it is the difference between "do not consult the inventory" and "the
+    inventory disagreed".
+    """
+    _prune_ai_runtime_fields(ai_discovery)
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    # A runtime block that says nothing beyond "off" is the default state and
+    # does not belong on disk at all.
+    #
+    # The sentinel is derived from a pruned default rather than written out,
+    # for the same reason the pruning above is shared: a literal is a drift
+    # point. Add one more field defaulting to False or 0 and a hardcoded dict
+    # stops matching, so a config that never touched the runtime planes starts
+    # persisting a redundant runtime block.
+    if runtime == _pruned_default_ai_runtime():
+        ai_discovery.pop("runtime", None)
+
+
+def _pruned_default_ai_runtime() -> dict[str, Any]:
+    """The serialized shape of a runtime block an operator never configured."""
+    from dataclasses import asdict
+
+    reference: dict[str, Any] = {"runtime": asdict(AIRuntimeConfig())}
+    # Prune everything except the emptiness check itself, which is what this
+    # result feeds.
+    _prune_ai_runtime_fields(reference)
+    return reference.get("runtime", {})
+
+
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
     from dataclasses import asdict
 
-    return asdict(AIDiscoveryConfig(enabled=False))
+    disabled = asdict(AIDiscoveryConfig(enabled=False))
+    # Prune the reference the same way the serialized block is pruned, so the
+    # "is this just the default?" comparison stays an equality check on one
+    # shape rather than drifting every time a nested block gains a field.
+    _prune_ai_runtime(disabled)
+    return disabled
 
 
 def _default_application_protection_dict() -> dict[str, Any]:
@@ -4317,6 +4669,49 @@ def _merge_observability_connectors(
     return out
 
 
+def _merge_acp(raw: Any) -> ACPConfig:
+    if not isinstance(raw, dict):
+        return ACPConfig()
+
+    def _bindings(value: Any) -> dict[str, ACPBinding]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(name): ACPBinding(
+                enabled=_coerce_bool(item.get("enabled", False)),
+                profile=str(item.get("profile", "")),
+            )
+            for name, item in value.items()
+            if isinstance(item, dict)
+        }
+
+    profiles: dict[str, ACPProfile] = {}
+    profiles_raw = raw.get("profiles")
+    if profiles_raw is None:
+        profiles_raw = {}
+    if not isinstance(profiles_raw, dict):
+        raise ConfigVersionError("acp.profiles must be a mapping")
+    for name, item in profiles_raw.items():
+        if not isinstance(item, dict):
+            continue
+        profiles[str(name)] = ACPProfile(
+            mode=str(item.get("mode", "")),
+            fail_mode=str(item.get("fail_mode", "")),
+            allowed_clients=[str(value) for value in (item.get("allowed_clients") or [])],
+            allowed_agents=[str(value) for value in (item.get("allowed_agents") or [])],
+            denied_methods=[str(value) for value in (item.get("denied_methods") or [])],
+        )
+    return ACPConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        mode=str(raw.get("mode", "observe")),
+        default_profile=str(raw.get("default_profile", "default")),
+        clients=_bindings(raw.get("clients")),
+        agents=_bindings(raw.get("agents")),
+        bindings=_bindings(raw.get("bindings")),
+        profiles=profiles,
+    )
+
+
 def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     if not raw:
         return OpenShellConfig()
@@ -4356,6 +4751,16 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
             take_action=plugin_raw.get("take_action", False),
             dirs=plugin_raw.get("dirs", []),
         ),
+    )
+
+
+def _merge_gateway_watchdog(raw: dict[str, Any] | None) -> GatewayWatchdogConfig:
+    if not raw:
+        return GatewayWatchdogConfig()
+    return GatewayWatchdogConfig(
+        enabled=_coerce_bool(raw.get("enabled", True), default=True),
+        interval=raw.get("interval", 30),
+        debounce=raw.get("debounce", 2),
     )
 
 
@@ -4605,6 +5010,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
             openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
+        acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
@@ -4674,6 +5080,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             api_port=gw_raw.get("api_port", 18970),
             config_reload=_merge_gateway_config_reload(gw_raw.get("config_reload")),
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
+            watchdog=_merge_gateway_watchdog(gw_raw.get("watchdog")),
         ),
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
@@ -4686,8 +5093,14 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
-        training=_merge_training(raw.get("training")),
     )
+    if not os.path.isabs(cfg.gateway.device_key_file):
+        resolved_device_key = _resolve_relative_gateway_device_key_file(
+            cfg.gateway.device_key_file,
+            cfg.data_dir,
+        )
+        if resolved_device_key is not None:
+            cfg.gateway.device_key_file = resolved_device_key
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
@@ -4719,32 +5132,6 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
-
-
-def _merge_training(raw: dict[str, Any] | None) -> TrainingConfig:
-    """Build a :class:`TrainingConfig` from the YAML ``training:`` block."""
-    if not isinstance(raw, dict):
-        return TrainingConfig()
-    return TrainingConfig(
-        enabled=bool(raw.get("enabled", False)),
-        backend=raw.get("backend", ""),
-        models_dir=raw.get("models_dir", ""),
-        llama_server_port=_as_int(raw.get("llama_server_port"), 0),
-    )
-
-
-def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
-    """Build a :class:`PrivacyConfig` from the YAML ``privacy:`` block.
-
-    Defaults match the Go side (``disable_redaction: false``) so a
-    config without the block keeps the historical
-    redact-by-default contract.
-    """
-    if not isinstance(raw, dict):
-        return PrivacyConfig()
-    return PrivacyConfig(
-        disable_redaction=bool(raw.get("disable_redaction", False)),
-    )
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
@@ -4782,15 +5169,39 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
-        lookup_model_provenance_online=_coerce_bool(
-            raw.get("lookup_model_provenance_online", False)
-        ),
+        include_user_email=_coerce_bool(raw.get("include_user_email", False)),
+        lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
         require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
+        runtime=_merge_ai_runtime(raw.get("runtime")),
+    )
+
+
+def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
+    if not isinstance(raw, dict):
+        return AIRuntimeConfig()
+    correlate = raw.get("correlate")
+    return AIRuntimeConfig(
+        enabled=bool(raw.get("enabled", False)),
+        poll_interval_s=int(raw.get("poll_interval_s", 0) or 0),
+        min_risk_to_report=int(raw.get("min_risk_to_report", 0) or 0),
+        planes=[str(v) for v in (raw.get("planes", []) or [])],
+        enable_host_plane=bool(raw.get("enable_host_plane", False)),
+        dns_capture=bool(raw.get("dns_capture", False)),
+        chain_window_min=int(raw.get("chain_window_min", 0) or 0),
+        sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
+        correlate=None if correlate is None else _coerce_bool(correlate),
+        # Reconstructed explicitly, like every other field: this merge
+        # rebuilds the block from a whitelist, so a key absent here is a key
+        # silently erased on the next save. An operator who pinned
+        # acquisition to "direct" while diagnosing would have found it gone
+        # after the next CLI write, with the gateway quietly back on auto.
+        acquisition=str(raw.get("acquisition", "") or ""),
+        helper_socket=str(raw.get("helper_socket", "") or ""),
     )
 
 
@@ -4927,11 +5338,26 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
     """Build a :class:`RoutingConfig` from the YAML ``routing:`` block."""
     if not isinstance(raw, dict):
         return RoutingConfig()
+
+    def mapping(name: str) -> dict[str, Any]:
+        value = raw.get(name)
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    def mapping_list(name: str) -> list[dict[str, Any]]:
+        value = raw.get(name)
+        if not isinstance(value, list):
+            return []
+        return [copy.deepcopy(entry) for entry in value if isinstance(entry, dict)]
+
     return RoutingConfig(
-        enabled=bool(raw.get("enabled", False)),
+        enabled=_coerce_bool(raw.get("enabled", False)),
         version=str(raw.get("version", "") or ""),
-        port=int(raw.get("port", 0) or 0),
+        port=_as_int(raw.get("port", 0), 0),
         algorithm=str(raw.get("algorithm", "") or ""),
+        remote=mapping("remote"),
+        models=mapping_list("models"),
+        signals=mapping("signals"),
+        decisions=mapping_list("decisions"),
     )
 
 
@@ -4957,6 +5383,13 @@ def default_config() -> Config:
         ai_discovery=AIDiscoveryConfig(
             enabled=True,
             confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
+            # New installs enable the user-level runtime planes. Plane C reads
+            # privileged host telemetry and remains an explicit opt-in.
+            runtime=AIRuntimeConfig(
+                enabled=True,
+                planes=list(USER_RUNTIME_PLANES),
+                enable_host_plane=False,
+            ),
         ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),

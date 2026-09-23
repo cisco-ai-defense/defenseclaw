@@ -107,7 +107,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
 
-    spec = lookup(env_name)
+    spec = lookup(env_name, app.cfg)
     if spec is None:
         ux.warn(f"{env_name} is not in the DefenseClaw registry.")
         ux.subhead(

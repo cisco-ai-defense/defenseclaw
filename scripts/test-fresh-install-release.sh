@@ -221,6 +221,32 @@ if versions != [expected]:
 PY
 }
 
+assert_managed_skill_scanner_launcher() {
+    local home="$1"
+    local launcher="${home}/.local/bin/skill-scanner"
+    local expected="${home}/.defenseclaw/.venv/bin/skill-scanner"
+    local output
+    [[ -L "${launcher}" ]] || {
+        echo "skill-scanner launcher is not a symlink: ${launcher}" >&2
+        exit 1
+    }
+    [[ "$(readlink "${launcher}")" == "${expected}" ]] || {
+        echo "skill-scanner launcher does not target the managed environment: ${launcher}" >&2
+        exit 1
+    }
+    output="$("${launcher}" --version 2>&1)" || {
+        echo "skill-scanner launcher failed: ${launcher}" >&2
+        exit 1
+    }
+    python3 - "${output}" <<'PY'
+import re
+import sys
+
+if re.fullmatch(r"skill-scanner (?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", sys.argv[1]) is None:
+    raise SystemExit(f"skill-scanner returned unexpected version output: {sys.argv[1]!r}")
+PY
+}
+
 if ! HOME="${BOOTSTRAP_HOME}" \
     DEFENSECLAW_HOME="${BOOTSTRAP_HOME}/.defenseclaw" \
     TMPDIR="${BOOTSTRAP_TMP}" \
@@ -254,6 +280,7 @@ fi
 
 assert_exact_version "${BOOTSTRAP_HOME}/.local/bin/defenseclaw"
 assert_exact_version "${BOOTSTRAP_HOME}/.local/bin/defenseclaw-gateway"
+assert_managed_skill_scanner_launcher "${BOOTSTRAP_HOME}"
 snapshot_tree "${BOOTSTRAP_HOME}" "${WORKDIR}/before.json"
 
 set +e
@@ -319,6 +346,7 @@ if find "${EXTERNAL_TMP}" -name 'cosign-*' -print -quit | grep -q .; then
 fi
 assert_exact_version "${EXTERNAL_HOME}/.local/bin/defenseclaw"
 assert_exact_version "${EXTERNAL_HOME}/.local/bin/defenseclaw-gateway"
+assert_managed_skill_scanner_launcher "${EXTERNAL_HOME}"
 
 [[ "$(command -v cosign)" == "${EXTERNAL_COSIGN}" ]] || {
     echo "the ambient Cosign command changed during fresh-install testing" >&2

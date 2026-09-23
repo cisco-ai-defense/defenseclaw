@@ -187,7 +187,7 @@ func newBuiltinConnectors() []Connector {
 		NewCodexConnector(),
 		NewHermesConnector(),
 		NewCursorConnector(),
-		NewWindsurfConnector(),
+		NewDevinConnector(),
 		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
 		NewOpenHandsConnector(),
@@ -195,6 +195,7 @@ func newBuiltinConnectors() []Connector {
 		NewOpenCodeConnector(),
 		NewAMPConnector(),
 		NewOmnigentConnector(),
+		NewKiroConnector(),
 	}
 }
 

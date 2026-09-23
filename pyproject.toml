@@ -1,6 +1,6 @@
 [project]
 name = "defenseclaw"
-version = "0.8.6"
+version = "0.8.10"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -134,6 +134,7 @@ defenseclaw = [
     "_data/policies/rego/*.rego",
     "_data/policies/rego/*.json",
     "_data/envvars/*.json",
+    "_data/plugin/*.json",
     "_data/skills/codeguard/*.md",
     "_data/skills/codeguard/*.yaml",
     "_data/skills/codeguard/*.py",
@@ -163,7 +164,9 @@ defenseclaw = [
     "_data/telemetry/v8/local-observability-v1.json",
     "_data/telemetry/v8/openinference-v1.json",
     "inventory/ai_signatures.json",
+    "inventory/acp_registry.json",
     "inventory/hook_contracts.json",
+    "inventory/validated_versions.json",
     "_data/policies/openshell/*.rego",
     "_data/policies/openshell/*.yaml",
     "_data/policies/guardrail/default/*.yaml",
@@ -178,6 +181,7 @@ defenseclaw = [
     "_data/local_observability_stack/*.md",
     "_data/local_observability_stack/*.yml",
     "_data/local_observability_stack/*.sh",
+    "_data/local_observability_stack/.gitignore",
     "_data/local_observability_stack/bin/*",
     "_data/local_observability_stack/otel-collector/*.yaml",
     "_data/local_observability_stack/prometheus/*.yml",
@@ -219,7 +223,8 @@ override-dependencies = [
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes
     # CVE-2026-34993 and CVE-2026-47265; 3.14.1 fixes CVE-2026-54273..54280;
-    # 3.14.3 fixes CVE-2026-59881 and CVE-2026-69243/69244.
+    # 3.14.2 fixes PYSEC-2026-3546 and PYSEC-2026-3547; 3.14.3 fixes
+    # CVE-2026-59881, CVE-2026-69243/69244, and PYSEC-2026-3545.
     # LiteLLM's transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.14.3,<4",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and

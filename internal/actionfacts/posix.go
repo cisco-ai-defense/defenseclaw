@@ -19,6 +19,7 @@
 package actionfacts
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -49,14 +50,24 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
-		out.markInvalid(IssueInvalidSyntax)
-		return out
+		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
+		if !valid {
+			out.markInvalid(IssueInvalidSyntax)
+			return out
+		}
+		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+		file, err = parser.Parse(strings.NewReader(normalized), "")
+		if err != nil {
+			out.markInvalid(IssueInvalidSyntax)
+			return out
+		}
 	}
 	if !checkPOSIXBounds(file, &out) {
 		return out
 	}
 
 	pipelines := posixPipelineRelations(file)
+	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -87,6 +98,9 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		case *syntax.BinaryCmd:
 			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt ||
 				typed.Op == syntax.PipeAll {
+				if _, represented := representedFallbacks[typed]; represented {
+					break
+				}
 				// Short-circuit reachability and stderr-inclusive pipelines
 				// cannot be represented by the current fact contract.
 				out.markPartial(IssueUnsupportedConstruct)
@@ -108,6 +122,122 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
 	return out
+}
+
+// exactStandalonePOSIXAbsoluteCDFallbacks returns every OR node in one closed
+// top-level fallback list such as `cd /tmp || cd /var/run || cd /`. The
+// individual attempts remain ControlFlowUncertain; this proof only establishes
+// that the complete static list is represented. Requiring the list to consume
+// the entire file prevents an unresolved selected directory from affecting the
+// interpretation of later relative paths.
+func exactStandalonePOSIXAbsoluteCDFallbacks(
+	file *syntax.File,
+) map[*syntax.BinaryCmd]struct{} {
+	represented := make(map[*syntax.BinaryCmd]struct{})
+	if file == nil || len(file.Stmts) != 1 ||
+		posixStatementHasUnsupportedControl(file.Stmts[0]) {
+		return represented
+	}
+	if _, ok := file.Stmts[0].Cmd.(*syntax.BinaryCmd); !ok ||
+		!collectExactPOSIXAbsoluteCDFallback(file.Stmts[0], represented) {
+		return map[*syntax.BinaryCmd]struct{}{}
+	}
+	return represented
+}
+
+func collectExactPOSIXAbsoluteCDFallback(
+	stmt *syntax.Stmt,
+	represented map[*syntax.BinaryCmd]struct{},
+) bool {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) ||
+		len(stmt.Redirs) != 0 {
+		return false
+	}
+	if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+		if binary.Op != syntax.OrStmt ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.X, represented) ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.Y, represented) {
+			return false
+		}
+		represented[binary] = struct{}{}
+		return true
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return false
+	}
+	program := projectPOSIXWord(call.Args[0])
+	target := projectPOSIXWord(call.Args[1])
+	return !program.Expands && program.Value == "cd" &&
+		!target.Expands && strings.HasPrefix(target.Value, "/")
+}
+
+// normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
+// extension whose complete effect can be represented without broadening the
+// POSIX grammar: an exact, nonexpanding &>/dev/null (or append/clobber sibling).
+// It rewrites that redirect into separate stdout and stderr null redirects,
+// then the ordinary POSIX parser validates every other byte. Bash-only syntax
+// elsewhere therefore remains invalid.
+func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader(source), "")
+	if err != nil {
+		return "", false
+	}
+	type replacement struct {
+		start int
+		end   int
+		value string
+	}
+	var replacements []replacement
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok {
+			return valid
+		}
+		appendMode := false
+		switch redirect.Op {
+		case syntax.RdrAll, syntax.RdrAllClob:
+		case syntax.AppAll, syntax.AppAllClob:
+			appendMode = true
+		default:
+			return valid
+		}
+		target := projectPOSIXWord(redirect.Word)
+		if target.Expands || target.Value != "/dev/null" {
+			valid = false
+			return false
+		}
+		start := int(redirect.OpPos.Offset())
+		end := int(redirect.End().Offset())
+		if start < 0 || end <= start || end > len(source) || source[start] != '&' {
+			valid = false
+			return false
+		}
+		segment := source[start:end]
+		stderr := " 2>/dev/null"
+		if appendMode {
+			stderr = " 2>>/dev/null"
+		}
+		replacements = append(replacements, replacement{
+			start: start,
+			end:   end,
+			value: segment[1:] + stderr,
+		})
+		return valid
+	})
+	if !valid || len(replacements) == 0 {
+		return "", false
+	}
+	sort.Slice(replacements, func(i, j int) bool {
+		return replacements[i].start > replacements[j].start
+	})
+	result := source
+	for _, edit := range replacements {
+		result = result[:edit.start] + edit.value + result[edit.end:]
+	}
+	return result, true
 }
 
 func checkPOSIXBounds(root syntax.Node, out *parseOutput) bool {
@@ -192,12 +322,15 @@ func projectPOSIXStatement(
 	}
 
 	command := CommandFact{
-		ID:              out.nextCommandID(),
-		ParentCommandID: parentID,
-		PipelineID:      pipelineID,
-		Dialect:         DialectPOSIX,
-		Effect:          EffectExecute,
-		ArgvComplete:    true,
+		ID:                   out.nextCommandID(),
+		ParentCommandID:      parentID,
+		PipelineID:           pipelineID,
+		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+		Background:           stmt.Background,
+		Dialect:              DialectPOSIX,
+		Effect:               EffectExecute,
+		ArgvComplete:         true,
 	}
 	if len(call.Assigns) > 0 {
 		// Prefix assignments can change executable lookup and runtime startup
@@ -275,15 +408,86 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	} else if quote == "" {
 		quote = QuoteNone
 	}
+	staticValue := value.String()
 	result := ArgumentFact{
-		Value:   value.String(),
+		Value:   staticValue,
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
 	}
 	if result.Expands {
+		if !expands && unquotedExpansion && quote == QuoteNone {
+			result.StaticGlob = staticValue
+		}
 		result.Value = ""
 	}
 	return result
+}
+
+func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return true
+	}
+	for _, ancestor := range stack {
+		switch typed := ancestor.(type) {
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.CaseClause,
+			*syntax.IfClause, *syntax.WhileClause, *syntax.Subshell:
+			return true
+		case *syntax.BinaryCmd:
+			switch typed.Op {
+			case syntax.AndStmt, syntax.OrStmt, syntax.PipeAll:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func posixControlFlowOperator(
+	stmt *syntax.Stmt,
+	stack []syntax.Node,
+) CommandControlFlowOperator {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) {
+		return ControlFlowOperatorMixedOrUnsupported
+	}
+	operator := ControlFlowOperatorNone
+	merge := func(candidate CommandControlFlowOperator) {
+		if operator == ControlFlowOperatorMixedOrUnsupported ||
+			candidate == ControlFlowOperatorNone {
+			return
+		}
+		if candidate == ControlFlowOperatorMixedOrUnsupported ||
+			operator != ControlFlowOperatorNone && operator != candidate {
+			operator = ControlFlowOperatorMixedOrUnsupported
+			return
+		}
+		operator = candidate
+	}
+	for _, ancestor := range stack {
+		switch typed := ancestor.(type) {
+		case *syntax.Stmt:
+			if posixStatementHasUnsupportedControl(typed) {
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.CaseClause,
+			*syntax.IfClause, *syntax.WhileClause, *syntax.Subshell,
+			*syntax.Block:
+			merge(ControlFlowOperatorMixedOrUnsupported)
+		case *syntax.BinaryCmd:
+			switch typed.Op {
+			case syntax.AndStmt:
+				merge(ControlFlowOperatorAnd)
+			case syntax.OrStmt:
+				merge(ControlFlowOperatorOr)
+			case syntax.PipeAll:
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		}
+	}
+	return operator
+}
+
+func posixStatementHasUnsupportedControl(stmt *syntax.Stmt) bool {
+	return stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown
 }
 
 func posixUnquotedExpansion(part syntax.WordPart, atWordStart bool) bool {
@@ -424,6 +628,10 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			out.markPartial(IssueUnsupportedConstruct)
 			continue
 		}
+		if redirection.Op == syntax.Hdoc || redirection.Op == syntax.DashHdoc {
+			projectPOSIXLiteralHeredoc(redirection, command, out)
+			continue
+		}
 		if redirection.Op == syntax.DplIn || redirection.Op == syntax.DplOut {
 			fd := int64(0)
 			access := PathAccessRead
@@ -438,6 +646,28 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 					continue
 				}
 				fd = parsed
+			}
+			target := projectPOSIXWord(redirection.Word)
+			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
+			if redirection.Op == syntax.DplOut && !target.Expands &&
+				targetFDErr == nil &&
+				target.Value == strconv.FormatInt(targetFD, 10) &&
+				(fd == 2 && targetFD == 1 || fd == 1 && targetFD == 2) &&
+				posixDescriptorAlreadyRedirectedToNull(
+					command.Redirects,
+					targetFD,
+				) {
+				// Resolve only an ordered descriptor copy whose source descriptor
+				// already names a static null sink. This covers the deterministic
+				// `>/dev/null 2>&1`, `&>/dev/null 2>&1`, and
+				// `2>/dev/null 1>&2` forms. Every other descriptor duplication
+				// remains non-authoritative below.
+				if !out.appendRedirects(command, RedirectFact{
+					FD: fd, Access: access, Target: "/dev/null",
+				}) {
+					return
+				}
+				continue
 			}
 			// Descriptor duplication changes structural stdin/stdout ownership,
 			// but its operand is another descriptor rather than a path. Retain
@@ -465,6 +695,14 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			fd = parsed
 		}
+		if fd == 0 && command.LiteralStdinComplete {
+			// Redirect ordering could replace the heredoc as stdin. The private
+			// projection deliberately does not model that mixed form.
+			command.LiteralStdin = ""
+			command.LiteralStdinComplete = false
+			command.LiteralStdinAmbiguous = true
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		target := projectPOSIXWord(redirection.Word)
 		if !target.Expands && len(target.Value) > maxScalarBytes {
 			out.markLimit(IssueInputLimit)
@@ -489,10 +727,95 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			command.ArgvComplete = false
 			out.markPartial(IssueDynamicWord)
 		}
-		if redirection.Hdoc != nil {
+	}
+}
+
+func projectPOSIXLiteralHeredoc(
+	redirection *syntax.Redirect,
+	command *CommandFact,
+	out *parseOutput,
+) {
+	if redirection == nil || command == nil || redirection.Op != syntax.Hdoc ||
+		redirection.Hdoc == nil {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		command.LiteralStdin = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = true
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if redirection.N != nil {
+		parsed, err := strconv.ParseInt(redirection.N.Value, 10, 64)
+		if err != nil || parsed != 0 {
 			out.markPartial(IssueUnsupportedConstruct)
+			return
 		}
 	}
+	if posixDescriptorIsRedirected(command, 0) {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	delimiter := projectPOSIXWord(redirection.Word)
+	body := projectPOSIXWord(redirection.Hdoc)
+	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
+		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
+		strings.ContainsRune(body.Value, '\x00') {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	command.LiteralStdin = body.Value
+	command.LiteralStdinComplete = true
+}
+
+func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {
+	if command == nil {
+		return false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.FD == fd || fd == 1 && redirect.FD == -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// StaticPOSIXCatLiteralStdinOutput returns the exact stdout bytes of a direct
+// cat invocation fed by the bounded quoted-heredoc projection. Cat options,
+// file operands, wrappers, and competing stdin redirects are excluded.
+func StaticPOSIXCatLiteralStdinOutput(command CommandFact) (string, bool) {
+	if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
+		command.Program != "cat" || !command.ArgvComplete ||
+		len(command.Argv) != 1 || len(command.Arguments) != 1 ||
+		len(command.Wrappers) != 0 || !command.LiteralStdinComplete ||
+		command.LiteralStdinAmbiguous {
+		return "", false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.FD == 0 {
+			return "", false
+		}
+	}
+	return command.LiteralStdin, true
+}
+
+func posixDescriptorAlreadyRedirectedToNull(
+	redirects []RedirectFact,
+	fd int64,
+) bool {
+	for index := len(redirects) - 1; index >= 0; index-- {
+		redirect := redirects[index]
+		if redirect.FD != fd && redirect.FD != -1 {
+			continue
+		}
+		return !redirect.Expands &&
+			redirect.Target == "/dev/null" &&
+			(redirect.Access == PathAccessWrite ||
+				redirect.Access == PathAccessAppend)
+	}
+	return false
 }
 
 func posixRedirectAccess(operator syntax.RedirOperator) (PathAccess, bool) {
@@ -658,6 +981,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parsePOSIX(strings.Join(command.Argv[1:], " "), out.nextID, wrapperDepth+1)
+		case "su":
+			nested, ok := exactRootSuCommand(command)
+			if !ok {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
 			nested, dialect, ok, unsafe := nestedCommand(command.Argv, program)
 			if unsafe {
@@ -715,6 +1048,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		out.mergeNested(child)
 	}
+}
+
+func exactRootSuCommand(command CommandFact) (string, bool) {
+	if command.Program != "su" || !command.ArgvComplete ||
+		len(command.Argv) != 3 || command.Argv[1] != "-c" ||
+		strings.TrimSpace(command.Argv[2]) == "" ||
+		!staticArguments(command.Arguments) {
+		return "", false
+	}
+	return command.Argv[2], true
 }
 
 var (

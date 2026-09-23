@@ -33,9 +33,12 @@ import os
 import uuid
 
 import click
+import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import OrchestratorClient, alert_disposition_timeout_seconds
+from defenseclaw.logger import _gateway_api_host
 
 # ---------------------------------------------------------------------------
 # Table view helpers
@@ -138,11 +141,19 @@ _CONNECTOR_SCAN_POOL = 2000
 
 
 def _event_connector(event) -> str:
-    """Connector attributed to an alert, from its ``connector=`` kv field.
+    """Connector attributed to an alert from its persisted provenance.
 
-    Mirrors the TUI Alerts panel (``parse_kv_details(...).get("connector")``)
-    so CLI and TUI agree on attribution. Gateway-global alerts (e.g.
-    ``sink-failure``) carry no connector and return ""."""
+    First-class audit and structured fields take precedence; the legacy
+    ``connector=`` detail token remains readable for historical rows.
+    Gateway-global alerts carry no connector and return ""."""
+    connector = str(getattr(event, "connector", "") or "").strip().lower()
+    if connector:
+        return connector
+    structured = getattr(event, "structured", None)
+    if isinstance(structured, dict):
+        connector = str(structured.get("connector") or "").strip().lower()
+        if connector:
+            return connector
     return _kv(event.details or "").get("connector", "").lower()
 
 
@@ -516,6 +527,24 @@ def _raise_alert_response_error(response: dict[str, object]) -> None:
     raise click.ClickException(message)
 
 
+def _alert_disposition_failure_message(exc: BaseException) -> str:
+    if isinstance(exc, requests.Timeout):
+        return (
+            "Gateway timed out while confirming alert disposition. "
+            "The audit database may still be applying the change; wait and retry."
+        )
+    if isinstance(exc, requests.ConnectionError):
+        return "Gateway is unreachable; start it with 'defenseclaw-gateway start' and retry."
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 401:
+            return "Gateway rejected authentication; run 'defenseclaw doctor' and retry."
+        if status is not None:
+            return f"Gateway rejected alert disposition (HTTP {status})."
+        return "Gateway rejected alert disposition."
+    return "Canonical alert disposition was not confirmed by the gateway."
+
+
 def _set_alert_disposition(
     app: AppContext,
     disposition: str,
@@ -531,8 +560,6 @@ def _set_alert_disposition(
 ) -> int | None:
     if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
         raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
-    from defenseclaw.gateway import OrchestratorClient
-    from defenseclaw.logger import _gateway_api_host
 
     selector = _alert_selector(
         alert_ids=alert_ids,
@@ -546,10 +573,12 @@ def _set_alert_disposition(
     token = app.cfg.gateway.resolved_token()
     if not token:
         raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
+    exact_ids = selector.get("ids")
+    id_count = len(exact_ids) if isinstance(exact_ids, list) else 0
     client = OrchestratorClient(
         host=_gateway_api_host(app.cfg),
         port=int(app.cfg.gateway.api_port),
-        timeout=10,
+        timeout=alert_disposition_timeout_seconds(id_count),
         token=token,
     )
     operation_id = f"alert-review-{uuid.uuid4().hex}"
@@ -593,6 +622,7 @@ def _set_alert_disposition(
             selector=selector,
             preview=False,
             selection_digest=selection_digest,
+            timeout=alert_disposition_timeout_seconds(matched),
         )
         if (
             int(response.get("_http_status", 0)) != 200
@@ -603,7 +633,7 @@ def _set_alert_disposition(
     except Exception as exc:
         if isinstance(exc, (click.ClickException, click.Abort)):
             raise
-        raise click.ClickException("Canonical alert disposition was not confirmed by the gateway.") from exc
+        raise click.ClickException(_alert_disposition_failure_message(exc)) from exc
     finally:
         client.close()
     return _response_count(response, "applied") + _response_count(response, "no_change")

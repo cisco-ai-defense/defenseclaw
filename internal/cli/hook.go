@@ -48,6 +48,7 @@ func newHookCmd() *cobra.Command {
 	var (
 		connector         string
 		event             string
+		hookContractID    string
 		apiAddr           string
 		failMode          string
 		inputFile         string
@@ -66,10 +67,11 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if enterpriseManaged && enterpriseManagedHookRuntimeNoop() {
+			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
 				return nil
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts.HookContractID = hookContractID
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
@@ -82,8 +84,9 @@ func newHookCmd() *cobra.Command {
 				}
 				opts.Stdin = input
 			}
-			// hookexec returns the exact agent exit code (0 allow / 2 block).
-			// os.Exit is required because cobra collapses RunE outcomes to 0/1.
+			// hookexec returns the connector-native process status after writing
+			// any structured decision. os.Exit is required because cobra
+			// collapses RunE outcomes to 0/1.
 			code := hookexec.Run(cmd.Context(), opts)
 			if input != nil {
 				// Preserve hookexec's exact allow/block exit code after it has
@@ -98,11 +101,13 @@ func newHookCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&connector, "connector", "", "connector name (e.g. claudecode, codex, amp, cursor)")
 	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (selects the request deadline; inferred when omitted)")
+	cmd.Flags().StringVar(&hookContractID, "hook-contract", "", "installer-bound connector hook contract")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
+	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")
 
@@ -166,19 +171,20 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 }
 
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
-	home, trustedNativeState := trustedNativeHookHome()
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
 		// unavailable strict runtime directly to hookexec's fail-closed boundary.
 		return hookexec.Options{
-			Connector:          connector,
-			Event:              event,
-			FailMode:           "closed",
-			StrictAvailability: true,
-			ManagedEnterprise:  true,
+			Connector:             connector,
+			Event:                 event,
+			FailMode:              "closed",
+			StrictAvailability:    true,
+			ManagedEnterprise:     true,
+			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
 	}
+	home, trustedNativeState := trustedNativeHookHome()
 	if !trustedNativeState {
 		home = config.DefaultDataPath()
 	}
@@ -187,19 +193,52 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	// Setup writes hooks/.hookcfg on Windows so the agent's hook command can
 	// stay free of per-install flags (keeping its trust-hash / match string
 	// stable). It supplies the gateway address + fail mode the flags omit.
-	sidecar := readHookSidecar(filepath.Join(hookDir, ".hookcfg"))
+	sidecar := map[string]string{}
+	if !enterpriseManaged {
+		// Managed Windows resolution already consumed the same sidecar through
+		// its bounded, identity-stable verifier and then replaces every
+		// security-critical value with protected machine state. Avoid a second
+		// unbounded target-owned read while preserving unmanaged behavior.
+		sidecar = readHookSidecar(filepath.Join(hookDir, ".hookcfg"))
+	}
 
-	if apiAddr == "" && trustedNativeState {
-		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
-	}
-	if apiAddr == "" && !trustedNativeState {
-		apiAddr = os.Getenv("DEFENSECLAW_GATEWAY_ADDR")
-	}
-	if apiAddr == "" {
-		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
-	}
-	if apiAddr == "" {
-		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
+	managedGatewayService := ""
+	var authenticatedManagedToken *string
+	managedRuntimeFailure := ""
+	if enterpriseManaged {
+		protectedAddr, protectedService, protectedToken, ok :=
+			enterpriseManagedHookRuntimeConnection(connector)
+		if ok {
+			apiAddr = protectedAddr
+			managedGatewayService = protectedService
+			authenticatedManagedToken = protectedToken
+		} else {
+			// Resolver failure is carried separately and blocks before network
+			// contact. Keep a loopback placeholder so no user-supplied flag,
+			// environment value, or target-writable sidecar becomes selected.
+			apiAddr = "127.0.0.1:1"
+			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
+			if strings.TrimSpace(managedRuntimeFailure) == "" {
+				// Keep direct/internal callers safe even when they bypass the normal
+				// NativeHookRuntimeNoop preflight. Managed execution may never fall
+				// back to the mutable legacy sidecars merely because no authenticated
+				// generation has been cached yet.
+				managedRuntimeFailure = "enterprise_managed_runtime_state_invalid"
+			}
+		}
+	} else {
+		if apiAddr == "" && trustedNativeState {
+			apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
+		}
+		if apiAddr == "" && !trustedNativeState {
+			apiAddr = os.Getenv("DEFENSECLAW_GATEWAY_ADDR")
+		}
+		if apiAddr == "" {
+			apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
+		}
+		if apiAddr == "" {
+			apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
+		}
 	}
 
 	// The gateway is always a local, loopback-bound sidecar: setup bakes
@@ -234,15 +273,17 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 
 	opts := hookexec.Options{
-		Connector:          connector,
-		Event:              event,
-		APIAddr:            apiAddr,
-		FailMode:           failMode,
-		Home:               home,
-		HookDir:            hookDir,
-		Token:              token,
-		StrictAvailability: hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
-		ManagedEnterprise:  enterpriseManaged,
+		Connector:                 connector,
+		Event:                     event,
+		APIAddr:                   apiAddr,
+		FailMode:                  failMode,
+		Home:                      home,
+		HookDir:                   hookDir,
+		Token:                     token,
+		AuthenticatedManagedToken: authenticatedManagedToken,
+		StrictAvailability:        hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
+		ManagedEnterprise:         enterpriseManaged,
+		ManagedGatewayServiceName: managedGatewayService,
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),
 			os.Getenv("TRACEPARENT"),
@@ -257,6 +298,16 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()
 	}
+	if enterpriseManaged {
+		opts.ManagedEnterprise = true
+		if managedRuntimeFailure == "" {
+			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
+		}
+		opts.ManagedRuntimeFailure = managedRuntimeFailure
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
+	}
+
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			if !trustedNativeState || n <= 1<<20 {

@@ -309,10 +309,10 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 9
+    assert len(installers) == 8
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
     versions = [step.get("with", {}).get("cosign-release") for step in installers]
-    assert versions.count("v2.6.2") == 7
+    assert versions.count("v2.6.2") == 6
     assert versions.count("v2.6.3") == 2
     channel = _workflow()["jobs"]["advance-stable-channel"]
     channel_installer = next(
@@ -379,6 +379,7 @@ def test_release_sensitive_policy_covers_channel_and_windows_publication_authori
     assert {
         ".github/workflows/windows-native.yml",
         "scripts/defenseclaw-rescue.ps1",
+        "scripts/install-pinned-windows-cosign.ps1",
         "scripts/invoke-windows-setup-standard-user-ci.ps1",
         "scripts/publish-release-channel.sh",
         "scripts/release_channel.py",
@@ -589,8 +590,7 @@ def test_release_target_must_be_absent_from_published_stable_state() -> None:
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert text.count("goreleaser/goreleaser-action@") == 1
-    assert text.count("make dist-cli") == 1
-    assert text.count("make dist-plugin") == 1
+    assert text.count("make dist-cli dist-plugin dist-extension-contract") == 1
     assert text.count("make extensions") == 1
     assert text.count("scripts/release_candidate.py prepare-runtime") == 1
     assert text.count("scripts/release_candidate.py assemble") == 1
@@ -1183,19 +1183,30 @@ def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture()
         bootstrap["env"]["BOOTSTRAP_LEGACY_INSTALLER_SHA256"]
         == hashlib.sha256((ROOT / "scripts/install.ps1").read_bytes()).hexdigest()
     )
-    assert "sigstore/cosign-installer@" in rendered
+    assert "sigstore/cosign-installer@" not in rendered
+    cosign = next(
+        step
+        for step in bootstrap["steps"]
+        if step.get("name") == "Stage pinned Windows Cosign verifier"
+    )
+    assert cosign["run"] == "./scripts/install-pinned-windows-cosign.ps1"
     assert "gh release view" in rendered
     assert "release not found" in rendered
     assert "Could not resolve bootstrap fixture release" in rendered
     assert "$global:LASTEXITCODE = 0" in rendered
     assert "gh release download" in rendered
+    assert "function Invoke-AuthenticatedReleaseAssetDownload" in release_download
+    assert "$maxAttempts = 3" in release_download
+    assert "--clobber" in release_download
+    assert "Start-Sleep -Seconds $attempt" in release_download
     assert "actions/download-artifact@" in rendered
     assert "checksums.txt.bundle" in rendered
     assert 'select(.name == "install.ps1")' in release_download
     assert "$installerAssetCount -notmatch '^[0-9]+$'" in release_download
     assert "[int]$installerAssetCount -gt 1" in release_download
     assert "[int]$installerAssetCount -eq 1" in release_download
-    assert "--pattern install.ps1" in release_download
+    assert "--pattern $Asset" in release_download
+    assert "-Asset install.ps1" in release_download
     assert "$env:BOOTSTRAP_FIXTURE_VERSION -cne '0.8.7'" in release_download
     assert "The authenticated release is missing its exact immutable install.ps1 asset" in release_messages
     assert "Pinned legacy 0.8.7 has no install.ps1 asset" in release_download

@@ -132,6 +132,119 @@ from defenseclaw.upgrade_receipt import (
 )
 
 
+def test_restored_local_observability_controller_prefers_native_and_never_uses_bash_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    posix_native = recovery_home / ".venv/bin/defenseclaw-observability"
+    windows_native = recovery_home / ".venv/Scripts/defenseclaw-observability.exe"
+    bridge.parent.mkdir(parents=True)
+    posix_native.parent.mkdir(parents=True)
+    windows_native.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    posix_native.write_bytes(b"native-posix\n")
+    windows_native.write_bytes(b"native-windows\r\n")
+
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(str(data_dir), destination, os_name="posix")
+        == posix_native
+    )
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(str(data_dir), destination, os_name="nt")
+        == windows_native
+    )
+
+    windows_native.unlink()
+    with pytest.raises(OSError, match="native local observability controller"):
+        cmd_upgrade_module._restored_local_observability_controller(str(data_dir), destination, os_name="nt")
+
+
+@pytest.mark.parametrize(
+    ("os_name", "native_relative_path"),
+    [
+        ("posix", ".venv/bin/defenseclaw-observability"),
+        ("nt", ".venv/Scripts/defenseclaw-observability.exe"),
+        ("windows", ".venv/Scripts/defenseclaw-observability.exe"),
+    ],
+)
+def test_restored_local_observability_restart_invokes_native_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: str,
+    native_relative_path: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    native = recovery_home / native_relative_path
+    destination.mkdir(parents=True)
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name=os_name,
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(native)
+    assert command[1:3] == ["--stack-dir", str(destination)]
+    assert "openclaw-observability-bridge" not in " ".join(command)
+
+
+def test_restored_local_observability_restart_keeps_legacy_bridge_arguments_compatible(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name="posix",
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(bridge)
+    assert "--stack-dir" not in command
+
+
 def _hard_cut_provenance_payload(
     bridge_checksums_sha256: str,
     *,
@@ -1820,6 +1933,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_crash_restart_failure_cannot_report_rollback_success(self):
@@ -1878,6 +1992,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
             receipt = load_upgrade_receipt(receipt_path)
             self.assertEqual(receipt.status, "failed")
@@ -1929,6 +2044,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_rollback_discards_target_dotenv_value_before_loading_restored_bridge(self):
@@ -5533,15 +5649,15 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         cfg = Config()
         cfg.data_dir = "/private/upgrade-data"
         with TemporaryDirectory() as install_dir:
-            target = Path(install_dir, "target")
-            target.write_bytes(b"gateway")
-            target.chmod(0o700)
             symlink = Path(install_dir, "defenseclaw-gateway")
-            symlink.symlink_to(target)
             with (
                 patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
                 patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
                 patch("defenseclaw.gateway.canonical_install_path", return_value=str(symlink)),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.lstat",
+                    return_value=types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777),
+                ),
                 patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
                 self.assertRaises(SystemExit),
             ):
@@ -6712,13 +6828,9 @@ class TestUpgradeManifest(unittest.TestCase):
             return nullcontext()
         stack = ExitStack()
         security = Mock(name="native-windows-security")
-        stack.enter_context(
-            patch("defenseclaw.windows_acl.capture_path", return_value=security)
-        )
+        stack.enter_context(patch("defenseclaw.windows_acl.capture_path", return_value=security))
         stack.enter_context(patch("defenseclaw.windows_acl.assert_trusted_owner"))
-        stack.enter_context(
-            patch("defenseclaw.windows_acl.assert_not_broadly_writable")
-        )
+        stack.enter_context(patch("defenseclaw.windows_acl.assert_not_broadly_writable"))
         return stack
 
     @staticmethod
@@ -7583,10 +7695,13 @@ class TestUpgradeManifest(unittest.TestCase):
         with TemporaryDirectory() as temp:
             local_appdata, profile, _state = self._native_install_state_fixture(temp)
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
-                side_effect=[local_appdata, profile],
-            ), self._native_windows_acl_fixture():
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+                self._native_windows_acl_fixture(),
+            ):
                 loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
         self.assertIsNotNone(loaded)
@@ -7602,21 +7717,39 @@ class TestUpgradeManifest(unittest.TestCase):
             ),
         )
 
-    def test_native_windows_install_state_accepts_amp_connector(self):
-        with TemporaryDirectory() as temp:
-            local_appdata, profile, _state = self._native_install_state_fixture(
-                temp,
-                connector="amp",
-            )
+    def test_native_windows_install_state_accepts_every_installer_connector(self):
+        connectors = (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        )
+        for connector in connectors:
+            with self.subTest(connector=connector), TemporaryDirectory() as temp:
+                local_appdata, profile, _state = self._native_install_state_fixture(
+                    temp,
+                    connector=connector,
+                )
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
-                side_effect=[local_appdata, profile],
-            ), self._native_windows_acl_fixture():
-                loaded = _native_windows_install_state("windows", expected_version="0.8.7")
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                        side_effect=[local_appdata, profile],
+                    ),
+                    self._native_windows_acl_fixture(),
+                ):
+                    loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded["connector"], "amp")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["connector"], connector)
 
     def test_native_windows_install_state_ignores_environment_install_root(self):
         with TemporaryDirectory() as temp:
@@ -7699,6 +7832,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "defenseclaw-gateway.exe",
             )
             Path(gateway).write_bytes(b"native gateway fixture")
+            gateway = str(Path(gateway).resolve())
             legacy = os.path.join(profile, ".local", "bin", "defenseclaw-gateway.exe")
             with (
                 patch.dict(os.environ, {"HOME": profile, "USERPROFILE": profile}),
@@ -8112,6 +8246,60 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
         self.assertIn("DefenseClaw 9.9.9", output)
 
+    def test_windows_setup_handoff_preserves_supported_selection(self):
+        manifest = {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": False,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+        for connector in (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        ):
+            with self.subTest(connector=connector):
+                state = {
+                    "version": "0.8.7",
+                    "connector": connector,
+                    "mode": "action",
+                    "maintenance_path": r"C:\Trusted\DefenseClawSetup-x64.exe",
+                }
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade._cache_verified_windows_setup",
+                        return_value=state["maintenance_path"],
+                    ),
+                    patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock,
+                ):
+                    _handoff_windows_setup_upgrade(
+                        r"C:\Download\DefenseClawSetup-x64.exe",
+                        "DefenseClawSetup-x64.exe",
+                        "9.9.9",
+                        state,
+                        manifest,
+                        yes=True,
+                    )
+
+                args = popen_mock.call_args.args[0]
+                self.assertIn(f"CONNECTOR={connector}", args)
+                self.assertIn("MODE=action", args)
+
     def test_machine_install_self_update_is_rejected(self):
         with self.assertRaises(SystemExit) as ctx:
             _enforce_windows_self_update_policy({"install_scope": "machine"})
@@ -8172,7 +8360,10 @@ class TestGatewayTarballExtraction(unittest.TestCase):
         with TemporaryDirectory() as tmp:
 
             def fake_download(_url, dest):
-                self._write_tarball(dest, {"defenseclaw": "#!/bin/sh\n"})
+                self._write_tarball(
+                    dest,
+                    {"defenseclaw": "#!/bin/sh\n", "defenseclaw-acp": "#!/bin/sh\n"},
+                )
 
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 binary, tarball_name = _download_gateway("9.9.9", "darwin", "arm64", tmp)
@@ -8201,6 +8392,27 @@ class TestGatewayTarballExtraction(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     _download_gateway("9.9.9", "darwin", "arm64", tmp)
             self.assertEqual(ctx.exception.code, 1)
+
+    def test_download_gateway_requires_acp_guard_from_0811(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_tarball(dest, {"defenseclaw": "#!/bin/sh\n"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                with self.assertRaises(SystemExit) as ctx:
+                    _download_gateway("0.8.11", "linux", "amd64", tmp)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_download_gateway_accepts_historical_archive_without_acp_guard(self):
+        with TemporaryDirectory() as tmp:
+
+            def fake_download(_url, dest):
+                self._write_tarball(dest, {"defenseclaw": "#!/bin/sh\n"})
+
+            with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
+                binary, _ = _download_gateway("0.8.4", "linux", "amd64", tmp)
+            self.assertTrue(os.path.isfile(binary))
 
 
 class TestGatewayWindowsArchive(unittest.TestCase):
@@ -8235,6 +8447,7 @@ class TestGatewayWindowsArchive(unittest.TestCase):
                     {
                         "defenseclaw.exe": "MZ\x00gateway",
                         "defenseclaw-hook.exe": "MZ\x00hook",
+                        "defenseclaw-acp.exe": "MZ\x00acp",
                     },
                 )
 
@@ -8261,7 +8474,10 @@ class TestGatewayWindowsArchive(unittest.TestCase):
         with TemporaryDirectory() as tmp:
 
             def fake_download(_url, dest):
-                self._write_zip(dest, {"defenseclaw.exe": "MZ\x00gateway"})
+                self._write_zip(
+                    dest,
+                    {"defenseclaw.exe": "MZ\x00gateway", "defenseclaw-acp.exe": "MZ\x00acp"},
+                )
 
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 with self.assertRaises(SystemExit) as ctx:
@@ -8284,6 +8500,36 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
     """Robustness: installing the new gateway must snapshot the old one
     so a failed health check has a documented rollback path."""
 
+    @staticmethod
+    def _write_acp_contract_lock(
+        data_dir: Path,
+        guard_path: Path,
+        digest: str,
+        *,
+        managed_custody: bool = False,
+    ) -> Path:
+        lock_dir = data_dir / "acp"
+        lock_dir.mkdir(parents=True, mode=0o700)
+        lock = lock_dir / "zed-kiro.contract-lock.json"
+        lock.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "guard": {
+                        "path": str(guard_path),
+                        "sha256": digest,
+                        "managed_custody": managed_custody,
+                    },
+                    "client": {"id": "zed"},
+                    "agent": {"id": "kiro"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lock.chmod(0o600)
+        return lock
+
     @unittest.skipIf(os.name == "nt", "POSIX gateway snapshot fixture")
     def test_snapshot_created_when_previous_binary_exists(self):
         with (
@@ -8302,6 +8548,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             with open(new_binary, "wb") as f:
                 f.write(b"#!/bin/sh\necho new\n")
             os.chmod(new_binary, 0o755)
+            Path(fake_home, "defenseclaw-acp").write_bytes(b"#!/bin/sh\necho acp\n")
 
             _install_gateway(new_binary, "linux", backup_dir=backup_dir)
 
@@ -8328,6 +8575,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             with open(new_binary, "wb") as f:
                 f.write(b"#!/bin/sh\n")
             os.chmod(new_binary, 0o755)
+            Path(fake_home, "defenseclaw-acp").write_bytes(b"#!/bin/sh\n")
 
             _install_gateway(new_binary, "linux", backup_dir=backup_dir)
 
@@ -8343,6 +8591,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             candidate = Path(fake_home) / "candidate-gateway"
             active.write_bytes(b"complete bridge gateway")
             candidate.write_bytes(b"complete target gateway")
+            (Path(fake_home) / "defenseclaw-acp").write_bytes(b"complete target acp")
 
             def fail_partial_copy(_source, destination, **_kwargs):
                 Path(destination).write_bytes(b"partial target")
@@ -8359,6 +8608,204 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
 
             self.assertEqual(active.read_bytes(), b"complete bridge gateway")
 
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
+    def test_posix_acp_publish_failure_rolls_back_gateway_and_acp(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            install_dir = Path(fake_home) / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway"
+            acp_target = install_dir / "defenseclaw-acp"
+            gateway_target.write_bytes(b"old gateway")
+            acp_target.write_bytes(b"old acp")
+            gateway = Path(fake_home) / "defenseclaw"
+            gateway.write_bytes(b"new gateway")
+            acp_source = Path(fake_home) / "defenseclaw-acp"
+            acp_source.write_bytes(b"new acp")
+
+            real_replace = os.replace
+
+            def fail_acp_replace(source, destination):
+                if os.path.normpath(destination) == os.path.normpath(acp_target):
+                    raise PermissionError("ACP guard is locked")
+                return real_replace(source, destination)
+
+            with (
+                patch("defenseclaw.commands.cmd_upgrade.os.replace", side_effect=fail_acp_replace),
+                self.assertRaises(PermissionError),
+            ):
+                _install_gateway(str(gateway), "linux", target_version="0.8.11")
+
+            self.assertEqual(gateway_target.read_bytes(), b"old gateway")
+            self.assertEqual(acp_target.read_bytes(), b"old acp")
+            self.assertEqual(
+                sorted(path.name for path in install_dir.iterdir()),
+                ["defenseclaw-acp", "defenseclaw-gateway"],
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
+    def test_posix_acp_upgrade_rebinds_guard_contract_digest(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway"
+            acp_target = install_dir / "defenseclaw-acp"
+            gateway_target.write_bytes(b"old gateway")
+            acp_target.write_bytes(b"old acp")
+            gateway_source = home / "defenseclaw"
+            acp_source = home / "defenseclaw-acp"
+            gateway_source.write_bytes(b"new gateway")
+            acp_source.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            lock = self._write_acp_contract_lock(
+                data_dir,
+                acp_target,
+                hashlib.sha256(b"old acp").hexdigest(),
+            )
+
+            _install_gateway(
+                str(gateway_source),
+                "linux",
+                target_version="0.8.11",
+                data_dir=str(data_dir),
+            )
+
+            document = json.loads(lock.read_text(encoding="utf-8"))
+            self.assertEqual(document["guard"]["sha256"], hashlib.sha256(b"new acp").hexdigest())
+            self.assertEqual(acp_target.read_bytes(), b"new acp")
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink-prefix fixture")
+    def test_acp_contract_rebind_resolves_install_prefix_symlink(self):
+        with TemporaryDirectory() as fake_home:
+            home = Path(fake_home)
+            physical = home / "physical-bin"
+            physical.mkdir()
+            lexical = home / "linked-bin"
+            lexical.symlink_to(physical, target_is_directory=True)
+            guard = physical / "defenseclaw-acp"
+            guard.write_bytes(b"old acp")
+            data_dir = home / ".defenseclaw"
+            lock = self._write_acp_contract_lock(
+                data_dir,
+                guard.resolve(),
+                hashlib.sha256(b"old acp").hexdigest(),
+            )
+
+            updates = cmd_upgrade_module._prepare_acp_contract_lock_updates(
+                str(data_dir),
+                str(lexical / "defenseclaw-acp"),
+                hashlib.sha256(b"new acp").hexdigest(),
+            )
+
+            self.assertEqual([update.path for update in updates], [str(lock)])
+
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
+    def test_acp_contract_rebind_failure_rolls_back_gateway_and_guard(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway"
+            acp_target = install_dir / "defenseclaw-acp"
+            gateway_target.write_bytes(b"old gateway")
+            acp_target.write_bytes(b"old acp")
+            gateway_source = home / "defenseclaw"
+            acp_source = home / "defenseclaw-acp"
+            gateway_source.write_bytes(b"new gateway")
+            acp_source.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            old_digest = hashlib.sha256(b"old acp").hexdigest()
+            lock = self._write_acp_contract_lock(data_dir, acp_target, old_digest)
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.atomic_write_private_bytes",
+                    side_effect=OSError("injected contract lock failure"),
+                ),
+                self.assertRaisesRegex(OSError, "contract lock failure"),
+            ):
+                _install_gateway(
+                    str(gateway_source),
+                    "linux",
+                    target_version="0.8.11",
+                    data_dir=str(data_dir),
+                )
+
+            self.assertEqual(gateway_target.read_bytes(), b"old gateway")
+            self.assertEqual(acp_target.read_bytes(), b"old acp")
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"], old_digest)
+
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
+    def test_acp_upgrade_refuses_to_heal_drifted_normal_contract(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway"
+            acp_target = install_dir / "defenseclaw-acp"
+            gateway_target.write_bytes(b"old gateway")
+            acp_target.write_bytes(b"old acp")
+            gateway_source = home / "defenseclaw"
+            acp_source = home / "defenseclaw-acp"
+            gateway_source.write_bytes(b"new gateway")
+            acp_source.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            lock = self._write_acp_contract_lock(data_dir, acp_target, "0" * 64)
+
+            with self.assertRaisesRegex(OSError, "does not match the active guard"):
+                _install_gateway(
+                    str(gateway_source),
+                    "linux",
+                    target_version="0.8.11",
+                    data_dir=str(data_dir),
+                )
+
+            self.assertEqual(gateway_target.read_bytes(), b"old gateway")
+            self.assertEqual(acp_target.read_bytes(), b"old acp")
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"], "0" * 64)
+
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
+    def test_acp_upgrade_does_not_rewrite_managed_custody_contract(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway"
+            acp_target = install_dir / "defenseclaw-acp"
+            gateway_target.write_bytes(b"old gateway")
+            acp_target.write_bytes(b"old acp")
+            gateway_source = home / "defenseclaw"
+            acp_source = home / "defenseclaw-acp"
+            gateway_source.write_bytes(b"new gateway")
+            acp_source.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            old_digest = hashlib.sha256(b"old acp").hexdigest()
+            lock = self._write_acp_contract_lock(
+                data_dir,
+                acp_target,
+                old_digest,
+                managed_custody=True,
+            )
+            original_lock = lock.read_bytes()
+
+            _install_gateway(
+                str(gateway_source),
+                "linux",
+                target_version="0.8.11",
+                data_dir=str(data_dir),
+            )
+
+            self.assertEqual(acp_target.read_bytes(), b"new acp")
+            self.assertEqual(lock.read_bytes(), original_lock)
+
+    def test_install_rejects_missing_required_acp_guard(self):
+        with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
+            candidate = Path(fake_home) / "candidate-gateway"
+            candidate.write_bytes(b"complete target gateway")
+            with self.assertRaises(SystemExit):
+                _install_gateway(str(candidate), "linux", target_version="0.8.11")
+
     def test_failed_macos_codesign_never_publishes_candidate_gateway(self):
         with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
             install_dir = Path(fake_home) / ".local/bin"
@@ -8367,6 +8814,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             candidate = Path(fake_home) / "candidate-gateway"
             active.write_bytes(b"signed bridge gateway")
             candidate.write_bytes(b"unsigned target gateway")
+            (Path(fake_home) / "defenseclaw-acp").write_bytes(b"unsigned target acp")
 
             with (
                 patch(
@@ -8384,10 +8832,13 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
         with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
             gateway = os.path.join(staging, "defenseclaw.exe")
             hook = os.path.join(staging, "defenseclaw-hook.exe")
+            acp = os.path.join(staging, "defenseclaw-acp.exe")
             with open(gateway, "wb") as stream:
                 stream.write(b"gateway")
             with open(hook, "wb") as stream:
                 stream.write(b"hook")
+            with open(acp, "wb") as stream:
+                stream.write(b"acp")
 
             def fake_expanduser(path):
                 return path.replace("~", fake_home, 1)
@@ -8405,6 +8856,88 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             installed_hook = os.path.join(fake_home, ".local", "bin", "defenseclaw-hook.exe")
             with open(installed_hook, "rb") as stream:
                 self.assertEqual(stream.read(), b"hook")
+            with open(os.path.join(fake_home, ".local", "bin", "defenseclaw-acp.exe"), "rb") as stream:
+                self.assertEqual(stream.read(), b"acp")
+
+    def test_windows_acp_upgrade_rebinds_guard_contract_digest(self):
+        with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
+            stage = Path(staging)
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway.exe"
+            hook_target = install_dir / "defenseclaw-hook.exe"
+            acp_target = install_dir / "defenseclaw-acp.exe"
+            gateway_target.write_bytes(b"old gateway")
+            hook_target.write_bytes(b"old hook")
+            acp_target.write_bytes(b"old acp")
+            gateway = stage / "defenseclaw.exe"
+            hook = stage / "defenseclaw-hook.exe"
+            acp = stage / "defenseclaw-acp.exe"
+            gateway.write_bytes(b"new gateway")
+            hook.write_bytes(b"new hook")
+            acp.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            lock = self._write_acp_contract_lock(
+                data_dir,
+                acp_target,
+                hashlib.sha256(b"old acp").hexdigest(),
+            )
+
+            def fake_expanduser(path):
+                return path.replace("~", fake_home, 1)
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                side_effect=fake_expanduser,
+            ):
+                _install_gateway(gateway.as_posix(), "windows", data_dir=data_dir.as_posix())
+
+            document = json.loads(lock.read_text(encoding="utf-8"))
+            self.assertEqual(document["guard"]["sha256"], hashlib.sha256(b"new acp").hexdigest())
+
+    def test_windows_acp_contract_rebind_failure_rolls_back_all_binaries(self):
+        with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
+            stage = Path(staging)
+            home = Path(fake_home)
+            install_dir = home / ".local/bin"
+            install_dir.mkdir(parents=True)
+            gateway_target = install_dir / "defenseclaw-gateway.exe"
+            hook_target = install_dir / "defenseclaw-hook.exe"
+            acp_target = install_dir / "defenseclaw-acp.exe"
+            gateway_target.write_bytes(b"old gateway")
+            hook_target.write_bytes(b"old hook")
+            acp_target.write_bytes(b"old acp")
+            gateway = stage / "defenseclaw.exe"
+            hook = stage / "defenseclaw-hook.exe"
+            acp = stage / "defenseclaw-acp.exe"
+            gateway.write_bytes(b"new gateway")
+            hook.write_bytes(b"new hook")
+            acp.write_bytes(b"new acp")
+            data_dir = home / ".defenseclaw"
+            old_digest = hashlib.sha256(b"old acp").hexdigest()
+            lock = self._write_acp_contract_lock(data_dir, acp_target, old_digest)
+
+            def fake_expanduser(path):
+                return path.replace("~", fake_home, 1)
+
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                    side_effect=fake_expanduser,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.atomic_write_private_bytes",
+                    side_effect=OSError("injected contract lock failure"),
+                ),
+                self.assertRaisesRegex(OSError, "contract lock failure"),
+            ):
+                _install_gateway(gateway.as_posix(), "windows", data_dir=data_dir.as_posix())
+
+            self.assertEqual(gateway_target.read_bytes(), b"old gateway")
+            self.assertEqual(hook_target.read_bytes(), b"old hook")
+            self.assertEqual(acp_target.read_bytes(), b"old acp")
+            self.assertEqual(json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"], old_digest)
 
     def test_windows_install_rolls_back_hook_if_gateway_replace_fails(self):
         with TemporaryDirectory() as staging, TemporaryDirectory() as fake_home:
@@ -8412,17 +8945,23 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             os.makedirs(install_dir)
             gateway_target = os.path.join(install_dir, "defenseclaw-gateway.exe")
             hook_target = os.path.join(install_dir, "defenseclaw-hook.exe")
+            acp_target = os.path.join(install_dir, "defenseclaw-acp.exe")
             with open(gateway_target, "wb") as stream:
                 stream.write(b"old gateway")
             with open(hook_target, "wb") as stream:
                 stream.write(b"old hook")
+            with open(acp_target, "wb") as stream:
+                stream.write(b"old acp")
 
             gateway = os.path.join(staging, "defenseclaw.exe")
             hook = os.path.join(staging, "defenseclaw-hook.exe")
+            acp = os.path.join(staging, "defenseclaw-acp.exe")
             with open(gateway, "wb") as stream:
                 stream.write(b"new gateway")
             with open(hook, "wb") as stream:
                 stream.write(b"new hook")
+            with open(acp, "wb") as stream:
+                stream.write(b"new acp")
 
             real_replace = os.replace
 
@@ -8451,9 +8990,11 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
                 self.assertEqual(stream.read(), b"old gateway")
             with open(hook_target, "rb") as stream:
                 self.assertEqual(stream.read(), b"old hook")
+            with open(acp_target, "rb") as stream:
+                self.assertEqual(stream.read(), b"old acp")
             self.assertEqual(
                 sorted(os.listdir(install_dir)),
-                ["defenseclaw-gateway.exe", "defenseclaw-hook.exe"],
+                ["defenseclaw-acp.exe", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"],
             )
 
 

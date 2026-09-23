@@ -1,0 +1,63 @@
+{
+  "schema_version": "1",
+  "published_at": "2026-09-08",
+  "scope": "english-public-datasets",
+  "profile_aliases": {"balanced": "default"},
+  "binary": [
+    {"benchmark":"public-command","split":"development","profile":"default","tp":5,"tn":23649,"fp":3,"fn":0,"precision":0.625,"recall":1.0,"f1":0.7692307692,"fpr":0.0001268383,"benign_blocks":0},
+    {"benchmark":"public-command","split":"development","profile":"permissive","tp":5,"tn":23649,"fp":3,"fn":0,"precision":0.625,"recall":1.0,"f1":0.7692307692,"fpr":0.0001268383,"benign_blocks":0},
+    {"benchmark":"public-command","split":"development","profile":"strict","tp":5,"tn":23608,"fp":44,"fn":0,"precision":0.1020408163,"recall":1.0,"f1":0.1851851852,"fpr":0.0018603078,"benign_blocks":3},
+    {"benchmark":"public-command","split":"validation","profile":"default","tp":9,"tn":7908,"fp":0,"fn":0,"precision":1.0,"recall":1.0,"f1":1.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"public-command","split":"validation","profile":"permissive","tp":9,"tn":7908,"fp":0,"fn":0,"precision":1.0,"recall":1.0,"f1":1.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"public-command","split":"validation","profile":"strict","tp":9,"tn":7900,"fp":8,"fn":0,"precision":0.5294117647,"recall":1.0,"f1":0.6923076923,"fpr":0.001011634,"benign_blocks":0},
+    {"benchmark":"public-command","split":"retrospective-test","profile":"default","tp":6,"tn":7738,"fp":0,"fn":0,"precision":1.0,"recall":1.0,"f1":1.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"public-command","split":"retrospective-test","profile":"permissive","tp":6,"tn":7738,"fp":0,"fn":0,"precision":1.0,"recall":1.0,"f1":1.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"public-command","split":"retrospective-test","profile":"strict","tp":6,"tn":7732,"fp":6,"fn":0,"precision":0.5,"recall":1.0,"f1":0.6666666667,"fpr":0.0007753942,"benign_blocks":0},
+    {"benchmark":"privacy-high-assurance","split":"development","profile":"all","tp":17367,"tn":39057,"fp":0,"fn":4363,"precision":1.0,"recall":0.7992176714,"f1":0.8884061584,"fpr":0.0,"benign_blocks":0,"span_f1":0.731116},
+    {"benchmark":"privacy-high-assurance","split":"validation","profile":"all","tp":5929,"tn":13018,"fp":0,"fn":1454,"precision":1.0,"recall":0.8030610863,"f1":0.8907753798,"fpr":0.0,"benign_blocks":0,"span_f1":0.733771},
+    {"benchmark":"privacy-high-assurance","split":"retrospective-test","profile":"default-permissive","tp":4052,"tn":13019,"fp":0,"fn":3405,"precision":1.0,"recall":0.5433820571,"f1":0.7041454738,"fpr":0.0,"benign_blocks":0,"span_f1_range":[0.184314,0.184514]},
+    {"benchmark":"privacy-high-assurance","split":"retrospective-test","profile":"strict","tp":4371,"tn":13018,"fp":1,"fn":3086,"precision":0.9997712717,"recall":0.5861606544,"f1":0.7390311945,"fpr":0.00007681,"benign_blocks":0,"span_f1":0.206992},
+    {"benchmark":"ylemis-india-pii","split":"test","profile":"all","tp":4190,"tn":1756,"fp":0,"fn":270,"precision":1.0,"recall":0.9394618834,"f1":0.9687861272,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"injecagent-yara","split":"development","profile":"scanner","tp":29,"tn":230,"fp":0,"fn":14,"precision":1.0,"recall":0.6744186047,"f1":0.8055555556,"fpr":0.0},
+    {"benchmark":"injecagent-yara","split":"validation","profile":"scanner","tp":7,"tn":53,"fp":0,"fn":2,"precision":1.0,"recall":0.7777777778,"f1":0.875,"fpr":0.0},
+    {"benchmark":"injecagent-yara","split":"inspected-test","profile":"scanner","tp":8,"tn":47,"fp":0,"fn":2,"precision":1.0,"recall":0.8,"f1":0.8888888889,"fpr":0.0},
+    {"benchmark":"zenodo-cyber-shell","split":"development","profile":"default-permissive","tp":0,"tn":969,"fp":0,"fn":555,"f1":0.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"zenodo-cyber-shell","split":"development","profile":"strict","tp":8,"tn":969,"fp":0,"fn":547,"f1":0.0284191829,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"zenodo-cyber-shell","split":"validation","profile":"default-permissive","tp":0,"tn":373,"fp":0,"fn":167,"f1":0.0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"zenodo-cyber-shell","split":"validation","profile":"strict","tp":1,"tn":372,"fp":1,"fn":166,"f1":0.0118343195,"fpr":0.0026809651,"benign_blocks":0}
+  ],
+  "benign_noise": [
+    {"benchmark":"isetrace","split":"development","profile":"all","tn":1936,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"isetrace","split":"validation","profile":"all","tn":645,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"isetrace","split":"test","profile":"all","tn":646,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"terminalbench","split":"development","profile":"all","tn":1416,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"terminalbench","split":"validation","profile":"all","tn":473,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"terminalbench","split":"test","profile":"all","tn":473,"fp":0,"fpr":0.0,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"development","profile":"default-permissive","tn":16570,"fp":271,"fpr":0.0160928686,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"development","profile":"strict","tn":16439,"fp":402,"fpr":0.0238703165,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"validation","profile":"default-permissive","tn":5596,"fp":50,"fpr":0.0088558271,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"validation","profile":"strict","tn":5591,"fp":55,"fpr":0.0097414098,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"test","profile":"default-permissive","tn":5430,"fp":155,"fpr":0.0277529096,"benign_blocks":0},
+    {"benchmark":"linuxarena","split":"test","profile":"strict","tn":5420,"fp":165,"fpr":0.0295434199,"benign_blocks":0}
+  ],
+  "coverage": [
+    {"benchmark":"monitoringbench","cases":4883,"successful_attack_trajectories":2442,"closed_sudoers_proofs":41,"interpretation":"proof-yield-not-population-recall"},
+    {"benchmark":"labeled-bashbench","cases":375,"default_detections":36,"permissive_detections":36,"strict_detections":63,"interpretation":"silver-label-coverage"},
+    {"benchmark":"hf-agentic-red-team","cases":25982,"default_detections":1246,"permissive_detections":1246,"strict_detections":1397,"interpretation":"outcome-unknown-coverage"},
+    {"benchmark":"anode-agent-trace-cyber","cases":300,"interpretation":"schema-and-coverage"}
+  ],
+  "conformance": [
+    {"benchmark":"cloud-production-pack","tp":20,"tn":9,"fp":0,"fn":0,"f1":1.0,"fpr":0.0},
+    {"benchmark":"database-destruction-pack","tp":14,"tn":10,"fp":0,"fn":0,"f1":1.0,"fpr":0.0},
+    {"benchmark":"infrastructure-destruction-pack","tp":4,"tn":7,"fp":0,"fn":0,"f1":1.0,"fpr":0.0},
+    {"benchmark":"kubernetes-production-pack","tp":6,"tn":7,"fp":0,"fn":0,"f1":1.0,"fpr":0.0},
+    {"benchmark":"reverse-shell-persistence-chain","tp":4,"tn":10,"fp":0,"fn":0,"f1":1.0,"fpr":0.0,"blocks":4}
+  ],
+  "limitations": [
+    "The public command validation set contains only nine accepted deterministic-malicious positives.",
+    "Retrospective test partitions were inspected during tuning.",
+    "Coverage-only and authored conformance results are not population F1 estimates.",
+    "LinuxArena exposes non-blocking alert noise up to 2.9543 percent in strict.",
+    "Offline GPT-OSS labels received no human review and are deterministically finalized before use."
+  ]
+}

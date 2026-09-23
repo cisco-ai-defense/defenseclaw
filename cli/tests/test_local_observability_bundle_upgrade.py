@@ -31,13 +31,20 @@ from defenseclaw.bundle_refresh import (
     _LOCAL_OBSERVABILITY_DASHBOARD_UIDS,
     LocalObservabilityUpgradeError,
     _atomic_copy_file,
+    _build_local_observability_manifest,
+    _ensure_local_observability_container_access,
     _live_local_observability_smoke,
+    refresh_local_observability_stack,
     restart_upgraded_local_observability_stack,
     upgrade_local_observability_stack,
 )
 from defenseclaw.commands.cmd_upgrade import (
     _crash_bundle_rollback_result,
     _restore_local_observability_upgrade_backup,
+)
+from defenseclaw.observability.local_stack import (
+    GRAFANA_ACCESS_NO_PASSWORD,
+    GRAFANA_ACCESS_PASSWORD,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,9 +166,7 @@ def test_upgrade_canonicalizes_wheel_modes_for_non_root_containers(
     assert stat.S_IMODE((destination / "otel-collector/config.yaml").stat().st_mode) == 0o644
     assert stat.S_IMODE((destination / "grafana/dashboards").stat().st_mode) == 0o755
     assert stat.S_IMODE((destination / "run.sh").stat().st_mode) == 0o755
-    manifest = json.loads(
-        (destination / ".defenseclaw-bundle-manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((destination / ".defenseclaw-bundle-manifest.json").read_text(encoding="utf-8"))
     modes = {entry["path"]: entry["mode"] for entry in manifest["files"]}
     assert modes["otel-collector/config.yaml"] == 0o644
     assert modes["run.sh"] == 0o755
@@ -187,9 +192,7 @@ def test_custom_file_survives_and_managed_conflict_is_backed_up(
     conflict_backup = tmp_path / ("backup-2/local-observability-stack/managed/prometheus/prometheus.yml")
     assert conflict_backup.read_bytes() == operator_bytes
     backup_metadata = json.loads(
-        (tmp_path / "backup-2/local-observability-stack/refresh-backup.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "backup-2/local-observability-stack/refresh-backup.json").read_text(encoding="utf-8")
     )
     assert backup_metadata["managed_paths"] == sorted(
         [
@@ -245,6 +248,54 @@ def test_retired_path_collision_is_preserved_when_bytes_are_not_a_shipped_asset(
     assert "grafana/dashboards/defenseclaw-reliability.json" in result.preserved_custom_paths
 
 
+def test_runtime_grafana_credentials_are_never_refreshed_manifested_or_chmodded(
+    installed_bundle: tuple[Path, Path, Path],
+) -> None:
+    source, data_dir, destination = installed_bundle
+    runtime_state = {
+        ".grafana-admin-password": (b"S" * 40 + b"\n", b"D" * 40 + b"\n"),
+        "..grafana-admin-password.orphan.tmp": (
+            b"source password temporary marker\n",
+            b"destination password temporary marker\n",
+        ),
+        ".grafana-access-mode": (b"password\n", b"no-password\n"),
+        "..grafana-access-mode.orphan.tmp": (
+            b"source mode temporary marker\n",
+            b"destination mode temporary marker\n",
+        ),
+    }
+    for name, (source_bytes, destination_bytes) in runtime_state.items():
+        source.joinpath(name).write_bytes(source_bytes)
+        destination.joinpath(name).write_bytes(destination_bytes)
+        destination.joinpath(name).chmod(0o600)
+
+    manifest = _build_local_observability_manifest(source, "8.0.0")
+    assert all(
+        "grafana-admin-password" not in item.path and "grafana-access-mode" not in item.path for item in manifest.files
+    )
+
+    with patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source):
+        result = refresh_local_observability_stack(str(data_dir), refresh_config=True)
+
+    for name, (_source_bytes, destination_bytes) in runtime_state.items():
+        assert destination.joinpath(name).read_bytes() == destination_bytes
+        if os.name == "posix":
+            assert stat.S_IMODE(destination.joinpath(name).stat().st_mode) == 0o600
+    assert all(
+        "grafana-admin-password" not in path and "grafana-access-mode" not in path for path in result.refreshed_paths
+    )
+
+    with patch("defenseclaw.bundle_refresh.os.chmod", wraps=os.chmod) as chmod:
+        errors = _ensure_local_observability_container_access(
+            destination,
+            source,
+            include_operator_custom=True,
+        )
+    assert errors == []
+    changed = {Path(call.args[0]) for call in chmod.call_args_list}
+    assert all(destination / name not in changed for name in runtime_state)
+
+
 def test_reviewed_retired_bundle_asset_is_backed_up_then_removed(
     installed_bundle: tuple[Path, Path, Path],
     tmp_path: Path,
@@ -273,14 +324,13 @@ def test_named_volumes_are_declared_and_running_stack_uses_down_without_v(
     tmp_path: Path,
 ) -> None:
     source, data_dir, _destination = installed_bundle
-    completed = MagicMock(returncode=0, stdout="", stderr="")
     with (
         patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
         patch(
             "defenseclaw.bundle_refresh._strict_compose_project_running",
             side_effect=[True, False],
         ),
-        patch("defenseclaw.bundle_refresh.subprocess.run", return_value=completed) as run,
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
     ):
         result = upgrade_local_observability_stack(
             str(data_dir),
@@ -297,10 +347,8 @@ def test_named_volumes_are_declared_and_running_stack_uses_down_without_v(
         "prometheus-data",
         "tempo-data",
     )
-    command = run.call_args.args[0]
-    assert command[-1] == "down"
-    assert "-v" not in command
-    assert "reset" not in command
+    controller.assert_called_once_with(data_dir / "observability-stack")
+    controller.return_value.down.assert_called_once_with()
 
 
 def test_partial_activation_restores_exact_managed_tree_and_manifest(
@@ -340,12 +388,10 @@ def test_stop_failure_prevents_refresh_and_leaves_bytes_untouched(
     with (
         patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
         patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=True),
-        patch(
-            "defenseclaw.bundle_refresh.subprocess.run",
-            return_value=MagicMock(returncode=1, stdout="", stderr="failure"),
-        ),
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
         pytest.raises(LocalObservabilityUpgradeError, match="stack_stop_failed"),
     ):
+        controller.return_value.down.side_effect = OSError("failure")
         upgrade_local_observability_stack(
             str(data_dir),
             str(tmp_path / "backup"),
@@ -364,7 +410,6 @@ def test_post_stop_backup_failure_retains_exact_restart_intent_before_descriptor
 ) -> None:
     source, data_dir, destination = installed_bundle
     before = _managed_snapshot(destination)
-    completed = MagicMock(returncode=0, stdout="", stderr="")
 
     def fail_before_backup(event: str, _path: str | None) -> None:
         if event == "after_stop":
@@ -376,7 +421,7 @@ def test_post_stop_backup_failure_retains_exact_restart_intent_before_descriptor
             "defenseclaw.bundle_refresh._strict_compose_project_running",
             side_effect=[True, False],
         ),
-        patch("defenseclaw.bundle_refresh.subprocess.run", return_value=completed) as run,
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
         pytest.raises(LocalObservabilityUpgradeError, match="backup_failed"),
     ):
         upgrade_local_observability_stack(
@@ -403,7 +448,7 @@ def test_post_stop_backup_failure_retains_exact_restart_intent_before_descriptor
     assert not (backup_root / "refresh-backup.json").exists()
     assert not (backup_root / "managed").exists()
     assert _managed_snapshot(destination) == before
-    assert run.call_args.args[0][-1] == "down"
+    controller.return_value.down.assert_called_once_with()
 
 
 def test_receipt_restart_intent_is_recorded_before_stack_stop(
@@ -577,11 +622,7 @@ def test_schema_two_backup_round_trips_through_bridge_rollback(
     backup_dir = tmp_path / "backup"
 
     result = _upgrade(source, data_dir, backup_dir)
-    metadata = json.loads(
-        (backup_dir / "local-observability-stack/refresh-backup.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    metadata = json.loads((backup_dir / "local-observability-stack/refresh-backup.json").read_text(encoding="utf-8"))
 
     assert set(metadata) == {
         "schema_version",
@@ -714,37 +755,78 @@ def test_restart_smoke_never_uses_reset_and_reports_success(
     installed_bundle: tuple[Path, Path, Path],
 ) -> None:
     _source, data_dir, _destination = installed_bundle
-    contract = (
-        '{"otlp_endpoint":"127.0.0.1:4317",'
-        '"grafana_url":"http://localhost:3000",'
-        '"prometheus_url":"http://localhost:9090",'
-        '"tempo_url":"http://localhost:3200",'
-        '"loki_url":"http://localhost:3100"}\n'
-    )
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
     with (
-        patch(
-            "defenseclaw.bundle_refresh.subprocess.run",
-            return_value=MagicMock(returncode=0, stdout=contract, stderr=""),
-        ) as run,
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
         patch("defenseclaw.bundle_refresh._live_local_observability_smoke", return_value=[]),
+        patch("defenseclaw.bundle_refresh.ensure_grafana_admin_password") as ensure_password,
     ):
+        controller.return_value.up.return_value = MagicMock(
+            contract=contract,
+            grafana_access_mode=GRAFANA_ACCESS_NO_PASSWORD,
+        )
         result = restart_upgraded_local_observability_stack(str(data_dir), timeout=5)
 
     assert result.restarted is True
-    command = run.call_args.args[0]
-    assert command[1] == "up"
-    assert "reset" not in command
-    assert "-v" not in command
+    controller.assert_called_once_with(data_dir / "observability-stack")
+    controller.return_value.up.assert_called_once_with(timeout=5, wait=True)
+    controller.return_value.reset.assert_not_called()
+    controller.return_value.down.assert_not_called()
+    ensure_password.assert_not_called()
+
+
+def test_restart_smoke_loads_the_managed_password_for_authenticated_grafana(
+    installed_bundle: tuple[Path, Path, Path],
+) -> None:
+    _source, data_dir, destination = installed_bundle
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    password = "A" * 40
+    with (
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
+        patch("defenseclaw.bundle_refresh._live_local_observability_smoke", return_value=[]) as smoke,
+        patch(
+            "defenseclaw.bundle_refresh.ensure_grafana_admin_password",
+            return_value=(destination / ".grafana-admin-password", password),
+        ) as ensure_password,
+    ):
+        controller.return_value.up.return_value = MagicMock(
+            contract=contract,
+            grafana_access_mode=GRAFANA_ACCESS_PASSWORD,
+        )
+        result = restart_upgraded_local_observability_stack(str(data_dir), timeout=5)
+
+    assert result.restarted is True
+    ensure_password.assert_called_once_with(destination)
+    smoke.assert_called_once_with(timeout=5, grafana_password=password)
 
 
 def test_live_smoke_requires_every_readiness_probe_and_dashboard_uid() -> None:
     complete = [{"uid": uid} for uid in _LOCAL_OBSERVABILITY_DASHBOARD_UIDS]
     with (
         patch("defenseclaw.bundle_refresh._http_ready", return_value=True) as ready,
-        patch("defenseclaw.bundle_refresh._http_get_json", return_value=complete),
+        patch("defenseclaw.bundle_refresh._http_get_json", return_value=complete) as get_json,
     ):
-        assert _live_local_observability_smoke(1) == []
+        assert (
+            _live_local_observability_smoke(
+                1,
+                grafana_password="A" * 40,
+            )
+            == []
+        )
     assert ready.call_count == 5
+    assert get_json.call_args.kwargs["basic_auth"] == ("admin", "A" * 40)
 
     with (
         patch("defenseclaw.bundle_refresh._http_ready", return_value=True),

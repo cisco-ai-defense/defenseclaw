@@ -61,8 +61,8 @@ func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
 //     the skill and plugin buckets — meaning the priority chain
 //     selected ComponentTargets and not cfg.SkillDirs() default.
 //  2. The skill/plugin slices contain at least one path under the
-//     connector-owned home directory (e.g. "~/.codex/skills" for
-//     codex). Path equality across $HOME is brittle — substring
+//     connector-owned personal directory (e.g. "~/.agents/skills" for
+//     Codex). Path equality across $HOME is brittle — substring
 //     check on the connector's expected home subpath is the
 //     stable assertion.
 func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
@@ -93,8 +93,8 @@ func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
 		{
 			name:             "codex",
 			ctor:             func() connector.Connector { return connector.NewCodexConnector() },
-			expectSkillFrag:  filepath.Join(".codex", "skills"),
-			expectPluginFrag: filepath.Join(".codex", "plugins"),
+			expectSkillFrag:  filepath.Join(".agents", "skills"),
+			expectPluginFrag: filepath.Join(".codex", "plugins", "cache"),
 		},
 	}
 
@@ -215,72 +215,89 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 // windsurf, geminicli, copilot, openhands). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
-//  1. Plugins is OpenClaw-only (G4): every hook-only connector
-//     advertises Plugins.Supported=false, so resolveWatcherDirs
-//     MUST fall back to cfg.PluginDirs() with src.Plugin=
-//     watcherDirsFromDefault. A regression that lets a hook-only
-//     connector contribute plugin paths would silently begin
-//     watching directories that the connector itself does not
-//     own — exactly the behavior we eliminated.
+//  1. Hermes exposes documented user/workspace plugins as read-only
+//     inventory, Cursor exposes its documented local plugin cache, and Gemini
+//     CLI exposes its bound-user extensions directory, so all three contribute
+//     plugin watcher paths. Copilot owns its command-backed plugin inventory
+//     without exposing filesystem directories. The remaining hook-only
+//     connectors advertise no plugin inventory and must fall back to
+//     cfg.PluginDirs(). This keeps watcher ownership aligned with each vendor
+//     surface rather than applying one connector's plugin semantics to all
+//     hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/geminicli/copilot/openhands
+//  2. Skills support varies: hermes/cursor/windsurf/geminicli/copilot/openhands
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
-//     framework-owned subpath. windsurf intentionally does NOT
-//     advertise a skills surface ("Windsurf skills are not exposed
-//     as a documented local install surface."), so it falls back to
-//     watcherDirsFromDefault. This split is what justifies a
-//     dedicated matrix rather than reusing the openclaw/zeptoclaw/
-//     claudecode/codex one above.
+//     framework-owned subpath. Windsurf is limited to the documented
+//     legacy Cascade user/workspace skill roots; Devin Local remains
+//     outside this connector. This split is what justifies a dedicated
+//     matrix rather than reusing the openclaw/zeptoclaw/claudecode/codex
+//     one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 	hermesSkillFragment := filepath.Join(".hermes", "skills")
+	hermesPluginFragment := filepath.Join(".hermes", "plugins")
 	if runtime.GOOS == "windows" {
 		hermesSkillFragment = filepath.Join("hermes", "skills")
+		hermesPluginFragment = filepath.Join("hermes", "plugins")
 	}
 	cases := []struct {
-		name            string
-		ctor            func() connector.Connector
-		expectSkillSrc  watcherDirSource
-		expectSkillFrag string // empty when expectSkillSrc != watcherDirsFromConnector
+		name             string
+		ctor             func() connector.Connector
+		expectSkillSrc   watcherDirSource
+		expectSkillFrag  string // empty when expectSkillSrc != watcherDirsFromConnector
+		expectPluginSrc  watcherDirSource
+		expectPluginFrag string // empty when the connector owns no filesystem directory
+		expectPluginNone bool
 	}{
 		{
-			name:            "hermes",
-			ctor:            func() connector.Connector { return connector.NewHermesConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: hermesSkillFragment,
+			name:             "hermes",
+			ctor:             func() connector.Connector { return connector.NewHermesConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  hermesSkillFragment,
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginFrag: hermesPluginFragment,
 		},
 		{
-			name:            "cursor",
-			ctor:            func() connector.Connector { return connector.NewCursorConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".cursor", "skills"),
+			name:             "cursor",
+			ctor:             func() connector.Connector { return connector.NewCursorConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  filepath.Join(".cursor", "skills"),
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginFrag: filepath.Join(".cursor", "plugins", "local"),
 		},
 		{
-			name:           "windsurf",
-			ctor:           func() connector.Connector { return connector.NewWindsurfConnector() },
-			expectSkillSrc: watcherDirsFromDefault,
+			name:            "windsurf",
+			ctor:            func() connector.Connector { return connector.NewWindsurfConnector() },
+			expectSkillSrc:  watcherDirsFromConnector,
+			expectSkillFrag: filepath.Join(".codeium", "windsurf", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 		{
-			name:            "geminicli",
-			ctor:            func() connector.Connector { return connector.NewGeminiCLIConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".gemini", "skills"),
+			name:             "geminicli",
+			ctor:             func() connector.Connector { return connector.NewGeminiCLIConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  filepath.Join(".gemini", "skills"),
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginFrag: filepath.Join(".gemini", "extensions"),
 		},
 		{
 			// With no workspace pinned in cfg the connector
 			// must surface its user-scope skill directory
 			// (~/.copilot/skills) instead of inferring a
 			// workspace from the daemon's cwd.
-			name:            "copilot",
-			ctor:            func() connector.Connector { return connector.NewCopilotConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".copilot", "skills"),
+			name:             "copilot",
+			ctor:             func() connector.Connector { return connector.NewCopilotConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  filepath.Join(".copilot", "skills"),
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginNone: true,
 		},
 		{
 			name:            "openhands",
 			ctor:            func() connector.Connector { return connector.NewOpenHandsConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
 			expectSkillFrag: filepath.Join(".agents", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 	}
 
@@ -293,7 +310,7 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			conn := tc.ctor()
-			skillDirs, _, src := resolveWatcherDirs(cfg, conn, wcfg)
+			skillDirs, pluginDirs, src := resolveWatcherDirs(cfg, conn, wcfg)
 
 			if src.Skill != tc.expectSkillSrc {
 				t.Errorf("skill source = %q, want %q", src.Skill, tc.expectSkillSrc)
@@ -303,12 +320,15 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 					skillDirs, tc.expectSkillFrag)
 			}
 
-			// Plugins are OpenClaw-only (G4). Every hook-only
-			// connector MUST fall back to the cfg default rather
-			// than contributing connector-specific plugin paths.
-			if src.Plugin != watcherDirsFromDefault {
-				t.Errorf("plugin source = %q, want %q (hook-only connectors must not contribute plugin paths)",
-					src.Plugin, watcherDirsFromDefault)
+			if src.Plugin != tc.expectPluginSrc {
+				t.Errorf("plugin source = %q, want %q", src.Plugin, tc.expectPluginSrc)
+			}
+			if tc.expectPluginFrag != "" && !anyContains(pluginDirs, tc.expectPluginFrag) {
+				t.Errorf("plugin dirs %v do not contain %q (connector ComponentTargets misrouted?)",
+					pluginDirs, tc.expectPluginFrag)
+			}
+			if tc.expectPluginNone && len(pluginDirs) != 0 {
+				t.Errorf("plugin dirs = %v, want empty for connector-owned command inventory", pluginDirs)
 			}
 		})
 	}
@@ -402,6 +422,141 @@ func TestResolveWatcherDirs_AMPDoesNotMaterializeOptionalClaudeRoots(t *testing.
 	}
 	if _, err := os.Stat(absentUserRoot); !os.IsNotExist(err) {
 		t.Fatalf("optional Claude root was materialized during resolution: %v", err)
+	}
+}
+
+func TestResolveWatcherDirs_OpenCodeDoesNotMaterializeCompatibilityRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	workspace := filepath.Join(home, "repo")
+
+	existingUserRoot := filepath.Join(home, ".agents", "skills")
+	existingWorkspaceRoot := filepath.Join(workspace, ".claude", "skills")
+	existingNativeFallback := filepath.Join(workspace, ".opencode", "skills")
+	for _, root := range []string{existingUserRoot, existingWorkspaceRoot, existingNativeFallback} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled = true
+
+	skillDirs, _, src := resolveWatcherDirs(cfg, connector.NewOpenCodeConnector(), wcfg)
+
+	if src.Skill != watcherDirsFromConnector {
+		t.Fatalf("OpenCode watcher skill source = %q, want %q", src.Skill, watcherDirsFromConnector)
+	}
+	for _, root := range []string{existingUserRoot, existingWorkspaceRoot} {
+		if !containsExactPath(skillDirs, root) {
+			t.Errorf("OpenCode skill dirs = %v, missing existing compatibility root %q", skillDirs, root)
+		}
+	}
+
+	absentRoots := []string{
+		filepath.Join(home, ".claude", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+	}
+	for _, root := range absentRoots {
+		if containsExactPath(skillDirs, root) {
+			t.Errorf("OpenCode skill dirs = %v, retained absent compatibility root %q", skillDirs, root)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Errorf("optional OpenCode compatibility root %q was materialized during resolution: %v", root, err)
+		}
+	}
+
+	for _, nativeRoot := range []string{
+		filepath.Join(home, ".config", "opencode", "skill"),
+		filepath.Join(home, ".config", "opencode", "skills"),
+		existingNativeFallback,
+	} {
+		if !containsExactPath(skillDirs, nativeRoot) {
+			t.Errorf("OpenCode skill dirs = %v, missing native root %q", skillDirs, nativeRoot)
+		}
+	}
+}
+
+func TestResolveWatcherDirs_OpenCodeHonorsBoundConfigHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	configured := filepath.Join(home, "opencode-home")
+	t.Setenv("OPENCODE_CONFIG_DIR", configured)
+
+	cfg := &config.Config{}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled = true
+	wcfg.Plugin.Enabled = true
+
+	skillDirs, pluginDirs, src := resolveWatcherDirs(cfg, connector.NewOpenCodeConnector(), wcfg)
+	if src.Skill != watcherDirsFromConnector || src.Plugin != watcherDirsFromConnector {
+		t.Fatalf("OpenCode watcher sources = %+v, want connector targets", src)
+	}
+	for _, root := range []string{
+		filepath.Join(configured, "skill"),
+		filepath.Join(configured, "skills"),
+	} {
+		if !containsExactPath(skillDirs, root) {
+			t.Errorf("OpenCode skill dirs = %v, missing bound config root %q", skillDirs, root)
+		}
+	}
+	for _, root := range []string{
+		filepath.Join(configured, "plugin"),
+		filepath.Join(configured, "plugins"),
+	} {
+		if !containsExactPath(pluginDirs, root) {
+			t.Errorf("OpenCode plugin dirs = %v, missing bound config root %q", pluginDirs, root)
+		}
+	}
+
+	fallbackRoots := []string{
+		filepath.Join(home, ".config", "opencode", "skill"),
+		filepath.Join(home, ".config", "opencode", "skills"),
+		filepath.Join(home, ".config", "opencode", "plugin"),
+		filepath.Join(home, ".config", "opencode", "plugins"),
+		filepath.Join(home, ".opencode", "skill"),
+		filepath.Join(home, ".opencode", "skills"),
+		filepath.Join(home, ".opencode", "plugin"),
+		filepath.Join(home, ".opencode", "plugins"),
+	}
+	for _, root := range fallbackRoots {
+		if containsExactPath(skillDirs, root) || containsExactPath(pluginDirs, root) {
+			t.Errorf("OpenCode watcher dirs retained absent fallback root %q: skills=%v plugins=%v", root, skillDirs, pluginDirs)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Errorf("OpenCode fallback root %q was materialized during resolution: %v", root, err)
+		}
+	}
+	for _, parent := range []string{
+		filepath.Join(home, ".config", "opencode"),
+		filepath.Join(home, ".opencode"),
+	} {
+		if _, err := os.Stat(parent); !os.IsNotExist(err) {
+			t.Errorf("OpenCode fallback home %q was materialized during resolution: %v", parent, err)
+		}
+	}
+
+	existingSkill := filepath.Join(home, ".opencode", "skills")
+	existingPlugin := filepath.Join(home, ".config", "opencode", "plugin")
+	for _, root := range []string{existingSkill, existingPlugin} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skillDirs, pluginDirs, _ = resolveWatcherDirs(cfg, connector.NewOpenCodeConnector(), wcfg)
+	if !containsExactPath(skillDirs, existingSkill) {
+		t.Errorf("OpenCode skill dirs = %v, missing preexisting native fallback %q", skillDirs, existingSkill)
+	}
+	if !containsExactPath(pluginDirs, existingPlugin) {
+		t.Errorf("OpenCode plugin dirs = %v, missing preexisting native fallback %q", pluginDirs, existingPlugin)
 	}
 }
 

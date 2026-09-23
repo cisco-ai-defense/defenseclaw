@@ -620,6 +620,42 @@ class TestResolveListConnector(unittest.TestCase):
         self.assertIn("Configured connectors: codex", message)
         self.assertNotIn("Active connectors:", message)
 
+    def test_cleanup_only_connector_is_rejected_with_antigravity_migration(self):
+        import click
+        from defenseclaw.commands import resolve_list_connector
+
+        app = self._app(connector="geminicli")
+        with self.assertRaises(click.UsageError) as cm:
+            resolve_list_connector(app, "")
+        message = str(cm.exception)
+        self.assertIn("cleanup-only", message)
+        self.assertIn("Antigravity", message)
+        self.assertIn("setup remove geminicli --yes", message)
+
+    def test_asset_fanout_skips_cleanup_only_connector(self):
+        from defenseclaw.commands import resolve_list_connectors
+
+        app = self._app(
+            connector="codex",
+            connectors=["codex", "geminicli", "cursor"],
+        )
+        self.assertEqual(
+            resolve_list_connectors(app, ""),
+            ["codex", "cursor"],
+        )
+
+    def test_explicit_cleanup_only_connector_is_rejected_in_mixed_roster(self):
+        import click
+        from defenseclaw.commands import resolve_list_connectors
+
+        app = self._app(
+            connector="codex",
+            connectors=["codex", "geminicli"],
+        )
+        with self.assertRaises(click.UsageError) as cm:
+            resolve_list_connectors(app, "gemini-cli")
+        self.assertIn("Antigravity", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

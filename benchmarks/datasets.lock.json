@@ -1,0 +1,1274 @@
+{
+  "schema_version": "1",
+  "frozen_at": "2026-09-06",
+  "datasets": [
+    {
+      "id": "defenseclaw-smoke",
+      "purpose": ["text", "action", "code"],
+      "source_url": "benchmarks/fixtures/smoke.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-cloud-production-conformance-v1",
+      "purpose": ["action", "cloud-policy-conformance"],
+      "source_url": "benchmarks/fixtures/cloud-production-conformance-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-database-destruction-conformance-v1",
+      "purpose": ["action", "database-policy-conformance"],
+      "source_url": "benchmarks/fixtures/database-destruction-conformance-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-kubernetes-production-conformance-v1",
+      "purpose": ["action", "kubernetes-policy-conformance"],
+      "source_url": "benchmarks/fixtures/kubernetes-production-conformance-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-infrastructure-destruction-conformance-v1",
+      "purpose": ["action", "infrastructure-policy-conformance"],
+      "source_url": "benchmarks/fixtures/infrastructure-destruction-conformance-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-postgresql-copy-program-v1",
+      "purpose": ["action", "database-command-execution-conformance"],
+      "source_url": "benchmarks/fixtures/postgresql-copy-program-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-sql-command-udf-atomic-v1",
+      "purpose": ["action", "command-positive", "hard-negative", "real-tool-arguments"],
+      "source_url": "benchmarks/fixtures/sql-command-udf-atomic-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "atomic-red-team",
+      "purpose": ["action", "command-positive"],
+      "source_url": "https://github.com/redcanaryco/atomic-red-team.git",
+      "revision": "cb486d9a888e921fac5902a06c7b46e420bb14a7",
+      "fetch": "git",
+      "include_paths": ["LICENSE.txt", "README.md", "atomics"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "shell-attack-evolution",
+      "purpose": ["action", "command-positive-candidate", "real-tool-arguments", "silver-development-only"],
+      "source_url": "https://huggingface.co/datasets/zyw-286/shell-attack-evolution-dataset",
+      "revision": "d201aafbbcbb5347078ca64f06c5428fa6814bc9",
+      "fetch": "git",
+      "include_paths": [".gitattributes", "README.md", "commands", "request_response/curated.jsonl"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "zenodo-cyber-training-shell-v4",
+      "purpose": ["action", "command-unlabeled", "command-positive-candidate", "hard-negative-candidate"],
+      "source_url": "https://zenodo.org/records/8136017",
+      "revision": "v4-record-8136017-data-md5-a11b58d28a4c7d16482e84ed9540e238",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "nl2bash",
+      "purpose": ["action", "command-benign"],
+      "source_url": "https://github.com/TellinaTool/nl2bash.git",
+      "revision": "d6b9f5bdff45621d190134e31ab63b7bf7002190",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "data/README.md", "data/bash/LICENSE", "data/bash/all.cm", "data/bash/all.nl"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "nl2bash-pii-negative",
+      "purpose": ["text", "pii-negative", "pii-hard-negative"],
+      "source_url": "https://github.com/TellinaTool/nl2bash.git",
+      "revision": "d6b9f5bdff45621d190134e31ab63b7bf7002190",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "data/README.md", "data/bash/LICENSE", "data/bash/all.cm", "data/bash/all.nl"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "tldr",
+      "purpose": ["action", "command-benign", "hard-negative"],
+      "source_url": "https://github.com/tldr-pages/tldr.git",
+      "revision": "929720614d45348dd9ac353ff845006cb2d76639",
+      "fetch": "git",
+      "include_paths": ["LICENSE.md", "README.md", "pages"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "secretbench",
+      "purpose": ["secret-positive", "secret-negative"],
+      "source_url": "https://github.com/setu1421/SecretBench.git",
+      "revision": "290553d30a8a54748032b3b582779eab5e8a6836",
+      "fetch": "manual",
+      "license": "dataset-terms-required",
+      "license_status": "restricted",
+      "redistribution": "aggregate-only",
+      "enabled": false
+    },
+    {
+      "id": "fpsecretbench",
+      "purpose": ["secret-hard-negative"],
+      "source_url": "https://github.com/setu1421/FPSecretBench.git",
+      "revision": "47882de0c784a741946477f2487cca4513ccbc5c",
+      "fetch": "manual",
+      "license": "dataset-terms-required",
+      "license_status": "restricted",
+      "redistribution": "aggregate-only",
+      "enabled": false
+    },
+    {
+      "id": "nemotron-pii",
+      "purpose": ["pii-positive", "pii-negative"],
+      "source_url": "https://huggingface.co/datasets/nvidia/Nemotron-PII",
+      "revision": "b70ffaf5ff39e079776134c5bf4381f00a9fd1ed",
+      "fetch": "git",
+      "include_paths": [".gitattributes", "README.md", "data/test-00000-of-00001.parquet"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "gretel-pii-en-v1",
+      "purpose": ["pii-positive", "pii-negative"],
+      "source_url": "https://huggingface.co/datasets/gretelai/gretel-pii-masking-en-v1",
+      "revision": "e06eb1499ca8d54470f085021cd8e54f9efac7fd",
+      "fetch": "git",
+      "include_paths": [".gitattributes", "README.md", "data/test-00000-of-00001.parquet"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "ylemis-india-pii-benchmark",
+      "purpose": ["pii-independent-holdout", "pii-positive", "pii-hard-negative"],
+      "source_url": "https://huggingface.co/datasets/Pranshurs/ylemis-india-pii-benchmark",
+      "revision": "cc2cc39c8462bfe939ad20ce19b895361c5464d7",
+      "fetch": "git",
+      "include_paths": ["README.md", "LICENSE_DATA.md", "benchmark.jsonl"],
+      "license": "CC0-1.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "polyai-banking77",
+      "purpose": ["pii-negative-candidate", "banking-language", "metadata-only"],
+      "source_url": "https://huggingface.co/datasets/PolyAI/banking77",
+      "revision": "90d4e2ee5521c04fc1488f065b8b083658768c57",
+      "fetch": "manual",
+      "include_paths": ["README.md", "banking77.py", "dataset_infos.json"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "spy-pii",
+      "purpose": ["pii-positive", "pii-hard-negative"],
+      "source_url": "https://github.com/LogicZMaksimka/SPY_Dataset.git",
+      "revision": "5baabd6c6a9a1d7b971d301878f182bcbe53b0cb",
+      "fetch": "git",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "owasp-benchmark-java",
+      "purpose": ["code-positive", "code-negative"],
+      "source_url": "https://github.com/OWASP-Benchmark/BenchmarkJava.git",
+      "revision": "51f0a7cf8bb9d17ce1f6d72598c1d1c6ce90f661",
+      "fetch": "git",
+      "license": "GPL-2.0",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "nist-juliet-1.3",
+      "purpose": ["code-positive", "code-negative"],
+      "source_url": "https://samate.nist.gov/SARD/test-suites/112",
+      "revision": "1.3",
+      "fetch": "manual",
+      "license": "public-domain",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "ossf-malicious-packages",
+      "purpose": ["package-positive", "plugin-positive"],
+      "source_url": "https://github.com/ossf/malicious-packages.git",
+      "revision": "de3a859ea74ab1a4701902937140ae4f496c6a28",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "osv"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "agentdojo",
+      "purpose": ["stateful", "tool-injection-positive", "tool-benign"],
+      "source_url": "https://github.com/ethz-spylab/agentdojo.git",
+      "revision": "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+      "fetch": "git",
+      "include_paths": [
+        "LICENSE",
+        "README.md",
+        "docs/api/base_tasks.md",
+        "docs/api/task_suite.md",
+        "src/agentdojo/base_tasks.py",
+        "src/agentdojo/default_suites"
+      ],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "injecagent",
+      "purpose": ["stateful", "tool-injection-positive"],
+      "source_url": "https://github.com/uiuc-kang-lab/InjecAgent.git",
+      "revision": "f19c9f2c79a41046eb13c03c51a24c567a8ffa07",
+      "fetch": "git",
+      "include_paths": [
+        "LICENCE",
+        "README.md",
+        "data/attacker_cases_dh.jsonl",
+        "data/attacker_cases_ds.jsonl",
+        "data/test_cases_dh_base.json",
+        "data/test_cases_ds_base.json",
+        "data/tools.json"
+      ],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "agentic-redteam-benchmark",
+      "purpose": ["stateful", "trajectory-drift-positive", "trajectory-prefix-negative"],
+      "source_url": "https://github.com/Alkur123/agentic-redteam-benchmark.git",
+      "revision": "12ddc82333e5df3581341493df4513a24cfc61bb",
+      "fetch": "git",
+      "include_paths": [
+        "LICENSE-DATA",
+        "SCHEMA.md",
+        "v0.1/samples"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "hf-agentic-red-team",
+      "purpose": ["stateful", "synthetic-command-positive-candidate", "synthetic-chain-positive-candidate", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/sh111111111111111/agentic_red_team",
+      "revision": "3ed8b32aaed0006b960f2344ec9d3fcfa64b447d",
+      "fetch": "manual",
+      "include_paths": ["README.md", "agentic_red_team_verified.jsonl"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "trace-commons-agent-traces",
+      "purpose": ["action", "benign", "hard-negative", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/trace-commons/agent-traces",
+      "revision": "112ebd4d03ce852b00e935d523107c3d0c9a65bf",
+      "fetch": "manual",
+      "include_paths": ["README.md", "data/train-00000-of-00001.parquet"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "rogue-coding-agent-security",
+      "purpose": ["action", "benign", "security-positive-candidate", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/rogue-security/coding-agent-security-benchmark",
+      "revision": "bf7ff748d80ca24db30b57c9255a2fb8884ed7eb",
+      "fetch": "manual",
+      "include_paths": ["README.md", "data/test-00000-of-00001.parquet"],
+      "license": "CC-BY-NC-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "toolsandbox",
+      "purpose": ["stateful", "tool-benign"],
+      "source_url": "https://github.com/apple/ToolSandbox.git",
+      "revision": "165848b9a78cead7ca7fe7c89c688b58e6501219",
+      "fetch": "git",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "tau2-bench",
+      "purpose": ["stateful", "tool-benign"],
+      "source_url": "https://github.com/sierra-research/tau2-bench.git",
+      "revision": "a2c024725189473d2d7cea3a5cfdbcc67478e41f",
+      "fetch": "git",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "msb",
+      "purpose": ["mcp-positive", "mcp-benign", "stateful"],
+      "source_url": "https://huggingface.co/datasets/DongsenZhang/MSB",
+      "revision": "66e968486b78b246f28e75e880a70aeec9f6c8bc",
+      "fetch": "git",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "mcptox",
+      "purpose": ["mcp-positive", "mcp-benign"],
+      "source_url": "https://arxiv.org/abs/2508.14925",
+      "revision": "paper-v1",
+      "fetch": "manual",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "aggregate-only",
+      "enabled": false
+    },
+    {
+      "id": "assay",
+      "purpose": ["mcp-positive", "mcp-benign", "stateful"],
+      "source_url": "https://github.com/VatsSShah/assay.git",
+      "revision": "675fae7d2d3c6ae9fb97ce3d761492dfb7e35a37",
+      "fetch": "git",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "AI45Research/ATBench-Codex",
+      "purpose": ["action", "stateful", "trajectory-safety", "sealed-reserve"],
+      "source_url": "https://huggingface.co/datasets/AI45Research/ATBench-Codex",
+      "revision": "0991350e2f7ad174fae5fb8f7b6f5ec5a171a609",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "AI45Research/ATBench-Claw",
+      "purpose": ["action", "stateful", "trajectory-safety", "sealed-reserve"],
+      "source_url": "https://huggingface.co/datasets/AI45Research/ATBench-Claw",
+      "revision": "75f70f4bfd8305e33e22006e1e6eeb668684d3f2",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "AI45Research/ATBench",
+      "purpose": ["action", "stateful", "trajectory-safety", "sealed-reserve"],
+      "source_url": "https://huggingface.co/datasets/AI45Research/ATBench",
+      "revision": "4476ef92ed8f85c8d58d8a5b9dfdf55aa7893138",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "yoonholee/terminalbench-trajectories",
+      "purpose": ["action", "benign", "hard-negative", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/yoonholee/terminalbench-trajectories",
+      "revision": "04e8940f5b6736a7ce8d22224fe2f2af74163ed2",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "AnodeAI/Agent-Trace-Cyber-v1",
+      "purpose": ["action", "stateful", "cyber-trajectory", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/AnodeAI/Agent-Trace-Cyber-v1",
+      "revision": "fda9b9438c8fba28a2f69fd05a992689e92600f3",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "anonymouslinuxarena/linuxarena-public",
+      "purpose": ["action", "stateful", "attack-context", "hard-negative", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/anonymouslinuxarena/linuxarena-public",
+      "revision": "2fd29f9c7bc190fb873bd76c6bd648f22b9ab0a7",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "eval-aware/linuxarena-trajectories",
+      "purpose": ["action", "stateful", "attack-context", "hard-negative", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/eval-aware/linuxarena-trajectories",
+      "revision": "45641faf10b7cc1645036c2cddfb9a77323494e1",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "AISafety-Student/labeled-bashBench",
+      "purpose": ["action", "command-positive-candidate", "silver-development-only"],
+      "source_url": "https://huggingface.co/datasets/AISafety-Student/labeled-bashBench",
+      "revision": "d0e5da0f3f88da1bdc3595f3074d190ae32a062f",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "neur26anonsub/ctrldataset2026",
+      "purpose": ["action", "stateful", "environment-verified-attack", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/neur26anonsub/ctrldataset2026",
+      "revision": "6c72cf19883376b921a94a0dd17dc8ab6b25e52f",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "valiere/ISETrace",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/valiere/ISETrace",
+      "revision": "e40e04d41c04e4eb4bae181ebdd41b61c688081b",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "AI-Secure/DTap-Bench-Agent-Trajectories",
+      "purpose": ["action", "stateful", "bounded-chain-candidate", "benign", "hard-negative", "real-tool-arguments", "trajectory-label-candidate"],
+      "source_url": "https://huggingface.co/datasets/AI-Secure/DTap-Bench-Agent-Trajectories",
+      "revision": "836caf2fdd78b888ddd14fb62dc038e932e17898",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "ScaleAI/MCP-Atlas",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "real-tool-arguments", "execution-status"],
+      "source_url": "https://huggingface.co/datasets/ScaleAI/MCP-Atlas",
+      "revision": "8c563b55d7c967755f474299848049834d624617",
+      "fetch": "manual",
+      "include_paths": ["README.md", "MCP-Atlas.parquet"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "Yunhao-Feng/AgentHazard",
+      "purpose": ["action", "stateful", "harmful-scenario", "execution-status", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/Yunhao-Feng/AgentHazard",
+      "revision": "786147ad768f924608697cdcca87c367379b11ee",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "forgelab/mole",
+      "purpose": ["action", "stateful", "benign", "service-state-verified-account-day", "resource-lineage", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/forgelab/mole",
+      "revision": "7eb86b0d2918c32760fe8a91b78bb50ccc054ce5",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "DataDog/stratus-red-team",
+      "purpose": ["action", "stateful", "executed-attack", "cloud-audit", "resource-lineage", "execution-status", "real-tool-arguments"],
+      "source_url": "https://github.com/DataDog/stratus-red-team",
+      "revision": "efadfd50605f29c644167787ce907b7577793f54",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "docs/detonation-logs"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "CyCraftAI/TraceSafe",
+      "purpose": ["action", "stateful", "paired-benign", "deterministic-mutation", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/CyCraftAI/TraceSafe",
+      "revision": "b8d546242a7182d2f5a97f5ff88cecca63d8e719",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "soc-agent-traces-10k",
+      "purpose": ["action", "benign", "hard-negative", "soc-investigation", "real-tool-arguments"],
+      "source_url": "https://huggingface.co/datasets/alirezaaminzadeh/soc-agent-traces-10k",
+      "revision": "d69237c8890dea0f34400a33af488bc5ac108e83",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "stats.json",
+        "data/train-00000-of-00001.parquet",
+        "data/validation-00000-of-00001.parquet",
+        "data/test-00000-of-00001.parquet"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "open-swe-traces-v1.2",
+      "purpose": ["action", "benign", "hard-negative", "coding-agent", "execution-backed"],
+      "source_url": "https://huggingface.co/datasets/nvidia/Open-SWE-Traces",
+      "revision": "31cfd32021f674a1bbd5ff9f56a2151436fe2be3",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "swe-rebench-openhands-trajectories",
+      "purpose": ["action", "stateful", "benign-candidate", "hard-negative", "coding-agent", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/nebius/SWE-rebench-openhands-trajectories",
+      "revision": "35455389ab51bf5e2306bfd436ef72d0f98bf882",
+      "fetch": "manual",
+      "include_paths": ["LICENSE", "README.md", "trajectories.parquet"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "Agent-Ark/Toucan-1.5M",
+      "purpose": ["action", "stateful", "unlabeled-candidate", "mcp", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/Agent-Ark/Toucan-1.5M",
+      "revision": "0df3cf37f2abefb380370cfb02eabea2a35ae782",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "SFT/train-00000-of-00003.parquet",
+        "SFT/train-00001-of-00003.parquet",
+        "SFT/train-00002-of-00003.parquet"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "HuggingEnvs/data-agent-sft",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "data-analysis", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/HuggingEnvs/data-agent-sft",
+      "revision": "cc0a03c10342a8f7fcf33c9203039582df405703",
+      "fetch": "manual",
+      "include_paths": ["README.md", "data/train-00000-of-00001.parquet"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "DiscoPosse/agent-llm-traces",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "saas", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/DiscoPosse/agent-llm-traces",
+      "revision": "6b1add7c19f1fb50bb0edf5b240d6149a5c621fb",
+      "fetch": "manual",
+      "license": "CDLA-Permissive-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "actbench",
+      "purpose": ["action", "stateful", "paired-benign", "grader-verified-attack", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/ZJUICSR/ActBench",
+      "revision": "595df032d53ef71f927c9a1d8c068dad0edebbc5",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "MLZoo/CrossMCP-Bench",
+      "purpose": ["action", "stateful", "paired-benign", "authorization-context", "canonical-attack-sequence"],
+      "source_url": "https://huggingface.co/datasets/MLZoo/CrossMCP-Bench",
+      "revision": "6269d7fcd7a42c96a87eddc7dd328d2bc5630663",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "lihaonan0716/mcphunt-agent-traces",
+      "purpose": ["action", "stateful", "paired-benign", "hard-negative", "executed-attack", "real-tool-arguments", "real-tool-result-state", "canary-lineage"],
+      "source_url": "https://huggingface.co/datasets/lihaonan0716/mcphunt-agent-traces",
+      "revision": "c4c69322bf9ed7690f5265577365709dad5dd454",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "TokenWasteGroup/DynamicMCPBench",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "contextual-sequence", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/TokenWasteGroup/DynamicMCPBench",
+      "revision": "7aa8ee663ae4d7a7561cbc97a7fea95bc522dfbc",
+      "fetch": "manual",
+      "include_paths": ["README.md", "labels.json", "specs.jsonl", "traces.jsonl"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "internlm/WildClawBench-Trajectories",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "safety-contextual", "real-tool-arguments", "real-tool-result-state"],
+      "source_url": "https://huggingface.co/datasets/internlm/WildClawBench-Trajectories",
+      "revision": "d2816016a7a7b41fa6b7ba368b28ddafcb54fd93",
+      "fetch": "manual",
+      "include_paths": ["README.md", "train.parquet"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "splunk/attack_data",
+      "purpose": ["action", "stateful", "endpoint-security-control", "audit-policy", "firewall", "kubernetes", "sql-shell", "real-tool-results"],
+      "source_url": "https://github.com/splunk/attack_data",
+      "revision": "be1980668e58497d23ba77ba25769996c4d1efaa",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "zenodo/19933893",
+      "purpose": ["action", "stateful", "cloud-audit", "destructive-operation", "paired-control", "real-tool-results", "aws", "azure", "gcp"],
+      "source_url": "https://zenodo.org/records/19933893",
+      "revision": "19933893",
+      "fetch": "manual",
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "mihail-gribov/quadrat-ipi-model-eval",
+      "purpose": ["action", "stateful", "paired-benign", "indirect-prompt-injection", "canary-lineage", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://github.com/mihail-gribov/quadrat-ipi-model-eval",
+      "revision": "03e496ba1af2baee5b54373f582a6752d3f2079f",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "NOTICE", "data/episodes-money7-neb.jsonl.gz", "data/episodes-money7-oac.jsonl.gz", "data/episodes-money7-oai.jsonl.gz", "data/episodes-money7.jsonl.gz", "data/labels_money.jsonl", "data/probe_capability.jsonl.gz", "data/quadrat-money.sha256"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "lyptus-research/cyber-task-horizons-data",
+      "purpose": ["action", "stateful", "offensive-cyber", "contextual-sequence", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://github.com/lyptus-research/cyber-task-horizons-data",
+      "revision": "178c0da1800f9c07311e1b8d6c61dd8104e7b4ae",
+      "fetch": "manual",
+      "include_paths": ["data/eval_logs/eval-set-q2eavajb0blxpmc1/full.eval", "data/eval_logs/eval-set-x2n13zd6vulak29q/full.eval"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "zenodo/21860163",
+      "purpose": ["action", "stateful", "credential-lineage", "confirmed-exfiltration", "paired-benign-audit", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://zenodo.org/records/21860163",
+      "revision": "21860163-v1-2026-08-09",
+      "fetch": "manual",
+      "include_paths": ["p15b-run-data-2026-08-09.zip"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "microsoft/Orchard",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "coding-agent", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/microsoft/Orchard",
+      "revision": "70c05ec1f20f823ae6adc60374922e9271bb74e2",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "enigma-agent/trajectories",
+      "purpose": ["action", "stateful", "offensive-cyber", "exact-observation-lineage", "verifier-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://github.com/enigma-agent/trajectories",
+      "revision": "431dda6896b261ecebf658a5e6fc05ee695efe76",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "CyBench", "HTB", "InterCode_CTF", "NYU_CTF"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "andreashappe/cochise",
+      "purpose": ["action", "stateful", "offensive-cyber", "credential-extraction", "authentication-chain", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://github.com/andreashappe/cochise",
+      "revision": "3abdb11f577dbdc8c4cf219c1b289d8c858f2877",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "examples/run-trajectories"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "lxSYSU/DriftSQL-Recovery",
+      "purpose": ["action", "stateful", "benign", "sql", "hard-negative", "execution-status", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/lxSYSU/DriftSQL-Recovery",
+      "revision": "0235d8ce682c2ac4a95f6bf822f9e62d73007eb3",
+      "fetch": "manual",
+      "include_paths": ["data/failure_trajectories/train.parquet", "data/oracle_trajectories/train.parquet", "data/oracle_trajectories/tune.parquet"],
+      "license": "CC-BY-SA-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "ibm-research/ITBench-Trajectories",
+      "purpose": ["action", "stateful", "benign", "sre", "hard-negative", "execution-status", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/ibm-research/ITBench-Trajectories",
+      "revision": "c3093ee33b4f16a8eed97ade1266d0d7e88b2dec",
+      "fetch": "manual",
+      "license": "CC-BY-NC-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "alirezaaminzadeh/soc-agent-traces-100k",
+      "purpose": ["action", "stateful", "benign", "soc-investigation", "observation-confusion", "hard-negative", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/alirezaaminzadeh/soc-agent-traces-100k",
+      "revision": "fe94a95dadbd188c2bf137a9785b82cb5f7865c2",
+      "fetch": "manual",
+      "include_paths": ["README.md", "data/test-00000-of-00001.parquet"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "zenodo/bixbench-audit-trajectories",
+      "purpose": ["action", "stateful", "benign", "data-science-agent", "hard-negative", "execution-status", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://doi.org/10.5281/zenodo.22151975",
+      "revision": "10.5281/zenodo.22151975",
+      "fetch": "manual",
+      "include_paths": ["bixbench_audit_trajectories.zip"],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "OTRF/Security-Datasets",
+      "purpose": ["action", "stateful", "security-positive", "execution-backed", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://github.com/OTRF/Security-Datasets",
+      "revision": "d9d40ef123d2c87d5d3df28c96bcab4f0faccc87",
+      "fetch": "git",
+      "include_paths": ["LICENSE", "README.md", "datasets/atomic/windows/credential_access/host", "datasets/atomic/windows/defense_evasion/host", "datasets/atomic/linux/defense_evasion/host"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "LulaCola/AgentProcessBench",
+      "purpose": ["action", "stateful", "benign", "hard-negative", "process-label", "execution-status", "real-tool-arguments", "real-tool-results"],
+      "source_url": "https://huggingface.co/datasets/LulaCola/AgentProcessBench",
+      "revision": "cd81f326aece8b0a3f6359e20df370690d3a98bf",
+      "fetch": "manual",
+      "include_paths": ["bfcl/test.jsonl", "gaia_dev/test.jsonl", "hotpotqa/test.jsonl", "tau2/test.jsonl"],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "cheatbench",
+      "purpose": [
+        "action",
+        "stateful",
+        "security-positive",
+        "benign",
+        "reward-hacking",
+        "human-vetted",
+        "real-tool-arguments"
+      ],
+      "source_url": "https://huggingface.co/datasets/steinad/CheatBench",
+      "revision": "461360b34e93644955563dcc9243c6cc1a53bd0f",
+      "fetch": "manual",
+      "include_paths": [
+        "data/processed/parquet/micro.parquet",
+        "data/processed/subsets/cheatbench-micro.manifest.jsonl"
+      ],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "sentinel-flow",
+      "purpose": [
+        "stateful",
+        "synthetic-conformance",
+        "contextual-security",
+        "source-sink-lineage",
+        "real-tool-arguments"
+      ],
+      "source_url": "https://huggingface.co/datasets/ihabler/sentinel-flow",
+      "revision": "f3b8d86ab1b2c8bfd99648478110b218c064ceaf",
+      "fetch": "manual",
+      "include_paths": [
+        "traces.jsonl"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "thu-coai/Agent-SafetyBench",
+      "purpose": [
+        "action",
+        "contextual-security",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/thu-coai/Agent-SafetyBench",
+      "revision": "3c60d5aa0af6a5c817b4ea4856e72f252e283bb7",
+      "fetch": "manual",
+      "include_paths": [
+        "released_data.json"
+      ],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "openguardrails/terminal-bench-2.1-deepseek-v4-flash-trajectories",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "terminal",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/openguardrails/terminal-bench-2.1-deepseek-v4-flash-trajectories",
+      "revision": "3f5b93ff1c5ea84b2c94cf479d0c942227191b4a",
+      "fetch": "git",
+      "include_paths": [
+        "README.md",
+        "trajectories"
+      ],
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "few-sh/terminal-wrench-trajectories",
+      "purpose": [
+        "action",
+        "stateful",
+        "contextual-security",
+        "hard-negative",
+        "terminal",
+        "bounded-sequence",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/few-sh/terminal-wrench-trajectories",
+      "revision": "622449769ec6ddf33f770794489b8cd21712a0ad",
+      "fetch": "manual",
+      "include_paths": [
+        "data/baseline/train-00000-of-00001.parquet",
+        "data/hack/train-00000-of-00001.parquet",
+        "data/non_hack/train-00000-of-00001.parquet",
+        "data/sanitized_hack/train-00000-of-00001.parquet",
+        "data/stripped_hack/train-00000-of-00001.parquet"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "few-sh/terminal-wrench",
+      "purpose": [
+        "trajectory-content-source",
+        "action",
+        "stateful",
+        "terminal",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "source_url": "https://github.com/few-sh/terminal-wrench",
+      "revision": "d8a29613235a0ef56a8b70b3142626a533da28c2",
+      "fetch": "git",
+      "include_paths": [
+        "index/tasks.json",
+        "index/trajectories.json",
+        "tasks"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "terminal",
+        "verifier-passing-trajectory",
+        "real-tool-arguments"
+      ],
+      "source_url": "https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+      "revision": "eaef26944643644c8a3dbbf361ce6128142f5976",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "atcb_terminal_pivot_release_final_v2.jsonl"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "aisa-group/ResearchArena-Trajectories",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "contextual-security",
+        "coding-agent",
+        "bounded-sequence",
+        "evaluator-scored-side-task",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/aisa-group/ResearchArena-Trajectories",
+      "revision": "241e456ba88bc09ba40ec906cf0c16e4b2daa918",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "cuda_kernel",
+        "inference_optimization",
+        "safety_finetuning",
+        "utility_finetuning"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "infraset/infraset",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "infrastructure",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/infraset/infraset",
+      "revision": "7ce198e310a4972d7de07a68e91e9d91bef6e312",
+      "fetch": "manual",
+      "include_paths": [
+        "data/commands.parquet",
+        "data/runs.parquet"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "stepshield",
+      "purpose": [
+        "action",
+        "stateful",
+        "coding-agent-policy",
+        "paired-development-context",
+        "heldout-evaluation",
+        "bounded-sequence",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "source_url": "https://github.com/glo26/stepshield",
+      "revision": "031aa88219f78cda987c2b9d034112e360afda7e",
+      "fetch": "git",
+      "include_paths": [
+        "data/README.md",
+        "data/RELEASE_NOTES.md",
+        "data/canonical_trajectory_manifest.json",
+        "data/train",
+        "data/test_holdout/scrubbed",
+        "data/test_holdout/mapping/answer_key.jsonl"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "SecureAI-SE/fuzz-agent-trajectories",
+      "purpose": [
+        "action",
+        "web-api-security",
+        "deterministic-command-injection",
+        "benign-hard-negative",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/SecureAI-SE/fuzz-agent-trajectories",
+      "revision": "a5db1bb894eb1eee839a84330d49075132f050ee",
+      "fetch": "manual",
+      "include_paths": [
+        "data/train-00000-of-00001.parquet"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "secebl-public-examples",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "contextual-security",
+        "deterministic-malicious-subset",
+        "linux",
+        "kubernetes",
+        "bounded-sequence",
+        "exact-command-arguments",
+        "reviewed-behavior-tags"
+      ],
+      "source_url": "https://github.com/EBWi11/SecEBL",
+      "revision": "c328237fc46fd5ab3355bb6f65e9d8cd88dcac66",
+      "fetch": "git",
+      "include_paths": [
+        "LICENSE",
+        "examples/README.md",
+        "examples/manifest.json",
+        "examples/linux/example_sessions.jsonl",
+        "examples/linux/example_gold.rev20.jsonl",
+        "examples/k8s/example_sessions.jsonl",
+        "examples/k8s/example_gold.rev20.jsonl"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "elastic/integrations-aws-cloudtrail-fixtures",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "successful-permission-removal",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://github.com/elastic/integrations",
+      "revision": "f79b2e9c59de04d980d0bb087421f2c2b1a9cd8d",
+      "fetch": "git",
+      "include_paths": [
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-snapshot-attribute-json.log",
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-image-attribute-json.log",
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-db-snapshot-attributte-json.log"
+      ],
+      "license": "Elastic-2.0",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "achinta3/cybersec-jsonschemabench-cloudtrail-v6",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/achinta3/cybersec-jsonschemabench-cloudtrail-v6",
+      "revision": "f90172fc32a3900e97f63bd30538abcc9565f238",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "test.jsonl"
+      ],
+      "license": "other",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "adanalvarez/TrailDiscover",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "parser-boundary"
+      ],
+      "source_url": "https://github.com/adanalvarez/TrailDiscover",
+      "revision": "f96cbdb0591f78d16b1948e84c211becce6258e6",
+      "fetch": "git",
+      "include_paths": [
+        "LICENSE",
+        "events/EC2/ModifySnapshotAttribute.json.cloudtrail",
+        "events/EC2/ModifyImageAttribute.json.cloudtrail",
+        "events/RDS/ModifyDBSnapshotAttribute.json.cloudtrail"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "agent-trace",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/pagarsky/agent-trace",
+      "revision": "4b05b2f00eea267a5bb4d841c228059d1bf9ac0c",
+      "fetch": "manual",
+      "include_paths": [
+        "data/agenttrace.parquet"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    }
+  ]
+}

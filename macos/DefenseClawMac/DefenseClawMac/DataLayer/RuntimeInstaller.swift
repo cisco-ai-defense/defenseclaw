@@ -25,25 +25,57 @@
 import CryptoKit
 import Foundation
 
+enum ProtectedArtifactError: Error, Equatable, LocalizedError {
+    case invalidEnvelope
+    case emptyPayload
+    case checksumMismatch
+    case invalidSize
+    case outputCreationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidEnvelope:
+            return "Protected artifact header is invalid."
+        case .emptyPayload:
+            return "Protected artifact contains no payload."
+        case .checksumMismatch:
+            return "Protected artifact changed after verification."
+        case .invalidSize:
+            return "Protected artifact size is invalid."
+        case .outputCreationFailed:
+            return "Could not create a private decoded artifact."
+        }
+    }
+}
+
 /// The runtime release embedded in the app bundle at build time.
 struct RuntimePayload: Sendable {
     static let protectedArtifactMagic = Data(
         "DEFENSECLAW-PROTECTED-ARTIFACT-V1\n".utf8
     )
     static let protectedArtifactXORByte: UInt8 = 0xA5
+    static let maximumProtectedArtifactBytes: Int64 = 512 * 1024 * 1024
+
     var version: String
     var tag: String
     var arch: String
     var gatewayURL: URL
     var gatewaySHA256: String
+    var acpGuardURL: URL
+    var acpGuardSHA256: String
     var wheelURL: URL
     var wheelSHA256: String
     /// Optional dependency overrides — upstream pyproject's [tool.uv]
     /// override-dependencies (CVE floors + the textual>=8.2.7 pin the
-    /// wheel's own scanner constraint would defeat). Applied with
-    /// `uv pip install --overrides` to reproduce upstream's resolution.
+    /// wheel's own scanner constraint would defeat). Retained as provenance
+    /// for the build-generated dependency lock; never resolved again on-device.
     var overridesURL: URL?
     var overridesSHA256: String?
+    /// Build-time resolution output for the target macOS/Python platform.
+    /// Every dependency is version-pinned and includes accepted SHA-256
+    /// distribution hashes; the root wheel remains separately authenticated.
+    var dependencyLockURL: URL
+    var dependencyLockSHA256: String
 
     /// Loaded once per launch — the bundle is immutable while running.
     static let bundled: RuntimePayload? = load()
@@ -58,9 +90,16 @@ struct RuntimePayload: Sendable {
               let gateway = root["gateway"] as? [String: Any],
               let gatewayFile = gateway["file"] as? String,
               let gatewaySHA = gateway["sha256"] as? String,
+              let acpGuard = root["acp_guard"] as? [String: Any],
+              let acpGuardFile = acpGuard["file"] as? String,
+              let acpGuardSHA = acpGuard["sha256"] as? String,
               let wheel = root["wheel"] as? [String: Any],
               let wheelFile = wheel["file"] as? String,
               let wheelSHA = wheel["sha256"] as? String,
+              let dependencyLock = root["dependency_lock"] as? [String: Any],
+              let dependencyLockFile = dependencyLock["file"] as? String,
+              let dependencyLockSHA = dependencyLock["sha256"] as? String,
+              dependencyLockFile == "runtime-requirements.lock",
               wheelFile == "defenseclaw-\(version)-2-py3-none-any.dcwheel"
         else { return nil }
         let overrides = root["overrides"] as? [String: Any]
@@ -71,10 +110,14 @@ struct RuntimePayload: Sendable {
             arch: (root["arch"] as? String) ?? "",
             gatewayURL: payloadDir.appendingPathComponent(gatewayFile),
             gatewaySHA256: gatewaySHA,
+            acpGuardURL: payloadDir.appendingPathComponent(acpGuardFile),
+            acpGuardSHA256: acpGuardSHA,
             wheelURL: payloadDir.appendingPathComponent(wheelFile),
             wheelSHA256: wheelSHA,
             overridesURL: overridesFile.map(payloadDir.appendingPathComponent),
-            overridesSHA256: overrides?["sha256"] as? String
+            overridesSHA256: overrides?["sha256"] as? String,
+            dependencyLockURL: payloadDir.appendingPathComponent(dependencyLockFile),
+            dependencyLockSHA256: dependencyLockSHA
         )
     }
 
@@ -88,6 +131,12 @@ struct RuntimePayload: Sendable {
         }
         guard gatewayActual == gatewaySHA256 else {
             return "Bundled gateway does not match its manifest checksum."
+        }
+        guard let acpGuardActual = Self.sha256(of: acpGuardURL) else {
+            return "Bundled ACP guard is missing or unreadable."
+        }
+        guard acpGuardActual == acpGuardSHA256 else {
+            return "Bundled ACP guard does not match its manifest checksum."
         }
         guard let wheelActual = Self.sha256(of: wheelURL) else {
             return "Bundled wheel is missing or unreadable."
@@ -106,6 +155,12 @@ struct RuntimePayload: Sendable {
                 return "Bundled dependency overrides do not match their manifest checksum."
             }
         }
+        guard let lockActual = Self.sha256(of: dependencyLockURL) else {
+            return "Bundled runtime dependency lock is missing or unreadable."
+        }
+        guard lockActual == dependencyLockSHA256 else {
+            return "Bundled runtime dependency lock does not match its manifest checksum."
+        }
         return nil
     }
 
@@ -113,30 +168,170 @@ struct RuntimePayload: Sendable {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 4 << 20), !chunk.isEmpty {
-            hasher.update(data: chunk)
+        do {
+            while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+                hasher.update(data: chunk)
+            }
+        } catch {
+            return nil
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    static func expectedProtectedWheelFilename(version: String) -> String {
+        "defenseclaw-\(version)-2-py3-none-any.dcwheel"
+    }
+
     static func protectedPayloadSHA256(of url: URL) -> String? {
+        guard let size = encodedArtifactSize(of: url),
+              protectedArtifactSizeIsAllowed(size) else { return nil }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard (try? handle.read(upToCount: protectedArtifactMagic.count))
                 == protectedArtifactMagic else { return nil }
         var hasher = SHA256()
         var sawPayload = false
-        while var chunk = try? handle.read(upToCount: 4 << 20), !chunk.isEmpty {
-            sawPayload = true
-            chunk.withUnsafeMutableBytes { bytes in
-                for index in bytes.indices {
-                    bytes[index] ^= protectedArtifactXORByte
-                }
+        var encodedBytesRead = Int64(protectedArtifactMagic.count)
+        do {
+            while var chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+                encodedBytesRead += Int64(chunk.count)
+                guard encodedBytesRead <= maximumProtectedArtifactBytes else { return nil }
+                sawPayload = true
+                decodeProtectedBytes(&chunk)
+                hasher.update(data: chunk)
             }
-            hasher.update(data: chunk)
+        } catch {
+            return nil
         }
         guard sawPayload else { return nil }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+    /// Decode a protected release artifact into a private installer input.
+    /// The encoded checksum is revalidated while streaming so a development
+    /// build cannot swap the artifact between the initial integrity check and
+    /// materialization.
+    static func decodeProtectedArtifact(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        expectedEncodedSHA256: String
+    ) throws {
+        guard let size = encodedArtifactSize(of: sourceURL),
+              protectedArtifactSizeIsAllowed(size) else {
+            throw ProtectedArtifactError.invalidSize
+        }
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? source.close() }
+
+        guard FileManager.default.createFile(
+            atPath: destinationURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw ProtectedArtifactError.outputCreationFailed
+        }
+
+        do {
+            let destination = try FileHandle(forWritingTo: destinationURL)
+            defer { try? destination.close() }
+
+            guard let header = try source.read(upToCount: protectedArtifactMagic.count),
+                  header == protectedArtifactMagic else {
+                throw ProtectedArtifactError.invalidEnvelope
+            }
+
+            var encodedHasher = SHA256()
+            encodedHasher.update(data: header)
+            var sawPayload = false
+            var encodedBytesRead = Int64(header.count)
+            while var chunk = try source.read(upToCount: 4 << 20), !chunk.isEmpty {
+                encodedBytesRead += Int64(chunk.count)
+                guard encodedBytesRead <= maximumProtectedArtifactBytes else {
+                    throw ProtectedArtifactError.invalidSize
+                }
+                sawPayload = true
+                encodedHasher.update(data: chunk)
+                decodeProtectedBytes(&chunk)
+                try destination.write(contentsOf: chunk)
+            }
+            guard sawPayload else { throw ProtectedArtifactError.emptyPayload }
+
+            let encodedSHA = encodedHasher.finalize()
+                .map { String(format: "%02x", $0) }
+                .joined()
+            guard encodedSHA == expectedEncodedSHA256 else {
+                throw ProtectedArtifactError.checksumMismatch
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
+        }
+    }
+
+    private static func decodeProtectedBytes(_ data: inout Data) {
+        data.withUnsafeMutableBytes { bytes in
+            for index in bytes.indices {
+                bytes[index] ^= protectedArtifactXORByte
+            }
+        }
+    }
+
+    static func protectedArtifactSizeIsAllowed(_ size: Int64) -> Bool {
+        size >= Int64(protectedArtifactMagic.count) && size <= maximumProtectedArtifactBytes
+    }
+
+    private static func encodedArtifactSize(of url: URL) -> Int64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.int64Value
+    }
+}
+
+struct RuntimeAuditRecoveryTarget {
+    let homeRoot: URL
+    let configURL: URL
+    let venvURL: URL
+    let runtimeCLIURL: URL
+    let installedVersion: String
+    let permitsMutation: Bool
+}
+
+/// Targets the selected installation's CLI. Modern DefenseClaw handles this
+/// flag before config/audit initialization and authenticates the release-owned
+/// recovery resolver in a sanitized environment.
+enum RuntimeAuditRecoveryCommand {
+    static func command(for target: RuntimeAuditRecoveryTarget) -> String? {
+        guard target.permitsMutation,
+              FileManager.default.isExecutableFile(atPath: target.runtimeCLIURL.path),
+              let version = normalizedVersion(target.installedVersion),
+              let home = shellQuote(target.homeRoot.path),
+              let config = shellQuote(target.configURL.path),
+              let venv = shellQuote(target.venvURL.path),
+              let cli = shellQuote(target.runtimeCLIURL.path),
+              let quotedVersion = shellQuote(version) else {
+            return nil
+        }
+        return """
+        (
+          set -eu
+          export DEFENSECLAW_HOME=\(home)
+          export DEFENSECLAW_CONFIG=\(config)
+          export DEFENSECLAW_VENV=\(venv)
+          exec \(cli) upgrade --yes --version \(quotedVersion) --recover-corrupt-audit
+        )
+        """
+    }
+
+    private static func normalizedVersion(_ value: String) -> String? {
+        let version = value.hasPrefix("v") ? String(value.dropFirst()) : value
+        guard version.range(
+            of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
+        return version
+    }
+
+    private static func shellQuote(_ value: String) -> String? {
+        guard !value.contains(where: { $0.isNewline || $0 == "\0" }) else { return nil }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 }
 
@@ -195,7 +390,7 @@ extension AppState {
             return
         }
 
-        // A prior process may have died between the three canonical no-replace
+        // A prior process may have died between the canonical no-replace
         // moves. Recover the exact, inode-bound plan before the ordinary
         // existing-install gate sees that partial activation.
         do {
@@ -371,9 +566,9 @@ extension AppState {
 
         runtimeInstallState = .running("Materializing authenticated runtime wheel")
         let materializedWheel = dataHome + "/defenseclaw-\(payload.version)-py3-none-any.whl"
-        let materializedOverrides = dataHome + "/dependency-overrides-\(payload.version).txt"
+        let materializedDependencyLock = dataHome + "/runtime-requirements-\(payload.version).lock"
         var materializedWheelIdentity: RuntimeInstallFilesystem.PathIdentity?
-        var materializedOverridesIdentity: RuntimeInstallFilesystem.PathIdentity?
+        var materializedDependencyLockIdentity: RuntimeInstallFilesystem.PathIdentity?
         do {
             materializedWheelIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
                 source: payload.wheelURL.path,
@@ -384,11 +579,18 @@ extension AppState {
                 decodeXORByte: RuntimePayload.protectedArtifactXORByte,
                 expectedSourceSHA256: payload.wheelSHA256
             )
+            materializedDependencyLockIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
+                source: payload.dependencyLockURL.path,
+                destination: materializedDependencyLock,
+                expectedParentIdentity: dataHomeIdentity,
+                mode: 0o600,
+                expectedSourceSHA256: payload.dependencyLockSHA256
+            )
             if let overridesURL = payload.overridesURL,
                let overridesSHA256 = payload.overridesSHA256 {
-                materializedOverridesIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
+                _ = try RuntimeInstallFilesystem.installRegularFileNoReplace(
                     source: overridesURL.path,
-                    destination: materializedOverrides,
+                    destination: dataHome + "/dependency-overrides-\(payload.version).txt",
                     expectedParentIdentity: dataHomeIdentity,
                     mode: 0o600,
                     expectedSourceSHA256: overridesSHA256
@@ -413,34 +615,43 @@ extension AppState {
             return
         }
 
-        runtimeInstallState = .running("Installing DefenseClaw CLI \(payload.version) (network: PyPI dependencies)")
-        var wheelArguments = ["pip", "install", "--python", stagingDir + "/bin/python"]
-        if materializedOverridesIdentity != nil {
-            // Upstream's own override-dependencies: without them a fresh
-            // resolve honors the scanner's textual<8 cap and the TUI
-            // crashes, and the CVE-driven floors are lost.
-            wheelArguments += ["--overrides", materializedOverrides]
-        }
-        wheelArguments.append(materializedWheel)
-        let wheel = await installerStep(
-            "Install DefenseClaw CLI \(payload.version) (bundled wheel + PyPI dependencies)",
+        runtimeInstallState = .running("Installing hash-locked Python dependencies (network: PyPI)")
+        let dependencies = await installerStep(
+            "Install DefenseClaw CLI \(payload.version) hash-locked dependencies",
             binary: uv,
-            arguments: wheelArguments,
-            successEffects: ["DefenseClaw CLI \(payload.version) installed"]
+            arguments: [
+                "pip", "install", "--python", stagingDir + "/bin/python",
+                "--require-hashes",
+                "--requirements", materializedDependencyLock,
+            ],
+            successEffects: ["Authenticated Python dependency set installed"]
         )
+        var wheel = dependencies
+        if dependencies.succeeded {
+            runtimeInstallState = .running("Installing authenticated DefenseClaw CLI \(payload.version)")
+            wheel = await installerStep(
+                "Install authenticated DefenseClaw CLI \(payload.version) wheel",
+                binary: uv,
+                arguments: [
+                    "pip", "install", "--python", stagingDir + "/bin/python",
+                    "--no-deps", materializedWheel,
+                ],
+                successEffects: ["DefenseClaw CLI \(payload.version) installed"]
+            )
+        }
         let wheelCleanupSucceeded = materializedWheelIdentity.map {
             RuntimeInstallFilesystem.cleanupOwnedPath(
                 materializedWheel,
                 identity: $0
             )
         } ?? false
-        let overridesCleanupSucceeded = materializedOverridesIdentity.map {
+        let dependencyLockCleanupSucceeded = materializedDependencyLockIdentity.map {
             RuntimeInstallFilesystem.cleanupOwnedPath(
-                materializedOverrides,
+                materializedDependencyLock,
                 identity: $0
             )
-        } ?? true
-        guard wheelCleanupSucceeded, overridesCleanupSucceeded else {
+        } ?? false
+        guard wheelCleanupSucceeded, dependencyLockCleanupSucceeded else {
             RuntimeInstallFilesystem.cleanupFailedFreshInstall(
                 stagingDir: stagingDir,
                 stagingIdentity: stagingIdentity,
@@ -450,6 +661,22 @@ extension AppState {
             runtimeInstallState = .failed(
                 "Private runtime input cleanup could not prove ownership; installation was not activated."
             )
+            return
+        }
+        guard dependencies.succeeded else {
+            RuntimeInstallFilesystem.cleanupFailedFreshInstall(
+                stagingDir: stagingDir,
+                stagingIdentity: stagingIdentity,
+                dataHome: dataHome,
+                removeDataHomeIfEmpty: !dataHomeExistedBeforeInstall
+            )
+            if dependencies.cancelled {
+                runtimeInstallState = .failed("Installation cancelled. No pre-existing runtime was changed; retry when ready.")
+            } else {
+                runtimeInstallState = .failed(
+                    "Hash-locked dependency install failed (exit \(dependencies.exitCode)). Only distributions matching the signed runtime lock are accepted from pypi.org / files.pythonhosted.org. Check network or proxy access; no pre-existing runtime was changed. See Activity for output."
+                )
+            }
             return
         }
         guard wheel.succeeded else {
@@ -463,7 +690,7 @@ extension AppState {
                 runtimeInstallState = .failed("Installation cancelled. No pre-existing runtime was changed; retry when ready.")
             } else {
                 runtimeInstallState = .failed(
-                    "CLI wheel install failed (exit \(wheel.exitCode)). This step downloads Python dependencies from pypi.org / files.pythonhosted.org — check network or proxy access. No pre-existing runtime was changed; retry after correcting the network issue. See Activity for output."
+                    "Authenticated CLI wheel install failed (exit \(wheel.exitCode)). Dependency resolution was not retried or widened. No pre-existing runtime was changed; see Activity for output."
                 )
             }
             return
@@ -494,14 +721,17 @@ extension AppState {
         // descriptor against the bundle manifest. The release build already
         // signed those exact bytes with the fixed gateway identifier; never
         // rewrite the staging inode with the install host's codesign version.
-        // All three canonical targets remain absent until every component is
+        // All four canonical targets remain absent until every component is
         // staged and ready for no-replace activation.
         runtimeInstallState = .running("Staging gateway \(payload.version)")
         let gatewayDest = binDir + "/defenseclaw-gateway"
+        let acpGuardDest = binDir + "/defenseclaw-acp"
         let cliDest = binDir + "/defenseclaw"
         let gatewayStage = gatewayDest + ".install-" + UUID().uuidString
+        let acpGuardStage = acpGuardDest + ".install-" + UUID().uuidString
         let cliStage = cliDest + ".install-" + UUID().uuidString
         var gatewayStageIdentity: RuntimeInstallFilesystem.PathIdentity?
+        var acpGuardStageIdentity: RuntimeInstallFilesystem.PathIdentity?
         do {
             gatewayStageIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
                 source: payload.gatewayURL.path,
@@ -510,7 +740,26 @@ extension AppState {
                 mode: 0o755,
                 expectedSourceSHA256: payload.gatewaySHA256
             )
+            acpGuardStageIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
+                source: payload.acpGuardURL.path,
+                destination: acpGuardStage,
+                expectedParentIdentity: binDirectoryIdentity,
+                mode: 0o755,
+                expectedSourceSHA256: payload.acpGuardSHA256
+            )
         } catch {
+            if let gatewayStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    gatewayStage,
+                    identity: gatewayStageIdentity
+                )
+            }
+            if let acpGuardStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    acpGuardStage,
+                    identity: acpGuardStageIdentity
+                )
+            }
             RuntimeInstallFilesystem.cleanupFailedFreshInstall(
                 stagingDir: stagingDir,
                 stagingIdentity: stagingIdentity,
@@ -528,6 +777,12 @@ extension AppState {
                 RuntimeInstallFilesystem.cleanupOwnedPath(
                     gatewayStage,
                     identity: gatewayStageIdentity
+                )
+            }
+            if let acpGuardStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    acpGuardStage,
+                    identity: acpGuardStageIdentity
                 )
             }
             if let cliStageIdentity {
@@ -570,6 +825,33 @@ extension AppState {
             )
             return
         }
+        guard let attestedACPGuardIdentity = acpGuardStageIdentity else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed("Release-attested ACP guard staging identity is unavailable.")
+            return
+        }
+        let acpSignatureVerify = await installerStep(
+            "Verify release-attested ACP guard signature and identifier",
+            binary: "/usr/bin/codesign",
+            arguments: [
+                "--verify", "--strict", "-R",
+                #"=identifier "com.cisco.defenseclaw.acp""#,
+                "--verbose=4", acpGuardStage,
+            ],
+            category: "info"
+        )
+        guard acpSignatureVerify.succeeded,
+              RuntimeInstallFilesystem.pathIdentity(binDir) == binDirectoryIdentity,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
+        else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed(
+                "Release-attested ACP guard signature requirement, parent, or hash verification failed; nothing was activated."
+            )
+            return
+        }
         let stagedGatewayVersion = await installerStep(
             "Verify staged DefenseClaw gateway",
             binary: gatewayStage,
@@ -586,6 +868,24 @@ extension AppState {
             cleanupKnownStages()
             runtimeInstallState = .failed(
                 "Staged gateway did not report expected version \(payload.version), or its parent/inode changed; nothing was activated."
+            )
+            return
+        }
+        let stagedACPGuardVersion = await installerStep(
+            "Verify staged DefenseClaw ACP guard",
+            binary: acpGuardStage,
+            arguments: ["--version"],
+            category: "info"
+        )
+        guard stagedACPGuardVersion.succeeded,
+              UpdateChecker.parseVersion(stagedACPGuardVersion.output) == payload.version,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
+        else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed(
+                "Staged ACP guard did not report expected version \(payload.version), or its inode changed; nothing was activated."
             )
             return
         }
@@ -607,7 +907,10 @@ extension AppState {
         guard RuntimeInstallFilesystem.pathIdentity(binDir) == binDirectoryIdentity,
               RuntimeInstallFilesystem.pathIdentity(gatewayStage) == attestedGatewayIdentity,
               RuntimePayload.sha256(of: URL(fileURLWithPath: gatewayStage))
-                == payload.gatewaySHA256
+                == payload.gatewaySHA256,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
         else {
             cleanupKnownStages()
             runtimeInstallState = .failed(
@@ -616,7 +919,7 @@ extension AppState {
             return
         }
 
-        guard let gatewayStageIdentity, let cliStageIdentity,
+        guard let gatewayStageIdentity, let acpGuardStageIdentity, let cliStageIdentity,
               let venvStageIdentity = RuntimeInstallFilesystem.pathIdentity(stagingDir),
               venvStageIdentity == stagingIdentity
         else {
@@ -636,12 +939,13 @@ extension AppState {
             activationTargets = try RuntimeInstallFilesystem.prepareActivationTargets([
                 (staged: stagingDir, destination: venvDir),
                 (staged: gatewayStage, destination: gatewayDest),
+                (staged: acpGuardStage, destination: acpGuardDest),
                 (staged: cliStage, destination: cliDest),
             ])
             // Ensure preparation captured exactly the inodes created by this
             // attempt before entering the no-replace transaction.
             guard activationTargets.map(\.stagedIdentity) == [
-                venvStageIdentity, gatewayStageIdentity, cliStageIdentity,
+                venvStageIdentity, gatewayStageIdentity, acpGuardStageIdentity, cliStageIdentity,
             ] else {
                 throw RuntimeInstallFilesystem.ActivationError.missingOrChangedStage(stagingDir)
             }
@@ -657,6 +961,10 @@ extension AppState {
             _ = RuntimeInstallFilesystem.cleanupOwnedPath(
                 gatewayStage,
                 identity: gatewayStageIdentity
+            )
+            _ = RuntimeInstallFilesystem.cleanupOwnedPath(
+                acpGuardStage,
+                identity: acpGuardStageIdentity
             )
             _ = RuntimeInstallFilesystem.cleanupOwnedPath(
                 cliStage,
@@ -710,6 +1018,23 @@ extension AppState {
                 preserved.isEmpty
                     ? "Installed gateway did not report expected version \(payload.version); this attempt was removed and can be retried."
                     : "Installed gateway version check failed and concurrent state was preserved at \(preserved.joined(separator: ", "))."
+            )
+            return
+        }
+        let acpGuardVerify = await installerStep(
+            "Verify DefenseClaw ACP guard",
+            binary: acpGuardDest,
+            arguments: ["--version"],
+            category: "info"
+        )
+        guard acpGuardVerify.succeeded,
+              UpdateChecker.parseVersion(acpGuardVerify.output) == payload.version
+        else {
+            let preserved = RuntimeInstallFilesystem.rollbackActivation(activation)
+            runtimeInstallState = .failed(
+                preserved.isEmpty
+                    ? "Installed ACP guard did not report expected version \(payload.version); this attempt was removed and can be retried."
+                    : "Installed ACP guard version check failed and concurrent state was preserved at \(preserved.joined(separator: ", "))."
             )
             return
         }
@@ -905,6 +1230,15 @@ extension AppState {
     /// every native-app refusal surface. Returning nil prevents a release tag
     /// from being interpolated into a URL unless it is canonical SemVer.
     static func authenticatedRuntimeUpgradeResolverCommand(releaseTag: String) -> String? {
+        RuntimeUpgradeResolverCommand.authenticated(releaseTag: releaseTag)
+    }
+
+}
+
+/// Produces the runnable, signed-release resolver command shared by native-app
+/// upgrade surfaces. The release tag is validated before URL interpolation.
+enum RuntimeUpgradeResolverCommand {
+    static func authenticated(releaseTag: String) -> String? {
         let tag = releaseTag.hasPrefix("v") ? String(releaseTag.dropFirst()) : releaseTag
         guard tag.range(
             of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,

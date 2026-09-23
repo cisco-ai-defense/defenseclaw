@@ -294,9 +294,10 @@ class TestScanAllSweep(_PluginScanUXBase):
         self.app.cfg.plugin_dirs = lambda c=None: []  # type: ignore[method-assign]
         result = self.invoke(["scan", "--all"])
         self.assertEqual(result.exit_code, 0, result.output)
-        # Each active connector gets its own banner.
-        self.assertIn("── connector: openclaw ──", result.output)
-        self.assertIn("── connector: codex ──", result.output)
+        # Each active connector gets its own banner. Redirected/test output is
+        # intentionally ASCII while interactive UTF-8 terminals use box lines.
+        self.assertIn("connector: openclaw", result.output)
+        self.assertIn("connector: codex", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
@@ -323,6 +324,93 @@ class TestScanAllSweep(_PluginScanUXBase):
         self.assertEqual(result.exit_code, 0, result.output)
         scanned = {call.args[0] for call in mock_scan.call_args_list}
         self.assertIn(plugin_file, scanned)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_claudecode_registry_failures_stop_scan_all_in_text_and_json(
+        self,
+        mock_scan,
+        _mock_oc,
+    ) -> None:
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "managed-empty")
+        os.makedirs(self.app.cfg.plugin_dir)
+        cases = {
+            "malformed": "{not-json",
+            "unsupported": json.dumps({"version": 3, "plugins": {}}),
+        }
+        for expected_state, raw in cases.items():
+            with self.subTest(state=expected_state):
+                plugin_root = os.path.join(self.tmp_dir, expected_state, "plugins")
+                os.makedirs(plugin_root)
+                registry = os.path.join(plugin_root, "installed_plugins.json")
+                with open(registry, "w", encoding="utf-8") as handle:
+                    handle.write(raw)
+                self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+                self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+                self.app.cfg.plugin_dirs = lambda c=None, root=plugin_root: [root]  # type: ignore[method-assign]
+
+                text_result = self.invoke(
+                    ["scan", "--all", "--connector", "claudecode"]
+                )
+                self.assertEqual(text_result.exit_code, 1, text_result.output)
+                self.assertIn(registry, text_result.output)
+                self.assertIn(
+                    f"— {expected_state}; entries=0",
+                    text_result.output,
+                )
+
+                json_result = self.invoke(
+                    ["scan", "--all", "--connector", "claudecode", "--json"]
+                )
+                self.assertEqual(json_result.exit_code, 1, json_result.output)
+                self.assertEqual(json.loads(json_result.stdout), [])
+                error_payload = json.loads(json_result.stderr)
+                self.assertEqual(error_payload["error"], "plugin_discovery_failed")
+                self.assertEqual(error_payload["discovery"][0]["source"], registry)
+                self.assertEqual(error_payload["discovery"][0]["state"], expected_state)
+        mock_scan.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_all_zero_targets_is_successful_with_missing_or_valid_empty_diagnostics(
+        self,
+        mock_scan,
+        _mock_oc,
+    ) -> None:
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "managed-empty")
+        os.makedirs(self.app.cfg.plugin_dir)
+        for expected_state in ("missing", "valid"):
+            with self.subTest(state=expected_state):
+                plugin_root = os.path.join(self.tmp_dir, expected_state, "plugins")
+                os.makedirs(plugin_root)
+                registry = os.path.join(plugin_root, "installed_plugins.json")
+                if expected_state == "valid":
+                    with open(registry, "w", encoding="utf-8") as handle:
+                        json.dump({"version": 2, "plugins": {}}, handle)
+                self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+                self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+                self.app.cfg.plugin_dirs = lambda c=None, root=plugin_root: [root]  # type: ignore[method-assign]
+
+                text_result = self.invoke(
+                    ["scan", "--all", "--connector", "claudecode"]
+                )
+                self.assertEqual(text_result.exit_code, 0, text_result.output)
+                self.assertIn(registry, text_result.output)
+                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                self.assertIn("No plugins found to scan", text_result.output)
+
+                json_result = self.invoke(
+                    ["scan", "--all", "--connector", "claudecode", "--json"]
+                )
+                self.assertEqual(json_result.exit_code, 0, json_result.output)
+                payload = json.loads(json_result.output)
+                self.assertEqual(payload[0]["error"], "no_plugin_targets")
+                self.assertEqual(payload[0]["discovery"][0]["source"], registry)
+                self.assertEqual(
+                    payload[0]["discovery"][0]["state"],
+                    expected_state,
+                )
+        mock_scan.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
@@ -372,6 +460,154 @@ class TestScanAllSweep(_PluginScanUXBase):
         self.assertNotIn(stale_sites, scanned)
         self.assertNotIn(os.path.join(cache, "openai-bundled"), scanned)
         self.assertNotIn(os.path.join(cache, "openai-curated-remote"), scanned)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_claudecode_v2_registry_scans_exact_install_path(
+        self,
+        mock_scan,
+        _mock_oc,
+    ) -> None:
+        plugin_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        cached = os.path.join(
+            plugin_root,
+            "cache",
+            "compound-market",
+            "compound-engineering",
+            "1.2.3",
+        )
+        os.makedirs(os.path.join(cached, ".claude-plugin"), exist_ok=True)
+        with open(
+            os.path.join(cached, ".claude-plugin", "plugin.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {"name": "compound-engineering", "version": "1.2.3"},
+                handle,
+            )
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "compound-engineering@compound-market": [
+                            {
+                                "scope": "user",
+                                "installPath": cached,
+                                "version": "1.2.3",
+                            }
+                        ]
+                    },
+                },
+                handle,
+            )
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [plugin_root]  # type: ignore[method-assign]
+        mock_scan.side_effect = lambda path, **_kwargs: ScanResult(
+            scanner="plugin-scanner",
+            target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(milliseconds=1),
+        )
+
+        result = self.invoke(["scan", "--all", "--connector", "claudecode"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanned = {call.args[0] for call in mock_scan.call_args_list}
+        self.assertIn(cached, scanned)
+        self.assertNotIn(os.path.join(plugin_root, "cache"), scanned)
+        self.assertNotIn(os.path.join(plugin_root, "cache", "compound-market"), scanned)
+
+        json_result = self.invoke(
+            ["scan", "--all", "--connector", "claudecode", "--json"]
+        )
+        self.assertEqual(json_result.exit_code, 0, json_result.output)
+        payload = json.loads(json_result.output)
+        self.assertEqual(payload[0]["connector"], "claudecode")
+        self.assertIn(
+            cached,
+            {scan_result["target"] for scan_result in payload[0]["results"]},
+        )
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_claudecode_named_and_all_scans_preserve_scope_instances(
+        self,
+        mock_scan,
+        _mock_oc,
+    ) -> None:
+        plugin_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        user = os.path.join(plugin_root, "cache", "market", "shared", "1.0.0")
+        project = os.path.join(plugin_root, "cache", "market", "shared", "2.0.0")
+        os.makedirs(user)
+        os.makedirs(project)
+        project_root = os.path.join(self.tmp_dir, "workspace", "alpha")
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "shared@market": [
+                            {"scope": "user", "installPath": user},
+                            {
+                                "scope": "project",
+                                "projectPath": project_root,
+                                "installPath": project,
+                            },
+                        ]
+                    },
+                },
+                handle,
+            )
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [plugin_root]  # type: ignore[method-assign]
+        mock_scan.side_effect = lambda path, **_kwargs: ScanResult(
+            scanner="plugin-scanner",
+            target=path,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(milliseconds=1),
+        )
+
+        named = self.invoke(["scan", "shared", "--connector", "claudecode"])
+
+        self.assertEqual(named.exit_code, 0, named.output)
+        self.assertEqual(
+            [call.args[0] for call in mock_scan.call_args_list],
+            [project, user],
+        )
+        self.assertIn("connector: claudecode; plugin: shared (scope=project", named.output)
+        self.assertNotIn("plugin: claudecode (", named.output)
+        self.assertIn(project_root, named.output)
+
+        mock_scan.reset_mock()
+        all_result = self.invoke(
+            ["scan", "--all", "--connector", "claudecode", "--json"]
+        )
+
+        self.assertEqual(all_result.exit_code, 0, all_result.output)
+        scanned = {call.args[0] for call in mock_scan.call_args_list}
+        self.assertTrue({user, project}.issubset(scanned))
+        payload = json.loads(all_result.output)
+        scoped_results = {
+            row["target_metadata"]["scope"]: row["target_metadata"]
+            for row in payload[0]["results"]
+            if row["target"] in {user, project}
+        }
+        self.assertEqual(set(scoped_results), {"user", "project"})
+        self.assertEqual(scoped_results["project"]["project_path"], project_root)
 
 
 if __name__ == "__main__":

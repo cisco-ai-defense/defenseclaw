@@ -31,6 +31,8 @@ struct StreamDelta: Sendable {
 actor EventStreamReader {
     static let tailBudget = 512 * 1024
     static let tailLineLimit = 2_000
+    static let maximumRecordBytes = 64 * 1024
+    static let maximumRetainedBytes = 8 * 1024 * 1024
 
     private let url: URL
     private let gatewayLogURL: URL
@@ -45,6 +47,7 @@ actor EventStreamReader {
     private(set) var findings: [ScanFindingEvent] = []
     private(set) var activity: [ActivityMutation] = []
     private(set) var egress: [EgressEvent] = []
+    private(set) var retainedBufferBytes = 0
 
     /// Scan blocks grouped by scan_id — mirrors load_gateway_scan_blocks,
     /// which reads the bounded gateway.jsonl tail (512 KiB / 2,000 lines).
@@ -56,16 +59,24 @@ actor EventStreamReader {
         scanBlockMap.values.sorted { $0.timestamp > $1.timestamp }
     }
 
-    private let bufferCap = 20_000
+    private let bufferCap: Int
+    private let recordByteLimit: Int
+    private let retainedByteLimit: Int
 
     init(
         url: URL,
         gatewayLogURL: URL,
-        watchdogLogURL: URL
+        watchdogLogURL: URL,
+        bufferCap: Int = 20_000,
+        maximumRecordBytes: Int = EventStreamReader.maximumRecordBytes,
+        maximumRetainedBytes: Int = EventStreamReader.maximumRetainedBytes
     ) {
         self.url = url
         self.gatewayLogURL = gatewayLogURL
         self.watchdogLogURL = watchdogLogURL
+        self.bufferCap = max(1, bufferCap)
+        self.recordByteLimit = max(1, maximumRecordBytes)
+        self.retainedByteLimit = max(1, maximumRetainedBytes)
     }
 
     /// Reload scan/scan_finding rows from the same bounded tail the TUI uses.
@@ -104,6 +115,7 @@ actor EventStreamReader {
         scanSummaryCounts = [:]
         observedFindingCounts = [:]
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).suffix(Self.tailLineLimit) {
+            guard line.utf8.count <= recordByteLimit else { continue }
             guard line.contains("\"event_type\":\"scan") || line.contains("\"event_type\": \"scan") else { continue }
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
@@ -190,6 +202,12 @@ actor EventStreamReader {
                     offset += UInt64(complete.count)
                     let text = String(decoding: complete, as: UTF8.self)
                     for line in text.split(separator: "\n") {
+                        guard line.utf8.count <= recordByteLimit else {
+                            delta.logRows.append(
+                                oversizedRecordNotice(stream: .verdicts, actualBytes: line.utf8.count)
+                            )
+                            continue
+                        }
                         guard let lineData = line.data(using: .utf8),
                               let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
                         else { continue }
@@ -201,18 +219,7 @@ actor EventStreamReader {
         ingestPlainLog(gatewayLogURL, stream: .gateway, offset: &gatewayLogOffset, into: &delta)
         ingestPlainLog(watchdogLogURL, stream: .watchdog, offset: &watchdogLogOffset, into: &delta)
 
-        for row in delta.logRows {
-            logBuffers[row.stream, default: []].append(row)
-            if logBuffers[row.stream]!.count > bufferCap {
-                logBuffers[row.stream]!.removeFirst(logBuffers[row.stream]!.count - bufferCap)
-            }
-        }
-        findings.append(contentsOf: delta.findings)
-        activity.append(contentsOf: delta.activity)
-        egress.append(contentsOf: delta.egress)
-        if findings.count > bufferCap { findings.removeFirst(findings.count - bufferCap) }
-        if activity.count > bufferCap { activity.removeFirst(activity.count - bufferCap) }
-        if egress.count > bufferCap { egress.removeFirst(egress.count - bufferCap) }
+        retain(delta)
         return delta
     }
 
@@ -223,6 +230,7 @@ actor EventStreamReader {
         findings = []
         activity = []
         egress = []
+        retainedBufferBytes = 0
         scanBlockMap = [:]
         scanSummaryCounts = [:]
         observedFindingCounts = [:]
@@ -254,7 +262,20 @@ actor EventStreamReader {
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let raw = String(line)
             guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            delta.logRows.append(plainLogRow(raw, stream: stream))
+            guard raw.utf8.count <= recordByteLimit else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: stream, actualBytes: raw.utf8.count)
+                )
+                continue
+            }
+            let row = plainLogRow(raw, stream: stream)
+            if retainedBytes(of: row) <= recordByteLimit {
+                delta.logRows.append(row)
+            } else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: stream, actualBytes: retainedBytes(of: row))
+                )
+            }
         }
     }
 
@@ -264,6 +285,144 @@ actor EventStreamReader {
     private func completeLinePrefix(_ data: Data) -> Data? {
         guard let newline = data.lastIndex(of: 0x0A) else { return nil }
         return data.prefix(through: newline)
+    }
+
+    private enum RetainedHead {
+        case log(LogStream)
+        case finding
+        case activity
+        case egress
+    }
+
+    private func retain(_ delta: StreamDelta) {
+        for row in delta.logRows {
+            logBuffers[row.stream, default: []].append(row)
+            retainedBufferBytes += retainedBytes(of: row)
+        }
+        for event in delta.findings {
+            findings.append(event)
+            retainedBufferBytes += retainedBytes(of: event)
+        }
+        for mutation in delta.activity {
+            activity.append(mutation)
+            retainedBufferBytes += retainedBytes(of: mutation)
+        }
+        for event in delta.egress {
+            egress.append(event)
+            retainedBufferBytes += retainedBytes(of: event)
+        }
+
+        enforceCountLimits()
+        while retainedBufferBytes > retainedByteLimit, removeOldestRetainedRecord() {}
+    }
+
+    private func enforceCountLimits() {
+        for stream in LogStream.allCases {
+            guard var rows = logBuffers[stream], rows.count > bufferCap else { continue }
+            let removalCount = rows.count - bufferCap
+            for row in rows.prefix(removalCount) {
+                subtractRetainedBytes(retainedBytes(of: row))
+            }
+            rows.removeFirst(removalCount)
+            logBuffers[stream] = rows
+        }
+        if findings.count > bufferCap {
+            let removalCount = findings.count - bufferCap
+            for event in findings.prefix(removalCount) {
+                subtractRetainedBytes(retainedBytes(of: event))
+            }
+            findings.removeFirst(removalCount)
+        }
+        if activity.count > bufferCap {
+            let removalCount = activity.count - bufferCap
+            for mutation in activity.prefix(removalCount) {
+                subtractRetainedBytes(retainedBytes(of: mutation))
+            }
+            activity.removeFirst(removalCount)
+        }
+        if egress.count > bufferCap {
+            let removalCount = egress.count - bufferCap
+            for event in egress.prefix(removalCount) {
+                subtractRetainedBytes(retainedBytes(of: event))
+            }
+            egress.removeFirst(removalCount)
+        }
+    }
+
+    @discardableResult
+    private func removeOldestRetainedRecord() -> Bool {
+        var oldest: (date: Date, head: RetainedHead)?
+        for stream in LogStream.allCases {
+            guard let row = logBuffers[stream]?.first else { continue }
+            if oldest == nil || row.timestamp < oldest!.date {
+                oldest = (row.timestamp, .log(stream))
+            }
+        }
+        if let event = findings.first, oldest == nil || event.timestamp < oldest!.date {
+            oldest = (event.timestamp, .finding)
+        }
+        if let mutation = activity.first, oldest == nil || mutation.timestamp < oldest!.date {
+            oldest = (mutation.timestamp, .activity)
+        }
+        if let event = egress.first, oldest == nil || event.timestamp < oldest!.date {
+            oldest = (event.timestamp, .egress)
+        }
+
+        guard let oldest else { return false }
+        switch oldest.head {
+        case .log(let stream):
+            guard var rows = logBuffers[stream], !rows.isEmpty else { return false }
+            let removed = rows.removeFirst()
+            subtractRetainedBytes(retainedBytes(of: removed))
+            logBuffers[stream] = rows
+        case .finding:
+            let removed = findings.removeFirst()
+            subtractRetainedBytes(retainedBytes(of: removed))
+        case .activity:
+            let removed = activity.removeFirst()
+            subtractRetainedBytes(retainedBytes(of: removed))
+        case .egress:
+            let removed = egress.removeFirst()
+            subtractRetainedBytes(retainedBytes(of: removed))
+        }
+        return true
+    }
+
+    private func subtractRetainedBytes(_ count: Int) {
+        retainedBufferBytes = max(0, retainedBufferBytes - count)
+    }
+
+    private func retainedBytes(of row: LogRow) -> Int {
+        textBytes([row.id, row.action, row.eventType, row.message, row.rawJSON, row.connector])
+    }
+
+    private func retainedBytes(of event: ScanFindingEvent) -> Int {
+        textBytes([
+            event.id, event.scanner, event.target, event.title, event.detail,
+            event.location, event.remediation, event.runID, event.connector,
+        ])
+    }
+
+    private func retainedBytes(of mutation: ActivityMutation) -> Int {
+        textBytes([
+            mutation.id, mutation.actor, mutation.action, mutation.targetType,
+            mutation.targetID, mutation.reason, mutation.versionFrom, mutation.versionTo,
+            mutation.beforeJSON, mutation.afterJSON, mutation.connector,
+        ])
+    }
+
+    private func retainedBytes(of event: EgressEvent) -> Int {
+        textBytes([
+            event.id, event.target, event.decision, event.reason, event.branch,
+            event.connector, event.targetPath, event.bodyShape, event.source,
+        ])
+    }
+
+    private func textBytes(_ values: [String]) -> Int {
+        values.reduce(into: 0) { total, value in
+            let count = value.utf8.count
+            total = total > Int.max - count ? Int.max : total + count
+        }
     }
 
     private func plainLogRow(_ line: String, stream: LogStream) -> LogRow {
@@ -279,6 +438,21 @@ actor EventStreamReader {
             message: line,
             rawJSON: line,
             connector: metadata.connector
+        )
+    }
+
+    private func oversizedRecordNotice(stream: LogStream, actualBytes: Int) -> LogRow {
+        rowCounter += 1
+        return LogRow(
+            id: "oversized-record-\(rowCounter)",
+            timestamp: Date(),
+            stream: stream,
+            severity: .medium,
+            action: "omitted",
+            eventType: "oversized_record",
+            message: "Omitted oversized log record (\(actualBytes) bytes; limit \(recordByteLimit)).",
+            rawJSON: "",
+            connector: ""
         )
     }
 
@@ -363,7 +537,7 @@ actor EventStreamReader {
         case "scan_finding":
             let finding = (obj["scan_finding"] as? [String: Any]) ?? obj
             let findingTarget = (finding["target"] as? String) ?? target
-            delta.findings.append(ScanFindingEvent(
+            let event = ScanFindingEvent(
                 id: nextID(obj, "finding"),
                 timestamp: ts,
                 scanner: (finding["scanner"] as? String) ?? "scanner",
@@ -375,7 +549,14 @@ actor EventStreamReader {
                 severity: severity,
                 runID: (obj["run_id"] as? String) ?? "",
                 connector: connector.isEmpty ? ConnectorAttribution.fromTarget(findingTarget) : connector
-            ))
+            )
+            if retainedBytes(of: event) <= recordByteLimit {
+                delta.findings.append(event)
+            } else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: .verdicts, actualBytes: retainedBytes(of: event))
+                )
+            }
         case "activity":
             // Mutation fields are nested under "activity" (gateway_events.py
             // load_gateway_activity); top level is a fallback for older rows.
@@ -386,7 +567,7 @@ actor EventStreamReader {
                let diff = act["diff"] as? [[String: Any]], !diff.isEmpty {
                 after = jsonString(diff) // JSON-patch style op/path entries
             }
-            delta.activity.append(ActivityMutation(
+            let mutation = ActivityMutation(
                 id: nextID(obj, "activity"),
                 timestamp: ts,
                 actor: firstString(act["actor"], obj["actor"], "system"),
@@ -399,7 +580,14 @@ actor EventStreamReader {
                 beforeJSON: before,
                 afterJSON: after,
                 connector: connector
-            ))
+            )
+            if retainedBytes(of: mutation) <= recordByteLimit {
+                delta.activity.append(mutation)
+            } else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: .verdicts, actualBytes: retainedBytes(of: mutation))
+                )
+            }
         case "egress":
             // Egress fields are nested under "egress"; the TUI's
             // load_gateway_egress skips rows without that dict, and its
@@ -415,7 +603,7 @@ actor EventStreamReader {
             let synthesized: Severity = (decision == "block" || (branch == "shape" && looksLikeLLM))
                 ? .medium : .info
             let tsParsed = DCDates.parse(obj["ts"] ?? obj["timestamp"] ?? obj["time"]) != nil
-            delta.egress.append(EgressEvent(
+            let event = EgressEvent(
                 id: nextID(obj, "egress"),
                 timestamp: ts,
                 target: firstString(egress["target_host"]),
@@ -429,7 +617,14 @@ actor EventStreamReader {
                 bodyShape: firstString(egress["body_shape"]),
                 source: firstString(egress["source"]),
                 timestampParsed: tsParsed
-            ))
+            )
+            if retainedBytes(of: event) <= recordByteLimit {
+                delta.egress.append(event)
+            } else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: .verdicts, actualBytes: retainedBytes(of: event))
+                )
+            }
         default:
             break
         }
@@ -440,7 +635,7 @@ actor EventStreamReader {
         // The TUI's Gateway and Watchdog tabs are backed by gateway.log and
         // watchdog.log. JSONL rows feed the structured tabs and counters.
         if stream != .gateway && stream != .watchdog {
-            delta.logRows.append(LogRow(
+            let row = LogRow(
                 id: nextID(obj, "log"),
                 timestamp: ts,
                 stream: stream,
@@ -450,7 +645,14 @@ actor EventStreamReader {
                 message: message.isEmpty ? raw : message,
                 rawJSON: raw,
                 connector: connector
-            ))
+            )
+            if retainedBytes(of: row) <= recordByteLimit {
+                delta.logRows.append(row)
+            } else {
+                delta.logRows.append(
+                    oversizedRecordNotice(stream: stream, actualBytes: retainedBytes(of: row))
+                )
+            }
         }
     }
 

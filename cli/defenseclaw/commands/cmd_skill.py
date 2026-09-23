@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -720,6 +720,40 @@ def _latest_skill_scan_for_connector(
     return matches[0][1]
 
 
+def _build_scan_map_for_connector(
+    app: AppContext, connector: str,
+) -> dict[str, dict[str, Any]]:
+    """Build a skill-name scan map limited to one connector's roots.
+
+    Multiple native connectors can install a skill with the same basename.
+    The audit database records the absolute target path rather than a connector
+    column, so resolve each name through the same path-scoping rules used by
+    ``skill info`` instead of reusing the global basename-only map.
+    """
+    if app.store is None:
+        return {}
+    try:
+        latest = app.store.latest_scans_by_scanner("skill-scanner")
+    except Exception:
+        return {}
+
+    matches: list[tuple[Any, str, dict[str, Any]]] = []
+    for ls in latest:
+        target = str(ls.get("target") or "")
+        if not target:
+            continue
+        payload = _scan_payload_from_latest(ls)
+        if not _scan_entry_matches_connector(app, payload, connector):
+            continue
+        matches.append((ls.get("timestamp"), os.path.basename(target), payload))
+
+    matches.sort(key=lambda item: item[0], reverse=True)
+    scan_map: dict[str, dict[str, Any]] = {}
+    for _, name, payload in matches:
+        scan_map.setdefault(name, payload)
+    return scan_map
+
+
 def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
     """Build a map of skill-name -> effective ActionEntry from the DB.
 
@@ -814,14 +848,14 @@ def _scan_entry_matches_connector(
     target = str(scan_data.get("target") or "")
     if not target:
         return False
-    real_target = os.path.realpath(target)
+    real_target = os.path.normcase(os.path.realpath(target))
     try:
         roots = app.cfg.skill_dirs(_normalize_runtime_connector(connector))
     except Exception:  # noqa: BLE001 — fail closed for explicit connector scope.
         return False
     return any(
-        real_target == os.path.realpath(root)
-        or real_target.startswith(os.path.realpath(root) + os.sep)
+        real_target == os.path.normcase(os.path.realpath(root))
+        or real_target.startswith(os.path.normcase(os.path.realpath(root)) + os.sep)
         for root in roots
     )
 
@@ -1030,8 +1064,11 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     from defenseclaw.commands import resolve_list_connectors
 
     connectors = resolve_list_connectors(app, connector_flag)
+    legacy_single_scope = (
+        len(connectors) == 1
+        and not (connector_flag and connector_flag.strip())
+    )
 
-    scan_map = _build_scan_map(app.store)
     # SK-4: resolve the effective actions per connector (connector-scoped row
     # overrides global) so each connector's table/card shows its own actions.
 
@@ -1039,6 +1076,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
         if len(connectors) > 1:
             groups = []
             for c in connectors:
+                scan_map = _build_scan_map_for_connector(app, c)
                 actions_map = _build_actions_map(app.store, c)
                 groups.append({
                     "connector": c,
@@ -1051,6 +1089,11 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
         else:
+            scan_map = (
+                _build_scan_map(app.store)
+                if legacy_single_scope
+                else _build_scan_map_for_connector(app, connectors[0])
+            )
             actions_map = _build_actions_map(app.store, connectors[0])
             skills = _collect_skills_for_connector(app, connectors[0], scan_map, actions_map)
             items = _skill_list_json_items(
@@ -1069,6 +1112,11 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
     shown_any = False
     for connector in connectors:
+        scan_map = (
+            _build_scan_map(app.store)
+            if legacy_single_scope
+            else _build_scan_map_for_connector(app, connector)
+        )
         actions_map = _build_actions_map(app.store, connector)
         skills = _collect_skills_for_connector(app, connector, scan_map, actions_map)
         if not skills:
@@ -1474,22 +1522,40 @@ def scan(
         # (so "all skills" means every connector's skills, not just the
         # primary's). Single-connector installs keep the original single pass
         # (connector=None ⇒ the active connector).
-        from defenseclaw.commands import resolve_list_connector
-        if connector_flag:
-            connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
-        elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
-            connectors = list(app.cfg.active_connectors())
-        else:
-            connectors = [None]
+        from defenseclaw.commands import resolve_list_connectors
+
+        resolved_connectors = resolve_list_connectors(app, connector_flag)
+        raw_connectors = (
+            [name for name in app.cfg.active_connectors() if name]
+            if hasattr(app.cfg, "active_connectors")
+            else resolved_connectors
+        )
+        connectors: list[str | None] = (
+            resolved_connectors
+            if connector_flag or len(raw_connectors) > 1
+            else [None]
+        )
         json_rows: list[dict[str, Any]] = []
-        enforcement_failed = False
+        active_label = (
+            str(app.cfg.active_connector() or "openclaw")
+            if hasattr(app.cfg, "active_connector")
+            else "openclaw"
+        )
+        batch_failed = False
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
+                if as_json and any(
+                    isinstance(row, dict)
+                    and bool(row.get("error") or row.get("telemetry_error"))
+                    for row in rows
+                ):
+                    batch_failed = True
             else:
+                scan_errors: list[int] = []
                 try:
                     scanner = _build_skill_scanner(
                         app,
@@ -1497,23 +1563,46 @@ def scan(
                         connector=c,
                         pack_cache=pack_cache,
                     )
-                    rows = _scan_all(
-                        app,
-                        scanner,
-                        as_json,
-                        enforce=action,
-                        connector=c,
-                    )
+                    scan_kwargs: dict[str, Any] = {
+                        "enforce": action,
+                        "connector": c,
+                    }
+                    if as_json:
+                        scan_kwargs["error_sink"] = scan_errors
+                    rows = _scan_all(app, scanner, as_json, **scan_kwargs)
                 except SystemExit as exc:
-                    if not action or exc.code in (None, 0):
+                    if exc.code in (None, 0):
                         raise
-                    enforcement_failed = True
+                    if not as_json and len(connectors) == 1:
+                        raise
+                    batch_failed = True
                     rows = []
+                except Exception as exc:
+                    if not as_json and len(connectors) == 1:
+                        raise
+                    batch_failed = True
+                    label = str(c or active_label)
+                    if as_json:
+                        rows = [
+                            _skill_scan_error_json_payload(
+                                f"connector:{label}",
+                                exc,
+                                connector=label,
+                            )
+                        ]
+                    else:
+                        click.echo(
+                            f"[scan] connector {label!r} failed: {exc}",
+                            err=True,
+                        )
+                        rows = []
+                if scan_errors:
+                    batch_failed = True
             if as_json:
                 json_rows.extend(rows or [])
         if as_json:
             click.echo(json.dumps(json_rows, indent=2, default=str))
-        if enforcement_failed:
+        if batch_failed:
             raise SystemExit(1)
         return
 
@@ -1573,6 +1662,21 @@ def scan(
         info = _get_openclaw_skill_info(target, app, connector=connector_flag or None)
         if info and _skill_info_path(info):
             scan_dir = _skill_info_path(info) or ""
+            if bool(info.get("bundled")):
+                payload = _skill_scan_skipped_json_payload(
+                    str(info.get("name") or target),
+                    scan_dir,
+                    reason="vendor-bundled",
+                    connector=connector_flag,
+                )
+                if as_json:
+                    _emit_skill_json_payload(payload)
+                else:
+                    click.echo(
+                        f"SKIPPED: {target} — vendor-bundled skills are "
+                        "discovery-only and are not scanned or blocked"
+                    )
+                return
             if connector_flag:
                 from defenseclaw.commands import resolve_list_connector as _resolve_scan_connector
                 scan_connector = _resolve_scan_connector(app, connector_flag)
@@ -1696,6 +1800,22 @@ def _scan_one_local_skill(
     from defenseclaw.enforce import PolicyEngine
 
     name = os.path.basename(scan_dir)
+
+    if _is_bundled_skill_scan_path(scan_dir):
+        payload = _skill_scan_skipped_json_payload(
+            name,
+            scan_dir,
+            reason="vendor-bundled",
+            connector=connector,
+        )
+        if as_json:
+            _emit_skill_json_payload(payload, json_sink=json_sink)
+        else:
+            click.echo(
+                f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
+                "and are not scanned or blocked"
+            )
+        return payload
 
     pe = PolicyEngine(app.store)
 
@@ -2135,6 +2255,7 @@ def _scan_all(
     *,
     enforce: bool = False,
     connector: str | None = None,
+    error_sink: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
@@ -2162,6 +2283,7 @@ def _scan_all(
     pe = PolicyEngine(app.store)
     verdicts = []
     errors = 0
+    telemetry_errors = 0
 
     connector = resolved_connector
 
@@ -2178,6 +2300,8 @@ def _scan_all(
         for info in skill_entries:
             name = str(info["name"])
             base_dir = _skill_info_path(info)
+            if bool(info.get("bundled")) or _is_bundled_skill_scan_path(base_dir):
+                continue
             if not base_dir:
                 resolved_info = _get_openclaw_skill_info(
                     name,
@@ -2226,6 +2350,8 @@ def _scan_all(
             ):
                 entry = discovered.name
                 path = discovered.path
+                if discovered.bundled or _is_bundled_skill_scan_path(path):
+                    continue
                 if entry in seen_names:
                     continue
                 if skill_entries and entry not in unresolved_names:
@@ -2281,38 +2407,32 @@ def _scan_all(
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
             else:
                 result = scanner.scan(base_dir)
-            if app.logger:
-                app.logger.log_scan(result)
-            verdicts.append({"name": name, "result": result})
-            if as_json:
-                json_rows.append(_skill_scan_result_json_payload(result, connector=connector))
-            else:
-                enforcement_blocks = False
-                if result.is_clean():
-                    _scan_ui.render_per_target_status(
-                        ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
-                    )
-                else:
-                    enforcement_blocks = (
-                        enforce
-                        and _skill_scan_would_install_block(
-                            app, pe, name, base_dir, result, connector=connector,
-                        )
-                    )
-                    _scan_ui.render_per_target_status(
-                        ctx,
-                        target=name,
-                        verdict=_skill_scan_findings_verdict(
-                            result, blocked=enforcement_blocks,
-                        ),
-                        detail=f"max severity: {result.max_severity()}",
-                        findings=len(result.findings),
-                    )
-                v = verdicts[-1]
-                v["blocked"] = bool(enforcement_blocks)
-                v["findings"] = len(result.findings)
-            if not result.is_clean() and enforce:
-                _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
+        except SystemExit as exc:
+            # The scanner wrapper uses SystemExit for dependency/bootstrap
+            # failures. In the normal JSON batch path that is still a
+            # per-target failure: preserve rows already collected for this
+            # connector, append a structured error row, and let the caller
+            # emit the complete array before returning non-zero. Keep the
+            # human-output and successful-exit behavior. JSON action batches
+            # also need the rows accumulated before this target failed.
+            if not as_json or exc.code in (None, 0):
+                raise
+            errors += 1
+            if captured_stdout is not None:
+                _emit_captured_scan_stdout(captured_stdout.getvalue())
+            detail = (
+                f"scanner exited with status {exc.code}"
+                if isinstance(exc.code, int)
+                else str(exc)
+            )
+            json_rows.append(
+                _skill_scan_error_json_payload(
+                    base_dir,
+                    RuntimeError(detail),
+                    connector=connector,
+                )
+            )
+            continue
         except Exception as exc:
             errors += 1
             if not as_json:
@@ -2328,6 +2448,59 @@ def _scan_all(
                 json_rows.append(
                     _skill_scan_error_json_payload(base_dir, exc, connector=connector)
                 )
+            continue
+
+        # A canonical telemetry admission failure must not erase a completed
+        # scan result or prevent its enforcement decision. Report it alongside
+        # that skill and defer the non-zero exit until after the whole batch is
+        # serialized.
+        telemetry_error: Exception | None = None
+        if app.logger:
+            try:
+                app.logger.log_scan(result)
+            except Exception as exc:
+                telemetry_error = exc
+                telemetry_errors += 1
+
+        verdicts.append({"name": name, "result": result})
+        if as_json:
+            payload = _skill_scan_result_json_payload(result, connector=connector)
+            if telemetry_error is not None:
+                payload["telemetry_error"] = str(telemetry_error)
+            json_rows.append(payload)
+        else:
+            enforcement_blocks = False
+            if result.is_clean():
+                _scan_ui.render_per_target_status(
+                    ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                )
+            else:
+                enforcement_blocks = (
+                    enforce
+                    and _skill_scan_would_install_block(
+                        app, pe, name, base_dir, result, connector=connector,
+                    )
+                )
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=name,
+                    verdict=_skill_scan_findings_verdict(
+                        result, blocked=enforcement_blocks,
+                    ),
+                    detail=f"max severity: {result.max_severity()}",
+                    findings=len(result.findings),
+                )
+            v = verdicts[-1]
+            v["blocked"] = bool(enforcement_blocks)
+            v["findings"] = len(result.findings)
+            if telemetry_error is not None:
+                click.echo(
+                    f"[scan] warning: telemetry for {name!r} was not recorded: "
+                    f"{telemetry_error}",
+                    err=True,
+                )
+        if not result.is_clean() and enforce:
+            _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
 
     if not as_json and verdicts:
         clean = sum(1 for v in verdicts if v["result"].is_clean())
@@ -2348,8 +2521,11 @@ def _scan_all(
             hint("View alerts:       defenseclaw alerts")
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
-    if errors:
-        raise SystemExit(1)
+    batch_errors = errors + telemetry_errors
+    if batch_errors:
+        if error_sink is None:
+            raise SystemExit(1)
+        error_sink.append(batch_errors)
     return json_rows
 
 
@@ -2410,11 +2586,31 @@ def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -
     """
     from defenseclaw.safety import is_symlink
 
-    def _matched_candidate(skill_root: str, skill_name: str) -> str | None:
+    def _matched_candidates(
+        skill_root: str,
+        skill_name: str,
+        connector_name: str,
+    ) -> list[str]:
         candidate = os.path.join(skill_root, skill_name)
-        if not os.path.isdir(candidate) or is_symlink(candidate):
-            return None
-        return os.path.realpath(candidate)
+        if os.path.isdir(candidate) and not is_symlink(candidate):
+            return [os.path.realpath(candidate)]
+        if _normalize_runtime_connector(connector_name) != "hermes":
+            return []
+
+        # Hermes installer-managed skills are nested below category folders,
+        # while hub/operator skills may remain direct children of the same
+        # root. Resolve the actual SKILL.md identity rather than treating a
+        # category directory as the skill.
+        from defenseclaw.skill_discovery import discover_skill_directories
+
+        return [
+            os.path.realpath(discovered.path)
+            for discovered in discover_skill_directories(
+                skill_root,
+                connector="hermes",
+            )
+            if discovered.name == skill_name and not is_symlink(discovered.path)
+        ]
 
     name = _skill_basename(target)
     if connector:
@@ -2422,19 +2618,19 @@ def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -
         resolved = resolve_list_connector(app, connector)
         scoped_matches: list[tuple[str, str]] = []
         for d in app.cfg.skill_dirs(resolved):
-            candidate = _matched_candidate(d, name)
-            if candidate and (resolved, candidate) not in scoped_matches:
-                scoped_matches.append((resolved, candidate))
+            for candidate in _matched_candidates(d, name, resolved):
+                if (resolved, candidate) not in scoped_matches:
+                    scoped_matches.append((resolved, candidate))
         return scoped_matches
 
     matches: list[tuple[str, str]] = []
     seen_paths: set[str] = set()
     for c in _active_skill_connectors(app):
         for d in app.cfg.skill_dirs(c):
-            candidate = _matched_candidate(d, name)
-            if candidate and candidate not in seen_paths:
-                matches.append((c, candidate))
-                seen_paths.add(candidate)
+            for candidate in _matched_candidates(d, name, c):
+                if candidate not in seen_paths:
+                    matches.append((c, candidate))
+                    seen_paths.add(candidate)
     return matches
 
 
@@ -2504,7 +2700,11 @@ def _all_active_skill_dirs(app: AppContext) -> list[str]:
     cfg = app.cfg
     if hasattr(cfg, "active_connectors"):
         try:
-            connectors: list[str | None] = list(cfg.active_connectors()) or [None]
+            connectors = [
+                name
+                for name in cfg.active_connectors()
+                if name and not connector_paths.is_cleanup_only(name)
+            ] or [None]
         except Exception:  # noqa: BLE001 — fall back to the active connector.
             connectors = [None]
     else:
@@ -2521,7 +2721,11 @@ def _active_skill_connectors(app: AppContext) -> list[str]:
     cfg = app.cfg
     if hasattr(cfg, "active_connectors"):
         try:
-            names = [n for n in cfg.active_connectors() if n]
+            names = [
+                n
+                for n in cfg.active_connectors()
+                if n and not connector_paths.is_cleanup_only(n)
+            ]
             if names:
                 return names
         except Exception:  # noqa: BLE001 — fall back to singular active connector.
@@ -2529,7 +2733,7 @@ def _active_skill_connectors(app: AppContext) -> list[str]:
     if hasattr(cfg, "active_connector"):
         active = cfg.active_connector()
         if active:
-            return [active]
+            return [] if connector_paths.is_cleanup_only(active) else [active]
     return ["openclaw"]
 
 
@@ -2566,6 +2770,22 @@ def _scan_via_sidecar(
     so one connector's remote error (e.g. a sidecar 500 on a malformed skill
     dir) is reported per-target and the rest of the fleet still gets scanned.
     """
+    if _is_bundled_skill_scan_path(target):
+        payload = _skill_scan_skipped_json_payload(
+            name,
+            target,
+            reason="vendor-bundled",
+            connector=connector,
+        )
+        if as_json:
+            _emit_skill_json_payload(payload, json_sink=json_sink)
+        else:
+            click.echo(
+                f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
+                "and are not scanned or blocked"
+            )
+        return payload
+
     client = _sidecar_client(app)
 
     if not as_json:
@@ -2650,6 +2870,8 @@ def _scan_all_remote(
     for s in oc_list["skills"]:
         name = s.get("name", "")
         base_dir = s.get("baseDir") or s.get("filePath") or ""
+        if bool(s.get("bundled")) or _is_bundled_skill_scan_path(base_dir):
+            continue
         if not base_dir:
             click.echo(f"[scan] warning: no path for {name}", err=True)
             continue
@@ -2665,6 +2887,21 @@ def _scan_all_remote(
         if not as_json:
             click.echo()
     return json_rows
+
+
+def _is_bundled_skill_scan_path(path: str) -> bool:
+    """True when *path* is a genuine vendor-managed skill.
+
+    The lexical and resolved forms are both checked so an alias cannot make a
+    bundled Codex or unchanged manifest-tracked Hermes skill eligible for
+    scanning. Discovery continues to report these skills; only
+    scanner/enforcement entrypoints use this predicate.
+    """
+    if not path or not path.strip():
+        return False
+    from defenseclaw.enforce.skill_enforcer import is_bundled_skill_path
+
+    return is_bundled_skill_path(path) or is_bundled_skill_path(os.path.realpath(path))
 
 
 # ---------------------------------------------------------------------------
@@ -3432,6 +3669,33 @@ def _quarantine_skill_with_provenance(
     return moved_to
 
 
+def _refuse_bundled_skill_policy_action(
+    app: AppContext,
+    skill_name: str,
+    connector_flag: str,
+    action: str,
+) -> None:
+    """Keep discovery-only vendor skills out of name-based policy actions."""
+
+    bundled = [
+        path
+        for _connector, path in _skill_match_dir_scopes(
+            app,
+            skill_name,
+            connector_flag,
+        )
+        if _is_bundled_skill_scan_path(path)
+    ]
+    if not bundled:
+        return
+    click.echo(
+        f"error: refusing to {action} vendor-bundled skill {skill_name!r}; "
+        "bundled skills are discovery-only and cannot be scanned or blocked",
+        err=True,
+    )
+    raise SystemExit(2)
+
+
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for blocking")
@@ -3456,6 +3720,12 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         reason = "manual block via CLI"
 
     connector = _resolve_connector_scope(app, connector_flag)
+    _refuse_bundled_skill_policy_action(
+        app,
+        skill_name,
+        connector_flag,
+        "block",
+    )
     if connector:
         if pe.is_blocked_for_connector("skill", skill_name, connector):
             if app.store and app.store.has_action(
@@ -3872,6 +4142,12 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     connector = _resolve_connector_scope(app, connector_flag)
     pe = PolicyEngine(app.store)
     target_connector = _normalize_runtime_connector(connector or active)
+    _refuse_bundled_skill_policy_action(
+        app,
+        skill_name,
+        connector_flag,
+        "disable",
+    )
 
     if not connector_flag:
         fanout_connectors = _skill_runtime_fanout_connectors(
@@ -4095,6 +4371,19 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
     if not targets:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
         raise SystemExit(1)
+
+    bundled_targets = [
+        skill_path
+        for _target_connector, skill_path in targets
+        if _is_bundled_skill_scan_path(skill_path)
+    ]
+    if bundled_targets:
+        click.echo(
+            f"error: refusing to quarantine vendor-bundled skill {skill_name!r}; "
+            "bundled skills are discovery-only and cannot be scanned or blocked",
+            err=True,
+        )
+        raise SystemExit(2)
 
     if not reason:
         reason = "manual quarantine via CLI"
@@ -4391,7 +4680,7 @@ def _skill_install_targets(
     for connector in connectors:
         resolver = (
             getattr(app.cfg, "skill_write_dirs", app.cfg.skill_dirs)
-            if _normalize_runtime_connector(connector) == "amp"
+            if _normalize_runtime_connector(connector) in {"amp", "opencode"}
             else app.cfg.skill_dirs
         )
         dirs = [d for d in resolver(connector) if d]

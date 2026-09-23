@@ -174,8 +174,6 @@ func adaptObservabilityV8ProfileName(value string) (observabilityredaction.Profi
 		return observabilityredaction.ProfileContent, true
 	case string(observabilityredaction.ProfileStrict):
 		return observabilityredaction.ProfileStrict, true
-	case string(observabilityredaction.ProfileLegacyV7):
-		return observabilityredaction.ProfileLegacyV7, true
 	default:
 		return "", false
 	}

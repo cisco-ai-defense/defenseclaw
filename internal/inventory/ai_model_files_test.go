@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectModelFilesFindsFormatsWithoutDynamicProductLabels(t *testing.T) {
@@ -953,10 +954,7 @@ func TestSuppressedAmbiguousModelTransitionsPriorRowToGone(t *testing.T) {
 	}, nil)
 	cleanupPreparedDiscoveryService(t, svc)
 
-	first, err := svc.runScan(context.Background(), true, "test")
-	if err != nil {
-		t.Fatalf("specialized first scan: %v", err)
-	}
+	first := runModelFileOnlyTestScan(t, svc)
 	if got := findLocalModelSignal(t, first.Signals, noisyID); got.State != AIStateNew {
 		t.Fatalf("seed model state = %q, want new", got.State)
 	}
@@ -964,18 +962,12 @@ func TestSuppressedAmbiguousModelTransitionsPriorRowToGone(t *testing.T) {
 	// Removing the specialized-store context exercises upgrade behavior: the
 	// same conclusive root is now governed by strict enhanced-root admission.
 	t.Setenv("HF_HUB_CACHE", "")
-	second, err := svc.runScan(context.Background(), true, "test")
-	if err != nil {
-		t.Fatalf("strict second scan: %v", err)
-	}
+	second := runModelFileOnlyTestScan(t, svc)
 	if got := findLocalModelSignal(t, second.Signals, noisyID); got.State != AIStateGone {
 		t.Fatalf("suppressed prior model state = %q, want gone", got.State)
 	}
 
-	third, err := svc.runScan(context.Background(), true, "test")
-	if err != nil {
-		t.Fatalf("third scan: %v", err)
-	}
+	third := runModelFileOnlyTestScan(t, svc)
 	for _, signal := range third.Signals {
 		if signal.Detector == "model_file" && signal.Model != nil && signal.Model.ID == noisyID {
 			t.Fatalf("suppressed prior model persisted after gone transition: %+v", signal)
@@ -1300,6 +1292,31 @@ func newModelFileModeTestService(t *testing.T, mode, home string, roots []string
 	}
 	t.Setenv("LEMONADE_CACHE_DIR", filepath.Join(t.TempDir(), "empty-lemonade-cache"))
 	return newModelFileModeTestServiceWithoutEnvReset(t, mode, home, roots, limit)
+}
+
+func runModelFileOnlyTestScan(t *testing.T, svc *ContinuousDiscoveryService) AIDiscoveryReport {
+	t.Helper()
+	previous, err := svc.store.Load()
+	if err != nil {
+		t.Fatalf("load previous model-file state: %v", err)
+	}
+	startedAt := time.Now()
+	signals, files, outcome, err := svc.detectModelFilesWithOutcome(context.Background())
+	if err != nil {
+		t.Fatalf("detect model files: %v", err)
+	}
+	stats := scanStats{
+		FilesScanned:        files,
+		DetectorErrors:      make(map[string]string),
+		DetectorDurations:   make(map[string]int),
+		ModelFileConclusive: outcome.conclusive,
+		ModelFileAttempted:  outcome.attempted,
+		ModelFileDeferred:   outcome.deferred,
+	}
+	for rootKey, detail := range outcome.rootErrors {
+		stats.DetectorErrors["model_file:"+rootKey] = detail
+	}
+	return svc.classifyAndPersist(newScanID(), "test", startedAt, signals, stats, previous, true)
 }
 
 func newModelFileModeTestServiceWithoutEnvReset(t *testing.T, mode, home string, roots []string, limit int) *ContinuousDiscoveryService {

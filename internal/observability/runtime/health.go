@@ -37,6 +37,7 @@ type DestinationHealth struct {
 	ConsecutiveFailures uint64
 	CircuitOpenUntil    time.Time
 	LastFailureClass    delivery.FailureClass
+	LastFailureCode     delivery.FailureCode
 	Queue               *delivery.QueueSnapshot
 	Counters            delivery.Counters
 	LastSuccess         time.Time
@@ -103,6 +104,8 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		rows = append(rows, row)
 	}
 	circuitFailureTimes := make([]time.Time, len(rows))
+	failureCodeTimes := make([]time.Time, len(rows))
+	failureCodeStateRanks := make([]int, len(rows))
 
 	sources := make([]delivery.HealthSnapshot, 0, len(rows)*2)
 	if value, ok := lease.Component(DestinationDispatchComponentName); ok {
@@ -130,7 +133,8 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			!validDeliveryHealthState(source.State) ||
 			!validDeliveryHealthReason(source.Reason) ||
 			!validCircuitState(source.CircuitState) ||
-			!validFailureClass(source.LastFailureClass) {
+			!validFailureClass(source.LastFailureClass) ||
+			!validFailureCode(source.LastFailureCode) {
 			continue
 		}
 		row := &rows[index]
@@ -183,11 +187,32 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			row.LastFailureClass = source.LastFailureClass
 			circuitFailureTimes[index] = source.LastFailure
 		}
+		sourceHealthRank := healthStateRank(source.State)
+		if source.LastFailureCode != "" && (row.LastFailureCode == "" ||
+			sourceHealthRank > failureCodeStateRanks[index] ||
+			(sourceHealthRank == failureCodeStateRanks[index] &&
+				source.LastFailure.After(failureCodeTimes[index]))) {
+			row.LastFailureCode = source.LastFailureCode
+			failureCodeStateRanks[index] = sourceHealthRank
+			failureCodeTimes[index] = source.LastFailure
+		}
 		if source.LastSuccess.After(row.LastSuccess) {
 			row.LastSuccess = source.LastSuccess.UTC()
 		}
 		if source.LastFailure.After(row.LastFailure) {
 			row.LastFailure = source.LastFailure.UTC()
+		}
+	}
+	for index := range rows {
+		switch rows[index].CircuitState {
+		case delivery.CircuitOpen:
+			rows[index].State = delivery.HealthFailing
+			rows[index].Reason = string(delivery.HealthReasonCircuitOpen)
+		case delivery.CircuitHalfOpen:
+			if healthStateRank(rows[index].State) < healthStateRank(delivery.HealthDegraded) {
+				rows[index].State = delivery.HealthDegraded
+				rows[index].Reason = string(delivery.HealthReasonCircuitHalfOpen)
+			}
 		}
 	}
 
@@ -242,6 +267,10 @@ func validFailureClass(class delivery.FailureClass) bool {
 	default:
 		return false
 	}
+}
+
+func validFailureCode(code delivery.FailureCode) bool {
+	return code == "" || delivery.IsFailureCode(code)
 }
 
 func containsHealthSignal(signals []observability.Signal, wanted observability.Signal) bool {

@@ -40,6 +40,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -52,6 +53,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
+	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -74,6 +77,16 @@ type APIServer struct {
 	notifier          *notifier.Dispatcher
 	aiDiscoveryMu     sync.RWMutex
 	aiDiscovery       *inventory.ContinuousDiscoveryService
+	aiRuntimeMu       sync.RWMutex
+	aiRuntime         *sensor.Service
+	// scanOutputRedactor is initialized only if the code-scan response path is
+	// used. Failed loads are deliberately not cached: repairing key-store
+	// permissions must restore useful protected output without a restart.
+	scanOutputRedactionMu sync.Mutex
+	scanOutputRedactor    *scanoutput.Redactor
+	// codeScanner is a hermetic test seam. Production leaves it nil and always
+	// executes scanner.ScanCode.
+	codeScanner func(context.Context, string, string) (*scanner.ScanResult, error)
 
 	// inspectToolScanTimeout optionally overrides the synchronous
 	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
@@ -86,6 +99,13 @@ type APIServer struct {
 	// prove that post-cancellation worker completion cannot record a fail-open
 	// decision after the handler has already returned 504.
 	inspectToolWorkerDone func()
+	// ACP readiness is surfaced on unauthenticated /health. Cache the bounded
+	// custody probe briefly so health polling cannot force repeated protected-
+	// directory traversal. Authentication never uses this cache.
+	acpReadinessMu        sync.Mutex
+	acpReadinessCheckedAt time.Time
+	acpReadinessKey       string
+	acpReadinessValue     bool
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -170,8 +190,12 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	codexMu                     sync.Mutex
-	codexLastComponentScan      time.Time
+	// activeAgentContext is process-local, authenticated connector context. It
+	// is deliberately separate from hook payloads so tool arguments and generic
+	// request fields cannot assert which agent instruction files are active.
+	activeAgentContext     activeAgentContextCache
+	codexMu                sync.Mutex
+	codexLastComponentScan time.Time
 	// codexAdditionalContextMu protects the bounded, process-local cache used
 	// only to suppress repeated in-chat Observe warnings. Canonical detection,
 	// audit, and notification emission happen before this cache is consulted.
@@ -228,7 +252,7 @@ type APIServer struct {
 	// regex + CodeGuard verdict in that case. Wired by the sidecar
 	// at boot via SetCiscoInspector. Only the proxy lane held an
 	// AID client historically; this field extends coverage to the
-	// hook surface (Codex / Claude Code / Cursor / Windsurf /
+	// hook surface (Codex / Claude Code / Cursor / Devin /
 	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
 	// Widened from *CiscoInspectClient to the Inspector interface so
@@ -590,6 +614,26 @@ func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryServ
 // handler. Config reload publishes the replacement with the write lock, so it
 // waits for handlers using the old service/store before canceling that service
 // and allowing its Run defer to close inventory.db.
+// SetAIRuntimeService wires the runtime planes into the API. Safe to call
+// with nil: the planes are opt-in, and a nil service is the disabled state the
+// handler reports rather than an error.
+func (a *APIServer) SetAIRuntimeService(svc *sensor.Service) {
+	if a == nil {
+		return
+	}
+	a.aiRuntimeMu.Lock()
+	a.aiRuntime = svc
+	a.aiRuntimeMu.Unlock()
+}
+
+func (a *APIServer) leaseAIRuntime() (*sensor.Service, func()) {
+	if a == nil {
+		return nil, func() {}
+	}
+	a.aiRuntimeMu.RLock()
+	return a.aiRuntime, a.aiRuntimeMu.RUnlock
+}
+
 func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, func()) {
 	if a == nil {
 		return nil, func() {}
@@ -693,7 +737,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
+		for _, name := range []string{"hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -702,6 +746,9 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 	}
 
 	for _, name := range a.connectorRegistry.Names() {
+		if connector.ConnectorSupportOnHostOS(name).Status == connector.PlatformUnsupported {
+			continue
+		}
 		conn, ok := a.connectorRegistry.Get(name)
 		if !ok {
 			continue
@@ -844,6 +891,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
+	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
+	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
+	mux.HandleFunc("/v1/acp/profiles", a.handleACPProfiles)
 	// Provider configuration belongs to the management API so hook-only
 	// deployments can inspect and reload it without enabling the proxy listener.
 	a.registerProviderRoutes(mux)
@@ -884,6 +935,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
+	// discovery -- presence and behaviour -- reads as one surface.
+	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
+	mux.HandleFunc("/api/v1/ai-usage/runtime/scan", a.handleAIRuntimeScan)
 	// Correlation graph endpoints expose the durable, evidence-backed identity
 	// ledger. They remain behind the same bearer-token and CSRF middleware as
 	// every other API route; handlers are read-only and accept exactly one
@@ -1070,6 +1125,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		body["acp"] = map[string]interface{}{
+			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
+			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
+			"configured_clients": len(cfg.ACP.Clients), "configured_agents": len(cfg.ACP.Agents),
+			"scoped_token_ready": a.acpScopedTokenReady(),
+		}
+	}
 	a.writeJSON(w, http.StatusOK, body)
 }
 
@@ -1102,6 +1165,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		LLMTrafficMode   string                           `json:"llm_traffic_mode"`
 		HookCapabilities *connector.HookCapability        `json:"hook_capabilities,omitempty"`
 		Capabilities     *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
+		ACP              *connector.ACPCapability         `json:"acp,omitempty"`
 		Locations        *connector.ConnectorLocations    `json:"locations,omitempty"`
 	}
 	avail := reg.Available()
@@ -1118,6 +1182,9 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
+			if capability := connector.ACPAgentCapabilityForConnector(info.Name); capability.Agent || capability.Client {
+				entry.ACP = &capability
+			}
 			opts := connector.SetupOpts{
 				DataDir:      a.configDataDir(),
 				APIAddr:      a.apiAddrForCapabilities(),
@@ -1128,6 +1195,9 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			if cp, ok := conn.(connector.ConnectorCapabilityProvider); ok {
 				caps := cp.Capabilities(opts)
 				entry.Capabilities = &caps
+				if caps.ACP.Agent || caps.ACP.Client {
+					entry.ACP = &caps.ACP
+				}
 				entry.HookCapabilities = &caps.Hooks
 			}
 			if hp, ok := conn.(connector.HookCapabilityProvider); ok {
@@ -1153,6 +1223,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap := a.health.Snapshot()
+	runtimeEnvironment := ""
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		runtimeEnvironment = cfg.Environment
+	}
 
 	status := map[string]interface{}{
 		"health":     snap,
@@ -1163,8 +1237,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// process's memory or environment. Never add authentication material to
 		// this object.
 		"runtime": map[string]interface{}{
-			"pid":      os.Getpid(),
-			"data_dir": a.configDataDir(),
+			"pid":         os.Getpid(),
+			"data_dir":    a.configDataDir(),
+			"environment": runtimeEnvironment,
 		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
@@ -1339,32 +1414,40 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		policyMode = "observe"
 	}
 
-	switch name {
-	case "codex":
+	// Derive the data-path trio from the connector's declared traffic mode,
+	// through the same predicate the sidecar uses to decide whether to bind
+	// the proxy listener. It used to come from the name list below, and a
+	// connector missing from that list was reported as proxy-intercepted with
+	// enforcement_surface llm_proxy -- which is how Kiro, a hooks-only
+	// connector, showed up in `defenseclaw-gateway status` as "Data path:
+	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
+	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
+	// data path". The list below now contributes only the telemetry channels
+	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"
+	}
+
+	switch name {
+	case "codex":
 		// codex telemetry always wires all three channels (hooks,
 		// the [otel.exporter.otlp-http] block, the notify bridge).
 		telemetry = []string{"hooks", "otel", "notify"}
 	case "claudecode":
-		mode = "observability"
-		intercept = false
-		surface = "agent_lifecycle_hooks"
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
-		mode = "observability"
-		intercept = false
-		surface = "agent_lifecycle_hooks"
+	case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands",
+		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-		if name == "geminicli" || name == "copilot" {
+		if name == "geminicli" {
 			telemetry = append(telemetry, "otel")
 		}
 	case "omnigent":
-		mode = "observability"
-		intercept = false
+		// OmniGent enforces through its own policy API rather than the
+		// shared lifecycle-hook bridge, so it keeps a distinct surface.
 		surface = "omnigent_policy_api"
 		telemetry = []string{"policy-api"}
 	default:
@@ -2138,6 +2221,12 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if isBundledSkillScanPath(req.Target) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "vendor-bundled skills are discovery-only and are not scanned or blocked",
+		})
+		return
+	}
 
 	// Verify target exists on this host.
 	// If the path doesn't exist locally, the scanner will fail with a clear
@@ -2152,7 +2241,6 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
 		return
 	}
-
 	// Route through the unified resolver so top-level ``llm:`` defaults
 	// flow into the skill scanner with ``scanners.skill.llm:`` overrides
 	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
@@ -2182,6 +2270,68 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
 }
 
+func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
+	if a == nil || a.scannerCfg == nil {
+		return false
+	}
+	servers, err := a.scannerCfg.ReadMCPServersForConnector("codex")
+	if err != nil {
+		return false
+	}
+	for _, server := range servers {
+		if !server.Bundled {
+			continue
+		}
+		if req.Target == server.Name {
+			return true
+		}
+		if req.Name == server.Name && (req.Target == server.Name || req.Target == server.URL) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBundledSkillScanPath(path string) bool {
+	if enforce.IsBundledSkillPath(path) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && enforce.IsBundledSkillPath(resolved)
+}
+
+func (a *APIServer) isManagedPluginScanTarget(target string) bool {
+	if a == nil || a.scannerCfg == nil || strings.TrimSpace(target) == "" {
+		return false
+	}
+	reg := connector.NewDefaultRegistry()
+	opts := connector.SetupOpts{WorkspaceDir: a.scannerCfg.ConnectorWorkspaceDir()}
+	for _, name := range a.scannerCfg.ActiveConnectors() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		for _, managedPath := range connector.ManagedPluginArtifacts(conn, opts) {
+			if sameAPIScanPath(target, managedPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameAPIScanPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
 func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2195,6 +2345,12 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+	if a.isManagedPluginScanTarget(req.Target) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "connector-managed plugins are lifecycle-owned and are not scanned",
+		})
 		return
 	}
 
@@ -2254,6 +2410,12 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
+		return
+	}
+	if a.isBundledMCPScanRequest(req) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "vendor-bundled MCP servers are discovery-only and are not scanned",
+		})
 		return
 	}
 
@@ -2442,6 +2604,8 @@ type guardrailEventRequest struct {
 	Direction      string   `json:"direction"`
 	Model          string   `json:"model"`
 	Action         string   `json:"action"`
+	RawAction      string   `json:"raw_action,omitempty"`
+	WouldBlock     bool     `json:"would_block,omitempty"`
 	Severity       string   `json:"severity"`
 	Reason         string   `json:"reason"`
 	Findings       []string `json:"findings"`
@@ -3108,6 +3272,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
+		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
+			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
+			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
+			if !ok {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			serveACPSignedResponse(w, authenticated, next, token, nonce)
+			return
+		}
+		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 
 		token := ""
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
@@ -3191,9 +3372,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if a.hookAPITokenMatches(hookScope, token) {
+				r = r.WithContext(withAuthenticatedHookConnector(
+					PromoteSessionIfAuthenticated(r.Context()),
+					hookScope,
+				))
 				next.ServeHTTP(w, r)
 				return
 			}
+		}
+		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
+			if authenticated, ok := a.authenticateACPToken(r, token); ok {
+				r = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+				next.ServeHTTP(w, r)
+				return
+			}
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
@@ -3226,7 +3421,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// succeeded, upgrade the previously peeked agent identity
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
-		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+		ctx = PromoteSessionIfAuthenticated(r.Context())
+		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -3837,30 +4033,63 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
 
-	result, err := scanner.ScanCode(r.Context(), req.Path, rulesDir)
+	codeScanner := scanner.ScanCode
+	if a.codeScanner != nil {
+		codeScanner = a.codeScanner
+	}
+	result, err := codeScanner(r.Context(), req.Path, rulesDir)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	// The canonical logger intentionally neutralizes sensitive findings in
+	// place before persistence. Snapshot scanner-owned response facts first so
+	// the detached output projector can preserve safe location/remediation
+	// context while independently removing detected spans.
+	responseSource := scanoutput.Clone(result)
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	// Keep the authenticated REST response conservative by default. Canonical
-	// persistence above already retained the source facts so each configured
-	// destination can independently apply `none`, `detect`, or `whole`
-	// redaction. This in-place copy change affects only the response body.
-	// Title remains an operator-searchable rule summary.
-	for i := range result.Findings {
-		f := &result.Findings[i]
-		f.Description = redaction.ForSinkString(f.Description)
-		f.Location = redaction.ForSinkString(f.Location)
-		f.Remediation = redaction.ForSinkString(f.Remediation)
-	}
+	// Canonical persistence above owns the raw local facts. Project a detached
+	// response copy so detector-recognized spans are protected while ordinary
+	// file/line and remediation context remains useful. The REST contract has
+	// no raw-output switch; only the local CLI can make that explicit choice.
+	a.writeJSON(w, http.StatusOK, a.codeScanOutputProjector().Project(responseSource))
+}
 
-	a.writeJSON(w, http.StatusOK, result)
+func (a *APIServer) codeScanOutputProjector() *scanoutput.Redactor {
+	if a == nil {
+		return scanoutput.NewUnavailableRedactor()
+	}
+	a.scanOutputRedactionMu.Lock()
+	defer a.scanOutputRedactionMu.Unlock()
+	if a.scanOutputRedactor != nil {
+		return a.scanOutputRedactor
+	}
+	cfg := a.runtimeConfigSnapshot()
+	dataDir := ""
+	if cfg != nil {
+		dataDir = strings.TrimSpace(cfg.DataDir)
+	}
+	var (
+		redactor *scanoutput.Redactor
+		err      error
+	)
+	if dataDir == "" {
+		redactor, err = scanoutput.NewEphemeralRedactor()
+	} else {
+		redactor, err = scanoutput.LoadRedactor(dataDir)
+	}
+	if err != nil || redactor == nil {
+		// Fail closed for this response, but retry after an operator repairs
+		// key custody instead of pinning degraded output for process lifetime.
+		return scanoutput.NewUnavailableRedactor()
+	}
+	a.scanOutputRedactor = redactor
+	return redactor
 }
 
 // handleNetworkEgress serves GET /api/v1/network-egress and
@@ -3971,8 +4200,12 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 	evt.Connector = firstNonEmpty(env.Connector, evt.Connector)
 	evt.AgentID = firstNonEmpty(identity.AgentID, env.AgentID, evt.AgentID)
 	evt.ToolID = firstNonEmpty(env.ToolID, evt.ToolID)
-	userID, _ := userFromHTTPRequest(r, nil)
-	evt.UserID = firstNonEmpty(userID, evt.UserID)
+	requestUser := resolveHTTPUserIdentity(r, nil)
+	evt.UserID = firstNonEmpty(requestUser.ID, evt.UserID)
+	evt.UserIDKind = ""
+	if evt.UserID == requestUser.ID {
+		evt.UserIDKind = requestUser.IDKind
+	}
 	if evt.AgentLifecycleID == "" && evt.Connector != "" && evt.SessionID != "" && evt.AgentID != "" {
 		evt.AgentLifecycleID = stableLLMEventID("lifecycle", evt.Connector, evt.SessionID, evt.AgentID)
 	}
@@ -3999,4 +4232,17 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// connectorProxyBindsByName reports whether the named connector puts the
+// DefenseClaw proxy in its LLM data path, resolved through the connector
+// registry so status can never disagree with what the sidecar actually binds.
+// An unknown or unregistered name keeps the conservative proxy default that
+// plugin connectors have always had.
+func connectorProxyBindsByName(name string) bool {
+	conn, ok := sharedDefaultRegistry().Get(strings.ToLower(strings.TrimSpace(name)))
+	if !ok {
+		return true
+	}
+	return proxyShouldBindForConnector(conn, nil)
 }

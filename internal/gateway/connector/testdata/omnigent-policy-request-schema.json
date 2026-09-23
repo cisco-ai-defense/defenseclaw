@@ -1,0 +1,32 @@
+{
+  "type": "request",
+  "target": null,
+  "data": {
+    "user_content": "Review the attached deployment plan.",
+    "attachments": [
+      {
+        "filename": "deployment.txt",
+        "content_type": "text/plain",
+        "text": "production=false\nregion=us-east-1\n"
+      }
+    ]
+  },
+  "context": {
+    "model": "test-model",
+    "actor": {
+      "client_id": "client-123",
+      "run_as": "alice@example.test"
+    },
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 0,
+      "total_tokens": 10,
+      "total_cost_usd": 0.001
+    },
+    "user_daily_cost": {},
+    "harness": null,
+    "labels": {}
+  },
+  "session_state": {},
+  "llm_client": null
+}

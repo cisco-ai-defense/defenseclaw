@@ -802,9 +802,22 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 		},
 		Limitations: []string{
 			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-			"A post_tool_call commits success only when extra.status is ok; error and blocked statuses must not advance state.",
+			"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
 		},
 	}
+}
+
+func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
+	contract := hermesToolCallLifecycle()
+	contract.OfficialSourceURLs = []string{
+		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/agent/shell_hooks.py",
+		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
+	}
+	contract.Limitations = []string{
+		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
+		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+	}
+	return contract
 }
 
 func cursorToolCallLifecycle() ToolCallLifecycleContract {
@@ -878,6 +891,41 @@ func windsurfToolCallLifecycle() ToolCallLifecycleContract {
 		Limitations: []string{
 			"Trajectory and execution identifiers are conversation/turn identifiers, not stable per-tool invocation IDs.",
 			"post_run_command exposes neither an authoritative exit status nor output; hook errors other than exit code 2 fail open.",
+		},
+	}
+}
+
+func devinToolCallLifecycle() ToolCallLifecycleContract {
+	return ToolCallLifecycleContract{
+		Version:                           ToolCallLifecycleContractVersion,
+		PreProposalEvents:                 []string{"PreToolUse"},
+		AuthoritativeSuccessEvents:        []string{"PostToolUse"},
+		AuthoritativeFailureEvents:        []string{"PostToolUse"},
+		AuthoritativeDenialEvents:         []string{},
+		AuthoritativePendingDiscardEvents: []string{"Stop"},
+		AuthoritativeTerminalEvents:       []string{"SessionEnd"},
+		InvocationIDAuthority:             ToolInvocationIDNone,
+		OutcomeAuthority:                  ToolOutcomeResultPayload,
+		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
+		Routing: ToolEventRouting{
+			StructuredActionEvents: []string{"PreToolUse", "PermissionRequest"},
+			ResultContentEvents:    []string{"PostToolUse"},
+			StateTransitionEvents:  []string{},
+			AuditOnlyEvents: []string{
+				"UserPromptSubmit", "Stop", "PostCompaction", "SessionStart", "SessionEnd",
+			},
+		},
+		CoveredToolSurfaces: []ToolSurface{
+			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
+			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+		},
+		OfficialSourceURLs: []string{
+			"https://docs.devin.ai/cli/extensibility/hooks/overview",
+			"https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks",
+		},
+		Limitations: []string{
+			"Devin publishes session_id and per-turn prompt_id but no stable per-tool invocation identifier, so PreToolUse/PostToolUse state remains detection-only.",
+			"PostToolUse success/failure is authoritative only through tool_response.success; hook errors other than exit code 2 fail open upstream.",
 		},
 	}
 }
@@ -976,7 +1024,7 @@ func antigravityToolCallLifecycle() ToolCallLifecycleContract {
 			"https://github.com/google-antigravity/antigravity-cli/blob/21f650e7bb852f58562425ddd0c7d203c80e3d0e/CHANGELOG.md",
 		},
 		Limitations: []string{
-			"conversationId plus stepIdx is a sequence rather than an opaque call ID, so it remains detection-only; CLI 1.1.9 or newer is required because it fixed spurious PostToolUse events and matcher handling.",
+			"conversationId plus stepIdx is a sequence rather than an opaque call ID, so it remains detection-only; the accepted protected harness pins official CLI 1.1.10 without inferring a higher compatibility floor than the documented 1.1.8 contract.",
 			"PreInvocation can inject context but cannot block or ask; Stop only supports continue, MCP hook matcher coverage is undocumented, and skill expansion has no dedicated event.",
 		},
 	}
@@ -1040,8 +1088,8 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/plugin/src/index.ts",
-			"https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/opencode/src/session/tools.ts",
+			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/plugin/src/index.ts",
+			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/opencode/src/session/tools.ts",
 		},
 		Limitations: []string{
 			"Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
@@ -1108,7 +1156,7 @@ func omniGentToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/omnigent-ai/omnigent/blob/73657266ed68e50f30965a0202bc334f06507a30/omnigent/policies/schema.py",
+			"https://github.com/omnigent-ai/omnigent/blob/eebef804e1fe4beddc61ea232b951cddddd7f890/omnigent/policies/schema.py",
 			"https://omnigent.ai/docs/policies/custom",
 		},
 		Limitations: []string{

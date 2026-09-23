@@ -61,11 +61,15 @@ func windowsCommandFindingsWithOptions(
 		name := windowsExecutableName(tokens[0])
 		args := tokens[1:]
 
-		if isPowerShellRemoveItem(name) && hasPowerShellSwitch(args, "recurse", "r") && hasPowerShellSwitch(args, "force", "fo") {
-			add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced deletion", "CRITICAL", 0.98, "destructive", "windows")
+		if isPowerShellRemoveItem(name) && hasPowerShellSwitch(args, "force", "fo") {
+			if hasPowerShellSwitch(args, "recurse", "r") &&
+				windowsRecursiveDeleteTargetsDriveRoot(name, args, dialect) {
+				add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced drive-root deletion", "CRITICAL", 0.98, "destructive", "windows")
+			}
 		}
-		if (name == "rmdir" || name == "rd") && hasWindowsSwitch(args, "s") && hasWindowsSwitch(args, "q") {
-			add("CMD-WIN-RMDIR-SQ", "cmd recursive quiet directory deletion", "CRITICAL", 0.98, "destructive", "windows")
+		if (name == "rmdir" || name == "rd") && hasWindowsSwitch(args, "s") &&
+			hasWindowsSwitch(args, "q") && windowsRecursiveDeleteTargetsDriveRoot(name, args, dialect) {
+			add("CMD-WIN-RMDIR-SQ", "cmd recursive quiet drive-root deletion", "CRITICAL", 0.98, "destructive", "windows")
 		}
 		if name == "reg" && windowsPersistenceRegistryKey(args) {
 			add("CMD-WIN-REG-PERSIST", "Windows registry persistence modification", "CRITICAL", 0.97, "persistence", "windows")
@@ -105,6 +109,62 @@ func windowsCommandFindingsWithOptions(
 	return findings
 }
 
+func windowsRecursiveDeleteTargetsDriveRoot(
+	_ string,
+	args []string,
+	dialect windowsShellDialect,
+) bool {
+	for index := 0; index < len(args); index++ {
+		argument := strings.TrimSpace(args[index])
+		if dialect == windowsDialectPowerShell {
+			key, joinedValue, joined := splitPowerShellOption(argument)
+			switch key {
+			case "-path", "-literalpath":
+				if joined {
+					if windowsDriveRootDeleteTarget(joinedValue) {
+						return true
+					}
+					continue
+				}
+				if index+1 < len(args) {
+					index++
+					if windowsDriveRootDeleteTarget(args[index]) {
+						return true
+					}
+				}
+				continue
+			}
+			if strings.HasPrefix(argument, "-") {
+				continue
+			}
+		} else if strings.HasPrefix(argument, "/") {
+			continue
+		}
+		if windowsDriveRootDeleteTarget(argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsDriveRootDeleteTarget(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	value = strings.ReplaceAll(value, "/", `\`)
+	for strings.HasSuffix(value, `\`) && len(value) > 3 {
+		value = strings.TrimSuffix(value, `\`)
+	}
+	if len(value) == 3 && value[1] == ':' && value[2] == '\\' &&
+		((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) {
+		return true
+	}
+	switch strings.ToLower(value) {
+	case `%systemdrive%`, `%systemdrive%\`, `$env:systemdrive`, `$env:systemdrive\`:
+		return true
+	default:
+		return false
+	}
+}
+
 type windowsShellDialect uint8
 
 const (
@@ -128,7 +188,7 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 
 	var object map[string]interface{}
 	if json.Unmarshal([]byte(text), &object) == nil {
-		for _, key := range []string{"command", "cmd", "script", "input"} {
+		for _, key := range []string{"command", "CommandLine", "commandLine", "cmd", "script", "input"} {
 			if value, ok := object[key].(string); ok && strings.TrimSpace(value) != "" {
 				return value, dialect, true
 			}
@@ -467,6 +527,17 @@ func windowsPersistenceRegistryKey(args []string) bool {
 	return false
 }
 
+func windowsRegistryValueNameForProgram(program string, args []string) string {
+	switch strings.ToLower(program) {
+	case "reg", "reg.exe":
+		return windowsRegistryValueName(args)
+	case "set-itemproperty", "sp", "new-itemproperty":
+		return windowsPowerShellRegistryValueName(args)
+	default:
+		return ""
+	}
+}
+
 func windowsRegistryValueName(args []string) string {
 	for i, arg := range args {
 		lower := strings.ToLower(strings.TrimSpace(arg))
@@ -478,6 +549,41 @@ func windowsRegistryValueName(args []string) string {
 		}
 	}
 	return ""
+}
+
+func windowsPowerShellRegistryValueName(args []string) string {
+	valueName := ""
+	seen := false
+	for i := 0; i < len(args); i++ {
+		key, joinedValue, joined := strings.Cut(args[i], ":")
+		if !strings.EqualFold(key, "-Name") {
+			continue
+		}
+		if seen {
+			return ""
+		}
+		seen = true
+		if joined {
+			valueName = joinedValue
+		} else {
+			i++
+			if i >= len(args) {
+				return ""
+			}
+			valueName = args[i]
+		}
+		// Mirror ActionFacts' structured PowerShell operand boundary. Values
+		// that need expansion, wildcard binding, or option reinterpretation
+		// cannot provide an authoritative registry property name.
+		if valueName == "" || strings.HasPrefix(valueName, "-") ||
+			strings.ContainsAny(valueName, "$`*?[]{}") {
+			return ""
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return strings.ToLower(valueName)
 }
 
 func windowsCommandCanReadSensitivePath(name string) bool {

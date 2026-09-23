@@ -335,7 +335,13 @@
           "legendFormat": "fds",
           "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Not supported on this platform"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "row",
@@ -635,13 +641,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{error_subsystem}} · {{error_code}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No gateway errors in range",
           "unit": "cps"
         }
       },
@@ -674,6 +681,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No sink delivery samples in range",
           "unit": "cps"
         }
       },
@@ -701,6 +709,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No sink delivery samples in range",
           "unit": "ms"
         }
       },

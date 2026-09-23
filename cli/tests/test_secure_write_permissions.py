@@ -300,9 +300,7 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
     extended_parent = Path(file_permissions._windows_extended_path(parent))
     extended_target = Path(file_permissions._windows_extended_path(target))
     extended_staging = Path(file_permissions._windows_extended_path(staging))
-    extended_root = Path(
-        file_permissions._windows_extended_path(tmp_path / "durable-segment-00")
-    )
+    extended_root = Path(file_permissions._windows_extended_path(tmp_path / "durable-segment-00"))
     try:
         extended_parent.mkdir(parents=True)
         extended_target.write_bytes(b"old")
@@ -364,6 +362,84 @@ def test_private_atomic_write_rejects_unsafe_unmanaged_parent(tmp_path):
         file_permissions.atomic_write_private_bytes(target, b"synthetic fixture", protect_parent=False)
 
     assert not target.exists()
+
+
+def test_windows_system_controller_parent_policy_is_narrow(monkeypatch):
+    fake_os = SimpleNamespace(name="nt")
+    custody_checks: list[tuple[str, bool, bool]] = []
+
+    def custody_check(path, *, allow_current_user, require_current_user_owner=False):
+        custody_checks.append((path, allow_current_user, require_current_user_owner))
+        return None
+
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(file_permissions, "windows_acl_custody_write_error", custody_check)
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda _path: pytest.fail("the strict file trustee policy must not validate this parent"),
+    )
+
+    file_permissions._validate_unmodified_parent(
+        "synthetic-profile",
+        allow_windows_system_controllers=True,
+    )
+
+    assert custody_checks == [("synthetic-profile", True, True)]
+
+
+def test_windows_system_controller_parent_policy_requires_unmanaged_parent_mode(tmp_path):
+    with pytest.raises(ValueError, match="requires protect_parent=False"):
+        file_permissions.atomic_write_private_bytes(
+            tmp_path / "must-not-exist",
+            b"synthetic fixture",
+            allow_windows_system_controllers_in_parent=True,
+        )
+
+    assert not (tmp_path / "must-not-exist").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows system-controller inheritance")
+@pytest.mark.allow_subprocess
+def test_private_atomic_write_accepts_system_controller_parent_but_keeps_private_target(tmp_path):
+    parent = tmp_path / "normal-profile-parent"
+    parent.mkdir()
+    set_known_windows_directory_acl(parent)
+    subprocess.run(
+        [
+            "icacls",
+            os.fspath(parent),
+            "/grant",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    before = file_permissions._windows_acl_snapshot(os.fspath(parent))
+    target = parent / "private-state"
+
+    file_permissions.atomic_write_private_bytes(
+        target,
+        b"synthetic fixture",
+        protect_parent=False,
+        allow_windows_system_controllers_in_parent=True,
+    )
+
+    assert file_permissions._windows_acl_snapshot(os.fspath(parent)) == before
+    assert_owner_only_file(target)
+    assert file_permissions.windows_acl_confidentiality_error(target) is None
+
+    grant_everyone(parent)
+    with pytest.raises(OSError, match=r"untrusted SID S-1-1-0"):
+        file_permissions.atomic_write_private_bytes(
+            parent / "must-not-exist",
+            b"synthetic fixture",
+            protect_parent=False,
+            allow_windows_system_controllers_in_parent=True,
+        )
+    assert not (parent / "must-not-exist").exists()
+    assert list(parent.iterdir()) == [target]
 
 
 def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
@@ -1143,6 +1219,40 @@ def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
         allow_current_user=False,
     )
     assert problem == f"owner SID {current_sid} is not a trusted custody principal"
+
+
+@pytest.mark.parametrize(
+    ("permissions", "sid", "inheritance", "expected_problem"),
+    [
+        (0x00000002, "S-1-5-32-545", 0, False),  # FILE_WRITE_DATA cannot replace an existing child.
+        (0x00000040, "S-1-5-32-545", 0, True),  # FILE_DELETE_CHILD can replace it.
+        (0x00000002, "S-1-1-0", 0, True),  # Everyone always retains the strict leaf mask.
+        (0x00000040, "S-1-5-32-545", 0x08, False),  # INHERIT_ONLY_ACE does not apply here.
+    ],
+)
+def test_windows_custody_ancestor_uses_replace_authority(
+    monkeypatch,
+    permissions,
+    sid,
+    inheritance,
+    expected_problem,
+):
+    owner_sid = "S-1-5-32-544"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (owner_sid, False, [(permissions, 1, inheritance, sid)]),
+    )
+
+    problem = file_permissions.windows_acl_custody_write_error(
+        "synthetic-managed-ancestor",
+        allow_current_user=False,
+        ancestor_replace_only=True,
+    )
+
+    assert (problem is not None) is expected_problem
 
 
 def test_windows_runtime_custody_accepts_trusted_system_writers(monkeypatch):

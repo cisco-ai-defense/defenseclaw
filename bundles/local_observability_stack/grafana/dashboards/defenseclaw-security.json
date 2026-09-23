@@ -70,7 +70,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) show up too — defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
+        "description": "Filter panels by connector name. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, devin) show up too — defenseclaw_otel_ingest_records_total only carries connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -704,6 +704,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No guardrail evaluations in range",
           "unit": "ms"
         }
       }
@@ -1074,6 +1075,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No AI Defense attempts in range",
           "unit": "ms"
         }
       }

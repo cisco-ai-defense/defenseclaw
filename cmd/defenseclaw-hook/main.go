@@ -52,6 +52,13 @@ func main() {
 	if cli.NativeHookRuntimeNoop() {
 		os.Exit(0)
 	}
+	// Hermes v0.19 keeps registered callbacks in memory until its host is
+	// restarted. A connector-scoped disabled tombstone lets an already-running
+	// Hermes process safely call the exact cached native command after teardown
+	// without disabling any other connector that shares this launcher.
+	if cli.NativeConnectorHookNoop(os.Args[1:]) {
+		os.Exit(0)
+	}
 	if !isHookEntrypoint(os.Args[1:]) {
 		fmt.Fprintln(os.Stderr, "defenseclaw-hook: expected hook or notify subcommand")
 		os.Exit(2)

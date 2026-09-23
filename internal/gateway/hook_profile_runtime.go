@@ -71,7 +71,7 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	}
 }
 
-func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
 			return a.rememberCodexRawHookEvents(decodeCodexRequestFromBytes(rawBody, payload), req.SemanticEventID)
@@ -82,7 +82,7 @@ func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
 			cxReq := decodeCodexRequestFromBytes(rawBody, payload)
 			enrichCodexHookSpan(ctx, cxReq)
-			return codexResponseToAgentHookResponse(a.evaluateCodexHook(ctx, cxReq))
+			return codexResponseToAgentHookResponse(a.evaluateCodexHookForProfile(ctx, cxReq, profile))
 		},
 	}
 }

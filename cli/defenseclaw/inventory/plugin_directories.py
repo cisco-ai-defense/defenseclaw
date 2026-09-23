@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared filtering and Codex-cache discovery for filesystem plugins."""
+"""Shared filtering and connector-registry discovery for filesystem plugins."""
 
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 try:
@@ -30,18 +32,33 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
+from defenseclaw.file_permissions import (
+    open_regular_file_no_follow,
+    reject_reparse_path,
+)
 from defenseclaw.inventory.plugin_identity import (
     AmbiguousPluginIdentityError,
     PluginIdentityError,
     canonical_plugin_id,
     filesystem_identity_key,
+    is_link_or_reparse,
+    read_plugin_manifest,
+    validate_plugin_id,
 )
 from defenseclaw.safety import is_symlink, is_within_roots
 
+_MAX_AMP_PLUGIN_BYTES = 2_097_152
+_MAX_OPENCODE_PLUGIN_BYTES = 2_097_152
 _CODEX_MANIFEST = ".codex-plugin/plugin.json"
+_CLAUDE_INSTALLED_PLUGINS = "installed_plugins.json"
+_CLAUDE_MANIFEST = ".claude-plugin/plugin.json"
 _MAX_MANIFEST_BYTES = 1_048_576
 _MAX_CONFIG_BYTES = 2_097_152
-_MAX_AMP_PLUGIN_BYTES = 2_097_152
+_MAX_CLAUDE_CACHE_DEPTH = 4
+_MAX_CODEX_DIRECTORY_SNAPSHOT_ATTEMPTS = 8
+_CLAUDE_CACHE_SKIP_DIRS = frozenset(
+    {"node_modules", ".git", ".hg", ".svn", "__pycache__"}
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +75,203 @@ class PluginDirectory:
     manifest: str = ""
     registry: str = ""
     cached: bool = False
+    scope: str = ""
+    project_path: str = ""
+    registry_source: str = ""
+    activation_verified: bool = True
+    logical_id: str = ""
+
+
+@dataclass(frozen=True)
+class _PluginInstallClaim:
+    """One physical claimant for a connector plugin identity."""
+
+    path: str
+    registry_instance: tuple[str, str] | None
+
+
+class PluginInstallClaims:
+    """Reject conflicting plugin paths without collapsing registry scopes.
+
+    Ordinary filesystem plugins have one connector-wide identity and remain
+    fail-closed when two directories claim it. Claude Code v2 registry rows
+    are authoritative per ``(scope, projectPath)`` instance, so the same
+    logical plugin may legitimately have a user install plus one or more
+    project installs. Two different paths for the *same* registry instance
+    are still ambiguous and fail closed.
+    """
+
+    def __init__(self) -> None:
+        self._claims: dict[str, list[_PluginInstallClaim]] = {}
+
+    @staticmethod
+    def _registry_instance(
+        registry_source: str,
+        scope: str,
+        project_path: str,
+    ) -> tuple[str, str] | None:
+        if not registry_source:
+            return None
+        normalized_project = (
+            os.path.normcase(os.path.normpath(project_path.strip()))
+            if project_path.strip()
+            else ""
+        )
+        return scope.strip().casefold(), normalized_project
+
+    @staticmethod
+    def _same_path(first: str, second: str) -> bool:
+        try:
+            return os.path.samefile(first, second)
+        except OSError:
+            return os.path.normcase(os.path.realpath(first)) == os.path.normcase(
+                os.path.realpath(second)
+            )
+
+    def add(
+        self,
+        plugin_id: str,
+        path: str,
+        root: str,
+        *,
+        registry_source: str = "",
+        scope: str = "",
+        project_path: str = "",
+    ) -> bool:
+        """Claim one install, returning false only for an exact duplicate."""
+
+        logical_key = filesystem_identity_key(plugin_id, root)
+        registry_instance = self._registry_instance(
+            registry_source,
+            scope,
+            project_path,
+        )
+        previous_claims = self._claims.setdefault(logical_key, [])
+        for previous in previous_claims:
+            # Distinct authoritative scope/project instances are both valid.
+            # Any ordinary claimant, or the same authoritative instance, must
+            # resolve to one physical path.
+            conflicts = (
+                previous.registry_instance is None
+                or registry_instance is None
+                or previous.registry_instance == registry_instance
+            )
+            if not conflicts:
+                continue
+            if self._same_path(previous.path, path):
+                return False
+            instance_detail = ""
+            if registry_instance is not None:
+                instance_detail = (
+                    f" for scope={scope.strip() or '<unspecified>'!r}"
+                    f", projectPath={project_path.strip() or '<none>'!r}"
+                )
+            scoped_registry_conflict = (
+                previous.registry_instance is not None and registry_instance is not None
+            )
+            identity_kind = "Claude plugin" if scoped_registry_conflict else "plugin"
+            remediation = (
+                "remove the conflicting installation record"
+                if scoped_registry_conflict
+                else "remove or rename duplicate directories"
+            )
+            raise AmbiguousPluginIdentityError(
+                f"ambiguous {identity_kind} identity {plugin_id!r}{instance_detail}: "
+                f"{previous.path}, {path}; {remediation}"
+            )
+        previous_claims.append(
+            _PluginInstallClaim(
+                path=path,
+                registry_instance=registry_instance,
+            )
+        )
+        return True
+
+    def add_directory(self, entry: PluginDirectory, root: str) -> bool:
+        """Claim a discovered directory using its registry provenance."""
+
+        return self.add(
+            entry.id,
+            entry.path,
+            root,
+            registry_source=entry.registry_source,
+            scope=entry.scope,
+            project_path=entry.project_path,
+        )
+
+
+class PluginRegistryState(str, Enum):
+    """Machine-stable outcome of probing one connector plugin registry."""
+
+    MISSING = "missing"
+    UNSAFE_OR_UNREADABLE = "unsafe/unreadable"
+    MALFORMED = "malformed"
+    UNSUPPORTED = "unsupported"
+    VALID = "valid"
+
+
+@dataclass(frozen=True)
+class PluginRegistryProbe:
+    """Diagnostic for one exact connector registry source."""
+
+    source_path: str
+    state: PluginRegistryState
+    entries: int = 0
+    detail: str = ""
+
+    @property
+    def failed(self) -> bool:
+        """Return whether an existing registry could not be safely consumed."""
+
+        return self.state in {
+            PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            PluginRegistryState.MALFORMED,
+            PluginRegistryState.UNSUPPORTED,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-ready representation with stable field names."""
+
+        result: dict[str, Any] = {
+            "source": self.source_path,
+            "state": self.state.value,
+            "entries": self.entries,
+        }
+        if self.detail:
+            result["detail"] = self.detail
+        return result
+
+
+# A command-scoped cache keeps one immutable projection of Claude's
+# authoritative registry per root. Callers deliberately own the dictionary so
+# results never leak across commands after the registry changes on disk.
+PluginRegistryCache = dict[
+    str,
+    tuple[tuple[PluginDirectory, ...], PluginRegistryProbe],
+]
+
+
+def _claude_registry_cache_key(plugin_root: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(plugin_root)))
+
+
+def _discover_claude_registry_cached(
+    plugin_root: str,
+    registry_cache: PluginRegistryCache | None,
+) -> tuple[list[PluginDirectory], PluginRegistryProbe]:
+    if registry_cache is None:
+        return _discover_claude_registry(plugin_root)
+
+    key = _claude_registry_cache_key(plugin_root)
+    cached = registry_cache.get(key)
+    if cached is None:
+        plugins, probe = _discover_claude_registry(plugin_root)
+        cached = (tuple(plugins), probe)
+        registry_cache[key] = cached
+    plugins, probe = cached
+    # Discovery appends ordinary sibling directories to this list, so each
+    # caller receives a fresh list while the cached registry rows stay fixed.
+    return list(plugins), probe
 
 
 def _child_directories(root: str) -> list[tuple[str, str]]:
@@ -105,6 +319,65 @@ def _amp_plugin_files(root: str, connector: str) -> list[tuple[str, str]]:
     return plugins
 
 
+def _opencode_plugin_files(root: str, connector: str) -> list[tuple[str, str]]:
+    """Return direct OpenCode JS/TS plugins, excluding our exact bridge."""
+
+    if (connector or "").casefold().replace("-", "") != "opencode":
+        return []
+    config_root = (os.environ.get("OPENCODE_CONFIG_DIR") or "").strip()
+    if config_root:
+        config_root = os.path.abspath(os.path.expanduser(config_root))
+    else:
+        config_root = os.path.join(str(Path.home()), ".config", "opencode")
+    # DefenseClaw may leave a lifecycle-owned bridge at the documented global
+    # location when an operator later selects OPENCODE_CONFIG_DIR. Neither the
+    # effective bridge nor that stale managed location is an operator plugin;
+    # same-named project siblings remain eligible because their paths differ.
+    managed_bridges = {
+        os.path.normcase(
+            os.path.abspath(os.path.join(config_root, "plugins", "defenseclaw.js"))
+        ),
+        os.path.normcase(
+            os.path.abspath(
+                os.path.join(
+                    str(Path.home()),
+                    ".config",
+                    "opencode",
+                    "plugins",
+                    "defenseclaw.js",
+                )
+            )
+        ),
+    }
+    try:
+        reject_reparse_path(root)
+        entries = sorted(os.scandir(root), key=lambda entry: entry.name.casefold())
+    except OSError:
+        return []
+    plugins: list[tuple[str, str]] = []
+    for entry in entries:
+        stem, extension = os.path.splitext(entry.name)
+        if (
+            entry.name.startswith(".")
+            or extension.casefold() not in {".js", ".ts"}
+            or not stem.strip()
+        ):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            if entry.stat(follow_symlinks=False).st_size > _MAX_OPENCODE_PLUGIN_BYTES:
+                continue
+            reject_reparse_path(entry.path)
+        except OSError:
+            continue
+        if os.path.normcase(os.path.abspath(entry.path)) in managed_bridges:
+            continue
+        if is_within_roots(entry.path, root):
+            plugins.append((stem.strip(), entry.path))
+    return plugins
+
+
 def read_amp_plugin_source(path: str) -> str:
     """Read one Amp plugin as bounded UTF-8 without following symlinks."""
 
@@ -134,38 +407,172 @@ def read_amp_plugin_source(path: str) -> str:
 
 
 def _read_bounded_json(path: str) -> dict[str, Any] | None:
-    if is_symlink(path) or not os.path.isfile(path):
-        return None
     try:
-        with open(path, encoding="utf-8") as handle:
-            raw = handle.read(_MAX_MANIFEST_BYTES + 1)
-    except OSError:
-        return None
-    if len(raw) > _MAX_MANIFEST_BYTES:
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
+        raw = _read_bounded_stable_file(path, max_bytes=_MAX_MANIFEST_BYTES)
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
 
 
+def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
+    """Read one stable regular file without following a reparse path."""
+    fd = open_regular_file_no_follow(path)
+    try:
+        before = os.fstat(fd)
+        if before.st_size > max_bytes:
+            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > max_bytes:
+            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+        after = os.fstat(fd)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity:
+            raise OSError("file changed while it was being inventoried")
+        reject_reparse_path(path)
+        named = os.stat(path, follow_symlinks=False)
+        if not os.path.samestat(before, named):
+            raise OSError("file was replaced while it was being inventoried")
+        return payload
+    finally:
+        os.close(fd)
+
+
+def _stable_directory_info(path: str) -> os.stat_result:
+    """Return one real directory's stable, named identity."""
+    reject_reparse_path(path)
+    before = os.stat(path, follow_symlinks=False)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or bool(getattr(before, "st_file_attributes", 0) & reparse_flag)
+    ):
+        raise OSError(f"directory is a symlink or reparse point: {path}")
+    reject_reparse_path(path)
+    after = os.stat(path, follow_symlinks=False)
+    if _directory_identity(before) != _directory_identity(after):
+        raise OSError(f"directory changed while it was being inventoried: {path}")
+    return after
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    """Bind both directory object identity and observable content metadata."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _directory_unchanged(path: str, expected: os.stat_result) -> bool:
+    try:
+        current = _stable_directory_info(path)
+    except OSError:
+        return False
+    return _directory_identity(expected) == _directory_identity(current)
+
+
+def _directory_entry_matches(
+    enumerated: os.stat_result,
+    named: os.stat_result,
+) -> bool:
+    """Compare an entry snapshot without requiring unavailable Windows IDs."""
+    if not stat.S_ISDIR(enumerated.st_mode) or not stat.S_ISDIR(named.st_mode):
+        return False
+    if enumerated.st_dev or enumerated.st_ino:
+        return (
+            enumerated.st_dev,
+            enumerated.st_ino,
+            enumerated.st_mtime_ns,
+            enumerated.st_ctime_ns,
+        ) == (
+            named.st_dev,
+            named.st_ino,
+            named.st_mtime_ns,
+            named.st_ctime_ns,
+        )
+    # Windows DirEntry.stat() can expose 0/0 for dev/ino even though a named
+    # os.stat() returns the real file ID. Its cached directory size and
+    # timestamps can likewise differ from the named view. When the entry has
+    # no usable identity, use it only for type/reparse filtering; the
+    # twice-checked named snapshot still binds file ID, timestamps, type, and
+    # no-reparse custody before and after traversal.
+    return True
+
+
+def _codex_child_directories(
+    root: str,
+) -> list[tuple[str, str, os.stat_result]]:
+    """Return stable real child directories for Codex cache traversal."""
+    for _attempt in range(_MAX_CODEX_DIRECTORY_SNAPSHOT_ATTEMPTS):
+        try:
+            before = _stable_directory_info(root)
+            with os.scandir(root) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+            after = _stable_directory_info(root)
+        except OSError:
+            continue
+        if _directory_identity(before) != _directory_identity(after):
+            continue
+
+        children: list[tuple[str, str, os.stat_result]] = []
+        refresh_snapshot = False
+        for entry in entries:
+            try:
+                entry_info = entry.stat(follow_symlinks=False)
+                if (
+                    entry.is_symlink()
+                    or is_link_or_reparse(entry.path)
+                    or not stat.S_ISDIR(entry_info.st_mode)
+                ):
+                    continue
+                named = _stable_directory_info(entry.path)
+                if not _directory_entry_matches(entry_info, named):
+                    refresh_snapshot = True
+                    break
+            except OSError:
+                continue
+            children.append((entry.name, entry.path, named))
+        if not refresh_snapshot:
+            return children
+    return []
+
+
 def _codex_config_path(cache_root: str) -> str:
     # <CODEX_HOME>/plugins/cache -> <CODEX_HOME>/config.toml
-    return os.path.join(os.path.dirname(os.path.dirname(cache_root)), "config.toml")
+    normalized = os.path.normpath(cache_root)
+    return os.path.join(os.path.dirname(os.path.dirname(normalized)), "config.toml")
 
 
 def _codex_active_plugins(cache_root: str) -> dict[str, bool]:
     """Read only Codex's ``plugins`` activation table from config.toml."""
     path = _codex_config_path(cache_root)
-    if is_symlink(path) or not os.path.isfile(path):
-        return {}
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read(_MAX_CONFIG_BYTES + 1)
+        raw = _read_bounded_stable_file(path, max_bytes=_MAX_CONFIG_BYTES)
     except OSError:
-        return {}
-    if len(raw) > _MAX_CONFIG_BYTES:
         return {}
     try:
         payload = tomllib.loads(raw.decode("utf-8"))
@@ -205,20 +612,404 @@ def _is_codex_cache_root(root: str, connector: str) -> bool:
     )
 
 
+def _claude_plugin_registry_root(root: str, connector: str) -> str | None:
+    """Return Claude's registry parent for a plugin parent or cache root."""
+
+    normalized = (connector or "").casefold().replace("-", "")
+    if normalized not in {"claude", "claudecode"}:
+        return None
+    candidate = os.path.normpath(root)
+    leaf = os.path.basename(candidate).casefold()
+    if leaf == "plugins":
+        return candidate
+    if leaf == "cache":
+        parent = os.path.dirname(candidate)
+        if os.path.basename(parent).casefold() == "plugins":
+            return parent
+    return None
+
+
+def _is_claude_plugin_root(root: str, connector: str) -> bool:
+    """Return whether *root* is Claude's plugin registry parent."""
+
+    registry_root = _claude_plugin_registry_root(root, connector)
+    return registry_root is not None and os.path.basename(
+        os.path.normpath(root)
+    ).casefold() == "plugins"
+
+
+def _read_claude_registry(
+    plugin_root: str,
+) -> tuple[dict[str, Any] | None, PluginRegistryProbe]:
+    """Read and classify Claude Code's registry without following links."""
+
+    path = os.path.join(plugin_root, _CLAUDE_INSTALLED_PLUGINS)
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.MISSING,
+            detail="registry source does not exist",
+        )
+    except OSError:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            detail="registry source metadata could not be read safely",
+        )
+    if is_link_or_reparse(plugin_root) or is_link_or_reparse(path):
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            detail="registry source traverses a link or reparse point",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            detail="registry source could not be opened safely",
+        )
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(opened.st_mode):
+            return None, PluginRegistryProbe(
+                source_path=path,
+                state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+                detail="registry source is not a regular file",
+            )
+        if not os.path.samestat(before, opened) or opened.st_size > _MAX_CONFIG_BYTES:
+            detail = (
+                "registry source changed while opening"
+                if not os.path.samestat(before, opened)
+                else f"registry source exceeds {_MAX_CONFIG_BYTES} bytes"
+            )
+            return None, PluginRegistryProbe(
+                source_path=path,
+                state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+                detail=detail,
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_CONFIG_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            detail="registry source could not be read safely",
+        )
+    finally:
+        os.close(fd)
+    if len(raw) > _MAX_CONFIG_BYTES:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSAFE_OR_UNREADABLE,
+            detail=f"registry source exceeds {_MAX_CONFIG_BYTES} bytes",
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.MALFORMED,
+            detail="registry source is not valid UTF-8 JSON",
+        )
+    if not isinstance(payload, dict):
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.MALFORMED,
+            detail="registry root must be a JSON object",
+        )
+    if payload.get("version") != 2:
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.UNSUPPORTED,
+            detail=f"unsupported registry version {payload.get('version')!r}; expected 2",
+        )
+    if not isinstance(payload.get("plugins"), dict):
+        return None, PluginRegistryProbe(
+            source_path=path,
+            state=PluginRegistryState.MALFORMED,
+            detail="registry field 'plugins' must be a JSON object",
+        )
+    return payload, PluginRegistryProbe(
+        source_path=path,
+        state=PluginRegistryState.VALID,
+    )
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    """Cross-platform, drive-aware real-path containment."""
+
+    candidate = os.path.normcase(os.path.realpath(path))
+    boundary = os.path.normcase(os.path.realpath(root))
+    try:
+        return os.path.normcase(os.path.commonpath((candidate, boundary))) == boundary
+    except ValueError:
+        # Different Windows drives have no common path.
+        return False
+
+
+def _path_has_linked_component(path: str, root: str) -> bool:
+    """Return whether *path* traverses a link/reparse point below *root*."""
+
+    candidate = os.path.abspath(path)
+    boundary = os.path.abspath(root)
+    try:
+        common = os.path.normcase(os.path.commonpath((candidate, boundary)))
+        if common != os.path.normcase(boundary):
+            return True
+    except ValueError:
+        return True
+    current = candidate
+    while True:
+        if is_link_or_reparse(current):
+            return True
+        if os.path.normcase(current) == os.path.normcase(boundary):
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
+
+
+def _claude_registry_identity(
+    registry_key: str,
+    plugin_path: str,
+) -> tuple[str, str, dict[str, Any]]:
+    """Resolve a cached Claude plugin's identity with a registry-key fallback."""
+
+    registry_name, separator, _marketplace = registry_key.rpartition("@")
+    fallback = registry_name if separator and registry_name else registry_key
+    if fallback.startswith("@"):
+        # Claude preserves npm-style scoped plugin names in the authoritative
+        # registry key (for example ``@compound/engineering@market``). Plugin
+        # IDs are intentionally one portable path segment, so retain the
+        # scoped package's final name rather than rejecting a manifest-less
+        # install solely because its registry identity contains ``/``.
+        _scope, scoped_separator, scoped_name = fallback[1:].partition("/")
+        if _scope and scoped_separator and scoped_name:
+            fallback = scoped_name
+    try:
+        safe_fallback = validate_plugin_id(fallback)
+    except PluginIdentityError:
+        safe_fallback = ""
+    try:
+        manifest = read_plugin_manifest(plugin_path)
+    except PluginIdentityError:
+        # The authoritative install record remains a scan target even when a
+        # malformed manifest cannot supply trusted display metadata.
+        if not safe_fallback:
+            raise
+        return safe_fallback, "", {}
+    if manifest is None:
+        if not safe_fallback:
+            raise PluginIdentityError("Claude plugin registry identity is not portable")
+        return safe_fallback, "", {}
+    payload, relative = manifest
+    declared = payload.get("id") or payload.get("name") or fallback
+    try:
+        plugin_id = validate_plugin_id(declared)
+    except PluginIdentityError:
+        if not safe_fallback:
+            raise
+        plugin_id = safe_fallback
+    return plugin_id, relative, payload
+
+
+def _discover_claude_registry(
+    plugin_root: str,
+) -> tuple[list[PluginDirectory], PluginRegistryProbe]:
+    """Read Claude Code's v2 install registry and return exact cache roots.
+
+    ``installed_plugins.json`` maps ``plugin@marketplace`` identifiers to a
+    list of scope-specific installation records. Each record's ``installPath``
+    points below ``plugins/cache``; the cache is nested too deeply for the
+    ordinary one-level directory discovery contract.
+    """
+
+    payload, probe = _read_claude_registry(plugin_root)
+    if payload is None:
+        return [], probe
+    registry_path = probe.source_path
+    plugins = payload["plugins"]
+
+    cache_root = os.path.join(plugin_root, "cache")
+    candidates: list[PluginDirectory] = []
+    claimed = PluginInstallClaims()
+    for registry_key in sorted(plugins, key=lambda value: str(value).casefold()):
+        installs = plugins.get(registry_key)
+        if not isinstance(registry_key, str) or not isinstance(installs, list):
+            continue
+        for install in installs:
+            if not isinstance(install, dict):
+                continue
+            raw_path = install.get("installPath")
+            if (
+                not isinstance(raw_path, str)
+                or not raw_path.strip()
+                or not os.path.isabs(raw_path)
+            ):
+                continue
+            plugin_path = os.path.abspath(raw_path)
+            same_as_cache = os.path.normcase(
+                os.path.realpath(plugin_path)
+            ) == os.path.normcase(os.path.realpath(cache_root))
+            if (
+                same_as_cache
+                or not _path_is_within(plugin_path, cache_root)
+                or _path_has_linked_component(plugin_path, cache_root)
+                or not os.path.isdir(plugin_path)
+            ):
+                continue
+            try:
+                plugin_id, manifest, manifest_payload = _claude_registry_identity(
+                    registry_key,
+                    plugin_path,
+                )
+            except PluginIdentityError:
+                continue
+            _plugin_name, separator, marketplace = registry_key.rpartition("@")
+            raw_scope = install.get("scope")
+            scope = raw_scope.strip() if isinstance(raw_scope, str) else ""
+            raw_project_path = install.get("projectPath")
+            project_path = (
+                raw_project_path.strip()
+                if isinstance(raw_project_path, str)
+                else ""
+            )
+            if not claimed.add(
+                plugin_id,
+                plugin_path,
+                plugin_root,
+                registry_source=registry_path,
+                scope=scope,
+                project_path=project_path,
+            ):
+                continue
+
+            origin_parts = [scope, project_path]
+            origin_parts.append(marketplace if separator else "")
+            candidates.append(
+                PluginDirectory(
+                    id=plugin_id,
+                    name=str(manifest_payload.get("displayName") or plugin_id),
+                    path=plugin_path,
+                    enabled=True,
+                    version=str(
+                        manifest_payload.get("version")
+                        or install.get("version")
+                        or ""
+                    ),
+                    description=str(manifest_payload.get("description") or ""),
+                    origin=(
+                        ":".join(part for part in origin_parts if part)
+                        or registry_path
+                    ),
+                    manifest=manifest,
+                    registry=marketplace if separator else "",
+                    cached=True,
+                    scope=scope,
+                    project_path=project_path,
+                    registry_source=registry_path,
+                )
+            )
+    candidates = sorted(
+        candidates,
+        key=lambda entry: (
+            entry.id.casefold(),
+            entry.scope.casefold(),
+            os.path.normcase(os.path.normpath(entry.project_path)),
+            os.path.normcase(entry.path),
+        ),
+    )
+    return candidates, PluginRegistryProbe(
+        source_path=probe.source_path,
+        state=probe.state,
+        entries=len(candidates),
+        detail=probe.detail,
+    )
+
+
+def probe_claude_plugin_registry(
+    plugin_root: str,
+    *,
+    connector: str = "claudecode",
+    registry_cache: PluginRegistryCache | None = None,
+) -> PluginRegistryProbe | None:
+    """Return the typed Claude registry diagnostic for a configured root.
+
+    Non-Claude roots have no ``installed_plugins.json`` contract and return
+    ``None`` rather than manufacturing a missing-source warning.
+    """
+
+    registry_root = _claude_plugin_registry_root(plugin_root, connector)
+    if registry_root is None:
+        return None
+    try:
+        _plugins, probe = _discover_claude_registry_cached(
+            registry_root,
+            registry_cache,
+        )
+    except PluginIdentityError as exc:
+        return PluginRegistryProbe(
+            source_path=os.path.join(registry_root, _CLAUDE_INSTALLED_PLUGINS),
+            state=PluginRegistryState.MALFORMED,
+            detail=str(exc),
+        )
+    return probe
+
+
 def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
     """Discover exact ``registry/name/version`` Codex manifest roots."""
+    plugins_root = os.path.dirname(os.path.normpath(cache_root))
+    codex_home = os.path.dirname(plugins_root)
+    try:
+        # POSIX permits symlinked system ancestors, so reject_reparse_path()
+        # only checks the leaf and its immediate parent there. Validate the
+        # complete declared Codex cache chain explicitly without climbing
+        # above the client-owned home.
+        _stable_directory_info(codex_home)
+        _stable_directory_info(plugins_root)
+        cache_identity = _stable_directory_info(cache_root)
+    except OSError:
+        return []
     active = _codex_active_plugins(cache_root)
     candidates: list[PluginDirectory] = []
-    for registry, registry_path in _child_directories(cache_root):
+    for registry, registry_path, registry_identity in _codex_child_directories(
+        cache_root
+    ):
         if registry.startswith("."):
             continue
-        for logical_name, logical_path in _child_directories(registry_path):
+        for logical_name, logical_path, logical_identity in _codex_child_directories(
+            registry_path
+        ):
             if logical_name.startswith("."):
                 continue
-            for folder_version, plugin_path in _child_directories(logical_path):
-                if folder_version.startswith(".") or not is_within_roots(plugin_path, cache_root):
+            for (
+                folder_version,
+                plugin_path,
+                plugin_identity,
+            ) in _codex_child_directories(logical_path):
+                if folder_version.startswith(".") or not is_within_roots(
+                    plugin_path,
+                    cache_root,
+                ):
                     continue
-                manifest_path = os.path.join(plugin_path, ".codex-plugin", "plugin.json")
+                manifest_path = os.path.join(
+                    plugin_path,
+                    ".codex-plugin",
+                    "plugin.json",
+                )
                 if not is_within_roots(manifest_path, plugin_path):
                     continue
                 manifest = _read_bounded_json(manifest_path)
@@ -228,6 +1019,14 @@ def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
                 if not plugin_id:
                     continue
                 version = str(manifest.get("version") or folder_version).strip()
+                try:
+                    named_plugin = _stable_directory_info(plugin_path)
+                except OSError:
+                    return []
+                if _directory_identity(plugin_identity) != _directory_identity(
+                    named_plugin
+                ):
+                    return []
                 activation_keys = (
                     f"{plugin_id}@{registry}".casefold(),
                     f"{logical_name}@{registry}".casefold(),
@@ -247,6 +1046,13 @@ def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
                         cached=True,
                     )
                 )
+            if not _directory_unchanged(logical_path, logical_identity):
+                return []
+        if not _directory_unchanged(registry_path, registry_identity):
+            return []
+
+    if not _directory_unchanged(cache_root, cache_identity):
+        return []
 
     # One logical plugin row. An explicitly active registry wins over stale
     # copies; otherwise keep the newest cached version deterministically.
@@ -273,52 +1079,326 @@ def _discover_codex_cache(cache_root: str) -> list[PluginDirectory]:
     return sorted(selected.values(), key=lambda entry: entry.id.casefold())
 
 
+def _is_claude_root(root: str, connector: str, leaf: str) -> bool:
+    normalized = (connector or "").casefold().replace("-", "")
+    return normalized in {"claude", "claudecode"} and (
+        os.path.basename(os.path.normpath(root)).casefold() == leaf
+    )
+
+
+def _claude_config_dir() -> str:
+    configured = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(os.path.abspath(os.path.expanduser("~")), ".claude")
+
+
+def _read_claude_enabled_plugins(
+    workspace_dir: str = "",
+    *,
+    managed_settings_paths: tuple[str, ...] | None = None,
+) -> tuple[dict[str, bool], bool]:
+    """Resolve user → project → local → managed ``enabledPlugins`` layers."""
+
+    settings_paths = [os.path.join(_claude_config_dir(), "settings.json")]
+    workspace = (workspace_dir or "").strip()
+    if workspace:
+        workspace = os.path.abspath(os.path.expanduser(workspace))
+        settings_paths.extend(
+            [
+                os.path.join(workspace, ".claude", "settings.json"),
+                os.path.join(workspace, ".claude", "settings.local.json"),
+            ]
+        )
+
+    resolved: dict[str, bool] = {}
+    for path in settings_paths:
+        payload = _read_bounded_json(path)
+        if payload is None:
+            continue
+        enabled = payload.get("enabledPlugins")
+        if not isinstance(enabled, dict):
+            continue
+        for plugin_id, value in enabled.items():
+            if isinstance(plugin_id, str) and isinstance(value, bool):
+                resolved[plugin_id.casefold()] = value
+    # Import lazily so the small inventory module does not pull Doctor's
+    # Windows inspection dependencies into non-Claude discovery.
+    from defenseclaw.doctor_hooks import inspect_claude_managed_enabled_plugins
+
+    managed, managed_verified = inspect_claude_managed_enabled_plugins(
+        settings_paths[0],
+        managed_settings_paths=managed_settings_paths,
+    )
+    if managed_verified:
+        # Managed settings are the highest-precedence scope and cannot be
+        # overridden by local/project/user plugin preferences.
+        resolved.update(managed)
+    return resolved, managed_verified
+
+
+def _claude_enabled(
+    configured: dict[str, bool],
+    keys: tuple[str, ...],
+    manifest: dict[str, Any],
+) -> bool:
+    for key in keys:
+        if key.casefold() in configured:
+            return configured[key.casefold()]
+    default_enabled = manifest.get("defaultEnabled")
+    return default_enabled if isinstance(default_enabled, bool) else True
+
+
+def _discover_claude_cache(
+    cache_root: str,
+    *,
+    workspace_dir: str = "",
+    managed_settings_paths: tuple[str, ...] | None = None,
+) -> list[PluginDirectory]:
+    """Discover exact cached Claude marketplace plugin versions.
+
+    Anthropic documents
+    ``~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`` and makes the
+    plugin manifest optional. Walk only that exact depth, never follow links,
+    and treat each physical version directory as a distinct custody boundary.
+    """
+
+    configured, managed_verified = _read_claude_enabled_plugins(
+        workspace_dir,
+        managed_settings_paths=managed_settings_paths,
+    )
+    candidates: list[PluginDirectory] = []
+    cache_abs = os.path.abspath(cache_root)
+    for current, dirs, _files in os.walk(cache_abs, topdown=True, followlinks=False):
+        relative = os.path.relpath(current, cache_abs)
+        depth = 0 if relative == "." else len(Path(relative).parts)
+        dirs[:] = [
+            name
+            for name in sorted(dirs, key=str.casefold)
+            if not name.startswith(".")
+            and name.casefold() not in _CLAUDE_CACHE_SKIP_DIRS
+            and not is_symlink(os.path.join(current, name))
+        ]
+        if depth >= _MAX_CLAUDE_CACHE_DEPTH:
+            dirs[:] = []
+        if not is_within_roots(current, cache_abs):
+            continue
+
+        parts = Path(relative).parts
+        # The documented cache layout is
+        # <marketplace>/<plugin>/<version>. A manifest at the plugin root is
+        # optional, so directory shape -- not manifest presence -- establishes
+        # a cache artifact boundary.
+        if len(parts) != 3:
+            continue
+        manifest_path = os.path.join(current, _CLAUDE_MANIFEST)
+        manifest_present = os.path.isfile(manifest_path) and not is_symlink(manifest_path)
+        manifest = _read_bounded_json(manifest_path) or {}
+        logical_name = str(manifest.get("name") or parts[1]).strip()
+        if not logical_name:
+            continue
+        registry = parts[0]
+        storage_name = parts[1]
+        scoped_ids = tuple(
+            value
+            for value in (
+                f"{storage_name}@{registry}" if registry else storage_name,
+                f"{logical_name}@{registry}" if registry else logical_name,
+            )
+            if value
+        )
+        folder_version = parts[2]
+        version = str(manifest.get("version") or folder_version).strip()
+        candidates.append(
+            PluginDirectory(
+                id=scoped_ids[0],
+                name=logical_name,
+                path=current,
+                # Cache presence alone does not prove the installed/active
+                # version: Claude retains orphaned versions for 14 days.
+                # Activation is resolved after grouping below.
+                enabled=False,
+                version=version,
+                description=str(manifest.get("description") or ""),
+                origin=registry or cache_root,
+                manifest=_CLAUDE_MANIFEST if manifest_present else "",
+                registry=registry,
+                cached=True,
+                activation_verified=False,
+                logical_id=scoped_ids[0],
+            )
+        )
+        # A plugin root is the attribution boundary. Do not discover manifests
+        # planted inside its dependency tree.
+        dirs[:] = []
+
+    grouped: dict[str, list[PluginDirectory]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.id.casefold(), []).append(candidate)
+
+    selected: list[PluginDirectory] = []
+    for key, versions in grouped.items():
+        versions.sort(
+            key=lambda candidate: (
+                _natural_version_key(candidate.version),
+                candidate.path.casefold(),
+            )
+        )
+        configured_state = configured.get(key)
+        # An explicit enabledPlugins entry plus exactly one cached version is
+        # sufficient filesystem evidence. With multiple retained versions,
+        # only `claude plugin list --json` can identify the active one, so the
+        # cache row remains conservatively disabled/unverified.
+        activation_verified = (
+            managed_verified
+            and len(versions) == 1
+            and configured_state is not None
+        )
+        for candidate in versions:
+            physical_id = candidate.id
+            if len(versions) > 1:
+                physical_id = f"{candidate.id}#{Path(candidate.path).name}"
+            selected.append(
+                PluginDirectory(
+                    **{
+                        **candidate.__dict__,
+                        "id": physical_id,
+                        "enabled": (
+                            bool(configured_state)
+                            if activation_verified
+                            else False
+                        ),
+                        "activation_verified": activation_verified,
+                    }
+                )
+            )
+    return sorted(selected, key=lambda entry: entry.id.casefold())
+
+
+def _discover_claude_skills_plugins(
+    skills_root: str,
+    *,
+    workspace_dir: str = "",
+    managed_settings_paths: tuple[str, ...] | None = None,
+) -> list[PluginDirectory]:
+    """Return only manifest-bearing immediate children of a skills directory."""
+
+    configured, managed_verified = _read_claude_enabled_plugins(
+        workspace_dir,
+        managed_settings_paths=managed_settings_paths,
+    )
+    plugins: list[PluginDirectory] = []
+    claimed: dict[str, str] = {}
+    for storage_name, plugin_path in _child_directories(skills_root):
+        manifest_path = os.path.join(plugin_path, _CLAUDE_MANIFEST)
+        manifest = _read_bounded_json(manifest_path)
+        if manifest is None:
+            continue
+        logical_name = str(manifest.get("name") or storage_name).strip()
+        if not logical_name:
+            continue
+        plugin_id = f"{logical_name}@skills-dir"
+        identity = filesystem_identity_key(plugin_id, skills_root)
+        if identity in claimed:
+            raise AmbiguousPluginIdentityError(
+                f"ambiguous plugin identity {plugin_id!r}: "
+                f"{claimed[identity]}, {plugin_path}; remove or rename duplicate directories"
+            )
+        claimed[identity] = plugin_path
+        plugins.append(
+            PluginDirectory(
+                id=plugin_id,
+                name=logical_name,
+                path=plugin_path,
+                enabled=(
+                    _claude_enabled(configured, (plugin_id,), manifest)
+                    if managed_verified
+                    else False
+                ),
+                version=str(manifest.get("version") or ""),
+                description=str(manifest.get("description") or ""),
+                origin="skills-dir",
+                manifest=_CLAUDE_MANIFEST,
+                registry="skills-dir",
+                activation_verified=managed_verified,
+                logical_id=plugin_id,
+            )
+        )
+    return plugins
+
+
 def discover_plugin_directories(
     root: str,
     *,
     connector: str = "",
+    registry_cache: PluginRegistryCache | None = None,
+    workspace_dir: str = "",
+    claude_managed_settings_paths: tuple[str, ...] | None = None,
 ) -> list[PluginDirectory]:
     """Return real plugin roots, never registry/cache container directories."""
-    if not os.path.isdir(root) or is_symlink(root):
+    if not os.path.isdir(root) or is_link_or_reparse(root):
         return []
     if _is_codex_cache_root(root, connector):
         return _discover_codex_cache(root)
-
-    plugins: list[PluginDirectory] = []
-    claimed: dict[str, str] = {}
-    for entry, path in _child_directories(root):
-        if entry == "cache" or entry.startswith("."):
-            continue
-        try:
-            plugin_id, manifest = canonical_plugin_id(path)
-        except PluginIdentityError as exc:
-            if not str(exc).startswith(("invalid plugin manifest", "could not read plugin manifest")):
-                raise
-            plugin_id, manifest = entry, ""
-        key = filesystem_identity_key(plugin_id, root)
-        if key in claimed:
-            raise AmbiguousPluginIdentityError(
-                f"ambiguous plugin identity {plugin_id!r}: {claimed[key]}, {path}; "
-                "remove or rename duplicate directories"
-            )
-        claimed[key] = path
-        plugins.append(
-            PluginDirectory(
-                id=plugin_id,
-                name=plugin_id,
-                path=path,
-                origin=root,
-                manifest=manifest,
-            )
+    if _is_claude_root(root, connector, "cache"):
+        plugin_root = os.path.dirname(os.path.normpath(root))
+        registry_plugins, registry_probe = _discover_claude_registry_cached(
+            plugin_root,
+            registry_cache,
         )
-    for plugin_id, path in _amp_plugin_files(root, connector):
-        key = filesystem_identity_key(plugin_id, root)
-        if key in claimed:
-            raise AmbiguousPluginIdentityError(
-                f"ambiguous plugin identity {plugin_id!r}: {claimed[key]}, {path}; "
-                "remove or rename duplicate plugins"
+        if registry_probe.state == PluginRegistryState.VALID:
+            return registry_plugins
+        return _discover_claude_cache(
+            root,
+            workspace_dir=workspace_dir,
+            managed_settings_paths=claude_managed_settings_paths,
+        )
+    if _is_claude_root(root, connector, "skills"):
+        return _discover_claude_skills_plugins(
+            root,
+            workspace_dir=workspace_dir,
+            managed_settings_paths=claude_managed_settings_paths,
+        )
+    if is_symlink(root):
+        return []
+
+    claude_root = _is_claude_plugin_root(root, connector)
+    plugins = (
+        _discover_claude_registry_cached(root, registry_cache)[0]
+        if claude_root
+        else []
+    )
+    claimed = PluginInstallClaims()
+    for plugin in plugins:
+        claimed.add_directory(plugin, root)
+    if (connector or "").casefold().replace("-", "") != "opencode":
+        for entry, path in _child_directories(root):
+            if entry == "cache" or entry.startswith(".") or (
+                claude_root and entry == "marketplaces"
+            ):
+                continue
+            try:
+                plugin_id, manifest = canonical_plugin_id(path)
+            except PluginIdentityError as exc:
+                if not str(exc).startswith(
+                    ("invalid plugin manifest", "could not read plugin manifest")
+                ):
+                    raise
+                plugin_id, manifest = entry, ""
+            if not claimed.add(plugin_id, path, root):
+                continue
+            plugins.append(
+                PluginDirectory(
+                    id=plugin_id,
+                    name=plugin_id,
+                    path=path,
+                    origin=root,
+                    manifest=manifest,
+                )
             )
-        claimed[key] = path
+    for plugin_id, path in _amp_plugin_files(root, connector):
+        if not claimed.add(plugin_id, path, root):
+            continue
         plugins.append(
             PluginDirectory(
                 id=plugin_id,
@@ -330,13 +1410,73 @@ def discover_plugin_directories(
                 manifest=os.path.basename(path),
             )
         )
+    for plugin_id, path in _opencode_plugin_files(root, connector):
+        if not claimed.add(plugin_id, path, root):
+            continue
+        plugins.append(
+            PluginDirectory(
+                id=plugin_id,
+                name=plugin_id,
+                path=path,
+                origin=root,
+                manifest=os.path.basename(path),
+            )
+        )
     return sorted(plugins, key=lambda entry: entry.id.casefold())
+
+
+def discover_exact_plugin_directory(
+    path: str,
+    *,
+    origin: str = "",
+) -> list[PluginDirectory]:
+    """Return one marketplace-declared plugin root, if it is a safe directory."""
+    try:
+        root_identity = _stable_directory_info(path)
+    except OSError:
+        return []
+
+    manifest_path = os.path.join(path, _CODEX_MANIFEST)
+    payload = _read_bounded_json(manifest_path)
+    plugin_id = validate_plugin_id(
+        (payload or {}).get("id")
+        or (payload or {}).get("name")
+        or os.path.basename(os.path.normpath(path))
+    )
+    manifest = _CODEX_MANIFEST if payload is not None else ""
+    try:
+        named_root = _stable_directory_info(path)
+    except OSError:
+        return []
+    if _directory_identity(root_identity) != _directory_identity(named_root):
+        return []
+    return [
+        PluginDirectory(
+            id=plugin_id,
+            name=plugin_id,
+            path=path,
+            origin=origin or os.path.dirname(path),
+            manifest=manifest,
+        )
+    ]
 
 
 def plugin_directory_entries(
     root: str,
     *,
     connector: str = "",
+    registry_cache: PluginRegistryCache | None = None,
+    workspace_dir: str = "",
+    claude_managed_settings_paths: tuple[str, ...] | None = None,
 ) -> list[tuple[str, str]]:
     """Backward-compatible ``(id, path)`` view of plugin discovery."""
-    return [(entry.id, entry.path) for entry in discover_plugin_directories(root, connector=connector)]
+    return [
+        (entry.id, entry.path)
+        for entry in discover_plugin_directories(
+            root,
+            connector=connector,
+            registry_cache=registry_cache,
+            workspace_dir=workspace_dir,
+            claude_managed_settings_paths=claude_managed_settings_paths,
+        )
+    ]

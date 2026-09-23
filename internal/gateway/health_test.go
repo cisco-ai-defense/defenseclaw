@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -129,6 +130,24 @@ func TestConnectorLastActivityNeverRegresses(t *testing.T) {
 	got := connByName(h.Snapshot().Connectors)["codex"].LastActivityAt
 	if got == nil || !got.Equal(later) {
 		t.Fatalf("last activity = %v, want %s", got, later)
+	}
+}
+
+func TestConnectorLoadHeartbeatIsSeparateFromOrdinaryActivity(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetConnector("opencode", "", "")
+	h.RecordConnectorRequestFor("opencode")
+	before := connByName(h.Snapshot().Connectors)["opencode"]
+	if before.LastLoadHeartbeatAt != nil {
+		t.Fatalf("ordinary request set load heartbeat: %v", before.LastLoadHeartbeatAt)
+	}
+
+	start := time.Now().UTC()
+	h.RecordConnectorLoadHeartbeatFor("opencode")
+	end := time.Now().UTC()
+	after := connByName(h.Snapshot().Connectors)["opencode"]
+	if after.LastLoadHeartbeatAt == nil || after.LastLoadHeartbeatAt.Before(start) || after.LastLoadHeartbeatAt.After(end) {
+		t.Fatalf("load heartbeat = %v, want timestamp in [%s, %s]", after.LastLoadHeartbeatAt, start, end)
 	}
 }
 
@@ -294,6 +313,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 				CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
 				CircuitOpenUntil: now.Add(24 * time.Hour),
 				LastFailureClass: delivery.FailureClassAuthentication,
+				LastFailureCode:  delivery.FailureCodeHTTPAuthentication,
 				Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 				LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				Sources: []delivery.HealthSnapshot{{
@@ -302,6 +322,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 					CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
 					CircuitOpenUntil: now.Add(24 * time.Hour),
 					LastFailureClass: delivery.FailureClassAuthentication,
+					LastFailureCode:  delivery.FailureCodeHTTPAuthentication,
 					Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 					LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				}},
@@ -318,12 +339,15 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	health.observeObservabilityV8Failure("all-signals", 3, "stale_failure", now.Add(time.Hour))
 
 	snapshot := health.Snapshot()
-	if snapshot.Telemetry.State != StateError || snapshot.Telemetry.LastError != "" {
+	if snapshot.Telemetry.State != StateRunning || snapshot.Telemetry.LastError != "" {
 		t.Fatalf("telemetry=%+v", snapshot.Telemetry)
 	}
 	details := snapshot.Telemetry.Details
 	if details["generation"] != uint64(4) || details["destination_count"] != 3 ||
-		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) {
+		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) ||
+		details["optional_destination_state"] != "degraded" ||
+		details["optional_destination_failure_count"] != 1 ||
+		details["optional_destination_failure_summary"] != "all-signals:degraded:http_authentication" {
 		t.Fatalf("details=%+v", details)
 	}
 	if _, ok := details["event_history_failure"]; ok {
@@ -338,13 +362,15 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		row["reason"] != "queue_full" || row["failure"] != nil ||
 		row["circuit_state"] != "open" || row["consecutive_failures"] != uint64(4) ||
 		row["circuit_open_until"] != now.Add(24*time.Hour).Format(time.RFC3339Nano) ||
-		row["last_failure_class"] != "authentication" {
+		row["last_failure_class"] != "authentication" ||
+		row["last_failure_code"] != "http_authentication" {
 		t.Fatalf("destination row=%+v", row)
 	}
 	signalRows, ok := row["signal_health"].([]map[string]interface{})
 	if !ok || len(signalRows) != 1 || signalRows[0]["circuit_state"] != "open" ||
 		signalRows[0]["consecutive_failures"] != uint64(4) ||
-		signalRows[0]["last_failure_class"] != "authentication" {
+		signalRows[0]["last_failure_class"] != "authentication" ||
+		signalRows[0]["last_failure_code"] != "http_authentication" {
 		t.Fatalf("signal health=%T %+v", row["signal_health"], row["signal_health"])
 	}
 	queueMap, ok := row["queue"].(map[string]interface{})
@@ -360,6 +386,39 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		if stringContains(string(encoded), forbidden) {
 			t.Fatalf("health disclosed forbidden %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestObservabilityV8HealthKeepsMandatoryLocalFailureFatalAndBoundsOptionalSummary(t *testing.T) {
+	destinations := []observabilityruntime.DestinationHealth{{
+		Name: config.ObservabilityV8LocalDestinationName,
+		Kind: config.ObservabilityV8DestinationLocalSQLite, Enabled: true,
+		Signals: []observability.Signal{observability.SignalLogs},
+		State:   delivery.HealthFailing, Reason: string(delivery.HealthReasonDeliveryFailed),
+	}}
+	for index := 0; index < observabilityV8MaxFailureSummaryItems+4; index++ {
+		destinations = append(destinations, observabilityruntime.DestinationHealth{
+			Name: fmt.Sprintf("optional-%02d", index), Kind: config.ObservabilityV8DestinationSplunkHEC,
+			Enabled: true, Signals: []observability.Signal{observability.SignalLogs},
+			State: delivery.HealthFailing, Reason: string(delivery.HealthReasonDeliveryFailed),
+			LastFailureCode: delivery.FailureCodeProjectionInvalid,
+		})
+	}
+	health := renderObservabilityV8Health(
+		time.Now().UTC(),
+		observabilityruntime.DestinationHealthSnapshot{Generation: 9, Destinations: destinations},
+		nil, "healthy", "", 30, observabilityV8EventHistorySnapshot{},
+	)
+	if health.State != StateError {
+		t.Fatalf("telemetry state=%q", health.State)
+	}
+	if health.Details["optional_destination_failure_count"] != observabilityV8MaxFailureSummaryItems+4 {
+		t.Fatalf("details=%+v", health.Details)
+	}
+	summary, ok := health.Details["optional_destination_failure_summary"].(string)
+	if !ok || len(summary) > observabilityV8MaxFailureSummaryBytes ||
+		strings.Count(summary, ",") >= observabilityV8MaxFailureSummaryItems {
+		t.Fatalf("summary=%q bytes=%d", summary, len(summary))
 	}
 }
 
@@ -849,4 +908,143 @@ func stringContains(value, fragment string) bool {
 		}
 	}
 	return false
+}
+
+// TestSetEnumeratorPublishesSubsystem pins the wire contract spec 005
+// Workstream D introduces: SidecarHealth.Enumerator is nil until
+// SetEnumerator is called, then holds the last-published state +
+// LastError + Details verbatim. Snapshot() must surface the field
+// in the JSON payload so a Cisco Secure Client IPC consumer can
+// render "enumerator error: <reason>" alongside the gateway +
+// guardian tiles.
+func TestSetEnumeratorPublishesSubsystem(t *testing.T) {
+	h := NewSidecarHealth()
+
+	// Pre-call: enumerator absent from the snapshot (nil pointer
+	// omits the field in JSON via omitempty).
+	before := h.Snapshot()
+	if before.Enumerator != nil {
+		t.Fatalf("Enumerator should be nil before SetEnumerator; got %+v", before.Enumerator)
+	}
+
+	h.SetEnumerator(StateRunning, "", map[string]interface{}{"cycle_count": int64(3)})
+
+	after := h.Snapshot()
+	if after.Enumerator == nil {
+		t.Fatal("Enumerator should be non-nil after SetEnumerator")
+	}
+	if after.Enumerator.State != StateRunning {
+		t.Fatalf("Enumerator.State = %v, want %v", after.Enumerator.State, StateRunning)
+	}
+	if after.Enumerator.LastError != "" {
+		t.Fatalf("Enumerator.LastError = %q, want empty", after.Enumerator.LastError)
+	}
+	if v, ok := after.Enumerator.Details["cycle_count"].(int64); !ok || v != 3 {
+		t.Fatalf("Enumerator.Details[cycle_count] = %v, want int64(3)", after.Enumerator.Details["cycle_count"])
+	}
+
+	// Second call flips the state and clears LastError back to empty.
+	h.SetEnumerator(StateError, "walk profiles: registry unreadable", nil)
+	after2 := h.Snapshot()
+	if after2.Enumerator.State != StateError {
+		t.Fatalf("after second SetEnumerator: State = %v, want %v", after2.Enumerator.State, StateError)
+	}
+	if after2.Enumerator.LastError != "walk profiles: registry unreadable" {
+		t.Fatalf("LastError not surfaced: %q", after2.Enumerator.LastError)
+	}
+}
+
+// TestSetEnumeratorNilReceiverIsSafe asserts SetEnumerator can be
+// called against a nil *SidecarHealth without panicking. The
+// enumerator CLI subcommand may run standalone (`--once` from an
+// installer shell-out) with no sidecar wired; the CLI passes a
+// nil receiver in that case and expects a no-op.
+func TestSetEnumeratorNilReceiverIsSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SetEnumerator on nil receiver panicked: %v", r)
+		}
+	}()
+	var h *SidecarHealth
+	h.SetEnumerator(StateStarting, "", nil)
+}
+
+// TestSetEnumeratorNotifiesSubscribers asserts the pub/sub wake-up
+// invariant SetEnumerator inherits from the pattern SetManaged /
+// SetGuardrail / etc. use — a change to the enumerator's state
+// wakes any registered subscriber exactly once.
+func TestSetEnumeratorNotifiesSubscribers(t *testing.T) {
+	h := NewSidecarHealth()
+	ch, cancel := h.Subscribe()
+	defer cancel()
+
+	h.SetEnumerator(StateStarting, "", nil)
+
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SetEnumerator did not wake subscriber within 500ms")
+	}
+}
+
+// TestSetEnumeratorJSONShape asserts the field appears in the
+// wire-level JSON payload as `enumerator` (lower-case, matches the
+// json tag) — a rename here would break every downstream dashboard
+// or CI check keyed on the field.
+func TestSetEnumeratorJSONShape(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetEnumerator(StateRunning, "", nil)
+	raw, err := json.Marshal(h.Snapshot())
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if !stringContains(string(raw), `"enumerator":`) {
+		t.Fatalf("snapshot JSON missing `enumerator` key:\n%s", string(raw))
+	}
+}
+
+// TestSetEnumeratorDeepCopiesDetails is the regression pin CR
+// spec-005:PRRT_kwDORuAK-s6atyfQ asks for: mutating the caller's
+// input map after SetEnumerator MUST NOT mutate the stored
+// subsystem health; mutating the Snapshot()-returned pointer's
+// Details map MUST NOT mutate the stored subsystem health either.
+// Without the boundary-copy discipline, a concurrent JSON marshal
+// and a live setter race on the same map header.
+func TestSetEnumeratorDeepCopiesDetails(t *testing.T) {
+	h := NewSidecarHealth()
+
+	// Round 1: input-map mutation.
+	details := map[string]interface{}{"cycle_count": int64(1)}
+	h.SetEnumerator(StateRunning, "", details)
+	// Caller mutates the map they retained.
+	details["cycle_count"] = int64(99)
+	details["injected"] = "attacker-controlled"
+
+	got := h.Snapshot().Enumerator
+	if got == nil {
+		t.Fatal("Enumerator nil after SetEnumerator")
+	}
+	if got.Details["cycle_count"] != int64(1) {
+		t.Fatalf("input-map mutation leaked: cycle_count = %v, want int64(1)", got.Details["cycle_count"])
+	}
+	if _, present := got.Details["injected"]; present {
+		t.Fatalf("input-map mutation leaked: injected key present in stored details: %+v", got.Details)
+	}
+
+	// Round 2: snapshot-return mutation.
+	snap := h.Snapshot()
+	if snap.Enumerator == nil {
+		t.Fatal("second Snapshot() returned nil Enumerator")
+	}
+	snap.Enumerator.Details["cycle_count"] = int64(-1)
+	snap.Enumerator.Details["poisoned"] = true
+
+	// A fresh snapshot must still show the original value.
+	fresh := h.Snapshot()
+	if fresh.Enumerator.Details["cycle_count"] != int64(1) {
+		t.Fatalf("snapshot mutation leaked: cycle_count = %v, want int64(1)", fresh.Enumerator.Details["cycle_count"])
+	}
+	if _, present := fresh.Enumerator.Details["poisoned"]; present {
+		t.Fatalf("snapshot mutation leaked: poisoned key present: %+v", fresh.Enumerator.Details)
+	}
 }

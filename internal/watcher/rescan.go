@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -152,6 +153,28 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
 
 	for _, dir := range w.skillDirs {
+		if hermesskills.IsRoot(dir) {
+			entries, err := hermesskills.Discover(dir, hermesskills.DefaultDirectoryLimit)
+			if err == nil {
+				for _, entry := range entries {
+					if entry.Bundled {
+						continue
+					}
+					targets = append(targets, InstallEvent{
+						Type:      InstallSkill,
+						Name:      entry.Name,
+						Path:      entry.Path,
+						Connector: "hermes",
+						Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
+			// Discovery errors deliberately fall through to the ordinary
+			// direct-child scan. Failure to prove vendor provenance must not
+			// turn an untrusted category tree into a scanner bypass.
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate Hermes skills dir %s: %v\n", dir, err)
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[rescan] enumerate skills dir %s: %v\n", dir, err)
@@ -161,16 +184,36 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
+			path := filepath.Join(dir, e.Name())
+			if isBundledSkillWatchPath(path) {
+				continue
+			}
+			if watcherConnectorName(w.cfg) == "claudecode" &&
+				isClaudeSkillsPlugin(path) {
+				continue
+			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallSkill,
 				Name:      e.Name(),
-				Path:      filepath.Join(dir, e.Name()),
+				Path:      path,
 				Timestamp: time.Now().UTC(),
 			})
 		}
 	}
 
 	for _, dir := range w.pluginDirs {
+		if watcherConnectorName(w.cfg) == "claudecode" {
+			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
+				targets = append(targets, InstallEvent{
+					Type:      InstallPlugin,
+					Name:      claudeWatcherPluginIdentity(dir, plugin),
+					Path:      plugin,
+					Connector: "claudecode",
+					Timestamp: time.Now().UTC(),
+				})
+			}
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
@@ -195,7 +238,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		return targets
 	}
 	for _, server := range servers {
-		if strings.TrimSpace(server.Name) == "" {
+		if strings.TrimSpace(server.Name) == "" || server.Bundled {
 			continue
 		}
 		targets = append(targets, InstallEvent{
@@ -209,12 +252,132 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	return targets
 }
 
+func isClaudeSkillsPlugin(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".claude-plugin", "plugin.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+func claudeSkillsPluginIdentity(path string) string {
+	fallback := filepath.Base(path) + "@skills-dir"
+	manifestPath := filepath.Join(path, ".claude-plugin", "plugin.json")
+	info, err := os.Lstat(manifestPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1_048_576 {
+		return fallback
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fallback
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return fallback
+	}
+	name := strings.TrimSpace(manifest.Name)
+	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fallback
+	}
+	return name + "@skills-dir"
+}
+
+func claudeWatcherPluginIdentity(root, path string) string {
+	root = filepath.Clean(root)
+	if strings.EqualFold(filepath.Base(root), "skills") {
+		return claudeSkillsPluginIdentity(path)
+	}
+	if strings.EqualFold(filepath.Base(root), "cache") {
+		relative, err := filepath.Rel(root, path)
+		if err == nil {
+			parts := strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			})
+			if len(parts) == 3 {
+				return parts[1] + "@" + parts[0]
+			}
+		}
+	}
+	return filepath.Base(path)
+}
+
+func enumerateClaudeWatcherPlugins(root string) []string {
+	root = filepath.Clean(root)
+	if strings.EqualFold(filepath.Base(root), "skills") {
+		var out []string
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil
+		}
+		for _, entry := range entries {
+			path := filepath.Join(root, entry.Name())
+			if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") &&
+				isClaudeSkillsPlugin(path) {
+				out = append(out, path)
+			}
+		}
+		return out
+	}
+	if !strings.EqualFold(filepath.Base(root), "cache") {
+		return nil
+	}
+
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return filepath.SkipAll
+			}
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return filepath.SkipDir
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return filepath.SkipDir
+		}
+		depth := 0
+		if relative != "." {
+			depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			}))
+		}
+		if depth > 3 {
+			return filepath.SkipDir
+		}
+		// Anthropic's cache boundary is
+		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
+		// exactly that directory and never let a nested dependency manifest
+		// manufacture a second plugin identity.
+		if depth == 3 {
+			out = append(out, path)
+			return filepath.SkipDir
+		}
+		if entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+		switch strings.ToLower(entry.Name()) {
+		case "node_modules", "__pycache__":
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return out
+}
+
 // rescanTarget snapshots a single target, decides whether a fresh scan is
 // warranted (content drift or scanner-fingerprint change), and only then runs
 // the scanner, diffs findings, emits drift alerts, and refreshes the baseline.
 // Targets whose content and scanner fingerprint are unchanged are skipped
 // without invoking the scanner or writing a scan_results row.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
+	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
+		return rescanSkipped
+	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
 		return rescanSkipped
@@ -448,7 +611,7 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"llm_base_url="+llm.BaseURL,
 		)
 	case InstallPlugin:
-		bin := w.cfg.Scanners.PluginScanner
+		bin := scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner).BinaryPath
 		llm := w.cfg.ResolveLLM("scanners.plugin")
 		parts = append(parts,
 			"binary="+bin,

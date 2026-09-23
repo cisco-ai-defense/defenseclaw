@@ -226,6 +226,14 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
+		// Fail-open surface: managed_enterprise's local detectors are
+		// demoted, so a nil AID verdict means this inspection ends
+		// with no enforceable decision. Every occurrence must be
+		// operator-visible per the "no silent skip" contract — the
+		// metric-only accounting below is retained for /health and
+		// long-term dashboards, but the stderr line is what a human
+		// tailing gateway.err.log during triage will actually see.
+		logManagedAIDSkip(string(failOpenReason), "hookAIDInspect returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
 		verdict := &ToolInspectVerdict{
 			Action:                   "allow",
 			Severity:                 "NONE",
@@ -520,6 +528,12 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		Connector:          req.Connector,
 		EnforcementCapable: true,
 	}
+	if trustedShimArgvTool(req.Tool) {
+		// Authenticated PATH shims have one closed argv envelope. If that
+		// envelope is malformed, extended, or names another executable, raw
+		// fallback findings remain useful telemetry but cannot authorize a deny.
+		action.EnforcementCapable = false
+	}
 	if argv, ok := parseTrustedShimArgv(req.Tool, req.Args); ok {
 		action.Input = actionfacts.Input{
 			Tool:       req.Tool,
@@ -527,6 +541,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 			ActiveHome: trustedSameHostHome(),
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
+		action.EnforcementCapable = true
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 }
@@ -536,9 +551,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 // deliberately rejected so inspectToolPolicyCtx keeps its non-authoritative
 // Args projection and owner-local regex fallback.
 func parseTrustedShimArgv(tool string, raw json.RawMessage) ([]string, bool) {
-	switch tool {
-	case "curl", "wget", "ssh", "nc", "pip", "npm":
-	default:
+	if !trustedShimArgvTool(tool) {
 		return nil, false
 	}
 
@@ -571,6 +584,15 @@ func parseTrustedShimArgv(tool string, raw json.RawMessage) ([]string, bool) {
 		return nil, false
 	}
 	return argv, true
+}
+
+func trustedShimArgvTool(tool string) bool {
+	switch tool {
+	case "curl", "wget", "ssh", "nc", "pip", "npm":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *APIServer) inspectTrustedToolPolicyCtx(
@@ -631,8 +653,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			if !isWriteToolName(strings.ToLower(req.Tool)) {
 				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 			}
-			if cg := a.runCodeGuardOnArgs(req); len(cg) > 0 {
-				return a.codeGuardOnlyVerdict(req, cg)
+			if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
+				return a.codeGuardOnlyVerdict(req, cg, true, action.EnforcementCapable)
 			}
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
@@ -644,6 +666,17 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// The calling adapter established this as a trusted action. Structured
 	// semantic evaluation and owner-local fallback share one immutable
 	// connector generation.
+	priorTelemetryRecorder := action.recordTelemetry
+	action.recordTelemetry = func(observation trustedActionTelemetry) {
+		if priorTelemetryRecorder != nil {
+			priorTelemetryRecorder(observation)
+		}
+		a.recordParserUncertaintyMetricV8(
+			ctx,
+			firstNonEmpty(req.Connector, action.Connector),
+			observation.ParserUncertaintyCount,
+		)
+	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
 
 	// CodeGuard: scan file content for any file-write tool.
@@ -656,10 +689,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// recognised file-write alias (case-insensitive).
 	tool := strings.ToLower(toolName)
 	isWriteTool := isWriteToolName(tool)
-	var cgFindings []scanner.Finding
+	var cgScan codeGuardArgsScan
 	if isWriteTool {
-		cgFindings = a.runCodeGuardOnArgs(req)
+		cgScan = a.runCodeGuardOnArgsWithProvenance(req)
 	}
+	cgFindings := codeGuardRuleFindings(cgScan, true, action.EnforcementCapable)
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 && len(cgFindings) == 0 {
@@ -673,31 +707,22 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 	} else {
 		severity := HighestSeverity(ruleFindings)
-		confidence := HighestConfidence(ruleFindings, severity)
 		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
+		severity, enforceableSeverity = aggregateCodeGuardSeverity(
+			cgFindings,
+			severity,
+			enforceableSeverity,
+		)
+		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		for _, cf := range cgFindings {
-			if cf.Severity == scanner.SeverityCritical {
-				severity = "CRITICAL"
-				enforceableSeverity = "CRITICAL"
-				break
-			}
-			if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
-				severity = "HIGH"
-			}
-			if cf.Severity == scanner.SeverityHigh && enforceableSeverity != "CRITICAL" {
-				enforceableSeverity = "HIGH"
-			}
-		}
-
-		runtimeAction := guardrailActionAllow
+		runtimeAction := guardrailRuntimeActionForFindings(
+			a.scannerCfg, req.Connector, ruleFindings, true,
+		)
 		if enforceableSeverity != "NONE" {
-			runtimeAction = guardrailRuntimeActionForConnector(
-				a.scannerCfg,
-				req.Connector,
-				enforceableSeverity,
-				true,
+			codeGuardAction := guardrailRuntimeActionForConnector(
+				a.scannerCfg, req.Connector, enforceableSeverity, true,
 			)
+			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
@@ -710,7 +735,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 
 		findingStrs := FindingStrings(ruleFindings)
 		for _, cf := range cgFindings {
-			findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
+			findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.RuleID, cf.Title))
 		}
 
 		verdict = &ToolInspectVerdict{
@@ -719,7 +744,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Confidence:       confidence,
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
-			DetailedFindings: append(ruleFindings, codeGuardRuleFindings(cgFindings)...),
+			DetailedFindings: append(ruleFindings, cgFindings...),
 		}
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
@@ -736,15 +761,28 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// Judge lane (J3-3b): forward the tool args to the LLM judge for
 	// connectors opted into the tool_call direction via
 	// guardrail.judge.hook_connectors + EffectiveStrategy("tool_call").
-	// Tool-call args are agent-initiated input, so they are judged under
-	// the "prompt" direction (injection + exfil). The shipped default
-	// (regex_only) returns nil and no LLM round-trip happens. Runs after
-	// the regex/AID lanes so regex_judge can skip the round-trip when the
-	// local lanes already condemned the call.
+	// Tool-call args use the dedicated tool-injection judge. Sending this
+	// surface through the ordinary prompt judges loses the tool's semantic
+	// boundary: it can mistake source-code strings for instructions while
+	// missing destructive or exfiltrating command effects. The shipped
+	// default (regex_only) returns nil and no LLM round-trip happens. Runs
+	// after the regex/AID lanes so regex_judge can skip the round-trip when
+	// the local lanes already condemned the call.
 	if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
+}
+
+// highestInspectConfidence keeps verdict confidence aligned with the visible
+// finding that established the final severity, regardless of whether that
+// finding came from the rule scanner or CodeGuard.
+func highestInspectConfidence(ruleFindings, codeGuardFindings []RuleFinding, severity string) float64 {
+	confidence := HighestConfidence(ruleFindings, severity)
+	if codeGuardConfidence := HighestConfidence(codeGuardFindings, severity); codeGuardConfidence > confidence {
+		confidence = codeGuardConfidence
+	}
+	return confidence
 }
 
 // unmarshalArgsObject decodes a tool-call args payload that may
@@ -790,12 +828,21 @@ func isWriteToolName(tool string) bool {
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
+	return a.runCodeGuardOnArgsWithProvenance(req).findings
+}
+
+type codeGuardArgsScan struct {
+	findings []scanner.Finding
+	complete bool
+}
+
+func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) codeGuardArgsScan {
 	// managed_enterprise: local content scanners (CodeGuard/ClawShield)
 	// are disabled — AID is authoritative. Defense-in-depth: short-circuit
 	// here too so no other caller re-introduces CodeGuard blocking in
 	// managed mode (e.g. the allow-listed write-tool path).
 	if a.managedAIDOnly() {
-		return nil
+		return codeGuardArgsScan{}
 	}
 	// the managed inspect-tool hook serializes
 	// TOOL_INPUT with `jq -n --arg args "$TOOL_INPUT"`, which yields
@@ -805,37 +852,20 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 	// any error, so the hook path silently skipped CodeGuard. We
 	// first try the object form; on failure we attempt to interpret
 	// req.Args as a JSON string and unmarshal its contents.
-	parsed, ok := unmarshalArgsObject(req.Args)
-	if !ok {
-		return nil
+	parsed, structurallyComplete := decodeCodeGuardArgsObject(req.Args)
+	if parsed == nil {
+		return codeGuardArgsScan{}
 	}
+	bestEffort := codeGuardBestEffortObject(parsed)
 
-	filePath, _ := parsed["path"].(string)
-	content, _ := parsed["content"].(string)
-	if content == "" {
-		content, _ = parsed["new_string"].(string)
-	}
+	filePath, pathComplete := exactCodeGuardStringField(parsed, bestEffort, "path", "file_path", "filePath")
+	content, contentComplete := exactCodeGuardStringField(parsed, bestEffort, "content", "new_string", "text", "body")
 	if filePath == "" || content == "" {
-		// native aliases use different field names.
-		if filePath == "" {
-			filePath, _ = parsed["file_path"].(string)
-		}
-		if filePath == "" {
-			filePath, _ = parsed["filePath"].(string)
-		}
-		if content == "" {
-			content, _ = parsed["text"].(string)
-		}
-		if content == "" {
-			content, _ = parsed["body"].(string)
-		}
-	}
-	if filePath == "" || content == "" {
-		return nil
+		return codeGuardArgsScan{}
 	}
 
 	if !scanner.IsCodeFile(filepath.Ext(filePath)) {
-		return nil
+		return codeGuardArgsScan{}
 	}
 
 	rulesDir := ""
@@ -843,56 +873,204 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
 	cg := scanner.NewCodeGuardScanner(rulesDir)
-	return cg.ScanContent(filePath, content)
+	scan := cg.ScanContentWithProvenance(filePath, content)
+	return codeGuardArgsScan{
+		findings: scan.Findings(),
+		complete: structurallyComplete && pathComplete && contentComplete && scan.Complete(),
+	}
 }
+
+// decodeCodeGuardArgsObject preserves every field occurrence so proof-relevant
+// aliases can be checked for ambiguity. Duplicate unrelated metadata is not a
+// reason to discard otherwise exact path/content proof.
+func decodeCodeGuardArgsObject(raw json.RawMessage) (map[string][]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		raw = json.RawMessage(encoded)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, false
+	}
+	fields := make(map[string][]json.RawMessage)
+	complete := true
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		fields[name] = append(fields[name], append(json.RawMessage(nil), value...))
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		complete = false
+	}
+	return fields, complete
+}
+
+func codeGuardBestEffortObject(fields map[string][]json.RawMessage) map[string]interface{} {
+	result := make(map[string]interface{}, len(fields))
+	for name, values := range fields {
+		if len(values) == 0 {
+			continue
+		}
+		var value interface{}
+		if err := json.Unmarshal(values[len(values)-1], &value); err == nil {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func exactCodeGuardStringField(
+	raw map[string][]json.RawMessage,
+	bestEffort map[string]interface{},
+	names ...string,
+) (string, bool) {
+	present := 0
+	value := ""
+	exact := ""
+	complete := true
+	for _, name := range names {
+		if candidate, ok := bestEffort[name].(string); ok && candidate != "" {
+			value = candidate
+			break
+		}
+	}
+	for _, name := range names {
+		values := raw[name]
+		if len(values) == 0 {
+			continue
+		}
+		present += len(values)
+		for _, encoded := range values {
+			var candidate string
+			if err := json.Unmarshal(encoded, &candidate); err != nil || candidate == "" {
+				complete = false
+				continue
+			}
+			if exact == "" {
+				exact = candidate
+			} else if candidate != exact {
+				complete = false
+			}
+		}
+	}
+	return value, complete && present > 0 && value != "" && value == exact
+}
+
+// CodeGuard reports exact binary matches rather than probabilistic scores. Its
+// scanner findings intentionally leave confidence unset; the gateway projection
+// makes that binary certainty explicit without changing enforcement provenance.
+const codeGuardBinaryConfidence = 1.0
 
 // codeGuardOnlyVerdict builds a verdict from CodeGuard findings alone, for an
 // allow-listed WRITE tool whose content CodeGuard flagged. The allow skipped
 // rule/AID/judge scanning, but CodeGuard is retained (D2); severity and action
 // mirror the main inspectToolPolicy path with no rule findings.
-func (a *APIServer) codeGuardOnlyVerdict(req *ToolInspectRequest, cgFindings []scanner.Finding) *ToolInspectVerdict {
-	severity := "NONE"
-	for _, cf := range cgFindings {
-		if cf.Severity == scanner.SeverityCritical {
-			severity = "CRITICAL"
-			break
-		}
-		if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
-			severity = "HIGH"
-		}
+func (a *APIServer) codeGuardOnlyVerdict(
+	req *ToolInspectRequest,
+	scan codeGuardArgsScan,
+	trustedBoundary bool,
+	enforcementCapable bool,
+) *ToolInspectVerdict {
+	cgFindings := codeGuardRuleFindings(scan, trustedBoundary, enforcementCapable)
+	severity, enforceableSeverity := aggregateCodeGuardSeverity(
+		cgFindings,
+		"NONE",
+		"NONE",
+	)
+	action := guardrailActionAllow
+	if enforceableSeverity != "NONE" {
+		action = guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
 	}
-	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
-		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
+		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.RuleID, cf.Title))
+	}
+	confidence := 0.0
+	if len(cgFindings) > 0 {
+		confidence = codeGuardBinaryConfidence
 	}
 	return &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
-		Confidence:       1.0,
+		Confidence:       confidence,
 		Reason:           fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
 		Findings:         findingStrs,
-		DetailedFindings: codeGuardRuleFindings(cgFindings),
+		DetailedFindings: cgFindings,
 	}
 }
 
-func codeGuardRuleFindings(findings []scanner.Finding) []RuleFinding {
-	if len(findings) == 0 {
+// aggregateCodeGuardSeverity folds visible and enforcement-eligible CodeGuard
+// findings independently. A detection-only CRITICAL finding remains visible at
+// CRITICAL without hiding a lower-severity finding that can actually enforce.
+func aggregateCodeGuardSeverity(
+	findings []RuleFinding,
+	severity string,
+	enforceableSeverity string,
+) (string, string) {
+	for _, finding := range findings {
+		findingSeverity := strings.ToUpper(strings.TrimSpace(finding.Severity))
+		if severityRank[findingSeverity] > severityRank[severity] {
+			severity = findingSeverity
+		}
+		if finding.contributesToEnforcement() &&
+			severityRank[findingSeverity] > severityRank[enforceableSeverity] {
+			enforceableSeverity = findingSeverity
+		}
+	}
+	return severity, enforceableSeverity
+}
+
+func codeGuardRuleFindings(
+	scan codeGuardArgsScan,
+	trustedBoundary bool,
+	enforcementCapable bool,
+) []RuleFinding {
+	if len(scan.findings) == 0 {
 		return nil
 	}
-	result := make([]RuleFinding, 0, len(findings))
-	for _, finding := range findings {
+	result := make([]RuleFinding, 0, len(scan.findings))
+	for _, finding := range scan.findings {
 		ruleID := firstNonEmpty(finding.RuleID, finding.ID)
-		if ruleID == "" || strings.TrimSpace(finding.Title) == "" {
+		if ruleID == "" {
 			continue
 		}
-		result = append(result, RuleFinding{
-			RuleID: ruleID, Title: finding.Title, Severity: string(finding.Severity),
-			Confidence: finding.Confidence, Tags: append([]string(nil), finding.Tags...),
+		title := strings.TrimSpace(finding.Title)
+		builtinMatch := finding.CodeGuardBuiltinMatch(ruleID)
+		if title == "" {
+			title = ruleID
+			builtinMatch = false
+		}
+		converted := RuleFinding{
+			RuleID: ruleID, Title: title, Severity: string(finding.Severity),
+			Confidence: codeGuardBinaryConfidence, Tags: append([]string(nil), finding.Tags...),
 			ToolCapabilityClass: finding.ToolCapabilityClass,
-		})
+		}.withTrustedActionProof(newExactCodeGuardFindingProof(
+			ruleID,
+			trustedBoundary,
+			scan.complete,
+			builtinMatch,
+		))
+		result = append(result, converted)
 	}
-	return result
+	return applyTrustedActionProofBoundary(result, enforcementCapable)
 }
 
 // inspectMessageContent scans outbound message content for secrets, PII,
@@ -1076,9 +1254,8 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 //     tool-call args, "completion" for tool output / completions,
 //     "prompt" for prompts. Maps to the --detection-strategy-* flags
 //     fu/setup writes onto `setup guardrail`.
-//   - judgeDirection is the proxy-lane vocabulary RunJudges speaks:
-//     "prompt" runs injection + exfil (+ PII-prompt); "completion" the
-//     PII-completion judge.
+//   - judgeDirection is the proxy-lane vocabulary RunJudges speaks for
+//     message/tool-result content. Tool calls bypass it and use RunToolJudge.
 //
 // The judge round-trip is bounded by its OWN timeout (JudgeConfig.HookTimeout,
 // else defaultHookJudgeTimeout) derived from the supplied parent ctx —
@@ -1146,7 +1323,12 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
-	v := a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+	var v *ScanVerdict
+	if strings.EqualFold(strategyDirection, "tool_call") {
+		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
+	} else {
+		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+	}
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather

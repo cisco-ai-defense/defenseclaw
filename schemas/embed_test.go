@@ -121,36 +121,70 @@ func TestGatewayEventEnvelopeInternalCopyMatchesCanonical(t *testing.T) {
 	}
 }
 
-func TestGatewayEventEnvelopeDocumentsModelProvenanceAuthority(t *testing.T) {
+// TestTelemetryV8DocumentsModelProvenanceAuthority pins the tri-state contract
+// for the local-model derivation flags. It used to assert against the v7
+// gateway-event envelope's AIDiscoveryPayload; that payload is gone, but the
+// contract it protected is real and now lives in the v8 registry: a consumer
+// that reads absent as false would report an unquantized model for one whose
+// quantization was simply never observed.
+func TestTelemetryV8DocumentsModelProvenanceAuthority(t *testing.T) {
 	t.Parallel()
-	var root map[string]any
-	if err := json.Unmarshal(GatewayEventEnvelopeSchema(), &root); err != nil {
-		t.Fatalf("decode gateway envelope schema: %v", err)
+	raw, err := os.ReadFile("telemetry/v8/operations.yaml")
+	if err != nil {
+		t.Fatalf("read operations.yaml: %v", err)
 	}
-	definitions := schemaMap(t, root, "$defs")
-	discovery := schemaMap(t, definitions, "AIDiscoveryPayload")
-	discoveryProperties := schemaMap(t, discovery, "properties")
-	model := schemaMap(t, discoveryProperties, "model")
-	modelProperties := schemaMap(t, model, "properties")
-	provenance := schemaMap(t, modelProperties, "provenance")
-	provenanceProperties := schemaMap(t, provenance, "properties")
+	var doc struct {
+		Attributes []struct {
+			ID            string `yaml:"id"`
+			Normalization struct {
+				Notes     string `yaml:"notes"`
+				Overrides struct {
+					Enum []string `yaml:"enum"`
+				} `yaml:"overrides"`
+			} `yaml:"normalization"`
+		} `yaml:"attributes"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode operations.yaml: %v", err)
+	}
+	notes := map[string]string{}
+	enums := map[string][]string{}
+	for _, attr := range doc.Attributes {
+		notes[attr.ID] = attr.Normalization.Notes
+		enums[attr.ID] = attr.Normalization.Overrides.Enum
+	}
 
-	for _, name := range []string{"quantized", "distilled"} {
-		description, _ := schemaMap(t, provenanceProperties, name)["description"].(string)
-		if !strings.Contains(description, "Authoritative when non-null") ||
-			!strings.Contains(description, "null means unknown") {
-			t.Errorf("%s authority/null contract is not explicit: %q", name, description)
+	for _, id := range []string{
+		"defenseclaw.ai.model.provenance.quantized",
+		"defenseclaw.ai.model.provenance.distilled",
+	} {
+		note, ok := notes[id]
+		if !ok {
+			t.Fatalf("%s is absent from the v8 registry", id)
+		}
+		for _, phrase := range []string{"tri-state", "absent means unknown"} {
+			if !strings.Contains(note, phrase) {
+				t.Errorf("%s authority/absence contract is missing %q: %q", id, phrase, note)
+			}
 		}
 	}
-	derivationDescription, _ := schemaMap(t, provenanceProperties, "derivation")["description"].(string)
-	for _, phrase := range []string{
-		"Normalized summary of the authoritative flags",
-		"distilled+quantized means both are true",
-		"null means neither flag is true",
-		"must not infer false from null",
-	} {
-		if !strings.Contains(derivationDescription, phrase) {
-			t.Errorf("derivation contract is missing %q: %q", phrase, derivationDescription)
+
+	const derivation = "defenseclaw.ai.model.provenance.derivation"
+	note, ok := notes[derivation]
+	if !ok {
+		t.Fatalf("%s is absent from the v8 registry", derivation)
+	}
+	if !strings.Contains(note, "at least one authoritative derivation flag is true") {
+		t.Errorf("derivation presence contract is not explicit: %q", note)
+	}
+	want := []string{"distilled", "quantized", "distilled+quantized"}
+	got := enums[derivation]
+	if len(got) != len(want) {
+		t.Fatalf("derivation enum = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("derivation enum = %v, want %v", got, want)
 		}
 	}
 }
@@ -298,10 +332,10 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"privacy",
 		"ai_discovery",
 		"application_protection",
+		"acp",
 		"notifications",
 		"managed",
 		"routing",
-		"training",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))
@@ -483,7 +517,7 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			"local": map[string]any{
 				"path":              "~/.defenseclaw/audit.db",
 				"judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-				"retention_days":    90,
+				"retention_days":    7,
 			},
 			"destinations": []any{
 				map[string]any{
@@ -562,6 +596,136 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefenseClawConfigV8RoutingSchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	schema := compileConfigV8Schema(t)
+
+	t.Run("valid routing block", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":   true,
+				"version":   "0.3.0",
+				"port":      8888,
+				"algorithm": "hybrid",
+				"models": []any{
+					map[string]any{
+						"name":         "reasoning",
+						"provider":     "anthropic",
+						"model":        "claude-sonnet-4-6",
+						"api_key_env":  "ANTHROPIC_API_KEY",
+						"capabilities": []any{"reasoning", "analysis"},
+					},
+				},
+				"signals": map[string]any{
+					"keywords": []any{
+						map[string]any{
+							"name":     "complex_task",
+							"keywords": []any{"analyze", "compare"},
+							"operator": "OR",
+						},
+					},
+				},
+				"decisions": []any{
+					map[string]any{
+						"name":       "reasoning_route",
+						"priority":   100,
+						"operator":   "AND",
+						"conditions": []any{map[string]any{"type": "keyword", "name": "complex_task"}},
+						"model_refs": []any{"reasoning"},
+					},
+				},
+			},
+		}
+		if err := schema.Validate(doc); err != nil {
+			t.Fatalf("valid routing config rejected: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "valid Ollama colon model identifier", model: "library/qwen2.5:0.5b"},
+		{name: "valid 256 byte model identifier", model: strings.Repeat("a", 256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "local",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err != nil {
+				t.Fatalf("valid routing model rejected: %v", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "empty model identifier", model: ""},
+		{name: "model identifier with spaces", model: "qwen 2.5:0.5b"},
+		{name: "oversized model identifier", model: strings.Repeat("a", 257)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "invalid",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err == nil {
+				t.Fatalf("routing config with model %q should be rejected", tc.model)
+			}
+		})
+	}
+
+	t.Run("invalid port zero", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled": true,
+				"port":    0,
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with port 0 should be rejected")
+		}
+	})
+
+	t.Run("unknown property in routing", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":          true,
+				"unknown_property": "bad",
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with unknown property should be rejected")
+		}
+	})
 }
 
 func TestDefenseClawConfigV8CurrentNonObservabilitySectionsValidate(t *testing.T) {

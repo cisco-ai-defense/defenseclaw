@@ -59,6 +59,7 @@ from typing import TypeAlias
 import yaml
 
 from defenseclaw.models import Finding
+from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 
 _log = logging.getLogger(__name__)
 
@@ -412,6 +413,19 @@ class RulePackOverlayScanner:
         return result
 
     def _apply_overlay(self, result, target, kwargs) -> None:
+        # The plugin scanner's exact self-identity exclusion also covers the
+        # optional rule-pack overlay. Without this guard the base scanner would
+        # return clean while the overlay immediately re-scanned the same
+        # bundled runtime and recreated the self-hits.
+        if (
+            isinstance(target, str)
+            and not kwargs.get("include_self", False)
+            and is_first_party_self_target(
+                target,
+                trusted_paths=kwargs.get("trusted_self_paths") or (),
+            )
+        ):
+            return
         new: list[Finding]
         if isinstance(target, str) and os.path.exists(target):
             new = self.pack.scan_path(target)

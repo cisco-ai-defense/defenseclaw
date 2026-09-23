@@ -43,6 +43,18 @@ const (
 	ObservabilityV8MaxResourceKeyBytes     = 128
 	ObservabilityV8MaxResourceValueBytes   = 1_024
 	ObservabilityV8MaxResourceTotalBytes   = 16 * 1_024
+	// ObservabilityV8DefaultRetentionDays is the rolling window applied when
+	// observability.local.retention_days is unset. The local store is an
+	// operational buffer for triage and correlation, not the system of record
+	// — durable history belongs at a configured destination. A week covers the
+	// realistic lookback while bounding retained history in a database that
+	// reached 26 GB and 1.9M events under the previous 90-day default. SQLite
+	// reuses freed pages, but the database file does not shrink automatically.
+	// Must match the canonical
+	// default in schemas/config/v8/defenseclaw-config.schema.json and
+	// cli/defenseclaw/observability/v8_config.py, which assert against it.
+	ObservabilityV8DefaultRetentionDays = 7
+
 	// ObservabilityV8MaxRetentionDays is the largest whole-day retention
 	// period that can be represented as a time.Duration without overflow.
 	ObservabilityV8MaxRetentionDays = int((1<<63 - 1) / int64(24*time.Hour))

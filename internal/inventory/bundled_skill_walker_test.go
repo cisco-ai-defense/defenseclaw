@@ -17,6 +17,8 @@
 package inventory
 
 import (
+	"crypto/md5"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,8 +41,8 @@ import (
 func TestSignalFromDirectoryChildrenExpandsBundledSkillContainer(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	skillsRoot := filepath.Join(root, "skills")
+	home := t.TempDir()
+	skillsRoot := filepath.Join(home, ".codex", "skills")
 	if err := os.MkdirAll(filepath.Join(skillsRoot, ".system", "hello"), 0o755); err != nil {
 		t.Fatalf("prepare bundled hello: %v", err)
 	}
@@ -57,7 +59,7 @@ func TestSignalFromDirectoryChildrenExpandsBundledSkillContainer(t *testing.T) {
 		t.Fatalf("prepare user custom-review: %v", err)
 	}
 
-	s := &ContinuousDiscoveryService{}
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
 	sig := AISignature{ID: "codex"}
 	signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", skillsRoot)
 
@@ -113,6 +115,97 @@ func TestSignalFromDirectoryChildrenExpandsBundledSkillContainer(t *testing.T) {
 	}
 	if userCount != 2 {
 		t.Fatalf("user skill_entry count: got %d, want 2 (hello + custom-review)", userCount)
+	}
+}
+
+func TestSignalFromDirectoryChildrenKeepsArbitrarySystemChildrenUserOwned(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	skillsRoot := filepath.Join(home, ".agents", "skills")
+	operatorSkill := filepath.Join(skillsRoot, ".system", "operator-skill")
+	if err := os.MkdirAll(operatorSkill, 0o755); err != nil {
+		t.Fatalf("prepare operator skill: %v", err)
+	}
+
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
+	signal := s.signalFromDirectoryChildren(AISignature{ID: "codex"}, SignalSkill, "skill", skillsRoot)
+
+	var entries []AIEvidence
+	for _, ev := range signal.Evidence {
+		if ev.Type == "skill_entry" {
+			entries = append(entries, ev)
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("skill entries = %#v, want one expanded operator child", entries)
+	}
+	if entries[0].Basename != "operator-skill" || entries[0].Origin != "user" || entries[0].Bundled {
+		t.Fatalf("operator .system child provenance = %#v, want user-owned", entries[0])
+	}
+}
+
+func TestCodexHomeOverrideDoesNotTrustDefaultHomeSystemContainer(t *testing.T) {
+	home := t.TempDir()
+	override := filepath.Join(t.TempDir(), "codex-override")
+	t.Setenv("CODEX_HOME", override)
+
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
+	defaultContainer := filepath.Join(home, ".codex", "skills", ".system")
+	overrideContainer := filepath.Join(override, "skills", ".system")
+	if s.isCodexBundledSkillContainer(defaultContainer) {
+		t.Fatal("default home .system remained bundled after CODEX_HOME override")
+	}
+	if !s.isCodexBundledSkillContainer(overrideContainer) {
+		t.Fatal("exact CODEX_HOME .system was not classified bundled")
+	}
+}
+
+func TestSignalFromDirectoryChildrenExpandsHermesNestedSkillsWithProvenance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HERMES_HOME", home)
+	root := filepath.Join(home, "skills")
+	bundled := filepath.Join(root, "productivity", "vendor-docs")
+	sourceBundled := filepath.Join(home, "hermes-agent", "skills", "productivity", "vendor-docs")
+	user := filepath.Join(root, "operator-skill")
+	bundledMarker := []byte("---\nname: vendor-docs\n---\n")
+	for path, marker := range map[string][]byte{
+		bundled:       bundledMarker,
+		sourceBundled: bundledMarker,
+		user:          []byte("---\nname: operator-skill\n---\n"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("prepare skill: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), marker, 0o600); err != nil {
+			t.Fatalf("write skill: %v", err)
+		}
+	}
+	origin := md5.Sum(append([]byte("SKILL.md"), bundledMarker...)) // #nosec G401 -- Hermes compatibility fixture.
+	if err := os.WriteFile(
+		filepath.Join(root, ".bundled_manifest"),
+		[]byte(fmt.Sprintf("vendor-docs:%x\n", origin)),
+		0o600,
+	); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, StoreRawLocalPaths: true}}
+	signal := s.signalFromDirectoryChildren(AISignature{ID: "hermes"}, SignalSkill, "skill", root)
+	entries := make(map[string]AIEvidence)
+	for _, evidence := range signal.Evidence {
+		if evidence.Type == "skill_entry" {
+			entries[evidence.Basename] = evidence
+		}
+	}
+	if _, ok := entries["productivity"]; ok {
+		t.Fatal("Hermes category directory was emitted as a skill")
+	}
+	if got := entries["vendor-docs"]; !got.Bundled || got.Origin != "bundled" || got.RawPath != bundled {
+		t.Fatalf("bundled Hermes evidence = %+v", got)
+	}
+	if got := entries["operator-skill"]; got.Bundled || got.Origin != "user" || got.RawPath != user {
+		t.Fatalf("user Hermes evidence = %+v", got)
 	}
 }
 

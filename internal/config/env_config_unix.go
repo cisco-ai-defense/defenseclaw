@@ -25,6 +25,15 @@ import (
 	"syscall"
 )
 
+// DefaultEnvConfigPath is the AVC drop location on Unix managed installs.
+// See the doc comment on the package-level declaration in env_config.go.
+const DefaultEnvConfigPath = "/opt/cisco/secureclient/defenseclaw/env_config.json"
+
+// ResolveDefaultEnvConfigPath returns the fixed AVC-owned Unix drop location.
+func ResolveDefaultEnvConfigPath() (string, error) {
+	return DefaultEnvConfigPath, nil
+}
+
 // openEnvConfig opens path with O_NOFOLLOW so a symlinked env_config
 // (attacker replacement between stat and read on Unix) is rejected up
 // front. The returned *os.File is used both for Fstat trust checks
@@ -39,14 +48,23 @@ func openEnvConfig(path string) (*os.File, error) {
 }
 
 // trustEnvConfigFilePlatform enforces the uid==0 + not-group/world-writable
-// check on Unix. When the process is not running as root (dev boxes,
-// unit tests, opensource local runs) the invariant can't hold, so we
-// skip the check and rely on the caller to only wire
-// LoadEnvConfigEndpoint on managed_enterprise where the sidecar runs
-// as uid 0.
+// check on Unix.
+//
+// A non-root caller cannot enforce the invariant (Fstat's uid check
+// still runs but comparing to 0 is only meaningful for a root caller),
+// so we FAIL CLOSED rather than silently return nil. This surfaces
+// misconfiguration where LoadEnvConfigEndpoint is wired in a mode that
+// isn't managed_enterprise-as-root, instead of trusting arbitrary file
+// content in that case. Tests that need to exercise the parse path
+// with a non-root euid must set DEFENSECLAW_ENV_CONFIG_SKIP_TRUST=1 —
+// trustEnvConfigFile short-circuits before reaching this helper (see
+// env_config.go).
 func trustEnvConfigFilePlatform(info os.FileInfo) error {
 	if os.Geteuid() != 0 {
-		return nil
+		return errors.New(
+			"env_config trust requires the caller to run as root; " +
+				"set DEFENSECLAW_ENV_CONFIG_SKIP_TRUST=1 for parser-only test fixtures",
+		)
 	}
 	sys, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

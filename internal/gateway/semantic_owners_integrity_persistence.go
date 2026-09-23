@@ -17,23 +17,70 @@
 package gateway
 
 import (
+	"encoding/base64"
+	"path"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-const semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+const (
+	semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+	// The owner binds this mutation shape to the exact active instruction file,
+	// using trusted case-sensitivity metadata captured when the file was loaded.
+	// Owner eligibility accepts only executing mutations (or static redirects
+	// that remain executing in the enforcement projection), so an unrelated
+	// sibling mutation cannot lend it authority.
+	semanticActiveAgentInstructionMutationExpression = `f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])`
+)
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
+	"integrity.posix_system_shell_replacement": {
+		prerequisite:     actionfacts.ExactPOSIXSystemShellReplacement,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"integrity.posix_system_interpreter_wrapper": {
+		prerequisite:     actionfacts.ExactPOSIXSystemInterpreterWrapper,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"integrity.dpkg_status_direct_mutation": {
+		prerequisite:     actionfacts.ExactPOSIXDPKGStatusMutation,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
+	},
+	"privilege.posix_non_root_uid_zero_account_write": {
+		prerequisite:     actionfacts.ExactPOSIXNonRootUIDZeroAccountWrite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"persistence.malicious_download_execute_payload": {
+		prerequisite:  actionfacts.ExactMaliciousPersistencePayload,
+		detectionOnly: true,
+	},
 	"CMD-CRONTAB": {
 		prerequisite:     crontabInstallPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		// Installing a schedule is dual-use. Without proof of the scheduled
+		// payload, this is a useful persistence signal but not sufficient
+		// evidence for a synchronous block.
+		detectionOnly: true,
 	},
 	"CMD-SYSTEMCTL": {
-		matchedOnlyAliases: []string{"CMD-WIN-REG-PERSIST"},
-		prerequisite:       schedulerInstallPrerequisite,
-		suppressFallback:   authoritativeSemanticSafeNegative,
+		prerequisite:     schedulerInstallPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
 	},
+	"CMD-WIN-REG-PERSIST": {
+		prerequisite:     windowsRegistryPersistencePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"COG-AGENTS-MD":    activeAgentInstructionMutationOwner("AGENTS.md"),
+	"COG-CLAUDE-MD":    activeAgentInstructionMutationOwner("CLAUDE.md"),
+	"COG-GATEWAY-JSON": activeAgentInstructionMutationOwner("gateway.json"),
+	"COG-IDENTITY":     activeAgentInstructionMutationOwner("IDENTITY.md"),
+	"COG-MEMORY":       activeAgentInstructionMutationOwner("MEMORY.md"),
+	"COG-SOUL":         activeAgentInstructionMutationOwner("SOUL.md"),
+	"COG-TOOLS-MD":     activeAgentInstructionMutationOwner("TOOLS.md"),
 	"integrity.git_hooks_bypass": {
 		prerequisite:     gitHooksBypassPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -41,6 +88,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"source.git_remote_tamper": {
 		prerequisite:     gitRemoteTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
 	},
 	"source.git_config_exec": {
 		prerequisite:     gitConfigExecPrerequisite,
@@ -56,14 +104,30 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"integrity.history_tamper": {
 		prerequisite:     historyTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
 	},
-	"PATH-HISTORY": integrityMutationOwner(
-		matchesShellHistoryCandidate, matchesActiveShellHistory, nil,
-		"PATH-WIN-PS-HISTORY",
-	),
+	"PATH-HISTORY": {
+		// The generic owner handles mutations, but a read of the Windows
+		// PowerShell history file remains independently useful advisory evidence.
+		// Claim the Windows alias only after the mutation prerequisite matches so
+		// the trusted-action disposition can classify exact reads as advisory.
+		matchedOnlyAliases: []string{"PATH-WIN-PS-HISTORY"},
+		prerequisite: integrityMutationPrerequisite(
+			matchesActiveShellHistory,
+		),
+		suppressFallback: integrityMutationSafeNegative(
+			matchesShellHistoryCandidate,
+			matchesActiveShellHistory,
+			nil,
+		),
+	},
 	"PATH-ETC-SUDOERS": integrityMutationOwner(
 		matchesSudoersCandidate, matchesActiveSudoers, nil,
 	),
+	"privilege.sudoers_unrestricted_nopasswd": {
+		prerequisite:     unrestrictedSudoersGrantPrerequisite,
+		suppressFallback: func(actionfacts.Facts) bool { return true },
+	},
 	"PATH-SSH-DIR": {
 		prerequisite:     sshAuthorizedKeysStructuredPrerequisite,
 		suppressFallback: sshAuthorizedKeysPathSafeNegative,
@@ -71,9 +135,12 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"privilege.container_runtime_socket_access": {
 		prerequisite:     containerRuntimeSocketPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
 	},
 	"persistence.shell_profile_write": integrityMutationOwner(
-		matchesShellProfileCandidate, matchesActiveShellProfile, nil,
+		matchesShellProfileCandidate,
+		matchesActiveShellProfile,
+		matchesSafeShellProfileCandidate,
 	),
 	"persistence.git_hook_write": integrityMutationOwner(
 		matchesGitHookCandidate,
@@ -93,7 +160,6 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	},
 	"COG-OPENCLAW-JSON": integrityMutationOwner(
 		matchesAgentConfigCandidate, matchesActiveAgentConfig, nil,
-		"COG-GATEWAY-JSON",
 	),
 	"tamper.detector_state_write": integrityMutationOwner(
 		matchesDefenseClawStateCandidate,
@@ -125,6 +191,296 @@ func integrityMutationOwner(
 			isCandidate, isActive, isSafe,
 		),
 	}
+}
+
+func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
+	isCandidate := func(value string) bool {
+		return pathBase(canonicalSemanticPath(value)) == strings.ToLower(fileName)
+	}
+	isActive := func(
+		facts actionfacts.Facts,
+		candidate actionfacts.PathFact,
+	) bool {
+		candidatePath, ok := activeAgentInstructionPath(
+			exactSemanticPathValue(candidate),
+			candidate.Flavor,
+		)
+		if !ok || !activeAgentInstructionCandidateBaseMatches(
+			path.Base(candidatePath),
+			candidate.Flavor,
+			fileName,
+		) {
+			return false
+		}
+		for _, activePath := range facts.ActiveAgentFiles {
+			canonicalActivePath, active := activeAgentInstructionPath(
+				activePath,
+				candidate.Flavor,
+			)
+			if active && activeAgentInstructionBaseMatches(
+				canonicalActivePath,
+				candidate.Flavor,
+				fileName,
+			) && activeAgentInstructionPathsMatch(
+				canonicalActivePath,
+				candidatePath,
+				candidate.Flavor,
+				activeAgentFileCaseInsensitive(facts, activePath),
+			) {
+				return true
+			}
+		}
+		if facts.ActiveAgentFilesUncertain {
+			// Check retained exact entries above before falling back to lost
+			// context. Exact POSIX basenames always fail closed. A folded POSIX
+			// basename does so only when authenticated load-time state proved that
+			// at least one omitted active file used case-insensitive lookup.
+			if activeAgentInstructionBaseMatches(
+				candidatePath,
+				candidate.Flavor,
+				fileName,
+			) {
+				return true
+			}
+			return candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				facts.ActiveAgentFilesCaseInsensitiveUncertain &&
+				activeAgentInstructionCandidateBaseMatches(
+					path.Base(candidatePath),
+					candidate.Flavor,
+					fileName,
+				)
+		}
+		return false
+	}
+	isSafe := func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		resolved := candidate.Resolved
+		if resolved == "" {
+			resolved = candidate.Normalized
+		}
+		flavor := candidate.Flavor
+		if flavor != actionfacts.PathFlavorPOSIX &&
+			flavor != actionfacts.PathFlavorWindows {
+			normalized := strings.ReplaceAll(resolved, `\`, "/")
+			switch {
+			case strings.HasPrefix(normalized, "//") ||
+				len(normalized) >= 3 && normalized[1] == ':' && normalized[2] == '/':
+				flavor = actionfacts.PathFlavorWindows
+			case strings.HasPrefix(normalized, "/"):
+				flavor = actionfacts.PathFlavorPOSIX
+			default:
+				return false
+			}
+		}
+		if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
+			return false
+		}
+		if !activeAgentInstructionCandidateMutatesPath(facts, candidate) {
+			return true
+		}
+		// A distinct path may still be a hard-link or symlink alias of a
+		// retained active file. The synchronous decision path deliberately does
+		// not touch the filesystem, so keep that ambiguity visible instead of
+		// declaring it safe. A known-empty rule-specific context remains quiet.
+		return !activeAgentInstructionContextPresent(facts, flavor, fileName)
+	}
+	owner := integrityMutationOwner(
+		isCandidate,
+		isActive,
+		isSafe,
+	)
+	// A fixture-looking path can alias the active file just as any other path
+	// can. Known-empty context is already handled by isSafe; do not let the
+	// generic lexical fixture exemption erase an unresolved alias finding.
+	pathSafeNegative := integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		nil,
+	)
+	owner.suppressFallback = func(facts actionfacts.Facts) bool {
+		if pathSafeNegative(facts) {
+			return true
+		}
+		if !facts.Authoritative() {
+			return false
+		}
+		for _, command := range facts.Commands {
+			if hasAnyOperation(
+				command,
+				actionfacts.OperationWrite,
+				actionfacts.OperationAppend,
+				actionfacts.OperationDelete,
+				actionfacts.OperationCopy,
+				actionfacts.OperationMove,
+				actionfacts.OperationConfigChange,
+			) {
+				// If ActionFacts saw a mutation but could not prove its target,
+				// retain the lexical fallback as non-authoritative evidence.
+				return false
+			}
+		}
+		// A bare filename in an otherwise authoritative read/list/search or
+		// prose-only command is not evidence of an instruction-file mutation.
+		return true
+	}
+	return owner
+}
+
+// exactSemanticPathValue intentionally does not use semanticPathValue: that
+// helper folds case for broad pattern matching. Active instruction-file
+// authority must preserve the proven spelling and filesystem flavor until it
+// is checked against authenticated, load-time identity metadata.
+func exactSemanticPathValue(candidate actionfacts.PathFact) string {
+	if candidate.Resolved != "" {
+		return candidate.Resolved
+	}
+	if candidate.Normalized != "" {
+		return candidate.Normalized
+	}
+	return candidate.Value
+}
+
+func activeAgentInstructionPath(
+	value string,
+	flavor actionfacts.PathFlavor,
+) (string, bool) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", false
+	}
+	switch flavor {
+	case actionfacts.PathFlavorPOSIX:
+		if !strings.HasPrefix(value, "/") {
+			return "", false
+		}
+		value = path.Clean(value)
+		return value, value != "/"
+	case actionfacts.PathFlavorWindows:
+		value = strings.ReplaceAll(value, `\`, "/")
+		unc := strings.HasPrefix(value, "//")
+		if !unc && (len(value) < 3 || !isASCIIPathLetter(value[0]) ||
+			value[1] != ':' || value[2] != '/') {
+			return "", false
+		}
+		if unc {
+			value = "//" + strings.TrimPrefix(
+				path.Clean("/"+strings.TrimLeft(value, "/")),
+				"/",
+			)
+		} else {
+			value = path.Clean(value)
+		}
+		return strings.ToLower(value), value != "" && value != "//"
+	default:
+		return "", false
+	}
+}
+
+func activeAgentInstructionBaseMatches(
+	value string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	// POSIX matching is deliberately exact here. This is the baseline
+	// fail-closed basename gate when bounded active-file context is uncertain and
+	// when validating the canonical active path itself. The caller handles the
+	// separate proof-gated folded-candidate case.
+	base := path.Base(value)
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX && base == fileName
+}
+
+func activeAgentInstructionCandidateBaseMatches(
+	base string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	// Candidate discovery may recognize an ASCII case variant, but that alone
+	// never grants authority. POSIX enforcement still requires the exact parent
+	// and authenticated load-time case proof in activeAgentInstructionPathsMatch.
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX &&
+		activeAgentASCIIEqualFold(base, fileName)
+}
+
+func activeAgentInstructionPathsMatch(
+	activePath string,
+	candidatePath string,
+	flavor actionfacts.PathFlavor,
+	caseInsensitive bool,
+) bool {
+	if activePath == candidatePath {
+		return true
+	}
+	if flavor != actionfacts.PathFlavorPOSIX || !caseInsensitive {
+		return false
+	}
+	return path.Dir(activePath) == path.Dir(candidatePath) &&
+		activeAgentASCIIEqualFold(
+			path.Base(activePath),
+			path.Base(candidatePath),
+		)
+}
+
+func activeAgentFileCaseInsensitive(
+	facts actionfacts.Facts,
+	activePath string,
+) bool {
+	for _, candidate := range facts.ActiveAgentFilesCaseInsensitive {
+		if candidate == activePath {
+			return true
+		}
+	}
+	return false
+}
+
+func activeAgentInstructionContextPresent(
+	facts actionfacts.Facts,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	if facts.ActiveAgentFilesUncertain {
+		return true
+	}
+	for _, activePath := range facts.ActiveAgentFiles {
+		canonicalActivePath, active := activeAgentInstructionPath(
+			activePath,
+			flavor,
+		)
+		if active && activeAgentInstructionBaseMatches(
+			canonicalActivePath,
+			flavor,
+			fileName,
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func activeAgentInstructionCandidateMutatesPath(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	candidatePath := semanticPathValue(candidate)
+	for _, pathCandidate := range facts.Paths {
+		if pathCandidate.CommandID != candidate.CommandID ||
+			semanticPathValue(pathCandidate) != candidatePath {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, pathCandidate.CommandID)
+		if ok && integrityCommandMutatesPath(command, pathCandidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIPathLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 func historyTamperPrerequisite(facts actionfacts.Facts) bool {
@@ -230,6 +586,20 @@ func integrityMutationSafeNegative(
 	isActive integrityPathMatcher,
 	isSafe integrityPathMatcher,
 ) semanticOwnerPrerequisite {
+	return integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		isDefiniteFixturePath,
+	)
+}
+
+func integrityMutationSafeNegativeWithFixture(
+	isCandidate semanticPathCandidate,
+	isActive integrityPathMatcher,
+	isSafe integrityPathMatcher,
+	isFixture integrityPathMatcher,
+) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
 		if !facts.Authoritative() {
 			return false
@@ -258,7 +628,7 @@ func integrityMutationSafeNegative(
 			}
 			if isActive(facts, candidate) ||
 				isSafe != nil && isSafe(facts, candidate) ||
-				isDefiniteFixturePath(facts, candidate) {
+				isFixture != nil && isFixture(facts, candidate) {
 				continue
 			}
 			return false
@@ -401,21 +771,29 @@ func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
 			if hasOperation(command, actionfacts.OperationSchedule) {
 				return true
 			}
-		case "reg", "reg.exe", "set-itemproperty", "sp",
-			"new-itemproperty":
-			if !hasOperation(command, actionfacts.OperationConfigChange) {
-				continue
-			}
-			for _, candidate := range facts.Paths {
-				if candidate.CommandID == command.ID &&
-					candidate.Access == actionfacts.PathAccessWrite &&
-					matchesActiveRunKey(candidate) {
-					return true
-				}
+		}
+	}
+	return windowsRegistryPersistencePrerequisite(facts) ||
+		integrityMutationPrerequisite(matchesActiveSchedulerPath)(facts)
+}
+
+func windowsRegistryPersistencePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete ||
+			!oneOfFold(command.Program, "reg", "reg.exe", "set-itemproperty", "sp", "new-itemproperty") ||
+			!hasOperation(command, actionfacts.OperationConfigChange) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessWrite &&
+				matchesActiveRegistryPersistence(command, candidate) {
+				return true
 			}
 		}
 	}
-	return integrityMutationPrerequisite(matchesActiveSchedulerPath)(facts)
+	return false
 }
 
 func systemctlInstallForm(argv []string) bool {
@@ -449,9 +827,19 @@ func integrityFirstPositional(argv []string) (string, bool) {
 			return lower, true
 		}
 		key, _, joined := strings.Cut(lower, "=")
-		if systemctlValueOption(key) && !joined {
-			index++
+		if systemctlValueOption(key) {
+			if !joined {
+				if index+1 >= len(argv) {
+					return "", false
+				}
+				index++
+			}
+			continue
 		}
+		if systemctlFlagOption(key) && !joined {
+			continue
+		}
+		return "", false
 	}
 	return "", false
 }
@@ -459,9 +847,51 @@ func integrityFirstPositional(argv []string) (string, bool) {
 func systemctlValueOption(option string) bool {
 	switch option {
 	case "-h", "--host", "-m", "--machine", "-n", "--lines",
-		"-o", "--output", "-p", "--property", "--root",
+		"-o", "--output", "-p", "--property", "--job-mode", "--root",
 		"--runtime-scope", "--state", "-t", "--type":
 		return true
+	default:
+		return false
+	}
+}
+
+func systemctlFlagOption(option string) bool {
+	switch option {
+	case "-a", "--all", "--failed", "--force", "--global",
+		"--no-ask-password", "--no-block", "--no-legend", "--no-pager",
+		"--no-reload", "--now", "-q", "--quiet", "--recursive",
+		"--runtime", "--system", "--user", "--dry-run", "--help",
+		"--version":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveRegistryPersistence(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesActiveRunKey(candidate) {
+		return true
+	}
+	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	if len(command.Argv) == 0 {
+		return false
+	}
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
+	valueName := windowsRegistryValueNameForProgram(
+		command.Program,
+		command.Argv[1:],
+	)
+	switch {
+	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon" ||
+		value == "hkcu/software/microsoft/windows nt/currentversion/winlogon":
+		return valueName == "shell" || valueName == "userinit"
+	case strings.HasPrefix(value, "hklm/system/currentcontrolset/services/"):
+		return valueName == "imagepath" || valueName == "servicedll"
 	default:
 		return false
 	}
@@ -471,11 +901,15 @@ func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
 		return false
 	}
-	value := strings.Trim(semanticPathValue(candidate), "/")
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
 	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
 		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
 		value == "hklm/software/microsoft/windows/currentversion/run" ||
-		value == "hklm/software/microsoft/windows/currentversion/runonce"
+		value == "hklm/software/microsoft/windows/currentversion/runonce" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/runonce" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/runonce"
 }
 
 func matchesActiveSchedulerPath(
@@ -713,8 +1147,10 @@ func gitRemoteTamperPrerequisite(facts actionfacts.Facts) bool {
 			continue
 		}
 		argv := lowerArgv(command.Argv[invocation.subcommandIndex:])
-		if len(argv) < 2 ||
-			(argv[1] != "add" && argv[1] != "set-url") {
+		// Adding a remote is ordinary repository initialization. Without trusted
+		// prior-state proving that the named remote already existed, only an
+		// explicit set-url operation is a deterministic routing change.
+		if len(argv) < 2 || argv[1] != "set-url" {
 			continue
 		}
 		if hasExternalNetworkAction(
@@ -1141,6 +1577,8 @@ func cloudMetadataPrerequisite(facts actionfacts.Facts) bool {
 		}
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
+				(strings.EqualFold(network.Scheme, "http") ||
+					strings.EqualFold(network.Scheme, "https")) &&
 				networkActionIn(
 					network.Action,
 					actionfacts.NetworkDownload,
@@ -1206,6 +1644,71 @@ func matchesSudoersCandidate(value string) bool {
 		strings.Contains(value, "/etc/sudoers.d/")
 }
 
+func matchesGlobalLDPreload(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/ld.so.preload" &&
+		(candidate.Access == actionfacts.PathAccessWrite ||
+			candidate.Access == actionfacts.PathAccessAppend)
+}
+
+// globalLDPreloadInstallPrerequisite proves a system-wide loader injection
+// only when a closed literal producer writes one absolute shared-object path
+// to the active preload file, or one exact profile fragment exports that path.
+// Merely reading either location, clearing it during remediation, setting
+// process-local LD_PRELOAD, or writing opaque/dynamic content is insufficient.
+func globalLDPreloadInstallPrerequisite(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	if actionfacts.ExactGlobalLDPreloadProfileWrite(input, facts) {
+		return true
+	}
+	for _, target := range facts.Paths {
+		preloadFile := matchesGlobalLDPreload(facts, target)
+		profileFragment := actionfacts.ExactGlobalLDPreloadProfilePath(
+			semanticPathValue(target),
+		) && target.Access == actionfacts.PathAccessWrite
+		if !preloadFile && !profileFragment {
+			continue
+		}
+		destination, ok := integrityCommandByID(facts, target.CommandID)
+		if !ok || !integrityCommandMutatesPath(destination, target) ||
+			destination.ControlFlowUncertain {
+			continue
+		}
+		for _, source := range facts.Commands {
+			if !sudoersLiteralOutputReachesDestination(facts, source, destination) {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(source)
+			if ok && (preloadFile && literalSharedObjectPath(content) ||
+				profileFragment && actionfacts.ExactGlobalLDPreloadProfileContent(content)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func literalSharedObjectPath(content string) bool {
+	if strings.ContainsRune(content, '\x00') {
+		return false
+	}
+	value := strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+	if value == "" || !strings.HasPrefix(value, "/") ||
+		strings.IndexFunc(value, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' || r == ' ' }) >= 0 {
+		return false
+	}
+	base := path.Base(path.Clean(value))
+	marker := strings.Index(base, ".so")
+	return marker > 0 && (marker+3 == len(base) || base[marker+3] == '.')
+}
+
 func matchesActiveSudoers(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -1213,6 +1716,296 @@ func matchesActiveSudoers(
 	value := canonicalSemanticPath(semanticPathValue(candidate))
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
+}
+
+var unrestrictedSudoersGrantLine = regexp.MustCompile(
+	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
+)
+
+// unrestrictedSudoersGrantPrerequisite accepts only authoritative,
+// enforcement-eligible literal content whose resolved destination is an
+// active sudoers target. It supports a closed set of direct writers and
+// staged writer/sed/copy flows, while rejecting expandable heredocs,
+// variables, command substitutions, aliases, includes, and opaque transforms.
+func unrestrictedSudoersGrantPrerequisite(facts actionfacts.Facts) bool {
+	// A dedicated closed terminal envelope may prove this fact even though the
+	// generic shell parser conservatively marks redirected terminal input as
+	// partial. No generic or malformed input can project the fact.
+	if actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) ||
+		actionfacts.ExactPOSIXNestedChrootUnrestrictedSudoersGrant(facts) {
+		return true
+	}
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	if stagedUnrestrictedSudoersCopy(facts) {
+		return true
+	}
+	for _, target := range facts.Paths {
+		if !integrityMutationAccess(target.Access) ||
+			!matchesActiveSudoers(facts, target) {
+			continue
+		}
+		destination, ok := integrityCommandByID(facts, target.CommandID)
+		if !ok || !integrityCommandMutatesPath(destination, target) ||
+			destination.ControlFlowUncertain {
+			continue
+		}
+		if content, mutationTarget, proven :=
+			actionfacts.StaticPOSIXSedInPlaceLiteralMutation(destination); proven && mutationTarget == target.Value &&
+			containsUnrestrictedSudoersGrant(content) {
+			return true
+		}
+		for _, source := range facts.Commands {
+			if !sudoersLiteralOutputReachesDestination(facts, source, destination) {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(source)
+			if !ok {
+				continue
+			}
+			if sudoersBase64StdinDecoder(destination) {
+				content, ok = decodeBoundedSudoersBase64(content)
+			}
+			if ok && containsUnrestrictedSudoersGrant(content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stagedUnrestrictedSudoersCopy(facts actionfacts.Facts) bool {
+	for copyIndex, command := range facts.Commands {
+		source, destination, ok := exactPOSIXCopyEndpoints(facts, command)
+		if !ok || !matchesActiveSudoers(facts, destination) {
+			continue
+		}
+		for writerIndex := 0; writerIndex < copyIndex; writerIndex++ {
+			writer := facts.Commands[writerIndex]
+			if writer.ControlFlowUncertain || writer.Effect != actionfacts.EffectExecute {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(writer)
+			if !ok || !commandWritesResolvedPath(facts, writer.ID, source.Resolved) {
+				continue
+			}
+			valid := true
+			for mutationIndex := writerIndex + 1; mutationIndex < copyIndex; mutationIndex++ {
+				mutation := facts.Commands[mutationIndex]
+				if !commandMutatesExactResolvedPath(facts, mutation.ID, source.Resolved) {
+					continue
+				}
+				mutated, target, applied := actionfacts.ApplyStaticPOSIXSedInPlaceLiteralMutation(
+					mutation,
+					content,
+				)
+				if !applied || canonicalSemanticPath(target) != canonicalSemanticPath(source.Resolved) {
+					valid = false
+					break
+				}
+				content = mutated
+			}
+			if valid && containsUnrestrictedSudoersGrant(content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exactPOSIXCopyEndpoints(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (actionfacts.PathFact, actionfacts.PathFact, bool) {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		command.Program != "cp" || command.Effect != actionfacts.EffectExecute ||
+		command.ControlFlowUncertain || !command.ArgvComplete ||
+		len(command.Argv) != 3 || len(command.Wrappers) != 0 ||
+		len(command.Redirects) != 0 ||
+		!hasOperation(command, actionfacts.OperationCopy) {
+		return actionfacts.PathFact{}, actionfacts.PathFact{}, false
+	}
+	var source, destination actionfacts.PathFact
+	readCount := 0
+	writeCount := 0
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || !candidate.Absolute || candidate.Resolved == "" {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessRead:
+			source = candidate
+			readCount++
+		case actionfacts.PathAccessWrite:
+			destination = candidate
+			writeCount++
+		}
+	}
+	if readCount != 1 || writeCount != 1 || source.Resolved == destination.Resolved {
+		return actionfacts.PathFact{}, actionfacts.PathFact{}, false
+	}
+	return source, destination, true
+}
+
+func commandWritesResolvedPath(facts actionfacts.Facts, commandID int64, resolved string) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == commandID && candidate.Resolved == resolved &&
+			(candidate.Access == actionfacts.PathAccessWrite ||
+				candidate.Access == actionfacts.PathAccessAppend) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandMutatesExactResolvedPath(facts actionfacts.Facts, commandID int64, resolved string) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID || candidate.Resolved != resolved {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+			return true
+		}
+	}
+	return false
+}
+
+func sudoersBase64StdinDecoder(command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "base64") ||
+		!hasOperation(command, actionfacts.OperationDecode) ||
+		len(command.Argv) < 2 {
+		return false
+	}
+	decode := false
+	for _, argument := range command.Argv[1:] {
+		if argument == "--decode" {
+			decode = true
+			continue
+		}
+		if len(argument) < 2 || argument[0] != '-' {
+			return false
+		}
+		for _, option := range argument[1:] {
+			if option != 'd' {
+				return false
+			}
+			decode = true
+		}
+	}
+	return decode
+}
+
+func decodeBoundedSudoersBase64(encoded string) (string, bool) {
+	const maximumEncodedSudoersBytes = 4096
+	if encoded == "" || len(encoded) > maximumEncodedSudoersBytes ||
+		strings.IndexFunc(encoded, func(value rune) bool {
+			return !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=", value)
+		}) != -1 {
+		return "", false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding.Strict(),
+		base64.RawStdEncoding.Strict(),
+	} {
+		decoded, err := encoding.DecodeString(encoded)
+		if err == nil {
+			return string(decoded), true
+		}
+	}
+	return "", false
+}
+
+func sudoersLiteralOutputReachesDestination(
+	facts actionfacts.Facts,
+	source actionfacts.CommandFact,
+	destination actionfacts.CommandFact,
+) bool {
+	if source.Effect != actionfacts.EffectExecute ||
+		source.ControlFlowUncertain || !source.ArgvComplete {
+		return false
+	}
+	if source.ID == destination.ID {
+		return true
+	}
+	if source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
+		hasCommandDataFlow(
+			facts,
+			source.ID,
+			destination.ID,
+			actionfacts.DataStdout,
+			actionfacts.DataStdin,
+		) {
+		return true
+	}
+	if destination.ParentCommandID == 0 || len(destination.Wrappers) != 1 ||
+		destination.Wrappers[0].Executable != "sudo" {
+		return false
+	}
+	parent, ok := integrityCommandByID(facts, destination.ParentCommandID)
+	return ok && parent.Program == "sudo" && parent.ArgvComplete &&
+		len(parent.Argv) == len(destination.Argv)+1 &&
+		slices.Equal(parent.Argv[1:], destination.Argv) &&
+		source.PipelineID != 0 && source.PipelineID == parent.PipelineID &&
+		hasCommandDataFlow(
+			facts,
+			source.ID,
+			parent.ID,
+			actionfacts.DataStdout,
+			actionfacts.DataStdin,
+		)
+}
+
+func sudoersLiteralCommandOutput(command actionfacts.CommandFact) (string, bool) {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		len(command.Argv) != len(command.Arguments) {
+		return "", false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands {
+			return "", false
+		}
+	}
+	switch strings.ToLower(command.Program) {
+	case "cat":
+		return actionfacts.StaticPOSIXCatLiteralStdinOutput(command)
+	case "echo":
+		if len(command.Argv) != 2 || strings.HasPrefix(command.Argv[1], "-") {
+			return "", false
+		}
+		return command.Argv[1], true
+	case "printf":
+		segments := actionfacts.StaticPOSIXPrintfFormatStdoutSegments(command)
+		if len(segments) == 1 && segments[0].LeftExact && segments[0].RightExact {
+			return segments[0].Value, true
+		}
+		if len(command.Argv) != 3 ||
+			(command.Argv[1] != `%s\n` && command.Argv[1] != "%s") {
+			return "", false
+		}
+		return command.Argv[2], true
+	default:
+		return "", false
+	}
+}
+
+func containsUnrestrictedSudoersGrant(content string) bool {
+	if strings.ContainsRune(content, '\x00') {
+		return false
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") ||
+			!unrestrictedSudoersGrantLine.MatchString(line) {
+			continue
+		}
+		principal := strings.Fields(line)[0]
+		if !strings.EqualFold(strings.TrimPrefix(principal, "%"), "root") {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesSSHDirectoryCandidate(value string) bool {
@@ -1302,6 +2095,28 @@ func matchesActiveShellProfile(
 	default:
 		return false
 	}
+}
+
+func matchesSafeShellProfileCandidate(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if value == "" || matchesActiveShellProfile(facts, candidate) {
+		return false
+	}
+	if strings.HasSuffix(value, ".sample") ||
+		strings.HasSuffix(value, ".example") {
+		return true
+	}
+	// Once ActionFacts has resolved a complete path, a profile-shaped basename
+	// outside the active home is not an active startup file. This distinction is
+	// important for dotfile repositories such as
+	// /var/lib/dotfiles/users/alice/.bashrc: the nested /users/alice suffix must
+	// not acquire the authority of /Users/alice/.bashrc.
+	return isAbsoluteSemanticPath(value) &&
+		matchesShellProfileCandidate(value) &&
+		value != "/etc/profile"
 }
 
 func matchesGitHookCandidate(value string) bool {

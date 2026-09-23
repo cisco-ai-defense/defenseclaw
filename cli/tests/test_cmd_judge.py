@@ -424,12 +424,11 @@ class JudgeRemoveTests(unittest.TestCase):
         restart.assert_not_called()
 
     def test_remove_unknown_connector_rejected(self):
-        # remove must validate like add: `remove claude-code` (the
-        # spelling `setup claude-code` teaches) exiting 0 with "nothing
-        # to do" would leave the operator believing the judge is off
-        # while 'claudecode' stays gated.
+        # remove must validate like add. Supported aliases such as
+        # `claude-code` normalize to their canonical connector; a genuinely
+        # unknown value must still fail without changing the configured gate.
         app = make_ctx(hook_connectors=["claudecode"])
-        result = invoke(app, ["remove", "claude-code"])
+        result = invoke(app, ["remove", "not-a-connector"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("unknown connector", result.output)
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["claudecode"])

@@ -1,13 +1,13 @@
 <dashboard version="1.1">
   <label>DefenseClaw Gateway Health</label>
-  <description>Operational health for the DefenseClaw gateway: circuit breaker state, verdict rates, sink failures, guardrail latency, and schema violations. Mirrors the Grafana overview health-at-a-glance and SLO panels.</description>
+  <description>Operational health for the DefenseClaw gateway: circuit breaker state across all destinations, verdict rates, sink failures, guardrail latency, and schema violations. Mirrors the Grafana overview health-at-a-glance and SLO panels.</description>
 
   <row>
     <panel>
-      <title>Circuit breaker state (Splunk HEC sink)</title>
+      <title>Circuit breaker state (worst destination)</title>
       <single>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by component | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
+          <query>`defenseclaw_circuit_breaker_events` | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by destination | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
@@ -79,10 +79,10 @@
 
   <row>
     <panel>
-      <title>Circuit breaker state over time</title>
+      <title>Circuit breaker state over time (by destination)</title>
       <chart>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | timechart span=5m max(circuit_state_num) as circuit_state_num | eval circuit_state=case(circuit_state_num=0, "closed", circuit_state_num=1, "half-open", circuit_state_num=2, "open", 1=1, "unknown")</query>
+          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m latest(circuit_state_num) as circuit_state_num by destination limit=0 useother=f | filldown</query>
           <earliest>-1h</earliest>
           <latest>now</latest>
         </search>
@@ -136,10 +136,10 @@
 
   <row>
     <panel>
-      <title>Recent circuit breaker state changes</title>
+      <title>Recent circuit breaker state changes (all destinations)</title>
       <table>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | table timestamp component circuit_state action severity details | sort - timestamp | head 25</query>
+          <query>`defenseclaw_circuit_breaker_events` | table timestamp destination circuit_state action severity details | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>

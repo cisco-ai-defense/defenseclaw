@@ -21,7 +21,7 @@
     "schema_version": {"const": 1},
     "source_config_version": {"const": 7},
     "registry_schema_version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
-    "projection_profile": {"const": "legacy-v7"},
+    "projection_profile": {"const": "v7-compatible"},
     "collection": {
       "type": "object",
       "additionalProperties": false,

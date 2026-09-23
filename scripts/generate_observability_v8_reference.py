@@ -85,7 +85,7 @@ YAML_HEADER = """\
 # default redaction profile is none. Explicit send/routes replace the generated
 # destination default. Collection is evaluated before routing and sampling.
 #
-# Built-in redaction: none, sensitive, content, strict, legacy-v7.
+# Built-in redaction: none, sensitive, content, strict.
 # Route selectors: different fields AND; values inside one field OR.
 # Route evaluation: first match wins independently per destination and signal.
 # Secrets are references (for example token_env or {env: NAME}), never literals.
@@ -166,7 +166,7 @@ YAML_ANNOTATIONS = {
     "    judge_bodies_path: ~/.defenseclaw/judge_bodies.db": (
         "    # Separate forensic judge-body store; must not alias any configured file.",
     ),
-    "    retention_days: 90": ("    # Applies to local event/evidence/judge history; zero means retain forever.",),
+    "    retention_days: 7": ("    # Applies to eligible local event/evidence/judge/correlation history; zero means retain forever.",),
     "  destinations:": (
         "  # Optional exports. Presence defaults enabled:true. Every example is disabled",
         "  # so this exhaustive reference is safe to inspect without exporting data.",
@@ -304,7 +304,7 @@ def _reference_document() -> dict[str, Any]:
             "local": {
                 "path": "~/.defenseclaw/audit.db",
                 "judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-                "retention_days": 90,
+                "retention_days": 7,
             },
             "destinations": [
                 {

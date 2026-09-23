@@ -27,6 +27,7 @@ func TestWaitForWatchdogStartWaitsForOwnedPIDLock(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), watchdogPIDFile)
 	info := watchdogPIDInfo{
 		PID:           os.Getpid(),
+		Executable:    mustWatchdogStartTestExecutable(t),
 		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
 	}
 
@@ -56,6 +57,7 @@ func TestWaitForWatchdogStartRejectsDifferentOwner(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), watchdogPIDFile)
 	info := watchdogPIDInfo{
 		PID:           os.Getpid(),
+		Executable:    mustWatchdogStartTestExecutable(t),
 		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
 	}
 	holder, err := acquireWatchdogPIDFile(pidPath, info)
@@ -67,4 +69,13 @@ func TestWaitForWatchdogStartRejectsDifferentOwner(t *testing.T) {
 	if err := waitForWatchdogStart(pidPath, info.PID+1, time.Second, 5*time.Millisecond); err == nil {
 		t.Fatal("waitForWatchdogStart accepted an ownership lock held by another PID")
 	}
+}
+
+func mustWatchdogStartTestExecutable(t *testing.T) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return executable
 }

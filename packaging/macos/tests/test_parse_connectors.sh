@@ -68,6 +68,8 @@ t_is_supported() {
   assert_status "${rc}" 0 "claudecode supported"
   is_supported_connector "cursor"; rc=$?
   assert_status "${rc}" 0 "cursor supported"
+  is_supported_connector "opencode"; rc=$?
+  assert_status "${rc}" 0 "opencode supported"
   is_supported_connector "geminicli"; rc=$?
   assert_status "${rc}" 1 "geminicli not auto-wired"
 }
@@ -76,14 +78,16 @@ t_classify_zero_target_none_installed() {
   # AIFW-31486 customer case: connector list contains at least one
   # auto-wireable name, but no eligible user has the CLI installed yet.
   # Rerun of the installer won't help — the enumerator's tick will pick
-  # it up as soon as the user installs amp/Codex/ClaudeCode/Cursor.
+  # it up as soon as the user installs Amp/Codex/ClaudeCode/Cursor/OpenCode.
   local got
-  got="$(classify_zero_target_reason "amp,codex,claudecode,cursor")"
+  got="$(classify_zero_target_reason "amp,codex,claudecode,cursor,opencode")"
   assert_eq "${got}" "none-installed" "all-supported list -> none-installed"
   got="$(classify_zero_target_reason "amp")"
   assert_eq "${got}" "none-installed" "single-supported (amp) list -> none-installed"
   got="$(classify_zero_target_reason "codex")"
   assert_eq "${got}" "none-installed" "single-supported (codex) list -> none-installed"
+  got="$(classify_zero_target_reason "opencode")"
+  assert_eq "${got}" "none-installed" "single-supported (opencode) list -> none-installed"
   got="$(classify_zero_target_reason "codex,geminicli")"
   assert_eq "${got}" "none-installed" "mixed supported+unsupported -> none-installed (supported wins)"
 }

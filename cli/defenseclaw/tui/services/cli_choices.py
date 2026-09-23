@@ -39,14 +39,14 @@ CONNECTORS: tuple[str, ...] = (
     "claudecode",
     "hermes",
     "cursor",
-    "windsurf",
-    "geminicli",
+    "devin",
     "copilot",
     "openhands",
     "antigravity",
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 )
 
 # Connectors that participate in the gateway proxy / guardrail stack.
@@ -59,9 +59,8 @@ GUARDRAIL_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 def supported_connector_choices(os_name: str | None = None) -> tuple[str, ...]:
     """``CONNECTORS`` filtered to those supported on *os_name*.
 
-    Unsupported connectors are dropped on Windows while preview connectors
-    remain selectable; this is a no-op on macOS/Linux. Use this wherever the
-    connector list is presented to or chosen by the operator.
+    Unsupported or retired connectors are dropped on every platform. Use this
+    wherever the connector list is presented to or chosen by the operator.
     """
     return tuple(supported_connectors(CONNECTORS, os_name))
 

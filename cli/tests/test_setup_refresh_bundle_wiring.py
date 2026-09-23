@@ -63,6 +63,7 @@ def _local_stack_controller() -> MagicMock:
     controller = MagicMock()
     controller.up.return_value = SimpleNamespace(
         readiness_verified=True,
+        grafana_access_mode="password",
         contract={
             "otlp_endpoint": "127.0.0.1:4317",
             "otlp_protocol": "grpc",
@@ -820,7 +821,11 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
             service_name="defenseclaw",
         )
         controller.preflight.assert_called_once_with()
-        controller.up.assert_called_once_with(timeout=180, wait=True)
+        controller.up.assert_called_once_with(
+            timeout=180,
+            wait=True,
+            grafana_access_mode=None,
+        )
 
     def test_up_no_refresh_bundle_skips_refresh(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (
@@ -854,7 +859,11 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
         mock_otlp.assert_called_once()
-        controller.up.assert_called_once_with(timeout=180, wait=True)
+        controller.up.assert_called_once_with(
+            timeout=180,
+            wait=True,
+            grafana_access_mode=None,
+        )
 
     def test_up_refresh_config_propagates_flag(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (

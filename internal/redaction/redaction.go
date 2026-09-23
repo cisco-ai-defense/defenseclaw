@@ -132,7 +132,7 @@ func String(s string) string {
 	return ForSinkString(s)
 }
 
-// ForSinkString is the Reveal-bypassing legacy-v7 projection. It always returns
+// ForSinkString is the Reveal-bypassing projection. It always returns
 // the redacted form and has no global mutable bypass. New v8 producers must
 // retain the raw fact and let the central destination projection apply policy.
 //
@@ -140,18 +140,16 @@ func String(s string) string {
 // returned unchanged so layered helpers don't lose the original hash
 // or length on a second pass.
 func ForSinkString(s string) string {
-	return LegacyV7String(s)
+	return projectString(s)
 }
 
 // redactString is the unconditional compatibility core used when a
 // per-inspection Cisco AI Defense directive forces redaction.
-func redactString(s string) string { return LegacyV7String(s) }
+func redactString(s string) string { return projectString(s) }
 
-// LegacyV7String applies the exact v7 arbitrary-string projection without
-// consulting environment variables or mutable package state. It exists only
-// for the immutable observability-v8 legacy-v7 migration profile; new policy
-// code should use the central v8 projection engine instead.
-func LegacyV7String(s string) string {
+// projectString applies the arbitrary-string projection without consulting
+// environment variables or mutable package state.
+func projectString(s string) string {
 	if s == "" {
 		return "<empty>"
 	}
@@ -246,7 +244,7 @@ func Entity(value string) string {
 	return ForSinkEntity(value)
 }
 
-// ForSinkEntity is the Reveal-bypassing legacy-v7 projection. It is
+// ForSinkEntity is the Reveal-bypassing projection. It is
 // idempotent over its own placeholder shape and has no global bypass.
 //
 // The first-rune preview is only included for values long enough
@@ -256,15 +254,15 @@ func Entity(value string) string {
 // leading `A` of a 6-byte value like `AB4FGH` narrows the search
 // space for an attacker who controls adjacent log rows.
 func ForSinkEntity(value string) string {
-	return LegacyV7Entity(value)
+	return projectEntity(value)
 }
 
-func redactEntity(value string) string { return LegacyV7Entity(value) }
+func redactEntity(value string) string { return projectEntity(value) }
 
-// LegacyV7Entity applies the exact v7 entity projection without consulting
-// environment variables or mutable package state. The reviewed byte-length
-// threshold and first-rune preview are preserved for migration compatibility.
-func LegacyV7Entity(value string) string {
+// projectEntity applies the entity projection without consulting environment
+// variables or mutable package state. The reviewed byte-length threshold and
+// first-rune preview are load-bearing; see ForSinkEntity.
+func projectEntity(value string) string {
 	if value == "" {
 		return "<empty>"
 	}
@@ -296,17 +294,17 @@ func MessageContent(content string) string {
 	return ForSinkMessageContent(content)
 }
 
-// ForSinkMessageContent is the Reveal-bypassing legacy-v7 projection.
+// ForSinkMessageContent is the Reveal-bypassing projection.
 // It is idempotent and always redacts, even when Reveal() is set.
 func ForSinkMessageContent(content string) string {
-	return LegacyV7MessageContent(content)
+	return projectMessageContent(content)
 }
 
-func redactMessageContent(content string) string { return LegacyV7MessageContent(content) }
+func redactMessageContent(content string) string { return projectMessageContent(content) }
 
-// LegacyV7MessageContent applies the exact v7 model/tool-content projection
-// without consulting environment variables or mutable package state.
-func LegacyV7MessageContent(content string) string {
+// projectMessageContent applies the model/tool-content projection without
+// consulting environment variables or mutable package state.
+func projectMessageContent(content string) string {
 	if content == "" {
 		return "<empty>"
 	}
@@ -330,7 +328,7 @@ func Reason(reason string) string {
 	return ForSinkReason(reason)
 }
 
-// ForSinkReason is the Reveal-bypassing legacy-v7 projection. It always
+// ForSinkReason is the Reveal-bypassing projection. It always
 // redacts free-form values regardless of the display-only Reveal flag.
 //
 // Idempotent: if the input has already been through redaction (i.e.
@@ -344,14 +342,14 @@ func ReasonForAgent(reason string) string {
 }
 
 func ForSinkReason(reason string) string {
-	return LegacyV7Reason(reason)
+	return projectReason(reason)
 }
 
-func redactReason(reason string) string { return LegacyV7Reason(reason) }
+func redactReason(reason string) string { return projectReason(reason) }
 
-// LegacyV7Reason applies the exact v7 bounded token-aware reason projection
+// projectReason applies the bounded token-aware reason projection
 // without consulting environment variables or mutable package state.
-func LegacyV7Reason(reason string) string {
+func projectReason(reason string) string {
 	if reason == "" {
 		return ""
 	}
@@ -520,7 +518,7 @@ func redactReasonTokenDepth(t string, depth int) string {
 		if isSafeReasonToken(t) {
 			return t
 		}
-		return LegacyV7String(t)
+		return projectString(t)
 	}
 	if idx := strings.Index(t, ": "); idx > 0 {
 		prefix := t[:idx]
@@ -554,7 +552,7 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(rest) {
 				return prefix + ":" + rest
 			}
-			return prefix + ":" + LegacyV7String(rest)
+			return prefix + ":" + projectString(rest)
 		}
 	}
 	if isSafeReasonToken(t) {
@@ -573,10 +571,10 @@ func redactReasonTokenDepth(t string, depth int) string {
 			if isPlaceholder(val) {
 				return key + "=" + val
 			}
-			return key + "=" + LegacyV7String(val)
+			return key + "=" + projectString(val)
 		}
 	}
-	return LegacyV7String(t)
+	return projectString(t)
 }
 
 // redactWhitespaceTokens handles "key=value [key=value …]" audit
@@ -592,7 +590,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		if i == 0 && start > 0 {
 			leading := strings.TrimSpace(clause[:start])
 			if leading != "" {
-				b.WriteString(LegacyV7String(leading))
+				b.WriteString(projectString(leading))
 				b.WriteByte(' ')
 			}
 		}
@@ -604,7 +602,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 		segment = strings.TrimRight(segment, " \t")
 		eq := strings.IndexByte(segment, '=')
 		if eq < 0 {
-			b.WriteString(LegacyV7String(segment))
+			b.WriteString(projectString(segment))
 		} else {
 			key := segment[:eq]
 			value := segment[eq+1:]
@@ -617,7 +615,7 @@ func redactWhitespaceTokens(clause string) (string, bool) {
 			case isSafeKVValue(value):
 				b.WriteString(value)
 			default:
-				b.WriteString(LegacyV7String(value))
+				b.WriteString(projectString(value))
 			}
 		}
 		if i+1 < len(boundaries) {
@@ -715,21 +713,21 @@ func Evidence(content string, matchStart, matchEnd int) string {
 	return ForSinkEvidence(content, matchStart, matchEnd)
 }
 
-// ForSinkEvidence is the Reveal-bypassing legacy-v7 projection. It is
+// ForSinkEvidence is the Reveal-bypassing projection. It is
 // idempotent over its own placeholder shape and has no global bypass.
 func ForSinkEvidence(content string, matchStart, matchEnd int) string {
-	return LegacyV7Evidence(content, matchStart, matchEnd)
+	return projectEvidence(content, matchStart, matchEnd)
 }
 
 func redactEvidence(content string, matchStart, matchEnd int) string {
-	return LegacyV7Evidence(content, matchStart, matchEnd)
+	return projectEvidence(content, matchStart, matchEnd)
 }
 
-// LegacyV7Evidence applies the exact v7 evidence projection without
-// consulting environment variables or mutable package state. Coordinates are
+// projectEvidence applies the evidence projection without consulting
+// environment variables or mutable package state. Coordinates are
 // included only when supplied as a valid non-empty range; the helper never
 // derives or invents them.
-func LegacyV7Evidence(content string, matchStart, matchEnd int) string {
+func projectEvidence(content string, matchStart, matchEnd int) string {
 	if content == "" {
 		return "<empty>"
 	}

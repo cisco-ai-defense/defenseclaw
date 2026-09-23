@@ -24,8 +24,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -117,6 +119,84 @@ type AgentConfig struct {
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
+// ACPConfig controls the local stdio ACP guard. It contains no executable
+// commands or secrets: agent entry points are selected from the compiled ACP
+// catalog (or supplied explicitly to defenseclaw-acp), and credentials stay in
+// permission-restricted token files.
+type ACPConfig struct {
+	Enabled        bool                  `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Mode           string                `mapstructure:"mode" yaml:"mode,omitempty"`
+	DefaultProfile string                `mapstructure:"default_profile" yaml:"default_profile,omitempty"`
+	Clients        map[string]ACPBinding `mapstructure:"clients" yaml:"clients,omitempty"`
+	Agents         map[string]ACPBinding `mapstructure:"agents" yaml:"agents,omitempty"`
+	// Bindings carries per-pair policy keyed "<client>/<agent>", the same
+	// identifier `defenseclaw acp status` already prints. Clients and Agents
+	// each hold exactly one profile, and evaluation used to require both of
+	// those pins to equal the profile being evaluated, which made the profile
+	// global across the whole client x agent matrix: giving a second agent its
+	// own profile took it offline in every client pinned to a different one,
+	// in both directions. That also made `--activate` all-or-nothing, since
+	// promoting one pair promoted every pair sharing the profile, defeating
+	// the observe-then-activate rollout the CLI is built around.
+	//
+	// A present entry decides the profile for that pair alone. Absent, the
+	// Clients/Agents pins continue to decide it exactly as before, so an
+	// existing config behaves identically.
+	Bindings map[string]ACPBinding `mapstructure:"bindings" yaml:"bindings,omitempty"`
+	Profiles map[string]ACPProfile `mapstructure:"profiles" yaml:"profiles,omitempty"`
+}
+
+// ACPBindingKey is the canonical "<client>/<agent>" key for ACPConfig.Bindings.
+func ACPBindingKey(client, agent string) string {
+	return strings.ToLower(strings.TrimSpace(client)) + "/" + strings.ToLower(strings.TrimSpace(agent))
+}
+
+// ACPBindingFor returns the per-pair binding for one client/agent pair.
+func (c ACPConfig) ACPBindingFor(client, agent string) (ACPBinding, bool) {
+	if len(c.Bindings) == 0 {
+		return ACPBinding{}, false
+	}
+	binding, ok := c.Bindings[ACPBindingKey(client, agent)]
+	return binding, ok
+}
+
+// ACPProfileForPair resolves the profile name that governs one pair.
+//
+// Most specific wins: an explicit per-pair binding, then the agent pin, then
+// the client pin, then default_profile. The caller still validates that the
+// resolved name exists and admits the pair.
+func (c ACPConfig) ACPProfileForPair(client, agent string) string {
+	if binding, ok := c.ACPBindingFor(client, agent); ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Agents[agent]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Clients[client]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	return strings.TrimSpace(c.DefaultProfile)
+}
+
+type ACPBinding struct {
+	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
+}
+
+type ACPProfile struct {
+	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty" json:"mode,omitempty"`
+	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
+	AllowedClients []string `mapstructure:"allowed_clients" yaml:"allowed_clients,omitempty" json:"allowed_clients,omitempty"`
+	AllowedAgents  []string `mapstructure:"allowed_agents" yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
+	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty" json:"denied_methods,omitempty"`
+}
+
 // CurrentConfigVersion is the last compatibility-decoder version used by the
 // explicit release upgrader. The strict target runtime is schema v8 and is
 // loaded through LoadRuntimeV8FromBytes plus the observability-v8 compiler; do
@@ -197,6 +277,7 @@ type Config struct {
 	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
 	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
 	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	ACP             ACPConfig                  `mapstructure:"acp"              yaml:"acp,omitempty"`
 	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
 	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
@@ -225,50 +306,42 @@ type Config struct {
 	// and compiled independently; connector audit_sinks survive here only as
 	// release-upgrader input and never own target-runtime routing.
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
+	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 	// Managed configures the local UDS gRPC server consumed by AVC
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
-	Managed  ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing  RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
-	Training TrainingConfig   `mapstructure:"training"         yaml:"training,omitempty"`
+	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
+	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
 // Kept in config package to avoid circular imports; the gateway adapter
 // converts to routing.RoutingConfig at boot.
 type RoutingConfig struct {
-	Enabled       bool                       `mapstructure:"enabled"       yaml:"enabled"`
-	Version       string                     `mapstructure:"version"       yaml:"version,omitempty"`
-	Port          int                        `mapstructure:"port"          yaml:"port,omitempty"`
-	Algorithm     string                     `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
-	Remote        RoutingRemoteConfig        `mapstructure:"remote"        yaml:"remote,omitempty"`
-	Embedding     RoutingEmbeddingConfig     `mapstructure:"embedding"     yaml:"embedding,omitempty"`
-	LLMClassifier RoutingLLMClassifierConfig `mapstructure:"llm_classifier" yaml:"llm_classifier,omitempty"`
-	Models        []RoutingModelBackend      `mapstructure:"models"        yaml:"models,omitempty"`
-	Signals       RoutingSignalConfig        `mapstructure:"signals"       yaml:"signals,omitempty"`
-	Decisions     []RoutingDecisionRule      `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+	Enabled   bool                  `mapstructure:"enabled"       yaml:"enabled"`
+	Version   string                `mapstructure:"version"       yaml:"version,omitempty"`
+	Port      int                   `mapstructure:"port"          yaml:"port,omitempty"`
+	Algorithm string                `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
+	Remote    RoutingRemoteConfig   `mapstructure:"remote"        yaml:"remote,omitempty"`
+	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
+	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
+	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
 }
 
 type RoutingModelBackend struct {
-	Name            string   `mapstructure:"name"              yaml:"name"`
-	Provider        string   `mapstructure:"provider"          yaml:"provider"`
-	Model           string   `mapstructure:"model"             yaml:"model"`
-	BaseURL         string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
-	APIKeyEnv       string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
-	Weight          int      `mapstructure:"weight"            yaml:"weight,omitempty"`
-	Capabilities    []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
-	CostPer1kTokens float64  `mapstructure:"cost_per_1k_tokens" yaml:"cost_per_1k_tokens,omitempty"`
+	Name         string   `mapstructure:"name"              yaml:"name"`
+	Provider     string   `mapstructure:"provider"          yaml:"provider"`
+	Model        string   `mapstructure:"model"             yaml:"model"`
+	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
+	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
+	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
 }
 
 type RoutingSignalConfig struct {
-	Keywords      []RoutingKeywordSignal     `mapstructure:"keywords"       yaml:"keywords,omitempty"`
-	Embedding     RoutingEmbeddingSignalCfg  `mapstructure:"embedding"      yaml:"embedding,omitempty"`
-	Domain        RoutingDomainSignalCfg     `mapstructure:"domain"         yaml:"domain,omitempty"`
-	Complexity    RoutingComplexitySignalCfg `mapstructure:"complexity"     yaml:"complexity,omitempty"`
-	ContextLength RoutingContextLengthCfg    `mapstructure:"context_length" yaml:"context_length,omitempty"`
+	Keywords []RoutingKeywordSignal `mapstructure:"keywords" yaml:"keywords,omitempty"`
 }
 
 type RoutingKeywordSignal struct {
@@ -294,34 +367,6 @@ type RoutingCondition struct {
 type RoutingRemoteConfig struct {
 	Endpoint  string `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
 	TimeoutMs int    `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
-}
-
-type RoutingEmbeddingConfig struct {
-	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
-	BaseURL  string `mapstructure:"base_url" yaml:"base_url,omitempty"`
-	Model    string `mapstructure:"model"    yaml:"model,omitempty"`
-}
-
-type RoutingLLMClassifierConfig struct {
-	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
-	Model   string `mapstructure:"model"    yaml:"model,omitempty"`
-}
-
-type RoutingEmbeddingSignalCfg struct {
-	Enabled   bool    `mapstructure:"enabled"   yaml:"enabled,omitempty"`
-	Threshold float64 `mapstructure:"threshold" yaml:"threshold,omitempty"`
-}
-
-type RoutingDomainSignalCfg struct {
-	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
-}
-
-type RoutingComplexitySignalCfg struct {
-	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
-}
-
-type RoutingContextLengthCfg struct {
-	Thresholds []int `mapstructure:"thresholds" yaml:"thresholds,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -372,14 +417,22 @@ type AIDiscoveryConfig struct {
 	// this list from the same eligible-users enumeration that renders
 	// targets.yaml, so per-user detectors and per-user hook wiring stay
 	// in lockstep.
-	HomeDirs                    []string `mapstructure:"home_dirs"                 yaml:"home_dirs,omitempty"`
-	SignaturePacks              []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures    bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs        []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory         bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests     bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames          bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains       bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	HomeDirs                 []string `mapstructure:"home_dirs"                 yaml:"home_dirs,omitempty"`
+	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	// IncludeUserEmail adds the signed-in email address DefenseClaw can read
+	// from a connector's own account file to identity telemetry: the per-user
+	// inventory rows and the hook lifecycle records. Off by default. The uid
+	// or SID it would accompany identifies an account on one endpoint, while
+	// the address identifies a person across every system they use and is
+	// emitted as plaintext, so collecting it is a deliberate privacy decision
+	// for the deployment rather than a consequence of enabling discovery.
+	IncludeUserEmail            bool     `mapstructure:"include_user_email"        yaml:"include_user_email"`
 	LookupModelProvenanceOnline bool     `mapstructure:"lookup_model_provenance_online" yaml:"lookup_model_provenance_online"`
 	MaxFilesPerScan             int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
 	MaxFileBytes                int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
@@ -388,6 +441,198 @@ type AIDiscoveryConfig struct {
 	ConfidencePolicyPath        string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 	RequireTrustedBinaryPaths   bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
 	TrustedBinaryPrefixes       []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
+
+	// Runtime controls the runtime planes -- the half of AI discovery that
+	// observes what actually ran, next to this block's inventory of what is
+	// present. Disabled by default; see AIRuntimeConfig.
+	Runtime AIRuntimeConfig `mapstructure:"runtime" yaml:"runtime,omitempty"`
+}
+
+// AIRuntimeConfig controls the AI Discovery runtime planes.
+//
+// Where the surrounding AIDiscoveryConfig inventories what is installed, these
+// planes observe behaviour: sustained inference compute, per-process egress to
+// a provider, and -- where the platform and privilege allow it -- the sequence
+// of host actions an agent takes. The two are joined in process, so a signal
+// can report whether an inventoried component was ever actually used and
+// whether observed behaviour has any inventoried explanation.
+//
+// This surface reads more than the inventory scanner does, and the extra reads
+// are individually gated:
+//
+//   - Process argv is read, which the inventory detector deliberately does not
+//     collect. It is what makes an agent framework inside a bare python3
+//     visible. Argv is classified as content and passes through the same v8
+//     field-class projection as everything else, so each destination's
+//     redaction profile governs whether it leaves the host.
+//   - DNSCapture opens a packet capture to name egress peers exactly rather
+//     than inferring them from an address. It needs elevated privilege and is
+//     off by default.
+//   - EnableHostPlane turns on kernel process, file, and identity events. Every
+//     host-plane signal is gated on an AI agent appearing in the process
+//     lineage, which is the primary false-positive control: a developer running
+//     sudo produces nothing, the same sudo under an agent produces a signal.
+//
+// Environment variable values are never read on any of these paths, matching
+// the inventory detector's names-only rule.
+type AIRuntimeConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+
+	// PollIntervalSec is how often the planes are sampled. Plane A works on
+	// the CPU delta between two polls, so this also sets the window that
+	// distinguishes sustained inference from a momentary spike.
+	PollIntervalSec int `mapstructure:"poll_interval_s" yaml:"poll_interval_s,omitempty"`
+
+	// MinRiskToReport is the score a finding must reach to be emitted.
+	// Defaults to the medium band.
+	MinRiskToReport int `mapstructure:"min_risk_to_report" yaml:"min_risk_to_report,omitempty"`
+
+	// Planes selects which of "a", "b", "c" run. Empty means A and B, which
+	// need no privilege beyond what the gateway already has.
+	Planes []string `mapstructure:"planes" yaml:"planes,omitempty"`
+
+	// EnableHostPlane is the explicit opt-in for Plane C.
+	EnableHostPlane bool `mapstructure:"enable_host_plane" yaml:"enable_host_plane"`
+
+	// DNSCapture enables passive DNS observation so an egress peer is named
+	// from the answer the process actually received rather than inferred.
+	DNSCapture bool `mapstructure:"dns_capture" yaml:"dns_capture"`
+
+	// ChainWindowMin bounds how long a kill chain may take. A chain is a chain
+	// within a window rather than over the lifetime of a long-running agent.
+	ChainWindowMin int `mapstructure:"chain_window_min" yaml:"chain_window_min,omitempty"`
+
+	// SanctionedEndpoints are gateway hostnames through which AI use is
+	// approved. Reaching one is recorded as inventory rather than alarm; going
+	// around one that exists is scored as a bypass.
+	SanctionedEndpoints []string `mapstructure:"sanctioned_endpoints" yaml:"sanctioned_endpoints,omitempty"`
+
+	// Correlate joins runtime observations against the inventory snapshot.
+	// Defaults on. Disabling it removes the read entirely; it does not make
+	// findings score as though the inventory disagreed.
+	Correlate *bool `mapstructure:"correlate" yaml:"correlate,omitempty"`
+
+	// Acquisition selects where the privileged reads come from:
+	//
+	//   auto     read directly when this process can, ask the helper when a
+	//            managed deployment has de-privileged the gateway
+	//   direct   always read directly
+	//   helper   always ask the helper, and report blindness if it is absent
+	//
+	// Empty means auto. The distinction matters because the two failure
+	// modes read differently to an operator: "direct" on a sandboxed gateway
+	// is a plane that sees nothing, and "helper" with no helper running is a
+	// plane that says so.
+	Acquisition string `mapstructure:"acquisition" yaml:"acquisition,omitempty"`
+
+	// HelperSocket overrides where the helper listens. Empty means the
+	// deployment default.
+	HelperSocket string `mapstructure:"helper_socket" yaml:"helper_socket,omitempty"`
+}
+
+// Acquisition modes.
+const (
+	AcquisitionAuto   = "auto"
+	AcquisitionDirect = "direct"
+	AcquisitionHelper = "helper"
+)
+
+// EffectiveAcquisition resolves the acquisition mode, applying the default.
+func (c AIRuntimeConfig) EffectiveAcquisition() string {
+	switch c.Acquisition {
+	case AcquisitionDirect, AcquisitionHelper:
+		return c.Acquisition
+	default:
+		return AcquisitionAuto
+	}
+}
+
+// Defaults for the runtime planes, applied when a field is left at zero.
+const (
+	DefaultRuntimePollIntervalSec = 30
+	DefaultRuntimeMinRiskToReport = 30
+	DefaultRuntimeChainWindowMin  = 60
+)
+
+// EffectivePollInterval resolves the poll interval, applying the default.
+func (c AIRuntimeConfig) EffectivePollInterval() time.Duration {
+	if c.PollIntervalSec <= 0 {
+		return DefaultRuntimePollIntervalSec * time.Second
+	}
+	return time.Duration(c.PollIntervalSec) * time.Second
+}
+
+// EffectiveMinRisk resolves the reporting floor, applying the default.
+func (c AIRuntimeConfig) EffectiveMinRisk() int {
+	if c.MinRiskToReport <= 0 {
+		return DefaultRuntimeMinRiskToReport
+	}
+	return c.MinRiskToReport
+}
+
+// EffectiveChainWindow resolves the chain window, applying the default.
+func (c AIRuntimeConfig) EffectiveChainWindow() time.Duration {
+	if c.ChainWindowMin <= 0 {
+		return DefaultRuntimeChainWindowMin * time.Minute
+	}
+	return time.Duration(c.ChainWindowMin) * time.Minute
+}
+
+// CorrelationEnabled resolves the correlate opt-out, which defaults on.
+func (c AIRuntimeConfig) CorrelationEnabled() bool {
+	return c.Correlate == nil || *c.Correlate
+}
+
+// EffectivePlanes resolves which planes run.
+//
+// An empty selection means A and B. Plane C is never implied: it reads kernel
+// process, file, and identity events and must be asked for explicitly, both
+// here and through EnableHostPlane.
+func (c AIRuntimeConfig) EffectivePlanes() []string {
+	if len(c.Planes) == 0 {
+		if c.EnableHostPlane {
+			return []string{"a", "b", "c"}
+		}
+		return []string{"a", "b"}
+	}
+	selected := make([]string, 0, 3)
+	for _, plane := range []string{"a", "b", "c"} {
+		for _, candidate := range c.Planes {
+			if strings.EqualFold(strings.TrimSpace(candidate), plane) {
+				if plane == "c" && !c.EnableHostPlane {
+					// Selecting plane c without the host-plane opt-in is a
+					// configuration mistake worth ignoring loudly rather than
+					// silently honouring: the opt-in is where the privilege
+					// and privacy decision is recorded.
+					break
+				}
+				selected = append(selected, plane)
+				break
+			}
+		}
+	}
+	return selected
+}
+
+// HostPlaneRequestedWithoutOptIn reports the one configuration where plane c
+// is asked for in two places and granted in neither: listed in Planes, with
+// EnableHostPlane left false.
+//
+// It exists so the health surface can name the setting the operator actually
+// has to change. Collapsing this into "not selected in
+// ai_discovery.runtime.planes" sends someone to a list that already contains
+// "c", which is the same failure the permissions command's [unknown] state is
+// written to avoid.
+func (c AIRuntimeConfig) HostPlaneRequestedWithoutOptIn() bool {
+	if c.EnableHostPlane {
+		return false
+	}
+	for _, candidate := range c.Planes {
+		if strings.EqualFold(strings.TrimSpace(candidate), "c") {
+			return true
+		}
+	}
+	return false
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -1627,6 +1872,10 @@ func normalizeConnectorKey(name string) string {
 	switch n {
 	case "open-hands", "open_hands":
 		return "openhands"
+	case "claude-code", "claude_code":
+		return "claudecode"
+	case "gemini-cli", "gemini_cli", "gemini":
+		return "geminicli"
 	default:
 		return n
 	}
@@ -2384,10 +2633,11 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}, nil
 }
 
-// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases only omitted path fields on
-// the canonical compiler-selected data directory. It is used after compilation
-// when data_dir was defaulted externally (for example by a reload transaction).
-// Explicit operator paths are preserved.
+// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases omitted path fields and an
+// explicit relative device-key spelling on the canonical compiler-selected
+// data directory. It is used after compilation when data_dir was defaulted
+// externally (for example by a reload transaction). Explicit absolute paths
+// are preserved.
 func ApplyRuntimeV8DataDirDefaultsFromBytes(candidate *Config, source string, raw []byte, dataDir string) error {
 	document, err := ParseV8YAML(source, raw)
 	if err != nil {
@@ -2438,6 +2688,12 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+	} else if gateway := v8YAMLMapValue(root, "gateway"); gateway != nil {
+		if keyFile := v8YAMLMapValue(gateway, "device_key_file"); keyFile != nil {
+			if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(keyFile.Value, dataDir); ok {
+				candidate.Gateway.DeviceKeyFile = resolved
+			}
+		}
 	}
 }
 
@@ -2586,6 +2842,9 @@ func loadConfigSource(
 	}
 
 	migrateConfig(&cfg)
+	if !runtimeV8 {
+		normalizeRelativeGatewayDeviceKeyFile(&cfg)
+	}
 	if runtimeV8 {
 		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
 			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
@@ -2617,11 +2876,27 @@ func loadConfigSource(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+		if err := managed.ValidateTrustedServiceRuntimeDir(
+			cfg.DataDir,
+			"managed data_dir",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
 			}
 			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
+		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
+		}
+		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
+			}
+			return nil, err
 		}
 	}
 
@@ -2699,12 +2974,24 @@ func loadConfigSource(
 		}
 		return nil, err
 	}
+	if err := cfg.ACP.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "acp_invalid")
+		}
+		return nil, fmt.Errorf("config: acp: %w", err)
+	}
 
 	if err := cfg.Guardrail.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.Routing.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "routing_invalid")
+		}
+		return nil, fmt.Errorf("config: routing: %w", err)
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -2808,6 +3095,107 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
 	return nil
 }
 
+// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// surface on loopback. The managed hook transport is intentionally pinned to
+// canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
+// than another loopback spelling or address. This is enterprise-only:
+// unmanaged/BYOD deployments retain their existing remote-bind behavior.
+func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+
+	apiBind := cfg.Gateway.APIBind
+	if apiBind == "" {
+		// Persist the effective managed bind into the in-memory config so
+		// standalone topology cannot later derive the API listener from an
+		// independent IPv6 guardrail host.
+		cfg.Gateway.APIBind = "127.0.0.1"
+		apiBind = cfg.Gateway.APIBind
+	}
+	if apiBind != "127.0.0.1" {
+		return fmt.Errorf(
+			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
+			apiBind,
+		)
+	}
+
+	if cfg.Guardrail.Enabled {
+		proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
+		if !isLoopbackListenerHost(proxyBind) {
+			return fmt.Errorf(
+				"config: managed_enterprise guardrail proxy must bind to loopback, got %q",
+				proxyBind,
+			)
+		}
+	}
+	return nil
+}
+
+// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// managed_enterprise config on Windows that carries non-empty
+// AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
+// only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
+// credentials give the AF_UNIX IPC surface a real accept-time codesign
+// check. On Windows the AF_UNIX kernel implementation exposes no peer
+// credential API, so the values are silently discarded by
+// newCodesignValidatingListener (peerauth_windows.go, deferred_windows
+// posture). Accepting them from config and dropping them at start-time
+// is a config-honesty gap: an operator setting an allowlist expecting
+// hardening ends up with an AF_UNIX socket whose only access boundary
+// is the file DACL. Refusing to load makes that gap loud instead of
+// silent; the deferred Windows peer-auth mechanism belongs to parity
+// plan §4.4 and is not something operators can enable from config.
+//
+// Non-managed builds keep operator config verbatim per the existing
+// unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
+// all outside dev rigs), so this validator is scoped to
+// managed_enterprise on Windows.
+func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	var offending []string
+	if len(cfg.Managed.AllowedTeamIDs) != 0 {
+		offending = append(offending, "managed.allowed_team_ids")
+	}
+	if len(cfg.Managed.AllowedSigningIDs) != 0 {
+		offending = append(offending, "managed.allowed_signing_ids")
+	}
+	if len(cfg.Managed.AllowedBundleIDs) != 0 {
+		offending = append(offending, "managed.allowed_bundle_ids")
+	}
+	if len(offending) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
+			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
+			"credential API on Windows, so any allowlist here would be silently "+
+			"discarded. Remove these keys from config.yaml; the socket DACL is "+
+			"the enforcement boundary until parity plan §4.4 lands the Windows "+
+			"peer-auth mechanism.",
+		strings.Join(offending, ", "),
+	)
+}
+
+func isLoopbackListenerHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
+}
+
 // clearLegacyObservabilityRuntimeConfig makes the general application Config
 // a one-way consumer of the v8 compiler. These fields remain on Config solely
 // so the upgrade/preview loaders can decode historical v7 sources; no target
@@ -2823,10 +3211,6 @@ func clearLegacyObservabilityRuntimeConfig(cfg *Config) {
 		connector.AuditSinks = nil
 		cfg.Observability.Connectors[name] = connector
 	}
-}
-
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the

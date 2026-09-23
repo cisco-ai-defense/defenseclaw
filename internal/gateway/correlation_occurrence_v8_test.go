@@ -796,7 +796,7 @@ func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t 
 	}
 }
 
-func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *testing.T) {
+func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testing.T) {
 	installCorrelationHMACForTest()
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
@@ -812,8 +812,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if start.ModelRequestID != "provider-model-request-1" {
-		t.Fatalf("reported model request ID changed: %q", start.ModelRequestID)
+	if start.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent request_id populated model identity: %q", start.ModelRequestID)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -832,9 +832,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if end.ModelRequestID != start.ModelRequestID {
-		t.Fatalf("missing model end ID did not resolve reported start: start=%q end=%q",
-			start.ModelRequestID, end.ModelRequestID)
+	if end.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent aliases inferred model identity after restart: %q", end.ModelRequestID)
 	}
 	repo, err := reopened.CorrelationRepository()
 	if err != nil {
@@ -847,9 +846,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].OperationID != "provider-model-request-1" ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("reported model pending resolution=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("unproven OmniGent model aliases created completed operations=%+v", operations)
 	}
 }
 
@@ -902,7 +900,7 @@ func TestHookOccurrenceRejectsConflictingTypedAliasesBeforePersistence(t *testin
 	}
 }
 
-func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *testing.T) {
+func TestOpenHandsCommandHookRejectsSDKOnlyActionIdentity(t *testing.T) {
 	installCorrelationHMACForTest()
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
@@ -910,17 +908,23 @@ func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *test
 	profile := server.hookProfileForConnector("openhands")
 	req := normalizeAgentHookRequestWithProfile("openhands", map[string]interface{}{
 		"hook_event_name": "user_prompt_submit",
-		"conversation_id": "conversation-1",
+		"session_id":      "session-1",
 		"message_id":      "message-1",
 		"action_id":       "action-1",
 	}, profile)
+	if req.SessionID != "session-1" {
+		t.Fatalf("documented session ID was not preserved before correlation: %+v", req)
+	}
 	if req.ToolInvocationID != "" {
 		t.Fatalf("action ID populated tool invocation before correlation: %+v", req)
 	}
 	_, correlated, err := server.correlateHookOccurrence(t.Context(), profile, req,
-		[]byte(`{"action_id":"action-1","conversation_id":"conversation-1","hook_event_name":"user_prompt_submit","message_id":"message-1"}`))
+		[]byte(`{"action_id":"action-1","hook_event_name":"user_prompt_submit","message_id":"message-1","session_id":"session-1"}`))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if correlated.SessionID != "session-1" {
+		t.Fatalf("documented session ID was not preserved after correlation: %+v", correlated)
 	}
 	if correlated.ToolInvocationID != "" {
 		t.Fatalf("action ID populated tool invocation after correlation: %+v", correlated)
@@ -931,7 +935,11 @@ func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *test
 		t.Fatal(err)
 	}
 	defer database.Close() //nolint:errcheck
-	var actions, tools int
+	var sessions, actions, tools int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
+		WHERE identifier_kind='session' AND normalized_value='session-1'`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_identifiers
 		WHERE identifier_kind='action' AND normalized_value='action-1'`).Scan(&actions); err != nil {
 		t.Fatal(err)
@@ -940,8 +948,8 @@ func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *test
 		WHERE identifier_kind='tool_invocation' AND normalized_value='action-1'`).Scan(&tools); err != nil {
 		t.Fatal(err)
 	}
-	if actions != 1 || tools != 0 {
-		t.Fatalf("action/tool identifier rows=%d/%d", actions, tools)
+	if sessions != 1 || actions != 0 || tools != 0 {
+		t.Fatalf("session/action/tool identifier rows=%d/%d/%d", sessions, actions, tools)
 	}
 }
 

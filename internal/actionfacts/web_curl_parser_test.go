@@ -135,7 +135,7 @@ func TestParseCurlArgvOwnsOptionLookingAndEmptyValues(t *testing.T) {
 		},
 		{
 			name:      "empty data value is present",
-			argv:      []string{"curl", "--data=", "https://files.invalid/run"},
+			argv:      []string{"curl", "--data", "", "https://files.invalid/run"},
 			canonical: "--data",
 			value:     "",
 		},
@@ -164,6 +164,22 @@ func TestParseCurlArgvOwnsOptionLookingAndEmptyValues(t *testing.T) {
 	}
 }
 
+func TestParseCurlArgvOwnsURLQueryValues(t *testing.T) {
+	t.Parallel()
+
+	for _, argv := range [][]string{
+		{"curl", "--url-query", "key=value", "https://files.invalid/run"},
+		{"curl", "--url-query", "", "https://files.invalid/run"},
+	} {
+		parsed := parseCurlArgv(argv)
+		option := requireCurlParsedOption(t, parsed, "--url-query")
+		if !parsed.Complete || len(parsed.Targets) != 1 ||
+			!option.ValuePresent || !parsed.hasValidOptionValues() {
+			t.Fatalf("parse = %#v", parsed)
+		}
+	}
+}
+
 func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 	t.Parallel()
 
@@ -171,7 +187,6 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 		{"curl", "-m", "1", "https://files.invalid/run"},
 		{"curl", "-m1", "https://files.invalid/run"},
 		{"curl", "--max-time", "1", "https://files.invalid/run"},
-		{"curl", "--max-time=1", "https://files.invalid/run"},
 	} {
 		parsed := parseCurlArgv(argv)
 		option := requireCurlParsedOption(t, parsed, "--max-time")
@@ -190,13 +205,13 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 	}{
 		{
 			short:     []string{"curl", "-Uproxy:user", "https://files.invalid/run"},
-			long:      []string{"curl", "--proxy-user=proxy:user", "https://files.invalid/run"},
+			long:      []string{"curl", "--proxy-user", "proxy:user", "https://files.invalid/run"},
 			canonical: "--proxy-user",
 			value:     "proxy:user",
 		},
 		{
 			short:     []string{"curl", "-Eclient.pem", "https://files.invalid/run"},
-			long:      []string{"curl", "--cert=client.pem", "https://files.invalid/run"},
+			long:      []string{"curl", "--cert", "client.pem", "https://files.invalid/run"},
 			canonical: "--cert",
 			value:     "client.pem",
 		},
@@ -230,6 +245,37 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 		explicitStdout.Targets[0].Output != curlOutputStdout ||
 		!explicitStdout.provesResponseStdout() {
 		t.Fatalf("explicit stdout bundle = %#v", explicitStdout)
+	}
+}
+
+func TestParseCurlArgvRejectsJoinedLongOptionValues(t *testing.T) {
+	t.Parallel()
+
+	for _, argv := range [][]string{
+		{"curl", "--data=fixture", "https://files.invalid/run"},
+		{"curl", "--data=", "https://files.invalid/run"},
+		{"curl", "--max-time=1", "https://files.invalid/run"},
+		{"curl", "--request=GET", "https://files.invalid/run"},
+		{"curl", "--url=https://files.invalid/run"},
+		{"curl", "--silent=true", "https://files.invalid/run"},
+	} {
+		parsed := parseCurlArgv(argv)
+		if parsed.Complete || len(parsed.Unresolved) != 1 ||
+			parsed.Unresolved[0].Raw != argv[1] ||
+			parsed.Unresolved[0].Reason !=
+				"joined value is not accepted for this curl option" ||
+			len(parsed.Options) != 1 || parsed.Options[0].ValuePresent ||
+			parsed.provesResponseStdout() {
+			t.Fatalf("joined long argv=%v parse=%#v", argv, parsed)
+		}
+	}
+
+	shortJoined := parseCurlArgv([]string{
+		"curl", "-m1", "-XGET", "https://files.invalid/run",
+	})
+	if !shortJoined.Complete || !shortJoined.hasValidOptionValues() ||
+		!shortJoined.provesResponseStdout() {
+		t.Fatalf("short joined options lost authority: %#v", shortJoined)
 	}
 }
 
@@ -398,7 +444,7 @@ func TestParseCurlArgvMethodHeadConfigUnknownAndNoTarget(t *testing.T) {
 	}
 
 	finalGet := parseCurlArgv([]string{
-		"curl", "-sXHEAD", "--request=GET", "https://files.invalid/run",
+		"curl", "-sXHEAD", "--request", "GET", "https://files.invalid/run",
 	})
 	if !finalGet.Complete || len(finalGet.Targets) != 1 ||
 		finalGet.Targets[0].Method != "GET" ||
@@ -507,6 +553,66 @@ func TestParseCurlArgvExactProofRequiresValidValuesAndTarget(t *testing.T) {
 		if !parsed.provesResponseStdout() {
 			t.Fatalf("valid argv=%v did not prove response stdout: %#v", argv, parsed)
 		}
+	}
+}
+
+func TestParseCurlArgvNumericGrammarMatchesCurl87(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		canonical string
+		value     string
+		valid     bool
+	}{
+		{name: "leading whitespace signed decimal zero", canonical: "--max-time", value: "\t+0", valid: true},
+		{name: "negative decimal zero", canonical: "--connect-timeout", value: "-0", valid: true},
+		{name: "decimal exponent", canonical: "--max-time", value: "0e3", valid: true},
+		{name: "decimal zero extreme negative exponent", canonical: "--max-time", value: "0e-4000", valid: true},
+		{name: "negative decimal zero extreme negative exponent", canonical: "--connect-timeout", value: "-0e-4000", valid: true},
+		{name: "decimal positive underflow to zero rejected", canonical: "--max-time", value: "1e-4000"},
+		{name: "decimal negative underflow to zero rejected", canonical: "--max-time", value: "-1e-4000"},
+		{name: "decimal positive subnormal rejected", canonical: "--max-time", value: "1e-320"},
+		{name: "decimal negative subnormal rejected", canonical: "--max-time", value: "-1e-320"},
+		{name: "decimal near normal subnormal rejected", canonical: "--max-time", value: "1e-308"},
+		{name: "decimal minimum normal portability boundary rejected", canonical: "--max-time", value: "2.2250738585072014e-308"},
+		{name: "ordinary normal sub millisecond", canonical: "--max-time", value: "1e-307", valid: true},
+		{name: "sub millisecond decimal", canonical: "--max-time", value: ".000999999999", valid: true},
+		{name: "hex float exponent", canonical: "--max-time", value: "0x1p-11", valid: true},
+		{name: "hex float implicit exponent", canonical: "--max-time", value: "+0x0.", valid: true},
+		{name: "hex zero extreme negative exponent", canonical: "--max-time", value: "0x0p-999999", valid: true},
+		{name: "negative hex zero extreme negative exponent", canonical: "--connect-timeout", value: "-0x0p-999999", valid: true},
+		{name: "hex positive underflow to zero rejected", canonical: "--max-time", value: "0x1p-999999"},
+		{name: "hex negative underflow to zero rejected", canonical: "--max-time", value: "-0x1p-999999"},
+		{name: "hex positive subnormal rejected", canonical: "--max-time", value: "0x1p-1074"},
+		{name: "hex negative subnormal rejected", canonical: "--max-time", value: "-0x1p-1074"},
+		{name: "hex positive subnormal rounded to minimum normal rejected", canonical: "--max-time", value: "0x1.fffffffffffffp-1023"},
+		{name: "hex negative subnormal rounded to minimum normal rejected", canonical: "--max-time", value: "-0x1.fffffffffffffp-1023"},
+		{name: "hex minimum normal portability boundary rejected", canonical: "--max-time", value: "0x1p-1022"},
+		{name: "expect timeout exact zero extreme exponent", canonical: "--expect100-timeout", value: "0e-4000", valid: true},
+		{name: "expect timeout normal sub millisecond", canonical: "--expect100-timeout", value: "1e-307", valid: true},
+		{name: "expect timeout underflow rejected globally", canonical: "--expect100-timeout", value: "1e-4000"},
+		{name: "Go underscore rejected", canonical: "--max-time", value: "0_0"},
+		{name: "NaN rejected", canonical: "--max-time", value: "NaN"},
+		{name: "infinity rejected", canonical: "--max-time", value: "Inf"},
+		{name: "trailing whitespace rejected", canonical: "--max-time", value: "0 "},
+		{name: "negative nonzero rejected", canonical: "--max-time", value: "-0.0001"},
+		{name: "signed integer zero", canonical: "--retry", value: "-000", valid: true},
+		{name: "leading whitespace integer zero", canonical: "--speed-time", value: "\t+000", valid: true},
+		{name: "integer decimal rejected", canonical: "--retry", value: "0.0"},
+		{name: "integer exponent rejected", canonical: "--retry-delay", value: "0e1"},
+		{name: "integer hex rejected", canonical: "--retry-max-time", value: "0x0"},
+		{name: "integer underscore rejected", canonical: "--speed-limit", value: "0_0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			parsed := parseCurlArgv([]string{
+				"curl", test.canonical, test.value, "https://files.invalid/run",
+			})
+			if got := parsed.hasValidOptionValues(); got != test.valid {
+				t.Fatalf("hasValidOptionValues = %t, want %t; parse = %#v", got, test.valid, parsed)
+			}
+		})
 	}
 }
 

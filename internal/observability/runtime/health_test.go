@@ -155,9 +155,11 @@ func TestDestinationHealthSnapshotAggregatesCircuitDiagnostics(t *testing.T) {
 			row.CircuitOpenUntil.IsZero() ||
 			cooldown < 5*time.Minute-time.Second || cooldown > 5*time.Minute+time.Second ||
 			row.LastFailureClass != delivery.FailureClassAuthentication ||
+			row.LastFailureCode != delivery.FailureCodeUnspecified ||
 			len(row.Sources) != 1 ||
 			row.Sources[0].CircuitState != delivery.CircuitOpen ||
-			row.Sources[0].LastFailureClass != delivery.FailureClassAuthentication {
+			row.Sources[0].LastFailureClass != delivery.FailureClassAuthentication ||
+			row.Sources[0].LastFailureCode != delivery.FailureCodeUnspecified {
 			t.Fatalf("circuit health=%+v", row)
 		}
 		return

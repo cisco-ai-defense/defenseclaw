@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -37,6 +39,7 @@ type extractedInput struct {
 	urls         []string
 	method       string
 	payload      []extractedPayload
+	policyBypass bool
 	status       ParseStatus
 	issues       []IssueCode
 }
@@ -101,7 +104,576 @@ func extractArgs(raw json.RawMessage) extractedInput {
 }
 
 func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
+	switch {
+	case strings.EqualFold(tool, "search_files"):
+		return extractExactSearchFilesArgs(raw)
+	case strings.EqualFold(tool, "get_file_info"):
+		return extractExactGetFileInfoArgs(raw)
+	case strings.EqualFold(tool, "fs.read_batch"):
+		return extractExactFSReadBatchArgs(raw)
+	}
+	if exactTerminalKeystrokesTool(tool) {
+		return extractExactTerminalKeystrokesArgs(raw)
+	}
+	if tool == "aws.ec2.terminate_instances" {
+		if exactAWSBulkEC2TerminationArgs(raw) {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == kubernetesBatchSecretTool {
+		if _, ok := exactKubernetesBatchSecretCollectionArgs(raw); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if strings.EqualFold(tool, "shell") && exactEndpointProcessMetadataInput(raw) != "" {
+		// Closed Sysmon process metadata may accompany an explicit shell command.
+		// It contributes only an opaque lineage identity; it is not command text.
+		return extractedInput{status: StatusComplete}
+	}
+	if usesClosedCodingAgentArgumentSchema(raw, tool) {
+		return extractClosedCodingAgentArgs(raw, tool)
+	}
+	if tool == "secretsdump" || tool == "hashcat_crack" || tool == "kerberoast" {
+		if _, ok := exactStructuredDirectoryCredentialAcquisition(Input{Tool: tool, Args: raw}); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if exactShellExecutionTool(tool) || usesClosedShellExecutionArgumentSchema(raw, tool) {
+		return extractExactShellExecutionArgs(raw)
+	}
+	if strings.EqualFold(tool, "persist") {
+		return extractExactPersistenceArgs(raw)
+	}
+	if tool == "cloud_metadata" {
+		if _, _, ok := exactCloudMetadataInput(raw); ok {
+			// The reviewed metadata recognizer owns this closed schema. Provider
+			// paths remain private and are never projected as filesystem paths.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "aws.cloudtrail_event" {
+		if _, ok := exactCloudAuditSecurityOperationInput(raw); ok ||
+			exactCloudAuditResourceMutationInput(tool, raw) != nil ||
+			exactCloudShareOperationEnvelope(raw) {
+			// The reviewed CloudTrail recognizer owns this closed, post-action
+			// schema. Cloud values remain private and never become generic argv.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "azure.activity_event" || tool == "gcp.audit_event" {
+		if exactCloudAuditResourceMutationInput(tool, raw) != nil {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "windows.event" {
+		if _, ok := exactEndpointSecurityControlMutationInput(raw); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "credential_extract" {
+		if _, ok := exactStructuredCredentialReadInput(raw); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "get_file_by_id" || tool == "send_email" ||
+		tool == "append_to_file" || tool == "share_file" ||
+		(tool == "delete_file" && structuredResourceMutationSchemaSelected(raw)) {
+		if exactStructuredResourceArtifactInput(tool, raw) {
+			// The resource/artifact lineage recognizer owns these closed schemas.
+			// Identifiers and message content remain private and never become
+			// generic command, path, payload, or network facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "port_forward" {
+		if _, ok := exactStructuredPortForwardInput(raw); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "sql_query" {
+		if _, _, _, ok := exactSQLQueryArgs(raw); ok {
+			// sql_query is a closed structured schema. The query remains private
+			// to the reviewed SQL recognizers and is never reinterpreted as a
+			// shell command or projected into CEL-visible argv.
+			return extractedInput{status: StatusComplete}
+		}
+	}
+	if tool == "db.execute" {
+		if _, _, ok := exactDBExecuteArgs(raw); ok {
+			// The reviewed db.execute recognizer owns this exact two-key schema.
+			// SQL and database values remain private and are projected only as a
+			// closed mutation class plus domain-separated identity digests.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "read_query" {
+		if _, ok := exactSensitiveSQLReadQueryArgs(raw); ok {
+			// The reviewed rowset recognizer owns this closed schema. Query text
+			// remains private and is never projected into generic command facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "db.query" {
+		if _, _, ok := exactSQLDirectExternalEgressArgs(raw); ok {
+			// This exact schema binds a reviewed credential-bearing SELECT to a
+			// literal external result destination. SQL and URL text remain private
+			// to the recognizer and never enter generic command/network facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "write_query" {
+		if _, ok := exactSQLiteWriteQueryArgs(raw); ok {
+			// The reviewed SQLite mutation recognizer owns this closed schema.
+			// Query text remains private and is never projected into generic
+			// command facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "create_entities" {
+		if _, ok := exactStructuredEntityPersistenceArgs(raw); ok {
+			// The reviewed persistence recognizer owns this closed schema.
+			// Entity names, types, and observations remain private.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "http_request" && selectsHTTPPathRequestSchema(raw) {
+		if _, ok := exactHTTPRequestInput(raw); ok {
+			// The reviewed HTTP recognizers own both accepted request schemas.
+			// Request values remain private and are never reinterpreted as shell
+			// commands or projected into generic command, path, or payload facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if strings.EqualFold(tool, "kubectl") {
+		if exactKubernetesCronJobInputSchema(raw) || exactKubernetesPodRunInputSchema(raw) ||
+			exactKubernetesCronJobReverseShellInputSchema(raw) {
+			// The reviewed CronJob recognizer owns this closed structured
+			// schema. Patch bytes remain private to it and are not projected
+			// into the generic command classifier.
+			return extractedInput{status: StatusComplete}
+		}
+		command, namespace, ok := exactStructuredKubectlInput(raw)
+		if !ok {
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+		prefix := "kubectl "
+		if namespace != "" {
+			prefix = "kubectl --namespace=" + namespace + " "
+		}
+		return extractedInput{command: prefix + command, status: StatusComplete}
+	}
+	if strings.EqualFold(tool, "aws_cli") {
+		// aws_cli is an execution-capable schema only for the closed IAM
+		// productions owned by cloud_iam_principal.go. Never feed an unrelated
+		// provider command through generic command-field extraction.
+		return extractExactAWSCLIArgs(raw)
+	}
 	return extractArgsAtSchema(raw, 0, isApplyPatchTool(tool))
+}
+
+// exactTerminalKeystrokesTool identifies the one reviewed terminal-control
+// schema currently used by Terminal Wrench trajectories. Keystrokes are not a
+// generic command alias: an arbitrary tool carrying the same field remains
+// opaque input.
+func exactTerminalKeystrokesTool(tool string) bool {
+	return strings.EqualFold(tool, "bash_command")
+}
+
+// extractExactTerminalKeystrokesArgs accepts one submitted, literal POSIX
+// command. A single trailing Enter is part of the envelope and is removed
+// before parsing. Multi-line, compound, dynamic, redirected, piped, wrapped,
+// or interactive input remains partial so it cannot mint authoritative facts.
+func extractExactTerminalKeystrokesArgs(raw json.RawMessage) extractedInput {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" {
+		return problem
+	}
+	value, ok := object["keystrokes"]
+	if !ok {
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	keystrokes, ok := value.(string)
+	if !ok || validateCommandText(keystrokes) != "" {
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	for key, metadata := range object {
+		switch key {
+		case "keystrokes":
+		case "duration":
+			number, valid := metadata.(json.Number)
+			if !valid {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+			duration, err := strconv.ParseFloat(number.String(), 64)
+			if err != nil || math.IsInf(duration, 0) || math.IsNaN(duration) || duration < 0 {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+		default:
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+	}
+	command := ""
+	switch {
+	case strings.HasSuffix(keystrokes, "\r\n"):
+		command = strings.TrimSuffix(keystrokes, "\r\n")
+	case strings.HasSuffix(keystrokes, "\n"):
+		command = strings.TrimSuffix(keystrokes, "\n")
+	default:
+		// Without a literal Enter, the terminal input has not been submitted.
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if strings.ContainsAny(command, "\r\n") || containsTerminalControlInput(command) ||
+		!exactSingleStaticPOSIXCommand(command) {
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnsupportedConstruct}}
+	}
+	return extractedInput{command: command, status: StatusComplete}
+}
+
+func containsTerminalControlInput(source string) bool {
+	for _, character := range source {
+		if character == '\t' {
+			continue
+		}
+		if character < ' ' || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func exactSingleStaticPOSIXCommand(source string) bool {
+	parsed := parsePOSIX(source, 1, 0)
+	classifyOutput(&parsed)
+	enforceAnalyzeAuthority(&parsed)
+	statusAccepted := parsed.status == StatusComplete ||
+		(parsed.status == StatusPartial && len(parsed.issues) == 1 &&
+			parsed.issues[0] == IssueUnknownOperandGrammar)
+	if !statusAccepted || len(parsed.commands) != 1 {
+		return false
+	}
+	command := parsed.commands[0]
+	// POSIX parser internals use the zero value for process commands; the
+	// public Facts clone normalizes it to CommandKindProcess.
+	if command.Kind == "" {
+		command.Kind = CommandKindProcess
+	}
+	return exactUnconditionalTopLevelCommand(command) && command.ArgvComplete &&
+		staticArguments(command.Arguments)
+}
+
+func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" {
+		return false
+	}
+	hasAny := func(keys ...string) bool {
+		for _, key := range keys {
+			if _, ok := object[key]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	switch strings.ToLower(tool) {
+	case "read":
+		return hasAny("limit", "offset", "pages")
+	case "edit":
+		return hasAny("old_string", "new_string", "replace_all")
+	case "grep", "glob":
+		return hasAny("pattern")
+	case "webfetch":
+		return hasAny("prompt")
+	case "search_code":
+		return hasAny("root", "pattern", "max_results")
+	case "notebookedit":
+		return hasAny("notebook_path", "new_source", "edit_mode")
+	default:
+		return false
+	}
+}
+
+// extractClosedCodingAgentArgs projects the reviewed argument contracts used
+// by common coding-agent file and web tools. Pagination, presentation, and
+// search selectors are validated but do not become executable content.
+func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInput {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" {
+		return problem
+	}
+	out := extractedInput{status: StatusComplete}
+	allowed := map[string]func(string, any) bool{}
+	require := map[string]bool{}
+	stringField := func(key string, value any) bool {
+		text, ok := value.(string)
+		if !ok || validateScalar(text, maxScalarBytes) != "" || strings.TrimSpace(text) == "" {
+			return false
+		}
+		canonical := key
+		if key == "file_path" || key == "root" || key == "notebook_path" {
+			canonical = "path"
+		}
+		return appendExtractedPath(&out, canonical, text)
+	}
+	metadataString := func(_ string, value any) bool {
+		text, ok := value.(string)
+		return ok && validateScalar(text, maxScalarBytes) == ""
+	}
+	literalText := func(_ string, value any) bool {
+		_, ok := value.(string)
+		return ok
+	}
+	nonNegativeInteger := func(_ string, value any) bool {
+		number, ok := value.(json.Number)
+		if !ok || strings.ContainsAny(number.String(), ".eE") {
+			return false
+		}
+		parsed, err := strconv.ParseInt(number.String(), 10, 64)
+		return err == nil && parsed >= 0
+	}
+	boolean := func(_ string, value any) bool {
+		_, ok := value.(bool)
+		return ok
+	}
+
+	switch strings.ToLower(tool) {
+	case "read":
+		allowed["file_path"] = stringField
+		allowed["limit"] = nonNegativeInteger
+		allowed["offset"] = nonNegativeInteger
+		allowed["pages"] = metadataString
+		require["file_path"] = true
+	case "edit":
+		allowed["file_path"] = stringField
+		allowed["old_string"] = literalText
+		allowed["new_string"] = func(_ string, value any) bool {
+			text, ok := value.(string)
+			if ok {
+				out.payload = append(out.payload, extractedPayload{key: "content", nonEmpty: text != ""})
+			}
+			return ok
+		}
+		allowed["replace_all"] = boolean
+		require["file_path"], require["old_string"], require["new_string"] = true, true, true
+	case "grep":
+		allowed["pattern"] = metadataString
+		allowed["path"] = stringField
+		allowed["file_path"] = stringField
+		for _, key := range []string{"output_mode", "glob", "type"} {
+			allowed[key] = metadataString
+		}
+		for _, key := range []string{"context", "head_limit"} {
+			allowed[key] = nonNegativeInteger
+		}
+		allowed["-n"], allowed["-i"] = boolean, boolean
+		require["pattern"] = true
+	case "glob":
+		allowed["pattern"] = metadataString
+		allowed["path"] = stringField
+		require["pattern"] = true
+	case "webfetch":
+		allowed["url"] = func(_ string, value any) bool {
+			text, ok := value.(string)
+			return ok && appendExtractedURL(&out, text)
+		}
+		allowed["prompt"] = metadataString
+		require["url"], require["prompt"] = true, true
+	case "search_code":
+		allowed["root"] = stringField
+		allowed["pattern"] = metadataString
+		allowed["glob"] = metadataString
+		allowed["max_results"] = nonNegativeInteger
+		require["root"], require["pattern"] = true, true
+	case "notebookedit":
+		allowed["notebook_path"] = stringField
+		allowed["cell_id"] = metadataString
+		allowed["cell_type"] = metadataString
+		allowed["edit_mode"] = metadataString
+		allowed["new_source"] = func(_ string, value any) bool {
+			text, ok := value.(string)
+			if ok {
+				out.payload = append(out.payload, extractedPayload{key: "content", nonEmpty: text != ""})
+			}
+			return ok
+		}
+		for _, key := range []string{"notebook_path", "cell_id", "cell_type", "edit_mode", "new_source"} {
+			require[key] = true
+		}
+	}
+	for key, value := range object {
+		validator, ok := allowed[key]
+		if !ok || !validator(key, value) {
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+		delete(require, key)
+	}
+	if len(require) != 0 {
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	return out
+}
+
+func exactJSONObject(raw json.RawMessage) (map[string]any, extractedInput) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, extractedInput{status: StatusNotApplicable}
+	}
+	if len(raw) > maxArgsJSONBytes {
+		return nil, extractedInput{status: StatusLimitExceeded, issues: []IssueCode{IssueInputLimit}}
+	}
+	if !utf8.Valid(raw) {
+		return nil, extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidUTF8}}
+	}
+	if issue := validateJSONWithStringLimit(raw, maxCommandBytes); issue != "" {
+		return nil, extractedInput{status: statusForStructuredJSONIssue(issue), issues: []IssueCode{issue}}
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidJSON}}
+	}
+	return object, extractedInput{}
+}
+
+func exactShellExecutionTool(tool string) bool {
+	switch strings.ToLower(tool) {
+	case "bash", "powershell":
+		return true
+	default:
+		return false
+	}
+}
+
+func usesClosedShellExecutionArgumentSchema(raw json.RawMessage, tool string) bool {
+	if !strings.EqualFold(tool, "shell") {
+		return false
+	}
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" {
+		return false
+	}
+	for _, key := range []string{"description", "timeout", "run_in_background", "dangerouslyDisableSandbox", "workdir"} {
+		if _, ok := object[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// extractExactShellExecutionArgs accepts the closed argument contract used by
+// common coding-agent Bash and PowerShell tools. Descriptions and timeout
+// controls are metadata, not nested executable text. Unknown fields remain
+// partial, and an explicit sandbox disable is retained only as a value-free
+// policy-bypass bit for the command projection.
+func extractExactShellExecutionArgs(raw json.RawMessage) extractedInput {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return extractedInput{status: StatusNotApplicable}
+	}
+	if len(raw) > maxArgsJSONBytes {
+		return extractedInput{status: StatusLimitExceeded, issues: []IssueCode{IssueInputLimit}}
+	}
+	if !utf8.Valid(raw) {
+		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidUTF8}}
+	}
+	if issue := validateJSONWithStringLimit(raw, maxCommandBytes); issue != "" {
+		return extractedInput{status: statusForStructuredJSONIssue(issue), issues: []IssueCode{issue}}
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidJSON}}
+	}
+	commandValue, ok := object["command"]
+	if !ok {
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	out := extractedInput{status: StatusComplete}
+	switch command := commandValue.(type) {
+	case string:
+		if command == "" || validateCommandText(command) != "" {
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+		out.command = command
+	case []any:
+		if len(command) == 0 {
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+		out.argv = make([]string, 0, len(command))
+		for _, item := range command {
+			argument, valid := item.(string)
+			if !valid {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+			out.argv = append(out.argv, argument)
+		}
+		if validateArgv(out.argv) != "" {
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+	default:
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	for key, value := range object {
+		switch key {
+		case "command":
+		case "cwd", "workdir":
+			cwd, valid := value.(string)
+			if !valid || out.cwd != "" || strings.TrimSpace(cwd) == "" ||
+				validateScalar(cwd, maxScalarBytes) != "" {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+			out.cwd = cwd
+		case "description":
+			description, valid := value.(string)
+			if !valid || validateScalar(description, maxScalarBytes) != "" {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+		case "timeout":
+			number, valid := value.(json.Number)
+			if !valid {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+			timeout, err := strconv.ParseFloat(number.String(), 64)
+			if err != nil || math.IsInf(timeout, 0) || math.IsNaN(timeout) || timeout <= 0 {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+		case "run_in_background":
+			if _, valid := value.(bool); !valid {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+		case "dangerouslyDisableSandbox":
+			disabled, valid := value.(bool)
+			if !valid {
+				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+			}
+			out.policyBypass = disabled
+		default:
+			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+		}
+	}
+	return out
+}
+
+func statusForStructuredJSONIssue(issue IssueCode) ParseStatus {
+	if issue == IssueDuplicateJSONKey {
+		return StatusAmbiguous
+	}
+	return statusForInputIssue(issue)
 }
 
 func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {

@@ -25,10 +25,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// TestReadMCPFromCodexConfigTOML covers the bug fix where Codex's
-// global MCP server registry (~/.codex/config.toml) was being silently
-// ignored — `defenseclaw mcp list` for a Codex install only saw
-// project-local ./.mcp.json, hiding every globally-registered server.
+// TestReadMCPFromCodexConfigTOML covers Codex's config.toml
+// [mcp_servers] registry used by both user and trusted-project layers.
 func TestReadMCPFromCodexConfigTOML(t *testing.T) {
 	t.Run("happy_path_dotted_table", func(t *testing.T) {
 		dir := t.TempDir()
@@ -129,11 +127,72 @@ enabled = true
 			t.Fatal("expected TOML parse error for malformed file")
 		}
 	})
+
+	t.Run("oversized_input_returns_error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		payload := make([]byte, maxCodexInventoryConfigBytes+1)
+		copy(payload, "[mcp_servers.unsafe]\ncommand = \"ignored\"\n")
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMCPFromCodexConfigTOML(path); err == nil {
+			t.Fatal("expected oversized Codex MCP config to be rejected")
+		}
+	})
+
+	t.Run("symlink_input_returns_error", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.toml")
+		if err := os.WriteFile(target, []byte("[mcp_servers.unsafe]\ncommand = \"ignored\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "config.toml")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if _, err := readMCPFromCodexConfigTOML(link); err == nil {
+			t.Fatal("expected symlink Codex MCP config to be rejected")
+		}
+	})
+}
+
+func TestReadMCPServersCodexContinuesPastUnsafeProjectLayer(t *testing.T) {
+	homeDir := t.TempDir()
+	cwdDir := t.TempDir()
+	testenv.SetHome(t, homeDir)
+
+	codexDir := filepath.Join(homeDir, ".codex")
+	projectDir := filepath.Join(cwdDir, ".codex")
+	for _, dir := range []string{codexDir, projectDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexDir, "config.toml"),
+		[]byte("[mcp_servers.user-safe]\ncommand = \"safe\"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := make([]byte, maxCodexInventoryConfigBytes+1)
+	copy(unsafe, "[mcp_servers.project-unsafe]\ncommand = \"ignored\"\n")
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), unsafe, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readMCPServersCodex(cwdDir)
+	if err != nil {
+		t.Fatalf("read MCP layers: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "user-safe" || entries[0].SourceScope != "user" {
+		t.Fatalf("entries after unsafe project layer = %+v, want user-safe only", entries)
+	}
 }
 
 // TestReadMCPServersCodex_MergesGlobalAndProjectLocal verifies the
-// integration-level read path: config.toml + .mcp.json are both
-// consulted and de-duped by name.
+// integration-level read path: user and project config.toml layers are both
+// consulted and de-duped by name, with the closer project layer winning.
 func TestReadMCPServersCodex_MergesGlobalAndProjectLocal(t *testing.T) {
 	homeDir := t.TempDir()
 	cwdDir := t.TempDir()
@@ -155,12 +214,20 @@ args = ["/opt/global-fs.js"]
 		t.Fatal(err)
 	}
 
-	dotmcp := []byte(`{
-		"mcpServers": {
-			"local-search": {"command": "search-mcp", "args": ["--port", "8910"]}
-		}
-	}`)
-	if err := os.WriteFile(filepath.Join(cwdDir, ".mcp.json"), dotmcp, 0o600); err != nil {
+	projectConfigDir := filepath.Join(cwdDir, ".codex")
+	if err := os.MkdirAll(projectConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectConfigPath := filepath.Join(projectConfigDir, "config.toml")
+	projectTOML := `
+[mcp_servers.local-search]
+command = "search-mcp"
+args = ["--port", "8910"]
+
+[mcp_servers.global-fs]
+command = "project-node"
+`
+	if err := os.WriteFile(projectConfigPath, []byte(projectTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,6 +247,18 @@ args = ["/opt/global-fs.js"]
 			t.Fatalf("want %v, got %v", want, got)
 		}
 	}
+	for _, entry := range entries {
+		switch entry.Name {
+		case "local-search":
+			if entry.Source != projectConfigPath || entry.SourceScope != "project" || !entry.TrustRequired {
+				t.Errorf("local project metadata = %+v", entry)
+			}
+		case "global-fs":
+			if entry.Command != "project-node" || entry.SourceScope != "project" || !entry.TrustRequired {
+				t.Errorf("project override did not win: %+v", entry)
+			}
+		}
+	}
 }
 
 func entryNames(es []MCPServerEntry) []string {
@@ -192,7 +271,7 @@ func entryNames(es []MCPServerEntry) []string {
 
 // chdir pushes the test's cwd into dir for the duration of the test
 // and restores it via t.Cleanup. Wrapped here so each TOML test can
-// isolate its `./.mcp.json` lookup without leaking state across
+// isolate its project config lookup without leaking state across
 // tests in the package.
 func chdir(t *testing.T, dir string) {
 	t.Helper()

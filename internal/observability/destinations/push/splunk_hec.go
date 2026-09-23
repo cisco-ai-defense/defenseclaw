@@ -124,7 +124,9 @@ func (*SplunkHEC) EncodedSize(projectedSizes []int) (int, bool) {
 
 func (adapter *SplunkHEC) Deliver(ctx context.Context, batch delivery.Batch) delivery.DeliveryResult {
 	if adapter == nil || ctx == nil || batch.Len() == 0 {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeAdapterInputInvalid,
+		}
 	}
 	var body bytes.Buffer
 	if batch.EncodedSize() > 0 {
@@ -134,7 +136,9 @@ func (adapter *SplunkHEC) Deliver(ctx context.Context, batch delivery.Batch) del
 		projected := item.Bytes()
 		aliases, action, ok := projectedAliases(projected)
 		if !ok {
-			return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+			return delivery.DeliveryResult{
+				Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeProjectionInvalid,
+			}
 		}
 		sourceType := adapter.sourceType
 		if override, found := adapter.sourceTypeOverrides[action]; found {
@@ -147,18 +151,26 @@ func (adapter *SplunkHEC) Deliver(ctx context.Context, batch delivery.Batch) del
 		encoded, err := encodeHECEnvelope(envelope)
 		if err != nil || len(encoded)+1 > len(projected)+maxHECWrapperBytes ||
 			body.Len() > batch.EncodedSize()-len(encoded)-1 {
-			return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+			code := delivery.FailureCodeEnvelopeSizeInvalid
+			if err != nil {
+				code = delivery.FailureCodeEnvelopeEncodeFailed
+			}
+			return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload, FailureCode: code}
 		}
 		_, _ = body.Write(encoded)
 		_ = body.WriteByte('\n')
 	}
 	if body.Len() > batch.EncodedSize() {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeEnvelopeSizeInvalid,
+		}
 	}
 	writeTracker := &requestWriteTracker{}
 	req, err := http.NewRequestWithContext(writeTracker.traceContext(ctx), http.MethodPost, adapter.endpoint, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeRequestBuildFailed,
+		}
 	}
 	req.Header.Set("Authorization", "Splunk "+adapter.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -167,14 +179,14 @@ func (adapter *SplunkHEC) Deliver(ctx context.Context, batch delivery.Batch) del
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		return delivery.DeliveryResult{Outcome: classifyTransportError(err, writeTracker.mayHaveReachedPeer())}
+		return classifyTransportResult(err, writeTracker.mayHaveReachedPeer())
 	}
 	defer resp.Body.Close()
-	if outcome := classifyHTTPStatus(resp.StatusCode); outcome != delivery.OutcomeDelivered {
+	if result := classifyHTTPResult(resp.StatusCode); result.Outcome != delivery.OutcomeDelivered {
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
-		return delivery.DeliveryResult{Outcome: outcome}
+		return result
 	}
-	return delivery.DeliveryResult{Outcome: classifyHECAcknowledgement(resp.Body)}
+	return classifyHECAcknowledgementResult(resp.Body)
 }
 
 type hecEnvelope struct {
@@ -367,11 +379,13 @@ func firstStringAt(object map[string]any, keys ...string) string {
 	return ""
 }
 
-func classifyHECAcknowledgement(body io.Reader) delivery.DeliveryOutcome {
+func classifyHECAcknowledgementResult(body io.Reader) delivery.DeliveryResult {
 	limited := io.LimitReader(body, maxHECResponseBytes+1)
 	encoded, err := io.ReadAll(limited)
 	if err != nil || len(encoded) == 0 || len(encoded) > maxHECResponseBytes {
-		return delivery.OutcomeAmbiguous
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAmbiguous, FailureCode: delivery.FailureCodeHECAckInvalid,
+		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	var acknowledgement struct {
@@ -379,16 +393,24 @@ func classifyHECAcknowledgement(body io.Reader) delivery.DeliveryOutcome {
 		Text string `json:"text,omitempty"`
 	}
 	if decoder.Decode(&acknowledgement) != nil || decoder.Decode(&struct{}{}) != io.EOF || acknowledgement.Code == nil {
-		return delivery.OutcomeAmbiguous
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAmbiguous, FailureCode: delivery.FailureCodeHECAckInvalid,
+		}
 	}
 	switch *acknowledgement.Code {
 	case 0:
-		return delivery.OutcomeDelivered
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeDelivered}
 	case 1, 2, 3, 4:
-		return delivery.OutcomeAuthentication
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAuthentication, FailureCode: delivery.FailureCodeHECAckAuthentication,
+		}
 	case 8, 9:
-		return delivery.OutcomeTransient
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHECAckRetryable,
+		}
 	default:
-		return delivery.OutcomePermanentPayload
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeHECAckRejected,
+		}
 	}
 }

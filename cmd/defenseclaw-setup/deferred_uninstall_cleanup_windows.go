@@ -331,18 +331,7 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 	if err != nil {
 		return err
 	}
-	if err := requireDeferredCleanupHookRuntime(paths.Root); err != nil {
-		return err
-	}
 	transactionRoot, err := defaultTransactionRoot()
-	if err != nil {
-		return err
-	}
-	command, err := deferredCleanupRunCommand(transaction.MaintenancePath, transaction.ID)
-	if err != nil {
-		return err
-	}
-	bootIdentifier, err := queryDeferredCleanupBootIdentifier()
 	if err != nil {
 		return err
 	}
@@ -356,6 +345,27 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 		return errors.New("deferred uninstall cleanup requires the exact converged uninstall journal")
 	}
 	if err := connectorReconciliationPendingError("uninstall"); err != nil {
+		return err
+	}
+	runtimePresent, err := deferredCleanupHookRuntimePresent(paths.Root)
+	if err != nil {
+		return err
+	}
+	if !runtimePresent {
+		// A disabled stable runtime requires restart custody because Setup cannot
+		// delete its own launcher. If no runtime exists, the converged journal
+		// instead authorizes cleanupCommittedSetupTransaction's existing
+		// post-exit cache finalizer. Treat that proven absence as a
+		// supported terminal state, while retaining all journal and connector
+		// convergence checks above.
+		return nil
+	}
+	command, err := deferredCleanupRunCommand(transaction.MaintenancePath, transaction.ID)
+	if err != nil {
+		return err
+	}
+	bootIdentifier, err := queryDeferredCleanupBootIdentifier()
+	if err != nil {
 		return err
 	}
 
@@ -416,17 +426,13 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 	return errUninstallCleanupRequiresRestart
 }
 
-func requireDeferredCleanupHookRuntime(path string) error {
+func deferredCleanupHookRuntimePresent(path string) (bool, error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		// Every supported native installation publishes either the legacy full
-		// launcher or the schema-2 trampoline under HookRuntime. Without that
-		// authenticated residue there is no safe post-process authority after
-		// the completed-journal tombstone discards its transaction body.
-		return errors.New("disabled stable HookRuntime is missing; refusing unsupported legacy cache cleanup")
+		return false, nil
 	} else if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func authenticatedUninstallMaintenanceDigest(transaction setupTransaction) (string, error) {
@@ -557,10 +563,29 @@ func buildDeferredUninstallCleanupRecord(
 }
 
 func verifyRemovedConnectorsAfterUninstall(transaction setupTransaction) error {
+	return verifyRemovedConnectorsAfterUninstallWith(
+		transaction,
+		prepareConnectorMaintenanceGateway,
+		runDeferredUninstallConnectorVerifyWithEnv,
+	)
+}
+
+type deferredUninstallConnectorVerifyRunner func(
+	setupTransaction,
+	string,
+	string,
+	[]string,
+) error
+
+func verifyRemovedConnectorsAfterUninstallWith(
+	transaction setupTransaction,
+	prepare connectorMaintenanceGatewayProvider,
+	run deferredUninstallConnectorVerifyRunner,
+) error {
 	if len(transaction.PreviousConnectors) == 0 {
 		return nil
 	}
-	maintenance, err := prepareConnectorMaintenanceGateway()
+	maintenance, err := prepare()
 	if err != nil {
 		return err
 	}
@@ -571,11 +596,10 @@ func verifyRemovedConnectorsAfterUninstall(transaction setupTransaction) error {
 	for _, connectorName := range transaction.PreviousConnectors {
 		for _, configHome := range connectorCleanupHomes(transaction, connectorName) {
 			env := connectorLifecycleEnvForHome(transaction, connectorName, configHome)
-			if err := runConnectorLifecycleWithEnv(
+			if err := run(
+				transaction,
 				maintenance.path,
-				transaction.DataRoot,
 				connectorName,
-				"verify",
 				env,
 			); err != nil {
 				return fmt.Errorf(

@@ -10,3 +10,7 @@ import "errors"
 func runInteractiveWizard(_ options, _, _ string) (int, error) {
 	return 1, errors.New("interactive setup wizard is Windows-only")
 }
+
+func writeQuietSetupLog(_ string, _ int, _ error) (string, error) {
+	return "", nil
+}

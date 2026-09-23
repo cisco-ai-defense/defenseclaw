@@ -14,6 +14,27 @@ import (
 
 const eventRouterGuardrailV8Producer = "gateway.event_router.guardrail"
 
+func (r *EventRouter) recordParserUncertaintyMetricV8(
+	ctx context.Context,
+	count int64,
+) {
+	if r == nil || ctx == nil || count <= 0 {
+		return
+	}
+	emitter, _, authoritative := r.observabilityV8CapabilitiesSnapshot()
+	runtime, ok := emitter.(hookLifecycleMetricV8Runtime)
+	if !authoritative || !ok || runtime == nil {
+		return
+	}
+	recordParserUncertaintyMetricV8ForRuntime(
+		ctx,
+		runtime,
+		r.connectorName(),
+		eventRouterGuardrailV8Producer,
+		count,
+	)
+}
+
 type eventRouterGuardrailMetricObservation struct {
 	meta        llmEventMeta
 	tool        string

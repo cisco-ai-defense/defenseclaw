@@ -1,0 +1,28 @@
+{
+  "schema_version": "1",
+  "frozen_at": "2026-09-08",
+  "datasets": [
+    {
+      "id": "sh111111111111111/agentic_red_team",
+      "purpose": ["synthetic", "grammar-support", "real-arguments", "stateful"],
+      "source_url": "https://huggingface.co/datasets/sh111111111111111/agentic_red_team",
+      "revision": "3ed8b32aaed0006b960f2344ec9d3fcfa64b447d",
+      "fetch": "manual",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
+      "id": "defenseclaw-sqlserver-xp-cmdshell-chain-v1",
+      "purpose": ["stateful", "actionfacts", "identity-continuity", "hard-negative"],
+      "source_url": "benchmarks/fixtures/sqlserver-xp-cmdshell-chain-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    }
+  ]
+}

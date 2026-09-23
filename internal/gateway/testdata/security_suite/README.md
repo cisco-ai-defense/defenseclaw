@@ -22,6 +22,9 @@ surface.
 # deterministic tiers (tool-call semantics + regex + stubbed judge), no secrets:
 go test ./internal/gateway/ -run 'TestSecuritySuite(ToolCall|Regex|Judge)' -v
 
+# exact typed-CEL matrix for every shipped profile and applicable ActionFacts case:
+go test ./internal/gateway/ -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v
+
 # live judge scoring against a real model:
 GUARDRAIL_BENCHMARK_LLM=1 DEFENSECLAW_LLM_KEY=... \
   go test ./internal/gateway/ -run TestSecuritySuiteJudge -v
@@ -53,9 +56,19 @@ suppression, and whether a finding can contribute to enforcement. Payloads are
 parsed but never executed. Parser grammar edge cases remain in the focused
 ActionFacts tests instead of being duplicated here.
 
+The typed-CEL matrix treats a row as evaluable only when its target rule owns a
+CEL expression and `ActionFacts` is authoritative and projects successfully.
+CEL-targeted rows with partial or unsupported facts remain fallback-only.
+Every other corpus tier is text-only and is explicitly reported as
+non-applicable to the ActionFacts CEL activation.
+
 - `rule_id` — canonical owner expected to match or remain absent.
 - `command`, `argv`, `args`, `dialect`, `cwd`, and `active_home` — structured
   action inputs.
+- `active_agent_files` — optional trusted harness context containing exact
+  absolute `AGENTS.md` or `MEMORY.md` paths for active-file mutation cases. It
+  models connector-authenticated, same-session `InstructionsLoaded` state, not
+  a caller-controlled tool argument or generic payload field.
 - `expect_route` — `semantic`, `fallback`, or `none`.
 - `detection_only` — the finding must not contribute to a block.
 - `no_other_finding` — assert an exact zero-or-one finding result to catch

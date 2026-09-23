@@ -73,10 +73,10 @@ struct ActivityView: View {
         .inspector(isPresented: inspectorPresented) {
             if tab == .commands, let entry = selectedCommand {
                 commandInspector(entry)
-                    .inspectorColumnWidth(min: 340, ideal: 460)
+                    .dcInspectorColumnWidth()
             } else if let mutation = selectedMutation {
                 mutationInspector(mutation)
-                    .inspectorColumnWidth(min: 320, ideal: 420)
+                    .dcInspectorColumnWidth()
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search activity")
@@ -88,16 +88,19 @@ struct ActivityView: View {
                     } label: {
                         Label("Run Command", systemImage: "play.circle")
                     }
+                    .dcQuickHelp("Open Command Palette")
                     Button {
                         appState.activity.clearCompleted()
                     } label: {
                         Label("Clear Completed", systemImage: "trash")
                     }
                     .disabled(!appState.activity.entries.contains { !$0.status.isActive })
+                    .dcQuickHelp("Clear completed commands")
                 } else {
                     Button { Task { await loadMutations() } } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
+                    .dcQuickHelp("Refresh mutations")
                 }
             }
         }
@@ -197,66 +200,69 @@ struct ActivityView: View {
     }
 
     private func commandInspector(_ entry: CommandActivityEntry) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(entry.title).font(.headline)
-                Spacer()
-                if entry.status == .running {
-                    Button(role: .destructive) {
-                        appState.activity.cancel(entry.id)
-                    } label: {
-                        Label("Cancel", systemImage: "stop.fill")
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    Text(entry.title).font(.headline).lineLimit(2)
+                    Spacer(minLength: 8)
+                    if entry.status == .running {
+                        Button(role: .destructive) {
+                            appState.activity.cancel(entry.id)
+                        } label: {
+                            Label("Cancel", systemImage: "stop.fill")
+                        }
+                        .controlSize(.small)
+                    } else if entry.status == .cancelling {
+                        Button(role: .destructive) {} label: {
+                            Label("Cancelling...", systemImage: "stop.fill")
+                        }
+                        .controlSize(.small)
+                        .disabled(true)
+                    } else if entry.status == .finishing {
+                        Button {} label: {
+                            Label("Finishing...", systemImage: "hourglass")
+                        }
+                        .controlSize(.small)
+                        .disabled(true)
                     }
-                    .controlSize(.small)
-                } else if entry.status == .cancelling {
-                    Button(role: .destructive) {} label: {
-                        Label("Cancelling…", systemImage: "stop.fill")
-                    }
-                    .controlSize(.small)
-                    .disabled(true)
-                } else if entry.status == .finishing {
-                    Button {} label: {
-                        Label("Finishing…", systemImage: "hourglass")
-                    }
-                    .controlSize(.small)
-                    .disabled(true)
+                    Button { appState.activity.selectedID = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Close command details")
                 }
-                Button { appState.activity.selectedID = nil } label: { Image(systemName: "xmark.circle.fill") }
+                KeyValueGrid(pairs: [
+                    ("Status", entry.statusLabel),
+                    ("Started", entry.startedAt.formatted()),
+                    ("Duration", durationLabel(entry.duration)),
+                    ("Origin", entry.origin),
+                    ("Category", entry.category),
+                    ("Side effects", entry.sideEffects.joined(separator: ", ")),
+                    ("Next", entry.suggestedNextAction),
+                ].filter { !$0.1.isEmpty })
+                Text(entry.command)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                HStack {
+                    Text("Output").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        copyToPasteboard(entry.output)
+                    } label: { Image(systemName: "doc.on.doc") }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel("Close command details")
-            }
-            KeyValueGrid(pairs: [
-                ("Status", entry.statusLabel),
-                ("Started", entry.startedAt.formatted()),
-                ("Duration", durationLabel(entry.duration)),
-                ("Origin", entry.origin),
-                ("Category", entry.category),
-                ("Side effects", entry.sideEffects.joined(separator: ", ")),
-                ("Next", entry.suggestedNextAction),
-            ].filter { !$0.1.isEmpty })
-            Text(entry.command)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-            Divider()
-            HStack {
-                Text("Output").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    copyToPasteboard(entry.output)
-                } label: { Image(systemName: "doc.on.doc") }
-                .buttonStyle(.borderless)
-                .help("Copy Output")
-                .accessibilityLabel("Copy command output")
-            }
-            ScrollView {
+                    .help("Copy Output")
+                    .accessibilityLabel("Copy command output")
+                }
                 Text(entry.output.isEmpty ? emptyOutputLabel(entry.status) : entry.output)
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
     }
 
     private func mutationInspector(_ mutation: ActivityMutation) -> some View {

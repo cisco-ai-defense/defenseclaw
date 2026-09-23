@@ -17,6 +17,14 @@ func atomicFileProtectionMatches(_ *os.File, info os.FileInfo, perm os.FileMode)
 
 func atomicFileValidateStagedProtection(_ *os.File, _ os.FileMode) error { return nil }
 
+func atomicFileCreateTemp(dir string, _ os.FileMode) (*os.File, string, error) {
+	file, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return nil, "", err
+	}
+	return file, file.Name(), nil
+}
+
 func atomicFilePublish(source, destination string, _ os.FileInfo, _ os.FileMode) error {
 	return safefile.ReplaceFile(source, destination)
 }

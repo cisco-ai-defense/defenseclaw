@@ -117,10 +117,10 @@ func csInjectionScanContent(content []byte, path string) []Finding {
 	var findings []Finding
 
 	// Tier 1: pattern match on raw + normalized text.
-	findings = append(findings, csInjTier1(text, content, path, "")...)
+	findings = append(findings, csInjTier1(text, path, "")...)
 	if normalized != text {
 		suffix := " (detected after NFKC normalization)"
-		findings = append(findings, csInjTier1(normalized, content, path, suffix)...)
+		findings = append(findings, csInjTier1(normalized, path, suffix)...)
 	}
 
 	// Tier 2: statistical analysis.
@@ -129,20 +129,36 @@ func csInjectionScanContent(content []byte, path string) []Finding {
 	// Tier 3: Unicode analysis.
 	findings = append(findings, csInjTier3(text, content, path)...)
 
+	// The in-process detector owns these identities and the source path. Emit
+	// that producer knowledge directly instead of making output consumers infer
+	// a rule from redacted prose or parse an ambiguous trailing `:<number>`.
+	for index := range findings {
+		finding := &findings[index]
+		if strings.TrimSpace(finding.RuleID) == "" {
+			finding.RuleID = finding.ID
+		}
+		if finding.File == "" {
+			finding.File = path
+		}
+	}
+
 	return findings
 }
 
-func csInjTier1(text string, raw []byte, path, suffix string) []Finding {
+func csInjTier1(text, path, suffix string) []Finding {
 	var findings []Finding
+	source := []byte(text)
 
 	for _, p := range csRoleOverridePatterns {
 		if loc := p.FindStringIndex(text); loc != nil {
+			line := csOffsetToLine(source, loc[0])
 			findings = append(findings, Finding{
 				ID:          "CS-INJ-role_override",
 				Severity:    SeverityCritical,
 				Title:       "Prompt injection: role override attempt" + suffix,
 				Description: "Pattern matched: " + csTruncateMatch(text[loc[0]:loc[1]]),
-				Location:    csLocation(path, raw, loc[0]),
+				Location:    csLocation(path, source, loc[0]),
+				LineNumber:  &line,
 				Remediation: "Validate and sanitize all user-supplied content before passing to the agent",
 				Scanner:     "clawshield-injection",
 				Tags:        []string{"injection", "role_override", "clawshield"},
@@ -152,12 +168,14 @@ func csInjTier1(text string, raw []byte, path, suffix string) []Finding {
 
 	for _, p := range csInstructionPatterns {
 		if loc := p.FindStringIndex(text); loc != nil {
+			line := csOffsetToLine(source, loc[0])
 			findings = append(findings, Finding{
 				ID:          "CS-INJ-instruction_injection",
 				Severity:    SeverityHigh,
 				Title:       "Prompt injection: instruction override attempt" + suffix,
 				Description: "Pattern matched: " + csTruncateMatch(text[loc[0]:loc[1]]),
-				Location:    csLocation(path, raw, loc[0]),
+				Location:    csLocation(path, source, loc[0]),
+				LineNumber:  &line,
 				Remediation: "Validate and sanitize all user-supplied content before passing to the agent",
 				Scanner:     "clawshield-injection",
 				Tags:        []string{"injection", "instruction_injection", "clawshield"},
@@ -167,12 +185,14 @@ func csInjTier1(text string, raw []byte, path, suffix string) []Finding {
 
 	for _, p := range csDelimiterPatterns {
 		if loc := p.FindStringIndex(text); loc != nil {
+			line := csOffsetToLine(source, loc[0])
 			findings = append(findings, Finding{
 				ID:          "CS-INJ-delimiter_injection",
 				Severity:    SeverityCritical,
 				Title:       "Prompt injection: delimiter/framing injection" + suffix,
 				Description: "Pattern matched: " + csTruncateMatch(text[loc[0]:loc[1]]),
-				Location:    csLocation(path, raw, loc[0]),
+				Location:    csLocation(path, source, loc[0]),
+				LineNumber:  &line,
 				Remediation: "Reject or escape model-specific delimiter tokens in user input",
 				Scanner:     "clawshield-injection",
 				Tags:        []string{"injection", "delimiter_injection", "clawshield"},
@@ -188,7 +208,8 @@ func csInjTier2(text string, raw []byte, path string) []Finding {
 
 	// Base64 decode + recursive tier-1 scan.
 	b64Pat := regexp.MustCompile(`[A-Za-z0-9+/]{20,}={0,2}`)
-	for _, match := range b64Pat.FindAllString(text, 10) {
+	for _, loc := range b64Pat.FindAllStringIndex(text, 10) {
+		match := text[loc[0]:loc[1]]
 		decoded, err := base64.StdEncoding.DecodeString(match)
 		if err != nil {
 			decoded, err = base64.RawStdEncoding.DecodeString(match)
@@ -199,12 +220,14 @@ func csInjTier2(text string, raw []byte, path string) []Finding {
 		decodedText := string(decoded)
 		for _, p := range csRoleOverridePatterns {
 			if p.MatchString(decodedText) {
+				line := csOffsetToLine(raw, loc[0])
 				findings = append(findings, Finding{
 					ID:          "CS-INJ-base64_injection",
 					Severity:    SeverityCritical,
 					Title:       "Prompt injection: base64-encoded injection detected",
 					Description: "A role override pattern was found inside a base64-encoded blob",
-					Location:    path,
+					Location:    csLocation(path, raw, loc[0]),
+					LineNumber:  &line,
 					Remediation: "Decode and inspect base64 content before passing to the agent",
 					Scanner:     "clawshield-injection",
 					Tags:        []string{"injection", "base64", "clawshield"},
@@ -255,7 +278,6 @@ func csInjTier2(text string, raw []byte, path string) []Finding {
 		}
 	}
 
-	_ = raw
 	return findings
 }
 
@@ -263,15 +285,17 @@ func csInjTier3(text string, raw []byte, path string) []Finding {
 	var findings []Finding
 
 	// Zero-width character detection.
-	for _, r := range text {
+	for offset, r := range text {
 		for _, zw := range csZeroWidthChars {
 			if r == zw {
+				line := csOffsetToLine(raw, offset)
 				findings = append(findings, Finding{
 					ID:          "CS-INJ-zero_width_chars",
 					Severity:    SeverityHigh,
 					Title:       fmt.Sprintf("Zero-width Unicode character detected (U+%04X)", r),
 					Description: "Invisible Unicode characters can be used to hide injected instructions",
-					Location:    path,
+					Location:    csLocation(path, raw, offset),
+					LineNumber:  &line,
 					Remediation: "Strip zero-width characters from user-supplied input",
 					Scanner:     "clawshield-injection",
 					Tags:        []string{"injection", "unicode", "clawshield"},
@@ -283,14 +307,16 @@ func csInjTier3(text string, raw []byte, path string) []Finding {
 doneZeroWidth:
 
 	// Unicode tag character detection (U+E0000–U+E007F).
-	for _, r := range text {
+	for offset, r := range text {
 		if r >= 0xE0000 && r <= 0xE007F {
+			line := csOffsetToLine(raw, offset)
 			findings = append(findings, Finding{
 				ID:          "CS-INJ-unicode_tags",
 				Severity:    SeverityCritical,
 				Title:       fmt.Sprintf("Unicode tag character detected (U+%05X)", r),
 				Description: "Unicode tag block characters are invisible and can encode hidden instructions",
-				Location:    path,
+				Location:    csLocation(path, raw, offset),
+				LineNumber:  &line,
 				Remediation: "Reject any content containing Unicode tag block characters (U+E0000–U+E007F)",
 				Scanner:     "clawshield-injection",
 				Tags:        []string{"injection", "unicode", "clawshield"},
@@ -325,7 +351,6 @@ doneZeroWidth:
 		})
 	}
 
-	_ = raw
 	return findings
 }
 

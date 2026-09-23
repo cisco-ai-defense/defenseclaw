@@ -26,11 +26,14 @@ struct MainWindow: View {
     private let groups: [(String, [PanelID])] = [
         ("Monitor", [.overview, .alerts, .logs, .audit, .activity]),
         ("Govern", [.skills, .mcps, .plugins, .tools]),
-        ("Discover", [.inventory, .aiDiscovery, .registries]),
+        ("Discover", [.inventory, .aiDiscovery, .aiRuntime, .registries]),
         ("Configure", [.setup]),
     ]
 
     var body: some View {
+        // Keep sidebar visibility under NavigationSplitView/user control.
+        // Coupling it to inspector lifecycle events can create a re-entrant
+        // AppKit constraint pass while SwiftUI is inserting the inspector.
         NavigationSplitView {
             List(selection: selectedPanelBinding) {
                 ForEach(groups, id: \.0) { group in
@@ -88,7 +91,7 @@ struct MainWindow: View {
                 Button { appState.commandPalettePresented = true } label: {
                     Label("Command Palette", systemImage: "command")
                 }
-                .help("Command Palette (Command-Shift-P)")
+                .dcQuickHelp("Command Palette (Command-Shift-P)")
             }
         }
         .onAppear {
@@ -167,6 +170,7 @@ struct MainWindow: View {
         case .tools: ToolsView()
         case .inventory: InventoryView()
         case .aiDiscovery: AIDiscoveryView()
+        case .aiRuntime: AIRuntimeView()
         case .registries: RegistriesView()
         case .setup: SetupView()
         }

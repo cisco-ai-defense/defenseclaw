@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -171,6 +172,85 @@ func TestAcquireWatchdogPIDFile_ReleasedOnClose(t *testing.T) {
 		t.Fatalf("second acquire after close: %v", err)
 	}
 	_ = second.Close()
+}
+
+func TestWatchdogHeldUnixOwnershipWithMalformedPublicationFailsClosed(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(dataDir, "missing-config.yaml"))
+	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+
+	holder, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{PID: os.Getpid()})
+	if err != nil {
+		t.Fatalf("acquire held ownership: %v", err)
+	}
+	defer holder.Close()
+
+	malformed := []byte("malformed-owned-publication\n")
+	if err := holder.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Write(malformed); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	inspection := inspectWatchdogPIDOwnership(pidPath)
+	if !inspection.locked || inspection.publicationErr == nil {
+		t.Fatalf("held malformed inspection = %+v", inspection)
+	}
+
+	originalWait := watchdogOwnedRecordWait
+	originalTerminate := watchdogRequestTerminate
+	terminateCalled := false
+	watchdogOwnedRecordWait = func(path string, _, _ time.Duration) (watchdogPIDInfo, error) {
+		return waitForWatchdogOwnedRecord(path, 50*time.Millisecond, 5*time.Millisecond)
+	}
+	watchdogRequestTerminate = func(watchdogPIDInfo, *os.Process) error {
+		terminateCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		watchdogOwnedRecordWait = originalWait
+		watchdogRequestTerminate = originalTerminate
+	})
+
+	var stopErr error
+	stopOutput := captureStdout(t, func() { stopErr = runWatchdogStop(nil, nil) })
+	if stopErr == nil {
+		t.Fatal("stop reported success while ownership was held with malformed publication")
+	}
+	if strings.Contains(strings.ToLower(stopOutput), "not running") ||
+		strings.Contains(strings.ToLower(stopOutput), "stopped") {
+		t.Fatalf("stop falsely reported stopped state: %q", stopOutput)
+	}
+	var statusErr error
+	statusOutput := captureStdout(t, func() { statusErr = runWatchdogStatus(nil, nil) })
+	if statusErr == nil {
+		t.Fatal("status reported success while ownership was held with malformed publication")
+	}
+	if strings.Contains(strings.ToLower(statusOutput), "running") {
+		t.Fatalf("status falsely reported a healthy running state: %q", statusOutput)
+	}
+	if terminateCalled {
+		t.Fatal("held malformed publication caused a process signal")
+	}
+	got, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(malformed) {
+		t.Fatalf("held malformed publication mutated: got %q want %q", got, malformed)
+	}
+	inspection = inspectWatchdogPIDOwnership(pidPath)
+	if !inspection.locked || inspection.publicationErr == nil {
+		t.Fatalf("ownership no longer truthful after stop/status: %+v", inspection)
+	}
 }
 
 func TestWatchdogIsLocked(t *testing.T) {

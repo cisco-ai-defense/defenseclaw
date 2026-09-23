@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -218,9 +219,12 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
+			if target == "hermes" && runtime.GOOS == "windows" {
+				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
+			}
 			dir := t.TempDir()
 			// Copilot's Setup refuses any WorkspaceDir nested inside
 			// DataDir (audit DB / gateway config / secrets must not
@@ -266,19 +270,22 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			start, _ := reg.Get("codex")
 			start.SetCredentials("tok", "mk")
 
+			setupOpts := connector.SetupOpts{
+				DataDir:      dir,
+				ProxyAddr:    "127.0.0.1:4000",
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok",
+				WorkspaceDir: workspaceDir,
+			}
+			prepareProxyConnectorSwitchAuthorityFixture(t, target, &setupOpts)
+
 			p := &GuardrailProxy{
 				connector:    start,
 				registry:     reg,
 				gatewayToken: "tok",
 				masterKey:    "mk",
-				setupOpts: connector.SetupOpts{
-					DataDir:      dir,
-					ProxyAddr:    "127.0.0.1:4000",
-					APIAddr:      "127.0.0.1:18970",
-					APIToken:     "tok",
-					WorkspaceDir: workspaceDir,
-				},
-				health: NewSidecarHealth(),
+				setupOpts:    setupOpts,
+				health:       NewSidecarHealth(),
 			}
 
 			p.switchConnectorLocked(target)
@@ -297,7 +304,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 					target, p.connector.Name())
 			}
 
-			persisted := connector.LoadActiveConnector(dir)
+			persisted := connector.LoadActiveConnector(setupOpts.DataDir)
 			if target == "codex" {
 				// No-op: same-connector switch is documented to skip
 				// the persist step (TestSwitchConnectorLocked_SameConnectorIsNoop).
@@ -323,8 +330,11 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		t.Run(target, func(t *testing.T) {
+			if target == "hermes" && runtime.GOOS == "windows" {
+				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
+			}
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:
 			// keep WorkspaceDir outside DataDir so copilot's Setup
@@ -358,20 +368,23 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			start, _ := reg.Get("codex")
 			start.SetCredentials("tok", "mk")
 
+			setupOpts := connector.SetupOpts{
+				DataDir:      dir,
+				ProxyAddr:    "127.0.0.1:4000",
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok",
+				WorkspaceDir: workspaceDir,
+			}
+			prepareProxyConnectorSwitchAuthorityFixture(t, target, &setupOpts)
+
 			p := &GuardrailProxy{
 				connector:    start,
 				registry:     reg,
 				gatewayToken: "tok",
 				masterKey:    "mk",
-				setupOpts: connector.SetupOpts{
-					DataDir:      dir,
-					ProxyAddr:    "127.0.0.1:4000",
-					APIAddr:      "127.0.0.1:18970",
-					APIToken:     "tok",
-					WorkspaceDir: workspaceDir,
-				},
-				health:    NewSidecarHealth(),
-				inspector: NewGuardrailInspector("local", nil, nil, ""),
+				setupOpts:    setupOpts,
+				health:       NewSidecarHealth(),
+				inspector:    NewGuardrailInspector("local", nil, nil, ""),
 			}
 
 			p.applyRuntime(map[string]any{"connector": target})

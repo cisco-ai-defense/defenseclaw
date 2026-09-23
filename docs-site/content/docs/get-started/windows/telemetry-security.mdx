@@ -1,6 +1,6 @@
 ---
-title: Telemetry and security
-description: Native Windows telemetry channels, local audit persistence, credential scope, signing, and operational security boundaries.
+title: Windows security model
+description: Native Windows loopback authentication, local audit persistence, credential scope, signing, and operational security boundaries.
 keywords:
   - DefenseClaw Windows telemetry
   - DefenseClaw Windows OTLP
@@ -9,33 +9,42 @@ keywords:
   - DefenseClaw token rotation
 ---
 
-Windows enforcement and telemetry are separate paths. Hooks and Amp's
-`tool.call` plugin callback can return a decision; native OTLP cannot. Every
-supported event channel enters an authenticated loopback gateway and then uses
-the same local audit and optional outbound observability pipeline.
+Windows enforcement and telemetry are separate paths. A connector's declared
+synchronous hook, plugin callback, or awaited policy phase can return a
+decision; native OTLP cannot. Every supported event channel enters an
+authenticated loopback gateway and then uses the same local audit and optional
+outbound observability pipeline.
 
 ## Connector telemetry channels
 
-| Connector | Hook channel | Native telemetry | Configuration surface |
-| --- | --- | --- | --- |
-| Codex | Ten current lifecycle/tool events; the only enforcement path. | OTLP logs, metrics, and traces over HTTP/JSON. | Hooks in `%CODEX_HOME%\managed_config.toml`; marked OTLP/notify fields in `%CODEX_HOME%\config.toml`. |
-| Claude Code | 28 current lifecycle/tool/configuration events; the only enforcement path. | OTLP logs and metrics over HTTP/JSON; traces are explicitly disabled. | Marked hooks and OTLP environment entries in `%CLAUDE_CONFIG_DIR%\settings.json`. |
-| Amp | Five plugin callbacks; `tool.call` gates execution and `tool.result` can withhold output before model delivery. The other three are observation-only. | No documented customer native-OTLP exporter or W3C `traceparent` surface. DefenseClaw generates canonical logs, metrics, and spans from the callbacks. | Owner-only TypeScript system plugin at `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. |
+Each [connector page](/docs/connectors#platform-support) is the canonical place
+for that agent's hook or policy events, native telemetry support, configuration
+files, and Windows-only quirks. Keeping those facts beside macOS/Linux setup
+prevents this platform guide from becoming a second, drifting connector
+matrix.
 
-Codex and Claude Code configure a connector-scoped bearer and source/client
-identity for native OTLP. Codex does not place the credential in the endpoint
-URL. Claude Code stores the managed exporter settings in its configuration,
-not in the interactive shell. Amp has no native-OTLP credential because it has
-no documented native exporter; its plugin uses a connector-scoped hook
-credential. A scoped credential is accepted only for its connector and route;
-it cannot authenticate the management API, another connector, or a non-loopback
-request.
+The Windows-wide rule is simple: enforcement comes only from the connector's
+declared synchronous hook, plugin, or awaited policy response. Native OTLP and
+hook-derived telemetry are observation channels. They can enrich audit and
+dashboards, but cannot retroactively block an action.
+
+When a connector supports native OTLP, DefenseClaw gives it a separate scoped
+credential and pins the source identity to that connector. Hook and plugin
+credentials are also connector-scoped and remain distinct from the gateway
+master token. Connector pages identify which channels exist and where their
+managed settings live.
+
+A scoped credential is accepted only for its connector and route; it cannot
+authenticate the management API, another connector, or a non-loopback request.
+Hermes hook-derived audit records retain connector, session, event,
+and correlation attribution before entering generic alert, webhook, OTLP, or
+Splunk destinations.
 
 <Callout type="info" title="Native OTLP is observation-only">
 A native OTLP log, metric, or trace can enrich audit and dashboards, but it
 arrives after or beside agent activity. It cannot block a prompt or tool. Only
-the declared hook response surfaces and Amp's `tool.call` / `tool.result`
-callbacks can enforce action mode.
+the connector's declared synchronous hook response, plugin callback, or
+awaited policy phase can enforce action mode.
 </Callout>
 
 ## Local audit is always present
@@ -48,9 +57,9 @@ The v8 observability pipeline writes mandatory local SQLite audit data to
 - an optional remote destination is temporarily degraded.
 
 In the supported standalone hook topology, “gateway disabled” in a fleet row
-means there is no OpenClaw fleet WebSocket to dial. It does not mean the local
-hook/plugin API, policy evaluation, native OTLP ingest, local audit, alerts, or
-TUI have stopped.
+  means there is no OpenClaw fleet WebSocket to dial. It does not mean the local
+  hook API, policy evaluation, available native OTLP ingest, local audit,
+  alerts, or TUI have stopped.
 
 `gateway.jsonl` is **not** a default audit file. It exists only if an optional
 `kind: jsonl` destination is configured to write that path. The detached
@@ -89,7 +98,7 @@ DefenseClaw uses distinct credentials for distinct jobs:
 | --- | --- | --- |
 | Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
 | Connector hook/plugin credential | One connector's hook or plugin API route. | Managed by setup/teardown; never copy its sidecar or the credential-bearing Amp plugin. |
-| Connector native-OTLP credential | One connector's OTLP routes only. | Stable across unrelated master-token rotation and revoked during connector teardown. |
+| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex, Claude Code, or opt-in OmniGent. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
 | Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
 
 ### Rotate safely
@@ -108,11 +117,12 @@ each supported signal. A post-stop failure restores the exact prior protected
 file and ready gateway generation. `--no-restart` is intentionally refused,
 and an externally managed noncanonical token environment is not rewritten.
 
-Connector-scoped OTLP credentials remain distinct from the master token. The
-rotation does not expose them and does not turn one connector's credential into
-a cross-connector credential. Restart every configured Codex or Claude Code
-agent, and fully exit and relaunch Amp, after a successful rotation so the next
-hook or plugin callback uses the reconciled generation.
+Connector-scoped hook and OTLP credentials remain distinct from the master
+token. The rotation does not expose them and does not turn one connector's
+credential into a cross-connector credential. Restart every configured agent
+after a successful rotation so its next hook subprocess uses the reconciled
+generation; fully exit and relaunch Amp so its next plugin callback uses that
+generation.
 
 Verify without reading any token:
 
@@ -124,8 +134,9 @@ defenseclaw doctor
 
 ## Loopback and network boundaries
 
-The certified connector topology uses the current user's native agent and
-gateway on loopback, normally `127.0.0.1:18970`. The loopback HTTP receiver is
+The supported connector topology uses the current user's native agent and
+gateway on loopback, normally
+`127.0.0.1:18970`. The loopback HTTP receiver is
 authenticated; it is not a claim that localhost is inherently trusted.
 
 - A connector-scoped token is restricted by connector, route, signal, and
@@ -150,14 +161,20 @@ The current `0.8.10` Windows release trust chain is:
 3. require the authenticated provenance to describe the same artifact and
    signing state; and
 4. verify that Windows observes the matching Authenticode state; and
-5. certify that exact signed Setup through the
-   deterministic native Windows x64 matrix for Codex, Claude Code, and Amp.
+5. exercise that exact release Setup artifact through the deterministic native
+   Windows x64 matrix. Connector availability and authentic-client evidence
+   remain separate claims.
 
 The deterministic native gate is the certification basis. A separately
 configured real-agent run can add upstream smoke evidence, but it is not a
 substitute for that gate. In particular, an authenticated Amp turn requires
 `AMP_API_KEY`; the absence or presence of that optional secret does not change
 the packaged native Windows support classification.
+
+That artifact trust chain does not fabricate connector evidence. Supported
+availability for Codex, Cursor, Devin, Hermes, OpenCode, OmniGent,
+Copilot, and Antigravity does not populate validation fields or change
+`live=false`; authentic official-client evidence remains independently gated.
 
 For `0.8.10`, the authenticated provenance says `unsigned: true` and
 `product_executables_authenticode_signed: false`; Windows observes the outer
@@ -180,9 +197,12 @@ not supported for native Windows. See
 The public package runs as the current user and owns only exact state it
 created or recorded. Security-sensitive installer transaction directories,
 credentials, audit storage, and identity records use current-user ownership,
-non-reparse checks, and private Windows DACL validation. This is not a blanket
-claim that every file below every user-selected connector root has an identical
-DACL.
+non-reparse checks, and private Windows DACL validation. OpenCode's managed
+plugin restricts access to the current user, Administrators, and SYSTEM; that
+limits other standard users but is not tamper-proof against the owning user or
+an administrator. Doctor detects managed-plugin digest drift, and Setup
+reconciles it. This is not a blanket claim that every file below every
+user-selected connector root has an identical DACL.
 
 Setup and lifecycle commands:
 
@@ -211,9 +231,9 @@ connector homes as separate supported identities.
 | --- | --- |
 | Setup verification | Invalid architecture, launch identity, authenticated digest/provenance, recorded-versus-observed Authenticode state, payload, path, ownership, or prior state refuses before live mutation where possible. |
 | Setup transaction | Pre-commit failure rolls back owned changes; ambiguous or committed phases retain a journal and require safe recovery/convergence. |
-| Hook delivery/response | Effective `closed` blocks supported events for transport and malformed/unauthorized response failures. |
+| Hook delivery/response | Effective `closed` blocks only vendor-supported block-capable events for transport and malformed/unauthorized response failures. For OpenCode, only the awaited `tool.execute.before` thrown-error path is authoritative; after/lifecycle delivery remains best effort. Hermes officially warns and continues for timeout, nonzero exit, malformed output, authentication, and transport failures, so DefenseClaw never claims fail-closed Hermes delivery. |
 | Managed enterprise hook | The narrow administrator-managed Claude Code path fails closed when protected policy identity is invalid. |
-| Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. Amp has no separate skill-load callback; its resulting tool calls remain governed at `tool.call`. |
+| Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. Hermes exposes no equivalent native skill-selection enforcement event. Amp has no separate skill-load callback; its resulting tool calls remain governed at `tool.call`. |
 | Amp plugin initialization | Amp executes plugin top-level code while loading. DefenseClaw enforcement starts only when the managed plugin is loaded and receives `tool.call`; it does not sandbox sibling plugin initialization or define multi-plugin handler order. |
 | Internal evaluator panic | Fails open with warning and telemetry because no authoritative verdict was produced. |
 | Optional exporter outage | Local SQLite and healthy gateway operation continue; the destination is reported degraded. |

@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"net/netip"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -25,19 +27,212 @@ import (
 )
 
 const (
-	semanticRecursiveDeleteExpression        = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))`
-	semanticSudoDiscoveryElevationExpression = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
-	semanticAccessControlExpression          = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
-	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticFilesystemWipeExpression         = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)`
-	semanticNetworkSweepExpression           = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
-	semanticContainerHostEscapeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
-	semanticCryptominingExpression           = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
-	semanticMassProcessTerminationExpression = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
-	semanticPrivilegedAccountExpression      = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
+	semanticRecursiveDeleteExpression                 = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))`
+	semanticSudoDiscoveryElevationExpression          = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
+	semanticAccessControlExpression                   = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
+	semanticDDDiskWriteExpression                     = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticNetworkSweepExpression                    = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
+	semanticContainerHostEscapeExpression             = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
+	semanticCryptominingExpression                    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
+	semanticMassProcessTerminationExpression          = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
+	semanticPrivilegedAccountExpression               = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
+	semanticWindowsAccessibilityHijackExpression      = `f.commands.exists(c, c.argv_complete && ((c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations) || (c.program in ['copy', 'copy.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations)))`
+	semanticWindowsDefenderComponentDisableExpression = `f.commands.exists(c, c.argv_complete && c.program in ['mpcmdrun', 'mpcmdrun.exe', 'dism', 'dism.exe', 'disable-windowsoptionalfeature', 'remove-windowsfeature', 'uninstall-windowsfeature', 'schtasks', 'schtasks.exe', 'add-dnsclientnrptrule'])`
+	semanticWindowsUACAutoElevationExpression         = `f.commands.exists(c, c.argv_complete && c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty', 'new-item']) && f.commands.exists(c, c.argv_complete && c.program == 'start-process')`
 )
 
+var (
+	semanticFilesystemFormatterPrograms = celProgramList(actionfacts.FilesystemFormatterPrograms())
+	semanticFilesystemWipeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ` + semanticFilesystemFormatterPrograms + ` && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticDeviceWipeExpression        = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ` + semanticFilesystemFormatterPrograms + `) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+)
+
+func celProgramList(programs []string) string {
+	quoted := make([]string, 0, len(programs))
+	for _, program := range programs {
+		quoted = append(quoted, "'"+program+"'")
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
 var semanticReconImpactOwners = map[string]semanticOwner{
+	"credential.structured_directory_acquisition": {
+		prerequisite: actionfacts.ExactDirectoryCredentialAcquisition,
+		alertOnly:    true,
+	},
+	"credential.directory_credential_acquisition": {
+		prerequisite:     actionfacts.ExactDirectoryCredentialAcquisition,
+		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
+	},
+	"credential.pkcs12_private_key_extract": {
+		prerequisite: actionfacts.ExactOpenSSLPKCS12PrivateKeyExtraction,
+		// Exporting an unencrypted private key is high-confidence telemetry,
+		// but authorized certificate migration remains a legitimate workflow.
+		detectionOnly: true,
+	},
+	"credential.kerberos_ticket_forgery": {
+		prerequisite: exactKerberosTicketForgeryPrerequisite,
+	},
+	"credential.windows_ntds_ifm_dump": {
+		prerequisite:     actionfacts.ExactWindowsNTDSIFMDump,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.windows_delete_all_shadow_copies": {
+		prerequisite:     actionfacts.ExactWindowsVSSDeleteAllShadows,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_usn_journal_delete": {
+		prerequisite:     actionfacts.ExactWindowsUSNJournalDelete,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_recursive_everyone_full_control": {
+		prerequisite:     actionfacts.ExactWindowsRecursiveEveryoneFullControl,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.windows_recovery_disable_pair": {
+		prerequisite:     actionfacts.ExactWindowsRecoveryDisablePair,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_audit_policy_wipe": {
+		prerequisite:     actionfacts.ExactWindowsAuditPolicyWipePair,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"defense_evasion.windows_defender_executable_exclusion": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsDefenderExecutableExtensionExclusion,
+		),
+		detectionOnly: true,
+	},
+	"defense_evasion.windows_defender_drive_root_exclusion": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsDefenderDriveRootExclusion,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_detailed_tracking_failure_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditDetailedTrackingFailureDisable,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_process_creation_success_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditProcessCreationSuccessDisable,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_full_privilege_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditFullPrivilegeDisable,
+		),
+		detectionOnly: true,
+	},
+	"impact.windows_recovery_store_destruction": {
+		prerequisite:     actionfacts.ExactWindowsRecoveryStoreDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_defender_multi_control_disable": {
+		prerequisite:     actionfacts.ExactWindowsDefenderMultiControlDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_defender_component_disable": {
+		prerequisite:     actionfacts.ProvesWindowsDefenderDisablement,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_registry_security_control_disable": {
+		prerequisite:     windowsRegistrySecurityControlDisablePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.windows_uac_autoelevation_hijack": {
+		prerequisite:     actionfacts.ProvesWindowsUACAutoElevationHijack,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"persistence.windows_accessibility_feature_hijack": {
+		prerequisite:     actionfacts.ProvesWindowsAccessibilityFeatureHijack,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_telemetry_disable": {
+		prerequisite:     actionfacts.ExactWindowsTelemetryDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_credential_protection_weaken": {
+		prerequisite:     actionfacts.ExactWindowsCredentialProtectionWeakening,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_amsi_disable": {
+		prerequisite:     actionfacts.ExactWindowsAMSIDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.endpoint_security_product_disable": {
+		prerequisite:     actionfacts.ExactEndpointSecurityProductDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.complete_firewall_relaxation": {
+		prerequisite:     actionfacts.ExactCompleteFirewallRelaxation,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.complete_firewall_relaxation_attempt": {
+		prerequisite:     actionfacts.ExactCompleteFirewallRelaxationAttempt,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
+	},
+	"tamper.cloud_audit_control_destruction": {
+		prerequisite:     actionfacts.ExactCloudAuditControlDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.pam_password_capture": {
+		fallbackAliasesOnMatch: []string{"CMD-ETC-WRITE"},
+		prerequisite:           actionfacts.ExactPAMPasswordCapture,
+		suppressFallback:       authoritativeSemanticSafeNegative,
+	},
+	"tamper.posix_logging_hardening_disable": {
+		prerequisite:     actionfacts.ExactPOSIXLoggingHardeningDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.linux_security_control_disable": {
+		prerequisite:     actionfacts.ExactLinuxSecurityControlDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.macos_unified_log_erase": {
+		prerequisite:     actionfacts.ExactMacOSUnifiedLogErase,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.macos_fake_update_prompt": {
+		prerequisite:     actionfacts.ExactFakeMacOSUpdateCredentialPrompt,
+		suppressFallback: fakeMacOSUpdateCredentialPromptSafeNegative,
+	},
+	"credential.macos_login_keychain_dump": {
+		prerequisite:     actionfacts.ExactMacOSLoginKeychainDump,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.linux_magic_sysrq_destruction": {
+		prerequisite:     actionfacts.ExactLinuxMagicSysRqDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.posix_host_halt": {
+		prerequisite:     actionfacts.ExactPOSIXHostHalt,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.posix_system_log_destruction": {
+		prerequisite:     actionfacts.ExactPOSIXSystemLogDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Literal security-log destruction is strong detection evidence, but
+		// without protected-host policy context it is also a valid maintenance
+		// operation. Keep the built-in owner alert-only in every profile.
+		alertOnly: true,
+	},
+	"privilege.temporary_setuid_executable": {
+		prerequisite:     actionfacts.ExactTemporarySetuidExecutable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.custom_root_suid_implant": {
+		prerequisite:     actionfacts.ExactCustomRootSUIDImplant,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.pkroot_setuid_shell": {
+		prerequisite:     actionfacts.ExactPKRootSetuidShell,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"CMD-RM-RF": {
 		equivalentAliases: []string{
 			"CMD-WIN-REMOVE-ITEM-RF",
@@ -50,7 +245,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     sudoOrRootPrivilegeDiscoveryPrerequisite,
 		suppressFallback: sudoOrRootPrivilegeDiscoverySafeNegative,
 	},
-	"CMD-CHMOD-WORLD": reconImpactOwnerWithAliases(
+	"CMD-CHMOD-WORLD": detectionOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
 		accessControlMutationDisposition,
 		"CMD-CHOWN-ROOT",
@@ -61,6 +256,29 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-MKFS": {
 		prerequisite:     filesystemWipePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Formatting a device is exact high-impact telemetry, but may be an
+		// authorized provisioning operation. Built-in profiles do not know which
+		// devices are protected; the opt-in infrastructure pack enforces it.
+		detectionOnly: true,
+	},
+	"CMD-DEVICE-WIPE": {
+		prerequisite:     destructiveDeviceWritePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Preserve exact device-write recognition without universally denying
+		// storage retirement and incident-response workflows.
+		detectionOnly: true,
+	},
+	"impact.protected_access_control_change": reconImpactOwner(
+		actionfacts.OperationPermissionChange,
+		accessControlMutationDisposition,
+	),
+	"impact.protected_filesystem_format": {
+		prerequisite:     filesystemWipePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.protected_device_wipe": {
+		prerequisite:     destructiveDeviceWritePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"recon.network_sweep": {
@@ -89,6 +307,50 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	),
 }
 
+func exactKerberosTicketForgeryPrerequisite(facts actionfacts.Facts) bool {
+	_, ok := actionfacts.ExactKerberosTicketForgerySource(facts)
+	return ok
+}
+
+func windowsSecurityControlMutationPrerequisite(
+	operation actionfacts.WindowsSecurityControlMutation,
+) semanticOwnerPrerequisite {
+	return func(facts actionfacts.Facts) bool {
+		return actionfacts.ExactWindowsSecurityControlMutation(facts, operation)
+	}
+}
+
+func windowsRegistrySecurityControlDisablePrerequisite(facts actionfacts.Facts) bool {
+	return actionfacts.ExactWindowsRegistrySecurityControlDisable(facts) ||
+		actionfacts.ProvesWindowsUACPolicySuppression(facts)
+}
+
+// A complete static osascript argv is sufficient to reject the lexical
+// candidate when the exact T1056.002 owner does not match, even if the wider
+// shell action is partial because it contains command substitution. This keeps
+// near-miss and legitimate credential dialogs out of fallback detection.
+func fakeMacOSUpdateCredentialPromptSafeNegative(facts actionfacts.Facts) bool {
+	if facts.Authoritative() {
+		return true
+	}
+	for _, command := range facts.Commands {
+		if command.Program != "osascript" || !command.ArgvComplete {
+			continue
+		}
+		static := true
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				static = false
+				break
+			}
+		}
+		if static {
+			return true
+		}
+	}
+	return false
+}
+
 type reconImpactDisposition func(
 	actionfacts.Facts,
 	actionfacts.CommandFact,
@@ -112,6 +374,16 @@ func reconImpactOwnerWithAliases(
 ) semanticOwner {
 	owner := reconImpactOwner(operation, disposition)
 	owner.equivalentAliases = append([]string(nil), aliases...)
+	return owner
+}
+
+func detectionOnlyReconImpactOwnerWithAliases(
+	operation actionfacts.OperationKind,
+	disposition reconImpactDisposition,
+	aliases ...string,
+) semanticOwner {
+	owner := reconImpactOwnerWithAliases(operation, disposition, aliases...)
+	owner.detectionOnly = true
 	return owner
 }
 
@@ -175,7 +447,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 			command.ID,
 			actionfacts.PathAccessDelete,
 			func(candidate actionfacts.PathFact) bool {
-				return deleteTargetIsRootOrHome(facts, candidate)
+				return deleteTargetIsCriticalScope(facts, candidate)
 			},
 		) {
 			return true
@@ -255,13 +527,25 @@ func powerShellRecursiveForceFlags(argv []string) bool {
 			continue
 		}
 		switch key {
-		case "-recurse":
-			recurse = !joined
-		case "-force":
-			force = !joined
+		case "-recurse", "-rec":
+			recurse = powerShellSwitchValueEnabled(joinedValue, joined)
+		case "-force", "-fo":
+			force = powerShellSwitchValueEnabled(joinedValue, joined)
 		}
 	}
 	return recurse && force
+}
+
+func powerShellSwitchValueEnabled(value string, joined bool) bool {
+	if !joined {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "$true", "true", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 func cmdRecursiveQuietFlags(argv []string) bool {
@@ -278,17 +562,25 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
-func deleteTargetIsRootOrHome(
+func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := strings.TrimSpace(semanticPathValue(candidate))
+	value := canonicalSemanticPath(semanticPathValue(candidate))
 	if value == "/" || windowsDriveRoot(value) {
+		return true
+	}
+	switch strings.TrimRight(value, "/") {
+	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
+		"/applications", "/library", "/system", "/users",
+		"c:/program files", "c:/program files (x86)", "c:/programdata",
+		"c:/users", "c:/windows":
 		return true
 	}
 	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
 	return home != "" &&
-		strings.TrimRight(canonicalSemanticPath(value), "/") == home
+		strings.TrimRight(value, "/") == home
 }
 
 func windowsDriveRoot(value string) bool {
@@ -569,6 +861,45 @@ func symbolicPermissionRisk(mode string) (setID, publicReadWrite, valid bool) {
 	return setID, publicReadWrite, true
 }
 
+func secureCredentialFileDeletePrerequisite(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if !command.ArgvComplete || command.Program != "shred" ||
+			!hasOperation(command, actionfacts.OperationDelete) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID != command.ID ||
+				candidate.Access != actionfacts.PathAccessDelete ||
+				integrityPathHasFixtureSegment(firstNonEmpty(
+					candidate.Resolved, candidate.Normalized, candidate.Value,
+				)) {
+				continue
+			}
+			value := strings.ToLower(strings.ReplaceAll(
+				firstNonEmpty(candidate.Resolved, candidate.Normalized, candidate.Value),
+				`\`, "/",
+			))
+			base := path.Base(value)
+			switch base {
+			case ".env", "credentials", "credentials.json", "secret.yml", "secret.yaml",
+				"secrets.yml", "secrets.yaml", ".git-credentials", ".netrc", "_netrc",
+				".npmrc", ".pypirc":
+				return true
+			}
+			if strings.HasPrefix(base, "id_") && !strings.HasSuffix(base, ".pub") {
+				switch base {
+				case "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519":
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func recursiveActiveSSHOwnershipChange(
 	facts actionfacts.Facts,
 	command actionfacts.CommandFact,
@@ -764,7 +1095,7 @@ func ddDiskWritePrerequisite(facts actionfacts.Facts) bool {
 		if reconImpactExecutingOwned(command) &&
 			oneOfFold(command.Program, "dd") &&
 			hasOperation(command, actionfacts.OperationDiskWrite) &&
-			commandOwnsDeviceWrite(facts, command.ID) {
+			commandOwnsDeviceMutation(facts, command.ID) {
 			return true
 		}
 	}
@@ -775,39 +1106,40 @@ func filesystemWipePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDiskWrite) ||
-			oneOfFold(command.Program, "dd") {
+			!actionfacts.FilesystemFormatterProgram(command.Program) {
 			continue
 		}
-		if filesystemWipeProgram(command.Program) ||
-			len(command.Redirects) != 0 ||
-			commandOwnsDeviceWrite(facts, command.ID) {
+		if commandOwnsDeviceMutation(facts, command.ID) {
 			return true
 		}
 	}
 	return false
 }
 
-func filesystemWipeProgram(program string) bool {
-	switch strings.ToLower(program) {
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs",
-		"wipefs", "sgdisk", "shred", "blkdiscard", "tee", "cryptsetup",
-		"hdparm", "nvme", "parted", "diskutil", "format",
-		"format-volume", "clear-disk":
-		return true
-	default:
-		return false
+func destructiveDeviceWritePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!hasOperation(command, actionfacts.OperationDiskWrite) ||
+			oneOfFold(command.Program, "dd") ||
+			actionfacts.FilesystemFormatterProgram(command.Program) {
+			continue
+		}
+		if commandOwnsDeviceMutation(facts, command.ID) {
+			return true
+		}
 	}
+	return false
 }
 
-func commandOwnsDeviceWrite(facts actionfacts.Facts, commandID int64) bool {
+func commandOwnsDeviceMutation(facts actionfacts.Facts, commandID int64) bool {
 	return commandOwnsPath(
 		facts,
 		commandID,
-		actionfacts.PathAccessWrite,
+		"",
 		func(candidate actionfacts.PathFact) bool {
-			return candidate.Flavor == actionfacts.PathFlavorDevice
+			return (candidate.Access == actionfacts.PathAccessWrite ||
+				candidate.Access == actionfacts.PathAccessAppend) &&
+				candidate.Flavor == actionfacts.PathFlavorDevice
 		},
 	)
 }
@@ -885,6 +1217,9 @@ func containerHostEscapeDisposition(
 	facts actionfacts.Facts,
 	command actionfacts.CommandFact,
 ) (bool, bool) {
+	if actionfacts.ExactWritableHostRootContainerAccess(facts) {
+		return true, true
+	}
 	shape, determinate := exactContainerRunShape(command)
 	if !determinate || !shape.privileged {
 		return false, determinate
@@ -929,7 +1264,8 @@ func cryptominingFallbackProof(
 		if !reconImpactExecutingOwned(command) {
 			continue
 		}
-		if exactMinerName(executableBase(command.Program)) ||
+		if len(command.Argv) > 0 && exactMinerName(executableBase(command.Program)) &&
+			!minerPreviewArguments(command.Argv[1:]) ||
 			exactMinerWrapperTarget(command) {
 			return true
 		}
@@ -950,22 +1286,20 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 		} else if strings.HasPrefix(argv[index], "-") {
 			return false
 		}
-		return index < len(argv) &&
-			exactMinerName(executableBase(argv[index]))
+		return exactMinerInvocationAt(argv, index)
 	case "setsid":
 		for index := 1; index < len(argv); index++ {
 			switch argv[index] {
 			case "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 				continue
 			}
 			if strings.HasPrefix(argv[index], "-") {
 				return false
 			}
-			return exactMinerName(executableBase(argv[index]))
+			return exactMinerInvocationAt(argv, index)
 		}
 	case "nice":
 		for index := 1; index < len(argv); index++ {
@@ -973,8 +1307,7 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 			switch {
 			case argument == "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case argument == "-n" || argument == "--adjustment":
 				index++
 				if index >= len(argv) {
@@ -987,11 +1320,32 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 					return false
 				}
 			default:
-				return exactMinerName(executableBase(argument))
+				return exactMinerInvocationAt(argv, index)
 			}
 		}
 	}
 	return false
+}
+
+func exactMinerInvocationAt(argv []string, index int) bool {
+	return index >= 0 && index < len(argv) &&
+		exactMinerName(executableBase(argv[index])) &&
+		!minerPreviewArguments(argv[index+1:])
+}
+
+func minerPreviewArguments(arguments []string) bool {
+	if len(arguments) == 2 && arguments[0] == "--" {
+		arguments = arguments[1:]
+	}
+	if len(arguments) != 1 {
+		return false
+	}
+	switch strings.ToLower(arguments[0]) {
+	case "-h", "--help", "-v", "--version":
+		return true
+	default:
+		return false
+	}
 }
 
 func containerRunDisposition(
@@ -1148,7 +1502,7 @@ func containerRunValueOption(key string) bool {
 func containerRunFlagOption(argument string) bool {
 	switch argument {
 	case "-d", "--detach", "--init", "-i", "--interactive",
-		"--oom-kill-disable", "--privileged", "--read-only", "--rm",
+		"-it", "-ti", "--oom-kill-disable", "--privileged", "--read-only", "--rm",
 		"--tty", "-t":
 		return true
 	default:
@@ -1540,7 +1894,8 @@ func workloadExecFallbackProof(facts actionfacts.Facts) bool {
 		switch strings.ToLower(command.Program) {
 		case "kubectl", "oc":
 			if hasOperation(command, actionfacts.OperationWorkloadExec) &&
-				staticKubernetesExecOuter(command) {
+				staticKubernetesExecOuter(command) &&
+				!staticKubernetesLoopbackHealthCheck(command) {
 				return true
 			}
 		case "crictl":
@@ -1560,6 +1915,79 @@ func workloadExecFallbackProof(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+// staticKubernetesLoopbackHealthCheck recognizes only a literal, read-only
+// curl probe executed after kubectl/oc's argument separator. It intentionally
+// abstains on variables, non-loopback hosts, uploads, arbitrary paths, and
+// shell wrappers so those remain visible workload-exec evidence.
+func staticKubernetesLoopbackHealthCheck(command actionfacts.CommandFact) bool {
+	separator := -1
+	for index, argument := range command.Argv {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 > len(command.Argv) {
+		return false
+	}
+	child := command.Argv[separator+1:]
+	if len(child) < 2 || !oneOfFold(child[0], "curl", "curl.exe") {
+		return false
+	}
+	var target string
+	for index := 1; index < len(child); index++ {
+		argument := child[index]
+		switch strings.ToLower(argument) {
+		case "--fail", "--silent", "--show-error":
+			continue
+		case "--max-time", "--connect-timeout":
+			index++
+			if index >= len(child) {
+				return false
+			}
+			continue
+		}
+		if staticCurlProbeFlag(argument) {
+			continue
+		}
+		if strings.HasPrefix(argument, "-") || target != "" {
+			return false
+		}
+		target = argument
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "localhost" {
+		address, err := netip.ParseAddr(host)
+		if err != nil || !address.IsLoopback() {
+			return false
+		}
+	}
+	probePath := strings.TrimSuffix(strings.ToLower(parsed.EscapedPath()), "/")
+	for _, suffix := range []string{"/health", "/healthz", "/livez", "/readyz"} {
+		if probePath == suffix || strings.HasSuffix(probePath, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticCurlProbeFlag(argument string) bool {
+	if len(argument) < 2 || argument[0] != '-' || argument[1] == '-' {
+		return false
+	}
+	for _, option := range argument[1:] {
+		if option != 'f' && option != 's' && option != 'S' {
+			return false
+		}
+	}
+	return true
 }
 
 func staticKubernetesExecOuter(command actionfacts.CommandFact) bool {

@@ -57,8 +57,9 @@ const (
 var newHookConfigFSWatcher = fsnotify.NewWatcher
 
 type hookRuntimePolicy struct {
-	hookFailMode string
-	hiltEnabled  bool
+	hookFailMode  string
+	guardrailMode string
+	hiltEnabled   bool
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
@@ -623,6 +624,7 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
+		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
 	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {

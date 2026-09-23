@@ -72,8 +72,8 @@ builder then embeds:
 
 - the GoReleaser Windows archive;
 - the DefenseClaw wheel used for provenance;
-- CPython 3.13.14 embeddable x64, pinned by URL and SHA-256
-  `90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907`;
+- CPython 3.13.15 embeddable x64, pinned by URL and SHA-256
+  `d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf`;
 - cosign 2.6.2 for offline availability of release-manifest verification,
   pinned to the official Windows x64 release SHA-256
   `dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d40feb07be`;
@@ -228,7 +228,10 @@ owned Windows-DACL journal advances atomically and with write-through ordering
 through `intent`, `committed`, `converged`, and `complete`. The journal contains
 a random operation identity; every destructive application/cache path is
 derived from Windows Known Folders. It also records the explicitly selected
-Codex and Claude configuration homes and the observed user PATH. Recovery
+connector configuration homes needed for Codex, Claude Code, GitHub Copilot
+CLI, Cursor, Devin, Hermes, Antigravity, OpenCode, and OmniGent, plus the
+observed user PATH. Legacy Windsurf and Gemini CLI fields are consumed only for
+authenticated upgrade or uninstall cleanup. Recovery
 rejects an altered destructive path, an unrelated install-state identity, an
 untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
 configuration symlinks remain supported by the connector's target-aware writer.
@@ -247,9 +250,10 @@ The forward-commit boundary is crossed before packaged migrations, connector
 configuration, PATH, Apps registration, gateway auto-start, or hook teardown.
 Those changes are replayed idempotently toward the requested target after a
 crash; old binaries are never restored against already-migrated configuration.
-The journal records the source/target versions and effective `CODEX_HOME` and
-`CLAUDE_CONFIG_DIR`, and convergence reruns migrations/configuration, validates
-the installed and maintenance executables, requires atomic durable connector
+The journal records the source/target versions and effective connector-home
+bindings, and convergence reruns
+migrations/configuration, validates the installed and maintenance executables,
+requires atomic durable connector
 writes, flushes mutated Registry keys, and verifies selected services before
 advancing to `converged`. Backup,
 trash, user-data, and installer-cache cleanup happens only afterwards. When an

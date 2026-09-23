@@ -13,7 +13,7 @@ import subprocess
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -34,7 +34,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
-from defenseclaw import __version__
+from defenseclaw import __version__, connector_paths
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
@@ -76,9 +76,11 @@ from defenseclaw.tui.panels.overview import (
     OverviewCommandIntent,
     OverviewConfig,
     OverviewPanelModel,
+    string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.setup import (
     WIZARD_DESCRIPTIONS,
     WIZARD_HOW_TO,
@@ -294,6 +296,7 @@ PANELS = (
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
     ("ai", "V", "AI Discovery"),
+    ("runtime", "N", "Runtime"),
     ("registries", "R", "Registries"),
     ("setup", "0", "Setup"),
 )
@@ -873,6 +876,7 @@ class DefenseClawTUI(App[None]):
         overview_model: OverviewPanelModel | None = None,
         inventory_model: InventoryPanelModel | None = None,
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
+        runtime_model: RuntimePanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -945,6 +949,10 @@ class DefenseClawTUI(App[None]):
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
+        self._runtime_model_injected = runtime_model is not None
+        self.runtime_model = runtime_model or RuntimePanelModel()
+        if runtime_model is not None:
+            self.overview_model.set_runtime_overview(self.runtime_model.overview())
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -984,6 +992,7 @@ class DefenseClawTUI(App[None]):
         self._credentials_refresh_running = False
         self._health_poll_running = False
         self._ai_usage_poll_running = False
+        self._runtime_poll_running = False
         self._observability_status_load_running = False
         self._observability_status_reload_pending = False
         # Fingerprints of the last payload pushed into the body and
@@ -1208,6 +1217,7 @@ class DefenseClawTUI(App[None]):
                     yield Button("Plugins", id="inventory-tab-plugins", compact=True)
                     yield Button("MCPs", id="inventory-tab-mcp", compact=True)
                     yield Button("Agents", id="inventory-tab-agents", compact=True)
+                    yield Button("Tools", id="inventory-tab-tools", compact=True)
                     yield Button("Models", id="inventory-tab-models", compact=True)
                     yield Button("Memory", id="inventory-tab-memory", compact=True)
                     yield Button("All scope", id="inventory-scope-all", compact=True)
@@ -1355,6 +1365,38 @@ class DefenseClawTUI(App[None]):
                         id="ai-export",
                         compact=True,
                         tooltip="Save the AI usage snapshot to disk",
+                    )
+                with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
+                    yield Button(
+                        "Enable Runtime",
+                        id="runtime-enable",
+                        compact=True,
+                        variant="success",
+                        tooltip="Turn on the user-level inference and egress planes (`runtime enable --yes --no-enable-host-plane`)",
+                    )
+                    yield Button(
+                        "Poll now",
+                        id="runtime-scan",
+                        compact=True,
+                        tooltip="Poll the runtime planes now (`agent discovery runtime scan`)",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="runtime-refresh",
+                        compact=True,
+                        tooltip="Re-read the last runtime snapshot",
+                    )
+                    yield Button(
+                        "Permissions",
+                        id="runtime-permissions",
+                        compact=True,
+                        tooltip="Show the host grants each plane needs (`runtime permissions`)",
+                    )
+                    yield Button(
+                        "Open finding",
+                        id="runtime-open-detail",
+                        compact=True,
+                        tooltip="Open the highlighted finding (Enter)",
                     )
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
                 # All four panels share ``CatalogListModel`` semantics, so the
@@ -1748,12 +1790,19 @@ class DefenseClawTUI(App[None]):
             self.set_interval(CONFIG_POLL_INTERVAL_SECONDS, self._schedule_config_poll)
             self._schedule_config_poll()
         self.set_interval(30.0, self._schedule_ai_usage_poll)
-        # Mirror Go TUI: poll /health every 3s so the Overview SERVICES
+        # Poll authenticated /status every 3s so the Overview SERVICES
         # box reflects the actual sidecar state instead of "unknown".
         # Run once immediately so the first render isn't blank, then
         # let the interval keep it fresh.
         self.set_interval(3.0, self._schedule_health_poll)
         self._schedule_health_poll()
+        # Runtime coverage is Overview's most useful live signal after
+        # sudo-start. Poll it independently of the Runtime tab visit.
+        self.set_interval(15.0, self._schedule_runtime_poll)
+        self._schedule_runtime_poll()
+        # Native delivery evidence changes while the TUI is open; refresh the
+        # same bounded snapshot periodically without coupling it to 3s health.
+        self.set_interval(30.0, self._schedule_observability_status_load)
         self._schedule_observability_status_load()
         self._schedule_ai_usage_poll()
         # Mirror Go's loadCredentialsCmd dispatched from Init(): load
@@ -2133,6 +2182,12 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+        if (
+            panel == "runtime"
+            and not self._runtime_model_injected
+            and not self.runtime_model.snapshot.scanned_at
+        ):
+            self.run_worker(self._load_runtime_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
         # visit so the operator sees "Loading…" then the rows, instead
         # of an empty list with a small "press r to refresh" hint
@@ -3026,6 +3081,10 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_ai_control(button_id)
             return
+        if button_id.startswith("runtime-"):
+            event.stop()
+            self._handle_runtime_control(button_id)
+            return
         # All four catalog panels share ``CatalogListModel`` and the
         # ``_apply_catalog_action`` dispatcher, so the button-id →
         # handle_key mapping is uniform. Routing each prefix into its
@@ -3387,6 +3446,9 @@ class DefenseClawTUI(App[None]):
             self.audit_model.set_cursor(event.cursor_row)
         elif self.active_panel == "inventory":
             self.inventory_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "runtime":
+            self.runtime_model.cursor = event.cursor_row
+            self._sync_runtime_controls()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -4087,6 +4149,11 @@ class DefenseClawTUI(App[None]):
                 f"{suffix}"
             )
             return self.body_text
+        if self.active_panel == "runtime":
+            self._table_columns = self.runtime_model.data_table_columns()
+            self._table_rows = self.runtime_model.data_table_rows()
+            self.body_text = self._runtime_body_text()
+            return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
             self.body_text = self._setup_body_text()
@@ -4129,6 +4196,105 @@ class DefenseClawTUI(App[None]):
 
     def _status_text(self) -> str:
         return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
+
+    def _runtime_body_text(self) -> str:
+        """Colored Runtime header: health first, then planes, coverage, findings."""
+
+        model = self.runtime_model
+        state = model.health_state()
+        title = model.health_title()
+        color = {
+            "off": TOKENS.text_muted,
+            "waiting": TOKENS.accent_blue,
+            "degraded": TOKENS.accent_amber,
+            "healthy": TOKENS.accent_green,
+        }[state]
+        badge_color = {
+            "up": TOKENS.accent_green,
+            "idle": TOKENS.accent_amber,
+            "blind": TOKENS.accent_red,
+        }
+        snap = model.snapshot
+        meta: list[str] = [
+            f"[{TOKENS.text_secondary}]{len(model.filtered)}/{len(snap.rows)} findings[/]"
+        ]
+        if snap.scanned_at:
+            meta.append(f"[{TOKENS.text_muted}]polled {rich_escape(snap.scanned_at)}[/]")
+
+        lines = [
+            f"[bold {TOKENS.accent_cyan}]AI Discovery Runtime[/]  "
+            f"[bold {color}]● {title}[/]  "
+            + "  ".join(meta),
+            "",
+            f"[bold {color}]{title}[/]  [{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
+            "",
+            f"[bold {TOKENS.text_primary}]PLANES[/]",
+        ]
+        if not snap.planes:
+            lines.append(
+                f"  [{TOKENS.text_muted}]plane health unavailable: the gateway reported no planes[/]"
+            )
+        elif model.planes_expanded:
+            for plane in snap.planes:
+                badge = plane.badge.upper()
+                hue = badge_color.get(plane.badge, TOKENS.text_muted)
+                if plane.running:
+                    detail = f"watching via {plane.mechanism or 'unknown mechanism'}"
+                else:
+                    detail = plane.reason or "no reason reported"
+                lines.append(
+                    f"  [bold {hue}]● {badge:<5}[/]  [bold]{rich_escape(plane.name)}[/]  "
+                    f"[{TOKENS.text_secondary}]{rich_escape(detail)}[/]"
+                )
+                fix = model.plane_fix(plane)
+                if fix:
+                    lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
+        else:
+            for compact in model.plane_strip():
+                lines.append(f"  [{TOKENS.text_secondary}]{rich_escape(compact)}[/]")
+
+        skipped = f"  [{TOKENS.text_muted}]({snap.processes_skipped} partial)[/]" if snap.processes_skipped else ""
+        unattrib = (
+            f"  [{TOKENS.accent_amber}]({snap.connections_unattributed} unattributed)[/]"
+            if snap.connections_unattributed
+            else ""
+        )
+        context = model.findings_context()
+        next_action = model.next_action()
+        lines.extend(
+            [
+                "",
+                f"[bold {TOKENS.text_primary}]COVERAGE[/]",
+                f"  [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes watched{skipped}",
+                f"  [{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections seen{unattrib}",
+                f"  [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] Plane C kernel events classified; "
+                f"[{TOKENS.text_muted}]{snap.host_plane_gated} excluded outside AI-agent lineage[/]",
+                f"  [{TOKENS.text_secondary}]{rich_escape(context)}[/]",
+            ]
+        )
+        if next_action:
+            lines.append(f"  [{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
+
+        keys = (
+            "Keys: e enable user-level planes · r refresh · s poll now · p compact planes · "
+            "Enter finding · / filter"
+        )
+        lines.extend(["", f"[{TOKENS.text_muted}]{keys}[/]"])
+
+        if model.filtering:
+            lines.append(f"Filter: / {rich_escape(model.filter_text)}")
+        elif model.filter_text:
+            lines.append(f"Filter: {rich_escape(model.filter_text)}")
+
+        if model.detail_open:
+            detail = model.detail_text()
+            if detail:
+                lines.extend(["", rich_escape(detail)])
+        else:
+            empty = model.empty_state()
+            if empty and not model.filtered:
+                lines.extend(["", f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]"])
+        return "\n".join(lines)
 
     def _render_native_widgets(self) -> None:
         self._render_overview_metrics()
@@ -4229,6 +4395,7 @@ class DefenseClawTUI(App[None]):
         setup_wizard = self.query_one("#setup-wizard-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
+        runtime = self.query_one("#runtime-controls", Horizontal)
         # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
         # ``Horizontal`` containers (rather than one shared bar keyed on
         # active_panel) so each panel can advertise the action keys it
@@ -4265,6 +4432,7 @@ class DefenseClawTUI(App[None]):
         )
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
+        runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -4299,6 +4467,8 @@ class DefenseClawTUI(App[None]):
             self._sync_activity_controls()
         if self.active_panel == "ai" and not self.help_open:
             self._sync_ai_controls()
+        if self.active_panel == "runtime" and not self.help_open:
+            self._sync_runtime_controls()
         if self.active_panel in self.catalog_models and not self.help_open:
             self._sync_catalog_controls(self.active_panel)
 
@@ -4536,6 +4706,22 @@ class DefenseClawTUI(App[None]):
         self.query_one("#ai-open-detail", Button).disabled = self.ai_discovery_model.selected() is None
         # Export needs an actual snapshot.
         self.query_one("#ai-export", Button).disabled = snapshot is None
+
+    def _sync_runtime_controls(self) -> None:
+        """Show Enable Runtime only when planes are off or not selected."""
+
+        try:
+            refresh = self.query_one("#runtime-refresh", Button)
+            detail = self.query_one("#runtime-open-detail", Button)
+        except NoMatches:
+            return
+        model = self.runtime_model
+        enabled = bool(model.snapshot.enabled)
+        self._set_button_visible("#runtime-enable", model.needs_enable())
+        self._set_button_visible("#runtime-scan", enabled)
+        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        refresh.disabled = False
+        detail.disabled = model.selected() is None
 
     # Per-catalog-panel button-id → key map. Each catalog panel routes
     # its action bar through ``handle_key`` so the click flow is
@@ -5299,6 +5485,36 @@ class DefenseClawTUI(App[None]):
         if button_id == "ai-export":
             self._export_ai_discovery_snapshot()
             return
+
+    def _runtime_enable_command(self) -> str:
+        """Enable user-level planes; Endpoint Security stays an explicit opt-in."""
+
+        intent = self.runtime_model.command_for(RuntimePanelAction.ENABLE)
+        if intent is None:
+            return "defenseclaw agent discovery runtime enable --yes --no-enable-host-plane"
+        return "defenseclaw " + " ".join(intent.argv)
+
+    def _handle_runtime_control(self, button_id: str) -> None:
+        """Route a Runtime action-bar button to the matching CLI command."""
+
+        if button_id == "runtime-enable":
+            self._submit_command_text(self._runtime_enable_command())
+            return
+        if button_id == "runtime-scan":
+            self._apply_runtime_action(RuntimePanelAction.SCAN)
+            return
+        if button_id == "runtime-refresh":
+            self._apply_runtime_action(RuntimePanelAction.REFRESH)
+            return
+        if button_id == "runtime-permissions":
+            self._submit_command_text("defenseclaw agent discovery runtime permissions")
+            return
+        if button_id == "runtime-open-detail":
+            if self.runtime_model.selected() is None:
+                self._set_status("Highlight a finding first (↑/↓), then click Open finding.")
+                return
+            self.runtime_model.detail_open = True
+            self._render_chrome()
 
     def _export_ai_discovery_snapshot(self) -> None:
         """Write the loaded AI usage snapshot to a JSON file on disk.
@@ -6368,7 +6584,11 @@ class DefenseClawTUI(App[None]):
         modes = list(cfg.connector_modes) if cfg else []
         if len(modes) <= 1:
             return []
-        return [connector for connector, _mode in modes if connector]
+        return [
+            connector
+            for connector, _mode in modes
+            if connector and not connector_paths.is_cleanup_only(connector)
+        ]
 
     def _connector_filter(self) -> str:
         """The active connector filter (``""`` = All connectors).
@@ -6721,9 +6941,11 @@ class DefenseClawTUI(App[None]):
         if health is not None:
             for conn in health.connectors:
                 if conn.name:
-                    out[conn.name.strip().lower()] = (conn.state or "").strip()
+                    out[conn.name.strip().lower()] = self.overview_model._effective_connector_runtime(conn)[0]
             if not out and health.connector is not None and health.connector.name:
-                out[health.connector.name.strip().lower()] = (health.connector.state or "").strip()
+                out[health.connector.name.strip().lower()] = self.overview_model._effective_connector_runtime(
+                    health.connector
+                )[0]
         return out
 
     def _connector_last_activity(
@@ -6798,6 +7020,12 @@ class DefenseClawTUI(App[None]):
             # look active.
             if cfg.connector_is_disabled(connector):
                 status = "disabled"
+            elif connector.strip().lower() == "opencode" and connector.strip().lower() not in status_map:
+                # A running gateway is not proof that OpenCode loaded its
+                # managed plugin. Older/malformed health without an OpenCode
+                # row therefore stays unverified instead of inheriting the
+                # process-wide green state.
+                status = "degraded"
             else:
                 status = status_map.get(connector.strip().lower(), fallback_status) or "unknown"
             rows.append(
@@ -7529,7 +7757,7 @@ class DefenseClawTUI(App[None]):
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
         notice_block: list[Text] = []
-        for notice in notices[:3]:
+        for notice in notices[:4]:
             if notice.level == "error":
                 icon, color = "[!]", TOKENS.accent_red
             elif notice.level == "warn":
@@ -7636,6 +7864,10 @@ class DefenseClawTUI(App[None]):
                 else cfg.cisco_ai_defense_endpoint
             )
             cfg_rows.append(("AI Defense", Text(label)))
+        if health is not None:
+            api_addr = string_detail(health.api.details, "addr")
+            if api_addr:
+                cfg_rows.append(("API", Text(api_addr)))
         for label, value in cfg_rows:
             cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
 
@@ -8002,10 +8234,15 @@ class DefenseClawTUI(App[None]):
             padding=(0, 1),
         )
 
+        runtime_panel = self._overview_runtime_panel()
+
         columns = Table.grid(expand=True, padding=(0, 1))
         columns.add_column(ratio=1)
         columns.add_column(ratio=1)
-        columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
+        columns.add_row(
+            Group(services_panel, cfg_panel),
+            Group(enf_panel, runtime_panel, sc_panel, doc_panel),
+        )
 
         observability_panel = self._overview_observability_panel()
 
@@ -8067,6 +8304,60 @@ class DefenseClawTUI(App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
 
+    def _overview_runtime_panel(self) -> RenderableType:
+        """Always-visible Runtime coverage so Overview is not a services-only wall."""
+
+        runtime = self.overview_model.runtime
+        title_color = {
+            "HEALTHY": TOKENS.accent_green,
+            "DEGRADED": TOKENS.accent_amber,
+            "STARTING": TOKENS.accent_blue,
+            "OFF": TOKENS.text_muted,
+        }.get(runtime.health_title, TOKENS.text_secondary)
+        table = Table.grid(padding=(0, 1), expand=True)
+        table.add_column(overflow="fold")
+        if runtime.health_title:
+            header = Text()
+            header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
+            if runtime.processes or runtime.connections or runtime.findings:
+                header.append(
+                    f"   {runtime.findings} findings   "
+                    f"{runtime.processes} processes   "
+                    f"{runtime.connections} connections",
+                    style=TOKENS.text_secondary,
+                )
+            table.add_row(header)
+        if runtime.plane_summary:
+            table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+        if runtime.host_observations or runtime.host_gated:
+            table.add_row(
+                Text(
+                    f"Plane C: {runtime.host_observations} classified kernel events; "
+                    f"{runtime.host_gated} excluded outside AI-agent lineage",
+                    style=TOKENS.text_secondary,
+                )
+            )
+        if runtime.context:
+            table.add_row(Text(runtime.context, style=TOKENS.text_primary))
+        for line in runtime.top_findings:
+            table.add_row(Text(f"  {line}", style=TOKENS.text_secondary))
+        if runtime.next_action:
+            table.add_row(Text(f"→ {runtime.next_action}", style=TOKENS.accent_cyan))
+        if not runtime.health_title and not runtime.context:
+            table.add_row(
+                Text(
+                    "Runtime snapshot pending. The TUI polls /ai-usage/runtime every 15s.",
+                    style=TOKENS.text_muted,
+                )
+            )
+        return Panel(
+            table,
+            title=Text("RUNTIME", style=f"bold {TOKENS.accent_cyan}"),
+            title_align="left",
+            border_style=TOKENS.accent_cyan,
+            padding=(0, 1),
+        )
+
     def _overview_connectors_panel(
         self, rows: list[ConnectorOverviewRow]
     ) -> RenderableType | None:
@@ -8101,6 +8392,7 @@ class DefenseClawTUI(App[None]):
             Text("STATUS", style=header_style),
         )
         selected = self._connector_filter()
+        disclosure_lines: list[Text] = []
         for row in rows:
             normalized = row.status.strip().lower() or "unknown"
             color_dot = state_color(normalized)
@@ -8117,6 +8409,9 @@ class DefenseClawTUI(App[None]):
             )
             color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
             color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
+            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
+            if disclosure:
+                disclosure_lines.append(Text(f"{name} ({row.connector}): {disclosure}", style=TOKENS.text_muted))
             table.add_row(
                 Text(f"{name} ({row.connector})", style=name_style),
                 Text(row.mode or "?", style=TOKENS.text_secondary),
@@ -8132,12 +8427,53 @@ class DefenseClawTUI(App[None]):
             style=f"italic {TOKENS.text_muted}",
         )
         return Panel(
-            Group(table, hint),
+            Group(table, *disclosure_lines, hint),
             title=Text("CONNECTORS", style=f"bold {TOKENS.accent_green}"),
             title_align="left",
             border_style=TOKENS.accent_green,
             padding=(0, 1),
         )
+
+    def _overview_native_delivery_renderables(self) -> list[RenderableType]:
+        """Render bounded native acceptance separately from runtime health."""
+
+        summary = self.overview_model.native_delivery_summary
+        if summary is None:
+            return [
+                Text(
+                    "Native connector OTLP delivery · bounded evidence loading · "
+                    "collector/runtime health does not prove accepted delivery",
+                    style=TOKENS.text_muted,
+                )
+            ]
+        scope = f"bounded {summary.observation_window_hours}h"
+        if summary.event_rows_truncated:
+            scope += ", truncated; counts partial"
+        lines: list[RenderableType] = [
+            Text(
+                f"Native connector OTLP delivery · {scope} · collector/runtime health does not prove accepted delivery",
+                style=TOKENS.text_secondary,
+            )
+        ]
+        if not summary.connectors:
+            reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
+            lines.append(Text(f"  no evidence{reason}", style=TOKENS.text_muted))
+            return lines
+        for item in summary.connectors:
+            instance = "" if item.default else " · additional instance"
+            style = {
+                "all_drop_only": TOKENS.accent_red,
+                "partial_drop_only": TOKENS.accent_amber,
+                "accepted": TOKENS.accent_green,
+            }.get(item.state, TOKENS.text_muted)
+            lines.append(
+                Text(
+                    f"  {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
+                    f"{item.state.replace('_', '-')} · {item.detail}",
+                    style=style,
+                )
+            )
+        return lines
 
     def _overview_observability_panel(self) -> RenderableType:
         """Full-width inventory of runtime-loaded telemetry destinations."""
@@ -8239,6 +8575,7 @@ class DefenseClawTUI(App[None]):
                 )
             body: RenderableType = Group(
                 *prefix,
+                *self._overview_native_delivery_renderables(),
                 table,
                 Text(
                     "Names are identities: a new name adds a route; the same name updates it. "
@@ -8253,7 +8590,10 @@ class DefenseClawTUI(App[None]):
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
                 "Observability / Galileo, then restart the gateway."
             )
-            body = Text(message, style=TOKENS.text_secondary)
+            body = Group(
+                *self._overview_native_delivery_renderables(),
+                Text(message, style=TOKENS.text_secondary),
+            )
         return Panel(
             body,
             title=Text(
@@ -8290,6 +8630,9 @@ class DefenseClawTUI(App[None]):
                 f"[{color_alerts}]{row.alerts:>8}[/]"
                 f"  [{color_dot}]{dot} {row.status or 'unknown'}[/]"
             )
+            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
+            if disclosure:
+                lines.append(f"  [{TOKENS.text_muted}]{name}: {disclosure}[/]")
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 
@@ -8298,6 +8641,31 @@ class DefenseClawTUI(App[None]):
 
         rows = self.overview_model.observability_destination_rows()
         storage = self.overview_model.observability_storage_status()
+        summary = self.overview_model.native_delivery_summary
+        delivery_lines: list[str] = []
+        if summary is None:
+            delivery_lines.append(
+                "  Native connector OTLP delivery · bounded evidence loading · "
+                "collector/runtime health does not prove accepted delivery"
+            )
+        else:
+            scope = f"bounded {summary.observation_window_hours}h"
+            if summary.event_rows_truncated:
+                scope += ", truncated; counts partial"
+            delivery_lines.append(
+                f"  Native connector OTLP delivery · {scope} · "
+                "collector/runtime health does not prove accepted delivery"
+            )
+            if not summary.connectors:
+                reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
+                delivery_lines.append(f"    no evidence{reason}")
+            for item in summary.connectors:
+                instance = "" if item.default else " · additional instance"
+                delivery_lines.append(
+                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
+                    f"{item.state.replace('_', '-')} · {item.detail}"
+                )
+        delivery_text = "\n".join(delivery_lines)
         if not rows:
             message = (
                 f"Canonical observability status unavailable: "
@@ -8307,8 +8675,7 @@ class DefenseClawTUI(App[None]):
                 "Observability / Galileo, then restart the gateway."
             )
             return (
-                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
-                f"  {message}\n\n"
+                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n{delivery_text}\n  {message}\n\n"
             )
         if storage is not None:
             retention_health = storage.retention_health or "unavailable"
@@ -8343,6 +8710,8 @@ class DefenseClawTUI(App[None]):
             )
             return (
                 f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+                + delivery_text
+                + "\n"
                 + "\n".join(lines)
                 + "\n\n"
             )
@@ -8370,6 +8739,8 @@ class DefenseClawTUI(App[None]):
         )
         return (
             f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+            + delivery_text
+            + "\n"
             + "\n".join(lines)
             + "\n\n"
         )
@@ -8386,7 +8757,7 @@ class DefenseClawTUI(App[None]):
         connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
-        for notice in notices[:3]:
+        for notice in notices[:4]:
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
                 color = TOKENS.accent_blue
@@ -8427,6 +8798,29 @@ class DefenseClawTUI(App[None]):
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
         observability_text = self._overview_observability_text()
+        runtime = self.overview_model.runtime
+        runtime_lines = []
+        if runtime.health_title:
+            runtime_lines.append(
+                f"  {rich_escape(runtime.health_title)}  {runtime.findings} findings  "
+                f"{runtime.processes} processes  {runtime.connections} connections"
+            )
+        if runtime.plane_summary:
+            runtime_lines.append(f"  {rich_escape(runtime.plane_summary)}")
+        if runtime.host_observations or runtime.host_gated:
+            runtime_lines.append(
+                f"  Plane C: {runtime.host_observations} classified kernel events; "
+                f"{runtime.host_gated} excluded outside AI-agent lineage"
+            )
+        if runtime.context:
+            runtime_lines.append(f"  {rich_escape(runtime.context)}")
+        for line in runtime.top_findings:
+            runtime_lines.append(f"  {rich_escape(line)}")
+        if runtime.next_action:
+            runtime_lines.append(f"  -> {rich_escape(runtime.next_action)}")
+        if not runtime_lines:
+            runtime_lines.append("  Runtime snapshot pending")
+        runtime_text = "\n".join(runtime_lines)
 
         scanner_lines = [
             ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
@@ -8569,6 +8963,7 @@ class DefenseClawTUI(App[None]):
             + "\n".join(notice_lines)
             + "\n\n"
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
+            f"[bold {TOKENS.accent_cyan}]RUNTIME[/]\n{runtime_text}\n\n"
             + observability_text
             + (
                 f"[bold {TOKENS.accent_amber}]ENFORCEMENT · {enf_selected}[/]\n"
@@ -9354,6 +9749,8 @@ class DefenseClawTUI(App[None]):
         ):
             self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
             return True
+        if self.active_panel == "runtime":
+            return self._apply_runtime_action(self.runtime_model.handle_key(key))
         if self.active_panel == "alerts":
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
@@ -9605,6 +10002,27 @@ class DefenseClawTUI(App[None]):
             self._set_status(action.hint)
         if getattr(action, "intent", None) is not None:
             self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _apply_runtime_action(self, action: RuntimePanelAction) -> bool:
+        """Apply a Runtime panel keypress."""
+        if action is RuntimePanelAction.NONE:
+            self._update_body_only()
+            return False
+        if action is RuntimePanelAction.REFRESH:
+            self.run_worker(self._load_runtime_model(), exclusive=False, thread=False)
+            return True
+        if action is RuntimePanelAction.SCAN:
+            self._submit_command_text("defenseclaw agent discovery runtime scan")
+            return True
+        if action is RuntimePanelAction.ENABLE:
+            self._submit_command_text(self._runtime_enable_command())
+            return True
+        if action is RuntimePanelAction.START_FILTER:
+            self._set_status("Filter runtime findings: type to narrow, esc to clear.")
+            self._render_chrome()
+            return True
         self._render_chrome()
         return True
 
@@ -10253,6 +10671,10 @@ class DefenseClawTUI(App[None]):
         # ultimately "" under the merged "All" view, so the form writes
         # ``--connector`` instead of silently defaulting to the primary.
         connector = model.action_connector(selected)
+        effective_connector = connector or str(getattr(model, "connector", "") or "")
+        if connector_paths.is_cleanup_only(effective_connector):
+            self._set_status(connector_paths.cleanup_only_guidance(effective_connector))
+            return
         result = await self.push_screen_wait(
             MCPSetFormScreen(initial_name=initial_name, connector=connector)
         )
@@ -10692,6 +11114,7 @@ class DefenseClawTUI(App[None]):
         self._sync_catalog_connector_filters()
         self._sync_setup_readiness()
         self.overview_model.set_observability_status(None)
+        self.overview_model.set_native_delivery_summary(None)
         self._schedule_observability_status_load()
 
         if self.first_run_model.active and new_cfg is not None:
@@ -10816,6 +11239,38 @@ class DefenseClawTUI(App[None]):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._render_chrome()
+
+    async def _load_runtime_model(self) -> None:
+        """Fetch the runtime-plane snapshot into the panel."""
+        self._set_status("Loading runtime planes...")
+        await self._refresh_runtime_snapshot(render=True)
+
+    def _schedule_runtime_poll(self) -> None:
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if self._runtime_model_injected:
+            return
+        if getattr(self, "_runtime_poll_running", False):
+            return
+        self._runtime_poll_running = True
+        self.run_worker(self._poll_runtime_once(), exclusive=False, thread=False)
+
+    async def _poll_runtime_once(self) -> None:
+        try:
+            await self._refresh_runtime_snapshot(render=self.active_panel in {"overview", "runtime"})
+        finally:
+            self._runtime_poll_running = False
+
+    async def _refresh_runtime_snapshot(self, *, render: bool) -> None:
+        payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
+        if payload is not None:
+            self.runtime_model.set_snapshot(payload)
+            self.overview_model.set_runtime_overview(self.runtime_model.overview())
+        if render and not self.help_open:
+            if self.active_panel == "overview":
+                self._schedule_overview_sampled_refresh()
+            else:
+                self._render_chrome()
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
@@ -10995,16 +11450,25 @@ class DefenseClawTUI(App[None]):
     async def _load_catalog_model(self, panel: str) -> None:
         model = self.catalog_models[panel]
         names = self._active_connector_names()
+        asset_panel = panel in {"skills", "mcps", "plugins"}
+        current_connector = str(getattr(model, "connector", "") or "")
+        if asset_panel and not names and connector_paths.is_cleanup_only(current_connector):
+            guidance = connector_paths.cleanup_only_guidance(current_connector)
+            model.apply_loaded([])
+            model.message = guidance
+            self._set_status(guidance)
+            self._render_chrome()
+            return
         # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
         # into one table with a CONNECTOR column. Tools is a process-global
         # enforcement view, so it never merges. Single-connector installs keep
         # the original one-shot load (no column, no per-connector fan-out).
-        if len(names) > 1 and panel in {"skills", "mcps", "plugins"}:
+        if len(names) > 1 and asset_panel:
             model.show_connector_column = True
             await self._load_catalog_merged(panel, model, names)
             return
         model.show_connector_column = False
-        intent = model.load_intent()
+        intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
         self._set_status(intent.hint or f"Loading {panel}...")
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
@@ -11675,7 +12139,7 @@ class DefenseClawTUI(App[None]):
             self._write_activity(f"[#FBBF24]mutations unavailable:[/] {exc}")
 
     def _schedule_health_poll(self) -> None:
-        """Kick off a non-blocking ``/health`` fetch.
+        """Kick off a non-blocking authenticated ``/status`` fetch.
 
         The Go TUI runs ``fetchHealth`` on a ticker (see
         ``internal/tui/health.go`` + ``app.go`` ``pollHealth``) and
@@ -11750,8 +12214,15 @@ class DefenseClawTUI(App[None]):
                 self.config,
                 self.data_dir,
             )
+            delivery_summary = await asyncio.to_thread(
+                _fetch_native_delivery_summary,
+                self.config,
+                self.data_dir,
+                status,
+            )
             if not self._observability_status_reload_pending:
                 self.overview_model.set_observability_status(status, error=error)
+                self.overview_model.set_native_delivery_summary(delivery_summary)
                 self.setup_model.set_observability_status(status, error=error)
                 if self.active_panel in {"overview", "setup"} and not self.help_open:
                     if self.active_panel == "overview":
@@ -12145,8 +12616,36 @@ def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
     return ""
 
 
+def _project_omnigent_effective_readiness(
+    config: object,
+    snapshot: HealthSnapshot,
+) -> HealthSnapshot:
+    """Apply Status's passive OmniGent readiness to TUI presentation state."""
+
+    from defenseclaw.commands.cmd_status import _omnigent_effective_runtime_state
+
+    projected: dict[str, str] = {}
+
+    def _project(connector: ConnectorHealth | None) -> ConnectorHealth | None:
+        if connector is None or connector.name.strip().lower() != "omnigent":
+            return connector
+        if connector.state not in projected:
+            projected[connector.state], _detail = _omnigent_effective_runtime_state(
+                config,
+                connector.state,
+            )
+        state = projected[connector.state]
+        return connector if state == connector.state else replace(connector, state=state)
+
+    return replace(
+        snapshot,
+        connector=_project(snapshot.connector),
+        connectors=tuple(_project(connector) for connector in snapshot.connectors),
+    )
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
-    """Probe the configured authenticated sidecar API without using proxy state.
+    """Probe the configured authenticated sidecar status without using proxy state.
 
     ``gateway.api_bind`` / ``api_port`` identify the REST listener;
     ``gateway.host`` / ``port`` identify the optional fleet uplink and must not
@@ -12177,7 +12676,19 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "sidecar API client configuration is invalid")
 
     try:
-        payload = client.health()
+        from defenseclaw.commands.cmd_doctor import (
+            _authenticated_runtime_matches,
+            _trusted_gateway_listener,
+        )
+
+        trust = _trusted_gateway_listener(config)
+    except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
+        return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+    if not trust.trusted:
+        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+
+    try:
+        document = client.status()
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         if status in {401, 403}:
@@ -12186,19 +12697,37 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
                 f"authentication error: sidecar rejected the configured token (HTTP {status})",
             )
         label = f"HTTP {status}" if status else "HTTP error"
-        return GatewayHealthResult("error", f"sidecar health request failed ({label})")
+        return GatewayHealthResult("error", f"sidecar status request failed ({label})")
     except (requests.ConnectionError, requests.Timeout, OSError):
         return GatewayHealthResult("offline", "sidecar API is unreachable")
     except (requests.RequestException, ValueError):
-        return GatewayHealthResult("error", "sidecar health response is invalid")
+        return GatewayHealthResult("error", "sidecar status response is invalid")
     except Exception:  # noqa: BLE001 - unexpected probe failures are errors, not outages.
-        return GatewayHealthResult("error", "sidecar health probe failed")
+        return GatewayHealthResult("error", "sidecar status probe failed")
+
+    if not isinstance(document, dict):
+        return GatewayHealthResult("error", "authenticated sidecar status is invalid")
+    payload = document.get("health")
+    if not isinstance(payload, dict):
+        return GatewayHealthResult("error", "authenticated sidecar status is invalid")
+    try:
+        runtime_ok, runtime_detail = _authenticated_runtime_matches(
+            config,
+            trust.pid,
+            json.dumps(document),
+        )
+    except (TypeError, ValueError):
+        runtime_ok, runtime_detail = False, "authenticated runtime metadata is malformed"
+    if not runtime_ok:
+        return GatewayHealthResult("error", runtime_detail)
 
     snapshot = _health_snapshot_from_mapping(payload)
     if snapshot is None:
-        return GatewayHealthResult("error", "sidecar health response is invalid")
+        return GatewayHealthResult("error", "authenticated sidecar health is invalid")
+    snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
-    return GatewayHealthResult(state, _gateway_snapshot_detail(snapshot, state), snapshot)
+    detail = _gateway_snapshot_detail(snapshot, state)
+    return GatewayHealthResult(state, detail, snapshot)
 
 
 def _fetch_v8_operator_status(
@@ -12236,6 +12765,33 @@ def _fetch_v8_operator_status(
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
             return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
         return None, "canonical v8 status could not be loaded; run defenseclaw observability validate"
+
+
+def _fetch_native_delivery_summary(
+    config: object | None,
+    data_dir: str | Path | None,
+    status: object | None = None,
+):
+    """Return the same bounded, redacted native-delivery truth as Doctor."""
+
+    from defenseclaw.observability.custody_status import (
+        NativeDeliverySummary,
+        inspect_connector_custody,
+        summarize_native_delivery,
+    )
+
+    if config is None:
+        return NativeDeliverySummary("no_evidence", "config_unavailable", 24)
+    root = str(data_dir or getattr(config, "data_dir", "") or "")
+    database = str(getattr(status, "local_path", "") or "")
+    if not database:
+        database = str(getattr(config, "audit_db", "") or "")
+    if not database:
+        database = str(Path(root) / "audit.db")
+    try:
+        return summarize_native_delivery(inspect_connector_custody(database, root))
+    except Exception:  # noqa: BLE001 - TUI absence is bounded evidence, never a failure.
+        return NativeDeliverySummary("no_evidence", "evidence_unavailable", 24)
 
 
 def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
@@ -12281,6 +12837,41 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return AIUsageSnapshot.from_mapping(payload)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _fetch_ai_runtime(config: object | None) -> dict | None:
+    """Blocking ``/api/v1/ai-usage/runtime`` fetcher for the Runtime panel.
+
+    Returns None on a transient gateway or auth failure so the previous good
+    snapshot is not cleared during a restart. Clearing it would replace a
+    stale-but-true coverage report with an empty one, which reads as a clean
+    host rather than as a lost connection.
+    """
+    if config is None:
+        return None
+    gateway_cfg = getattr(config, "gateway", None)
+    if gateway_cfg is None:
+        return None
+    try:
+        port = int(getattr(gateway_cfg, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    resolve_token = getattr(gateway_cfg, "resolved_token", None)
+    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+    try:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    except Exception:  # noqa: BLE001
+        return None
+    host = gateway_api_client_host(config)
+    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    client._session.headers["Accept"] = "application/json"  # noqa: SLF001 - mirrors _fetch_ai_usage.
+    try:
+        payload = client.ai_runtime()
+    except Exception:  # noqa: BLE001
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _resolve_data_dir(config: object | None, data_dir: str | Path | None) -> Path | None:
@@ -12610,6 +13201,34 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
+    cleanup_only_actives = [
+        connector
+        for connector in actives
+        if isinstance(connector, str) and connector_paths.is_cleanup_only(connector)
+    ]
+    actives = [
+        connector
+        for connector in actives
+        if not (
+            isinstance(connector, str)
+            and connector_paths.is_cleanup_only(connector)
+        )
+    ]
+    if cleanup_only_actives and not actives and not roster_error:
+        roster_error = connector_paths.cleanup_only_guidance(cleanup_only_actives[0])
+
+    raw_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_claw_mode = (
+        (actives[0] if actives else "")
+        if connector_paths.is_cleanup_only(raw_claw_mode)
+        else raw_claw_mode
+    )
+    raw_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
+    display_guardrail_connector = (
+        (actives[0] if actives else "")
+        if connector_paths.is_cleanup_only(raw_guardrail_connector)
+        else raw_guardrail_connector
+    )
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.
     # Project its effective values into the legacy singular Overview fields;
@@ -12702,9 +13321,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # then resolves the genuinely-zero-connector case to "" (no phantom
         # connector) instead of fabricating "openclaw". The Go-parity
         # config.active_connector() contract is deliberately left untouched.
-        claw_mode=str(getattr(claw, "mode", "") or ""),
+        claw_mode=display_claw_mode,
         guardrail_enabled=effective_guardrail_enabled,
-        guardrail_connector=str(getattr(guardrail, "connector", "") or ""),
+        guardrail_connector=display_guardrail_connector,
         guardrail_mode=effective_guardrail_mode,
         guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
@@ -12865,6 +13484,8 @@ def _styled_cell(column: str, value: str) -> Text:
         "unknown",
         "warn",
         "warning",
+        "degraded",
+        "healthy",
     }:
         text.stylize(state_color(value))
         if normalized in {"running", "active", "enabled", "allowed", "blocked", "error", "stopped"}:
@@ -12989,10 +13610,12 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
     return ConnectorHealth(
         name=_coerce_str(raw.get("name")),
         state=_coerce_str(raw.get("state")),
+        source=raw.get("source") if isinstance(raw.get("source"), str) else "",
         since=_coerce_str(raw.get("since")),
         last_activity_at=_coerce_str(
             raw.get("last_activity_at") or raw.get("lastActivityAt")
         ),
+        load_heartbeat_at=_coerce_str(raw.get("load_heartbeat_at") or raw.get("loadHeartbeatAt")),
         tool_inspection_mode=_coerce_str(
             raw.get("tool_inspection_mode") or raw.get("toolInspectionMode")
         ),
@@ -13012,7 +13635,7 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
 
 
 def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:
-    """Parse ``/health``'s ``connectors[]`` array into per-connector health.
+    """Parse the status health ``connectors[]`` array into per-connector health.
 
     The gateway emits one entry per active connector with its own live
     counters (``internal/gateway/health.go``). Tolerant of a missing/null
@@ -13031,7 +13654,7 @@ def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:
 
 
 def _health_snapshot_from_mapping(raw: Any) -> HealthSnapshot | None:
-    """Convert a ``/health`` JSON payload into a ``HealthSnapshot``.
+    """Convert a status health payload into a ``HealthSnapshot``.
 
     Returns ``None`` when the response is unusable. The mapper is
     deliberately tolerant of missing / camelCased fields so a gateway

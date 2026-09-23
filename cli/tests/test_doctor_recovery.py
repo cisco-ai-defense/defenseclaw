@@ -26,6 +26,9 @@ import os
 import posixpath
 import sqlite3
 import stat
+import subprocess
+import sys
+import threading
 from contextlib import closing, nullcontext
 from pathlib import Path
 
@@ -77,6 +80,37 @@ def test_audit_db_plan_is_read_only_and_requires_explicit_approval(tmp_path: Pat
     assert exc.value.code == "recovery-approval-required"
     assert not target.exists()
 
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_existing_target_inspection_coexists_with_gateway_directory_lease(tmp_path: Path) -> None:
+    from defenseclaw.windows_acl import hold_directory_chain
+
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    target.write_bytes(b"existing")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_gateway_lease() -> None:
+        with hold_directory_chain(str(data_dir)):
+            entered.set()
+            assert release.wait(timeout=10.0)
+
+    holder = threading.Thread(target=hold_gateway_lease, daemon=True)
+    holder.start()
+    assert entered.wait(timeout=10.0)
+    try:
+        existing = plan_missing_audit_db(target, data_dir=data_dir)
+        missing = plan_missing_audit_db(data_dir / "missing.db", data_dir=data_dir)
+    finally:
+        release.set()
+        holder.join(timeout=10.0)
+
+    assert not holder.is_alive()
+    assert existing.disposition is RecoveryDisposition.NOT_NEEDED
+    assert existing.reason_code == "target-already-exists"
+    assert missing.disposition is RecoveryDisposition.BLOCKED
+    assert missing.reason_code == "directory-custody-unavailable"
 
 def test_recovery_refuses_a_filesystem_root_as_data_dir(tmp_path: Path) -> None:
     root = Path(tmp_path.anchor)
@@ -140,7 +174,26 @@ def test_audit_db_inspection_distinguishes_missing_invalid_and_valid_state(
     plan = plan_missing_audit_db(target, data_dir=data_dir)
     result = apply_audit_db_recovery(plan, approved=True, unattended=True)
     assert result.status is RecoveryApplyStatus.CREATED
-    assert inspect_audit_db(target, data_dir=data_dir).status is AuditDBHealthStatus.VALID
+    valid = inspect_audit_db(target, data_dir=data_dir)
+    assert valid.status is AuditDBHealthStatus.VALID
+    assert valid.integrity_scanned is True
+
+
+def test_audit_db_inspection_skips_full_quick_check_on_large_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    apply_audit_db_recovery(plan, approved=True, unattended=True)
+    monkeypatch.setattr(recovery, "_AUDIT_FULL_INTEGRITY_MAX_BYTES", 0)
+
+    health = inspect_audit_db(target, data_dir=data_dir)
+
+    assert health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED
+    assert health.reason_code == "audit-db-integrity-unverified"
+    assert health.integrity_scanned is False
+    assert health.file_bytes > 0
 
 
 def test_audit_db_apply_creates_verified_private_schema(tmp_path: Path) -> None:
@@ -259,6 +312,154 @@ def test_device_key_continuity_markers_fail_closed(tmp_path: Path) -> None:
     assert custom.reason_code == "continuity-evidence-present"
 
 
+@pytest.mark.parametrize(
+    ("relative_target", "reason_code"),
+    (
+        ("device.provenance.secret", "identity-artifact-alias"),
+        (
+            os.path.join("device.provenance.secret", "nested", "device.key"),
+            "reserved-provenance-secret-path",
+        ),
+        ("DEVICE.PROVENANCE.SECRET", "identity-artifact-alias"),
+        (
+            os.path.join("DEVICE.PROVENANCE.SECRET", "nested", "device.key"),
+            "reserved-provenance-secret-path",
+        ),
+    ),
+)
+def test_device_key_plan_blocks_reserved_artifact_paths_without_mutation(
+    tmp_path: Path,
+    relative_target: str,
+    reason_code: str,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / relative_target
+    before = tuple(data_dir.iterdir())
+
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == reason_code
+    with pytest.raises(RecoveryRefusedError) as exc:
+        apply_device_key_recovery(plan, approved=True)
+    assert exc.value.code == "recovery-plan-not-ready"
+    assert tuple(data_dir.iterdir()) == before
+    assert not target.exists()
+
+
+def test_device_key_plan_resolves_local_relative_target_and_blocks_root_data_dir(
+    tmp_path: Path,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    tilde_parent = data_dir / "~"
+    tilde_parent.mkdir(mode=0o700)
+    from defenseclaw.file_permissions import make_private_directory
+
+    make_private_directory(tilde_parent)
+    before = tuple(data_dir.iterdir())
+
+    relative = plan_missing_device_key("device.key", data_dir=data_dir)
+    tilde_relative = plan_missing_device_key("~/device.key", data_dir=data_dir)
+    traversal = plan_missing_device_key("../outside.key", data_dir=data_dir)
+    root = Path(tmp_path.anchor)
+    broad = plan_missing_device_key(root / "device.key", data_dir=root)
+
+    assert relative.disposition is RecoveryDisposition.READY
+    assert relative.target == os.fspath(data_dir / "device.key")
+    assert tilde_relative.disposition is RecoveryDisposition.READY
+    assert tilde_relative.target == os.fspath(data_dir / "~" / "device.key")
+    assert traversal.disposition is RecoveryDisposition.BLOCKED
+    assert traversal.reason_code == "invalid-recovery-path"
+    assert broad.disposition is RecoveryDisposition.BLOCKED
+    assert broad.reason_code == "data-dir-too-broad"
+    assert tuple(data_dir.iterdir()) == before
+
+
+def test_device_key_plan_rejects_tilde_data_dir_without_expansion() -> None:
+    plan = plan_missing_device_key("device.key", data_dir="~/.defenseclaw")
+
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "invalid-recovery-path"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("../outside.key", r"C:device.key", r"\device.key", "device.key:stream"),
+)
+def test_device_key_plan_rejects_nonlocal_relative_spellings(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    before = tuple(data_dir.iterdir())
+
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "invalid-recovery-path"
+    assert tuple(data_dir.iterdir()) == before
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    (
+        (r"C:\DefenseClaw\device.key", False),
+        (r"\\server\share\DefenseClaw\device.key", False),
+        (r"\\?\C:\DefenseClaw\device.key", False),
+        (r"\\?\UNC\server\share\DefenseClaw\device.key", False),
+        (
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\DefenseClaw\device.key",
+            False,
+        ),
+        (r"C:\DefenseClaw\device.key:stream", True),
+        (r"C:\DefenseClaw:identity\device.key", True),
+        (r"C:\DefenseClaw\device.provenance.secret:KEY", True),
+        (r"\\server\share\DefenseClaw\device.key:stream", True),
+        (r"\\?\C:\DefenseClaw\DEVICE.PROVENANCE.SECRET:key", True),
+    ),
+)
+def test_windows_ads_path_classifier(path: str, expected: bool) -> None:
+    assert recovery._windows_path_has_alternate_data_stream(path) is expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows ADS regression")
+def test_device_key_plan_blocks_ads_before_custody_or_publication(tmp_path: Path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    variants = (
+        data_dir / "device.key:stream",
+        data_dir / "device.provenance.secret:key",
+        data_dir / "DEVICE.PROVENANCE.SECRET:KEY",
+        data_dir / "missing" / "device.key:stream",
+    )
+    for target in variants:
+        plan = plan_missing_device_key(target, data_dir=data_dir)
+        assert plan.disposition is RecoveryDisposition.BLOCKED
+        assert plan.reason_code == "windows-alternate-data-stream-path"
+        with pytest.raises(RecoveryRefusedError) as exc:
+            apply_device_key_recovery(plan, approved=True)
+        assert exc.value.code == "recovery-plan-not-ready"
+    assert tuple(data_dir.iterdir()) == ()
+
+    stream_data_dir = Path(os.fspath(data_dir) + ":identity")
+    plan = plan_missing_device_key(
+        stream_data_dir / "device.key",
+        data_dir=stream_data_dir,
+    )
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "windows-alternate-data-stream-path"
+    assert tuple(data_dir.iterdir()) == ()
+
+    base = data_dir / "existing-holder"
+    base.write_bytes(b"base-preserved")
+    stream = Path(os.fspath(base) + ":device-key")
+    stream.write_bytes(b"existing-stream")
+    plan = plan_missing_device_key(stream, data_dir=data_dir)
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "windows-alternate-data-stream-path"
+    assert base.read_bytes() == b"base-preserved"
+    assert not Path(os.fspath(stream) + ".provenance").exists()
+
+
 def test_device_key_recovery_is_attended_and_provenance_bound(tmp_path: Path) -> None:
     data_dir = _private_data_dir(tmp_path)
     target = data_dir / "device.key"
@@ -315,6 +516,69 @@ def test_device_key_recovery_is_attended_and_provenance_bound(tmp_path: Path) ->
     assert not any(item.name.startswith(".doctor-device-") for item in data_dir.iterdir())
 
 
+def test_device_key_recovery_revalidates_custody_before_each_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "device.key"
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    original = recovery._revalidate_directory_custody
+    calls = 0
+
+    def counted_revalidation(candidate) -> None:
+        nonlocal calls
+        calls += 1
+        original(candidate)
+
+    monkeypatch.setattr(recovery, "_revalidate_directory_custody", counted_revalidation)
+
+    result = apply_device_key_recovery(plan, approved=True)
+
+    assert result.status is RecoveryApplyStatus.CREATED
+    assert calls == 3
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink replacement regression")
+def test_device_key_recovery_blocks_replaced_nested_parent_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target_parent = data_dir / "nested"
+    target_parent.mkdir(mode=0o700)
+    target = target_parent / "device.key"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    parked = data_dir / "parked"
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    original = recovery._revalidate_directory_custody
+    calls = 0
+
+    def replace_before_second_publication(candidate) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            target_parent.rename(parked)
+            target_parent.symlink_to(outside, target_is_directory=True)
+        original(candidate)
+
+    monkeypatch.setattr(
+        recovery,
+        "_revalidate_directory_custody",
+        replace_before_second_publication,
+    )
+
+    with pytest.raises(RecoveryRefusedError) as exc:
+        apply_device_key_recovery(plan, approved=True)
+
+    assert exc.value.code == "recovery-plan-stale"
+    assert calls == 2
+    assert not target.exists()
+    assert not Path(os.fspath(target) + ".provenance").exists()
+    assert tuple(outside.iterdir()) == ()
+
+
 def test_device_key_inspection_distinguishes_missing_legacy_and_invalid_state(
     tmp_path: Path,
 ) -> None:
@@ -357,10 +621,50 @@ def test_device_key_provenance_secret_without_key_blocks_regeneration(tmp_path: 
     assert not target.exists()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL regression")
+def test_device_key_plan_rejects_read_acl_before_staging_or_publication(
+    tmp_path: Path,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "device.key"
+    entry = "everyone allow read,readattr,readextattr,file_inherit,directory_inherit"
+    command = ["/bin/chmod", "+a", entry, os.fspath(data_dir)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        pytest.skip(f"macOS ACL fixture command unavailable: {exc}")
+    if result.returncode != 0:
+        message = (result.stdout + result.stderr).lower()
+        if "not supported" in message or "invalid argument" in message:
+            pytest.skip(f"macOS ACL fixture unavailable: {message.strip()}")
+        pytest.fail(f"could not add macOS ACL fixture: {message.strip()}")
+    try:
+        before = tuple(data_dir.iterdir())
+        plan = plan_missing_device_key(target, data_dir=data_dir)
+
+        assert plan.disposition is RecoveryDisposition.BLOCKED
+        assert plan.reason_code == "directory-chain-has-untrusted-reader"
+        with pytest.raises(RecoveryRefusedError) as exc:
+            apply_device_key_recovery(plan, approved=True)
+        assert exc.value.code == "recovery-plan-not-ready"
+        assert tuple(data_dir.iterdir()) == before
+        assert not target.exists()
+        assert not Path(os.fspath(target) + ".provenance").exists()
+        assert not (data_dir / "device.provenance.secret").exists()
+        assert not any(item.name.startswith(".doctor-device-") for item in data_dir.iterdir())
+    finally:
+        subprocess.run(
+            ["/bin/chmod", "-N", os.fspath(data_dir)],
+            capture_output=True,
+            check=False,
+        )
+
+
 def _inject_windows_backend(monkeypatch: pytest.MonkeyPatch):
     writes: list[tuple[str, bytes, bool]] = []
 
-    def fake_custody(data_dir: str, parent: str):
+    def fake_custody(data_dir: str, parent: str, *, protect_name: bool = True):
+        del protect_name
         identities = []
         for path in recovery._controlled_directory_paths(data_dir, parent):
             info = os.lstat(path)

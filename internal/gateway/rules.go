@@ -53,15 +53,38 @@ type RuleFinding struct {
 	Confidence float64  `json:"confidence"`
 	Evidence   string   `json:"evidence,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// LineNumber is the 1-based line of the scanned text the match started
+	// on. Zero means "not computed". Findings previously reached the audit
+	// store with no location of any kind, so a CRITICAL could not be told
+	// apart from a false positive without re-deriving the match by hand.
+	LineNumber int `json:"line_number,omitempty"`
 	// ToolCapabilityClass is set for tool-call inspection findings
 	// from the invoked tool's name (via guardrail.ClassifyToolName).
 	// Empty for content-only matches; the emission pipeline then
 	// falls back to a rule-id-based capability (CapabilityForRuleID).
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 	enforcement         findingEnforcement
+	// disposition is a private, value-free presentation class for trusted
+	// action findings. It lets benchmark and audit code distinguish an
+	// explicitly advisory result from audit-only evidence without changing the
+	// public finding schema or allowing remote input to select enforcement.
+	disposition findingDisposition
+	// proof is private, value-free enforcement provenance. It is intentionally
+	// absent from the public JSON contract: callers may emit the finding, but
+	// only the in-process trusted-action boundary may use the proof to decide
+	// whether the finding can participate in a synchronous deny decision.
+	proof findingProof
 }
 
 type findingEnforcement uint8
+
+type findingDisposition uint8
+
+const (
+	findingDispositionUnspecified findingDisposition = iota
+	findingDispositionAudit
+	findingDispositionAdvisory
+)
 
 const (
 	// findingEnforcementInherit preserves the enforcement behavior of every
@@ -69,10 +92,18 @@ const (
 	findingEnforcementInherit findingEnforcement = iota
 	findingEnforcementAllowed
 	findingEnforcementDetectionOnly
+	// findingEnforcementAlertOnly preserves a visible runtime alert while
+	// imposing a hard ceiling below confirm/block in every posture profile.
+	findingEnforcementAlertOnly
 )
 
 func (f RuleFinding) contributesToEnforcement() bool {
-	return f.enforcement != findingEnforcementDetectionOnly
+	return f.enforcement != findingEnforcementDetectionOnly &&
+		f.enforcement != findingEnforcementAlertOnly
+}
+
+func (f RuleFinding) contributesToAlertOnly() bool {
+	return f.enforcement == findingEnforcementAlertOnly
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +270,7 @@ func compileRulePackGenerationWithCompiler(
 		ruleIdentityTitles: make(map[string]map[string]struct{}),
 	}
 	claimed := make(map[string]string)
+	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
 	for _, category := range ownedCategories {
 		for _, rule := range category.Rules {
@@ -266,6 +298,27 @@ func compileRulePackGenerationWithCompiler(
 			if code != semantic.CompileOK {
 				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
 			}
+			if position, duplicate := semanticRulePositions[ruleID]; duplicate {
+				current := compiled.semanticRules[position]
+				currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.rule.Severity))]
+				candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(rule.Severity))]
+				// Added use-case categories may intentionally strengthen a base
+				// rule with the same identity. Compile only the strongest (and,
+				// at equal severity, latest) definition so the semantic lane sees
+				// the policy overlay instead of the earlier catalog entry.
+				if candidateRank < currentRank {
+					continue
+				}
+				staticCost -= current.program.StaticCost()
+				staticCost += program.StaticCost()
+				if staticCost > maxGenerationSemanticStaticCost {
+					return nil, errors.New("effective semantic rule cost exceeds limit")
+				}
+				compiled.semanticRules[position] = compiledSemanticRule{
+					rule: rule, program: program, owner: semanticOwnerForRule(rule.ID),
+				}
+				continue
+			}
 			if len(compiled.semanticRules) >= maxGenerationSemanticRules {
 				return nil, errors.New("effective semantic rule count exceeds limit")
 			}
@@ -290,6 +343,7 @@ func compileRulePackGenerationWithCompiler(
 				program: program,
 				owner:   owner,
 			})
+			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
 	}
 	return compiled, nil
@@ -821,6 +875,12 @@ func scanRuleCategoriesWithOptions(
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
+			// An effective profile can contain the same canonical rule through
+			// more than one merged category. Findings are identities, not match
+			// occurrences, so emit each rule ID at most once per scan.
+			if seen[rule.ID] {
+				continue
+			}
 			loc := firstAcceptedRuleMatch(*rule, text)
 			if loc == nil {
 				continue
@@ -835,6 +895,7 @@ func scanRuleCategoriesWithOptions(
 				Confidence: rule.Confidence,
 				Evidence:   sanitizeEvidence(evidence),
 				Tags:       rule.Tags,
+				LineNumber: lineNumberAtOffset(text, loc[0]),
 			}
 
 			f = adjustConfidence(toolName, f)
@@ -867,6 +928,9 @@ func scanRuleCategoriesWithOptions(
 
 				evidence := normalized[loc[0]:minInt(loc[1], loc[0]+80)]
 
+				// LineNumber is intentionally left zero here: this loop matches
+				// against shell-normalized text, so an offset into it does not
+				// correspond to a line in the content the operator would read.
 				f := RuleFinding{
 					RuleID:     rule.ID,
 					Title:      rule.Title + " (obfuscated)",
@@ -985,4 +1049,21 @@ func sanitizeEvidence(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\t", " ")
 	return s
+}
+
+// lineNumberAtOffset converts a byte offset into a 1-based line number.
+// Findings are emitted with no file path for content scans, so the line is
+// the only positional anchor an operator gets when triaging a match inside a
+// multi-line tool result.
+func lineNumberAtOffset(text string, offset int) int {
+	if offset < 0 || offset > len(text) {
+		return 0
+	}
+	line := 1
+	for i := 0; i < offset; i++ {
+		if text[i] == '\n' {
+			line++
+		}
+	}
+	return line
 }

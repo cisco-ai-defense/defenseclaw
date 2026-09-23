@@ -154,6 +154,14 @@ type JudgeStore struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   hookLifecycleMetricV8Runtime
+
+	// openHealthOps records which worker operations already have an open
+	// HIGH platform.health alert. The worker logs the first failure so
+	// operators see the outage, then stays quiet until that operation
+	// succeeds again. Per-hook repeats of the same failure (especially
+	// a cancelled request context) used to flood Alerts.
+	healthMu      sync.Mutex
+	openHealthOps map[string]struct{}
 }
 
 // NewJudgeStore wires the async completion queue. queueDepth <= 0 falls back to
@@ -229,11 +237,8 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 	if j == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	job := judgePersistJob{
-		ctx:        ctx,
+		ctx:        judgePersistContext(ctx),
 		dir:        dir,
 		payload:    p,
 		toolName:   toolName,
@@ -248,6 +253,17 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 		enqueuedAt: time.Now(),
 	}
 	return j.enqueue(job)
+}
+
+// judgePersistContext keeps request correlation values and drops the caller's
+// deadline/cancel. PersistJudgeEvent is queued after the hook HTTP handler has
+// already returned, so using the request context made every completion write
+// fail with context_done and then alert as subsystem.degraded.
+func judgePersistContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 // enqueue is the non-blocking submit. We choose drop-on-full over
@@ -442,6 +458,7 @@ func (j *JudgeStore) flushBatch(parent context.Context, jobs []judgePersistJob) 
 		j.recordPersistDropsV8(jobs, reason)
 		return
 	}
+	j.clearHealthDegraded("judge_persist.begin_batch")
 
 	// Track successful body inserts for body-persistence telemetry only.
 	committed := make([]judgePersistJob, 0, len(jobs))
@@ -481,6 +498,10 @@ func (j *JudgeStore) flushBatch(parent context.Context, jobs []judgePersistJob) 
 		j.recordPersistDropsV8(jobs, reason)
 		return
 	}
+	j.clearHealthDegraded("judge_persist.commit")
+	if len(committed) == len(jobs) {
+		j.clearHealthDegraded("judge_persist.insert")
+	}
 	j.recordPersistBatchSizeV8(firstJudgeJobContext(jobs), int64(len(committed)))
 }
 
@@ -491,7 +512,9 @@ func (j *JudgeStore) fanoutAuditBatch(jobs []judgePersistJob) {
 				"failure_class": string(jb.payload.FailureClass),
 				"kind":          jb.payload.Kind,
 			})
+			continue
 		}
+		j.clearHealthDegraded("judge_audit.emit")
 	}
 }
 
@@ -502,6 +525,9 @@ func (j *JudgeStore) fanoutAuditBatch(jobs []judgePersistJob) {
 // `defenseclaw.judge.persist.*` counters that already track the
 // same failure modes.
 func (j *JudgeStore) logErrorEvent(ctx context.Context, action string, err error, details map[string]string) {
+	if !j.markHealthDegraded(action) {
+		return
+	}
 	if j.logger != nil {
 		fields := make(map[string]any, 2+len(details))
 		fields["operation"] = boundedJudgeHealthValue(action, 128)
@@ -509,11 +535,44 @@ func (j *JudgeStore) logErrorEvent(ctx context.Context, action string, err error
 		for k, v := range details {
 			fields[boundedJudgeHealthValue(k, 128)] = boundedJudgeHealthValue(v, 256)
 		}
-		_ = j.logger.LogAlertCtx(ctx, "judge_store", "HIGH", action, fields)
+		if alertErr := j.logger.LogAlertCtx(
+			judgePersistContext(ctx), "judge_store", "HIGH", action, fields,
+		); alertErr != nil {
+			// The degraded marker is a delivery receipt, not merely an attempt.
+			// Roll it back so the continuing outage retries the health alert.
+			j.clearHealthDegraded(action)
+			fmt.Fprintf(os.Stderr, "[judge_store] health alert write failed for %s: %s\n",
+				boundedJudgeHealthValue(action, 128), boundedJudgeHealthValue(alertErr.Error(), 4096))
+		}
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[judge_store] %s: %s\n", boundedJudgeHealthValue(action, 128),
 		boundedJudgeHealthValue(err.Error(), 4096))
+}
+
+func (j *JudgeStore) markHealthDegraded(operation string) bool {
+	if j == nil || operation == "" {
+		return true
+	}
+	j.healthMu.Lock()
+	defer j.healthMu.Unlock()
+	if j.openHealthOps == nil {
+		j.openHealthOps = make(map[string]struct{})
+	}
+	if _, open := j.openHealthOps[operation]; open {
+		return false
+	}
+	j.openHealthOps[operation] = struct{}{}
+	return true
+}
+
+func (j *JudgeStore) clearHealthDegraded(operation string) {
+	if j == nil || operation == "" {
+		return
+	}
+	j.healthMu.Lock()
+	delete(j.openHealthOps, operation)
+	j.healthMu.Unlock()
 }
 
 func firstJudgeJobContext(jobs []judgePersistJob) context.Context {
@@ -553,7 +612,7 @@ func (j *JudgeStore) fanoutAudit(jb judgePersistJob) error {
 		),
 	}
 	audit.ApplyEnvelope(&evt, env)
-	return j.logger.LogJudgeCompletion(jb.ctx, evt, audit.JudgeCompletionInput{
+	return j.logger.LogJudgeCompletion(judgePersistContext(jb.ctx), evt, audit.JudgeCompletionInput{
 		Kind:         jb.payload.Kind,
 		Action:       jb.payload.Action,
 		LatencyMS:    jb.payload.LatencyMs,

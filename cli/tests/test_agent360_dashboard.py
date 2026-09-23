@@ -113,15 +113,20 @@ def test_agent360_durable_counts_use_loki_event_history() -> None:
         assert 'connector=~"$connector"' in panel["targets"][0]["expr"]
         assert '| json | __error__=""' in panel["targets"][0]["expr"]
         assert 'body_$scope_label=~"$agent"' in panel["targets"][0]["expr"]
-        assert "count(sum by (logical_event_id)" in panel["targets"][0]["expr"]
-        assert 'correlation_logical_event_id' in panel["targets"][0]["expr"]
-        assert 'logical_event_id!=""' not in panel["targets"][0]["expr"]
-        for fallback in (
-            "logical:{{.correlation_logical_event_id}}",
-            "semantic:{{.correlation_semantic_event_id}}",
-            "record:{{.record_id}}",
-        ):
-            assert fallback in panel["targets"][0]["expr"]
+        if title == "Tool calls":
+            assert panel["targets"][0]["expr"].startswith("sum(count_over_time(")
+            assert "logical_event_id" not in panel["targets"][0]["expr"]
+            assert "series limit" in panel["description"].lower()
+        else:
+            assert "count(sum by (logical_event_id)" in panel["targets"][0]["expr"]
+            assert 'correlation_logical_event_id' in panel["targets"][0]["expr"]
+            assert 'logical_event_id!=""' not in panel["targets"][0]["expr"]
+            for fallback in (
+                "logical:{{.correlation_logical_event_id}}",
+                "semantic:{{.correlation_semantic_event_id}}",
+                "record:{{.record_id}}",
+            ):
+                assert fallback in panel["targets"][0]["expr"]
 
     funnel = _panel_by_title(dashboard, "Lifecycle event totals")
     assert funnel["datasource"]["uid"] == "defenseclaw-loki"
@@ -139,15 +144,10 @@ def test_agent360_separates_logical_summaries_from_raw_correlation_evidence() ->
     )
 
     assert logical["datasource"]["uid"] == "defenseclaw-loki"
-    assert "count(sum by (logical_event_id)" in logical["targets"][0]["expr"]
-    assert "correlation_logical_event_id" in logical["targets"][0]["expr"]
-    assert 'logical_event_id!=""' not in logical["targets"][0]["expr"]
-    assert "semantic:{{.correlation_semantic_event_id}}" in logical["targets"][0]["expr"]
-    assert "record:{{.record_id}}" in logical["targets"][0]["expr"]
-    assert "exact hook, proxy, and native-otlp mirrors count once" in logical[
-        "description"
-    ].lower()
-    assert "no canonical observation is omitted" in logical["description"].lower()
+    assert logical["targets"][0]["expr"].startswith("sum(count_over_time(")
+    assert "logical_event_id" not in logical["targets"][0]["expr"]
+    assert "every canonical event observation" in logical["description"].lower()
+    assert "bounded aggregation" in logical["description"].lower()
 
     assert raw["datasource"]["uid"] == "defenseclaw-loki"
     assert raw["targets"][0]["expr"].startswith("sum(count_over_time(")
@@ -939,7 +939,7 @@ def test_agent360_topology_groups_model_and_normalized_tool_families_per_agent()
 
 def test_agent360_enables_layered_node_graph_layout() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
-    assert "GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,nodeGraphDotLayout" in compose
+    assert "GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,nodeGraphDotLayout" in compose
 
 
 def test_agent360_correlates_hook_decisions_to_recovery_paths() -> None:

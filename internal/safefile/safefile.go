@@ -78,7 +78,12 @@ func ReplaceFile(source, destination string) error {
 // WritePrivate protects the managed parent directory and holds it against
 // replacement while atomically writing a sensitive state file.
 func WritePrivate(path string, data []byte) error {
-	return writePrivate(path, data, nil)
+	if err := writePrivate(path, data, nil); err != nil {
+		return err
+	}
+	// Root writing into a user-owned directory must not leave 0600 root
+	// files the operator's TUI, Doctor, and first-run cannot read.
+	return ReclaimToDirectoryOwner(path)
 }
 
 func writePrivate(path string, data []byte, beforeWrite func()) error {
@@ -258,6 +263,16 @@ func ProtectFile(path string) error {
 		return fmt.Errorf("safefile: file changed while validating: %s", path)
 	}
 	return protectFile(path, f)
+}
+
+// ProtectFileWhileInUse applies the same owner-only protection contract as
+// ProtectFile while allowing a Windows executable image to remain mapped by a
+// running process. The Windows implementation binds validation and the DACL
+// update to one non-reparse handle; other platforms use ProtectFile directly.
+// This is intentionally separate from ProtectFile so ordinary writers retain
+// the stronger read/write-open behavior they already depend on.
+func ProtectFileWhileInUse(path string) error {
+	return protectFileWhileInUse(path)
 }
 
 // ValidatePrivateDirectory verifies that path is an existing, non-link

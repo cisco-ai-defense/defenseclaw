@@ -38,7 +38,6 @@ var historicalOperationalStateTables = []string{
 	"correlation_connector_instances",
 	"correlation_events",
 	"correlation_observations",
-	"guardrail_chain_deny_receipts",
 	"guardrail_chain_cutoff_barriers",
 }
 

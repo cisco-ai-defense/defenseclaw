@@ -402,7 +402,7 @@ def test_generated_destinations_are_read_only() -> None:
     source = _apply(_source(), ())[1]
     with pytest.raises(ValueError, match=r"generated destination.*read-only"):
         destination_inherit_mutations(source, "managed-enterprise-ai-defense")
-    with pytest.raises(ValueError, match="migration-only"):
+    with pytest.raises(ValueError, match="unknown redaction profile"):
         apply_profile_everywhere_mutations(source, "legacy-v7")
 
 

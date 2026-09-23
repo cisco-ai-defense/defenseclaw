@@ -22,8 +22,11 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
+
+	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
 
 // ToolInspectionMode describes how a connector monitors tool calls.
@@ -62,16 +65,14 @@ type ConnectorSignals struct {
 
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
-	DataDir   string // ~/.defenseclaw/
-	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
-	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken  string // gateway bearer token; baked into hook curl -H
-	// ConfigHome is an explicit, caller-validated connector-native config
-	// directory for lifecycle operations. It prevents privileged setup,
-	// repair, teardown, and verification from resolving a different user
-	// profile through mutable process environment. Connectors that support
-	// it define the directory's exact meaning; Amp uses its ~/.config/amp
-	// root. An empty value preserves normal interactive home discovery.
+	DataDir              string // ~/.defenseclaw/
+	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
+	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
+	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken             string // gateway bearer token; baked into hook curl -H
+	// ConfigHome is the exact installer-validated user configuration root used
+	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
+	// uses each vendor's documented discovery rules.
 	ConfigHome string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
@@ -100,11 +101,18 @@ type SetupOpts struct {
 	// transport failures) or "closed" (block on either failure class). Runtime
 	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
 	// Hook-writing helpers normalize an empty or invalid value to the secure
-	// "closed" fallback. Profile-only callers may omit it; provider-specific
-	// profile defaults are separate from the hook-writing boundary.
+	// "closed" fallback. Cursor pins this per mode: closed for action and open
+	// for observe.
+	// Profile-only callers may omit it; provider-specific profile defaults are
+	// separate from the hook-writing boundary.
 	// DEFENSECLAW_STRICT_AVAILABILITY remains
 	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
+
+	// GuardrailMode is the effective connector policy mode. Cursor uses it to
+	// render a blocking, fail-closed user hook for action and a nonblocking,
+	// fail-open user hook for observe. An empty value is treated as observe.
+	GuardrailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire
 	// their host approval delivery path. For OpenClaw this enables plugin
@@ -133,11 +141,12 @@ type SetupOpts struct {
 	// which client Setup validates.
 	AgentExecutable string
 
-	// HookExecutable pins the administrator-owned native hook launcher used by
-	// managed policy deployment. Ordinary per-user setup leaves this empty and
-	// resolves the packaged launcher through the installed-state contract.
-	// Enterprise installers must supply an absolute, independently trusted path
-	// so a privileged policy write never captures the caller's PATH or profile.
+	// HookExecutable pins an independently trusted native hook launcher.
+	// Managed policy deployment supplies its administrator-owned launcher.
+	// Native Windows Setup also supplies the stable HookRuntime launcher during
+	// maintenance so a quarantined/temporary gateway can reproduce the exact
+	// Hermes command originally registered. Ordinary per-user setup leaves this
+	// empty and resolves the packaged launcher through installed-state.
 	HookExecutable string
 
 	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
@@ -340,6 +349,20 @@ type TelemetryCapability struct {
 	Notes            []string         `json:"notes,omitempty"`
 }
 
+// ACPCapability advertises whether a connector can run as an ACP agent or
+// client. ACP is a transport boundary, not an executable registry: EntryPoint
+// is descriptive argv selected from DefenseClaw's separately validated ACP
+// catalog and is never executed through a shell.
+type ACPCapability struct {
+	Agent          bool     `json:"agent"`
+	Client         bool     `json:"client"`
+	Kind           string   `json:"kind,omitempty"`
+	EntryPoint     []string `json:"entry_point,omitempty"`
+	Support        string   `json:"support,omitempty"`
+	GuardedBy      string   `json:"guarded_by,omitempty"`
+	ProtocolSchema string   `json:"protocol_schema,omitempty"`
+}
+
 // ConnectorCapabilities is the first-class capability matrix used by setup,
 // doctor, API metadata, and future installer flows. HookCapabilityProvider
 // remains as a compatibility shim for the verdict mapper.
@@ -360,6 +383,22 @@ type ConnectorCapabilities struct {
 	Agents         SurfaceCapability   `json:"agents"`
 	CodeGuard      CodeGuardCapability `json:"codeguard"`
 	Telemetry      TelemetryCapability `json:"telemetry"`
+	ACP            ACPCapability       `json:"acp"`
+}
+
+func ACPAgentCapabilityForConnector(name string) ACPCapability {
+	connectorName := normalizeConnectorName(name)
+	for _, agent := range acpcatalog.BuiltinCatalog().Agents {
+		if agent.ConnectorID != connectorName {
+			continue
+		}
+		entryPoint := append([]string{agent.Command}, agent.Args...)
+		return ACPCapability{
+			Agent: true, Kind: agent.Kind, EntryPoint: entryPoint, Support: string(agent.Support),
+			GuardedBy: "defenseclaw-acp", ProtocolSchema: acpcatalog.SchemaVersion,
+		}
+	}
+	return ACPCapability{}
 }
 
 // LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
@@ -415,8 +454,8 @@ type HookCapabilityProvider interface {
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
 //     emission. nil when the connector does not emit native OTLP (cursor,
-//     windsurf, hermes today). Non-nil for codex (TOML), claudecode (env),
-//     geminicli (JSON + path-token), copilot (env).
+//     windsurf, hermes, copilot today). Non-nil for codex (TOML),
+//     claudecode (env), and geminicli (JSON + path-token).
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and
 //     MUST NOT override Correlation bindings; the gateway accepts correlation
@@ -469,6 +508,14 @@ type HookProfile struct {
 	// sub-object ever opened is the one declared in the audited
 	// contract.
 	ContentEnvelopeKey string
+
+	// DecodeToolArgs extracts the exact structured tool-argument value from
+	// the original request body when a connector nests it outside the shared
+	// hook vocabulary. The callback must return a valid JSON object or nil. A
+	// non-nil callback owns the projection completely: a nil result means the
+	// connector envelope was absent or ambiguous, and the gateway normalizes it
+	// to an empty object rather than treating the opaque payload as arguments.
+	DecodeToolArgs func(rawPayload []byte) json.RawMessage
 
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present
@@ -544,10 +591,14 @@ type HookProfileRequest struct {
 	SuppressCorrelationEmit   bool
 	CWD                       string
 	ToolName                  string
-	Content                   string
-	Direction                 string
-	Model                     string
-	Payload                   map[string]interface{}
+	ToolArgs                  json.RawMessage
+	// ToolArgsAuthoritative distinguishes a deliberately empty/fail-closed
+	// connector projection from a decoder that does not own tool arguments.
+	ToolArgsAuthoritative bool
+	Content               string
+	Direction             string
+	Model                 string
+	Payload               map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's

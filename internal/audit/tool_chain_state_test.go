@@ -6,6 +6,7 @@ package audit
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -61,7 +62,7 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 		}
 	}
 
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "constraints", correlationDigest("constraints-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -75,9 +76,34 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
-		SET enforcement_step_mask=4095, detection_step_mask=0
+		SET enforcement_step_mask=8191, detection_step_mask=0
 		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err == nil {
 		t.Fatal("projection subset constraint accepted invalid masks")
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detected_chain_mask=1048575, enforcement_safe_chain_mask=1048575
+		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err != nil {
+		t.Fatalf("twenty-slot event mask rejected: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detected_chain_mask=1048576, enforcement_safe_chain_mask=1048576,
+			denied_chain_mask=1048576
+		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err != nil {
+		t.Fatalf("event result-mask storage did not reserve the twenty-first slot: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
+		SET detected_chain_mask=1048575, enforcement_safe_chain_mask=1048575,
+			denied_chain_mask=1048575, severity='CRITICAL'`); err != nil {
+		t.Fatalf("twenty-slot critical receipt rejected: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
+		SET detected_chain_mask=1048576, enforcement_safe_chain_mask=1048576,
+			denied_chain_mask=1048576`); err != nil {
+		t.Fatalf("receipt result-mask storage did not reserve the twenty-first slot: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
+		SET detected_chain_mask=-1`); err == nil {
+		t.Fatal("receipt result mask accepted the reserved sign domain")
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
 		SET severity='LOW'`); err == nil {
@@ -86,6 +112,339 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 	if _, err := fixture.store.db.Exec(`DELETE FROM correlation_events
 		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err == nil {
 		t.Fatal("correlation event deletion bypassed chain-event RESTRICT")
+	}
+}
+
+func TestToolChainAppendOnlyMaskCapacityMigrationPreservesReplayAndRejectsUnknownMasks(t *testing.T) {
+	const migrationIndex = 44
+	if len(migrations) <= migrationIndex || migrations[migrationIndex].description !=
+		"guardrails: reserve append-only bounded chain mask capacity" {
+		t.Fatal("append-only mask capacity is not migration 45")
+	}
+	path := filepath.Join(t.TempDir(), "capacity.db")
+	fixture := newToolChainFixture(t, path)
+	input := fixture.seed(t, "capacity", correlationDigest("capacity-input"))
+	input.Projection = toolChainProjection(
+		t, []string{guardrail.ToolChainGuardrailsOffThenEgress}, 1, true,
+	)
+	first, err := fixture.chain.Observe(t.Context(), input)
+	if err != nil || first.Status != ToolChainObserveFresh {
+		t.Fatalf("initial observe=%+v err=%v", first, err)
+	}
+	if err := migrateToolChainAppendOnlyMaskCapacity(fixture.store.db); err != nil {
+		t.Fatalf("capacity migration: %v", err)
+	}
+	replay, err := fixture.chain.Observe(t.Context(), input)
+	if err != nil || replay.Status != ToolChainObserveReplay || !replay.SuppressTelemetry {
+		t.Fatalf("post-migration replay=%+v err=%v", replay, err)
+	}
+
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, enforcement_step_mask=0
+		WHERE semantic_event_id=?`, int64(1)<<52, string(input.SemanticEventID)); err != nil {
+		t.Fatalf("SQLite positive step capacity rejected bit 52: %v", err)
+	}
+	if _, err := fixture.chain.Observe(t.Context(), input); !errors.Is(err, ErrToolChainIntegrity) {
+		t.Fatalf("unknown persisted step mask error=%v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, detected_chain_mask=?
+		WHERE semantic_event_id=?`, input.Projection.DetectionStepMask,
+		int64(1)<<20, string(input.SemanticEventID)); err != nil {
+		t.Fatalf("SQLite positive result capacity rejected bit 20: %v", err)
+	}
+	if _, err := fixture.chain.Observe(t.Context(), input); !errors.Is(err, ErrToolChainIntegrity) {
+		t.Fatalf("unknown persisted result mask error=%v", err)
+	}
+
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, enforcement_step_mask=?, detected_chain_mask=0
+		WHERE semantic_event_id=?`, input.Projection.DetectionStepMask,
+		input.Projection.EnforcementStepMask, string(input.SemanticEventID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.Init(); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := restarted.ToolChainRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedAfterRestart, err := repository.Observe(t.Context(), input)
+	if err != nil || replayedAfterRestart.Status != ToolChainObserveReplay {
+		t.Fatalf("restart replay=%+v err=%v", replayedAfterRestart, err)
+	}
+}
+
+func TestToolChainExpandedCatalogMigrationIsAppendOnly(t *testing.T) {
+	const expandedCatalogMigrationIndex = 36
+	if len(migrations) <= expandedCatalogMigrationIndex ||
+		migrations[expandedCatalogMigrationIndex].description !=
+			"guardrails: expand bounded chain catalog to nine result slots" {
+		t.Fatal("nine-slot chain catalog is not append-only migration 37")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("nine-slot-input"),
+		RulesetFingerprint: correlationDigest("nine-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 257); low == high {
+		t.Fatal("ninth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainTenSlotCatalogMigrationIsAppendOnly(t *testing.T) {
+	const tenSlotCatalogMigrationIndex = 37
+	if len(migrations) <= tenSlotCatalogMigrationIndex ||
+		migrations[tenSlotCatalogMigrationIndex].description !=
+			"guardrails: expand bounded chain catalog to ten result slots" {
+		t.Fatal("ten-slot chain catalog is not append-only migration 38")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("ten-slot-input"),
+		RulesetFingerprint: correlationDigest("ten-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 513); low == high {
+		t.Fatal("tenth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainElevenSlotCatalogMigrationIsAppendOnly(t *testing.T) {
+	const elevenSlotCatalogMigrationIndex = 38
+	if len(migrations) <= elevenSlotCatalogMigrationIndex ||
+		migrations[elevenSlotCatalogMigrationIndex].description !=
+			"guardrails: expand bounded chain catalog to eleven result slots" {
+		t.Fatal("eleven-slot chain catalog is not append-only migration 39")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("eleven-slot-input"),
+		RulesetFingerprint: correlationDigest("eleven-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 1025); low == high {
+		t.Fatal("eleventh result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainTwelveSlotCatalogMigrationIsAppendOnly(t *testing.T) {
+	const twelveSlotCatalogMigrationIndex = 39
+	if len(migrations) <= twelveSlotCatalogMigrationIndex ||
+		migrations[twelveSlotCatalogMigrationIndex].description !=
+			"guardrails: expand bounded chain catalog to twelve result slots" {
+		t.Fatal("twelve-slot chain catalog is not append-only migration 40")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("twelve-slot-input"),
+		RulesetFingerprint: correlationDigest("twelve-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 2049); low == high {
+		t.Fatal("twelfth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainThirteenSlotCatalogMigrationIsAppendOnly(t *testing.T) {
+	const thirteenSlotCatalogMigrationIndex = 40
+	if len(migrations) <= thirteenSlotCatalogMigrationIndex ||
+		migrations[thirteenSlotCatalogMigrationIndex].description !=
+			"guardrails: expand bounded chain catalog to thirteen result slots" {
+		t.Fatal("thirteen-slot chain catalog is not append-only migration 41")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("thirteen-slot-input"),
+		RulesetFingerprint: correlationDigest("thirteen-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 4097); low == high {
+		t.Fatal("thirteenth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainFourteenSlotWideMaskMigrationIsAppendOnly(t *testing.T) {
+	const wideMaskMigrationIndex = 41
+	if len(migrations) <= wideMaskMigrationIndex ||
+		migrations[wideMaskMigrationIndex].description !=
+			"guardrails: widen bounded chain masks and add result slots fourteen through seventeen" {
+		t.Fatal("fourteen-slot wide-mask catalog is not append-only migration 42")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("fourteen-slot-input"),
+		RulesetFingerprint: correlationDigest("fourteen-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 8193); low == high {
+		t.Fatal("fourteenth result bit collided in stable action identity")
+	}
+	const legacyStableAction = "gca_bb8b49f67ea7060974b4fa423810a97cca7f57a8cf3cf880c3d4305f2de2ce07"
+	if got := stableToolChainActionID(input, 8193); got != legacyStableAction {
+		t.Fatalf("legacy stable action identity=%q want %q", got, legacyStableAction)
+	}
+}
+
+func TestToolChainEighteenSlotWideMaskMigrationIsAppendOnly(t *testing.T) {
+	const migrationIndex = 42
+	if len(migrations) <= migrationIndex ||
+		migrations[migrationIndex].description !=
+			"guardrails: add staged reverse-shell persistence result slot eighteen" {
+		t.Fatal("eighteen-slot wide-mask catalog is not append-only migration 43")
+	}
+	input := ToolChainObserveInput{
+		SemanticEventID:    SemanticEventID("0198a730-2210-7e11-8c3f-3d7bdbe3db10"),
+		InputFingerprint:   correlationDigest("eighteen-slot-input"),
+		RulesetFingerprint: correlationDigest("eighteen-slot-ruleset"),
+	}
+	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 131073); low == high {
+		t.Fatal("eighteenth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainTwentySlotValueLineageMigrationIsAppendOnly(t *testing.T) {
+	const migrationIndex = 43
+	if len(migrations) <= migrationIndex ||
+		migrations[migrationIndex].description !=
+			"guardrails: add result slots nineteen and twenty with bounded exact-value lineage" {
+		t.Fatal("twenty-slot value-lineage catalog is not append-only migration 44")
+	}
+}
+
+func TestToolChainUint32ResultMaskSQLiteCapacityBeyondSixteenChains(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	if _, err := fixture.store.db.Exec(`CREATE TEMP TABLE result_mask_capacity (
+		id INTEGER PRIMARY KEY,
+		mask INTEGER NOT NULL CHECK (mask BETWEEN 0 AND 2147483647)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []uint32{1 << 16, 1<<17 - 1, 1 << 30} {
+		if _, err := fixture.store.db.Exec(
+			`INSERT INTO result_mask_capacity (id, mask) VALUES (?, ?)`, index, want,
+		); err != nil {
+			t.Fatalf("insert mask %#x: %v", want, err)
+		}
+		var got uint32
+		if err := fixture.store.db.QueryRow(
+			`SELECT mask FROM result_mask_capacity WHERE id=?`, index,
+		).Scan(&got); err != nil {
+			t.Fatalf("scan mask %#x: %v", want, err)
+		}
+		if got != want {
+			t.Fatalf("mask round trip=%#x want %#x", got, want)
+		}
+	}
+	if _, err := fixture.store.db.Exec(
+		`INSERT INTO result_mask_capacity (id, mask) VALUES (99, ?)`, uint32(1<<31),
+	); err == nil {
+		t.Fatal("reserved result sign bit passed the signed SQLite bound")
+	}
+}
+
+func TestWideMaskMigrationPreservesAndReplaysEveryLegacyChainRow(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	definitions := guardrail.ToolChainDefinitions()
+	legacyDefinitions := definitions[:guardrail.ToolChainLegacyCount]
+	inputs := make([]ToolChainObserveInput, 0, len(legacyDefinitions))
+	for index, definition := range legacyDefinitions {
+		input := fixture.seed(t,
+			"legacy-chain-"+definition.ID,
+			correlationDigest("legacy-chain-input-"+definition.ID),
+		)
+		projection := guardrail.ToolChainProjection{
+			ParseStatus:       actionfacts.StatusComplete,
+			DetectionStepMask: definition.Step1Bit,
+		}
+		if definition.RequiresExactJoin || definition.RequiresEnforcementJoin {
+			chainIndex, _ := guardrail.ToolChainIndexByID(definition.ID)
+			projection.EnforcementJoinDigests[chainIndex] =
+				correlationDigest("legacy-chain-join-" + definition.ID)
+		}
+		if definition.OutputJoinFromFirst {
+			chainIndex, _ := guardrail.ToolChainIndexByID(definition.ID)
+			projection.EnforcementOutputJoinDigests[chainIndex] =
+				correlationDigest("legacy-chain-output-" + definition.ID)
+		}
+		input.Projection = projection
+		result, err := fixture.chain.Observe(t.Context(), input)
+		if err != nil || result.Status != ToolChainObserveFresh {
+			t.Fatalf("seed legacy chain %d %s: result=%+v err=%v",
+				index, definition.ID, result, err)
+		}
+		inputs = append(inputs, input)
+		fixture.now = fixture.now.Add(time.Second)
+	}
+
+	var preCount int
+	if err := fixture.store.db.QueryRow(`SELECT COUNT(*) FROM guardrail_chain_events`).Scan(&preCount); err != nil {
+		t.Fatal(err)
+	}
+	if preCount != len(legacyDefinitions) {
+		t.Fatalf("legacy rows=%d want %d", preCount, len(legacyDefinitions))
+	}
+	rows, err := fixture.store.db.Query(`SELECT enforcement_join_digests,
+		enforcement_output_join_digests FROM guardrail_chain_events`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var joins, outputs string
+		if err := rows.Scan(&joins, &outputs); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		for _, encoded := range []string{joins, outputs} {
+			if encoded != "" && strings.Count(encoded, ",") != 12 {
+				_ = rows.Close()
+				t.Fatalf("row is not in deployed 13-slot encoding: %q", encoded)
+			}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrateToolChainFourteenSlotWideMaskState(fixture.store.db); err != nil {
+		t.Fatalf("migrate pre-widening rows: %v", err)
+	}
+	var postCount int
+	if err := fixture.store.db.QueryRow(`SELECT COUNT(*) FROM guardrail_chain_events`).Scan(&postCount); err != nil {
+		t.Fatal(err)
+	}
+	if postCount != preCount {
+		t.Fatalf("migrated rows=%d want %d", postCount, preCount)
+	}
+	for index, input := range inputs {
+		replay, err := fixture.chain.Observe(t.Context(), input)
+		if err != nil || replay.Status != ToolChainObserveReplay || !replay.SuppressTelemetry {
+			t.Fatalf("replay legacy chain %d %s: result=%+v err=%v",
+				index, legacyDefinitions[index].ID, replay, err)
+		}
+	}
+
+	for index, newDefinition := range definitions[guardrail.ToolChainLegacyCount:] {
+		wide := fixture.seed(t,
+			fmt.Sprintf("wide-chain-%d", index),
+			correlationDigest(fmt.Sprintf("wide-chain-input-%d", index)),
+		)
+		wide.Projection = guardrail.ToolChainProjection{
+			ParseStatus:       actionfacts.StatusComplete,
+			DetectionStepMask: newDefinition.Step1Bit,
+		}
+		newIndex, _ := guardrail.ToolChainIndexByID(newDefinition.ID)
+		wide.Projection.EnforcementJoinDigests[newIndex] =
+			correlationDigest(fmt.Sprintf("wide-chain-join-%d", index))
+		if result, err := fixture.chain.Observe(t.Context(), wide); err != nil ||
+			result.Status != ToolChainObserveFresh {
+			t.Fatalf("persist widened bit %s: result=%+v err=%v",
+				newDefinition.ID, result, err)
+		}
 	}
 }
 
@@ -168,7 +527,7 @@ func (fixture *toolChainFixture) seed(
 
 func toolChainProjection(t *testing.T, ids []string, step int, enforce bool) guardrail.ToolChainProjection {
 	t.Helper()
-	var mask uint16
+	var mask uint64
 	for _, id := range ids {
 		bit, ok := guardrail.ToolChainStepMask(id, step)
 		if !ok {
@@ -181,17 +540,80 @@ func toolChainProjection(t *testing.T, ids []string, step int, enforce bool) gua
 	}
 	if enforce {
 		projection.EnforcementStepMask = mask
+		for _, id := range ids {
+			definition, _ := guardrail.ToolChainDefinitionByID(id)
+			if !definition.RequiresEnforcementJoin && !definition.RequiresExactJoin {
+				continue
+			}
+			index, _ := guardrail.ToolChainIndexByID(id)
+			projection.EnforcementJoinDigests[index] =
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}
 	}
 	return projection
+}
+
+func TestToolChainRepositoryPersistsThreeStepDerivedArtifactLineage(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	definition, _ := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainDownloadDecodeExecuteSameArtifact,
+	)
+	index, _ := guardrail.ToolChainIndexByID(definition.ID)
+	const archive = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const derived = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	projection := func(step uint64, input, output string) guardrail.ToolChainProjection {
+		result := guardrail.ToolChainProjection{
+			ParseStatus:         actionfacts.StatusComplete,
+			DetectionStepMask:   step,
+			EnforcementStepMask: step,
+		}
+		result.EnforcementJoinDigests[index] = input
+		result.EnforcementOutputJoinDigests[index] = output
+		return result
+	}
+
+	first := fixture.seed(t, "derived-lineage", correlationDigest("derived-download"))
+	first.Projection = projection(definition.Step1Bit, archive, "")
+	if result, err := fixture.chain.Observe(t.Context(), first); err != nil || result.DetectedMask != 0 {
+		t.Fatalf("download result=%+v err=%v", result, err)
+	}
+	fixture.now = fixture.now.Add(time.Second)
+	middle := fixture.seed(t, "derived-lineage", correlationDigest("derived-decode"))
+	middle.Projection = projection(definition.Step2Bit, archive, derived)
+	if result, err := fixture.chain.Observe(t.Context(), middle); err != nil || result.DetectedMask != 0 {
+		t.Fatalf("decode result=%+v err=%v", result, err)
+	}
+	fixture.now = fixture.now.Add(time.Second)
+	final := fixture.seed(t, "derived-lineage", correlationDigest("derived-execute"))
+	final.Projection = projection(definition.Step3Bit, "", derived)
+	final.DenyEligible = true
+	result, err := fixture.chain.Observe(t.Context(), final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DetectedMask != definition.ResultBit ||
+		result.EnforcementSafeMask != 0 || result.DeniedMask != 0 ||
+		len(result.ReceiptIDs) != 0 {
+		t.Fatalf("derived lineage result=%+v", result)
+	}
+
+	fixture.now = fixture.now.Add(time.Second)
+	failedFinal := fixture.seed(t, "failed-derived-lineage", correlationDigest("failed-execute"))
+	failedFinal.Projection = projection(definition.Step3Bit, "", derived)
+	failedFinal.DenyEligible = true
+	failed, err := fixture.chain.Observe(t.Context(), failedFinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.DetectedMask != 0 || failed.EnforcementSafeMask != 0 || failed.DeniedMask != 0 {
+		t.Fatalf("terminal action without successful predecessors joined: %+v", failed)
+	}
 }
 
 func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	fixture := newToolChainFixture(t, path)
-	chains := []string{
-		guardrail.ToolChainGuardrailsOffThenEgress,
-		guardrail.ToolChainSecretReadThenEgress,
-	}
+	chains := []string{guardrail.ToolChainStagedReverseShellPersistence}
 	first := fixture.seed(t, "session-a", correlationDigest("first"))
 	first.Projection = toolChainProjection(t, chains, 1, true)
 	if result, err := fixture.chain.Observe(t.Context(), first); err != nil ||
@@ -206,7 +628,7 @@ func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Status != ToolChainObserveFresh || len(fresh.ReceiptIDs) != 2 ||
+	if fresh.Status != ToolChainObserveFresh || len(fresh.ReceiptIDs) != 1 ||
 		fresh.DeniedMask == 0 || fresh.SuppressTelemetry {
 		t.Fatalf("fresh result=%#v", fresh)
 	}
@@ -248,7 +670,7 @@ func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 
 func TestToolChainObserveReplayModeTransitionsAreMonotonic(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainSecretReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	resultBit, _ := guardrail.ToolChainResultMask(chainID)
 
 	first := fixture.seed(t, "mode-transition", correlationDigest("mode-first"))
@@ -310,7 +732,7 @@ func TestToolChainObserveReplayModeTransitionsAreMonotonic(t *testing.T) {
 
 func TestToolChainObserveSerializesDuplicateAndIsolatesPartitions(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainSecretManagerReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "shared", correlationDigest("serial-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -436,7 +858,7 @@ func TestToolChainObserveNoJoinBoundsExpiryAndClose(t *testing.T) {
 	fixture.chain.maxPartitions = 1
 	fixture.chain.receiptTTL = time.Minute
 	fixture.chain.maxHorizon = 2 * time.Minute
-	chainID := guardrail.ToolChainWorkloadIdentityThenLateralExec
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "bounded", correlationDigest("bounded-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -510,7 +932,7 @@ func TestToolChainObserveNoJoinBoundsExpiryAndClose(t *testing.T) {
 
 func TestToolChainFinalizationRollsBackAsOneTransaction(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "rollback", correlationDigest("rollback-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -576,7 +998,7 @@ func TestToolChainCorruptWindowResetsWithoutDeny(t *testing.T) {
 
 func TestToolChainCorruptReceiptCannotReplayDeny(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "corrupt-receipt", correlationDigest("receipt-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {

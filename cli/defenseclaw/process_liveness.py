@@ -270,6 +270,60 @@ def _process_image_path_windows(pid: int) -> str | None:  # pragma: no cover - W
         close_handle(handle)
 
 
+def _process_parent_id_windows(pid: int) -> int | None:  # pragma: no cover - Windows only
+    """Return the snapshot parent PID for ``pid`` using the Windows toolhelp API."""
+    import ctypes
+    from ctypes import wintypes
+
+    if pid <= 0:
+        return None
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    create_snapshot.restype = wintypes.HANDLE
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+    process_first.restype = wintypes.BOOL
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+    process_next.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    snapshot = create_snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == wintypes.HANDLE(-1).value:
+        return None
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not process_first(snapshot, ctypes.byref(entry)):
+            return None
+        while True:
+            if entry.th32ProcessID == pid:
+                return int(entry.th32ParentProcessID) or None
+            entry.dwSize = ctypes.sizeof(entry)
+            if not process_next(snapshot, ctypes.byref(entry)):
+                return None
+    finally:
+        close_handle(snapshot)
+
+
 def process_is_gateway(
     pid: int,
     expected_names: Iterable[str] = GATEWAY_PROCESS_NAMES,

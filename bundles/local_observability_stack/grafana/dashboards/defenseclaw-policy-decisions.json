@@ -9,6 +9,13 @@
   "liveNow": false,
   "links": [
     {
+      "title": "Blocked Events & Analysis",
+      "type": "link",
+      "url": "/d/defenseclaw-blocked-events?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
       "title": "Agent Activity (Live)",
       "type": "link",
       "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
@@ -449,7 +456,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval]))",
+          "expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{policy_status}}",
           "refId": "A",
           "datasource": {
@@ -652,7 +659,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{action}} · {{severity}}",
           "refId": "A"
         }

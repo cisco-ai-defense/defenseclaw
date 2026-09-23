@@ -1,6 +1,14 @@
 graft cli
 graft bundles/local_observability_stack
 graft bundles/splunk_local_bridge
+exclude bundles/local_observability_stack/.grafana-admin-password
+recursive-exclude bundles/local_observability_stack ..grafana-admin-password.*.tmp
+exclude cli/defenseclaw/_data/local_observability_stack/.grafana-admin-password
+recursive-exclude cli/defenseclaw/_data/local_observability_stack ..grafana-admin-password.*.tmp
+exclude bundles/local_observability_stack/.grafana-access-mode
+recursive-exclude bundles/local_observability_stack ..grafana-access-mode.*.tmp
+exclude cli/defenseclaw/_data/local_observability_stack/.grafana-access-mode
+recursive-exclude cli/defenseclaw/_data/local_observability_stack ..grafana-access-mode.*.tmp
 prune cli/defenseclaw/_data/config/v8
 prune cli/defenseclaw/_data/telemetry/v8
 recursive-exclude cli *.py[cod]

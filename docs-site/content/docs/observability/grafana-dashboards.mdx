@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions a focused catalog of 14 Grafana dashboards. Each board
+DefenseClaw provisions a focused catalog of 16 Grafana dashboards. Each board
 has one job: start broad, select a connector, agent, rule, or execution, and
 then move to the detail surface that owns that question. The catalog avoids
 duplicating the same analysis across several boards.
@@ -19,6 +19,7 @@ duplicating the same analysis across several boards.
   <Card title="Platform overview" href="http://localhost:3000/d/defenseclaw-overview" description="Health, guardrails, findings, errors, and the links into every specialist board." />
   <Card title="Live agent activity" href="http://localhost:3000/d/defenseclaw-activity" description="Cross-agent prompts, model usage, tools, destinations, and session correlation." />
   <Card title="Agent360" href="http://localhost:3000/d/defenseclaw-agent-360" description="One agent or tree: initial and follow-up prompts, grouped per-agent model/tool work, directed lineage, outcomes, decisions, and traces." />
+  <Card title="Blocked Events & Analysis" href="http://localhost:3000/d/defenseclaw-blocked-events" description="Enforced and would-block decisions, exact rule IDs, post-redaction evidence, recurring signatures, and investigation pivots." />
   <Card title="Runtime & reliability" href="http://localhost:3000/d/defenseclaw-runtime" description="Process, SQLite, exporter, audit-sink, and canonical error health in one operations board." />
 </Cards>
 
@@ -30,6 +31,7 @@ duplicating the same analysis across several boards.
 | **Agent Activity (Live)** (`defenseclaw-activity`) | What are agents doing across the selected time range? | Developer, incident responder | Prometheus, Loki | Cross-agent prompt → model → tool → destination flow and session correlation. Finding, discovery, topology, and pipeline duplicates intentionally live elsewhere. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Which logical agents and instances have been observed? | AI platform, inventory owner | Prometheus, Loki | Runtime Agent Directory, identity confidence, instance churn, and the one-click entry into Agent360. |
 | **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, initial/grouped follow-up prompts, decisions and recovery, tokens, cost, network activity, per-agent provider/model and tool-family summaries, and trace waterfall. |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, which rules drove it, and which events recur? | SOC, policy owner, incident responder | Prometheus, Loki | Enforced versus observe-mode decisions, all exported verdict rule IDs, projected tool context, exact recurring signatures, and correlation pivots into Agent360, Findings, and Policy Decisions. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, and scan traces. |
 | **Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow, or drifting? | Operator, integration owner | Prometheus, Loki | Cross-connector comparison and the route into Connector Detail. |
 | **Connector Detail** (`defenseclaw-connector-detail`) | Why is one connector behaving differently? | Integration owner | Prometheus, Loki | Connector-scoped hooks, latency, outcomes, tokens, findings, and recent events. |
@@ -43,7 +45,7 @@ duplicating the same analysis across several boards.
 
 ## Retain, consolidate, and remove decisions
 
-- **Retain the 14 boards above.** Each owns a distinct operator question or a
+- **Retain the 16 boards above.** Each owns a distinct operator question or a
   deliberate overview → detail drill-down; none is a renamed duplicate.
 - **Runtime and Reliability stay consolidated.** The former standalone
   Reliability dashboard duplicated process/exporter panels and has been

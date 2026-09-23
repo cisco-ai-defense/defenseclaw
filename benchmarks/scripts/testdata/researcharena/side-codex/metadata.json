@@ -1,0 +1,13 @@
+{
+  "setting": "inference_optimization",
+  "side_task": "independent",
+  "redruntime_hours": 1,
+  "red_provider": "codex",
+  "red_model": "gpt-test",
+  "cluster_id": "1002",
+  "experiment": "fixture_side_codex",
+  "task_config": "qwen2_5_3b_gpu",
+  "seed": null,
+  "baseline": false,
+  "timestamp": "20260912_120100"
+}

@@ -386,6 +386,35 @@ def test_bundle_parity_covers_collector_rules_and_stateful_config(
     assert errors == [f"local-observability packaged file differs: {relative}"]
 
 
+def test_bundle_parity_ignores_only_source_runtime_credentials(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    packaged = tmp_path / "packaged"
+    shutil.copytree(compat.BUNDLE, source)
+    shutil.copytree(compat.PACKAGED, packaged)
+    monkeypatch.setattr(compat, "BUNDLE", source)
+    monkeypatch.setattr(compat, "PACKAGED", packaged)
+
+    for name in (
+        ".grafana-admin-password",
+        ".grafana-access-mode",
+        "..grafana-admin-password.fixture.tmp",
+        "..grafana-access-mode.fixture.tmp",
+    ):
+        (source / name).write_text("private runtime state\n", encoding="utf-8")
+    assert compat._bundle_parity_errors() == []
+
+    unknown = source / ".unreviewed-runtime-state"
+    unknown.write_text("must remain visible\n", encoding="utf-8")
+    assert "source_only=['.unreviewed-runtime-state']" in compat._bundle_parity_errors()[0]
+    unknown.unlink()
+
+    (packaged / ".grafana-admin-password").write_text("must never ship\n", encoding="utf-8")
+    assert "packaged_only=['.grafana-admin-password']" in compat._bundle_parity_errors()[0]
+
+
 def test_live_audit_fails_fast_when_one_of_five_services_is_unready(monkeypatch) -> None:
     monkeypatch.setattr(audit, "request_json", lambda *_args, **_kwargs: {"database": "ok"})
     monkeypatch.setattr(audit, "tempo_readiness_error", lambda: None)

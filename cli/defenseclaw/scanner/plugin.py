@@ -97,6 +97,8 @@ class PluginScannerWrapper:
         llm_provider: str = "",
         llm_consensus_runs: int = 0,
         disable_meta: bool = False,
+        include_self: bool = False,
+        trusted_self_paths: tuple[str, ...] = (),
         lenient: bool = False,
     ) -> ScanResult:
         start = time.monotonic()
@@ -112,6 +114,8 @@ class PluginScannerWrapper:
         # Thread the --no-meta request through so the MetaAnalyzer is
         # actually skipped by the scanner pipeline (F-0302).
         options.disable_meta = disable_meta
+        options.include_self = include_self
+        options.trusted_self_paths = trusted_self_paths
 
         # Build the LLM override:
         #   1. Start from the resolved unified LLM config (top-level
@@ -199,6 +203,12 @@ class PluginScannerWrapper:
             if getattr(f, "suppressed", False):
                 continue
             rid = getattr(f, "rule_id", None) or ""
+            tags = list(f.tags) if f.tags else []
+            correlation_evidence = (
+                (getattr(f, "evidence", None) or "")
+                if rid.startswith("META-") and "correlation" in tags
+                else ""
+            )
             line = getattr(f, "line", None) or getattr(f, "line_number", None)
             ln: int | None = int(line) if line is not None else None
             findings.append(Finding(
@@ -209,9 +219,11 @@ class PluginScannerWrapper:
                 location=f.location or "",
                 remediation=f.remediation or "",
                 scanner="plugin-scanner",
-                tags=list(f.tags) if f.tags else [],
+                tags=tags,
                 rule_id=rid,
                 line_number=ln,
+                confidence=getattr(f, "confidence", None),
+                evidence=correlation_evidence,
             ))
 
         return ScanResult(

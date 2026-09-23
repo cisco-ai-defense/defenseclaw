@@ -108,6 +108,7 @@ type HILTApprovalContext struct {
 	Phase             string
 	Sequence          *int64
 	UserID            string
+	UserIDKind        string
 	UserName          string
 	PolicyID          string
 	PolicyVersion     string

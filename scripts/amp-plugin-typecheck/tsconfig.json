@@ -17,6 +17,7 @@
     "target": "ES2022"
   },
   "files": [
+    "node-os.d.ts",
     "symbol-observable.d.ts",
     "../../internal/gateway/connector/hooks/amp-plugin.ts"
   ]

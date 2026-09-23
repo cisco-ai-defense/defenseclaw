@@ -115,30 +115,28 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 	_, metricRequests := capture.snapshot()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) &&
-		eventRouterToolMetricMaximum(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls) < 2 {
+		eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls) < 2 {
 		time.Sleep(10 * time.Millisecond)
 		_, metricRequests = capture.snapshot()
 	}
 	points := hookModelV8MetricPoints(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
-	maximum := eventRouterToolMetricMaximum(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
-	if maximum != 2 {
-		t.Errorf("tool call metric maximum=%v points=%+v want=2", maximum, points)
+	total := eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
+	if total != 2 {
+		t.Errorf("tool call metric delta total=%v points=%+v want=2", total, points)
 	}
 	assertEventRouterToolLocalLogs(t, databasePath,
 		[]string{"private-call-one", "private-call-two", "private-result-one", "private-result-two"})
 }
 
-func eventRouterToolMetricMaximum(
+func eventRouterToolMetricTotal(
 	requests []*collectormetricspb.ExportMetricsServiceRequest,
 	name string,
 ) float64 {
-	maximum := float64(0)
+	total := float64(0)
 	for _, point := range hookModelV8MetricPoints(requests, name) {
-		if point.value > maximum {
-			maximum = point.value
-		}
+		total += point.value
 	}
-	return maximum
+	return total
 }
 
 func TestEventRouterToolV8GeneratedLogsBuildAndPersist(t *testing.T) {

@@ -247,3 +247,58 @@ func countString(values []string, want string) int {
 	}
 	return count
 }
+
+// TestNormalizeProfileImagePathRejectsBlankValues guards the
+// platformDiscoveryHomeDirs path: a whitespace-only ProfileImagePath
+// registry value must never turn into a discovery root, because
+// `filepath.Clean("")` returns "." and that would inject the
+// enumerator process working directory into HomeDirs under
+// managed-enterprise mode.
+func TestNormalizeProfileImagePathRejectsBlankValues(t *testing.T) {
+	rejected := map[string]string{
+		"empty":            "",
+		"whitespace":       "   ",
+		"tabs":             "\t\t",
+		"newlines":         "\n",
+		"mixed-whitespace": "  \t\r\n ",
+		// Relative-path shapes must never resolve against the enumerator
+		// process working directory. On managed-enterprise mode, a
+		// ProfileImagePath registry value crafted to escape or land
+		// inside the service CWD would otherwise become a HomeDir for
+		// AI discovery.
+		"relative-simple":      `Profiles\alice`,
+		"relative-dotdot":      `..\..\etc`,
+		"relative-current-dir": `.`,
+		"relative-current-dot": `.\Users\bob`,
+		"drive-relative":       `\Users\alice`,
+	}
+	for name, raw := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if got, ok := normalizeProfileImagePath(raw); ok {
+				t.Fatalf("blank ProfileImagePath %q: got %q, want reject", raw, got)
+			}
+		})
+	}
+
+	accepted := map[string]struct {
+		raw  string
+		want string
+	}{
+		"absolute":         {raw: `C:\Users\alice`, want: `C:\Users\alice`},
+		"trimmed":          {raw: `  C:\Users\bob  `, want: `C:\Users\bob`},
+		"trailing-slash":   {raw: `C:\Users\carol\`, want: `C:\Users\carol`},
+		"forward-slashes":  {raw: `C:/Users/dave`, want: `C:\Users\dave`},
+		"trimmed-mixed-ws": {raw: "\tC:\\Users\\ellen\n", want: `C:\Users\ellen`},
+	}
+	for name, tc := range accepted {
+		t.Run(name, func(t *testing.T) {
+			got, ok := normalizeProfileImagePath(tc.raw)
+			if !ok {
+				t.Fatalf("valid ProfileImagePath %q rejected", tc.raw)
+			}
+			if got != tc.want {
+				t.Fatalf("normalize %q = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}

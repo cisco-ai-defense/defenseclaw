@@ -355,7 +355,7 @@ func TestRuntimeRealDestinationBoundaryExactlyOnceAndReloadRemoval(t *testing.T)
 				TLS:           config.ObservabilityV8TLSSource{CACert: caPath},
 				NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
 			},
-			logDestination("security-slow", config.ObservabilityV8DestinationHTTPJSONL, "legacy-v7", func(destination *config.ObservabilityV8DestinationSource) {
+			logDestination("security-slow", config.ObservabilityV8DestinationHTTPJSONL, "content", func(destination *config.ObservabilityV8DestinationSource) {
 				destination.Endpoint = slowServer.URL + "/slow"
 				destination.NetworkSafety.AllowPrivateNetworks = true
 				destination.Batch.ScheduledDelayMS = 1
@@ -544,7 +544,7 @@ func TestRuntimeRealDestinationBoundaryExactlyOnceAndReloadRemoval(t *testing.T)
 	for name, wantProfile := range map[string]string{
 		"sqlite": "none", "jsonl": "none", "console": "content",
 		"http": "sensitive", "splunk": "strict", "otlp": "sensitive",
-		"otlp-grpc": "content", "slow": "legacy-v7",
+		"otlp-grpc": "content", "slow": "content",
 	} {
 		if got := projectionProfile(t, projections[name]); got != wantProfile {
 			t.Fatalf("%s projection profile=%s want=%s", name, got, wantProfile)

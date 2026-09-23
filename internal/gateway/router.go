@@ -766,6 +766,9 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	if content == "" {
 		return
 	}
+	if r.judge != nil {
+		r.judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
+	}
 	start := time.Now()
 
 	verdict := scanLocalPatterns("prompt", content)
@@ -1260,7 +1263,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	// The typed router frame establishes a trusted action boundary, but this
 	// lane is observational and therefore cannot synchronously deny.
-	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+	vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+		DestinationApp: "builtin",
+		ToolName:       payload.Tool,
+		ToolID:         payload.ID,
+	})
+	findings := dispatchTrustedAction(vctx, trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool: payload.Tool,
 			Args: payload.Args,
@@ -1268,6 +1276,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		LegacyText:         string(payload.Args),
 		Connector:          r.connectorName(),
 		EnforcementCapable: false,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				vctx,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
@@ -1279,9 +1293,6 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
 
-		vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
-			DestinationApp: "builtin", ToolName: payload.Tool, ToolID: payload.ID,
-		})
 		emitVerdict(vctx, gatewaylog.StageRegex, gatewaylog.DirectionToolCall, "",
 			"alert", findings[0].Title, deriveSeverity(severity), []string{flaggedPattern}, 0,
 			emitVerdictExtras{RuleIDs: []string{flaggedPattern}})
@@ -1298,27 +1309,32 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative.
 	if !ManagedEnterpriseActive() && r.judge != nil && len(payload.Args) > 0 {
-		go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage) {
-			r.judgeSem <- struct{}{}
-			defer func() { <-r.judgeSem }()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
-			if verdict.Severity != "NONE" {
-				// Keep stderr redacted, but retain the source reason for the v8
-				// route-specific redaction boundary.
-				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-					tool, verdict.Severity, redaction.Reason(verdict.Reason))
-				r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
-					fmt.Sprintf("severity=%s findings=%d reason=%s",
-						verdict.Severity, len(verdict.Findings),
-						stripLogInjectionRunes(verdict.Reason)))
-				r.recordEventRouterGuardrailMetricsV8(ctx, eventRouterGuardrailMetricObservation{
-					meta: meta, tool: tool, action: verdict.Action,
-					severity: verdict.Severity, observedAt: time.Now().UTC(),
-				})
-			}
-		}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args)
+		judgeCtx := ContextWithSessionID(context.Background(), payload.SessionID)
+		judgeSample, judgeEligible := r.judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
+		if judgeEligible {
+			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample string) {
+				r.judgeSem <- struct{}{}
+				defer func() { <-r.judgeSem }()
+				judgeCtx := ContextWithSessionID(context.Background(), sessionID)
+				ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
+				defer cancel()
+				verdict := r.judge.runToolJudgeSample(ctx, tool, string(args), sample)
+				if verdict.Severity != "NONE" {
+					// Keep stderr redacted, but retain the source reason for the v8
+					// route-specific redaction boundary.
+					fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
+						tool, verdict.Severity, redaction.Reason(verdict.Reason))
+					r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
+						fmt.Sprintf("severity=%s findings=%d reason=%s",
+							verdict.Severity, len(verdict.Findings),
+							stripLogInjectionRunes(verdict.Reason)))
+					r.recordEventRouterGuardrailMetricsV8(ctx, eventRouterGuardrailMetricObservation{
+						meta: meta, tool: tool, action: verdict.Action,
+						severity: verdict.Severity, observedAt: time.Now().UTC(),
+					})
+				}
+			}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args, judgeSample)
+		}
 	}
 
 	toolObservation.dangerous = dangerous
@@ -1515,6 +1531,17 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 	approval = r.enrichEventRouterApprovalTopology(approval)
 	approvalContext := r.getToolParentCtx(approval.sessionKey, approval.runID)
+	identity := AgentIdentityFromContext(approvalContext)
+	if approval.userID == "" && approval.userName == "" {
+		approval.userID = identity.UserID
+		approval.userIDKind = identity.UserIDKind
+		approval.userName = identity.UserName
+	} else if approval.userID == identity.UserID {
+		approval.userIDKind = identity.UserIDKind
+		approval.userName = firstNonEmpty(approval.userName, identity.UserName)
+	} else {
+		approval.userIDKind = ""
+	}
 	_ = r.emitApprovalRequestedV8(approvalContext, approval)
 
 	// a sparse approval frame with no SystemRunPlan,
@@ -1565,6 +1592,12 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		LegacyText:         legacyText,
 		Connector:          r.connectorName(),
 		EnforcementCapable: true,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				approvalContext,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	enforceableFindings := enforceableRuleFindings(allFindings)
 	dangerousByRules := len(enforceableFindings) > 0 &&

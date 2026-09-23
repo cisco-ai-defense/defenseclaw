@@ -133,6 +133,7 @@ type ChatRequest struct {
 	Stop             json.RawMessage `json:"stop,omitempty"`
 	Tools            json.RawMessage `json:"tools,omitempty"`
 	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
+	ResponseFormat   json.RawMessage `json:"response_format,omitempty"`
 	Fallbacks        []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
 	ExtraParams      map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
 	RawBody          json.RawMessage `json:"-"`
@@ -618,6 +619,13 @@ func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Res
 // Returns "" immediately when local key resolution has been disabled via
 // DisableLocalKeyResolution (enterprise credential-management mode).
 func ResolveAPIKey(envVar string, dotenvPath string) string {
+	// Enterprise token hydration stores secrets in-memory so they never need
+	// to enter the process environment or an on-disk dotenv file. Keep the
+	// same precedence used by config.LLMConfig.ResolvedAPIKey so routed model
+	// backends and ordinary gateway providers share one credential source.
+	if v, ok := config.GetKey(envVar); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
 	if localKeyResolutionDisabled {
 		return ""
 	}

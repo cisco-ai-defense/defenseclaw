@@ -37,7 +37,7 @@ var trustedSensitiveFindingRuleIDs = map[sensitiveFindingKind]map[string]struct{
 	),
 	sensitiveFindingKindPII: makeSensitiveFindingRuleIDSet(
 		"ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN", "ENT-CC-VISA", "ENT-CC-MC",
-		"ENT-CC-AMEX", "ENT-CC-DISCOVER", "ENT-IBAN", "ENT-US-PHONE", "ENT-EMAIL-BULK",
+		"ENT-CC-AMEX", "ENT-CC-DISCOVER", "ENT-IBAN", "ENT-US-PHONE", "ENT-PHONE-E164", "ENT-EMAIL-BULK",
 		"ENT-PASSPORT-US", "ENT-DL-CA", "ENT-MEDICAL-RECORD", "ENT-DOB-PATTERN",
 		"ENT-NHS-NUMBER", "ENT-BULK-CSV-PII", "ENT-BULK-JSON-PII",
 		"CS-PII-CC-VISA", "CS-PII-CC-MC", "CS-PII-CC-AMEX", "CS-PII-CC-DISC", "CS-PII-CC-FMT",

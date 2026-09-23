@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,12 +30,36 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 }
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
-	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
+		if lastErr == nil {
+			return
+		}
+		var metricErr *observabilityruntime.GeneratedMetricError
+		if !errors.As(lastErr, &metricErr) || metricErr.Code() != observabilityruntime.GeneratedMetricRecordFailed {
+			t.Fatal(lastErr)
+		}
+	}
+	t.Fatal(lastErr)
+}
+
+func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
+	t.Helper()
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
 	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute), store: capture.store}
 	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
 	results, err := runtime.RecordGeneratedMetricBatch(t.Context(), items)
 	if err != nil {
-		t.Fatal(err)
+		recorded := capture.metricSnapshot()
+		failedFamily := observability.EventName("")
+		if len(recorded) < len(items) {
+			failedFamily = items[len(recorded)].Family
+		}
+		return fmt.Errorf(
+			"capacity batch failed after %d/%d metrics at family %q (capture_closed=%t): %w",
+			len(recorded), len(items), failedFamily, capture.closed.Load(), err,
+		)
 	}
 	if len(items) != 11 || len(results) != len(items) {
 		t.Fatalf("capacity batch items/results=%d/%d", len(items), len(results))
@@ -81,6 +107,7 @@ func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
 			t.Errorf("capacity family %q not recorded", name)
 		}
 	}
+	return nil
 }
 
 func TestCapacityCollectionDisabledSkipsAllSnapshotWork(t *testing.T) {
@@ -128,10 +155,25 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 	sidecar := &Sidecar{}
 	observedAt := time.Now().UTC()
-	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt, wrapper)
-	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(time.Second), wrapper)
+	// The health snapshot is now fetched by the caller and shared across
+	// consumers, so the test fetches it explicitly before each call instead
+	// of relying on recordExporterHealthMetricsV8 to poll internally.
+	health1, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt, wrapper, health1)
+	health2, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(time.Second), wrapper, health2)
 	wrapper.snapshot.Destinations[0].Sources[0].Counters.Failed = 5
-	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(2*time.Second), wrapper)
+	health3, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(2*time.Second), wrapper, health3)
 
 	metrics := capture.metricSnapshot()
 	errors := generatedMetricByName(
@@ -170,9 +212,16 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 }
 
-func TestExporterHealthCollectionGatePrecedesDestinationSnapshot(t *testing.T) {
+// TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled replaces
+// the prior "gate precedes snapshot" test: the destination snapshot is now
+// fetched once by the caller and shared with the sibling circuit-health
+// log recorder (which is intentionally never gated by this flag), so this
+// function can no longer avoid the fetch itself. What it must still do is
+// stop before touching the snapshot or recording anything when the metric
+// family is disabled.
+func TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled(t *testing.T) {
 	disabled := false
-	runtime, _ := newProxyGeneratedTraceRuntimeWithPolicies(
+	runtime, capture := newProxyGeneratedTraceRuntimeWithPolicies(
 		t, "always_on", config.ObservabilityV8BucketPolicySource{},
 		map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
 			observability.BucketPlatformHealth: {
@@ -181,8 +230,11 @@ func TestExporterHealthCollectionGatePrecedesDestinationSnapshot(t *testing.T) {
 		},
 	)
 	wrapper := &capacityHealthRuntime{Runtime: runtime}
-	(&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper)
+	(&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper, wrapper.snapshot)
 	if wrapper.snapshotCalls != 0 {
-		t.Fatalf("disabled exporter health took %d destination snapshots", wrapper.snapshotCalls)
+		t.Fatalf("disabled exporter-error metric family should return before consulting a destination snapshot, took %d", wrapper.snapshotCalls)
+	}
+	if len(capture.metricSnapshot()) != 0 {
+		t.Fatalf("disabled exporter-error metric family still recorded %d metrics", len(capture.metricSnapshot()))
 	}
 }

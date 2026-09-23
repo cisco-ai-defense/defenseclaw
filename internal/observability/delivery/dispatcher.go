@@ -74,6 +74,7 @@ type Dispatcher struct {
 	consecutiveFailures uint64
 	circuitOpenUntil    time.Time
 	lastFailureClass    FailureClass
+	lastFailureCode     FailureCode
 	lastSuccess         time.Time
 	lastFailure         time.Time
 	healthSequence      uint64
@@ -174,14 +175,14 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 	if dispatcher == nil || !payload.valid() {
 		if dispatcher != nil {
 			dispatcher.counters.rejected.Add(1)
-			dispatcher.recordFailure(dispatcher.nowUTC())
+			dispatcher.recordFailure(dispatcher.nowUTC(), FailureCodeAdapterInputInvalid)
 		}
 		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonInvalidPayload}
 	}
 	identity := payload.identity
 	if identity.OriginDestination != "" && identity.OriginDestination == dispatcher.config.Destination {
 		dispatcher.counters.rejected.Add(1)
-		dispatcher.recordFailure(dispatcher.nowUTC())
+		dispatcher.recordFailure(dispatcher.nowUTC(), FailureCodeOriginLoop)
 		dispatcher.setOperationalHealth(HealthDegraded, HealthReasonOriginLoop)
 		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonOriginLoop}
 	}
@@ -206,7 +207,7 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		dispatcher.queueMu.Unlock()
 		dispatcher.lifecycleMu.Unlock()
 		dispatcher.counters.dropped.Add(1)
-		dispatcher.recordFailure(dispatcher.nowUTC())
+		dispatcher.recordFailure(dispatcher.nowUTC(), FailureCodeQueueFull)
 		dispatcher.setOperationalHealth(HealthDegraded, HealthReasonQueueFull)
 		reason := ReasonCountLimit
 		if countFull && byteFull {
@@ -396,6 +397,7 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 	consecutiveFailures := dispatcher.consecutiveFailures
 	circuitOpenUntil := dispatcher.circuitOpenUntil
 	lastFailureClass := dispatcher.lastFailureClass
+	lastFailureCode := dispatcher.lastFailureCode
 	lastSuccess := dispatcher.lastSuccess
 	lastFailure := dispatcher.lastFailure
 	dispatcher.healthMu.Unlock()
@@ -410,6 +412,7 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 		ConsecutiveFailures: consecutiveFailures,
 		CircuitOpenUntil:    circuitOpenUntil,
 		LastFailureClass:    lastFailureClass,
+		LastFailureCode:     lastFailureCode,
 		Queue: &QueueSnapshot{
 			Items: items, Bytes: bytes,
 			InFlightItems: inFlightItems, InFlightBytes: inFlightBytes,
@@ -435,12 +438,13 @@ func (dispatcher *Dispatcher) recordSuccess(at time.Time) {
 	dispatcher.healthMu.Unlock()
 }
 
-func (dispatcher *Dispatcher) recordFailure(at time.Time) {
+func (dispatcher *Dispatcher) recordFailure(at time.Time, code FailureCode) {
 	if dispatcher == nil || at.IsZero() {
 		return
 	}
 	dispatcher.healthMu.Lock()
 	dispatcher.lastFailure = at.UTC()
+	dispatcher.lastFailureCode = normalizedFailureCode(code)
 	dispatcher.healthMu.Unlock()
 }
 
@@ -562,7 +566,7 @@ func (dispatcher *Dispatcher) run() {
 			dispatcher.abandonPending()
 			return
 		}
-		payloads, encodedSize, oversized := dispatcher.takeBatch()
+		payloads, encodedSize, oversized, sizeFailure := dispatcher.takeBatch()
 		if len(payloads) == 0 {
 			if mode == circuitDeliveryProbe {
 				dispatcher.abortCircuitProbe()
@@ -573,7 +577,7 @@ func (dispatcher *Dispatcher) run() {
 			dispatcher.counters.failed.Add(1)
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
 			now := dispatcher.nowUTC()
-			dispatcher.recordFailure(now)
+			dispatcher.recordFailure(now, sizeFailure)
 			reason := HealthReasonDeliveryFailed
 			if dispatcher.recordCircuitFailure(FailureClassPermanentPayload, now) {
 				reason = HealthReasonCircuitOpen
@@ -661,7 +665,12 @@ func (dispatcher *Dispatcher) takeCircuitRejectedBatch() []Payload {
 	return payloads
 }
 
-func (dispatcher *Dispatcher) takeBatch() (payloads []Payload, encodedSize int, oversized bool) {
+func (dispatcher *Dispatcher) takeBatch() (
+	payloads []Payload,
+	encodedSize int,
+	oversized bool,
+	failureCode FailureCode,
+) {
 	dispatcher.queueMu.Lock()
 	limit := len(dispatcher.pending)
 	if limit > dispatcher.config.MaxBatchItems {
@@ -684,8 +693,12 @@ func (dispatcher *Dispatcher) takeBatch() (payloads []Payload, encodedSize int, 
 		}
 		projectedSize += nextSize
 		sizes = append(sizes, nextSize)
-		estimate, ok := dispatcher.encodedSize(sizes)
+		estimate, ok, panicked := dispatcher.encodedSize(sizes)
 		if !ok || estimate < projectedSize || estimate > dispatcher.config.MaxBatchBytes {
+			failureCode = FailureCodeSizeEstimateRejected
+			if panicked {
+				failureCode = FailureCodeSizeEstimatorPanic
+			}
 			sizes = sizes[:len(sizes)-1]
 			if selected == 0 {
 				selected = 1
@@ -697,7 +710,7 @@ func (dispatcher *Dispatcher) takeBatch() (payloads []Payload, encodedSize int, 
 		selected++
 	}
 	if selected == 0 {
-		return nil, 0, false
+		return nil, 0, false, ""
 	}
 	payloads = append([]Payload(nil), candidates[:selected]...)
 	dispatcher.queueMu.Lock()
@@ -713,7 +726,7 @@ func (dispatcher *Dispatcher) takeBatch() (payloads []Payload, encodedSize int, 
 		dispatcher.inFlightBytes += payload.Size()
 	}
 	dispatcher.queueMu.Unlock()
-	return payloads, encodedSize, oversized
+	return payloads, encodedSize, oversized, failureCode
 }
 
 func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfOpen bool) bool {
@@ -735,10 +748,15 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			dispatcher.release(payloads)
 			return false
 		}
+		failureCode, validResult := deliveryFailureCode(result)
+		if !validResult {
+			dispatcher.rejectMalformedResult(payloads, FailureCodeAdapterResultInvalid)
+			return true
+		}
 		switch result.Outcome {
 		case OutcomeDelivered:
 			if result.DeliveredItems != 0 || result.RejectedItems != 0 {
-				dispatcher.rejectMalformedResult(payloads)
+				dispatcher.rejectMalformedResult(payloads, FailureCodeAdapterResultInvalid)
 				return true
 			}
 			dispatcher.counters.delivered.Add(uint64(len(payloads)))
@@ -749,7 +767,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			return true
 		case OutcomePartial:
 			if !validPartialResult(result, len(payloads)) {
-				dispatcher.rejectMalformedResult(payloads)
+				dispatcher.rejectMalformedResult(payloads, FailureCodeAdapterResultInvalid)
 				return true
 			}
 			dispatcher.counters.delivered.Add(uint64(result.DeliveredItems))
@@ -757,20 +775,20 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			dispatcher.counters.failed.Add(1)
 			now := dispatcher.nowUTC()
 			dispatcher.recordSuccess(now)
-			dispatcher.recordFailure(now)
+			dispatcher.recordFailure(now, failureCode)
 			dispatcher.recordCircuitSuccess()
 			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonPartial)
 			dispatcher.release(payloads)
 			return true
 		case OutcomeTransient, OutcomeAmbiguous:
 			if result.DeliveredItems != 0 || result.RejectedItems != 0 {
-				dispatcher.rejectMalformedResult(payloads)
+				dispatcher.rejectMalformedResult(payloads, FailureCodeAdapterResultInvalid)
 				return true
 			}
 			dispatcher.counters.failed.Add(1)
+			now := dispatcher.nowUTC()
+			dispatcher.recordFailure(now, failureCode)
 			if attempt == maxAttempts {
-				now := dispatcher.nowUTC()
-				dispatcher.recordFailure(now)
 				dispatcher.counters.rejected.Add(uint64(len(payloads)))
 				reason := HealthReasonDeliveryFailed
 				if dispatcher.recordCircuitFailure(FailureClassTransient, now) {
@@ -789,13 +807,13 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			}
 		case OutcomeAuthentication, OutcomePermanentPayload, OutcomeUnsafeEndpoint:
 			if result.DeliveredItems != 0 || result.RejectedItems != 0 {
-				dispatcher.rejectMalformedResult(payloads)
+				dispatcher.rejectMalformedResult(payloads, FailureCodeAdapterResultInvalid)
 				return true
 			}
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
 			dispatcher.counters.failed.Add(1)
 			now := dispatcher.nowUTC()
-			dispatcher.recordFailure(now)
+			dispatcher.recordFailure(now, failureCode)
 			reason := HealthReasonDeliveryFailed
 			if dispatcher.recordCircuitFailure(failureClassForOutcome(result.Outcome), now) {
 				reason = HealthReasonCircuitOpen
@@ -807,7 +825,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			dispatcher.counters.rejected.Add(uint64(len(payloads)))
 			dispatcher.counters.failed.Add(1)
 			now := dispatcher.nowUTC()
-			dispatcher.recordFailure(now)
+			dispatcher.recordFailure(now, FailureCodeAdapterResultInvalid)
 			reason := HealthReasonDeliveryFailed
 			if dispatcher.recordCircuitFailure(FailureClassPermanentPayload, now) {
 				reason = HealthReasonCircuitOpen
@@ -833,17 +851,40 @@ func failureClassForOutcome(outcome DeliveryOutcome) FailureClass {
 	}
 }
 
+func deliveryFailureCode(result DeliveryResult) (FailureCode, bool) {
+	if result.Outcome == OutcomeDelivered {
+		return "", result.FailureCode == ""
+	}
+	switch result.Outcome {
+	case OutcomePartial, OutcomeTransient, OutcomeAuthentication,
+		OutcomePermanentPayload, OutcomeUnsafeEndpoint, OutcomeAmbiguous:
+		if result.FailureCode == "" {
+			return FailureCodeUnspecified, true
+		}
+		return result.FailureCode, IsFailureCode(result.FailureCode)
+	default:
+		return FailureCodeAdapterResultInvalid, false
+	}
+}
+
+func normalizedFailureCode(code FailureCode) FailureCode {
+	if IsFailureCode(code) {
+		return code
+	}
+	return FailureCodeUnspecified
+}
+
 func validPartialResult(result DeliveryResult, batchItems int) bool {
 	return batchItems > 1 && result.DeliveredItems > 0 && result.RejectedItems > 0 &&
 		result.DeliveredItems <= batchItems && result.RejectedItems <= batchItems-result.DeliveredItems &&
 		result.DeliveredItems+result.RejectedItems == batchItems
 }
 
-func (dispatcher *Dispatcher) rejectMalformedResult(payloads []Payload) {
+func (dispatcher *Dispatcher) rejectMalformedResult(payloads []Payload, code FailureCode) {
 	dispatcher.counters.failed.Add(1)
 	dispatcher.counters.rejected.Add(uint64(len(payloads)))
 	now := dispatcher.nowUTC()
-	dispatcher.recordFailure(now)
+	dispatcher.recordFailure(now, code)
 	reason := HealthReasonDeliveryFailed
 	if dispatcher.recordCircuitFailure(FailureClassPermanentPayload, now) {
 		reason = HealthReasonCircuitOpen
@@ -852,18 +893,25 @@ func (dispatcher *Dispatcher) rejectMalformedResult(payloads []Payload) {
 	dispatcher.release(payloads)
 }
 
-func (dispatcher *Dispatcher) encodedSize(sizes []int) (size int, ok bool) {
+func (dispatcher *Dispatcher) encodedSize(sizes []int) (size int, ok bool, panicked bool) {
 	defer func() {
 		if recover() != nil {
-			size, ok = 0, false
+			size, ok, panicked = 0, false, true
 		}
 	}()
-	return dispatcher.adapter.EncodedSize(sizes)
+	size, ok = dispatcher.adapter.EncodedSize(sizes)
+	return size, ok, false
 }
 
 func (dispatcher *Dispatcher) callAdapter(ctx context.Context, batch Batch) (result DeliveryResult) {
-	result = DeliveryResult{Outcome: OutcomePermanentPayload}
-	defer func() { _ = recover() }()
+	result = DeliveryResult{Outcome: OutcomePermanentPayload, FailureCode: FailureCodeAdapterPanic}
+	defer func() {
+		if recover() != nil {
+			result = DeliveryResult{
+				Outcome: OutcomePermanentPayload, FailureCode: FailureCodeAdapterPanic,
+			}
+		}
+	}()
 	return dispatcher.adapter.Deliver(ctx, batch)
 }
 

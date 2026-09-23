@@ -179,10 +179,11 @@ func TestHandlePassthrough_ManagedAIDInspectsProviderNativeTopLevelPrompts(t *te
 	registerProviderDomainForTest(t, target.Hostname(), "openai")
 
 	tests := []struct {
-		name string
-		path string
-		body string
-		want string
+		name         string
+		path         string
+		body         string
+		want         string
+		wantMessages []ChatMessage
 	}{
 		{
 			name: "OpenAI Responses string input",
@@ -195,6 +196,16 @@ func TestHandlePassthrough_ManagedAIDInspectsProviderNativeTopLevelPrompts(t *te
 			path: "/api/generate",
 			body: `{"model":"llama3.2","prompt":"ollama native prompt"}`,
 			want: "ollama native prompt",
+		},
+		{
+			name: "Ollama system and prompt coexist",
+			path: "/api/generate",
+			body: `{"model":"llama3.2","system":"benign system context","prompt":"ollama dual-field prompt"}`,
+			want: "ollama dual-field prompt",
+			wantMessages: []ChatMessage{
+				{Role: "system", Content: "benign system context"},
+				{Role: "user", Content: "ollama dual-field prompt"},
+			},
 		},
 		{
 			name: "system-only provider request",
@@ -240,7 +251,10 @@ func TestHandlePassthrough_ManagedAIDInspectsProviderNativeTopLevelPrompts(t *te
 			if stub.calls != 1 {
 				t.Fatalf("AID calls = %d, want exactly 1", stub.calls)
 			}
-			wantMessages := []ChatMessage{{Role: "user", Content: tc.want}}
+			wantMessages := tc.wantMessages
+			if wantMessages == nil {
+				wantMessages = []ChatMessage{{Role: "user", Content: tc.want}}
+			}
 			if !reflect.DeepEqual(stub.messages, wantMessages) {
 				t.Fatalf("AID messages = %#v, want %#v", stub.messages, wantMessages)
 			}

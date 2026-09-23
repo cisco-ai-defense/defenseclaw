@@ -18,15 +18,18 @@ package enforce
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 )
 
-// BundledSkillContainer is the reserved directory name that Codex and
-// compatible agents use to ship first-party ("system") skills that are
-// managed by the vendor and must not be blocked, disabled, quarantined,
-// or otherwise mutated by DefenseClaw. Any skill entry that lives at or
-// below `<skills-root>/.system/…` is treated as bundled.
+// BundledSkillContainer is the reserved directory name Codex uses for its
+// first-party system-skill cache. The name alone is not trusted: only entries
+// at or below `$CODEX_HOME/skills/.system` are bundled. A same-named directory
+// under an operator or workspace skill root remains scan/enforcement eligible.
 const BundledSkillContainer = ".system"
 
 // ErrBundledSkill is the sentinel returned by every mutation path
@@ -37,14 +40,16 @@ const BundledSkillContainer = ".system"
 // audit-store side effects — because a corrupted bundled skill is a
 // vendor-supplied component and cannot be restored by the operator.
 var ErrBundledSkill = errors.New(
-	"enforce: bundled skill (.system container or descendant) is vendor-managed and cannot be blocked, disabled, or quarantined",
+	"enforce: bundled skill is vendor-managed and cannot be blocked, disabled, or quarantined",
 )
 
-// IsBundledSkillPath reports whether path is at or below a
-// BundledSkillContainer segment. The check is component-wise on the
-// cleaned path so a directory literally named ".system" as an
-// intermediate segment triggers, but a file whose basename happens to
-// contain the substring ".system" (e.g. `hello.system.md`) does not.
+// IsBundledSkillPath reports whether path is at or below Codex's exact
+// vendor-managed system-skill cache, or inside an unchanged Hermes skill whose
+// identity/content match both HERMES_HOME/skills/.bundled_manifest and the
+// corresponding source in the exact Hermes checkout.
+// Modified/untracked Hermes skills and a directory merely named ".system"
+// elsewhere remain operator-controlled and must not bypass scanning or
+// enforcement.
 //
 // Path is Cleaned before check. Symlink resolution is the caller's
 // responsibility: mutation surfaces MUST resolve symlinks (via
@@ -62,16 +67,61 @@ func IsBundledSkillPath(path string) bool {
 	if trimmed == "" {
 		return false
 	}
-	cleaned := filepath.Clean(trimmed)
-	// filepath.Clean strips a trailing separator, so components split
-	// on the OS-specific separator here matches what a caller sees
-	// when it navigates the tree via ReadDir.
-	for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
-		if part == BundledSkillContainer {
-			return true
-		}
+	if isCodexBundledSkillPath(trimmed) {
+		return true
 	}
-	return false
+	return hermesskills.IsBundledPath(trimmed)
+}
+
+func isCodexBundledSkillPath(path string) bool {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(userHome) == "" {
+			return false
+		}
+		codexHome = filepath.Join(userHome, ".codex")
+	} else if codexHome == "~" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		codexHome = userHome
+	} else if strings.HasPrefix(codexHome, "~/") || strings.HasPrefix(codexHome, `~\`) {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		codexHome = filepath.Join(userHome, codexHome[2:])
+	}
+	if !filepath.IsAbs(codexHome) {
+		absolute, err := filepath.Abs(codexHome)
+		if err != nil {
+			return false
+		}
+		codexHome = absolute
+	}
+	return pathAtOrBelow(path, filepath.Join(codexHome, "skills", BundledSkillContainer))
+}
+
+func pathAtOrBelow(path, root string) bool {
+	pathAbs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		pathAbs = strings.ToLower(pathAbs)
+		rootAbs = strings.ToLower(rootAbs)
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // IsBundledSkillContainerName reports whether the given basename is

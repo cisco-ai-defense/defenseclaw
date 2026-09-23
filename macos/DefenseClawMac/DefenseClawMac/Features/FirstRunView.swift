@@ -19,6 +19,11 @@ import SwiftUI
 #endif
 
 struct ConnectorDiscoverySelection: Equatable {
+    static let onboardingConnectors = [
+        "codex", "claudecode", "hermes", "cursor", "devin", "copilot",
+        "openhands", "antigravity", "opencode", "amp", "omnigent",
+    ]
+
     let registered: Set<String>
     let action: Set<String>
 
@@ -28,8 +33,9 @@ struct ConnectorDiscoverySelection: Equatable {
         registered: Set<String>,
         action: Set<String>
     ) -> ConnectorDiscoverySelection {
-        let detectedSet = Set(detected)
-        let newlyDetected = detectedSet.subtracting(previouslyDetected)
+        let allowed = Set(onboardingConnectors)
+        let detectedSet = Set(detected).intersection(allowed)
+        let newlyDetected = detectedSet.subtracting(Set(previouslyDetected).intersection(allowed))
         let reconciledRegistered = registered
             .intersection(detectedSet)
             .union(newlyDetected)
@@ -65,11 +71,11 @@ struct FirstRunView: View {
     @State private var verify = true
     @State private var runID: UUID?
     @State private var exitCode: Int32?
+    @State private var installerRelease: RuntimeInstallerInfo?
+    @State private var installerMetadataLoading = false
+    @State private var installerMetadataError: String?
 
-    private static let connectors = [
-        "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor",
-        "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent",
-    ]
+    private static let connectors = ConnectorDiscoverySelection.onboardingConnectors
     private static let installerURL = URL(
         string: "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh"
     )!
@@ -152,8 +158,8 @@ struct FirstRunView: View {
                     } label: {
                         Label(
                             runtimeInstallIsCancelling
-                                ? "Cancelling…"
-                                : (runtimeInstallIsFinishing ? "Finishing…" : "Cancel Install"),
+                                ? "Cancelling..."
+                                : (runtimeInstallIsFinishing ? "Finishing..." : "Cancel Install"),
                             systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
                         )
                     }
@@ -163,7 +169,7 @@ struct FirstRunView: View {
                         if let runID { appState.activity.cancel(runID) }
                     } label: {
                         Label(
-                            isCancelling ? "Cancelling…" : (isFinishing ? "Finishing…" : "Cancel"),
+                            isCancelling ? "Cancelling..." : (isFinishing ? "Finishing..." : "Cancel"),
                             systemImage: isFinishing ? "hourglass" : "stop.fill"
                         )
                     }
@@ -201,6 +207,9 @@ struct FirstRunView: View {
             // until a config exists — never exec other binaries without an
             // explicit user action.
             cliFound = await appState.cli.locateBinary() != nil
+            if !cliFound {
+                await loadInstallerRelease()
+            }
         }
     }
 
@@ -236,11 +245,6 @@ struct FirstRunView: View {
                     Text("Detected connectors are pre-selected; uncheck any you don't want DefenseClaw hooks installed into. Observe mode never blocks; Action applies only to the checked connectors below.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if !detectedProxyConnectors.isEmpty {
-                        Text("Proxy connectors \(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", ")) require their dedicated Setup flow and are not added to the hook roster.")
-                            .font(.caption)
-                            .foregroundStyle(Cisco.orange)
-                    }
                     if profile == "action" {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Enforce on").font(.callout.weight(.medium))
@@ -394,15 +398,56 @@ struct FirstRunView: View {
 
     private var scriptInstaller: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Download the installer, review its contents, then run it from Terminal. The Mac app does not execute a remote script automatically.")
+            Text("Download the release installer, verify its published SHA-256 digest, review the verified local file, then run it from Terminal. The Mac app does not execute a remote script automatically.")
                 .font(.callout).foregroundStyle(.secondary)
-            Link(destination: Self.installerURL) {
-                Label("Review Install Script", systemImage: "safari")
+            if installerMetadataLoading {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading authenticated release metadata...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let installerRelease {
+                Link(destination: installerRelease.releaseURL) {
+                    Label("Open DefenseClaw \(installerRelease.tag) Release", systemImage: "safari")
+                }
+                installCommandRow("1. Download and Verify", command: installerRelease.downloadCommand)
+                installCommandRow("2. Review Verified Local File", command: installerRelease.reviewCommand)
+                installCommandRow("3. Verify Again and Run", command: installerRelease.runCommand)
+                Text("Expected SHA-256: \(installerRelease.assetSHA256)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                Label(
+                    installerMetadataError
+                        ?? "Authenticated installer metadata is unavailable. No shell command was generated.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(Cisco.orange)
+                Link(
+                    "Open Official DefenseClaw Releases",
+                    destination: URL(
+                        string: "https://github.com/cisco-ai-defense/defenseclaw/releases"
+                    )!
+                )
             }
-            installCommandRow("1. Download", command: Self.downloadCommand)
-            installCommandRow("2. Run After Review", command: Self.runCommand)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @MainActor
+    private func loadInstallerRelease() async {
+        guard !installerMetadataLoading else { return }
+        installerMetadataLoading = true
+        installerMetadataError = nil
+        defer { installerMetadataLoading = false }
+        guard let release = await appState.updater.latestRuntimeInstaller() else {
+            installerMetadataError = "The latest release has no digest-bound install.sh asset. Use the official release page and verify its published checksum manually."
+            return
+        }
+        installerRelease = release
     }
 
     private func execution(_ entry: CommandActivityEntry) -> some View {
@@ -486,6 +531,7 @@ struct FirstRunView: View {
         Task {
             cliFound = await appState.cli.locateBinary() != nil
             appState.installDetected = await appState.configStore.installPresent
+            if !cliFound { await loadInstallerRelease() }
             // Re-discover only after the user opted into discovery — Check
             // Again must not become a back door into exec'ing agent CLIs.
             if cliFound, discoveryRequested { await discoverConnectors() }

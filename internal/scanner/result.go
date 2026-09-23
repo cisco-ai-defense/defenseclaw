@@ -60,11 +60,15 @@ type Finding struct {
 	// deterministic summary used by the canonical observability record. It is
 	// intentionally excluded from the legacy scanner JSON shape: v8 route
 	// projection, not a second scanner wire contract, owns its redaction.
-	EvidenceSummary string   `json:"-"`
-	Location        string   `json:"location"`
-	Remediation     string   `json:"remediation"`
-	Scanner         string   `json:"scanner"`
-	Tags            []string `json:"tags"`
+	EvidenceSummary string `json:"-"`
+	Location        string `json:"location"`
+	// File is the structured source path for machine-readable scan output.
+	// Scanners continue to own Location; output projectors populate File on a
+	// detached copy so persistence and scanner-owned evidence stay unchanged.
+	File        string   `json:"file,omitempty"`
+	Remediation string   `json:"remediation"`
+	Scanner     string   `json:"scanner"`
+	Tags        []string `json:"tags"`
 	// RuleID is the stable detection id (from upstream JSON or synthesized).
 	RuleID string `json:"rule_id,omitempty"`
 	// Category groups findings for synthesis when RuleID is absent.
@@ -113,6 +117,29 @@ type Finding struct {
 	// whether rubric reconciliation adjusted the verdict. Freeform
 	// JSON; the correlator and the TUI both read it for explanations.
 	DecisionPath json.RawMessage `json:"decision_path,omitempty"`
+
+	// codeGuardProvenance is minted only while the in-process CodeGuard
+	// scanner evaluates a code-owned rule. It is deliberately private and is
+	// therefore neither accepted from nor emitted to scanner JSON. Callers may
+	// use CodeGuardBuiltinMatch to decide whether a finding carries that
+	// provenance; a decoded or manually assembled Finding always fails closed.
+	codeGuardProvenance codeGuardFindingProvenance
+}
+
+type codeGuardFindingProvenance struct {
+	builtinRuleID string
+}
+
+// CodeGuardBuiltinMatch reports whether this finding was produced by an exact
+// match of a code-owned builtin CodeGuard rule. Rule IDs and scanner names are
+// public metadata and are intentionally insufficient on their own.
+func (f Finding) CodeGuardBuiltinMatch(ruleID string) bool {
+	builtinRuleID := f.codeGuardProvenance.builtinRuleID
+	return builtinRuleID != "" &&
+		ruleID == builtinRuleID &&
+		f.ID == builtinRuleID &&
+		f.RuleID == builtinRuleID &&
+		f.Scanner == "codeguard"
 }
 
 type ScanResult struct {
@@ -129,6 +156,9 @@ type ScanResult struct {
 	Verdict    string        `json:"verdict,omitempty"`
 	ExitCode   int           `json:"exit_code,omitempty"`
 	ScanError  string        `json:"error,omitempty"`
+	// FindingLifecycle is populated by the canonical audit persistence path.
+	// It is process-local projection metadata, never part of scanner JSON.
+	FindingLifecycle *FindingLifecycleDelta `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).

@@ -214,7 +214,7 @@ runtime_action := "allow" if {
 		"scanner_overrides": map[string]interface{}{},
 		"first_party_allow_list": []map[string]interface{}{
 			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions", ".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin", ".config/amp/plugins/defenseclaw.ts"}},
-			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"}},
+			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills"}},
 		},
 	}
 
@@ -485,7 +485,6 @@ func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
 		{"openclaw_workspace_skill", "skill", "codeguard", "/tmp/.openclaw/workspace/skills/codeguard"},
 		{"zeptoclaw_skill", "skill", "codeguard", "/tmp/.zeptoclaw/skills/codeguard"},
 		{"claudecode_skill", "skill", "codeguard", "/tmp/.claude/skills/codeguard"},
-		{"codex_skill", "skill", "codeguard", "/tmp/.codex/skills/codeguard"},
 		{"openclaw_plugin", "plugin", "defenseclaw", "/tmp/.openclaw/extensions/defenseclaw"},
 		{"zeptoclaw_plugin", "plugin", "defenseclaw", "/tmp/.zeptoclaw/extensions/defenseclaw"},
 		{"claudecode_plugin", "plugin", "defenseclaw", "/tmp/.claude/extensions/defenseclaw"},
@@ -514,6 +513,32 @@ func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
 					tc.targetType, tc.targetName, tc.path, out.Verdict)
 			}
 		})
+	}
+}
+
+func TestEngine_CodexSharedSkillNamespaceRequiresScan(t *testing.T) {
+	dir := setupRegoDir(t)
+	eng, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		"/home/operator/.agents/skills/codeguard",
+		"/work/repo/.agents/skills/codeguard",
+		"/home/operator/.codex/skills/codeguard",
+	} {
+		out, err := eng.Evaluate(context.Background(), AdmissionInput{
+			TargetType: "skill",
+			TargetName: "codeguard",
+			Path:       path,
+		})
+		if err != nil {
+			t.Fatalf("Evaluate(%s): %v", path, err)
+		}
+		if out.Verdict != "scan" {
+			t.Errorf("verdict at %s: got %q, want scan", path, out.Verdict)
+		}
 	}
 }
 

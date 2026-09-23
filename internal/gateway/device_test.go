@@ -19,7 +19,7 @@ import (
 // because they relate to the device/auth repair flow.
 
 func TestRepairPairing(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
 	if err != nil {
 		t.Fatalf("create identity: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestRepairPairing(t *testing.T) {
 // version refuses to overwrite, snapshots the corrupt bytes for
 // forensics, and returns an error to the caller.
 func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
 	if err != nil {
 		t.Fatalf("create identity: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
 // rename so a crash cannot leave a half-written file, and the final
 // file is 0600 (no longer world-readable 0644).
 func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
 	if err != nil {
 		t.Fatalf("create identity: %v", err)
 	}

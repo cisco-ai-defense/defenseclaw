@@ -82,6 +82,9 @@
     "agent": {
       "$ref": "#/$defs/agent"
     },
+    "acp": {
+      "$ref": "#/$defs/acp"
+    },
     "inspect_llm": {
       "$ref": "#/$defs/inspectLLM"
     },
@@ -164,83 +167,113 @@
       "$ref": "#/$defs/managedIPC"
     },
     "routing": {
-      "type": "object",
-      "description": "Semantic routing configuration for model selection based on request signals.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "version": {
-          "type": "string"
-        },
-        "port": {
-          "type": "integer"
-        },
-        "algorithm": {
-          "type": "string"
-        },
-        "remote": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "embedding": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "llm_classifier": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "models": {
-          "type": "array"
-        },
-        "signals": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "decisions": {
-          "type": "array"
-        }
-      }
-    },
-    "training": {
-      "type": "object",
-      "description": "GRPO training pipeline configuration for model improvement.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "backend": {
-          "type": "string"
-        },
-        "models_dir": {
-          "type": "string"
-        },
-        "llama_server_port": {
-          "type": "integer"
-        },
-        "training_timeout_hours": {
-          "type": "integer"
-        },
-        "trace_retention_days": {
-          "type": "integer"
-        },
-        "base_models": {
-          "type": "array"
-        },
-        "categories": {
-          "type": "array"
-        }
-      }
+      "$ref": "#/$defs/routing"
     }
   },
   "$defs": {
+    "acp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/acpMode"
+        },
+        "default_profile": {
+          "$ref": "#/$defs/stableName"
+        },
+        "clients": {
+          "$ref": "#/$defs/acpBindings"
+        },
+        "agents": {
+          "$ref": "#/$defs/acpBindings"
+        },
+        "bindings": {
+          "$ref": "#/$defs/acpPairBindings"
+        },
+        "profiles": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "$ref": "#/$defs/stableName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/acpProfile"
+          }
+        }
+      }
+    },
+    "acpMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "action"
+      ]
+    },
+    "acpBindings": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/stableName"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/$defs/stableName"
+          }
+        }
+      }
+    },
+    "acpProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/acpMode"
+        },
+        "fail_mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "allowed_clients": {
+          "$ref": "#/$defs/acpNameList"
+        },
+        "allowed_agents": {
+          "$ref": "#/$defs/acpNameList"
+        },
+        "denied_methods": {
+          "$ref": "#/$defs/acpMethodList"
+        }
+      }
+    },
+    "acpNameList": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stableName"
+      }
+    },
+    "acpMethodList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
     "boundedString": {
       "type": "string",
       "maxLength": 4096
@@ -1589,7 +1622,7 @@
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -1876,6 +1909,11 @@
         "include_network_domains": {
           "type": "boolean"
         },
+        "include_user_email": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to attaching the end-user email address a connector reports to identity telemetry. Off by default: unlike the uid or SID it accompanies, the address identifies a person across systems and is emitted as plaintext."
+        },
         "lookup_model_provenance_online": {
           "type": "boolean",
           "default": false,
@@ -1907,6 +1945,77 @@
           "items": {
             "$ref": "#/$defs/pathString"
           }
+        },
+        "runtime": {
+          "$ref": "#/$defs/aiDiscoveryRuntime"
+        }
+      }
+    },
+    "aiDiscoveryRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AI Discovery runtime planes: what actually ran, alongside the surrounding block's inventory of what is present. Disabled by default. Reads process argv, which the inventory detector deliberately does not collect; argv is classified as content and governed by each destination's redaction profile. Environment variable values are never read.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "poll_interval_s": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "Sampling interval, and the window that distinguishes sustained inference from a momentary CPU spike."
+        },
+        "min_risk_to_report": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "planes": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "a",
+              "b",
+              "c"
+            ]
+          },
+          "description": "Empty means a and b. Plane c additionally requires enable_host_plane; selecting it without that opt-in is ignored."
+        },
+        "enable_host_plane": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicit opt-in for kernel process, file, and identity events. Every host-plane signal is gated on an AI agent appearing in the process lineage."
+        },
+        "dns_capture": {
+          "type": "boolean",
+          "default": false,
+          "description": "Passive DNS observation, so an egress peer is named from the answer the process received rather than inferred from an address. Requires elevated privilege."
+        },
+        "chain_window_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "How long a kill chain may take. A chain is a chain within a window, not over the lifetime of a long-running agent."
+        },
+        "sanctioned_endpoints": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          "description": "Gateway hostnames through which AI use is approved. Reaching one is inventory rather than alarm; going around one that exists is scored as a bypass."
+        },
+        "correlate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Join runtime observations against the inventory snapshot. Disabling removes the read; it does not make findings score as though the inventory disagreed."
         }
       }
     },
@@ -2191,8 +2300,7 @@
             "none",
             "sensitive",
             "content",
-            "strict",
-            "legacy-v7"
+            "strict"
           ]
         },
         {
@@ -2214,8 +2322,7 @@
                 "none",
                 "sensitive",
                 "content",
-                "strict",
-                "legacy-v7"
+                "strict"
               ]
             }
           }
@@ -2335,8 +2442,8 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 106751,
-          "default": 90,
-          "description": "Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "default": 7,
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -3344,6 +3451,246 @@
         "HIGH",
         "CRITICAL"
       ]
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "enabled"
+            ],
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "models"
+            ],
+            "properties": {
+              "models": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "0.3.0",
+            "v0.3.0"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "algorithm": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000
+            }
+          }
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "provider",
+              "model"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+              },
+              "base_url": {
+                "$ref": "#/$defs/boundedString"
+              },
+              "api_key_env": {
+                "$ref": "#/$defs/envName"
+              },
+              "capabilities": {
+                "$ref": "#/$defs/stringList"
+              }
+            }
+          }
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keywords": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "keywords"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4096,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    }
+                  },
+                  "operator": {
+                    "type": "string",
+                    "enum": [
+                      "AND",
+                      "OR",
+                      "and",
+                      "or"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "model_refs"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "priority": {
+                "type": "integer"
+              },
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "name"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "keyword",
+                        "KEYWORD"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
+                  }
+                }
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "AND",
+                  "OR",
+                  "and",
+                  "or"
+                ]
+              },
+              "model_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "algorithm": {
+                "$ref": "#/$defs/boundedString"
+              }
+            }
+          }
+        }
+      }
+    },
+    "acpPairName": {
+      "type": "string",
+      "description": "Per-pair binding key, \"<client>/<agent>\" — the identifier `defenseclaw acp status` prints.",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "acpPairBindings": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/acpPairName"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/$defs/stableName"
+          }
+        }
+      }
     }
   }
 }

@@ -49,8 +49,8 @@ from defenseclaw.observability.v8_yaml import (
     prepare_v8_yaml_write,
 )
 
-ASSIGNABLE_BUILT_IN_PROFILES: Final = tuple(profile for profile in BUILT_IN_PROFILES if profile != "legacy-v7")
-CUSTOM_PROFILE_BASES: Final = tuple(profile for profile in BUILT_IN_PROFILES if profile not in {"none", "legacy-v7"})
+ASSIGNABLE_BUILT_IN_PROFILES: Final = BUILT_IN_PROFILES
+CUSTOM_PROFILE_BASES: Final = tuple(profile for profile in BUILT_IN_PROFILES if profile != "none")
 CONTENT_SIGNALS: Final = frozenset({"logs", "traces"})
 MANAGED_DESTINATION_NAME: Final = "managed-enterprise-ai-defense"
 LOCAL_DESTINATION_NAME: Final = "local-sqlite"
@@ -635,8 +635,6 @@ def _effective_data_dir(source: Mapping[str, Any], explicit: str | None) -> str:
 
 
 def _require_assignable_profile(source: Mapping[str, Any], profile: str) -> None:
-    if profile == "legacy-v7":
-        raise ValueError("legacy-v7 is migration-only and cannot be newly assigned")
     if profile not in redaction_profile_names(source):
         raise ValueError(f"unknown redaction profile {profile!r}")
 

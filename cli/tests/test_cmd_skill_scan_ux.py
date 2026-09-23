@@ -44,6 +44,7 @@ import sys
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -293,6 +294,28 @@ class TestScanAllUX(_SkillScanUXBase):
                 f.write(f"# {n}\n")
         return root
 
+    @patch("defenseclaw.commands.resolve_list_connectors", return_value=["openclaw"])
+    @patch(
+        "defenseclaw.commands.cmd_skill._build_skill_scanner",
+        side_effect=RuntimeError("original scan failure"),
+    )
+    def test_scan_all_json_failure_uses_safe_legacy_connector_label(
+        self, mock_build, _mock_resolve,
+    ) -> None:
+        original_cfg = self.app.cfg
+        self.app.cfg = SimpleNamespace()
+        try:
+            result = self.invoke(["scan", "--all", "--json"])
+        finally:
+            self.app.cfg = original_cfg
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload[0]["target"], "connector:openclaw")
+        self.assertEqual(payload[0]["connector"], "openclaw")
+        self.assertIn("original scan failure", payload[0]["error"])
+        mock_build.assert_called_once()
+
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_preamble_and_summary(self, mock_cls, _mock_list) -> None:
@@ -369,10 +392,15 @@ class TestScanAllUX(_SkillScanUXBase):
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_scan_all_filesystem_fallback_expands_codex_system_children(
+    def test_scan_all_filesystem_fallback_excludes_codex_system_children(
         self, mock_cls, _mock_list,
     ) -> None:
-        root = self._make_skills_dir(["operator-skill"])
+        codex_home = os.path.join(self.tmp_dir, "codex-home")
+        root = os.path.join(codex_home, "skills")
+        operator_path = os.path.join(root, "operator-skill")
+        os.makedirs(operator_path, exist_ok=True)
+        with open(os.path.join(operator_path, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# operator-skill\n")
         system_root = os.path.join(root, ".system")
         child_paths = [
             os.path.join(system_root, "imagegen"),
@@ -391,16 +419,45 @@ class TestScanAllUX(_SkillScanUXBase):
         mock_scanner.scan.side_effect = lambda path: self._clean_result(path)
         mock_cls.return_value = mock_scanner
 
-        result = self.invoke(["scan", "--all", "--connector", "codex"])
+        with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
+            result = self.invoke(["scan", "--all", "--connector", "codex"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         scanned = [call.args[0] for call in mock_scanner.scan.call_args_list]
+        self.assertEqual(scanned, [os.path.join(root, "operator-skill")])
+        self.assertNotIn(system_root, scanned)
+        for child_path in child_paths:
+            self.assertNotIn(child_path, scanned)
+        self.assertIn("Scanning 1 skill on codex", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_scans_arbitrary_system_children(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["operator-skill"])
+        system_child = os.path.join(root, ".system", "untrusted-child")
+        os.makedirs(system_child, exist_ok=True)
+        with open(os.path.join(system_child, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# untrusted-child\n")
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_cls.return_value.scan.side_effect = lambda path: self._clean_result(path)
+
+        with patch.dict(
+            os.environ,
+            {"CODEX_HOME": os.path.join(self.tmp_dir, "different-codex-home")},
+        ):
+            result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanned = [call.args[0] for call in mock_cls.return_value.scan.call_args_list]
         self.assertEqual(
             scanned,
-            [os.path.join(root, "operator-skill"), *child_paths],
+            [os.path.join(root, "operator-skill"), system_child],
         )
-        self.assertNotIn(system_root, scanned)
-        self.assertIn("Scanning 3 skills on codex", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -431,37 +488,37 @@ class TestScanAllUX(_SkillScanUXBase):
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scoped_empty_connector_names_connector_and_no_dirs(self, mock_cls) -> None:
         self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
-        self.app.cfg.active_connectors = lambda: ["codex", "windsurf"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "omnigent"]  # type: ignore[method-assign]
         self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
             "codex": [self.tmp_dir],
-            "windsurf": [],
+            "omnigent": [],
         }.get(connector, [self.tmp_dir])
 
-        result = self.invoke(["scan", "--connector", "windsurf"])
+        result = self.invoke(["scan", "--connector", "omnigent"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No skills found for connector='windsurf'", result.output)
+        self.assertIn("No skills found for connector='omnigent'", result.output)
         self.assertIn(
-            "(no skill directories configured for connector='windsurf')",
+            "(no skill directories configured for connector='omnigent')",
             result.output,
         )
         mock_cls.return_value.scan.assert_not_called()
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scoped_empty_connector_lists_checked_dirs(self, mock_cls) -> None:
-        empty = os.path.join(self.tmp_dir, "windsurf-skills")
+        empty = os.path.join(self.tmp_dir, "omnigent-skills")
         os.makedirs(empty, exist_ok=True)
         self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
-        self.app.cfg.active_connectors = lambda: ["codex", "windsurf"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "omnigent"]  # type: ignore[method-assign]
         self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
             "codex": [self.tmp_dir],
-            "windsurf": [empty],
+            "omnigent": [empty],
         }.get(connector, [self.tmp_dir])
 
-        result = self.invoke(["scan", "--connector", "windsurf"])
+        result = self.invoke(["scan", "--connector", "omnigent"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No skills found for connector='windsurf'", result.output)
+        self.assertIn("No skills found for connector='omnigent'", result.output)
         self.assertIn(empty, result.output)
         mock_cls.return_value.scan.assert_not_called()
 
@@ -491,6 +548,146 @@ class TestScanAllUX(_SkillScanUXBase):
             os.path.join(root, "beta"),
         ])
         self.assertEqual({row["connector"] for row in payload}, {"codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_json_mixed_failure_is_emitted_before_nonzero_exit(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+
+        def scan_impl(path: str) -> ScanResult:
+            if os.path.basename(path) == "alpha":
+                return self._clean_result(path)
+            raise RuntimeError("beta scanner failed")
+
+        mock_cls.return_value.scan.side_effect = scan_impl
+
+        result = self.invoke(["scan", "--all", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(payload[0]["target"], os.path.join(root, "alpha"))
+        self.assertEqual(payload[1]["target"], os.path.join(root, "beta"))
+        self.assertIn("beta scanner failed", payload[1]["error"])
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_json_system_exit_preserves_prior_rows_and_valid_stdout(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+
+        def scan_impl(path: str) -> ScanResult:
+            if os.path.basename(path) == "alpha":
+                return self._clean_result(path)
+            print("scanner bootstrap chatter")
+            raise SystemExit(23)
+
+        mock_cls.return_value.scan.side_effect = scan_impl
+
+        result = self.invoke(["scan", "--all", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(payload[0]["target"], os.path.join(root, "alpha"))
+        self.assertEqual(payload[1]["target"], os.path.join(root, "beta"))
+        self.assertIn("scanner exited with status 23", payload[1]["error"])
+        self.assertNotIn("scanner bootstrap chatter", result.stdout)
+        self.assertIn("scanner bootstrap chatter", result.stderr)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_action_json_system_exit_preserves_prior_rows(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+
+        def scan_impl(path: str) -> ScanResult:
+            if os.path.basename(path) == "alpha":
+                return self._clean_result(path)
+            raise SystemExit(23)
+
+        mock_cls.return_value.scan.side_effect = scan_impl
+
+        result = self.invoke(["scan", "--all", "--action", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            [row["target"] for row in payload],
+            [os.path.join(root, "alpha"), os.path.join(root, "beta")],
+        )
+        self.assertIn("scanner exited with status 23", payload[1]["error"])
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_non_json_preserves_scanner_system_exit(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["alpha"])
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        mock_cls.return_value.scan.side_effect = SystemExit(23)
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 23, result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_json_telemetry_failure_preserves_batch_before_nonzero_exit(
+        self, mock_cls, _mock_list,
+    ) -> None:
+        root = self._make_skills_dir(["alpha", "beta"])
+        targets = [os.path.join(root, name) for name in ("alpha", "beta")]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        self.app.logger.log_scan = MagicMock(side_effect=RuntimeError("admission rejected"))
+        mock_cls.return_value.scan.side_effect = self._clean_result
+
+        result = self.invoke(["scan", "--all", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual([row["target"] for row in payload], targets)
+        self.assertEqual(
+            [row["telemetry_error"] for row in payload],
+            ["admission rejected", "admission rejected"],
+        )
+        self.assertTrue(all(row["findings"] == [] for row in payload))
+        self.assertEqual(self.app.logger.log_scan.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
+    def test_scan_all_remote_json_telemetry_failure_is_nonzero(
+        self, mock_remote,
+    ) -> None:
+        row = {
+            "scanner": "skill-scanner",
+            "target": "/remote/alpha",
+            "connector": "codex",
+            "findings": [],
+            "telemetry_error": "remote admission rejected",
+        }
+        mock_remote.return_value = [row]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--remote", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(json.loads(result.stdout), [row])
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

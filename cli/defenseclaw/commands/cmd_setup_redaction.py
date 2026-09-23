@@ -400,7 +400,6 @@ def profile_list_cmd(app: AppContext, emit_json: bool) -> None:
     else:
         for value in profiles:
             click.echo(value)
-        click.echo("legacy-v7 (migration-only, read-only)")
 
 
 @profile_group.command("show")

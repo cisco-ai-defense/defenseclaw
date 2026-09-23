@@ -20,15 +20,19 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 )
 
 var (
 	scanOutputJSON  bool
 	scanPrintSchema bool
+	scanNoRedact    bool
 )
 
 var scanCmd = &cobra.Command{
@@ -52,12 +56,16 @@ YAML, JSON, XML, C/C++, and Rust files.`,
 
 func init() {
 	scanCodeCmd.Flags().BoolVar(&scanOutputJSON, "json", false, "Output results as JSON (v7 scan-result contract)")
+	scanCodeCmd.Flags().BoolVar(&scanNoRedact, "no-redact", false, "Emit raw finding text to local JSON stdout (requires --json)")
 	scanCodeCmd.Flags().BoolVar(&scanPrintSchema, "schema", false, "Print scan-result.json schema (for downstream validators) and exit")
 	scanCmd.AddCommand(scanCodeCmd)
 	rootCmd.AddCommand(scanCmd)
 }
 
 func runScanCode(_ *cobra.Command, args []string) error {
+	if scanNoRedact && !scanOutputJSON {
+		return fmt.Errorf("--no-redact requires --json")
+	}
 	if scanPrintSchema {
 		if _, err := os.Stdout.Write(scanResultSchemaJSON); err != nil {
 			return err
@@ -66,7 +74,10 @@ func runScanCode(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	target := args[0]
+	target, err := filepath.Abs(args[0])
+	if err != nil {
+		return fmt.Errorf("resolve scan target: %w", err)
+	}
 
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("target not found: %w", err)
@@ -82,12 +93,39 @@ func runScanCode(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("code scan failed: %w", err)
 	}
 
+	var redactor *scanoutput.Redactor
+	if scanNeedsRedactor(auditLog != nil) {
+		dataDir := ""
+		if cfg != nil {
+			dataDir = strings.TrimSpace(cfg.DataDir)
+		}
+		if dataDir == "" {
+			redactor, err = scanoutput.NewEphemeralRedactor()
+		} else {
+			redactor, err = scanoutput.LoadRedactor(dataDir)
+		}
+		if err != nil {
+			return fmt.Errorf("initialize scan output redaction: %w", err)
+		}
+	}
+
 	if auditLog != nil {
-		_ = auditLog.LogScan(result)
+		// Persistence sanitizes sensitive findings in place. Commit a detached
+		// copy so --no-redact remains an explicit local-output choice while the
+		// forensic database always receives the protected projection.
+		persisted := scanoutput.Clone(result)
+		if err := auditLog.PersistStandaloneScan(persisted, redactor); err != nil {
+			return fmt.Errorf("persist code scan: %w", err)
+		}
+		result.ScanID = persisted.ScanID
 	}
 
 	if scanOutputJSON {
-		b, err := marshalScanResultV7(result, appVersion)
+		options := scanResultV7Options{Raw: scanNoRedact, Redactor: redactor}
+		if scanNoRedact {
+			_, _ = fmt.Fprintln(os.Stderr, "WARNING: --no-redact exposes raw local scan paths and finding text")
+		}
+		b, err := marshalScanResultV7WithOptions(result, appVersion, options)
 		if err != nil {
 			return err
 		}
@@ -101,6 +139,10 @@ func runScanCode(_ *cobra.Command, args []string) error {
 
 	printCodeScanResults(result)
 	return nil
+}
+
+func scanNeedsRedactor(persistProtectedCopy bool) bool {
+	return persistProtectedCopy || (scanOutputJSON && !scanNoRedact)
 }
 
 func printCodeScanResults(result *scanner.ScanResult) {

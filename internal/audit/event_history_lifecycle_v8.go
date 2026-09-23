@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
 
 const lifecycleProjectionProducer = "gateway.hook.lifecycle"
@@ -217,6 +216,13 @@ func validLifecycleProjectionID(value string, required bool) bool {
 	return true
 }
 
+// retiredLegacyV7ProfileName is the redaction profile that pre-v8 rows were
+// written under. The profile itself is gone, but rows recorded while it was
+// selected are still on disk and their identifiers are v7 placeholder strings
+// rather than canonical values, so the lifecycle projection must keep
+// rejecting them by stored name.
+const retiredLegacyV7ProfileName = "legacy-v7"
+
 func decodeLifecycleProjection(
 	row storedLifecycleProjection,
 	query LifecycleProjectionQuery,
@@ -225,7 +231,7 @@ func decodeLifecycleProjection(
 		row.bucketCatalogVersion != observability.CurrentBucketCatalogVersion ||
 		row.source != string(observability.SourceConnector) || row.signal != string(observability.SignalLogs) ||
 		row.connector != query.Connector || row.sessionID != query.SessionID || row.agentID != query.AgentID ||
-		row.redactionProfile == string(observabilityredaction.ProfileLegacyV7) ||
+		row.redactionProfile == retiredLegacyV7ProfileName ||
 		!validLifecycleBucketEvent(row.bucket, row.eventName) {
 		return LifecycleProjection{}, false
 	}

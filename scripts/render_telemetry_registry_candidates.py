@@ -1773,7 +1773,7 @@ def _validate_v7_exporter_selection_materialized(
     if (
         selection["schema_version"] != 1
         or selection["source_config_version"] != 7
-        or selection["projection_profile"] != "legacy-v7"
+        or selection["projection_profile"] != "v7-compatible"
         or selection["local_observability"] != {"complete": True, "profile_id": "local-observability-v1"}
     ):
         raise CandidateRenderError("materialized v7 exporter selection metadata is invalid")

@@ -9,8 +9,9 @@
     Produces DefenseClawSetup-x64.exe from already-built release artifacts:
     the GoReleaser-shaped Windows gateway zip and the DefenseClaw Python wheel.
     The output is a native Windows executable that embeds a complete offline
-    payload: gateway zip, wheel, CPython embeddable runtime, locked
-    site-packages tree, and a small native CLI launcher.
+    payload: gateway zip, wheel, CPython embeddable runtime, app-local
+    Microsoft Visual C++ runtime closure, locked site-packages tree, and a
+    small native CLI launcher.
 
     Local/PR builds are unsigned and clearly marked. Production release signing
     is enabled only when real Authenticode credentials are provided via
@@ -23,22 +24,62 @@ param(
     [string]$OutRoot = $DistRoot,
     [string]$Version = "",
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-windows-installer-build"),
-    [ValidateSet('oss', 'managed-enterprise')][string]$DistributionFlavor = 'oss',
-    [switch]$SkipSigning
+    [ValidateSet('oss')][string]$DistributionFlavor = 'oss',
+    [switch]$SkipSigning,
+    [switch]$SkipCommitCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.13.14"
+$PythonVersion = "3.13.15"
 $PythonTargetVersion = "3.13"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
+$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"
+$VCRuntimeVersion = '14.42.34438'
+$VCRuntimeSourceName = 'Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
+$VCRuntimeSourceUrl = 'https://download.visualstudio.microsoft.com/download/pr/53b2bf3d-716a-455a-bcc0-39cfb7447fe0/49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
+$VCRuntimeSourceSha256 = '49D70DB282F1C74D456206501120134F021C2BC3AAABB41577FE18DEA35D1454'
+$VCRuntimeSourceLength = 3222320L
+$VCRuntimeArchiveName = "microsoft-vc-runtime-$VCRuntimeVersion-x64.zip"
+$VCRuntimeRetailPrefix = 'Contents/VC/Redist/MSVC/14.42.34433/x64/Microsoft.VC143.CRT/'
+$VCRuntimeRetailFiles = [ordered]@{
+    'concrt140.dll' = '1CCCD0F5553D6C4EAF452C5524B4312DB7EDB206C5D06FDCB6052E9586F6C611'
+    'msvcp140_1.dll' = '576D2AB235E32ACC129EDA78A3B9A3D3E78B0C97A01940D962CB8502ACD030D1'
+    'msvcp140_2.dll' = '9C9E06D56ADD83E08F0C530DE6F0A82C5BFBEE2B6FFA8B71E7B0446EC08E8970'
+    'msvcp140_atomic_wait.dll' = '5EC85A18501AF700E3EE748DAED242B8E33040F090371A2759217CB71FF26469'
+    'msvcp140_codecvt_ids.dll' = 'A12581D37F291121346E8BA2FDFEC64A3D72C07AEC6350EA0CD2F7AAC2F750A4'
+    'msvcp140.dll' = 'B99EB28A471311113F5C4109CB3C463F39CFD9BDB3B07F706204DEDDDB4516A1'
+    'vccorlib140.dll' = 'DCA072EE3C9F5DAE8C0DE6B432600DD766C5D851A1A14A572185ED48EBCF37AA'
+    'vcruntime140_1.dll' = '6A99BC0128E0C7D6CBBF615FCC26909565E17D4CA3451B97F8987F9C6ACBC6C8'
+    'vcruntime140_threads.dll' = 'FCF24D7FDEA131EC60E59E281FE4CEBD0B5F54A49180C40BBA43F859F7BC47F3'
+    'vcruntime140.dll' = '052AD6A20D375957E82AA6A3C441EA548D89BE0981516CA7EB306E063D5027F4'
+}
+$VCRuntimeClosureFiles = @('msvcp140.dll', 'msvcp140_1.dll')
+$VCRuntimeSignerThumbprintSha256 = '7698e1de0131245a5ef86a3df9bc7c4de048b4684bdd0bc7891c3643d7f8b52e'
+$VCRuntimeTimestampSignerThumbprintSha256 = '8d2e0d6834085b1e2b12b7035ea5d70ac8c2bb120eb5d9eb149fd05e316cca39'
 # Force the runtime owner to review the pinned binary at least quarterly. A
 # release after this deadline must deliberately move the deadline (and normally
 # the version/hash) after checking Python's current security release line.
-$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-09-10T00:00:00Z')
+#
+# The deadline is the pinned release's own date plus three months, so it tracks
+# the pin rather than the date someone happened to look.
+#
+# Review log -- keep the most recent entry, and say what was checked:
+#
+#   2026-09-10, 3.13.14 -> 3.13.15 (released 2026-08-05, current 3.13 security
+#   release; no 3.13.16 exists). Artifact verified beyond its digest: the
+#   sigstore bundle published beside it validates against certificate identity
+#   thomas@python.org (the 3.13 release manager) via accounts.google.com, with
+#   the Rekor inclusion proof checked. 3.13.15 carries ten Security entries,
+#   two of which matter directly to this product because the CLI extracts
+#   archives: gh-151558, a bypass of the tarfile data/tar extraction filters
+#   letting a crafted archive create a symlink outside the destination, and
+#   gh-151987, extract() not applying the filter to a link target. Also
+#   gh-150743 (unbounded http.client trailer/1xx reads), gh-153030 (quadratic
+#   html.parser DoS) and libexpat 2.8.2. Next review 2026-11-05.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-11-05T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'
@@ -173,6 +214,75 @@ function Copy-RequiredFile([string]$Source, [string]$Destination) {
     }
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Destination)) | Out-Null
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+
+function Expand-PinnedVCRuntime([string]$SourceArchive, [string]$DestinationRoot) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Directory]::CreateDirectory($DestinationRoot) | Out-Null
+    $archive = [IO.Compression.ZipFile]::OpenRead($SourceArchive)
+    try {
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $retail = @{}
+        foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            if (-not $seen.Add($name)) {
+                throw "Pinned VC++ runtime source has a duplicate Windows path: $name"
+            }
+            if ([IO.Path]::IsPathRooted($name) -or $name -eq '..' -or
+                $name.StartsWith('../') -or $name.Contains('/../') -or
+                (($entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000) {
+                throw "Pinned VC++ runtime source has an unsafe member: $name"
+            }
+            if (-not $name.StartsWith($VCRuntimeRetailPrefix, [StringComparison]::Ordinal)) {
+                continue
+            }
+            $relative = $name.Substring($VCRuntimeRetailPrefix.Length)
+            if (-not $relative -or $relative.Contains('/') -or -not $entry.Name) {
+                throw "Pinned VC++ runtime source has an invalid retail member: $name"
+            }
+            $retail[$relative] = $entry
+        }
+        $expectedRetail = @($VCRuntimeRetailFiles.Keys | Sort-Object)
+        $actualRetail = @($retail.Keys | Sort-Object)
+        if (Compare-Object -ReferenceObject $expectedRetail -DifferenceObject $actualRetail) {
+            throw 'Pinned VC++ runtime source retail x64 member set drifted.'
+        }
+        foreach ($name in $expectedRetail) {
+            $entry = $retail[$name]
+            $target = Join-Path $DestinationRoot $name
+            $source = $entry.Open()
+            $destination = [IO.File]::Create($target)
+            try { $source.CopyTo($destination) } finally { $destination.Dispose(); $source.Dispose() }
+            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -cne $VCRuntimeRetailFiles[$name]) {
+                throw "Pinned VC++ runtime retail file hash drifted: $name"
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    foreach ($name in $VCRuntimeClosureFiles) {
+        $path = Join-Path $DestinationRoot $name
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.VersionInfo.FileVersion -cne "$VCRuntimeVersion.0") {
+            throw "Pinned VC++ runtime identity or Authenticode validation failed: $name"
+        }
+        Get-DefenseClawAuthenticodeEvidence `
+            -Path $path `
+            -InstalledPath "runtime/python/$name" `
+            -SbomFileName "./expanded/vc-runtime/$name" `
+            -Policy 'pinned-microsoft-vc-runtime' `
+            -ExpectedStatus 'Valid' `
+            -ExpectedPublisher 'Microsoft Windows Software Compatibility Publisher' `
+            -ExpectedSignatureType 'Authenticode' `
+            -TimestampRequired $true `
+            -ExpectedSignerThumbprintSha256 $VCRuntimeSignerThumbprintSha256 `
+            -ExpectedTimestampSignerThumbprintSha256 $VCRuntimeTimestampSignerThumbprintSha256 | Out-Null
+    }
+    foreach ($name in @($VCRuntimeRetailFiles.Keys)) {
+        if ($name -notin $VCRuntimeClosureFiles) {
+            Remove-Item -LiteralPath (Join-Path $DestinationRoot $name) -Force
+        }
+    }
 }
 
 function Write-ZipFromDirectory(
@@ -581,7 +691,7 @@ function Assert-DefenseClawWheelV8Resources(
 
 function Set-WindowsExecutableResource(
     [string]$Executable,
-    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
     [switch]$VerifyOnly
 ) {
     $arguments = @(
@@ -754,11 +864,11 @@ foreach ($requiredSetupInput in @(
 }
 . $WindowsAuthenticodeHelper
 
-if ($DistributionFlavor -eq 'managed-enterprise') {
-    throw @'
-The public Windows installer builder cannot produce a managed-enterprise artifact. A managed Windows release requires the private CMID provider overlay, its pinned private module version, and authorized dependency credentials; only the macOS bundle pipeline currently implements that overlay contract. Refusing to compile the public cmid-tagged stub.
-'@
-}
+# This builder is intentionally restricted to the ordinary per-user product.
+# A CMID-enabled gateway does not turn its asInvoker/current-user transaction
+# into a machine-wide service installer. Managed-enterprise releases must use
+# scripts/build-windows-enterprise-installer.ps1 and the separate elevated
+# DefenseClawSetup-Enterprise-x64.exe entry point.
 $sourceCommit = Get-GitSourceCommit $repoRoot
 $sourceDateEpoch = Get-GitSourceEpoch $repoRoot $sourceCommit
 
@@ -768,6 +878,40 @@ $state = Resolve-FullPath $StateRoot
 [IO.Directory]::CreateDirectory($dist) | Out-Null
 [IO.Directory]::CreateDirectory($out) | Out-Null
 [IO.Directory]::CreateDirectory($state) | Out-Null
+
+# Managed-enterprise gateway zips are produced by
+# packaging/scripts/build-managed-windows-bundle.sh (on macOS), which drops a
+# gateway-source-commit.txt sidecar in -DistRoot recording the defenseclaw
+# commit the gateway was cross-built from. This script bakes the local git
+# HEAD into manifest.source_commit and the provenance record, so a Windows
+# box on a different commit would silently ship a setup.exe whose gateway
+# metadata points at the wrong sha — no other check catches that. Cross-
+# check when the sidecar is present (OSS builds do not ship one; nothing
+# changes for them). Bypass with -SkipCommitCheck for local dev.
+$commitSidecar = Join-Path $dist 'gateway-source-commit.txt'
+if ($SkipCommitCheck -and (Test-Path -LiteralPath $commitSidecar -PathType Leaf)) {
+    # Make the bypass visible in the build log so a mismatched source_commit
+    # in the shipped manifest/provenance is not silent.
+    Write-Warning "-SkipCommitCheck bypassing gateway-source-commit.txt guard; manifest.source_commit may not match the gateway zip's build commit."
+}
+if ((Test-Path -LiteralPath $commitSidecar -PathType Leaf) -and -not $SkipCommitCheck) {
+    $expectedCommit = (Get-Content -LiteralPath $commitSidecar -Raw -Encoding UTF8).Trim().ToLowerInvariant()
+    if ($expectedCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "gateway-source-commit.txt does not contain a 40-char lowercase git OID: $expectedCommit"
+    }
+    if ($sourceCommit -ne $expectedCommit) {
+        throw @"
+build-windows-installer: local defenseclaw HEAD does not match the gateway's source commit.
+
+  gateway built from: $expectedCommit
+  local HEAD:         $sourceCommit
+
+Check the same commit out (git -C $repoRoot checkout $expectedCommit) before
+running the installer, or re-run with -SkipCommitCheck if you accept a
+mismatched source_commit in the manifest / provenance.
+"@
+    }
+}
 
 if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
@@ -797,7 +941,7 @@ try {
 $gatewayArchive = [IO.Compression.ZipFile]::OpenRead($gatewayZip)
 try {
     $entryNames = @($gatewayArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('defenseclaw.exe', 'defenseclaw-hook.exe')) {
+    foreach ($required in @('defenseclaw.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
         if ($required -notin $entryNames) { throw "Gateway archive is missing $required." }
     }
 } finally { $gatewayArchive.Dispose() }
@@ -862,6 +1006,14 @@ if (-not (Test-Path -LiteralPath $pythonZip)) {
 }
 if ((Get-FileHash -LiteralPath $pythonZip -Algorithm SHA256).Hash -ne $PythonEmbedSha256) {
     throw "Pinned CPython embeddable runtime hash mismatch for $PythonEmbedName"
+}
+$vcRuntimeSource = Join-Path $downloadDir $VCRuntimeSourceName
+if (-not (Test-Path -LiteralPath $vcRuntimeSource)) {
+    Invoke-WebRequest -Uri $VCRuntimeSourceUrl -OutFile $vcRuntimeSource
+}
+if ((Get-Item -LiteralPath $vcRuntimeSource -Force).Length -ne $VCRuntimeSourceLength -or
+    (Get-FileHash -LiteralPath $vcRuntimeSource -Algorithm SHA256).Hash -cne $VCRuntimeSourceSha256) {
+    throw "Pinned Microsoft VC++ runtime source identity mismatch for $VCRuntimeSourceName"
 }
 $winUnicodeSource = Join-Path $downloadDir $WinUnicodeSourceName
 if (-not (Test-Path -LiteralPath $winUnicodeSource)) {
@@ -933,6 +1085,12 @@ Invoke-CheckedProcess "uv" @(
 
 $validationRuntime = Join-Path $build 'validation-runtime'
 Expand-Archive -LiteralPath $pythonZip -DestinationPath $validationRuntime -Force
+$vcRuntimeRoot = Join-Path $build 'vc-runtime'
+[IO.Directory]::CreateDirectory($vcRuntimeRoot) | Out-Null
+Expand-PinnedVCRuntime $vcRuntimeSource $vcRuntimeRoot
+foreach ($name in $VCRuntimeClosureFiles) {
+    Copy-RequiredFile (Join-Path $vcRuntimeRoot $name) (Join-Path $validationRuntime $name)
+}
 $pth = @(Get-ChildItem -LiteralPath $validationRuntime -Filter 'python*._pth' -File)
 if ($pth.Count -ne 1) { throw 'Pinned CPython runtime did not contain exactly one _pth file.' }
 $stdlibZip = [IO.Path]::GetFileNameWithoutExtension($pth[0].Name) + '.zip'
@@ -959,7 +1117,10 @@ Invoke-CheckedProcess $validationPython @(
 )
 $dependencyCheck = @'
 import importlib.metadata as metadata
+import ctypes
 import platform
+import sys
+from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
@@ -996,12 +1157,28 @@ if not magika_result.ok or not magika_result.output.is_text:
 findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
 if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
     raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+msvcp = kernel32.GetModuleHandleW('msvcp140.dll')
+if not msvcp:
+    raise SystemExit('Windows CPython dependency probe did not load msvcp140.dll')
+buffer = ctypes.create_unicode_buffer(32768)
+if not kernel32.GetModuleFileNameW(msvcp, buffer, len(buffer)):
+    raise SystemExit('Windows CPython dependency probe could not resolve loaded msvcp140.dll')
+expected_msvcp = Path(sys.executable).resolve().parent / 'msvcp140.dll'
+if Path(buffer.value).resolve() != expected_msvcp:
+    raise SystemExit(f'Windows CPython dependency probe escaped app-local VC++ runtime: {buffer.value}')
 print(f'validated {len(installed)} embedded distributions')
 '@
 Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck)
 
 $siteZip = Join-Path $payload "site-packages.zip"
 Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot
+$vcRuntimeArchive = Join-Path $payload $VCRuntimeArchiveName
+Write-ZipFromDirectory $vcRuntimeRoot $vcRuntimeArchive $validationPython $sourceDateEpoch $reproducibilityRoot
 
 $launcher = Join-Path $payload "defenseclaw-launcher.exe"
 Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot 'launcher'
@@ -1023,8 +1200,10 @@ Remove-SafeTree $gatewayPayloadDir $build
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
+$acpBinary = Join-Path $gatewayPayloadDir 'defenseclaw-acp.exe'
 Set-WindowsExecutableResource $gatewayBinary 'gateway' -VerifyOnly
 Set-WindowsExecutableResource $hookBinary 'hook' -VerifyOnly
+Set-WindowsExecutableResource $acpBinary 'acp-guard' -VerifyOnly
 . $WindowsBinaryIdentityHelper
 Assert-DefenseClawBinaryIdentity `
     -Path $gatewayBinary -ExpectedName 'defenseclaw-gateway' `
@@ -1032,14 +1211,18 @@ Assert-DefenseClawBinaryIdentity `
 Assert-DefenseClawBinaryIdentity `
     -Path $hookBinary -ExpectedName 'defenseclaw-hook' `
     -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
+Assert-DefenseClawBinaryIdentity `
+    -Path $acpBinary -ExpectedName 'defenseclaw-acp' `
+    -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
 $payloadSigned = Set-FileSignaturesIfConfigured @(
-    $launcher, $startupLauncher, $gatewayBinary, $hookBinary, $hookLauncher
+    $launcher, $startupLauncher, $gatewayBinary, $hookBinary, $acpBinary, $hookLauncher
 ) $build
 foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
     [pscustomobject]@{ Path = $startupLauncher; Component = 'startup' },
     [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
     [pscustomobject]@{ Path = $hookBinary; Component = 'hook' },
+    [pscustomobject]@{ Path = $acpBinary; Component = 'acp-guard' },
     [pscustomobject]@{ Path = $hookLauncher; Component = 'hook' }
 )) {
     Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
@@ -1051,6 +1234,7 @@ function Add-PayloadAuthenticodeEvidence(
     [string]$SourcePath,
     [string]$SbomFileName,
     [switch]$DefenseClawProduct,
+    [switch]$MicrosoftVCRuntime,
     [switch]$DigestOnlyUpstream
 ) {
     $normalizedInstalledPath = $InstalledPath.Replace('\', '/')
@@ -1067,6 +1251,14 @@ function Add-PayloadAuthenticodeEvidence(
         $arguments.ExpectedStatus = if ($payloadSigned) { 'Valid' } else { 'NotSigned' }
         $arguments.ExpectedPublisher = if ($payloadSigned) { 'Cisco Systems, Inc.' } else { '' }
         $arguments.TimestampRequired = [bool]$payloadSigned
+    } elseif ($MicrosoftVCRuntime) {
+        $arguments.Policy = 'pinned-microsoft-vc-runtime'
+        $arguments.ExpectedStatus = 'Valid'
+        $arguments.ExpectedPublisher = 'Microsoft Windows Software Compatibility Publisher'
+        $arguments.ExpectedSignatureType = 'Authenticode'
+        $arguments.TimestampRequired = $true
+        $arguments.ExpectedSignerThumbprintSha256 = $VCRuntimeSignerThumbprintSha256
+        $arguments.ExpectedTimestampSignerThumbprintSha256 = $VCRuntimeTimestampSignerThumbprintSha256
     } elseif ($DigestOnlyUpstream) {
         $arguments.Policy = 'digest-only-upstream'
         $arguments.ExpectedStatus = 'NotSigned'
@@ -1084,6 +1276,7 @@ foreach ($mapping in @(
     [pscustomobject]@{ Installed = 'bin/defenseclaw-startup.exe'; Source = $startupLauncher; Sbom = './payload/defenseclaw-startup.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-gateway.exe'; Source = $gatewayBinary; Sbom = './expanded/gateway/defenseclaw.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-acp.exe'; Source = $acpBinary; Sbom = './expanded/gateway/defenseclaw-acp.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-hook-launcher.exe'; Source = $hookLauncher; Sbom = './payload/defenseclaw-hook-launcher.exe' }
 )) {
     Add-PayloadAuthenticodeEvidence $mapping.Installed $mapping.Source $mapping.Sbom -DefenseClawProduct
@@ -1096,7 +1289,17 @@ foreach ($file in Get-ChildItem -LiteralPath $validationRuntime -File -Recurse |
     if (Test-PathWithin $file.FullName $validationSite) { continue }
     if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
     $relative = [IO.Path]::GetRelativePath($validationRuntime, $file.FullName).Replace('\', '/')
-    Add-PayloadAuthenticodeEvidence "runtime/python/$relative" $file.FullName "./expanded/python/$relative"
+    $sbomFileName = if ($relative -in $VCRuntimeClosureFiles) {
+        "./expanded/vc-runtime/$relative"
+    } else {
+        "./expanded/python/$relative"
+    }
+    if ($relative -in $VCRuntimeClosureFiles) {
+        Add-PayloadAuthenticodeEvidence `
+            "runtime/python/$relative" $file.FullName $sbomFileName -MicrosoftVCRuntime
+    } else {
+        Add-PayloadAuthenticodeEvidence "runtime/python/$relative" $file.FullName $sbomFileName
+    }
 }
 foreach ($file in Get-ChildItem -LiteralPath $sitePackages -File -Recurse | Sort-Object FullName) {
     if (-not (Test-DefenseClawPortableExecutable $file.FullName)) { continue }
@@ -1134,6 +1337,7 @@ $manifest = [ordered]@{
     gateway_archive = (Split-Path -Leaf $gatewayZip)
     wheel = (Split-Path -Leaf $wheel)
     python_embed = $PythonEmbedName
+    vc_runtime = $VCRuntimeArchiveName
     yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
     upgrade_manifest = 'upgrade-manifest.json'
     site_packages = "site-packages.zip"
@@ -1151,6 +1355,13 @@ $manifest = [ordered]@{
         python_embed_url = $PythonEmbedUrl
         python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
         python_runtime_review_deadline_utc = $PythonRuntimeReviewDeadlineUTC.ToString('o')
+        vc_runtime_version = $VCRuntimeVersion
+        vc_runtime_source = $VCRuntimeSourceName
+        vc_runtime_source_url = $VCRuntimeSourceUrl
+        vc_runtime_source_sha256 = $VCRuntimeSourceSha256.ToLowerInvariant()
+        vc_runtime_license = 'Microsoft Visual Studio 2022 license and REDIST list'
+        vc_runtime_license_url = 'https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/'
+        vc_runtime_redistribution_url = 'https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution'
         yara_compat_sha256 = $yaraCompatSha256
         win_unicode_console_source_url = $WinUnicodeSourceUrl
         win_unicode_console_source_sha256 = $WinUnicodeSourceSha256.ToLowerInvariant()
@@ -1218,6 +1429,7 @@ try {
         '--component', "setup=$setupPath",
         '--component', "gateway=$gatewayBinary",
         '--component', "hook=$hookBinary",
+        '--component', "acp-guard=$acpBinary",
         '--component', "hook-launcher=$hookLauncher",
         '--component', "launcher=$launcher",
         '--component', "startup-launcher=$startupLauncher",
@@ -1267,6 +1479,10 @@ try {
             wheel_sha256 = Get-FileHashHex $wheel
             python_embed = $PythonEmbedName
             python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+            vc_runtime = $VCRuntimeArchiveName
+            vc_runtime_sha256 = Get-FileHashHex $vcRuntimeArchive
+            vc_runtime_source = $VCRuntimeSourceName
+            vc_runtime_source_sha256 = $VCRuntimeSourceSha256.ToLowerInvariant()
             site_packages_sha256 = Get-FileHashHex $siteZip
             yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
             yara_compat_wheel_sha256 = $yaraCompatSha256

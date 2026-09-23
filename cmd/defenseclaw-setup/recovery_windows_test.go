@@ -76,6 +76,7 @@ func TestPendingRecoveryWaitsForLockedGatewayAndRestoresState(t *testing.T) {
 	rollback := func(got setupTransaction) error {
 		return rollbackSetupTransactionWithRuntime(
 			got,
+			func(string, string) error { return nil },
 			func(string, string) (serviceState, error) {
 				calls = append(calls, "authenticate-stop:gateway+watchdog")
 				if !releaseScheduled {
@@ -406,6 +407,7 @@ func TestRecoveryRejectsForeignGatewayProcessWithoutMutation(t *testing.T) {
 	started := false
 	err = rollbackSetupTransactionWithRuntime(
 		transaction,
+		func(string, string) error { return nil },
 		stopOwnedServices,
 		verifyOwnedRuntimeReleased,
 		func(setupTransaction) error { return nil },

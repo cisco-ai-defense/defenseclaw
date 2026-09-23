@@ -137,10 +137,10 @@ maintainers:
    who installed an affected build before upgrading.
 
 This change is intentionally Cursor-scoped, matching the connector where the
-lockout was observed. Other connectors that advertise `SupportsFailClosed`
-(geminicli, openhands, codex, claudecode) are worth a separate audit for the
-same empty-stdout-on-fail-open pattern, but each agent's empty-output semantics
-differ and should be verified individually rather than changed blind.
+lockout was observed. Other active connectors that advertise
+`SupportsFailClosed` (openhands, codex, claudecode) are worth a separate audit
+for the same empty-stdout-on-fail-open pattern, but each agent's empty-output
+semantics differ and should be verified individually rather than changed blind.
 
 ## Why this helps
 

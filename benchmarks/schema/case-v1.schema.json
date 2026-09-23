@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/benchmark-case-v1.json",
+  "title": "DefenseClaw benchmark case v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "source", "split", "surface", "payload", "truth"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset", "revision", "original_id", "license", "redistribution"],
+      "properties": {
+        "dataset": {"type": "string", "minLength": 1, "maxLength": 120},
+        "revision": {"type": "string", "minLength": 1, "maxLength": 160},
+        "original_id": {"type": "string", "minLength": 1, "maxLength": 240},
+        "license": {"type": "string", "minLength": 1, "maxLength": 120},
+        "redistribution": {"enum": ["vendored", "download-only", "aggregate-only", "manual"]}
+      }
+    },
+    "split": {"enum": ["smoke", "development", "validation", "test"]},
+    "surface": {"enum": ["text", "action", "tool_result", "stateful", "code", "skill", "plugin", "mcp", "e2e"]},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "direction": {"enum": ["prompt", "completion", "tool_call", "artifact"]},
+        "content": {"type": "string", "maxLength": 1048576},
+        "tool_name": {"type": "string", "maxLength": 240},
+        "command": {"type": "string", "maxLength": 1048576},
+        "argv": {"type": "array", "maxItems": 4096, "items": {"type": "string", "maxLength": 65536}},
+        "args": {},
+        "tool_resource_identity": {"type": "string", "maxLength": 1024},
+        "dialect": {"enum": ["", "none", "argv", "posix", "powershell", "cmd", "python", "mixed"]},
+        "cwd": {"type": "string", "maxLength": 4096},
+        "active_home": {"type": "string", "maxLength": 4096},
+        "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
+        "filename": {"type": "string", "maxLength": 4096},
+        "target": {"type": "string", "maxLength": 4096},
+        "annotation_spans": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/action_span"}
+        },
+        "events": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tool_name": {"type": "string", "maxLength": 240},
+              "command": {"type": "string", "maxLength": 1048576},
+              "argv": {"type": "array", "maxItems": 4096, "items": {"type": "string", "maxLength": 65536}},
+              "args": {},
+              "tool_resource_identity": {"type": "string", "maxLength": 1024},
+              "dialect": {"enum": ["", "none", "argv", "posix", "powershell", "cmd", "python", "mixed"]},
+              "cwd": {"type": "string", "maxLength": 4096},
+              "active_home": {"type": "string", "maxLength": 4096},
+              "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
+              "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled", "unknown"]},
+              "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800},
+              "result_proof": {"type": "string", "maxLength": 262144}
+            },
+            "allOf": [
+              {
+                "if": {"required": ["result_proof"]},
+                "then": {
+                  "required": ["outcome"],
+                  "properties": {"outcome": {"const": "succeeded"}}
+                }
+              }
+            ]
+          }
+        },
+        "tool_result": {"$ref": "#/$defs/tool_result"}
+      }
+    },
+    "truth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_truth", "applicability", "expected_disposition"],
+      "properties": {
+        "source_truth": {"enum": ["benign", "malicious", "sensitive", "unknown"]},
+        "deterministic_truth": {"enum": ["deterministic_malicious", "contextual_or_dual_use", "benign"]},
+        "label_confidence": {"enum": ["high", "medium", "low"]},
+        "label_source": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "enforcement_lens": {"enum": ["monitor", "egress"]},
+        "stateful_lens": {"enum": ["atomic_terminal", "bounded_intent", "bounded_completed"]},
+        "applicability": {"enum": ["in_scope", "out_of_scope"]},
+        "expected_disposition": {"enum": ["allow", "detect_only", "block"]},
+        "expected_profile_actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {"enum": ["allow", "alert", "confirm", "block"]},
+            "permissive": {"enum": ["allow", "alert", "confirm", "block"]},
+            "strict": {"enum": ["allow", "alert", "confirm", "block"]}
+          }
+        },
+        "categories": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "rule_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 160}},
+        "exclusion_reason": {"type": "string", "maxLength": 1000},
+        "spans": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/span"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"applicability": {"const": "out_of_scope"}}},
+          "then": {"required": ["exclusion_reason"]}
+        },
+        {
+          "if": {"properties": {"stateful_lens": {"const": "bounded_intent"}}, "required": ["stateful_lens"]},
+          "then": {"properties": {"expected_disposition": {"enum": ["allow", "detect_only"]}}}
+        }
+      ]
+    },
+    "strata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"type": "string", "maxLength": 80},
+        "provider": {"type": "string", "maxLength": 80},
+        "dialect": {"type": "string", "maxLength": 80},
+        "language": {"type": "string", "maxLength": 80},
+        "ecosystem": {"type": "string", "maxLength": 80},
+        "campaign": {"type": "string", "maxLength": 160},
+        "domain": {"type": "string", "maxLength": 160},
+        "document_type": {"type": "string", "maxLength": 160},
+        "hard_negative": {"type": "boolean"},
+        "split_group": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+        "trajectory_id": {"type": "string", "pattern": "^[0-9a-f]{24,64}$"},
+        "sequence_index": {"type": "integer", "minimum": 0},
+        "call_index": {"type": "integer", "minimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["trajectory_id"]},
+              {"required": ["sequence_index"]},
+              {"required": ["call_index"]}
+            ]
+          },
+          "then": {"required": ["trajectory_id", "sequence_index", "call_index"]}
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "surface": {"const": "stateful"},
+          "truth": {"required": ["stateful_lens"]}
+        },
+        "required": ["surface", "truth"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "events": {"items": {"required": ["outcome"]}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"surface": {"const": "tool_result"}},
+        "required": ["surface"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": ["tool_result"],
+            "minProperties": 1,
+            "maxProperties": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"payload": {"required": ["tool_result"]}},
+        "required": ["payload"]
+      },
+      "then": {"properties": {"surface": {"const": "tool_result"}}}
+    }
+  ],
+  "$defs": {
+    "tool_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation", "result"],
+      "properties": {
+        "invocation": {"$ref": "#/$defs/tool_result_invocation"},
+        "result": {"$ref": "#/$defs/tool_result_terminal"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "amp"}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "tool.call"}}},
+            "result": {"properties": {"connector": {"const": "amp"}, "event": {"const": "tool.result"}}}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "opencode"}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "tool.execute.before"}}},
+            "result": {"properties": {"connector": {"const": "opencode"}, "event": {"const": "tool.execute.after"}}}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"enum": ["claudecode", "codex"]}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "PreToolUse"}}},
+            "result": {"properties": {"connector": {"enum": ["claudecode", "codex"]}}, "allOf": [
+              {
+                "if": {"properties": {"outcome": {"const": "succeeded"}}},
+                "then": {"properties": {"event": {"const": "PostToolUse"}}},
+                "else": {"properties": {"event": {"const": "PostToolUseFailure"}}}
+              }
+            ]}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "claudecode"}}}}},
+          "then": {"properties": {"result": {"properties": {"connector": {"const": "claudecode"}}}}}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "codex"}}}}},
+          "then": {"properties": {"result": {"properties": {"connector": {"const": "codex"}}}}}
+        }
+      ]
+    },
+    "tool_result_invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector", "event", "session_id", "invocation_id", "tool_name", "args"],
+      "properties": {
+        "connector": {"enum": ["amp", "claudecode", "codex", "opencode"]},
+        "event": {"enum": ["tool.call", "PreToolUse", "tool.execute.before"]},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "invocation_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "tool_name": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "args": {"type": "object", "maxProperties": 4096}
+      }
+    },
+    "tool_result_terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector", "event", "session_id", "invocation_id", "outcome", "content"],
+      "properties": {
+        "connector": {"enum": ["amp", "claudecode", "codex", "opencode"]},
+        "event": {"enum": ["tool.result", "PostToolUse", "PostToolUseFailure", "tool.execute.after"]},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "invocation_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
+        "content": {"type": "string", "maxLength": 262144}
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "label"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "rule_id": {"type": "string", "minLength": 1, "maxLength": 160}
+      }
+    },
+    "action_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "label"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "rule_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "event_index": {"type": "integer", "minimum": 0, "maximum": 63}
+      }
+    }
+  }
+}

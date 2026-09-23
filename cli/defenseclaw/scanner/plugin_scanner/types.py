@@ -221,3 +221,10 @@ class PluginScanOptions:
     # CLI ``--no-meta`` flag so an operator's explicit request to disable
     # meta analysis actually reaches the analyzer pipeline.
     disable_meta: bool = False
+    # First-party DefenseClaw artifacts are excluded by exact identity so the
+    # scanner does not match its own bundled signatures/runtime. Developers
+    # can opt back in explicitly when auditing DefenseClaw itself.
+    include_self: bool = False
+    # Concrete additional first-party paths resolved from active config (for
+    # example a custom OpenClaw home). These are exact paths, never patterns.
+    trusted_self_paths: tuple[str, ...] = ()

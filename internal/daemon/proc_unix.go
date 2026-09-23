@@ -30,6 +30,8 @@ import (
 	"time"
 )
 
+func daemonStartDir(_ string, dataDir string) string { return dataDir }
+
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,

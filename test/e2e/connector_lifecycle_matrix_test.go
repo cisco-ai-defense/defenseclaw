@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ import (
 // A4 / S0.12 provider startup probe). We seed an OpenAI provider
 // for the test so Setup completes and we can prove the round-trip.
 func TestConnectorLifecycle_Matrix(t *testing.T) {
-	for _, fx := range connectorMatrix(t) {
+	for _, fx := range connectorLifecycleMatrix(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			home, dataDir := fx.Apply(t)
 			_ = home
@@ -90,6 +91,9 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			if !connector.ConnectorSupportedOnHostOS(fx.Name) {
 				t.Skipf("[%s] has no native lifecycle on this host; platform rejection is covered by connector support tests", fx.Name)
 			}
+			if runtime.GOOS == "darwin" && fx.Name == "openhands" {
+				t.Skip("[openhands] Darwin Setup requires a private setup-selected executable receipt; protected admission and lifecycle are covered in package connector")
+			}
 
 			// Stage 2: Setup. The actual error type is implementation
 			// detail; we only care that the connector's *contract*
@@ -120,6 +124,35 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func connectorLifecycleMatrix(t *testing.T) []ConnectorFixture {
+	t.Helper()
+	fixtures := connectorMatrix(t)
+	if runtime.GOOS != "windows" {
+		return fixtures
+	}
+
+	// Native Windows Hermes, Devin, OpenCode, and Amp require protected
+	// executable evidence.
+	// Manufacturing that evidence from this external package would either
+	// mutate a real profile or weaken admission. Their Windows lifecycles are
+	// exercised by package-connector and native-Windows tests where the private
+	// admission fixtures are available. Keep them in connectorMatrix for every
+	// non-lifecycle matrix and on other operating systems.
+	filtered := make([]ConnectorFixture, 0, len(fixtures)-4)
+	protectedRows := 0
+	for _, fixture := range fixtures {
+		if fixture.Name == "hermes" || fixture.Name == "devin" || fixture.Name == "opencode" || fixture.Name == "amp" {
+			protectedRows++
+			continue
+		}
+		filtered = append(filtered, fixture)
+	}
+	if protectedRows != 4 {
+		t.Fatalf("Windows lifecycle routing found %d protected executable fixtures, want exactly four", protectedRows)
+	}
+	return filtered
 }
 
 // seedZeptoClawProviderConfig writes a minimal

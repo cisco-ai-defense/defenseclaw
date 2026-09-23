@@ -215,6 +215,13 @@ type Store struct {
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+
+	// findingLifecycleMu serializes the one mutable state projection and its
+	// process-local up/down-counter baselines. SQLite serializes these writers
+	// too, but owning the boundary here also keeps concurrent first scans from
+	// publishing two current-state baselines after a runtime restart/reload.
+	findingLifecycleMu      sync.Mutex
+	findingGaugeInitialized map[string]struct{}
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -260,6 +267,11 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - busy_timeout=5000         SQLite waits up to 5 seconds before
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
+//   - wal_autocheckpoint=0      disables SQLite's connection-local commit
+//     hook. DefenseClaw checkpoints through the serialized Store connection
+//     in health and retention maintenance; running a second checkpoint from
+//     inside a commit can race a retiring sidecar process over the shared WAL
+//     mapping and terminate the gateway with SIGBUS.
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -284,6 +296,7 @@ type auditIntegerPragma struct {
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
 	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -1748,6 +1761,86 @@ var migrations = []migration{
 		description: historicalEvidencePurgeMigrationDescription,
 		apply:       purgeHistoricalEvidence,
 	},
+	{
+		description: "scan findings: add compact distinct lifecycle projection",
+		apply:       migrateFindingLifecycleState,
+	},
+	{
+		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
+		apply:       migrateToolChainLineageState,
+	},
+	{
+		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
+		apply:       migrateToolChainDerivedLineageState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to nine result slots",
+		apply:       migrateToolChainExpandedCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to ten result slots",
+		apply:       migrateToolChainTenSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to eleven result slots",
+		apply:       migrateToolChainElevenSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to twelve result slots",
+		apply:       migrateToolChainTwelveSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to thirteen result slots",
+		apply:       migrateToolChainThirteenSlotCatalogState,
+	},
+	{
+		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
+		apply:       migrateToolChainFourteenSlotWideMaskState,
+	},
+	{
+		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
+		apply:       migrateToolChainEighteenSlotWideMaskState,
+	},
+	{
+		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
+		apply:       migrateToolChainTwentySlotValueLineageState,
+	},
+	{
+		description: "guardrails: reserve append-only bounded chain mask capacity",
+		apply:       migrateToolChainAppendOnlyMaskCapacity,
+	},
+	{
+		description: "guardrails: bind pending SQL value sources to authoritative results",
+		apply:       migrateToolChainSQLValueSourceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
+		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-two for compromised credential authentication",
+		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
+	},
+	{
+		description: "guardrails: bind pending credential sources to authoritative results",
+		apply:       migrateToolChainReturnedCredentialSourceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
+		apply:       migrateToolChainTwentyThreeSlotADCSState,
+	},
+	{
+		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
+		apply:       migrateToolChainTwentyFourSlotS4UState,
+	},
+	{
+		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
+		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
+	},
+	{
+		description: "guardrails: add result slot twenty-six for exact file-email lineage",
+		apply:       migrateToolChainTwentySixSlotFileEmailState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1780,6 +1873,12 @@ func (s *Store) Init() error {
 	// flag false on retry also prevents a partially migrated store from being
 	// captured by a new event-history writer.
 	s.ready.Store(false)
+
+	// Incremental auto_vacuum can only be enabled before the first table exists.
+	// Retention then reclaims freed pages without a blocking full-file VACUUM.
+	if err := s.enableIncrementalAutoVacuumIfUnset(); err != nil {
+		return err
+	}
 
 	// Ensure the schema_version tracking table exists.
 	if _, err := s.execDB(context.Background(), "audit", `CREATE TABLE IF NOT EXISTS schema_version (
@@ -1862,6 +1961,8 @@ func (s *Store) Init() error {
 		"guardrail_chain_pending_boundaries",
 		"guardrail_chain_terminal_resets",
 		"guardrail_chain_cutoff_barriers",
+		"finding_scopes",
+		"finding_states",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1870,6 +1971,11 @@ func (s *Store) Init() error {
 		if !present {
 			return fmt.Errorf("audit: mandatory SQLite table %s is missing", table)
 		}
+	}
+	if present, err := s.hasColumn("scan_findings", "finding_fingerprint"); err != nil {
+		return fmt.Errorf("audit: verify mandatory finding lifecycle identity: %w", err)
+	} else if !present {
+		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
 	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
@@ -2005,6 +2111,35 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	return nil
 }
 
+func (s *Store) enableIncrementalAutoVacuumIfUnset() error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("audit: store is not initialized")
+	}
+	var mode int
+	if err := s.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return fmt.Errorf("audit: read auto_vacuum: %w", err)
+	}
+	if mode == 2 {
+		return nil
+	}
+	var tables int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tables); err != nil {
+		return fmt.Errorf("audit: inspect auto_vacuum eligibility: %w", err)
+	}
+	if tables > 0 {
+		return nil
+	}
+	if _, err := s.db.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		return fmt.Errorf("audit: enable incremental auto_vacuum: %w", err)
+	}
+	// WAL-opened files already have a header page, so the pragma does not
+	// persist until VACUUM rewrites the empty database.
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("audit: apply incremental auto_vacuum: %w", err)
+	}
+	return nil
+}
+
 // SchemaVersion returns the current schema version number.
 func (s *Store) SchemaVersion() (int, error) {
 	var v int
@@ -2055,6 +2190,8 @@ var knownTables = map[string]bool{
 	"schema_version":        true,
 	// v7 additions
 	"scan_findings":   true,
+	"finding_states":  true,
+	"finding_scopes":  true,
 	"activity_events": true,
 	"sink_health":     true,
 	// Observability v8 alert acknowledgement protected state.
@@ -2075,7 +2212,7 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
-	// Bounded, content-free state for the six fixed tool-call chains.
+	// Bounded, content-free state for nine fixed tool-call chain slots.
 	"guardrail_chain_partitions":         true,
 	"guardrail_chain_events":             true,
 	"guardrail_chain_deny_receipts":      true,
@@ -3417,11 +3554,25 @@ func legacyExplicitAlertSQL() string {
 	)`
 }
 
+// connectorEnforcedAlertSQL preserves the native-connector alert contract for
+// hook records that predate the canonical enforcement.action bucket. Only an
+// attributed, actually enforced decision is actionable; observe-mode and
+// unattributed hook telemetry remain outside the alert queue.
+func connectorEnforcedAlertSQL() string {
+	return `(
+		LOWER(COALESCE(event.action,'')) = 'connector-hook'
+		AND COALESCE(event.enforced, 0) = 1
+		AND LENGTH(TRIM(COALESCE(event.connector,''))) > 0
+	)`
+}
+
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	legacyExplicit := legacyExplicitAlertSQL()
 	return `(
+		` + connectorEnforcedAlertSQL() + `
+		OR
 		(
 			event.bucket = 'security.finding'
 			AND event.event_name = 'finding.observed'
@@ -3481,6 +3632,7 @@ func alertEffectiveSeveritySQL() string {
 	return `CASE
 		WHEN UPPER(TRIM(COALESCE(event.severity,''))) NOT IN ('','INFO')
 			THEN UPPER(TRIM(event.severity))
+		WHEN ` + connectorEnforcedAlertSQL() + ` THEN 'HIGH'
 		WHEN event.bucket = 'network.egress'
 		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
 			THEN 'WARNING'
@@ -3619,12 +3771,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
 			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
-			event.trace_id, event.request_id
+			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event
-		 WHERE (event.bucket IS NULL OR event.bucket IN (
+		 WHERE ((event.bucket IS NULL OR event.bucket IN (
 			'security.finding','enforcement.action','network.egress',
 			'platform.health','diagnostic'
-		 ))
+		 )) OR ` + connectorEnforcedAlertSQL() + `)
 		 AND ` + alertEligibilitySQL(placeholders) + `
 		 AND NOT EXISTS (
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
@@ -3645,8 +3797,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, structuredJSON, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity, &runID, &traceID, &requestID); err != nil {
+		var target, details, structuredJSON, severity, runID, traceID, requestID, connector sql.NullString
+		var enforced sql.NullBool
+		if err := rows.Scan(
+			&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON,
+			&severity, &runID, &traceID, &requestID, &connector, &enforced,
+		); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
@@ -3660,6 +3816,8 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		e.RunID = runID.String
 		e.TraceID = traceID.String
 		e.RequestID = requestID.String
+		e.Connector = connector.String
+		e.Enforced = enforced.Bool
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -3772,9 +3930,9 @@ func (s *Store) GetCounts() (Counts, error) {
 	legacyActions := legacyAlertEligibleActions()
 	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE (event.bucket IS NULL OR event.bucket IN (
+		WHERE ((event.bucket IS NULL OR event.bucket IN (
 			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
-		))
+		)) OR ` + connectorEnforcedAlertSQL() + `)
 		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
 		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
 		  AND NOT EXISTS (

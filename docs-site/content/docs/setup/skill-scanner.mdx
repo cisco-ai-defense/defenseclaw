@@ -13,7 +13,7 @@ keywords:
 
 Agents are getting comfortable installing skills. A "skill" is a small bundle — instructions, optional tools, sometimes auto-applied — that an LLM picks up and follows. The same shape is also a great place to hide a prompt-injection or an exfiltration tool.
 
-DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so every skill on disk gets a deterministic + LLM-assisted review before an agent is allowed to use it. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves.
+DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review before an agent is allowed to use them. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
 
 <DefenseClawDemo scenario="skill-quarantine" variant="critical" />
 
@@ -43,6 +43,12 @@ For each skill it runs:
 ```bash
 defenseclaw skill scan --all
 ```
+
+For automation, add `--json`. Batch JSON remains a single top-level array for
+backward compatibility. Successful results and per-skill error rows are always
+written before the command returns nonzero for a scanner failure; a telemetry
+recording warning is included on the affected result but does not fail or erase
+the completed scan.
 
 Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
   </Tab>
@@ -140,7 +146,7 @@ first_party_allow_list:
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill
-    source_path_contains: [".defenseclaw", ".openclaw/skills", ".claude/skills", ".codex/skills"]
+    source_path_contains: [".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard"]
 ```
 
 Each severity bucket has three independent actions:
@@ -150,6 +156,22 @@ Each severity bucket has three independent actions:
 - **`install`** — `none` or `block`. Whether to refuse a fresh install.
 
 `first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/defaults) for what each shipped rule pack sets these to.
+
+Codex's personal and project skill directories both use the shared
+`.agents/skills` namespace. Path alone cannot distinguish a protected install
+from an attacker-controlled repository entry, so CodeGuard at either Codex
+location remains scan-required unless stronger provenance is available.
+Codex also discovers operator-installed skills under `$CODEX_HOME/skills`;
+those remain scan-required. Only the exact vendor cache at
+`$CODEX_HOME/skills/.system` is discovery-only and excluded from every scanner
+and enforcement entrypoint. An unrelated `.system` directory receives no
+exemption.
+
+Hermes mixes installer-synced and operator-authored skills under
+`$HERMES_HOME/skills`. DefenseClaw grants discovery-only status only when the
+`.bundled_manifest` hash, installed copy, and matching
+`$HERMES_HOME/hermes-agent/skills` source tree all agree. Modified, untracked,
+linked, oversized, or otherwise unverifiable copies remain scan-required.
 
 To switch profiles for the entire `skill_actions` table:
 

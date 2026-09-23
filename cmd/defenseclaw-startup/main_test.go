@@ -26,6 +26,16 @@ func TestStartupPathsUseAdjacentGatewayAndUserData(t *testing.T) {
 	}
 }
 
+func TestStartupWorkingDirectoryDoesNotPinDataRoot(t *testing.T) {
+	gateway := filepath.Join(`C:\Program Files`, "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	dataRoot := filepath.Join(`C:\Users`, "Jane Doe", ".defenseclaw")
+	if got, want := startupWorkingDirectory(gateway), filepath.Dir(gateway); got != want {
+		t.Fatalf("startup working directory = %q, want adjacent gateway directory %q", got, want)
+	} else if got == dataRoot {
+		t.Fatalf("startup working directory pins protected data root %q", dataRoot)
+	}
+}
+
 func TestWithDefenseClawHomeReplacesInheritedValueCaseInsensitively(t *testing.T) {
 	got := withDefenseClawHome([]string{
 		"Path=C:\\Windows",

@@ -216,14 +216,22 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(Path(path).name for path in plan.binary_targets),
-            ("defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"),
+            (
+                "defenseclaw.cmd",
+                "defenseclaw-gateway.exe",
+                "defenseclaw-acp.exe",
+                "defenseclaw-hook.exe",
+            ),
         )
         self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))
         self.assertNotIn("defenseclaw.exe", tuple(Path(path).name for path in plan.binary_targets))
 
     def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            profile = Path(tmp) / "kévin profile"
+            # macOS exposes TemporaryDirectory through the /var -> /private/var
+            # symlink. Canonicalize before simulating Windows so the test does
+            # not trip the production reparse-ancestor guard on a POSIX alias.
+            profile = Path(tmp).resolve() / "kévin profile"
             root = profile / "bin"
             root.mkdir(parents=True)
             targets = tuple(
@@ -231,6 +239,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 for name in (
                     "defenseclaw.cmd",
                     "defenseclaw-gateway.exe",
+                    "defenseclaw-acp.exe",
                     "defenseclaw-hook.exe",
                 )
             )
@@ -261,7 +270,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
     def test_binary_failure_propagates(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "bin"
+            root = Path(tmp).resolve() / "bin"
             root.mkdir()
             target = root / "defenseclaw.cmd"
             managed_venv = Path(tmp) / ".defenseclaw" / ".venv"
@@ -896,6 +905,59 @@ class RenderPlanConnectorTests(unittest.TestCase):
                 include_openclaw=True,
             )
         self.assertEqual(got, ("amp",))
+
+    def test_teardown_connectors_recognize_every_non_openclaw_backup_roster(self):
+        expected = tuple(name for name in cmd_uninstall._CONNECTOR_BACKUP_MARKERS if name != "openclaw")
+        with tempfile.TemporaryDirectory() as data_dir:
+            for name in expected:
+                marker = os.path.join(data_dir, cmd_uninstall._CONNECTOR_BACKUP_MARKERS[name][0])
+                os.makedirs(os.path.dirname(marker), exist_ok=True)
+                with open(marker, "w", encoding="utf-8") as fh:
+                    fh.write("{}")
+            got = cmd_uninstall._teardown_connectors(
+                (),
+                data_dir=data_dir,
+                openclaw_config_file="",
+                include_openclaw=True,
+            )
+
+        self.assertEqual(got, expected)
+
+    def test_backup_roster_covers_all_native_lifecycle_connectors_and_legacy_receipts(self):
+        native_connectors = {
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        }
+        self.assertLessEqual(native_connectors, set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS))
+        self.assertIn(
+            os.path.join("connector_backups", "cursor", "config.json"),
+            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "cursor", "hooks.json.json"),
+            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "antigravity", "config.json"),
+            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["antigravity"],
+        )
+        self.assertEqual(
+            set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS["omnigent"]),
+            {
+                os.path.join("connector_backups", "omnigent", "config.json"),
+                os.path.join("connector_backups", "omnigent", "module.json"),
+                os.path.join("connector_backups", "omnigent", "pth.json"),
+            },
+        )
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):

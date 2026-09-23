@@ -12,10 +12,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
 	previous := AMPPluginPathOverride
 	AMPPluginPathOverride = pluginPath
@@ -28,6 +30,7 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 		APIToken:     "amp-scoped-token",
 		HookFailMode: "closed",
 	}
+	opts = prepareAmpSetupOptsForTest(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -142,7 +145,7 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 }
 
 func TestAMPTeardownRestoresPreExistingDefenseClawPluginAsClean(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
 	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -165,6 +168,7 @@ func TestAMPTeardownRestoresPreExistingDefenseClawPluginAsClean(t *testing.T) {
 		APIAddr:  "127.0.0.1:18970",
 		APIToken: "amp-scoped-token",
 	}
+	opts = prepareAmpSetupOptsForTest(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -184,8 +188,81 @@ func TestAMPTeardownRestoresPreExistingDefenseClawPluginAsClean(t *testing.T) {
 	}
 }
 
+func TestAMPVerifyCleanDetectsManagedMarkerAcrossLineEndings(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		lineEnding string
+	}{
+		{name: "LF", lineEnding: "\n"},
+		{name: "CRLF", lineEnding: "\r\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
+			if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			plugin := "// defenseclaw-managed-plugin v2" + test.lineEnding + "export default function managed() {}" + test.lineEnding
+			if err := os.WriteFile(pluginPath, []byte(plugin), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := AMPPluginPathOverride
+			AMPPluginPathOverride = pluginPath
+			t.Cleanup(func() { AMPPluginPathOverride = previous })
+			err := NewAMPConnector().VerifyClean(SetupOpts{DataDir: filepath.Join(root, ".defenseclaw")})
+			if err == nil || !strings.Contains(err.Error(), "managed plugin still present") {
+				t.Fatalf("VerifyClean %s residue error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestManagedPluginOwnershipMarkerNormalizesTemplateLineEndings(t *testing.T) {
+	want := "// defenseclaw-managed-plugin v2"
+	for _, template := range []string{want + "\nbody", want + "\r\nbody", want} {
+		marker, valid := managedPluginOwnershipMarker([]byte(template))
+		if !valid || string(marker) != want {
+			t.Fatalf("managedPluginOwnershipMarker(%q) = %q, %t", template, marker, valid)
+		}
+	}
+	for _, template := range []string{"", "// operator plugin\r\nbody"} {
+		if marker, valid := managedPluginOwnershipMarker([]byte(template)); valid {
+			t.Fatalf("managedPluginOwnershipMarker(%q) = %q, true", template, marker)
+		}
+	}
+}
+
+func TestManagedPluginOwnershipMarkerRequiresExactLine(t *testing.T) {
+	marker := []byte("// defenseclaw-managed-plugin v2")
+	for _, data := range []string{
+		string(marker) + "\nbody",
+		string(marker) + "\r\nbody",
+		"operator header\n" + string(marker) + "\nbody",
+		"operator header\r\n" + string(marker),
+		"// defenseclaw-managed-plugin v1\nold body",
+		"// defenseclaw-managed-plugin v42\r\nfuture body",
+	} {
+		if !managedPluginOwnershipMarkerPresent([]byte(data), marker) {
+			t.Errorf("exact managed marker was not found in %q", data)
+		}
+	}
+	for _, data := range []string{
+		"",
+		string(marker) + "-custom\nbody",
+		"// defenseclaw-managed-plugin v0\nbody",
+		"// defenseclaw-managed-plugin v02\nbody",
+		"// defenseclaw-managed-plugin v18446744073709551616\nbody",
+		"const note = '" + string(marker) + "'\n",
+		"prefix " + string(marker) + "\r\n",
+	} {
+		if managedPluginOwnershipMarkerPresent([]byte(data), marker) {
+			t.Errorf("non-exact managed marker was found in %q", data)
+		}
+	}
+}
+
 func TestAMPOwnedHookContractRejectsIncompletePlugin(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
 	previous := AMPPluginPathOverride
 	AMPPluginPathOverride = pluginPath
@@ -197,6 +274,7 @@ func TestAMPOwnedHookContractRejectsIncompletePlugin(t *testing.T) {
 		APIAddr:  "127.0.0.1:18970",
 		APIToken: "amp-scoped-token",
 	}
+	opts = prepareAmpSetupOptsForTest(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -543,15 +621,16 @@ func TestAMPHookEndpointRequiresBearerOnLoopbackAndRemote(t *testing.T) {
 }
 
 func TestAMPFailModeDefaultsClosed(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	previous := AMPPluginPathOverride
 	AMPPluginPathOverride = filepath.Join(root, "defenseclaw.ts")
 	t.Cleanup(func() { AMPPluginPathOverride = previous })
 	conn := NewAMPConnector()
-	if err := conn.Setup(context.Background(), SetupOpts{
+	opts := prepareAmpSetupOptsForTest(t, SetupOpts{
 		DataDir: filepath.Join(root, "data"),
 		APIAddr: "127.0.0.1:18970",
-	}); err != nil {
+	})
+	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(AMPPluginPathOverride)

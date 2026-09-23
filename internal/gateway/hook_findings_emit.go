@@ -103,7 +103,7 @@ func (a *APIServer) emitInspectVerdictFindings(
 		return hookEvaluationContext{}
 	}
 
-	inspectFindings := ruleFindingsToInspect(verdict.DetailedFindings)
+	inspectFindings := ruleFindingsToInspect(verdict.DetailedFindings, target)
 	src := scanner.InspectFindingSource{
 		Scanner:    scannerEnum,
 		Target:     target,
@@ -379,10 +379,11 @@ func (p *GuardrailProxy) emitToolCallInspectFindings(
 	if len(allFindings) == 0 {
 		return hookEvaluationContext{}
 	}
-	inspectFindings := ruleFindingsToInspect(allFindings)
+	toolCallTarget := p.connectorName() + ":tool-call"
+	inspectFindings := ruleFindingsToInspect(allFindings, toolCallTarget)
 	src := scanner.InspectFindingSource{
 		Scanner:    "tool-call-inspect",
-		Target:     p.connectorName() + ":tool-call",
+		Target:     toolCallTarget,
 		TargetType: "tool_call",
 		Verdict:    action,
 		Findings:   inspectFindings,
@@ -521,7 +522,11 @@ func hookEvaluationTarget(connector, hookEvent string) string {
 // EmitInspectFindings understands. RuleFinding.Evidence is
 // already redacted upstream by the rules engine, so this is a
 // pure structural copy — no additional sanitization.
-func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
+// ruleFindingsToInspect carries the scan location and per-match line number
+// through to the audit row. Both fields already existed on InspectFinding and
+// in the scan_findings schema but were never populated on the hook lane, so
+// every hook finding landed with an empty location.
+func ruleFindingsToInspect(in []RuleFinding, location string) []scanner.InspectFinding {
 	if len(in) == 0 {
 		return nil
 	}
@@ -539,6 +544,8 @@ func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
 			Evidence:            f.Evidence,
 			Tags:                tags,
 			ToolCapabilityClass: f.ToolCapabilityClass,
+			Location:            location,
+			LineNumber:          optionalLineNumber(f.LineNumber),
 		})
 	}
 	return out
@@ -573,4 +580,14 @@ func appendHookEvaluationDetails(details string, eval hookEvaluationContext) str
 		parts = append(parts, "rule_ids="+strings.Join(eval.RuleIDs, ","))
 	}
 	return strings.Join(parts, " ")
+}
+
+// optionalLineNumber maps the zero "not computed" sentinel onto the nil the
+// audit schema expects, so an unknown line is absent rather than line 0.
+func optionalLineNumber(line int) *int {
+	if line <= 0 {
+		return nil
+	}
+	value := line
+	return &value
 }

@@ -13,6 +13,13 @@ DefenseClaw compiles every guardrail pattern with Go's standard `regexp` package
 RE2-based. The wizard's regex tester catches incompatible features before you commit; this page
 is the deeper reference for the patterns that ship in the strict pack.
 
+<Callout type="info" title="Regex detection is not trusted-action proof">
+Patterns remain useful for broad, portable detection. On authenticated tool
+actions, however, a raw or custom regex match stays detection-only unless a
+separate complete, code-owned proof for the same rule authorizes enforcement.
+See the [CEL engine runtime boundary](/docs/policies/cel/engine#runtime-results).
+</Callout>
+
 <Callout type="info" title="RE2 in 30 seconds">
 RE2 trades a few features for predictable, polynomial-time matching. Patterns you know from PCRE
 that <strong>do not work</strong> in RE2:

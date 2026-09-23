@@ -35,6 +35,14 @@ type ScanPersistence interface {
 	InsertScanFindings(scanID, target string, findings []Finding, meta ScanFindingMeta) error
 }
 
+// ScanLifecyclePersistence is the atomic current-state extension implemented
+// by the canonical audit Store. Keeping it optional preserves small test and
+// correlator persistence implementations while ensuring ordinary Store-backed
+// scans cannot commit a summary without its occurrences and lifecycle update.
+type ScanLifecyclePersistence interface {
+	PersistScanLifecycle(ScanSummaryParams, []Finding, ScanFindingMeta) (FindingLifecycleDelta, error)
+}
+
 // Correlator runs after findings are persisted to detect multi-step
 // attack flows (lethal trifecta, escalation chains, destructive
 // flows) by reading a session's recent findings and matching them
@@ -110,6 +118,9 @@ type ScanSummaryParams struct {
 	// mid-stream, tool-call-inspect). Empty for classic scanner
 	// invocations.
 	EvaluationID string
+	// TargetType distinguishes complete, rescan-safe asset scans from runtime
+	// message/tool inspection surfaces, whose occurrences must remain distinct.
+	TargetType string
 }
 
 // ScanFindingMeta stamps correlation + provenance on scan_findings rows.
@@ -233,12 +244,21 @@ func EmitScanResult(
 			AgentInstanceID:   agent.AgentInstanceID,
 			SidecarInstanceID: agent.SidecarInstanceID,
 			EvaluationID:      agent.EvaluationID,
+			TargetType:        result.EffectiveTargetType(),
 		}
-		if err := pers.InsertScanSummary(sum); err != nil {
-			return scanID, err
-		}
-		if err := pers.InsertScanFindings(scanID, result.Target, result.Findings, meta); err != nil {
-			return scanID, err
+		if lifecyclePersistence, ok := pers.(ScanLifecyclePersistence); ok {
+			delta, persistErr := lifecyclePersistence.PersistScanLifecycle(sum, result.Findings, meta)
+			if persistErr != nil {
+				return scanID, persistErr
+			}
+			result.FindingLifecycle = &delta
+		} else {
+			if err := pers.InsertScanSummary(sum); err != nil {
+				return scanID, err
+			}
+			if err := pers.InsertScanFindings(scanID, result.Target, result.Findings, meta); err != nil {
+				return scanID, err
+			}
 		}
 
 		// Correlator runs once per scan, after findings are persisted.

@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -42,9 +43,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -156,9 +157,15 @@ type AIDiscoveryOptions struct {
 	// HomeDir is kept for backward compatibility and continues to
 	// anchor "~" expansion in candidate paths.
 	HomeDirs []string
-	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
-	// controls only the managed endpoint-inventory callback; canonical v8
-	// telemetry remains owned by the bound observability runtime.
+	// ManagedEnterprise mirrors deployment_mode == managed_enterprise at
+	// construction time. It is a static hint, not the live cadence gate:
+	// the sidecar can install/clear the managed endpoint-inventory callback
+	// on a running service across config reloads, so the fanoutReport gate
+	// keys on the live callback presence (see the SetManagedInventoryEmitHook
+	// contract) — the intra-cycle process tick is treated as a local refresh
+	// only whenever a managed callback is currently installed. Canonical v8
+	// scan-trace telemetry (StartScan / detector traces / End) remains owned
+	// by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
 }
 
@@ -720,6 +727,31 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.HomeDir == "" {
 		opts.HomeDir, _ = platformDiscoveryHomeDir()
 	}
+	// Windows service-context override. When no caller-supplied HomeDirs
+	// are set and the platform enumerator finds real interactive-user
+	// profiles (HKLM\...\ProfileList → S-1-5-21-... SIDs), prefer those
+	// over the current-user Known Folder — the sidecar runs as a service
+	// account whose ~ resolves to a virtual C:\Windows\ServiceProfiles
+	// path, so a bare-~ scan never sees any real .claude/.codex/.cursor
+	// directories. On non-Windows this returns nil (launchd/systemd-user
+	// already scope the process to the right $HOME). HomeDir is repointed
+	// at the first real profile so ScanRoots=["~"] still resolves to a
+	// meaningful root and downstream helpers that read opts.HomeDir keep
+	// working.
+	//
+	// Gated on ManagedEnterprise: only in managed installs (where the
+	// enterprise admin has consented to fleet-wide inventory of every
+	// enrolled user) do we cross the single-user → all-users boundary.
+	// Unmanaged / dev installs keep the historical single-user posture —
+	// the current process's own ~ is the only scan surface, so a
+	// developer running a local build does not silently start reading
+	// their coworkers' dotdirs on a shared workstation.
+	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
+		if platformHomes := platformDiscoveryHomeDirs(); len(platformHomes) > 0 {
+			opts.HomeDirs = platformHomes
+			opts.HomeDir = platformHomes[0]
+		}
+	}
 	// Dedupe HomeDirs and ensure HomeDir participates so single-user
 	// installs (unmanaged / dev) keep working without a config change.
 	// Order-preserving so detectors return signals in a stable order
@@ -968,6 +1000,15 @@ func (s *ContinuousDiscoveryService) AddReportObserver(fn AIDiscoveryReportObser
 }
 
 func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
+	return s.runScanSingleFlight(ctx, func() (AIDiscoveryReport, error) {
+		return s.runScanOnce(ctx, full, source)
+	})
+}
+
+func (s *ContinuousDiscoveryService) runScanSingleFlight(
+	ctx context.Context,
+	scan func() (AIDiscoveryReport, error),
+) (AIDiscoveryReport, error) {
 	// Single-flight: the scheduled-tick path, the process-tick
 	// path, and the API-triggered ScanNow path can all reach this
 	// function concurrently. Without the mutex, classifyAndPersist
@@ -986,7 +1027,10 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	if err := ctx.Err(); err != nil {
 		return AIDiscoveryReport{}, err
 	}
+	return scan()
+}
 
+func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
@@ -1050,7 +1094,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	s.lastErr = nil
 	s.mu.Unlock()
 
-	s.fanoutReport(ctx, report)
+	s.fanoutReport(ctx, report, full)
 	s.notifyReportObservers(ctx, report)
 	scanObservation.end(report)
 	return report, nil
@@ -1087,8 +1131,34 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // path called ComputeComponentConfidence with its own
 // time.Now()). The snapshot is built lazily so default-config
 // installs (no OTel, redaction enabled) don't pay for a rollup
-// they'd discard.
-func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport) {
+// they'd discard. `full` mirrors the runScan tick kind so
+// managed_enterprise ships to AI Defense on the full-scan cadence
+// only, not on every process tick.
+func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport, full bool) {
+	// Read the live managed-mode signal once and reuse it for both
+	// the cadence gate and the hook fire below. Deployment mode can
+	// change without rebuilding this service (see the pre-existing
+	// contract at SetManagedInventoryEmitHook), so gating on
+	// construction-time s.opts.ManagedEnterprise would let the gate
+	// drift from the live mode after a config reload that swapped
+	// the hook without an aiRestart. Hook-presence is the same
+	// live-mode indicator the hook-fire path below uses.
+	s.managedInventoryEmitMu.RLock()
+	emit := s.managedInventoryEmit
+	s.managedInventoryEmitMu.RUnlock()
+	// managed_enterprise (live: hook installed) ships the endpoint
+	// inventory to AI Defense on the FULL-scan cadence
+	// (ScanIntervalMin) only. The intra-cycle process-only tick
+	// (ProcessIntervalSec) is a local refresh — the non-process
+	// detectors do not re-run on it, so replaying the
+	// carried-forward inventory + firing the connector/MCP hook
+	// every process tick would flood the AID event-ingest endpoint
+	// without adding new information. Non-managed mode (live: no
+	// hook installed) is unaffected; the observer emission is
+	// per-report by design for local telemetry sinks.
+	if !full && emit != nil {
+		return
+	}
 	observer := s.observabilityV8Snapshot()
 	v8On := observer != nil
 	// The generated v8 observer is the sole telemetry owner. Skip the rollup
@@ -1114,12 +1184,10 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 		}
 		_ = observer.EmitReport(ctx, reportForObservabilityV8(report), components)
 	}
-	// Hook installation is the live managed-mode gate. Deployment mode can
-	// change without rebuilding this service, so construction-time options
-	// must not suppress a callback installed by a later config generation.
-	s.managedInventoryEmitMu.RLock()
-	emit := s.managedInventoryEmit
-	s.managedInventoryEmitMu.RUnlock()
+	// emit is the same live managed-mode indicator snapshot read at
+	// the top of this function; reuse it so a concurrent
+	// SetManagedInventoryEmitHook can't cause the gate decision and
+	// the hook fire to disagree within one fanout.
 	if emit != nil {
 		emit(ctx)
 	}
@@ -1914,6 +1982,14 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 			partial = true
 			coverageReason = CoverageReasonReadError
 		default:
+			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "hermes") &&
+				hermesskills.IsRoot(path) {
+				if childPartial, childReason := s.appendHermesSkillChildren(&evidence, path); childPartial {
+					partial = true
+					coverageReason = childReason
+				}
+				break
+			}
 			for _, entry := range entries {
 				if len(evidence) >= maxEvidencePerSignal {
 					// Cap hit before we processed every child.
@@ -1927,17 +2003,16 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				if name == "" {
 					continue
 				}
-				// Skill-only special case: a `.system` container is a
-				// vendor-shipped bundled-skill directory (see Codex's
-				// bundled-skills contract). Do NOT emit the container
-				// itself as an ordinary skill_entry — recurse one
-				// level and emit each of its children with
-				// origin="bundled" so downstream mutation surfaces
-				// can hard-refuse. Any other detector (rule / plugin)
-				// treats `.system` as an ordinary child.
-				if detector == "skill" && enforce.IsBundledSkillContainerName(entry.Name()) {
+				// Codex uses `.system` as a one-level skill container. Expand
+				// its children instead of presenting the container as a skill.
+				// Only the exact per-user `$CODEX_HOME/skills/.system` cache is
+				// vendor-bundled; a same-named container under `.agents` or a
+				// workspace stays user-owned and scan/enforcement eligible.
+				if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "codex") &&
+					enforce.IsBundledSkillContainerName(entry.Name()) {
 					systemDir := filepath.Join(path, entry.Name())
-					if childPartial, childReason := s.appendBundledSkillChildren(&evidence, systemDir); childPartial {
+					bundled := s.isCodexBundledSkillContainer(systemDir)
+					if childPartial, childReason := s.appendSystemSkillChildren(&evidence, systemDir, bundled); childPartial {
 						partial = true
 						if coverageReason == "" {
 							coverageReason = childReason
@@ -1975,18 +2050,63 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 	return out
 }
 
-// appendBundledSkillChildren enumerates one level below a `.system`
-// container and emits each child as a skill_entry with
-// origin="bundled", bundled=true. Nested bundled subtrees are not
-// recursed into — Codex's contract is one level of vendor children,
-// not a general bundled-tree. Cap check mirrors the parent walker so
-// a pathological bundled directory can't blow up payload size.
+// appendHermesSkillChildren expands Hermes's category hierarchy into actual
+// SKILL.md identities. The shared HERMES_HOME/skills root mixes
+// installer-synced, hub, and operator skills, so only unchanged entries backed
+// by .bundled_manifest receive bundled provenance.
+func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvidence, root string) (bool, string) {
+	remaining := maxEvidencePerSignal - len(*evidence)
+	if remaining <= 0 {
+		return true, CoverageReasonCapExceeded
+	}
+	entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return true, CoverageReasonPermissionDenied
+		}
+		if errors.Is(err, hermesskills.ErrDirectoryLimit) {
+			return true, CoverageReasonCapExceeded
+		}
+		return true, CoverageReasonReadError
+	}
+	partial := len(entries) > remaining
+	if partial {
+		entries = entries[:remaining]
+	}
+	for _, entry := range entries {
+		origin := "user"
+		if entry.Bundled {
+			origin = "bundled"
+		}
+		ev := AIEvidence{
+			Type:     "skill_entry",
+			Basename: sanitizeBasenameValue(entry.Name),
+			PathHash: hashPath(entry.Path),
+			Origin:   origin,
+			Bundled:  entry.Bundled,
+		}
+		if s.opts.StoreRawLocalPaths {
+			ev.RawPath = entry.Path
+		}
+		*evidence = append(*evidence, ev)
+	}
+	if partial {
+		return true, CoverageReasonCapExceeded
+	}
+	return false, ""
+}
+
+// appendSystemSkillChildren enumerates one level below a Codex `.system`
+// container. Exact vendor-cache children are stamped bundled; children below
+// any other root are stamped user-owned. Nested subtrees are not recursed into.
+// The cap mirrors the parent walker so a pathological directory cannot blow up
+// payload size.
 //
 // Returns (partial, coverageReason) so the caller can propagate
 // truncation state up to the outer signal — a bundled read error
 // leaves the operator's snapshot incomplete just as a user-skill
 // read error does.
-func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEvidence, systemDir string) (bool, string) {
+func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvidence, systemDir string, bundled bool) (bool, string) {
 	entries, err := os.ReadDir(systemDir)
 	if err != nil {
 		switch {
@@ -2005,12 +2125,16 @@ func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEv
 			continue
 		}
 		child := filepath.Join(systemDir, entry.Name())
+		origin := "user"
+		if bundled {
+			origin = "bundled"
+		}
 		ev := AIEvidence{
 			Type:     "skill_entry",
 			Basename: name,
 			PathHash: hashPath(child),
-			Origin:   "bundled",
-			Bundled:  true,
+			Origin:   origin,
+			Bundled:  bundled,
 		}
 		if s.opts.StoreRawLocalPaths {
 			ev.RawPath = child
@@ -2018,6 +2142,34 @@ func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEv
 		*evidence = append(*evidence, ev)
 	}
 	return false, ""
+}
+
+func (s *ContinuousDiscoveryService) isCodexBundledSkillContainer(path string) bool {
+	configured := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if configured != "" {
+		if !filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
+			return false
+		}
+		return sameInventoryPath(path, filepath.Join(configured, "skills", enforce.BundledSkillContainer))
+	}
+	for _, home := range s.homesToScan() {
+		if sameInventoryPath(path, filepath.Join(home, ".codex", "skills", enforce.BundledSkillContainer)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameInventoryPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
 }
 
 // sanitizeBasenameValue returns the trimmed name if it is a legitimate
@@ -2193,12 +2345,10 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 			filepath.Join(home, ".vscode-insiders", "extensions"),
 			filepath.Join(home, ".vscodium", "extensions"),
 			filepath.Join(home, ".cursor", "extensions"),
-			filepath.Join(home, ".windsurf", "extensions"),
 			filepath.Join(home, "Library", "Application Support", "Code", "User", "globalStorage"),
 			filepath.Join(home, "Library", "Application Support", "Code - Insiders", "User", "globalStorage"),
 			filepath.Join(home, "Library", "Application Support", "VSCodium", "User", "globalStorage"),
 			filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage"),
-			filepath.Join(home, "Library", "Application Support", "Windsurf", "User", "globalStorage"),
 		)
 		for _, pattern := range []string{
 			filepath.Join(home, "Library", "Application Support", "JetBrains", "*", "plugins"),
@@ -2947,7 +3097,17 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					PathHash:  hashPath(path),
 					ValueHash: hashValue(sig.ID + ":" + domain),
 				}
-				out = append(out, s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev}))
+				domainSignal := s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev})
+				// Carry the matched domain, not just the history file it was
+				// found in. Basenames is what a consumer joins on, and
+				// without this it holds ".zsh_history" while Name and
+				// Product hold "Claude Code" -- so nothing on the signal
+				// names api.anthropic.com and a runtime peer observation of
+				// that host cannot be accounted for by the very signal that
+				// detected it.
+				domainSignal.Basenames = appendUnique(domainSignal.Basenames, domain)
+				sort.Strings(domainSignal.Basenames)
+				out = append(out, domainSignal)
 				break
 			}
 		}
@@ -3622,7 +3782,10 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 			enrichLocalModelProvenance(report.Signals[i].Model, modelProvenanceHints{})
 		}
 	}
-	s.fanoutReport(ctx, *report)
+	// External reports carry a complete inventory snapshot by contract
+	// (validated above), so treat the fanout as a full-scan cycle —
+	// managed_enterprise ships to AI Defense on this path as well.
+	s.fanoutReport(ctx, *report, true)
 	return nil
 }
 
@@ -3891,7 +4054,9 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return safefile.WritePrivate(s.path, payload)
+	return managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(), s.path, "ai discovery state", payload,
+	)
 }
 
 // processNames is kept for backward compatibility with existing

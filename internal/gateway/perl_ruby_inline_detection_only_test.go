@@ -17,8 +17,6 @@
 package gateway
 
 import (
-	"database/sql"
-	"encoding/json"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -26,9 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 func TestPerlRubyInlineOwnersAreQuietAcrossProfilesModesAndPersistence(t *testing.T) {
@@ -38,16 +34,11 @@ func TestPerlRubyInlineOwnersAreQuietAcrossProfilesModesAndPersistence(t *testin
 			t.Run(profile+"/"+mode, func(t *testing.T) {
 				const connector = "codex"
 				installIssue708ProfileConnector(t, connector, profile)
-				fixture := newSidecarRuntimeFixture(t, true)
-				logger := audit.NewLogger(fixture.store)
-				logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime})
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = mode
 				cfg.Guardrail.Connector = connector
 				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
-				api := NewAPIServer(
-					"127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg,
-				)
+				api := &APIServer{scannerCfg: cfg}
 				for _, test := range []struct {
 					command string
 					ruleID  string
@@ -60,62 +51,18 @@ func TestPerlRubyInlineOwnersAreQuietAcrossProfilesModesAndPersistence(t *testin
 						ToolInput: map[string]interface{}{"command": test.command}, CWD: "/repo",
 					})
 					if response.Action != guardrailActionAllow ||
-						response.RawAction != guardrailActionAllow || response.Severity != "LOW" ||
+						response.RawAction != guardrailActionAllow || response.Severity != "NONE" ||
 						response.WouldBlock || response.AdditionalContext != "" ||
-						!findingStringHasRuleID(response.Findings, test.ruleID) {
-						t.Fatalf("%s/%s response for %q = %+v, want quiet LOW telemetry", profile, mode, test.command, response)
+						findingStringHasRuleID(response.Findings, test.ruleID) {
+						t.Fatalf("%s/%s response for %q = %+v, want quiet generic invocation", profile, mode, test.command, response)
 					}
-				}
-
-				database, err := sql.Open("sqlite", fixture.path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer database.Close()
-				rows, err := database.Query(
-					`SELECT rule_id, tags FROM scan_findings WHERE rule_id IN ('CMD-PERL-E', 'CMD-RUBY-E')`,
-				)
-				if err != nil {
-					t.Fatal(err)
-				}
-				count := 0
-				for rows.Next() {
-					var ruleID, rawTags string
-					if err := rows.Scan(&ruleID, &rawTags); err != nil {
-						t.Fatal(err)
-					}
-					var tags []string
-					if err := json.Unmarshal([]byte(rawTags), &tags); err != nil {
-						t.Fatal(err)
-					}
-					if !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) ||
-						hasStableFindingTag(tags, trustedParserUncertaintyTag) {
-						t.Fatalf("persisted %s tags = %v, want proven detection-only", ruleID, tags)
-					}
-					count++
-				}
-				if err := rows.Close(); err != nil {
-					t.Fatal(err)
-				}
-				if err := rows.Err(); err != nil {
-					t.Fatal(err)
-				}
-				if count != 2 {
-					t.Fatalf("persisted Perl/Ruby findings = %d, want 2", count)
-				}
-				alerts, err := fixture.store.ListAlerts(20)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(alerts) != 0 {
-					t.Fatalf("detection-only Perl/Ruby telemetry entered Alerts: %+v", alerts)
 				}
 			})
 		}
 	}
 }
 
-func TestPerlRubyInlineEffectFreeOwnersAreDetectionOnly(t *testing.T) {
+func TestPerlRubyInlineEffectFreeOwnersAreQuiet(t *testing.T) {
 	resetConnectorRuleCategories(t)
 	const connector = "issue-708-perl-ruby-benign"
 	installIssue708ProfileConnector(t, connector, "default")
@@ -134,31 +81,32 @@ func TestPerlRubyInlineEffectFreeOwnersAreDetectionOnly(t *testing.T) {
 				LegacyText: test.command, Connector: connector, EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil || matched.contributesToEnforcement() || matched.Severity != "LOW" {
-				t.Fatalf("effect-free %s finding = %+v, want retained LOW detection-only", test.ruleID, matched)
+			if matched != nil {
+				t.Fatalf("effect-free %s finding = %+v, want removed generic owner", test.ruleID, matched)
 			}
 		})
 	}
 }
 
-func TestPerlRubyInlineEffectfulOrUncertainOwnersRemainEnforceable(t *testing.T) {
+func TestRemovedPerlRubyGenericOwnersDoNotSuppressSpecificFindings(t *testing.T) {
 	resetConnectorRuleCategories(t)
 	const connector = "issue-708-perl-ruby-controls"
 	installIssue708ProfileConnector(t, connector, "default")
 	for _, test := range []struct {
-		name             string
-		command          string
-		ruleID           string
-		wantNetwork      bool
-		wantShellExec    bool
-		wantNonAuthority bool
+		name              string
+		command           string
+		ruleID            string
+		wantNetwork       bool
+		wantShellExec     bool
+		wantNonAuthority  bool
+		wantForkBombProof bool
 	}{
 		{name: "Perl read", command: `perl -e 'open(my $fh, "<", "/etc/shadow")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby write", command: `ruby -e 'File.write("/etc/profile", "x")'`, ruleID: "CMD-RUBY-E"},
 		{name: "Perl child", command: `perl -e 'system("/bin/rm", "-rf", "/tmp/x")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby child", command: `ruby -e 'system("rm -rf /tmp/x")'`, ruleID: "CMD-RUBY-E"},
-		{name: "Perl fork bomb", command: `perl -e 'fork while fork'`, ruleID: "CMD-PERL-E"},
-		{name: "Ruby fork bomb", command: `ruby -e 'loop { fork }'`, ruleID: "CMD-RUBY-E"},
+		{name: "Perl fork bomb", command: `perl -e 'fork while fork'`, ruleID: "CMD-PERL-E", wantForkBombProof: true},
+		{name: "Ruby fork bomb", command: `ruby -e 'loop { fork }'`, ruleID: "CMD-RUBY-E", wantForkBombProof: true},
 		{name: "Perl unknown", command: `perl -e 'Example::Unknown::call("x")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby dynamic", command: `ruby -e 'eval("puts 1")'`, ruleID: "CMD-RUBY-E"},
 		{
@@ -207,8 +155,14 @@ func TestPerlRubyInlineEffectfulOrUncertainOwnersRemainEnforceable(t *testing.T)
 				LegacyText: test.command, Connector: connector, EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil || !matched.contributesToEnforcement() {
-				t.Fatalf("unsafe %s finding = %+v, want conservative enforcement: %+v", test.ruleID, matched, findings)
+			if matched != nil {
+				t.Fatalf("removed generic %s finding returned: %+v", test.ruleID, findings)
+			}
+			if test.wantForkBombProof {
+				dangerous := findingWithID(findings, "impact.fork_bomb")
+				if dangerous == nil || dangerous.contributesToEnforcement() {
+					t.Fatalf("specific fork-bomb proof is not detection-only: %+v", findings)
+				}
 			}
 		})
 	}

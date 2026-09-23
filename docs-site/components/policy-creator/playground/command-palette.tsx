@@ -90,9 +90,13 @@ export const INDEX: IndexEntry[] = [
   // session correlator (Layer 5)
   { sectionId: 'correlator', group: 'Correlator', label: 'Session correlator (Layer 5)', keywords: ['layer 5', 'session', 'cross-event', 'multi-step'] },
   { sectionId: 'correlator', group: 'Correlator', label: 'Lethal trifecta', keywords: ['willison', 'trifecta', 'ingress untrusted', 'sensitive access', 'egress external'] },
-  { sectionId: 'correlator', group: 'Correlator', label: 'Escalation chain', keywords: ['escalation', 'sequence', 'medium high high'] },
-  { sectionId: 'correlator', group: 'Correlator', label: 'Destructive flow', keywords: ['rm -rf', 'destructive', 'exec_shell', 'capability'] },
   { sectionId: 'correlator', group: 'Correlator', label: 'Fingerprint chain', keywords: ['fingerprint', 'exfil', 'same value across turns'] },
+
+  // fixed deterministic runtime inventory
+  { sectionId: 'deterministic-coverage', group: 'Deterministic coverage', label: 'ActionFacts capabilities', keywords: ['facts', 'semantic', 'proof', 'tool calls'] },
+  { sectionId: 'deterministic-coverage', group: 'Deterministic coverage', label: 'Bounded tool-call chains', keywords: ['chain', 'lineage', 'identity', 'multi-step'] },
+  { sectionId: 'deterministic-coverage', group: 'Deterministic coverage', label: 'MCP description YARA', keywords: ['yara', 'mcp', 'description injection'] },
+  { sectionId: 'deterministic-coverage', group: 'Deterministic coverage', label: 'High-assurance policy packs', keywords: ['privacy', 'cloud', 'database', 'infrastructure', 'kubernetes', 'ssh'] },
 
   // cisco AI Defense
   { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'Cisco AI Defense (Optional · Enterprise)', keywords: ['cisco', 'ai defense', 'aid', 'second opinion', 'remote scanner', 'enterprise', 'optional'] },

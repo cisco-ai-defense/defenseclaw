@@ -41,6 +41,27 @@ from urllib.parse import quote
 import requests
 
 PLUGIN_MUTATION_TIMEOUT = 90
+ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS = 30
+ALERT_DISPOSITION_MAX_TIMEOUT_SECONDS = 300
+ALERT_DISPOSITION_SECONDS_PER_TARGET = 1
+
+
+def alert_disposition_timeout_seconds(target_count: int) -> int:
+    """Return a read timeout that can finish sequential alert-review writes.
+
+    Apply walks each matched alert through a protected-state CAS transaction
+    on the audit database. A short client timeout expires before a few hundred
+    writes on a large local store finish, and the CLI then reports a generic
+    confirmation failure even though the gateway may still be applying.
+    """
+    count = max(int(target_count), 0)
+    return min(
+        ALERT_DISPOSITION_MAX_TIMEOUT_SECONDS,
+        max(
+            ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS,
+            ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS + count * ALERT_DISPOSITION_SECONDS_PER_TARGET,
+        ),
+    )
 
 
 def gateway_api_client_host(cfg: Any) -> str:
@@ -207,6 +228,7 @@ class OrchestratorClient:
         selector: Mapping[str, Any],
         preview: bool,
         selection_digest: str | None = None,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         """Preview or apply protected alert-review state through the CAS API."""
 
@@ -219,10 +241,15 @@ class OrchestratorClient:
         }
         if selection_digest:
             payload["selection_digest"] = selection_digest
+        ids = selector.get("ids")
+        id_count = len(ids) if isinstance(ids, (list, tuple)) else 0
+        request_timeout = max(self.timeout, alert_disposition_timeout_seconds(id_count))
+        if timeout is not None:
+            request_timeout = max(request_timeout, int(timeout))
         resp = self._session.post(
             f"{self.base_url}/api/v1/alerts/disposition",
             json=payload,
-            timeout=self.timeout,
+            timeout=request_timeout,
             allow_redirects=False,
         )
         if resp.status_code not in {200, 409, 503}:
@@ -347,6 +374,33 @@ class OrchestratorClient:
     def scan_ai_usage(self) -> dict[str, Any]:
         resp = self._session.post(
             f"{self.base_url}/api/v1/ai-usage/scan",
+            json={},
+            timeout=120,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_runtime(self) -> dict[str, Any]:
+        """Fetch the most recent runtime-plane snapshot.
+
+        The response carries coverage -- how much of the process and
+        connection table this run could see -- alongside the findings, so a
+        caller cannot render one without the other. A quiet host and a blind
+        sensor look identical if you only read the findings.
+        """
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/runtime",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def scan_ai_runtime(self) -> dict[str, Any]:
+        """Trigger one immediate runtime-plane poll and return its result."""
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/ai-usage/runtime/scan",
             json={},
             timeout=120,
             allow_redirects=False,

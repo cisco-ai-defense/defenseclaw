@@ -943,11 +943,11 @@ func convergeAtomicTransformV2ExistingProtection(
 	if err != nil {
 		return false, err
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
+	userSID, err := windowsEffectiveUserSID()
+	if err != nil || userSID == nil {
 		return false, fmt.Errorf("resolve current user while converging config protection: %w", err)
 	}
-	if owner == nil || !owner.Equals(user.User.Sid) {
+	if owner == nil || !owner.Equals(userSID) {
 		return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user")
 	}
 	private, err := atomicTransformPrivateSecurityDescriptor()

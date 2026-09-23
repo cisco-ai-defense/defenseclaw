@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	osuser "os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +34,7 @@ type llmEventMeta struct {
 	Source             string
 	Provider           string
 	Model              string
+	ResponseModel      string
 	SessionID          string
 	RequestID          string
 	RunID              string
@@ -80,7 +80,9 @@ type llmEventMeta struct {
 	SessionSource     string
 	SessionResumed    bool
 	UserID            string
+	UserIDKind        string
 	UserName          string
+	UserEmail         string
 	PolicyID          string
 	DestinationApp    string
 	ToolName          string
@@ -184,6 +186,10 @@ func (a *APIServer) emitLLMResponseEventV8(
 	if a == nil {
 		return ""
 	}
+	// Hook completion payloads report the model that produced the response in
+	// their model field. Preserve that source-backed fact without teaching the
+	// shared log builder to fall back for proxy failures that saw no response.
+	meta.ResponseModel = firstNonEmpty(meta.ResponseModel, meta.Model)
 	return emitLLMResponseEventV8WithEmitter(
 		ctx, a.observabilityV8RuntimeEmitter(), meta, response, rawResponseBody, finishReasons,
 	)
@@ -210,7 +216,14 @@ func emitLLMResponseEventV8WithEmitterStatus(
 	finishReasons []string,
 ) (string, bool, error) {
 	if strings.TrimSpace(response) == "" && rawResponseBody == "" && len(finishReasons) == 0 {
-		return "", false, nil
+		switch strings.TrimSpace(meta.LifecycleOutcome) {
+		case "failed", "timed_out", "cancelled", "rejected":
+			// A terminal call failure can truthfully have no provider response,
+			// body, or finish reason. LifecycleOutcome selects the registered
+			// model.call.failed family without fabricating model output facts.
+		default:
+			return "", false, nil
+		}
 	}
 	if meta.ResponseID == "" {
 		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
@@ -354,6 +367,8 @@ func (r *EventRouter) emitLLMResponseEventV8Correlated(
 	finishReasons []string,
 ) (string, context.Context, llmEventMeta, bool) {
 	emitter := r.observabilityV8RuntimeEmitter()
+	// Session-message assistant frames report their producing model directly.
+	meta.ResponseModel = firstNonEmpty(meta.ResponseModel, meta.Model)
 	if meta.ResponseID == "" {
 		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
 	}
@@ -560,7 +575,7 @@ func (p *GuardrailProxy) emitProxyToolStartV8(
 
 func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, provider string) llmEventMeta {
 	env := audit.EnvelopeFromContext(r.Context())
-	userID, userName := userFromHTTPRequest(r, req.RawBody)
+	user := resolveHTTPUserIdentity(r, req.RawBody)
 	sessionID := firstNonEmpty(SessionIDFromContext(r.Context()), r.Header.Get("X-Conversation-ID"), env.SessionID)
 	requestID := firstNonEmpty(RequestIDFromContext(r.Context()), env.RequestID)
 	return llmEventMeta{
@@ -573,8 +588,10 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		AgentID:        firstNonEmpty(env.AgentID, p.agentIDForRequest()),
 		AgentName:      firstNonEmpty(env.AgentName, p.agentNameForRequest(r.Header.Get("X-Agent-Name"))),
 		AgentType:      p.connectorName(),
-		UserID:         userID,
-		UserName:       userName,
+		UserID:         user.ID,
+		UserIDKind:     user.IDKind,
+		UserName:       user.Name,
+		UserEmail:      user.Email,
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
@@ -595,7 +612,7 @@ func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agent
 }
 
 func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequest, _ []string, rawPayload []byte) {
-	meta := hookLLMEventMeta("codex", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
+	meta := hookLLMEventMeta(ctx, "codex", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	meta.ToolID = req.ToolUseID
 	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
@@ -652,7 +669,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		meta.ToolID = req.ToolUseID
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		arguments := stringFromJSONRaw(codexToolArgs(req))
-		response := codexToolResponseString(req.ToolResponse)
+		response := redactReturnedCredentialTelemetry(
+			codexToolResponseString(req.ToolResponse),
+		)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentCompleted, arguments, response)
 		completionContext := a.emitHookToolSpan(ctx, meta, codexToolName(req), arguments, response, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", codexToolName(req), "", response, nil)
@@ -697,7 +716,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		return
 	}
 	model := payloadString(req.Payload, "model")
-	meta := hookLLMEventMeta(source, req.SessionID, req.TurnID, model, source, req.AgentID, req.AgentName, req.AgentType, req.Payload)
+	meta := hookLLMEventMeta(ctx, source, req.SessionID, req.TurnID, model, source, req.AgentID, req.AgentName, req.AgentType, req.Payload)
 	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
@@ -774,15 +793,16 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			meta.LifecycleOutcome == "cancelled" || meta.LifecycleOutcome == "rejected" {
 			spawnPhase = hookSpawnIntentFailed
 		}
-		a.rememberHookSpawnIntent(meta, req.ToolName, spawnPhase, stringFromJSONRaw(req.ToolArgs), req.Content)
-		completionContext := a.emitHookToolSpan(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), req.Content, nil)
-		a.emitToolInvocationEventV8(completionContext, meta, "result", req.ToolName, "", req.Content, nil)
+		output := redactReturnedCredentialTelemetry(req.Content)
+		a.rememberHookSpawnIntent(meta, req.ToolName, spawnPhase, stringFromJSONRaw(req.ToolArgs), output)
+		completionContext := a.emitHookToolSpan(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), output, nil)
+		a.emitToolInvocationEventV8(completionContext, meta, "result", req.ToolName, "", output, nil)
 		a.emitInferredDelegatedAgentTransitions(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), false)
 	}
 }
 
 func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCodeHookRequest, _ []string, rawPayload []byte) {
-	meta := hookLLMEventMeta("claudecode", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
+	meta := hookLLMEventMeta(ctx, "claudecode", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	meta.ToolID = req.ToolUseID
 	meta.ToolName = claudeCodeToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
@@ -824,6 +844,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		}
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ResponseID = firstNonEmpty(req.MessageID, stableLLMEventID("response", "claudecode", req.SessionID, req.TurnID))
+		meta.ResponseIDReported = strings.TrimSpace(req.MessageID) != ""
 		finish := "streaming"
 		if req.DisplayFinal {
 			finish = "stop"
@@ -860,7 +881,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		meta.ToolID = req.ToolUseID
 		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		arguments := stringFromJSONRaw(claudeCodeToolArgs(req))
-		output := claudeCodeToolOutput(req)
+		output := redactReturnedCredentialTelemetry(claudeCodeToolOutput(req))
 		spawnPhase := hookSpawnIntentCompleted
 		if req.HookEventName == "PostToolUseFailure" {
 			spawnPhase = hookSpawnIntentFailed
@@ -886,8 +907,15 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	}
 }
 
-func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
-	userID, userName := userFromHookPayload(payload)
+// hookLLMEventMeta assembles the correlation facts for one hook delivery.
+//
+// ctx carries the identity the hook process reported for itself, which is the
+// only trustworthy answer to "which end user is this": the gateway may be
+// running as a service account. Callers without a request context pass
+// context.Background() and get whatever the payload and the local fallback
+// can supply.
+func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
+	user := resolveHookUserIdentity(ctx, firstNonEmpty(source, hookSource), payload)
 	provider := hookReportedProvider(source, model, hookSource, payload)
 	lifecycleEvent := canonicalHookLifecycleEvent(firstString(payload,
 		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName",
@@ -989,8 +1017,10 @@ func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, age
 		ReportedCostSum:     reportedCost.Cumulative,
 		SessionSource:       sessionSource,
 		SessionResumed:      resumed,
-		UserID:              userID,
-		UserName:            userName,
+		UserID:              user.ID,
+		UserIDKind:          user.IDKind,
+		UserName:            user.Name,
+		UserEmail:           user.Email,
 	}
 }
 
@@ -1977,7 +2007,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "geminicli", "windsurf", "openhands":
+	case "antigravity", "devin", "geminicli", "openhands":
 		return true
 	default:
 		return false
@@ -2588,29 +2618,6 @@ func (a *APIServer) lastHookPromptIDForTurn(source, sessionID, turnID string) st
 	return a.llmPromptBySourceSessionTurn[source+"\x00"+sessionID+"\x00"+turnID]
 }
 
-func userFromHookPayload(payload map[string]interface{}) (string, string) {
-	if payload == nil {
-		return llmEventUserWithLocalFallback("", "")
-	}
-	userID := firstNonEmpty(
-		stringMapValue(payload, "user_id"),
-		stringMapValue(payload, "user"),
-		stringMapValue(payload, "actor"),
-		stringMapValue(payload, "login"),
-	)
-	if userID == "" {
-		if email := strings.TrimSpace(strings.ToLower(stringMapValue(payload, "user_email"))); email != "" {
-			userID = stableLLMEventID("user", email)
-		}
-	}
-	userName := firstNonEmpty(
-		stringMapValue(payload, "user_name"),
-		stringMapValue(payload, "username"),
-		stringMapValue(payload, "user_login"),
-	)
-	return llmEventUserWithLocalFallback(userID, userName)
-}
-
 func stringMapValue(m map[string]interface{}, key string) string {
 	v, ok := m[key]
 	if !ok || v == nil {
@@ -2676,47 +2683,6 @@ func intString(v int) string {
 	return strconv.Itoa(v)
 }
 
-func userFromHTTPRequest(r *http.Request, rawBody []byte) (string, string) {
-	userID := firstNonEmpty(
-		r.Header.Get(llmEventUserIDHeader),
-		r.Header.Get("X-User-Id"),
-		r.Header.Get("X-User-ID"),
-		r.Header.Get("X-User"),
-	)
-	userName := firstNonEmpty(
-		r.Header.Get(llmEventUserNameHeader),
-		r.Header.Get("X-User-Name"),
-		r.Header.Get("X-Username"),
-	)
-	if len(rawBody) > 0 {
-		var body struct {
-			User     string `json:"user"`
-			UserID   string `json:"user_id"`
-			UserName string `json:"user_name"`
-			Username string `json:"username"`
-		}
-		if json.Unmarshal(rawBody, &body) == nil {
-			userID = firstNonEmpty(userID, body.UserID, body.User)
-			userName = firstNonEmpty(userName, body.UserName, body.Username)
-		}
-	}
-	return llmEventUserWithLocalFallback(userID, userName)
-}
-
-func llmEventUserWithLocalFallback(userID, userName string) (string, string) {
-	userID = sanitizeLLMEventUser(userID)
-	userName = sanitizeLLMEventUser(userName)
-	if userID != "" || userName != "" {
-		return userID, userName
-	}
-	current, err := osuser.Current()
-	if err != nil || current == nil {
-		return "", ""
-	}
-	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(current.Username, current.Name, current.Uid))
-}
-
 func sanitizeLLMEventUser(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -2749,4 +2715,18 @@ func responseIDFromRawJSON(raw []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(body.ID)
+}
+
+func responseModelFromRawJSON(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var body struct {
+		Model        string `json:"model"`
+		ModelVersion string `json:"modelVersion"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	return firstNonEmpty(strings.TrimSpace(body.Model), strings.TrimSpace(body.ModelVersion))
 }
