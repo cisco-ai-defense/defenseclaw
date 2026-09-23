@@ -1,13 +1,13 @@
 {
   "kind": "defenseclaw-system-one-reproduce-bundle",
   "schema_version": 1,
-  "generated_utc": "2026-09-23T20:42:06Z",
+  "generated_utc": "2026-09-23T20:51:15Z",
   "repo": {
     "public": "cisco-ai-defense/defenseclaw",
     "branch": "feat/system-one-benchmarks",
-    "commit": "a0b3ecef715491e8b3905d6ae5523d2baed18b53",
+    "commit": "ef91691e69816ea1b8795f2a0ea953127ea0cd88",
     "benchmarks_tree_branch": "https://github.com/cisco-ai-defense/defenseclaw/tree/feat/system-one-benchmarks/benchmarks",
-    "benchmarks_tree_pinned": "https://github.com/cisco-ai-defense/defenseclaw/tree/a0b3ecef715491e8b3905d6ae5523d2baed18b53/benchmarks",
+    "benchmarks_tree_pinned": "https://github.com/cisco-ai-defense/defenseclaw/tree/ef91691e69816ea1b8795f2a0ea953127ea0cd88/benchmarks",
     "commit_note": "The commit pin names the parent of the commit that adds this manifest, because the manifest must hash the tree it ships in. Use benchmarks_tree_branch for the state that includes it."
   },
   "scrub": {
@@ -18,6 +18,8 @@
     },
     "retained": [
       "127.0.0.1 (loopback tunnel endpoints; required to read the scripts)",
+      "/opt/dlami/nvme (GPU host instance-store scratch) and /teamspace/studios/this_studio (H200 studio writable volume): mount points, not identities",
+      "lightning.ai as the provider value in one serving record: provenance saying which cloud served that arm, not a host detail",
       "environment variable NAMES such as SYSONE_NO_KEY and CHEAP_KEY (names, never values)"
     ],
     "verified_absent": [
@@ -46,10 +48,10 @@
     }
   ],
   "totals": {
-    "files": 153,
-    "bytes": 1527029,
-    "payload_safe_files": 152,
-    "payload_safe_bytes": 1514608
+    "files": 166,
+    "bytes": 1583333,
+    "payload_safe_files": 165,
+    "payload_safe_bytes": 1570912
   },
   "files": [
     {
@@ -575,6 +577,60 @@
       "payload_safe": true
     },
     {
+      "path": "03-serving/openjev-qwen/h200_build_and_fetch_27b.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "f6f8b0647550a2eb7fd1b5d8605efb0600bf6a8fab932b9fc129e6e282d354a2",
+      "bytes": 2821,
+      "origin": "laptop .secjudge-work/h200/build_and_fetch_27b.sh",
+      "purpose": "Build the stack and fetch the 27B checkpoint onto the H200 studio volume in one pass.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/h200_build_stack.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "81ae4ef746d8317cc05691377d6fef2789e60be5fc1424423255b1c35b8a9a14",
+      "bytes": 2618,
+      "origin": "laptop .secjudge-work/h200/build_stack.sh",
+      "purpose": "First H200 studio stack build: venv and inference stack on the studio's writable volume.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/h200_build_stack_v2.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "ca31f1db92a92da55f785b7cf6c0530609aa00fc1d9b833b20cfaf857097d891",
+      "bytes": 4207,
+      "origin": "laptop .secjudge-work/h200/build_stack_v2.sh",
+      "purpose": "Revised H200 stack build, superseding h200_build_stack.sh.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/h200_build_studio2.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "d6b549a1e4735b570521133a8cf728d8c68e7062d200636930647d8bcb5e1811",
+      "bytes": 6026,
+      "origin": "laptop .secjudge-work/h200/build_studio2.sh",
+      "purpose": "Build the second H200 studio, used to parallelise the 27B fanout across studios.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/h200_serve_2b.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "c05743f28c685e0b8cb12e6629d191ab3159f82ccfa826a55bc39eef5a0b7d27",
+      "bytes": 1386,
+      "origin": "laptop .secjudge-work/h200/serve_2b.sh",
+      "purpose": "Serve open-jev-qwen-2b on H200, the reference arm for the cross-hardware agreement check against its settled L40S run.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/h200_throughput.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "837078ab66911831718a31735fcfe443d6756ff441ff9f1e5d60ad001150759d",
+      "bytes": 2024,
+      "origin": "laptop .secjudge-work/h200/throughput.sh",
+      "purpose": "Measure served throughput on H200, the evidence for the ~8.3x speedup that justified abandoning the L40S 27B attempt.",
+      "payload_safe": true
+    },
+    {
       "path": "03-serving/openjev-qwen/launch_2b_concurrent.sh",
       "stage": "Serving, per model family, plus the settled serving contracts",
       "sha256": "16baf4598494aef58590ae8381c8148cfb56679a2ae57ecd3e44244e082b812e",
@@ -710,6 +766,15 @@
       "payload_safe": true
     },
     {
+      "path": "04-run/h200_fanout.sh",
+      "stage": "The run",
+      "sha256": "79c09682b6b233d5eeb568d61b2e7eac26c49d0d2c6348d23aecd0873ad45ead",
+      "bytes": 5493,
+      "origin": "laptop .secjudge-work/h200/fanout.sh",
+      "purpose": "Fan the s2 stage out across the H200 single-card replicas.",
+      "payload_safe": true
+    },
+    {
       "path": "04-run/holdout324.py",
       "stage": "The run",
       "sha256": "79e5d63abb7f36f4f24915d700ba57b9b124372543e4aa9b254ecd2ee513d519",
@@ -734,6 +799,15 @@
       "bytes": 1379,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/resolution.py",
       "purpose": "Diagnostic: confidence/score resolution per arm while prediction files are still open.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_27b_s2.sh",
+      "stage": "The run",
+      "sha256": "d945fbfb3e056022f5d26e747bddafb769034bd6269f8f44b53711c872578bf3",
+      "bytes": 4390,
+      "origin": "laptop .secjudge-work/h200/run_27b_s2.sh",
+      "purpose": "Run the s2 stage for open-jev-qwen-27b on the H200 studio, sharded 4 ways.",
       "payload_safe": true
     },
     {
@@ -800,6 +874,15 @@
       "payload_safe": true
     },
     {
+      "path": "04-run/smoke27.sh",
+      "stage": "The run",
+      "sha256": "6d5ed754d5951b5617de783b55ab8f437444ffbcf692f65389d6fd164352b66d",
+      "bytes": 2836,
+      "origin": "laptop .secjudge-work/h200/smoke27.sh",
+      "purpose": "Smoke the 27B /v1/systemone contract on H200 before committing the full stage.",
+      "payload_safe": true
+    },
+    {
       "path": "05-settlement/after.sh",
       "stage": "Settlement",
       "sha256": "75a016397f9f1138b17b0b89eeedc9a3ed5b3e1d6f6e8e611d202dfde1bf07dd",
@@ -824,6 +907,15 @@
       "bytes": 4269,
       "origin": "$WORK/.system-one-data/outputs/secjudge/code/check_settled.py",
       "purpose": "Settled-file discipline, applied independently of in-flight scorecards.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/emit_openjev_full_meta.py",
+      "stage": "Settlement",
+      "sha256": "be446172f9b565866ab939bfd4a0765ffb2158a40fa8dde5196a7a2957fb5879",
+      "bytes": 4721,
+      "origin": "laptop .secjudge-work/h200/emit_openjev_full_meta.py",
+      "purpose": "Emit the additive settled sidecar for the s3 openjev-full prediction, rather than rewriting a meta already published in the private repo.",
       "payload_safe": true
     },
     {
@@ -860,6 +952,15 @@
       "bytes": 3766,
       "origin": "$WORK/j27/mark_partial.sh",
       "purpose": "Mark the stopped 27B L40S shards partial and superseded by renaming, never deleting, and deliberately writing no meta: an absent meta is exactly what the settlement rule treats as unsettled.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/settle_arm.py",
+      "stage": "Settlement",
+      "sha256": "999a1df84bef0321608e5bc1a6789d00ed94fa83bba24df6cde8e34438261560",
+      "bytes": 10383,
+      "origin": "laptop .secjudge-work/h200/settle_arm.py",
+      "purpose": "Generic arm settlement for the H200 run family: merge the shards, verify coverage, and write the settled meta. Existed on the operator laptop only.",
       "payload_safe": true
     },
     {
@@ -935,6 +1036,15 @@
       "payload_safe": true
     },
     {
+      "path": "05-settlement/write_serving_record.py",
+      "stage": "Settlement",
+      "sha256": "944d540dfc7ee792be3353c89faa43b52a47d9ed9afb5eb90be938257e917802",
+      "bytes": 4725,
+      "origin": "laptop .secjudge-work/h200/write_serving_record.py",
+      "purpose": "Write the settled serving provenance record for an H200-served arm, including the provider field that says which cloud served it.",
+      "payload_safe": true
+    },
+    {
       "path": "06-scoring/extract_incumbents.py",
       "stage": "Scoring",
       "sha256": "d0ab6ac10bb641cdac737cc63512d2b602d8578f2e0d64637b71157001fbe489",
@@ -977,6 +1087,15 @@
       "bytes": 2234,
       "origin": "$WORK/.system-one-data/outputs/secjudge/code/show_stage.py",
       "purpose": "Print one stage's case count, truth grades and cases_sha256 for spot checks.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/agree_diff.py",
+      "stage": "Analysis",
+      "sha256": "dc332cc1f448b77768f6a00adcdb63b0a70459970a2d142dcc1c917011e8485c",
+      "bytes": 4375,
+      "origin": "laptop .secjudge-work/h200/agree_diff.py",
+      "purpose": "Compare H200 and L40S answers for the same adapter on the same cases, quantifying whether the hardware change moved any decision.",
       "payload_safe": true
     },
     {
@@ -1423,8 +1542,8 @@
     {
       "path": "README.md",
       "stage": "Bundle documentation",
-      "sha256": "3e4839929f89b24a70e7732535c7db6fe6858f87253ac606b3c5620403537b8e",
-      "bytes": 11769,
+      "sha256": "3f414d613a5ca4312e9b9daf782816d8ded392eaa1d0b32210044114f6dbdd25",
+      "bytes": 12068,
       "origin": "authored for this bundle",
       "purpose": "Bundle entry point: deep links, placeholder key, reading order, pinned stack and the known reproduction gaps.",
       "payload_safe": true

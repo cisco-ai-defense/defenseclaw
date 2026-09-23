@@ -118,7 +118,10 @@ Operational detail is replaced, not deleted, so the structure still reads:
 variable **names** (`SYSONE_NO_KEY`, `CHEAP_KEY`) are retained; no value is present anywhere.
 `/opt/dlami/nvme/` is left verbatim because it is a mount point, not an identity: it is the
 GPU host's instance-store scratch holding `HF_HOME` and the staged checkpoints. Repoint it
-at any fast local disk.
+at any fast local disk. `/teamspace/studios/this_studio` is retained for the same reason: it
+is the writable volume on the H200 studio that the `h200_*` scripts build into. `lightning.ai`
+survives in one serving record as the `provider` field, which is provenance - it says which
+cloud served that arm - not a host detail.
 
 ## No dataset content
 
