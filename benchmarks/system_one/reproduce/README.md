@@ -126,6 +126,21 @@ Scripts here reference datasets **by id and revision only**. No rows, prompts, c
 tool-call arguments or provider rationales are included; this was verified mechanically
 against the payload guard's own corpus index (see `MANIFEST.json :: scrub.verified_absent`).
 
+## One file is deliberately not here
+
+`07-analysis/contamination/emit2.py` is **intentionally absent**, so the `emit*.py` series
+reads `emit.py`, `emit3.py` with a visible gap. It names the `mcptox` dataset, whose upstream
+licence is unresolved; that material is local-evaluation-only and is kept off every public
+surface, so this one script of the twenty-five is not vendored here.
+
+Two consequences worth knowing before you try to run the series:
+
+- The `## 9. Reproduction` block that `emit3.py` generates names `emit2.py` in its pipeline
+  command. That command will not run as written against this bundle.
+- `emit2.py` is **not lost**. It is preserved in the private evaluations dataset at
+  `stages/secjudge/contamination/work/emit2.py`, together with every other file in the
+  contamination study. See `MANIFEST.json :: intentional_omissions`.
+
 ## Reading order
 
 | Stage | What it establishes |
@@ -133,11 +148,11 @@ against the payload guard's own corpus index (see `MANIFEST.json :: scrub.verifi
 | `00-environment/` | environment pins, and what they do not cover |
 | `01-dataset-lock/` | pinned model revisions and checkpoint fetch |
 | `02-case-construction/` | case construction, serialisation, truncation, length/template gates |
-| `03-serving/` | serving per model family; `contracts/` holds the settled serving provenance |
+| `03-serving/` | serving per model family (`gemma4/`, `nimble/`, `openjev-qwen/`, `secjudge/`, `kev/`, shared `common/`); `contracts/` holds the settled serving provenance |
 | `04-run/` | the run, and its progress/row gates |
-| `05-settlement/` | settlement and settled-file discipline |
+| `05-settlement/` | settlement and settled-file discipline, including how a stopped run is marked unsettled |
 | `06-scoring/` | scoring through the shared scorer |
-| `07-analysis/` | recall@FPR, calibration, registry and report builders |
+| `07-analysis/` | recall@FPR, calibration, registry and report builders; `contamination/` holds the training-overlap study |
 | `08-site-build/` | site build and payload verification |
 
 `03-serving/contracts/*.serving.json` are the load-bearing provenance records: attention
@@ -169,9 +184,14 @@ topology, temperature, chat-template digest and pinned stack versions.
    when this bundle was staged. Re-copy it, re-scrub it and regenerate `MANIFEST.json`
    before publishing - see `MANIFEST.json :: restage_required`.
 9. **Hardware.** The serving topologies assume 4x L40S (46 GiB each); the 27B arm shards a
-   base model that does not fit on one card.
+   base model that does not fit on one card. `03-serving/openjev-qwen/studio_setup_h200.sh`
+   is the alternative that does fit: on a 143 GiB H200 the checkpoint is resident whole, so
+   four real single-card replicas replace two pipeline-sharded half-idle ones.
 10. **`open-jev-qwen-27b` has no settled artifacts yet.** Its serving contract must be added
-    to `03-serving/contracts/` once that arm settles.
+    to `03-serving/contracts/` once that arm settles. The stopped L40S attempt is **not** a
+    result: it reached 17,288 of 30,310 rows and was deliberately left with no meta, which
+    is what the settlement rule reads as unsettled. `05-settlement/mark_partial.sh` and
+    `05-settlement/stop_27b.sh` are how that state was produced; do not splice those rows.
 
 ## What an outsider can actually do
 

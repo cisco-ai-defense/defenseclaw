@@ -1,13 +1,14 @@
 {
   "kind": "defenseclaw-system-one-reproduce-bundle",
   "schema_version": 1,
-  "generated_utc": "2026-09-23T16:55:17Z",
+  "generated_utc": "2026-09-23T20:42:06Z",
   "repo": {
     "public": "cisco-ai-defense/defenseclaw",
     "branch": "feat/system-one-benchmarks",
-    "commit": "d2ae73f32736db0aa9fd8e78d5656355c1a41012",
+    "commit": "a0b3ecef715491e8b3905d6ae5523d2baed18b53",
     "benchmarks_tree_branch": "https://github.com/cisco-ai-defense/defenseclaw/tree/feat/system-one-benchmarks/benchmarks",
-    "benchmarks_tree_pinned": "https://github.com/cisco-ai-defense/defenseclaw/tree/d2ae73f32736db0aa9fd8e78d5656355c1a41012/benchmarks"
+    "benchmarks_tree_pinned": "https://github.com/cisco-ai-defense/defenseclaw/tree/a0b3ecef715491e8b3905d6ae5523d2baed18b53/benchmarks",
+    "commit_note": "The commit pin names the parent of the commit that adds this manifest, because the manifest must hash the tree it ships in. Use benchmarks_tree_branch for the state that includes it."
   },
   "scrub": {
     "placeholders": {
@@ -35,11 +36,20 @@
     "action": "re-copy from src/build.py, re-apply the scrub, then regenerate this manifest with mkmanifest.py",
     "staged_sha256_may_be_stale": true
   },
+  "intentional_omissions": [
+    {
+      "path": "07-analysis/contamination/emit2.py",
+      "reason": "Names the mcptox dataset, whose upstream licence is unresolved. mcptox material is local-evaluation-only and is kept off every public surface, so this one script in the contamination series is not vendored here.",
+      "consequence": "The emit*.py series therefore reads emit.py, emit3.py with a gap, and the Reproduction block that emit3.py generates names emit2.py in its pipeline command. A reproducer will not find it in this bundle.",
+      "preserved_at": "private dataset Vineethsain/defenseclaw-system-one-evaluations-v1, stages/secjudge/contamination/work/emit2.py",
+      "lost": false
+    }
+  ],
   "totals": {
-    "files": 98,
-    "bytes": 1268711,
-    "payload_safe_files": 97,
-    "payload_safe_bytes": 1256290
+    "files": 153,
+    "bytes": 1527029,
+    "payload_safe_files": 152,
+    "payload_safe_bytes": 1514608
   },
   "files": [
     {
@@ -67,6 +77,15 @@
       "bytes": 378,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/dl.py",
       "purpose": "Snapshot-download the Gemma 4 family checkpoints strictly at the revisions in pins.json.",
+      "payload_safe": true
+    },
+    {
+      "path": "01-dataset-lock/dl_kev.sh",
+      "stage": "Dataset lock and model revision pins",
+      "sha256": "a4ebe216b174ecc7ccba50e0e7f8f4d7bc5662b5ec0ea9efb9c4b9cc70cf4cf4",
+      "bytes": 544,
+      "origin": "<GPU_HOST>:/opt/dlami/nvme/kevbench/dl_kev.sh",
+      "purpose": "Fetch the kev-9b and decider-2b checkpoints onto the GPU host instance store, with HF_HOME pinned to that scratch disk.",
       "payload_safe": true
     },
     {
@@ -130,6 +149,15 @@
       "bytes": 1263,
       "origin": "<GPU_HOST>:$WORK/sysone/j27/mk_selftest.py",
       "purpose": "Select worst-case selftest requests (longest real prompts) for memory headroom checks.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/mk_smoke.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "c6d9c21961552e56e6dc6f5b6f5f03a652440846945e61def507465ef1ad8b39",
+      "bytes": 1862,
+      "origin": "$WORK/j27/mk_smoke.py",
+      "purpose": "Build a smoke cases file whose C7/I3/Q2 expansion is exactly N prediction rows; cases expand to a variable number of Q2 decisions, so a row target cannot be met by taking a fixed number of cases.",
       "payload_safe": true
     },
     {
@@ -265,6 +293,24 @@
       "bytes": 1806,
       "origin": "<GPU_HOST>:$WORK/sysone/provision_ojev.sh",
       "purpose": "Second venv pinned to Open-Jev's documented inference stack (transformers 5.10.2, peft 0.19.1).",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/tunnel.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "b8e0f21e8d8da5f21135f80f0f7953df9c7b426764a55f31c89aab41b3a474c4",
+      "bytes": 946,
+      "origin": "$WORK/sysone-tunnel.sh",
+      "purpose": "Idempotent loopback-only port forward from the dev host to the GPU host serving ports; both ends bind 127.0.0.1, nothing is exposed publicly.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/tunnel_watchdog.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a5661c9c7acdddb84f6c07189e6e5b9e539665179158c66da5b9273919e44044",
+      "bytes": 1105,
+      "origin": "$WORK/j27/tunnel_watchdog.sh",
+      "purpose": "Keep the loopback forwards for the two 27B replicas alive for the length of the run: a dropped forward would turn every in-flight request into an error row.",
       "payload_safe": true
     },
     {
@@ -466,6 +512,42 @@
       "payload_safe": true
     },
     {
+      "path": "03-serving/kev/run_decider_server.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "195275951f34156735c4d7617a400debd1cb0cb5a172a4b2337e2c3f8680af5f",
+      "bytes": 612,
+      "origin": "<GPU_HOST>:/opt/dlami/nvme/kevbench/run_decider_server.sh",
+      "purpose": "Launch the decider-2b replica pinned to one GPU, with HF_HOME on the instance store.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/kev/run_kev_server.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "415c96afa3916dc65cb87cc207d5e89c07bdb8d9711e8677f4cff621b2ece801",
+      "bytes": 724,
+      "origin": "<GPU_HOST>:/opt/dlami/nvme/kevbench/run_kev_server.sh",
+      "purpose": "Launch the kev-9b replica across its two assigned GPUs, with HF_HOME on the instance store.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/kev/serve_decider.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "0fe54d793403ad5d32a8111969a839e149e13e8b347751839a052d10e52c1847",
+      "bytes": 13841,
+      "origin": "<GPU_HOST>:/opt/dlami/nvme/kevbench/serve_decider.py",
+      "purpose": "Serve Mapika/decider-2b on the /v1/systemone contract, overriding decider.serve's own defaults (notably DECIDER_FP8=1) that would otherwise serve fp8 and make the numbers incomparable.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/kev/serve_kev.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a5090e8b7f2b9507235740f984286c0ab5cae1d0b018cfc688a1e6ff3b1cbe72",
+      "bytes": 13592,
+      "origin": "<GPU_HOST>:/opt/dlami/nvme/kevbench/serve_kev.py",
+      "purpose": "Serve jaredpalmer/kev-9b on the /v1/systemone contract, reusing kev.serve's own request path verbatim so the readout is the shipped one.",
+      "payload_safe": true
+    },
+    {
       "path": "03-serving/nimble/nimble_shim.py",
       "stage": "Serving, per model family, plus the settled serving contracts",
       "sha256": "13f59852c6776f3961ce742469b071d8a24e40bb227e97f7ac3d64521ef8cc17",
@@ -547,6 +629,15 @@
       "payload_safe": true
     },
     {
+      "path": "03-serving/openjev-qwen/studio_setup_h200.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "5226a40d192ca33a0d01df289c457774feee1bd09808d1393e89afb918961978",
+      "bytes": 1620,
+      "origin": "$WORK/scratch/studio_setup.sh",
+      "purpose": "Bring up open-jev-qwen-27b on the 4xH200 studio as four independent single-GPU replicas: the 54.7 GB checkpoint fits whole on one 143 GB H200, so replicas beat tensor parallelism for many small requests.",
+      "payload_safe": true
+    },
+    {
       "path": "03-serving/secjudge/secjudge_infer.py",
       "stage": "Serving, per model family, plus the settled serving contracts",
       "sha256": "38727b72447b821381f8806fd94b1518e324375381ce4e69322ebc623c396555",
@@ -574,6 +665,15 @@
       "payload_safe": true
     },
     {
+      "path": "04-run/drive_all.sh",
+      "stage": "The run",
+      "sha256": "d891bd66663cb502d512859d61cff554a0d429400ece97afaf7a94956fa30c08",
+      "bytes": 2008,
+      "origin": "$WORK/sysone-drive_all.sh",
+      "purpose": "Drive all three s2 phases back to back with no idle GPU time: wait for the 4 shard runners, settle/merge/score, swap the replicas to the next model, relaunch.",
+      "payload_safe": true
+    },
+    {
       "path": "04-run/drive_arm.sh",
       "stage": "The run",
       "sha256": "24acfb7a6ac28fca9f2df10004cd2cd9340e6c7c9744e8992e8abc91751130de",
@@ -589,6 +689,15 @@
       "bytes": 3917,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/drive_run.sh",
       "purpose": "Attach to an already-serving Gemma 4 shim and run one s2 arm to settlement.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/dump_requests.py",
+      "stage": "The run",
+      "sha256": "411b425fb3a00f92e3fe8594f0a11152be8abd5ee30b94e2a1fbf65231b961f0",
+      "bytes": 2316,
+      "origin": "$WORK/sysone-dump_requests.py",
+      "purpose": "Dump genuine s2 request bodies through the benchmark runner's own state builder, so the prefix-cache A/B and the token-length audit see byte-identical state and questions to the real run.",
       "payload_safe": true
     },
     {
@@ -637,6 +746,15 @@
       "payload_safe": true
     },
     {
+      "path": "04-run/run_s2.sh",
+      "stage": "The run",
+      "sha256": "e2123b2533be469b2f44e13a87755f881426f1a841e0b22717836dd57bb6c96f",
+      "bytes": 2103,
+      "origin": "$WORK/sysone-run_s2.sh",
+      "purpose": "Run the s2 stage (C7/I3/Q2, 4,277 cases / 30,310 decisions) for one model, stride-sharded 4 ways across the four L40S replicas, then coverage-verified merge.",
+      "payload_safe": true
+    },
+    {
       "path": "04-run/run_secjudge_stages.sh",
       "stage": "The run",
       "sha256": "1bc585aaabac8915da96606977d98022f0fe5ba05d764af90f680d4d52683d28",
@@ -673,12 +791,30 @@
       "payload_safe": true
     },
     {
+      "path": "04-run/smoke.sh",
+      "stage": "The run",
+      "sha256": "76cf9630674975f277aefb22ab9282e19259b80ec8eb2bb5950ea234d6e8ff2c",
+      "bytes": 2181,
+      "origin": "$WORK/sysone-smoke.sh",
+      "purpose": "20-case smoke validating the /v1/systemone contract end to end for all three adapters before a full stage is committed.",
+      "payload_safe": true
+    },
+    {
       "path": "05-settlement/after.sh",
       "stage": "Settlement",
       "sha256": "75a016397f9f1138b17b0b89eeedc9a3ed5b3e1d6f6e8e611d202dfde1bf07dd",
       "bytes": 614,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/after.sh",
       "purpose": "After finish_arms.sh scores both arms, build the three registry artifacts.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/capture_provenance.py",
+      "stage": "Settlement",
+      "sha256": "4884eab3883862bb5e3db8dc100f3545642386c271a279e4bfc4c9089f93d284",
+      "bytes": 11693,
+      "origin": "$WORK/sysone-capture_provenance.py",
+      "purpose": "Record the exact served artifact for one model so every figure stays traceable: friendly display name plus canonical repo id, pinned base revision and adapter revision.",
       "payload_safe": true
     },
     {
@@ -691,12 +827,48 @@
       "payload_safe": true
     },
     {
+      "path": "05-settlement/finish_27b.sh",
+      "stage": "Settlement",
+      "sha256": "07c614e7c6049408270aab00f1cd9fe335d86a5dc7911ed8188c11d1c47214ee",
+      "bytes": 6561,
+      "origin": "$WORK/j27/finish_27b.sh",
+      "purpose": "Settle, score and publish the open-jev-qwen-27b s2 arm through the shared already-published pipeline.",
+      "payload_safe": true
+    },
+    {
       "path": "05-settlement/finish_arms.sh",
       "stage": "Settlement",
       "sha256": "de46019d76546dead6840913bdaed78873446007f1935c992d7599ee7557e517",
       "bytes": 2198,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/finish_arms.sh",
       "purpose": "Wait for both Gemma 4 arms to settle, then score them on the real deterministic tier.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/g4j_settled.py",
+      "stage": "Settlement",
+      "sha256": "723b8c2d8b2db007cb5eee9f4572371a8dff391ef7fbd1d5b0a9301485fb0492",
+      "bytes": 1546,
+      "origin": "$WORK/g4j-settled.py",
+      "purpose": "Settled-file check narrowed to exactly the files the Gemma4Jev phase quotes.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/mark_partial.sh",
+      "stage": "Settlement",
+      "sha256": "728edfe1de40c47e9f2c2b5386ed70a94b60473aeefb6a100de2e312b9dabbc7",
+      "bytes": 3766,
+      "origin": "$WORK/j27/mark_partial.sh",
+      "purpose": "Mark the stopped 27B L40S shards partial and superseded by renaming, never deleting, and deliberately writing no meta: an absent meta is exactly what the settlement rule treats as unsettled.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/settle_context.py",
+      "stage": "Settlement",
+      "sha256": "97e51b630b22ca59562f04e6003fe5741437494322a06fde25cacf4faf3b2168",
+      "bytes": 4032,
+      "origin": "$WORK/settle_context.py",
+      "purpose": "Settle s1-n1000/jev-context.jsonl by additive sidecar rather than by rewriting a meta already published in the private predictions repo, whose digest is recorded in that repo's manifest.",
       "payload_safe": true
     },
     {
@@ -718,6 +890,51 @@
       "payload_safe": true
     },
     {
+      "path": "05-settlement/stop_27b.sh",
+      "stage": "Settlement",
+      "sha256": "ec5701585134d6b989250ac509ea0950a17505480fc8886d69b985a94db99983",
+      "bytes": 4036,
+      "origin": "$WORK/j27/stop_27b.sh",
+      "purpose": "Clean stop of the superseded open-jev-qwen-27b L40S run, ordered so the armed settle-and-score waiter cannot fire on a partial run.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/verify_settled.py",
+      "stage": "Settlement",
+      "sha256": "f088000982b14ac7ad2d95a248309073458dac0b43da2b712bd348d6fe648ebd",
+      "bytes": 1823,
+      "origin": "$WORK/sysone-verify_settled.py",
+      "purpose": "Verify a fixed set of merged s2 predictions against the publication rule (meta complete:true AND on-disk sha256 == prediction_sha256), reporting adapter and base provenance per arm.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/verify_settled_paths.py",
+      "stage": "Settlement",
+      "sha256": "7e4129c112722b41d11d90792923b57fdf06fe75a38b3d10d3009aef1118fa6f",
+      "bytes": 1750,
+      "origin": "$WORK/verify_settled.py",
+      "purpose": "Same settlement rule, argv-driven over arbitrary prediction paths, reporting run shape and cost (cases, requests, tokens per request, estimated_usd) rather than provenance.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/wait_then_finish.sh",
+      "stage": "Settlement",
+      "sha256": "9d3292c749ae1ee7de4e0849fb832af7719222af4c6c4caa21f6e429baea87a9",
+      "bytes": 1359,
+      "origin": "$WORK/j27/wait_then_finish.sh",
+      "purpose": "Wait detached for the four s2 runners to exit, then settle, score and publish, so the pipeline completes without an attached session.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/write_meta.py",
+      "stage": "Settlement",
+      "sha256": "5d12b5e26d95a90b171b56a2a280efaeb5780eeca4686d695144e0d1c8b7c2f5",
+      "bytes": 4904,
+      "origin": "$WORK/sysone-write_meta.py",
+      "purpose": "Write a settled meta for a merged s2 prediction file: the runner writes a meta per shard, and the merged file otherwise carries only a merge attestation.",
+      "payload_safe": true
+    },
+    {
       "path": "06-scoring/extract_incumbents.py",
       "stage": "Scoring",
       "sha256": "d0ab6ac10bb641cdac737cc63512d2b602d8578f2e0d64637b71157001fbe489",
@@ -733,6 +950,15 @@
       "bytes": 2745,
       "origin": "$WORK/.system-one-data/outputs/secjudge/code/score_incumbents.sh",
       "purpose": "Score incumbent models with the same shared scorer, cases and deterministic tier.",
+      "payload_safe": true
+    },
+    {
+      "path": "06-scoring/score_s2.sh",
+      "stage": "Scoring",
+      "sha256": "e19f17b05f401ae0e10ba3db76305f3dc93b9989e10e8a1e6812e2824264afe3",
+      "bytes": 5452,
+      "origin": "$WORK/sysone-score_s2.sh",
+      "purpose": "Settle and score one model's s2 run through the shared scorer: verify every shard meta, merge, then score the merged file.",
       "payload_safe": true
     },
     {
@@ -754,12 +980,30 @@
       "payload_safe": true
     },
     {
+      "path": "07-analysis/append_row_27b.py",
+      "stage": "Analysis",
+      "sha256": "8fdeaefe078e9f508115c6545086f66aeab327caaf0465821fb4245fb3753b88",
+      "bytes": 5452,
+      "origin": "$WORK/j27/append_row_27b.py",
+      "purpose": "Append the open-jev-qwen-27b row to comparison-s2.json preserving every existing row, importing row construction from compare_s2.py so the row is 1:1 with the published ones.",
+      "payload_safe": true
+    },
+    {
       "path": "07-analysis/assemble.py",
       "stage": "Analysis",
       "sha256": "ef1786d59e61e4c5cb79cfb36c5c9ee58a6e5d3d1532d7913018991af9e4f824",
       "bytes": 10305,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/assemble.py",
       "purpose": "Assemble the Gemma4Jev Phase 0 scorecard from the gate and holdout artifacts.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/auc_variants.py",
+      "stage": "Analysis",
+      "sha256": "3aa30d361b6ca81e2fc5f14dae10939403fddabb166cc2b22fc57c5d77e49a21",
+      "bytes": 3047,
+      "origin": "$WORK/sysone-auc_variants.py",
+      "purpose": "Quantify how much discriminative signal the shared `risk` ranking variable discards, since for the Open-Jev family it absorbs the model's confirm mass.",
       "payload_safe": true
     },
     {
@@ -796,6 +1040,258 @@
       "bytes": 3997,
       "origin": "$WORK/.system-one-data/outputs/gemma4jev/by_variable.py",
       "purpose": "Recall at fixed FPR for every ranking variable, with OpenJev's own FPR as a fifth point.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/by_variable_27b.py",
+      "stage": "Analysis",
+      "sha256": "b9bb0d5fa6a3c1b2095951e4f9a5235067c7526c2d24d28f350c5a7668bccee1",
+      "bytes": 11652,
+      "origin": "$WORK/j27/by_variable_27b.py",
+      "purpose": "Recall at fixed FPR for each of the three ranking variables for one Open-Jev arm, after `risk` alone scored open-jev-qwen-9b below chance.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/compare_s2.py",
+      "stage": "Analysis",
+      "sha256": "b24e26081e9f4898ecdc07cd5f966c49d318c8a8eb1d0d221bb942e24b6c5d06",
+      "bytes": 8015,
+      "origin": "$WORK/sysone-compare_s2.py",
+      "purpose": "Assemble the s2 comparison table from settled scorecards only, taking incumbent numbers from the same files and key paths the published leaderboard used.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/aggregate.py",
+      "stage": "Analysis",
+      "sha256": "c53c919239aad54689e5e587ce0b1c01bc70231539f3582cc3e30e6bac41b920",
+      "bytes": 5081,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/aggregate.py",
+      "purpose": "Task C aggregation over the union of all LSH passes.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/build_corpus_docs.py",
+      "stage": "Analysis",
+      "sha256": "c88d0364d36488b9fc9f202adce73b30e8cc7ff365507a13076caebf903e51eb",
+      "bytes": 4578,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/build_corpus_docs.py",
+      "purpose": "Emit normalised doc records for every case in the four evaluation corpora, in two mandated text views per case.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/build_train_docs.py",
+      "stage": "Analysis",
+      "sha256": "4b58684c9d4c1fc8bb10e8234bf25fdef32f17754b11b310db3d5b1949460e0e",
+      "bytes": 13588,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/build_train_docs.py",
+      "purpose": "Emit normalised doc records for every obtainable SecJudge training source plus the DefenseClaw Security Suite and the Task-E eval sources.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/command_overlap.py",
+      "stage": "Analysis",
+      "sha256": "5c83c41bc0c86dea37a28c67fe4bd27e4ab27535e7349f1c42ce8b54547ed165",
+      "bytes": 9513,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/command_overlap.py",
+      "purpose": "Bare-string command overlap: the corpora wrap commands as {\"command\": \"...\"}, which costs ~10 Jaccard points against a training row holding the bare string.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/contam_lib.py",
+      "stage": "Analysis",
+      "sha256": "c11a8ae368087a60cd0f52a26c1514804973f8b818690fc45f127c10d49a563a",
+      "bytes": 2881,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/contam_lib.py",
+      "purpose": "Shared normalisation, character-5-gram shingling and bottom-k sketching for the contamination study.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/dl_pivot.py",
+      "stage": "Analysis",
+      "sha256": "daa2e7ab19784bdbf38944ff2684cab7efa55ff4500b2fe6047e1f7cb86634f5",
+      "bytes": 973,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/dl_pivot.py",
+      "purpose": "Download the Nemotron Terminal-Pivot source at its pinned revision.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/download.py",
+      "stage": "Analysis",
+      "sha256": "366c015f4abe2f505640cc7e9c8e7aea19d8a2c50d2f5aa0059e161eb9a148cd",
+      "bytes": 2566,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/download.py",
+      "purpose": "Download the SecJudge training sources into the study cache at pinned revisions.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/emit.py",
+      "stage": "Analysis",
+      "sha256": "6aee281423ca09b143631e40a82d17b493b67345dd81f30a969e013411ae2b99",
+      "bytes": 17539,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/emit.py",
+      "purpose": "Emit the six deliverable artifacts under contamination/.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/emit3.py",
+      "stage": "Analysis",
+      "sha256": "425175713aa6f6c27a23456028fd6da06de265c9877465c0f086dafe8b3b70c8",
+      "bytes": 14908,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/emit3.py",
+      "purpose": "Emit methodology.md.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/exact_match.py",
+      "stage": "Analysis",
+      "sha256": "d43bdf15043a57af22c5f593d3d7162f121d24d0d9f340ff962f43a176c231dc",
+      "bytes": 3963,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/exact_match.py",
+      "purpose": "Task B: exact-match contamination check over sha256 of identically normalised text.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/exact_shingle_pass.py",
+      "stage": "Analysis",
+      "sha256": "123e54c76e2f43d0b6d5242cef0012a06b1cf10bd50640966efba90f69d514a6",
+      "bytes": 5103,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/exact_shingle_pass.py",
+      "purpose": "Task C/D/E cross-check: an exact full-shingle inverted index over the small, highest-risk sources, with no MinHash approximation.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/fix.py",
+      "stage": "Analysis",
+      "sha256": "b0ed28adc282431e0d9c278f2725cd5bb2584f2ae1fdd1145da95a511d5de9a8",
+      "bytes": 3070,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/fix.py",
+      "purpose": "One-shot repair of an unfilled placeholder and a wrong max-char figure in the methodology emitter.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/fix2.py",
+      "stage": "Analysis",
+      "sha256": "5dedf22b53f4baef8459e30016e3214bc65841747fdbaa6dd3a42fc345b06262",
+      "bytes": 580,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/fix2.py",
+      "purpose": "Second one-shot repair of a methodology emitter sentence.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/idspace.py",
+      "stage": "Analysis",
+      "sha256": "f2ddabd0257a13571e858ecb0239922329cdabd79f871e091ed7d72a6d1b11b4",
+      "bytes": 1050,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/idspace.py",
+      "purpose": "Enumerate the case id space per stage, so corpus-side documents can be counted without re-reading the corpora.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/inspect_sources.py",
+      "stage": "Analysis",
+      "sha256": "c139f3c390dcad54e728623a49a10fe0d8d314f00481a2ab6fa3fd102a9a698f",
+      "bytes": 2871,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/inspect_sources.py",
+      "purpose": "Peek at each cached third-party source to establish its real schema and row counts before any doc view is built.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/lsh_match.py",
+      "stage": "Analysis",
+      "sha256": "61dab3321b618266028588853f04563e829cf3606d86e59d95e180c9426ab2a1",
+      "bytes": 7975,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/lsh_match.py",
+      "purpose": "Task C: 128-permutation MinHash LSH candidate generation with parameterised banding, then exact-Jaccard verification.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/minhash_one.py",
+      "stage": "Analysis",
+      "sha256": "2243446a5e90917ae70b7ad1520e85e2afd91789cfa355c78bd0d12b95089f28",
+      "bytes": 1987,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/minhash_one.py",
+      "purpose": "128-permutation MinHash signatures for one doc file, by universal hashing with uint64 wraparound.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/neardup_gen.py",
+      "stage": "Analysis",
+      "sha256": "646851ced439ab0473dd833d16689dbba969ae0aa16fc000003d3e8d1ee1ef51",
+      "bytes": 6153,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/neardup_gen.py",
+      "purpose": "Task C pass 1: LSH-free bottom-k candidate generation over a frequency-capped inverted index of training-side sketch values.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/pivot_index.py",
+      "stage": "Analysis",
+      "sha256": "c25be5117419f3715df117a50de61540c1de3557924a3bae3ae592205011e3ba",
+      "bytes": 2060,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/pivot_index.py",
+      "purpose": "Index the Terminal-Pivot release to recover its uuid, task, schema, tool, harness and agent distributions.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/probe.py",
+      "stage": "Analysis",
+      "sha256": "e0a6c837d6e3d35c10e16107d8145d0fd019ad1a443aa951b2efc6dca9888249",
+      "bytes": 2158,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/probe.py",
+      "purpose": "Probe each candidate training repo for reachability, gating and licence before it is relied on.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/scan_all_stages.py",
+      "stage": "Analysis",
+      "sha256": "3364626bf5239f8b3508e1a38cbf8206e2f4057b40fade0314059af6e63f4715",
+      "bytes": 1423,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/scan_all_stages.py",
+      "purpose": "Read-only: does any benchmark stage on this host draw from a SecJudge training source?",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/sketch_one.py",
+      "stage": "Analysis",
+      "sha256": "bbd8a0e4195492354a492ee5faa53deddc33a705476df26ed138a5e1ef1abc56",
+      "bytes": 1879,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/sketch_one.py",
+      "purpose": "Build character-5-gram bottom-k (KMV, k=128) sketches for one doc file.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/srccount.py",
+      "stage": "Analysis",
+      "sha256": "0741f669bfafcb2dae1aea20cc3aabd0a98f6ede3b0fd21e32945e4dab801fac",
+      "bytes": 1801,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/srccount.py",
+      "purpose": "Count cases per source per stage, giving the denominators every overlap rate is expressed against.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/contamination/taske.py",
+      "stage": "Analysis",
+      "sha256": "3238a419f56800691ff3786c1ca87a4703671544d7248fbf48055bcc586481c6",
+      "bytes": 8072,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/contamination/work/taske.py",
+      "purpose": "Task E: eval-set reuse, establishing exact row-level provenance of the rogue-coding-agent-security and Nemotron Terminal-Pivot cases.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/incumbent_operating_fpr.py",
+      "stage": "Analysis",
+      "sha256": "6e937516d0196aadacbe43b33c00a6f272ee8247d242fe02ab9a2e9ee9b82d4a",
+      "bytes": 5246,
+      "origin": "$WORK/sysone-incumbent_operating_fpr.py",
+      "purpose": "Measure the incumbent cascade's recall at its own block false-positive rate, which none of the four fixed caps in the site's recall artifacts matches.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/mapping_check.py",
+      "stage": "Analysis",
+      "sha256": "98010dbe2273917f7821806e194f42e6a9c1bcd3187a48695449bc9c4be918b0",
+      "bytes": 5453,
+      "origin": "$WORK/sysone-mapping_check.py",
+      "purpose": "Distinguish a genuinely weak scalar head from an inverted or mis-wired disposition mapping, when block-only recall is low and ROC AUC falls below 0.5.",
       "payload_safe": true
     },
     {
@@ -841,6 +1337,15 @@
       "bytes": 9245,
       "origin": "$WORK/.system-one-data/outputs/secjudge/code/recall_at_fpr.py",
       "purpose": "Recall at fixed FPR for SecJudge and every other measured model, on our corpora.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/recall_by_variable.py",
+      "stage": "Analysis",
+      "sha256": "881cec6af5658106a88c724601584541b1528584453ba23e0fe54ae2a885d411",
+      "bytes": 5748,
+      "origin": "$WORK/sysone-recall_by_variable.py",
+      "purpose": "Recall at a capped block false-positive rate for each published ranking variable: an AUC is a whole-curve property, so a variable can win it where no guardrail operates.",
       "payload_safe": true
     },
     {
@@ -918,8 +1423,8 @@
     {
       "path": "README.md",
       "stage": "Bundle documentation",
-      "sha256": "ba43a19ef5c8a2ec7e76f6250c6f7b0f23a60c8a96d16af627c438ca48adbcb2",
-      "bytes": 10212,
+      "sha256": "3e4839929f89b24a70e7732535c7db6fe6858f87253ac606b3c5620403537b8e",
+      "bytes": 11769,
       "origin": "authored for this bundle",
       "purpose": "Bundle entry point: deep links, placeholder key, reading order, pinned stack and the known reproduction gaps.",
       "payload_safe": true
