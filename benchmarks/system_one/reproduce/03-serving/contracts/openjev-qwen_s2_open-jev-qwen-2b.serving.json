@@ -1,0 +1,34 @@
+{
+  "display_name": "open-jev-qwen-2b",
+  "grid": "C7/I3/Q2",
+  "kind": "defenseclaw-system-one-serving-provenance",
+  "schema_version": "1",
+  "served": {
+    "adapter_sha256": "2d23935b1a7380db444abac572c04646918ba794e59002d1588236182a3ca18f",
+    "architecture": "LoRA rank 8 (alpha 16) on attention projections + trained scalar decision head",
+    "base_model": "Qwen/Qwen3.5-2B",
+    "base_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "checkpoint_sha256": "3076462e6356412082e79af909227b39b2863b90def79155ca0821aa506b7ded",
+    "forward_passes_per_q2_decision": 7,
+    "loader": "jev.server (Open-Jev own loader; not vLLM/SGLang-servable)",
+    "max_length": 4096,
+    "pinned_stack": {
+      "peft": "0.19.1",
+      "transformers": "5.10.2"
+    },
+    "readout": "independent_candidate_lora_nll_brier: one forward pass per candidate, scalar head on the last hidden state, softmax over candidates / T",
+    "repo_id": "ZefanCai/Open-Jev-2B",
+    "repo_revision": "0c7aa498b1627be8da4acf34c863ff0ee0a92785",
+    "temperature": 1.518796342858676
+  },
+  "serving": {
+    "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's hidden state, not from token logits.",
+    "gpu": "4x NVIDIA L40S 46068 MiB",
+    "prefix_cache": false,
+    "prefix_cache_reason": "Open-Jev's opt-in request-local prefix cache failed a numeric A/B against the full-prefill path (worst probability delta 0.0311) and was 2.6x slower on this workload; rejected.",
+    "replicas": 4,
+    "sharding": "corpus stride shards rows[i::4], one single-GPU replica per shard (CUDA_VISIBLE_DEVICES; no tensor parallelism)",
+    "transport": "POST /v1/systemone on 127.0.0.1, ssh -L tunnel from the dev host; no port exposed publicly"
+  },
+  "stage": "s2"
+}

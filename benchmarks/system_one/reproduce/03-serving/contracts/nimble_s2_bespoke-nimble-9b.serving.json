@@ -1,0 +1,37 @@
+{
+  "display_name": "bespoke-nimble-9b",
+  "grid": "C7/I3/Q2",
+  "kind": "defenseclaw-system-one-serving-provenance",
+  "schema_version": "1",
+  "served": {
+    "adapter_revision": "93ec5d6ff1a9cd31d6cc0e0c58d312465d36de7c",
+    "adapter_sha256": "ba7e28acb97f973e80fa51f3aa6fc6f75ea4081b89632ed45d8e5f3a1d7bfa6b",
+    "architecture": "LoRA rank 16 (alpha 32) on attention + MLP projections, no separate head",
+    "base_model": "Qwen/Qwen3.5-9B",
+    "base_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "forward_passes_per_q2_decision": 3,
+    "loader": "published inference.py scoring path, served on the /v1/systemone contract",
+    "max_length": 8192,
+    "pinned_stack": {
+      "peft": "0.21.0",
+      "transformers": "5.17.0"
+    },
+    "prompt_code_sha256": "a0a0f94d0f65e972bc20d088678ad3d595ff1c42b9c0d78f96034526303f63fc",
+    "readout": "schema_candidate_classification_v1: one forward pass per schema field, logits of the one-token letter codes from the LM head, softmax / T",
+    "repo_id": "bespokelabs/Bespoke-Nimble-9B",
+    "repo_revision": "594dfdcfb6f94e3d0c0db7535180d3c71689169a",
+    "temperature": 2.179078721266035,
+    "temperature_fitted": true,
+    "trained_prompt_tokens": 2048
+  },
+  "serving": {
+    "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's hidden state, not from token logits.",
+    "gpu": "4x NVIDIA L40S 46068 MiB",
+    "prefix_cache": false,
+    "prefix_cache_reason": "Open-Jev's opt-in request-local prefix cache failed a numeric A/B against the full-prefill path (worst probability delta 0.0311) and was 2.6x slower on this workload; rejected.",
+    "replicas": 4,
+    "sharding": "corpus stride shards rows[i::4], one single-GPU replica per shard (CUDA_VISIBLE_DEVICES; no tensor parallelism)",
+    "transport": "POST /v1/systemone on 127.0.0.1, ssh -L tunnel from the dev host; no port exposed publicly"
+  },
+  "stage": "s2"
+}

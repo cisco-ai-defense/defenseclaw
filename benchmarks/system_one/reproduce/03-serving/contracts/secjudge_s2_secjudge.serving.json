@@ -1,0 +1,43 @@
+{
+  "display_name": "secjudge",
+  "grid": "C7/I0/Q0",
+  "kind": "defenseclaw-system-one-serving-provenance",
+  "schema_version": "1",
+  "served": {
+    "adapter": null,
+    "architecture": "ModernBertForSequenceClassification, 5-class severity head (NONE/LOW/MEDIUM/HIGH/CRITICAL) over a mean-pooled ModernBERT-large encoder, plus a shipped 1,000-point isotonic calibrator; 395,836,421 parameters, fp32",
+    "arm": "sev",
+    "arm_is_card_native": true,
+    "arm_source": "secjudge-report.json :: class_mapping.primary_arm, and class_mapping.sev",
+    "base_model": "answerdotai/ModernBERT-large",
+    "base_revision": "not declared by the publisher",
+    "base_revision_note": "SecJudge ships full fine-tuned weights, not an adapter, and its card names answerdotai/ModernBERT-large as the base without pinning a revision. No revision for the base repo appears anywhere in the published repo, so none is claimed here.",
+    "gated": "manual",
+    "loader": "the published secjudge_model.py forward path, driven directly on CPU; the repo's own load_secjudge() helper slices the input to 512 CHARACTERS before tokenising and was bypassed so the model saw the full 512 tokens it was trained for",
+    "max_length_tokens": 512,
+    "num_classes": 5,
+    "params": 395836421,
+    "prediction_sha256": "ff3901603d6dbcbd57db805ab8b09aa18fd70111a2ad42281a37c67a71ddb9b8",
+    "prompting_contract": "single serialised text (production_text rendering of the context variant); no policy, no question, no instruction -- NOT the Q0-Q4 judge grid",
+    "readout": "severity argmax mapped to a disposition by the arm the model card specifies: NONE/LOW -> allow, MEDIUM -> confirm, HIGH/CRITICAL -> block. risk = 1 - P(allow) is SecJudge's own calibrated P(attack).",
+    "repo_id": "nghodki/SecJudge",
+    "repo_revision": "28e810afc9113d5b3ec60401940657108f51f1bb",
+    "tokenizer_model_max_length": 8192
+  },
+  "serving": {
+    "device": "CPU only: Intel Xeon 6975P-C, 8 physical cores, shared dev host. No GPU was used for any SecJudge stage.",
+    "dtype": "float32",
+    "dtype_rationale": "bfloat16 via AMX was measured at only 1.97x and broke agreement: is_attack agreement fell to 0.9375 and the calibrated score moved by up to 0.404, because the shipped isotonic calibrator has just 19 distinct output levels so tiny numeric shifts jump a whole plateau. fp32 was therefore used for every reported number.",
+    "engine": "PyTorch/transformers on CPU. SecJudge is an encoder classifier with a trained severity head, so no LLM serving engine applies.",
+    "gpu": null,
+    "prefix_cache": false,
+    "prefix_cache_reason": "Not applicable: a single encoder forward pass per decision, so there is no prefix to reuse across tokens. A decision-level result cache was used and its hits are recorded in the stage throughput record.",
+    "provider_cost_usd": 0.0,
+    "replicas": 12,
+    "sharding": "corpus shards, one resident fp32 model copy per shard process",
+    "threads_per_replica": 1,
+    "topology": "12 single-threaded CPU processes on 8 physical cores, fp32",
+    "transport": "in-process; no server, no port, no tunnel."
+  },
+  "stage": "s2"
+}

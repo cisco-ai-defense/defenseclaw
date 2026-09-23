@@ -1,0 +1,95 @@
+{
+  "asserted_generation_prompt_tail": [
+    100,
+    45518,
+    107,
+    101
+  ],
+  "attention": "eager",
+  "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "cuda": "13.0",
+  "device_map": "auto",
+  "display_name": "gemma-4-26B-A4B-it",
+  "dtype": "bfloat16",
+  "enable_thinking": false,
+  "gpus": [
+    "NVIDIA L40S",
+    "NVIDIA L40S"
+  ],
+  "grid": "C7/I3/Q2",
+  "kind": "defenseclaw-system-one-serving-provenance",
+  "license": "apache-2.0",
+  "load_seconds": 5.067397807000816,
+  "max_gpu_memory": "30GiB",
+  "max_input_tokens": 8192,
+  "method": "jevify_label_readout",
+  "model": "gemma-4-26b-a4b-it",
+  "placement": {
+    "0": 17,
+    "1": 19
+  },
+  "prefix_cache": false,
+  "prompt_source": "jevify.prompting.render",
+  "readout": "full-vocabulary softmax, mass summed over label token variants, renormalized over labels",
+  "repo_id": "google/gemma-4-26B-A4B-it",
+  "response_formatter": "jev.api.format_response",
+  "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+  "schema_version": "1",
+  "served": {
+    "adapter": null,
+    "adapter_revision": null,
+    "architecture": "no adapter, the base weights served directly; typed-decision: full-vocabulary softmax, label-token mass, renormalized over candidates",
+    "attention": "eager",
+    "base_model": "google/gemma-4-26B-A4B-it",
+    "base_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+    "dtype": "bfloat16",
+    "forward_passes_per_q2_decision": 3,
+    "loader": "transformers AutoModelForCausalLM via gemma4_jev_shim.py; served on the jev.api/jev.server wire contract. eager attention, prefix cache disabled.",
+    "max_length": 8192,
+    "pinned_stack": {
+      "cuda": "13.0",
+      "torch": "2.13.0+cu130"
+    },
+    "readout": "typed-decision: full-vocabulary softmax, label-token mass, renormalized over candidates",
+    "readout_kind": "typed_decision_guard",
+    "repo_id": "google/gemma-4-26B-A4B-it",
+    "repo_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    "temperature": 5.15516951223468,
+    "temperature_note": "fitted global temperature from artifacts/out/temp-calibration.json; monotone in the logits, so holdout accuracy is unchanged at 0.845679 while score resolution is restored (uncalibrated: median top-probability 1.0000, 274/324 above 0.999)",
+    "weight_sha256": {
+      "model-00001-of-00002.safetensors": "1127684971bbca40465435a5cad69d67ad603bf5e61c6dfd5561fae4a3bcfdb3",
+      "model-00002-of-00002.safetensors": "aab47033e1e8a492ef8e581efae1cf36478d0433567e7729b3c1728bc8970db7"
+    }
+  },
+  "serving": {
+    "attention_reason": "G2: optimised CUDA SDPA diverges from eager past the sliding window on Gemma 4 (0.0874 label probability, 11.72 candidate logits, full-vocab argmax flip on a 961-token prompt); eager agreed with math-only SDPA to 2.9e-10",
+    "cuda_visible_devices": "0,3",
+    "engine": "transformers (gemma4_jev_shim.py); jev.api/jev.server wire contract",
+    "gpu": "2x NVIDIA L40S 46068 MiB, resident bf16, no CPU offload",
+    "gpu_count": 2,
+    "gpu_models": [
+      "NVIDIA L40S",
+      "NVIDIA L40S"
+    ],
+    "layer_placement": {
+      "0": 17,
+      "1": 19
+    },
+    "max_gpu_memory": "30GiB",
+    "prefix_cache": false,
+    "prefix_cache_reason": "cached vs cache-free flips 5/324 holdout decisions (1.54%), max probability delta 0.1626; cache-free is the defensible setting and deliberately departs from OpenJev SERVE.md's --enable-prefix-caching",
+    "relationship_to_incumbent": "SAME WEIGHTS as the incumbent Bedrock generative judge 'google.gemma-4-26b-a4b' (revision 4d7ae4984b7db7de8f8457170b3f1a419ee76d52) -- byte-identical safetensors, not a re-release. This row differs from the judge row only in how the decision is read out: a typed-decision label-logit readout (probabilities over the declared answer space) instead of a generative chat judge, plus the fitted temperature T=5.155170 for score resolution. Any comparison between this row and the 'Gemma 4 (judge, reference)' row is therefore a serving-architecture comparison on one set of weights, not a model comparison.",
+    "replicas": 1,
+    "same_base_weights_as_incumbent_judge": true,
+    "sharding": "single replica; transformers device_map=auto places 36 decoder layers across 2 GPUs device 0: 17 layers, device 1: 19 layers, 30GiB cap per device; no tensor parallelism and no corpus stride sharding",
+    "topology": "1 replica sharded across 2 GPUs (transformers device_map=auto)",
+    "transport": "POST on 127.0.0.1 loopback, jev.api/jev.server wire contract; no port exposed publicly"
+  },
+  "sliding_window": 1024,
+  "stage": "s2",
+  "temperature": 5.15516951223468,
+  "tf32": false,
+  "torch": "2.13.0+cu130",
+  "url": "http://127.0.0.1:8921"
+}

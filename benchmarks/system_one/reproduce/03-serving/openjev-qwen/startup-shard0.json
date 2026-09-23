@@ -1,0 +1,63 @@
+{
+  "adapter_revision": "28cf73067d5b337860bbef3c85b8b82ba8730956",
+  "attn_implementation": "eager",
+  "base_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "batch_size": 4,
+  "canonical_base_model": "Qwen/Qwen3.8-27B",
+  "checkpoint_sha256": "c49994563c3c4f04a99d9130203c4e526f4ae5086c84deec57698d18cb652e71",
+  "code_commit": "ed45657bf726c3b77408942830e5578f99df904e",
+  "cuda_device_count": 2,
+  "cuda_visible_devices": "0,1",
+  "device_map": "balanced",
+  "display_name": "open-jev-qwen-27b",
+  "dtype": "bfloat16",
+  "io_same_device_hook_on": "PeftModel",
+  "load_kwargs": {
+    "attn_implementation": "eager",
+    "device_map": "balanced",
+    "max_memory": "{0: 32212254720, 1: 32212254720}",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "torch_dtype": "torch.bfloat16"
+  },
+  "load_seconds": 9.9,
+  "max_length": 4096,
+  "max_memory_per_card": "30GiB",
+  "method": "lora_decision_head",
+  "model": "open-jev-qwen-27b",
+  "placement": {
+    "cpu_or_meta_devices": [],
+    "cuda_memory": {
+      "cuda:0": {
+        "allocated_gib": 23.812,
+        "free_mib": 20565,
+        "reserved_gib": 23.82,
+        "total_mib": 45460
+      },
+      "cuda:1": {
+        "allocated_gib": 27.202,
+        "free_mib": 17097,
+        "reserved_gib": 27.207,
+        "total_mib": 45460
+      }
+    },
+    "gib_by_device": {
+      "cuda:0": 22.954,
+      "cuda:1": 24.833
+    },
+    "head_devices": [
+      "cuda:0"
+    ],
+    "layers_offloaded_to_cpu": 0,
+    "modules_with_offload_hook": [],
+    "tensors_by_device": {
+      "cuda:0": 530,
+      "cuda:1": 642
+    },
+    "zero_offload": true
+  },
+  "prefix_cache": false,
+  "repo_id": "ZefanCai/Open-Jev-27B-v1.1",
+  "repo_revision": "28cf73067d5b337860bbef3c85b8b82ba8730956",
+  "temperature": 2.5343690298472983,
+  "url": "http://127.0.0.1:8831"
+}

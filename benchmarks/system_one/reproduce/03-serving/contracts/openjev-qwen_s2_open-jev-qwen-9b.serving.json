@@ -1,0 +1,40 @@
+{
+  "display_name": "open-jev-qwen-9b",
+  "grid": "C7/I3/Q2",
+  "kind": "defenseclaw-system-one-serving-provenance",
+  "live_health": {
+    "method": "lora_decision_head",
+    "model": "open-jev-qwen-9b",
+    "status": "ready"
+  },
+  "schema_version": "1",
+  "served": {
+    "adapter_sha256": "f85650a8fb97c6d0ac3e948cdca2f30a0ca6ace8b8a43aebca1c152fe38aeb75",
+    "architecture": "LoRA rank 8 (alpha 16) on attention projections + trained scalar decision head",
+    "base_model": "Qwen/Qwen3.5-9B",
+    "base_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "checkpoint_sha256": "9302c52feba99d079918755f2469f4f088266e9786327bab550248f3d83716d3",
+    "forward_passes_per_q2_decision": 7,
+    "head_sha256": "229fe9800384e824135e59d1af59bda7346da031aea61640be5f456b9be6ce70",
+    "loader": "jev.server (Open-Jev own loader; not vLLM/SGLang-servable)",
+    "max_length": 4096,
+    "pinned_stack": {
+      "peft": "0.19.1",
+      "transformers": "5.10.2"
+    },
+    "readout": "independent_candidate_lora_nll_brier: one forward pass per candidate, scalar head on the last hidden state, softmax over candidates / T",
+    "repo_id": "ZefanCai/Open-Jev-9B",
+    "repo_revision": "47e966881e489511c0c7f5633a9e1960a676a551",
+    "temperature": 1.8969118766347646
+  },
+  "serving": {
+    "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's hidden state, not from token logits.",
+    "gpu": "4x NVIDIA L40S 46068 MiB",
+    "prefix_cache": false,
+    "prefix_cache_reason": "Open-Jev's opt-in request-local prefix cache failed a numeric A/B against the full-prefill path (worst probability delta 0.0311) and was 2.6x slower on this workload; rejected.",
+    "replicas": 4,
+    "sharding": "corpus stride shards rows[i::4], one single-GPU replica per shard (CUDA_VISIBLE_DEVICES; no tensor parallelism)",
+    "transport": "POST /v1/systemone on 127.0.0.1, ssh -L tunnel from the dev host; no port exposed publicly"
+  },
+  "stage": "s2"
+}

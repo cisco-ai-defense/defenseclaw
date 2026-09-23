@@ -1,0 +1,928 @@
+{
+  "kind": "defenseclaw-system-one-reproduce-bundle",
+  "schema_version": 1,
+  "generated_utc": "2026-09-23T16:55:17Z",
+  "repo": {
+    "public": "cisco-ai-defense/defenseclaw",
+    "branch": "feat/system-one-benchmarks",
+    "commit": "d2ae73f32736db0aa9fd8e78d5656355c1a41012",
+    "benchmarks_tree_branch": "https://github.com/cisco-ai-defense/defenseclaw/tree/feat/system-one-benchmarks/benchmarks",
+    "benchmarks_tree_pinned": "https://github.com/cisco-ai-defense/defenseclaw/tree/d2ae73f32736db0aa9fd8e78d5656355c1a41012/benchmarks"
+  },
+  "scrub": {
+    "placeholders": {
+      "<GPU_HOST>": "address of the 4x L40S serving host",
+      "<SSH_KEY>": "path to the private key used to reach <GPU_HOST>",
+      "$WORK": "operator home root that held .system-one-data and .system-one-space-build"
+    },
+    "retained": [
+      "127.0.0.1 (loopback tunnel endpoints; required to read the scripts)",
+      "environment variable NAMES such as SYSONE_NO_KEY and CHEAP_KEY (names, never values)"
+    ],
+    "verified_absent": [
+      "host IPs other than loopback",
+      "ssh key paths",
+      "absolute operator-home paths (rewritten to the $WORK placeholder)",
+      "AWS account/instance/volume/security-group/AMI/ARN ids",
+      "credential values of any provider shape",
+      "private key blocks",
+      "dataset rows, prompts, case text and provider rationales"
+    ]
+  },
+  "restage_required": {
+    "path": "08-site-build/build.py",
+    "reason": "point-in-time copy of a file that was under active edit when this bundle was staged",
+    "action": "re-copy from src/build.py, re-apply the scrub, then regenerate this manifest with mkmanifest.py",
+    "staged_sha256_may_be_stale": true
+  },
+  "totals": {
+    "files": 98,
+    "bytes": 1268711,
+    "payload_safe_files": 97,
+    "payload_safe_bytes": 1256290
+  },
+  "files": [
+    {
+      "path": "00-environment/pinned-stack-by-arm.json",
+      "stage": "Environment pins",
+      "sha256": "40e7a096a75915fb630ccec76661f961b91376b48f105c7c3a655f4886865d61",
+      "bytes": 5008,
+      "origin": "derived from */s2/*.serving.json and */s2/*.jsonl.meta.json",
+      "purpose": "Per-arm serving pins recovered from each run meta and settled serving contract, not from any lockfile; records which arms have no transformers pin at all.",
+      "payload_safe": true
+    },
+    {
+      "path": "00-environment/requirements-frozen.client-venv.txt",
+      "stage": "Environment pins",
+      "sha256": "79a0e4e6db575fc294d702518f4ff216a4aa773c76275eccb7c8e516178442da",
+      "bytes": 591,
+      "origin": "$WORK/.system-one-data/outputs/requirements-frozen.txt",
+      "purpose": "Frozen pins for the evaluation-harness CLIENT venv only (34 packages). Contains no torch, vllm, transformers, tokenizers, accelerate or peft: it pins the client that called the models, not the stack that served them.",
+      "payload_safe": true
+    },
+    {
+      "path": "01-dataset-lock/dl.py",
+      "stage": "Dataset lock and model revision pins",
+      "sha256": "2f593acd3df9a804e9c4348158db5f4d46ca24b023fccfb9cb775a5ee90cdbb1",
+      "bytes": 378,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/dl.py",
+      "purpose": "Snapshot-download the Gemma 4 family checkpoints strictly at the revisions in pins.json.",
+      "payload_safe": true
+    },
+    {
+      "path": "01-dataset-lock/download.sh",
+      "stage": "Dataset lock and model revision pins",
+      "sha256": "f92b2d518d1237efaa407cf75c95d5318ec417ed7b520053b935ae9aa51d3b3a",
+      "bytes": 1322,
+      "origin": "<GPU_HOST>:$WORK/sysone/download.sh",
+      "purpose": "Fetch and stage the Open-Jev / Nimble / SecJudge checkpoints onto the GPU host NVMe.",
+      "payload_safe": true
+    },
+    {
+      "path": "01-dataset-lock/pins.json",
+      "stage": "Dataset lock and model revision pins",
+      "sha256": "0eb97db27d56f21f3380ef4d7eda0f29b676abd3e4eb4d15602206645a22699a",
+      "bytes": 303,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/pins.json",
+      "purpose": "Pinned HuggingFace commit revisions for the four Gemma 4 family repos used by the Gemma4Jev arms.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/audit_lengths.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "cf367b0817f27f521a96d9a3d21c80611106b0f292ba19222101166fca58fc5f",
+      "bytes": 3315,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/audit_lengths.py",
+      "purpose": "Audit real s2 prompt lengths against each model's hard input ceiling.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/combine_ablation.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "70a7627a94dcf6a61f324ce902d7cdf736d539e264cce84372060e5655098cbe",
+      "bytes": 1568,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/combine_ablation.py",
+      "purpose": "Merge the production and alternate serialisation ablation results into one table.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/g1_template.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "07ca43b427da02198789acaca72ada974d0f451394ff1e0c5bc46a3563b8c416",
+      "bytes": 5267,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g1_template.py",
+      "purpose": "Gate G1: pin the Gemma 4 chat templates and assert the rendered answer boundary.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/g4_lengths.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "2f907ef50c34ce9e28e8ee97557c8201f1d1dfe8a302641ec3a316a7a607e165",
+      "bytes": 5390,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g4_lengths.py",
+      "purpose": "Gate G4: the real C7/I3/Q2 prompt-length distribution under the Gemma 4 tokenizers.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/mk_selftest.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "24345e7681c8f77e24dfac25f3a63a024e8dd9c20d7dd35b27e65d4ed92162da",
+      "bytes": 1263,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/mk_selftest.py",
+      "purpose": "Select worst-case selftest requests (longest real prompts) for memory headroom checks.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/run_trunc_all.sh",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "10ed640504dd43ce565ea39f2e6096481cc57d08a581bc188093f10fb97595ae",
+      "bytes": 673,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/run_trunc_all.sh",
+      "purpose": "Driver: run the truncation measurement across all four corpora.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/secjudge_serialize.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "392ef6e5a934fb0c8d9e495f63e208aa9dafa2a892057d860f4c989b4793ba62",
+      "bytes": 5393,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/secjudge_serialize.py",
+      "purpose": "SecJudge input serialisation, held fixed across every stage and context variant.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/secjudge_trunc.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "99ca4f65dabfbb6f738ca62602567d821acd45a03e35b5f04fe46ae2d24abf9b",
+      "bytes": 5958,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/secjudge_trunc.py",
+      "purpose": "Measure the 512-token truncation rate on every corpus, split unsafe vs benign.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/sj_plan.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "9952df8dae3c876ada585178027cfa42b32fdcec963795a36f22df588caadb84",
+      "bytes": 2773,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/sj_plan.py",
+      "purpose": "Exact compute budget: padded-token totals per stage/variant plus deduplication potential.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/sj_serialization_ablation.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "7a1e5588f994d6e0a9fe6e21c9cdd4a2a59e4a7e3ae858792b4797f3d84f0393",
+      "bytes": 8844,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/sj_serialization_ablation.py",
+      "purpose": "Justify the SecJudge serialisation choice from measured data rather than assertion.",
+      "payload_safe": true
+    },
+    {
+      "path": "02-case-construction/sj_serialization_ablation_alt.py",
+      "stage": "Case construction, serialisation and normalisation",
+      "sha256": "eaf6e0724da8ca98f7de786b4dc195574fb22190b2c2359fde7ec0ea401e339d",
+      "bytes": 8933,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/sj_serialization_ablation_alt.py",
+      "purpose": "Alternate-form serialisation ablation, cross-checking the primary ablation.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/check_placement.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "18954e70eaeac4820f09b901658ac9b75b94429be0d45e16558e68e4b19908cd",
+      "bytes": 2368,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/check_placement.py",
+      "purpose": "Gate: assert the 26B checkpoint is fully resident on GPU with no CPU/disk offload.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/compare_attn.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "60f8524e3bfcacdc6803b810f67b5821d6cc6e22060c11c503dc0262d7afb1eb",
+      "bytes": 4516,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/compare_attn.py",
+      "purpose": "Quantify eager-vs-SDPA divergence on a checkpoint using identical request bodies.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/launch.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "18375e629f8729bf902d84621acca3b23dd9589b56f72857faf8eb6ef308f0a3",
+      "bytes": 1618,
+      "origin": "<GPU_HOST>:$WORK/sysone/launch.sh",
+      "purpose": "Launch one replica per GPU for a given Open-Jev / Nimble adapter.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/ops.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a1af6cfe60b2de7705a0c900e572752bf13d16938970ef09eeffab27ebc3d94a",
+      "bytes": 1862,
+      "origin": "<GPU_HOST>:$WORK/sysone/ops.sh",
+      "purpose": "Operations helper run on the GPU host; keeps backgrounding out of nested ssh quoting.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/phase.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "796a119ee9828fed5e8a5e8352210bbdf2ad0b5826d8f33b420c3dda93fa6438",
+      "bytes": 3076,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/phase.sh",
+      "purpose": "Phase launcher: bring up 4 single-GPU replicas of one model on the GPU host.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/probe_arch.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "3f24efe1599936dc4f0f0c8df3d564e75d2ae53fb857ae40377e57eb79190a2f",
+      "bytes": 3536,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/probe_arch.py",
+      "purpose": "Config-only probe: layer types, hidden size, and supported attn_implementation values.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/probe_bytes.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "bb4f387a4848e23fd4a1764c57e1a849d5b9e5d6d27e078c9c261d5edbce9414",
+      "bytes": 2396,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/probe_bytes.py",
+      "purpose": "Exact weight-byte accounting from safetensors headers only, reading no tensor data.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/provision.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "8847e936cda1051b3157ee5b05b85a9207793f347c7802d2dbcab08b028a220c",
+      "bytes": 1826,
+      "origin": "<GPU_HOST>:$WORK/sysone/provision.sh",
+      "purpose": "Provision the GPU host for System One benchmarking of the LoRA adapters.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/provision_ojev.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "54db9d2427558181420705db538da0d5184d9cbba5b33d18e696da9c6ec46bf9",
+      "bytes": 1806,
+      "origin": "<GPU_HOST>:$WORK/sysone/provision_ojev.sh",
+      "purpose": "Second venv pinned to Open-Jev's documented inference stack (transformers 5.10.2, peft 0.19.1).",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/common/verify_adapter.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "c3b1eda7e1baf544eb5823350a2e8cc327e3108bb30e2bc25e5dbfa0938234e9",
+      "bytes": 3830,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/verify_adapter.py",
+      "purpose": "Verify a staged adapter matches its claimed architecture, from headers only.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/gemma4jev_s2_gemma-4-26b-a4b-it.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "21827c490f402cb40b0a929caadba2e5c15e74c1f5fc0a4e0e84947049bd4803",
+      "bytes": 4826,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/s2/gemma-4-26b-a4b-it.serving.json",
+      "purpose": "Serving provenance contract for gemma-4-26b-a4b-it: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/gemma4jev_s2_jevify-gemma4-26b-a4b.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "c6fbb274fb4f22153088988795151ca7714b0ff6284387a44d8641b0da90efb6",
+      "bytes": 4587,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/s2/jevify-gemma4-26b-a4b.serving.json",
+      "purpose": "Serving provenance contract for jevify-gemma4-26b-a4b: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/nimble_s2_bespoke-nimble-9b.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "c967fe1fde174bde4beb03d92dda9e0ffa1bd4932cb1a1d358e687c2073acd25",
+      "bytes": 2010,
+      "origin": "$WORK/.system-one-data/outputs/nimble/s2/bespoke-nimble-9b.serving.json",
+      "purpose": "Serving provenance contract for bespoke-nimble-9b: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/openjev-qwen_s2_open-jev-qwen-2b.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "bc4e86bfd2ec58e318fb7d8c09f6e63cbcae8607c9deab0b8544f24a969157a4",
+      "bytes": 1853,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/s2/open-jev-qwen-2b.serving.json",
+      "purpose": "Serving provenance contract for open-jev-qwen-2b: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/openjev-qwen_s2_open-jev-qwen-9b.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "48532506917ddc6e0d920a3f742aaa5e35bc7898972f3227edd405ca5f47f8dd",
+      "bytes": 2056,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/s2/open-jev-qwen-9b.serving.json",
+      "purpose": "Serving provenance contract for open-jev-qwen-9b: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/contracts/secjudge_s2_secjudge.serving.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "983c064f7ebbd5b59abee6b81563a94ed9b7fd5f752181feec4c2c56015a663f",
+      "bytes": 3147,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/s2/secjudge.serving.json",
+      "purpose": "Serving provenance contract for secjudge: attention implementation, prefix-cache state and reason, dtype, device map, replica topology, temperature, chat-template digest and pinned stack versions.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/chain2.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "c3ae73a439c623de53de6741b2cb353bc28333bdf26abe0a2d66640ba19739d6",
+      "bytes": 1385,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/chain2.sh",
+      "purpose": "Queue after run_holdouts.sh: G2 GPU-vs-CPU adjudication, then Nimble-9B on the same 324.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/chain3.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "528c60d9d6da12289843cfad994e4179211326aff2f1abf09b9d53f593c2d258",
+      "bytes": 610,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/chain3.sh",
+      "purpose": "Third queued gate chain on a single dedicated card.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/cpu_ref.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "900580e045713ce5835550e592be76aa32b4edd1e0f27440dde3f63f76fa69c3",
+      "bytes": 423,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/cpu_ref.sh",
+      "purpose": "Produce the float32 CPU reference logits that gate G2c adjudicates against.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g2_attention.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "19e56825449aa8ceed143287cd088ebf9cec68fe643410a953b0de2d4bc4d119",
+      "bytes": 9067,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g2_attention.py",
+      "purpose": "Gate G2 (blocking): eager vs SDPA vs math-only SDPA logit agreement across the sliding window.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g2b_attention.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "9f76fe80b0368457a692f0f69dcacced74a787ce28f79ec3b11bfd7e9965ce71",
+      "bytes": 9551,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g2b_attention.py",
+      "purpose": "Gate G2b: same weights and placement, only the attention kernel changes.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g2c_cpu.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "acc7fe7f00a84157ec478a96c376cdb354b695e26cfd82ff01d454e9cb0effc8",
+      "bytes": 5268,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g2c_cpu.py",
+      "purpose": "Gate G2c: adjudicate eager vs SDPA on Gemma 4 26B-A4B against a CPU reference.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g2d_compare.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "ba8858c5d05caca91dac4ffb93fdc53bdd4c4b6d0a06e62d032514cca4660f76",
+      "bytes": 2889,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g2d_compare.py",
+      "purpose": "Compare the g2d_logits.py candidate-logit dumps across devices and attention kernels.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g2d_logits.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "966e84e6db16cb2635df712dccb8d0ca78011d4681b7a099327373dc99c3724f",
+      "bytes": 5680,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g2d_logits.py",
+      "purpose": "Dump answer-position candidate logits for a fixed prompt set, one device/kernel at a time.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/g3_compare.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "52faa9b4c842209647ab817562bef8b37e8a096104546b6bccae5485790d5032",
+      "bytes": 4427,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/g3_compare.py",
+      "purpose": "Gate G3: does the readout follow option content or option position?",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/gemma4_jev_shim.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "f97a4d1b5014456b5ad1b7dd9eabc61f81b3697a97c009d08deba5772d2608d9",
+      "bytes": 15922,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/gemma4_jev_shim.py",
+      "purpose": "Serve a Gemma 4 checkpoint on the /v1/systemone contract with jevify's own readout.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/larkooo_verdict.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "3d1043fd74dc55640deba03372e8f272dc0ad8901b4633fbcfe8c02b230d86c9",
+      "bytes": 3794,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/larkooo_verdict.py",
+      "purpose": "Record the MLX-to-CUDA verdict for larkooo/gemma-e2b-rlcd from its shipped metadata.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/serve_g4_2card.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a778f725e3ae9d576fe5f7c120896d0524afa4ec2b6e52b1c4c185c51de57100",
+      "bytes": 1778,
+      "origin": "<GPU_HOST>:$WORK/g4j/serve_g4_2card.sh",
+      "purpose": "Two-card variant of the Gemma 4 26B-A4B serving topology.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/serve_g4_multi.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a7791849d3921a81a83961cf9d26e63eb76e1646e5b4b11adb6e1b407833ee3f",
+      "bytes": 2017,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/serve_g4_multi.sh",
+      "purpose": "Serve Gemma 4 26B-A4B resident across N L40S, cache-free, eager attention.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/serve_gemma4.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "6963ad82e6e65f7a5035ca85056f09a87ba0171a381a02a4d8597eab88b41096",
+      "bytes": 1626,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/serve_gemma4.sh",
+      "purpose": "Serve a Gemma 4 checkpoint on /v1/systemone for the System One runner.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/gemma4/wdiff.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "8261a3575e29995c2dd012904b6e05c5b9803abdfeb19f276ce42d07fdb6f1bf",
+      "bytes": 4595,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/wdiff.py",
+      "purpose": "Which tensors did jevify's merged LoRA actually change relative to the base?",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/nimble/nimble_shim.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "13f59852c6776f3961ce742469b071d8a24e40bb227e97f7ac3d64521ef8cc17",
+      "bytes": 10495,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/nimble_shim.py",
+      "purpose": "Serve Bespoke-Nimble-9B on the /v1/systemone contract.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/ab_prefix.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "8053a929527e60d19300e7fb0415ee0910a4199544b5e42e0f5802ca73509e45",
+      "bytes": 4813,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/ab_prefix.py",
+      "purpose": "Gate Open-Jev's opt-in prefix cache against the unmodified full-prefill path.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/check_claims.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "314cc182e8aab3478992e272a9b47b63f3c6a0d52a681f413f9ec5d0d00b2553",
+      "bytes": 1588,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/check_claims.py",
+      "purpose": "Check the publisher's own JevBench figures against the numbers quoted to us.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/launch_2b_concurrent.sh",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "16baf4598494aef58590ae8381c8148cfb56679a2ae57ecd3e44244e082b812e",
+      "bytes": 1779,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/launch_2b_concurrent.sh",
+      "purpose": "Launch open-jev-qwen-2b replicas alongside the running bespoke-nimble-9b replicas.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/openjev_serve.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "f00cf967df07e64cdfbdda8c3cb53528b846384fb167f73e43d11a5522890194",
+      "bytes": 2354,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/openjev_serve.py",
+      "purpose": "Serve a ZefanCai Open-Jev checkpoint under a display name carrying its base family.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/parity_openjev.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "2e92cb76f91f6a8c29ecb5db15215c39458b028ec9060ed10a25d88c84c24896",
+      "bytes": 4879,
+      "origin": "$WORK/.system-one-data/outputs/openjev-qwen/validation/code/parity_openjev.py",
+      "purpose": "Parity gate: reproduce Open-Jev's published held-out accuracy with our serving stack.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/serve27.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "d392bc9a6475b7e9162fc136d75b30ac45aa20ddf7e72f7c316c4ef997293ae8",
+      "bytes": 15162,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/serve27.py",
+      "purpose": "Serve an Open-Jev checkpoint whose base model does not fit on one card (27B sharded).",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/startup-shard0.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "a8e754e697b432353dba2a8cf3a7a13e425b51515d711912f60da5bd92b9f2c6",
+      "bytes": 1823,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/startup-shard0.json",
+      "purpose": "Recorded startup provenance for 27B shard 0 (dtype, device map, attention, stack versions).",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/openjev-qwen/startup-shard1.json",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "9c934e13ed5da93521055f7c496b37d735b876e95e77c4483a96e3d6161caad6",
+      "bytes": 1823,
+      "origin": "<GPU_HOST>:$WORK/sysone/j27/startup-shard1.json",
+      "purpose": "Recorded startup provenance for 27B shard 1.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/secjudge/secjudge_infer.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "38727b72447b821381f8806fd94b1518e324375381ce4e69322ebc623c396555",
+      "bytes": 10677,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/secjudge_infer.py",
+      "purpose": "SecJudge CPU inference over a stage corpus.",
+      "payload_safe": true
+    },
+    {
+      "path": "03-serving/secjudge/sj_int8_probe.py",
+      "stage": "Serving, per model family, plus the settled serving contracts",
+      "sha256": "302eb035a003b97f835746fe4962c1fc0bab050fc8894a858749b644f9c9de75",
+      "bytes": 6116,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/sj_int8_probe.py",
+      "purpose": "int8 dynamic-quantization equivalence check with a documented delta distribution.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/check_rows.py",
+      "stage": "The run",
+      "sha256": "b73e73b51897720f7a26a63f16b61b8801486ea3393a021221119b12db6e356c",
+      "bytes": 1218,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/check_rows.py",
+      "purpose": "Assert a System One prediction file carries a graded, rankable readout.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/drive_arm.sh",
+      "stage": "The run",
+      "sha256": "24acfb7a6ac28fca9f2df10004cd2cd9340e6c7c9744e8992e8abc91751130de",
+      "bytes": 4040,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/drive_arm.sh",
+      "purpose": "Drive one Gemma 4 s2 arm end to end: serve, tunnel, placement gate, smoke, full 30,310, settle.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/drive_run.sh",
+      "stage": "The run",
+      "sha256": "00f0be76993a4394b1c4bf33d9ec50ee8b9b9a59e68c690951a13f6f27149945",
+      "bytes": 3917,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/drive_run.sh",
+      "purpose": "Attach to an already-serving Gemma 4 shim and run one s2 arm to settlement.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/eta.py",
+      "stage": "The run",
+      "sha256": "c3aa75d076ac2ec459ca54312821a7ecb7b391b1bd7953457a2260493a333476",
+      "bytes": 2918,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/eta.py",
+      "purpose": "Ground the stage ETAs in measured shard metas rather than guesses.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/holdout324.py",
+      "stage": "The run",
+      "sha256": "79e5d63abb7f36f4f24915d700ba57b9b124372543e4aa9b254ecd2ee513d519",
+      "bytes": 10481,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/holdout324.py",
+      "purpose": "Evaluate a Gemma 4 checkpoint on the 324-item Nimble/Jev holdout, with G3 built in.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/progress.py",
+      "stage": "The run",
+      "sha256": "31e246a90af819653f831347be30dde3285c532ecaafd9fddb72fa866b33cf3a",
+      "bytes": 1652,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/progress.py",
+      "purpose": "Report row counts, rate and ETA for the two Gemma 4 s2 arms.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/resolution.py",
+      "stage": "The run",
+      "sha256": "405491257c6a7c7f1895b0e16ae4c5fa922973325db916ea1e938040d17c7af9",
+      "bytes": 1379,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/resolution.py",
+      "purpose": "Diagnostic: confidence/score resolution per arm while prediction files are still open.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_holdouts.sh",
+      "stage": "The run",
+      "sha256": "75f92164caed5e4a856fe707754f8a8ecc395a1c14ba476747b749aa21781d65",
+      "bytes": 2124,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/run_holdouts.sh",
+      "purpose": "Phase 0 holdout sweep on the 324-item Nimble/Jev validation set.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_secjudge_stages.sh",
+      "stage": "The run",
+      "sha256": "1bc585aaabac8915da96606977d98022f0fe5ba05d764af90f680d4d52683d28",
+      "bytes": 4389,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/run_secjudge_stages.sh",
+      "purpose": "SecJudge stage runner: inference, merge, emit prediction arms, score with the shared scorer.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_secjudge_stages2.sh",
+      "stage": "The run",
+      "sha256": "29b5877b43c011881ab49a40b2b6180337b2d5e6a13e8955e49a63ff11183cf5",
+      "bytes": 4680,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/run_secjudge_stages2.sh",
+      "purpose": "SecJudge stage runner, revision 2.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_secjudge_stages3.sh",
+      "stage": "The run",
+      "sha256": "3003c68d3a99b0ec3c2ec50a6a7d63787fdd77505c796b73794578e4b478a2f5",
+      "bytes": 4869,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/run_secjudge_stages3.sh",
+      "purpose": "SecJudge stage runner, revision 3.",
+      "payload_safe": true
+    },
+    {
+      "path": "04-run/run_secjudge_stages4.sh",
+      "stage": "The run",
+      "sha256": "ff0a67ced633ff1328377f2481466daff550c0ac5e5634cfd20bafcd9f40017b",
+      "bytes": 5890,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/run_secjudge_stages4.sh",
+      "purpose": "SecJudge stage runner, revision 4.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/after.sh",
+      "stage": "Settlement",
+      "sha256": "75a016397f9f1138b17b0b89eeedc9a3ed5b3e1d6f6e8e611d202dfde1bf07dd",
+      "bytes": 614,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/after.sh",
+      "purpose": "After finish_arms.sh scores both arms, build the three registry artifacts.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/check_settled.py",
+      "stage": "Settlement",
+      "sha256": "825925a867cdb0786a268a1d131c1bed593475a391dabbf2ce00afa7873c208a",
+      "bytes": 4269,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/check_settled.py",
+      "purpose": "Settled-file discipline, applied independently of in-flight scorecards.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/finish_arms.sh",
+      "stage": "Settlement",
+      "sha256": "de46019d76546dead6840913bdaed78873446007f1935c992d7599ee7557e517",
+      "bytes": 2198,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/finish_arms.sh",
+      "purpose": "Wait for both Gemma 4 arms to settle, then score them on the real deterministic tier.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/settle_meta.py",
+      "stage": "Settlement",
+      "sha256": "e42690ed55e0c9790dad9cbdbd0e7c22c5936e78bab7fd2f977f6fd2652e39ad",
+      "bytes": 8112,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/settle_meta.py",
+      "purpose": "Enrich a completed System One prediction meta with full Gemma 4 provenance.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/settle_s2_c7.sh",
+      "stage": "Settlement",
+      "sha256": "f6336a2738c5de5e4299527f9ab7e4924ff13a0ff0127e15e1b6844a1268937d",
+      "bytes": 3937,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/settle_s2_c7.sh",
+      "purpose": "Settle only s2-C7: await shards, verify completeness, emit, score, recall@FPR.",
+      "payload_safe": true
+    },
+    {
+      "path": "06-scoring/extract_incumbents.py",
+      "stage": "Scoring",
+      "sha256": "d0ab6ac10bb641cdac737cc63512d2b602d8578f2e0d64637b71157001fbe489",
+      "bytes": 2052,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/extract_incumbents.py",
+      "purpose": "Collect the per-incumbent scorecards into one comparable rows table.",
+      "payload_safe": true
+    },
+    {
+      "path": "06-scoring/score_incumbents.sh",
+      "stage": "Scoring",
+      "sha256": "bfac12d1509fcd606ffa053cd2e4ab087f2d958c99e4c7b0a8bba88e9d3ca573",
+      "bytes": 2745,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/score_incumbents.sh",
+      "purpose": "Score incumbent models with the same shared scorer, cases and deterministic tier.",
+      "payload_safe": true
+    },
+    {
+      "path": "06-scoring/secjudge_emit.py",
+      "stage": "Scoring",
+      "sha256": "c795c8eebb2825570ad44e0d6e785723ad8acabeb23d4249b1c6b2e0361e110a",
+      "bytes": 9350,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/secjudge_emit.py",
+      "purpose": "Turn cached SecJudge raw scores into prediction JSONL arms the existing scorer accepts.",
+      "payload_safe": true
+    },
+    {
+      "path": "06-scoring/show_stage.py",
+      "stage": "Scoring",
+      "sha256": "294ce6f9a71dfd0d6fcdb1f099a285b8618056964b9b462b8230ecacd0bbc5ec",
+      "bytes": 2234,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/show_stage.py",
+      "purpose": "Print one stage's case count, truth grades and cases_sha256 for spot checks.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/assemble.py",
+      "stage": "Analysis",
+      "sha256": "ef1786d59e61e4c5cb79cfb36c5c9ee58a6e5d3d1532d7913018991af9e4f824",
+      "bytes": 10305,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/assemble.py",
+      "purpose": "Assemble the Gemma4Jev Phase 0 scorecard from the gate and holdout artifacts.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/build_extras.py",
+      "stage": "Analysis",
+      "sha256": "4a799f5873af587ab9e853dfca8c7bb9c4831175b0980d2de55d2b583169f745",
+      "bytes": 18680,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/build_extras.py",
+      "purpose": "Build the leaderboard-registry artifacts for the two Gemma 4 s2 arms.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/build_secjudge_md.py",
+      "stage": "Analysis",
+      "sha256": "c38147c21756a729853333c7c4dd997d70525c9ffd34106b15d29e77b1994bfa",
+      "bytes": 22572,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/build_secjudge_md.py",
+      "purpose": "Render secjudge-report.md from secjudge-report.json plus the incumbent scorecards.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/build_secjudge_report.py",
+      "stage": "Analysis",
+      "sha256": "03bfdb942ec960ece24f78fe8a1db50a7eaff494d137d5ce016dd4e9c2ec9412",
+      "bytes": 17554,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/build_secjudge_report.py",
+      "purpose": "Assemble secjudge-report.json and .md from settled artifacts only.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/by_variable.py",
+      "stage": "Analysis",
+      "sha256": "7a7aaaa4f6a480dd185749f8806337586a95cc3e3040bde939ad7976023927e5",
+      "bytes": 3997,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/by_variable.py",
+      "purpose": "Recall at fixed FPR for every ranking variable, with OpenJev's own FPR as a fifth point.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/narrative.py",
+      "stage": "Analysis",
+      "sha256": "278b9a2218c325b20298205ce42997e973cbff7ae672616b40a0fea5d199071e",
+      "bytes": 17240,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/narrative.py",
+      "purpose": "Narrative sections for the SecJudge report, kept separate from the numeric builder.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/nimble324.py",
+      "stage": "Analysis",
+      "sha256": "d13e009d409d0cfac70642eb0d5d455a7f26646eb3cef61c5a05db48dc0491b7",
+      "bytes": 7554,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/nimble324.py",
+      "purpose": "Re-run Bespoke-Nimble-9B on the same 324-row holdout for a calibration comparison.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/nimble_temp.py",
+      "stage": "Analysis",
+      "sha256": "1c66c0375dff27e8c6b91f61bd4b9111152192d2482d3eb6fdc88b66ca77120b",
+      "bytes": 4503,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/nimble_temp.py",
+      "purpose": "Per-primitive vs single temperature on Bespoke-Nimble-9B's own 324-row logits.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/perm_average.py",
+      "stage": "Analysis",
+      "sha256": "685ed559d5874510343a2d79e37daed56cb86e3d14a55e28ffcd452ec8d058ed",
+      "bytes": 4627,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/perm_average.py",
+      "purpose": "Permutation averaging, measured on runs already completed.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/recall_at_fpr.py",
+      "stage": "Analysis",
+      "sha256": "24b21b308326b372e5a53e851d7aa3859a9baeee61b7eb580db1ccbcc95f9305",
+      "bytes": 9245,
+      "origin": "$WORK/.system-one-data/outputs/secjudge/code/recall_at_fpr.py",
+      "purpose": "Recall at fixed FPR for SecJudge and every other measured model, on our corpora.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/render.py",
+      "stage": "Analysis",
+      "sha256": "474982c5469135a583cdb058058124e0c1ff989ccdc4d16cf41bf08c6d7e6fc6",
+      "bytes": 7334,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/render.py",
+      "purpose": "Render the Gemma4Jev Phase 0 scorecard as text.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/temp_fit.py",
+      "stage": "Analysis",
+      "sha256": "981ed48b5c10e67494c0171c50c158552a1e2804d56b7197ea6b14dd73629fee",
+      "bytes": 6773,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/artifacts/temp_fit.py",
+      "purpose": "Per-primitive vs single global temperature, fitted on our own 324-row measurements.",
+      "payload_safe": true
+    },
+    {
+      "path": "08-site-build/build.py",
+      "stage": "Site build and payload verification",
+      "sha256": "cbcc5841d0529b35f3c890bd81ab00bbde6eddbf5e9e1b5621e1b82c03b9ea96",
+      "bytes": 723730,
+      "origin": "$WORK/.system-one-space-build/src/build.py",
+      "purpose": "Site builder: reads the analysis JSONs, verifies every headline figure against its artifact, renders the pages.",
+      "payload_safe": true
+    },
+    {
+      "path": "08-site-build/conform_to_space_contract.py",
+      "stage": "Site build and payload verification",
+      "sha256": "2673d229f60d766782a50986e4994f5b23608960d18ed461ef5e609924895b8d",
+      "bytes": 18874,
+      "origin": "$WORK/.system-one-data/outputs/gemma4jev/conform_to_space_contract.py",
+      "purpose": "Conform the two settled Gemma 4 s2 arms to the Space build's added-arm contract without rewriting the runs.",
+      "payload_safe": true
+    },
+    {
+      "path": "08-site-build/guard.py",
+      "stage": "Site build and payload verification",
+      "sha256": "fbb92b14583e59251a11f60a748bd3c6935b40214ae920a45726d615efa3a78b",
+      "bytes": 12421,
+      "origin": "$WORK/.system-one-space-build/src/guard.py",
+      "purpose": "Payload guard: case-id, sensitive-shingle, CJK, credential and size/type checks. REFERENCE ONLY - see README, not payload-safe.",
+      "payload_safe": false
+    },
+    {
+      "path": "08-site-build/publish.py",
+      "stage": "Site build and payload verification",
+      "sha256": "2e189f58a46d559a9f8b0caec2fe3c10c94aa5abbfb3f1271e8db2dd63cccc63",
+      "bytes": 17337,
+      "origin": "$WORK/.system-one-space-build/src/publish.py",
+      "purpose": "Create the private static Space and upload the verified payload.",
+      "payload_safe": true
+    },
+    {
+      "path": "08-site-build/verify.py",
+      "stage": "Site build and payload verification",
+      "sha256": "d03933951f4d324320f8e61d0429f43ee939910ffbd16af7892a7570c1a884f1",
+      "bytes": 36406,
+      "origin": "$WORK/.system-one-space-build/src/verify.py",
+      "purpose": "Post-build verification gate suite over the generated static site.",
+      "payload_safe": true
+    },
+    {
+      "path": "08-site-build/wc.py",
+      "stage": "Site build and payload verification",
+      "sha256": "1382bbf43626649ac34bdc27afe260febc124315afd8632276f727d72ea06228",
+      "bytes": 3446,
+      "origin": "$WORK/.system-one-space-build/src/wc.py",
+      "purpose": "Card-span word counter used by the build's layout checks.",
+      "payload_safe": true
+    },
+    {
+      "path": "README.md",
+      "stage": "Bundle documentation",
+      "sha256": "ba43a19ef5c8a2ec7e76f6250c6f7b0f23a60c8a96d16af627c438ca48adbcb2",
+      "bytes": 10212,
+      "origin": "authored for this bundle",
+      "purpose": "Bundle entry point: deep links, placeholder key, reading order, pinned stack and the known reproduction gaps.",
+      "payload_safe": true
+    }
+  ]
+}

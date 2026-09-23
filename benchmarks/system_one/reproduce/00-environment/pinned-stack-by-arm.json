@@ -1,0 +1,111 @@
+{
+  "arms": {
+    "bespoke-nimble-9b": {
+      "base_model": "Qwen/Qwen3.5-9B",
+      "base_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "dtype": null,
+      "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's ",
+      "gated": null,
+      "loader": "published inference.py scoring path, served on the /v1/systemone contract",
+      "pinned_stack": {
+        "peft": "0.21.0",
+        "transformers": "5.17.0"
+      },
+      "pinned_stack_from_run_meta": {
+        "peft": "0.21.0",
+        "transformers": "5.17.0"
+      },
+      "prefix_cache": false,
+      "repo_id": "bespokelabs/Bespoke-Nimble-9B",
+      "repo_revision": "594dfdcfb6f94e3d0c0db7535180d3c71689169a"
+    },
+    "gemma-4-26B-A4B-it": {
+      "base_model": "google/gemma-4-26B-A4B-it",
+      "base_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+      "dtype": null,
+      "engine": "transformers (gemma4_jev_shim.py); jev.api/jev.server wire contract",
+      "gated": null,
+      "loader": "transformers AutoModelForCausalLM via gemma4_jev_shim.py; served on the jev.api/jev.server wire contract. eager attention, prefix cache disabled.",
+      "pinned_stack": {
+        "cuda": "13.0",
+        "torch": "2.13.0+cu130"
+      },
+      "prefix_cache": false,
+      "repo_id": "google/gemma-4-26B-A4B-it",
+      "repo_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
+    },
+    "jevify-gemma4-26b-a4b": {
+      "base_model": "google/gemma-4-26B-A4B-it",
+      "base_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+      "dtype": null,
+      "engine": "transformers (gemma4_jev_shim.py); jev.api/jev.server wire contract",
+      "gated": null,
+      "loader": "transformers AutoModelForCausalLM via gemma4_jev_shim.py; served on the jev.api/jev.server wire contract. eager attention, prefix cache disabled.",
+      "pinned_stack": {
+        "cuda": "13.0",
+        "torch": "2.13.0+cu130"
+      },
+      "prefix_cache": false,
+      "repo_id": "kushalpatil/jevify-gemma4-26b-a4b",
+      "repo_revision": "d4c0d1d455892957d274f68ec64e9fc0881011c8"
+    },
+    "open-jev-qwen-2b": {
+      "base_model": "Qwen/Qwen3.5-2B",
+      "base_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "dtype": null,
+      "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's ",
+      "gated": null,
+      "loader": "jev.server (Open-Jev own loader; not vLLM/SGLang-servable)",
+      "pinned_stack": {
+        "peft": "0.19.1",
+        "transformers": "5.10.2"
+      },
+      "pinned_stack_from_run_meta": {
+        "peft": "0.19.1",
+        "transformers": "5.10.2"
+      },
+      "prefix_cache": false,
+      "repo_id": "ZefanCai/Open-Jev-2B",
+      "repo_revision": "0c7aa498b1627be8da4acf34c863ff0ee0a92785"
+    },
+    "open-jev-qwen-9b": {
+      "base_model": "Qwen/Qwen3.5-9B",
+      "base_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "dtype": null,
+      "engine": "PyTorch/transformers via each project's own loader. Neither vLLM nor SGLang can serve Open-Jev: its decision comes from a trained scalar head on the backbone's ",
+      "gated": null,
+      "loader": "jev.server (Open-Jev own loader; not vLLM/SGLang-servable)",
+      "pinned_stack": {
+        "peft": "0.19.1",
+        "transformers": "5.10.2"
+      },
+      "pinned_stack_from_run_meta": {
+        "peft": "0.19.1",
+        "transformers": "5.10.2"
+      },
+      "prefix_cache": false,
+      "repo_id": "ZefanCai/Open-Jev-9B",
+      "repo_revision": "47e966881e489511c0c7f5633a9e1960a676a551"
+    },
+    "secjudge": {
+      "base_model": "answerdotai/ModernBERT-large",
+      "base_revision": "not declared by the publisher",
+      "dtype": "float32",
+      "engine": "PyTorch/transformers on CPU. SecJudge is an encoder classifier with a trained severity head, so no LLM serving engine applies.",
+      "gated": "manual",
+      "loader": "the published secjudge_model.py forward path, driven directly on CPU; the repo's own load_secjudge() helper slices the input to 512 CHARACTERS before tokenising",
+      "pinned_stack": {},
+      "prefix_cache": false,
+      "repo_id": "nghodki/SecJudge",
+      "repo_revision": "28e810afc9113d5b3ec60401940657108f51f1bb"
+    }
+  },
+  "kind": "defenseclaw-system-one-pinned-stack-by-arm",
+  "provenance": "Recovered from each arm's own run meta (<pred>.jsonl.meta.json :: pinned_stack) and settled serving contract (<pred>.serving.json :: served.pinned_stack). These are NOT from a lockfile: no lockfile pins the serving stack anywhere in outputs/. requirements-frozen.client-venv.txt pins only the harness CLIENT venv that called the models (34 packages; no torch, vllm, transformers, tokenizers, accelerate or peft).",
+  "schema_version": 1,
+  "unpinned_serving_stack": [
+    "gemma-4-26B-A4B-it",
+    "jevify-gemma4-26b-a4b",
+    "secjudge"
+  ]
+}
