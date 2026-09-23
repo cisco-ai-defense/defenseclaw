@@ -5,14 +5,14 @@
 ```bash
 # All installed by DefenseClaw:
 defenseclaw setup routing --enable    # Installs vllm-sr, starts Docker container
-defenseclaw setup training --enable   # Installs mlx-lm-lora + llama-server
+
 defenseclaw setup hermes --yes        # (or any connector to start the gateway)
 ```
 
 Verify:
 ```bash
 defenseclaw setup routing --status    # Should show: enabled, port 8888
-defenseclaw setup training --status   # Should show: enabled, backend mlx-lm-lora
+
 docker ps | grep semantic             # Should show: defenseclaw-semantic-router
 which llama-server                    # Should show: /opt/homebrew/bin/llama-server
 ```
@@ -104,7 +104,7 @@ sqlite3 ~/.defenseclaw/training-store.db \
 ### Test 2.4: Run training manually
 
 ```bash
-defenseclaw setup training --status  # check pipeline status
+
 # Training runs are triggered automatically when min_traces threshold is reached
 # Or triggered via the gateway API (future CLI command)
 ```

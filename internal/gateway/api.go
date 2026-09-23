@@ -863,7 +863,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
 	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
-	mux.HandleFunc("/routing/v1/chat/completions", a.handleRoutedChatCompletion)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
