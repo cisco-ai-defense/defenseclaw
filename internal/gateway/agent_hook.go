@@ -1852,15 +1852,6 @@ func inferAgentHookEvent(payload map[string]interface{}) string {
 // avoids).
 var hookEvaluatorPanicHook func()
 
-// reportedToolInvocationID returns the id the agent itself reported, empty when
-// the id was minted or derived here.
-func reportedToolInvocationID(req agentHookRequest) string {
-	if req.CorrelationOrigins[connector.CorrelationTargetTool] != connector.CorrelationOriginReported {
-		return ""
-	}
-	return req.ToolInvocationID
-}
-
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
@@ -1923,7 +1914,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Direction:               "tool_call",
 			Connector:               req.ConnectorName,
 			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
-			toolUseID:               reportedToolInvocationID(req),
+			toolUseID:               req.ToolInvocationID,
 			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&

@@ -121,7 +121,8 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 		args      map[string]interface{}
 		headers   map[string]string
 		// wantID is the id the agent reported. Empty means the golden carries
-		// none, and no id is sent.
+		// none, so the id is DefenseClaw's and only has to be non-empty: the
+		// chat schema rejects a tool call without one.
 		wantID string
 	}{
 		{
@@ -231,13 +232,10 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if !reflect.DeepEqual(args, test.args) {
 				t.Errorf("arguments = %v, want %v", args, test.args)
 			}
-			switch {
-			case test.wantID == "":
-				if call.ID != nil {
-					t.Errorf("id = %q, want the field omitted when the agent reports none", *call.ID)
-				}
-			case call.ID == nil || *call.ID != test.wantID:
-				t.Errorf("id = %v, want the agent's id %q", call.ID, test.wantID)
+			if call.ID == nil || *call.ID == "" {
+				t.Errorf("id = %v, want a non-empty id on every tool call", call.ID)
+			} else if test.wantID != "" && *call.ID != test.wantID {
+				t.Errorf("id = %q, want the agent's id %q", *call.ID, test.wantID)
 			}
 		})
 	}

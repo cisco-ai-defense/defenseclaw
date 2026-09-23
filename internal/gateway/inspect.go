@@ -19,6 +19,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,7 +81,7 @@ type ToolInspectRequest struct {
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
 	// toolUseID is set by a connector adapter, never from the wire (see
-	// contentScope below). Only an id the agent itself reported.
+	// contentScope below).
 	toolUseID string
 	// toolArgsAreHookEnvelope marks args the connector did not project from a
 	// tool payload: the whole hook envelope, session and event keys included.
@@ -436,6 +438,17 @@ func (a *APIServer) hookAIDInspectTool(
 	return a.hookAIDInspect(ctx, toolName, argsStr)
 }
 
+// toolCallWireID is the tool call's id. The chat schema requires a non-empty
+// one, so an invocation the agent did not identify is given a "dc-" id derived
+// from its own content, which also marks it as not the agent's.
+func toolCallWireID(call aidToolCall) string {
+	if call.ID != "" {
+		return call.ID
+	}
+	sum := sha256.Sum256(append([]byte(call.Name+"\x00"), call.Args...))
+	return "dc-" + hex.EncodeToString(sum[:8])
+}
+
 // hookAIDInspectToolCall sends the text form as a user message and the same
 // invocation as an assistant tool call: assistant role, arguments as a JSON
 // string. Text rules keep their input, field rules gain one.
@@ -457,13 +470,14 @@ func (a *APIServer) hookAIDInspectToolCall(
 	if strings.TrimSpace(name) == "" {
 		name = "tool"
 	}
-	function := map[string]interface{}{"name": name, "arguments": string(call.Args)}
-	entry := map[string]interface{}{"type": "function", "function": function}
-	// An absent id is omitted, never sent as "".
-	if call.ID != "" {
-		entry["id"] = call.ID
-	}
-	toolCalls, err := json.Marshal([]map[string]interface{}{entry})
+	toolCalls, err := json.Marshal([]map[string]interface{}{{
+		"id":   toolCallWireID(call),
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": string(call.Args),
+		},
+	}})
 	if err != nil {
 		return nil
 	}
