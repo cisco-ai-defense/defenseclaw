@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "defenseclaw_version": "0.5.0",
   "runtime_lock_file": "hook_contract_lock.json",
   "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
@@ -22,7 +22,24 @@
         "block_events": [
           "UserPromptSubmit",
           "PreToolUse"
-        ]
+        ],
+        "aid_surfaces": [
+          "prompt",
+          "tool_call",
+          "tool_result"
+        ],
+        "aid_surface_events": {
+          "prompt": [
+            "UserPromptSubmit"
+          ],
+          "tool_call": [
+            "PreToolUse"
+          ],
+          "tool_result": [
+            "PostToolUse"
+          ]
+        },
+        "aid_wire_version": "chat-tool-calls-v1"
       },
       "notes": [
         "block_events is resolved per request from the hook config that invoked the hook, not from the release. Setup marks the .kiro/hooks command with `--hook-surface v3`; that surface blocks on PreToolUse and UserPromptSubmit (kiro.dev/docs/hooks/actions). The CLI 2.x agent-hook config stays unmarked and blocks on PreToolUse only -- 2.x shows a non-zero exit on any other trigger as a warning (kiro.dev/docs/cli/2x-reference). Version probing cannot decide this: v3 is the `--v3` flag on the 2.x binary, so `kiro-cli --version` reports 2.x for both surfaces. An unmarked request resolves to the 2.x set.",
@@ -30,6 +47,67 @@
         "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
         "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
         "Hook stdout must remain empty because Kiro adds stdout to agent context."
+      ]
+    },
+    "windsurf": {
+      "kind": "hook",
+      "compatibility_gate": "not-gated",
+      "version_probe": "",
+      "contracts": [],
+      "native_hook_inventory": {
+        "status": "installed",
+        "format": "windsurf-cascade-hooks",
+        "config_path": "~/.codeium/windsurf/hooks.json",
+        "events": [
+          "pre_read_code",
+          "post_read_code",
+          "pre_write_code",
+          "post_write_code",
+          "pre_run_command",
+          "post_run_command",
+          "pre_mcp_tool_use",
+          "post_mcp_tool_use",
+          "pre_user_prompt",
+          "post_cascade_response",
+          "post_cascade_response_with_transcript",
+          "post_setup_worktree"
+        ],
+        "block_events": [
+          "pre_user_prompt",
+          "pre_read_code",
+          "pre_write_code",
+          "pre_run_command",
+          "pre_mcp_tool_use"
+        ],
+        "aid_surfaces": [
+          "prompt",
+          "tool_call",
+          "tool_result"
+        ],
+        "aid_surface_events": {
+          "prompt": [
+            "pre_user_prompt"
+          ],
+          "tool_call": [
+            "pre_read_code",
+            "pre_write_code",
+            "pre_run_command",
+            "pre_mcp_tool_use"
+          ],
+          "tool_result": [
+            "post_read_code",
+            "post_write_code",
+            "post_run_command",
+            "post_mcp_tool_use",
+            "post_cascade_response",
+            "post_cascade_response_with_transcript"
+          ]
+        },
+        "aid_wire_version": "chat-tool-calls-v1"
+      },
+      "notes": [
+        "Cascade hooks are not version-gated: Windsurf publishes no version probe DefenseClaw can bind a contract to, so there is no versioned contract here.",
+        "Tool-call routing is windsurfToolCallLifecycle; the AID surfaces above are what the hook lane sends to Cisco AI Defense."
       ]
     },
     "openclaw": {
@@ -82,6 +160,19 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -183,6 +274,19 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -286,6 +390,20 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "native_otlp_auth": "header-token",
@@ -404,6 +522,20 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "native_otlp_auth": "header-token",
@@ -524,6 +656,20 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "native_otlp_auth": "header-token",
@@ -672,6 +818,22 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PermissionDenied",
+              "PostToolUse",
+              "PostToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -820,6 +982,22 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PermissionDenied",
+              "PostToolUse",
+              "PostToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -972,6 +1150,20 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "pre_llm_call",
+              "subagent_start"
+            ],
+            "tool_call": [
+              "pre_tool_call"
+            ],
+            "tool_result": [
+              "post_tool_call",
+              "post_llm_call"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1095,6 +1287,20 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "pre_llm_call",
+              "subagent_start"
+            ],
+            "tool_call": [
+              "pre_tool_call"
+            ],
+            "tool_result": [
+              "post_tool_call",
+              "post_llm_call"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1223,6 +1429,30 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "subagentStart",
+              "beforeSubmitPrompt"
+            ],
+            "tool_call": [
+              "preToolUse",
+              "beforeShellExecution",
+              "beforeMCPExecution",
+              "beforeReadFile",
+              "beforeTabFileRead"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure",
+              "afterShellExecution",
+              "afterMCPExecution",
+              "afterFileEdit",
+              "afterTabFileEdit",
+              "afterAgentResponse",
+              "afterAgentThought"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1353,6 +1583,19 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1467,6 +1710,21 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "BeforeAgent",
+              "BeforeModel"
+            ],
+            "tool_call": [
+              "BeforeTool"
+            ],
+            "tool_result": [
+              "AfterTool",
+              "AfterModel",
+              "AfterAgent"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -1582,6 +1840,21 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "userPromptSubmitted",
+              "subagentStart"
+            ],
+            "tool_call": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1698,6 +1971,22 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "userPromptSubmitted",
+              "userPromptTransformed",
+              "subagentStart"
+            ],
+            "tool_call": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1812,6 +2101,12 @@
             "tool_call",
             "event_content"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1918,6 +2213,18 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "user_prompt_submit"
+            ],
+            "tool_call": [
+              "pre_tool_use"
+            ],
+            "tool_result": [
+              "post_tool_use"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": false,
           "platform_overrides": {
@@ -2044,6 +2351,15 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "tool.execute.before"
+            ],
+            "tool_result": [
+              "tool.execute.after"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": false,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -2149,6 +2465,19 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "agent.start"
+            ],
+            "tool_call": [
+              "tool.call"
+            ],
+            "tool_result": [
+              "tool.result",
+              "agent.end"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": false,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -2263,6 +2592,21 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "prompt": [
+              "UserPromptSubmit",
+              "BeforeModel"
+            ],
+            "tool_call": [
+              "PreToolUse"
+            ],
+            "tool_result": [
+              "PostToolUse",
+              "AfterAgentResponse",
+              "AfterModel"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {

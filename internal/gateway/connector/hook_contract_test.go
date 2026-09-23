@@ -610,6 +610,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		ResponseField           string                              `json:"response_field"`
 		Events                  []string                            `json:"events"`
 		AIDSurfaces             []string                            `json:"aid_surfaces"`
+		AIDSurfaceEvents        map[string][]string                 `json:"aid_surface_events"`
+		AIDWireVersion          string                              `json:"aid_wire_version"`
 		SupportsTraceparent     bool                                `json:"supports_traceparent"`
 		NativeOTLP              bool                                `json:"native_otlp"`
 		ContentEnvelopeKey      string                              `json:"content_envelope_key"`
@@ -642,8 +644,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	if err := json.Unmarshal(payload, &gotManifest); err != nil {
 		t.Fatalf("unmarshal hook contract manifest: %v", err)
 	}
-	if gotManifest.SchemaVersion != 2 {
-		t.Fatalf("hook contract manifest schema_version=%d want 2", gotManifest.SchemaVersion)
+	if gotManifest.SchemaVersion != 3 {
+		t.Fatalf("hook contract manifest schema_version=%d want 3", gotManifest.SchemaVersion)
 	}
 
 	contractForOS := func(contract manifestContract, goos string) manifestContract {
@@ -773,6 +775,25 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if !sameStrings(manifestContract.AIDSurfaces, runtime.AIDSurfaces) {
 				t.Fatalf("%s aid_surfaces=%v want %v", runtime.ContractID, manifestContract.AIDSurfaces, runtime.AIDSurfaces)
+			}
+			if !reflect.DeepEqual(manifestContract.AIDSurfaceEvents, runtime.AIDSurfaceEvents) {
+				t.Fatalf("%s aid_surface_events=%v want %v", runtime.ContractID, manifestContract.AIDSurfaceEvents, runtime.AIDSurfaceEvents)
+			}
+			if manifestContract.AIDWireVersion != runtime.AIDWireVersion {
+				t.Fatalf("%s aid_wire_version=%q want %q", runtime.ContractID, manifestContract.AIDWireVersion, runtime.AIDWireVersion)
+			}
+			// Every declared AID event must be an event the contract receives,
+			// and the tool_call set must be exactly the lifecycle routing.
+			for surface, events := range runtime.AIDSurfaceEvents {
+				if len(intersectEvents(events, runtime.Events)) != len(events) {
+					t.Fatalf("%s aid_surface_events[%q]=%v has events outside events=%v",
+						runtime.ContractID, surface, events, runtime.Events)
+				}
+			}
+			if routed := intersectEvents(runtime.Routing().StructuredActionEvents, runtime.Events); len(routed) > 0 &&
+				!sameStrings(runtime.AIDSurfaceEvents[AIDSurfaceToolCall], routed) {
+				t.Fatalf("%s aid_surface_events[tool_call]=%v want the lifecycle routing %v",
+					runtime.ContractID, runtime.AIDSurfaceEvents[AIDSurfaceToolCall], routed)
 			}
 			if manifestContract.SupportsTraceparent != runtime.SupportsTraceparent {
 				t.Fatalf("%s traceparent=%v want %v", runtime.ContractID, manifestContract.SupportsTraceparent, runtime.SupportsTraceparent)
