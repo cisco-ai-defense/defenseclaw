@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"evaluate","params":{"tool_name":"bash","tool_hash":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","capabilities":4,"session_id":1},"id":1}

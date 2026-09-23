@@ -106,6 +106,7 @@ endef
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
+        grpo-engine \
         dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -1364,3 +1365,10 @@ clean:
 	rm -rf cli/defenseclaw/_data
 	rm -rf build/macos-app
 	find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# GRPO training engine
+# ---------------------------------------------------------------------------
+
+grpo-engine:
+	$(MAKE) -C internal/training/grpo_engine

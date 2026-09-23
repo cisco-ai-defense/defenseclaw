@@ -65,6 +65,7 @@ cli/defenseclaw/_data/config/*
 # Local binaries
 /defenseclaw
 /defenseclaw-*
+!/defenseclaw-lite/
 /custom-scanner
 
 # Collector builder output
@@ -191,6 +192,11 @@ outputs/
 
 # Local native-Windows manual acceptance walkthrough.
 /WINDOWS_NATIVE_MANUAL_TEST.md
+
+# Compiled object files and static libraries
+*.o
+*.a
+
 # Local AI planning artifacts
 /.superpowers/
 /docs/superpowers/
