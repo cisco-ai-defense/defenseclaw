@@ -415,9 +415,19 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 	}
 	runtime := ciscoInspectRuntimeFromContext(ctx, c.observabilityV8Runtime())
 
-	chatMsgs := make([]map[string]string, len(messages))
+	chatMsgs := make([]map[string]interface{}, len(messages))
 	for i, m := range messages {
-		chatMsgs[i] = map[string]string{"role": m.Role, "content": m.Content}
+		msg := map[string]interface{}{"role": m.Role, "content": m.Content}
+		if len(m.ToolCalls) > 0 {
+			msg["tool_calls"] = m.ToolCalls
+		}
+		if m.ToolCallID != "" {
+			msg["tool_call_id"] = m.ToolCallID
+		}
+		if m.Name != "" {
+			msg["name"] = m.Name
+		}
+		chatMsgs[i] = msg
 	}
 
 	payload := map[string]interface{}{"messages": chatMsgs}

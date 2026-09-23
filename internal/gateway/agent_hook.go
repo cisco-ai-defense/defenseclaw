@@ -115,8 +115,11 @@ type agentHookRequest struct {
 	ToolName                    string
 	ToolArgs                    json.RawMessage
 	ToolArgsProjectionUncertain bool
-	Content                     string
-	Direction                   string
+	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
+	// the payload carries no tool-argument object.
+	ToolArgsAreHookEnvelope bool
+	Content                 string
+	Direction               string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -1592,6 +1595,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 	if args == nil {
 		args = firstValue(payload, "tool_info", "toolInfo")
 	}
+	argsAreEnvelope := args == nil
 	if args == nil {
 		args = payload
 	}
@@ -1663,7 +1667,8 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		CorrelationSurface: connector.CorrelationSurfaceHook, CorrelationOrigins: origins,
 		CorrelationValues: values, CorrelationIdentifiers: identifiers,
 		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
-		Content: content, Direction: direction, Payload: payload,
+		ToolArgsAreHookEnvelope: argsAreEnvelope,
+		Content:                 content, Direction: direction, Payload: payload,
 	}
 }
 
@@ -1707,17 +1712,20 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	if decoded.ToolArgsAuthoritative {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 		req.ToolArgsProjectionUncertain = len(req.ToolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(req.ToolArgs) == 0 {
 			req.ToolArgs = json.RawMessage(`{}`)
 		}
 	} else if len(decoded.ToolArgs) != 0 {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+		req.ToolArgsAreHookEnvelope = false
 	}
 	// The raw-payload decoder is the final authority for native tool arguments.
 	// An empty result stays valid JSON but records parser uncertainty downstream.
 	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(toolArgs) == 0 {
 			toolArgs = json.RawMessage(`{}`)
 		}
@@ -1901,11 +1909,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
 		)
 		toolRequest := &ToolInspectRequest{
-			Tool:          req.ToolName,
-			Args:          req.ToolArgs,
-			Direction:     "tool_call",
-			Connector:     req.ConnectorName,
-			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
+			Tool:                    req.ToolName,
+			Args:                    req.ToolArgs,
+			Direction:               "tool_call",
+			Connector:               req.ConnectorName,
+			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
+			toolUseID:               req.ToolInvocationID,
+			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
