@@ -105,7 +105,7 @@ func renderWindowsCursorAdapter(hookBinary, failMode string, managed bool, timeo
 // top-level fields, hook events, and hook entries retain their JSON semantics
 // and order. Enterprise mode is always fail closed.
 func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
-	command, err := windowsCursorEnterpriseHookCommand(adapterPath)
+	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 			}
 			continue
 		}
-		filtered := removeCursorHookCommand(entries, command)
+		filtered := removeCursorHookCommands(entries, command, legacyCommand)
 		if len(filtered) != len(entries) {
 			hooks[event] = filtered
 		}
@@ -154,7 +154,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 // VerifyWindowsCursorEnterpriseHooks validates exact writer/reader parity for
 // the protected machine configuration while allowing unrelated hook entries.
 func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) error {
-	command, err := windowsCursorEnterpriseHookCommand(adapterPath)
+	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,11 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		}
 		owned := 0
 		for _, raw := range entries {
-			if cursorHookCommand(raw) != command {
+			entryCommand := cursorHookCommand(raw)
+			if entryCommand == legacyCommand {
+				return fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
+			}
+			if entryCommand != command {
 				continue
 			}
 			owned++
@@ -201,7 +205,8 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 			continue
 		}
 		for _, entry := range entries {
-			if cursorHookCommand(entry) == command {
+			entryCommand := cursorHookCommand(entry)
+			if entryCommand == command || entryCommand == legacyCommand {
 				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
 			}
 		}
@@ -214,7 +219,7 @@ func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 // remain untouched. If there is nothing to remove, the original bytes are
 // returned unchanged.
 func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]byte, error) {
-	command, err := windowsCursorEnterpriseHookCommand(adapterPath)
+	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +237,7 @@ func RemoveWindowsCursorEnterpriseHooks(existing []byte, adapterPath string) ([]
 		if !ok {
 			continue
 		}
-		filtered := removeCursorHookCommand(entries, command)
+		filtered := removeCursorHookCommands(entries, command, legacyCommand)
 		if len(filtered) == len(entries) {
 			continue
 		}
@@ -351,10 +356,24 @@ func WindowsCursorEnterpriseHooksEmpty(data []byte) bool {
 }
 
 func windowsCursorEnterpriseHookCommand(adapterPath string) (string, error) {
+	command, _, err := windowsCursorEnterpriseHookCommands(adapterPath)
+	return command, err
+}
+
+func windowsCursorEnterpriseHookCommands(adapterPath string) (string, string, error) {
 	if err := validateAbsoluteLocalWindowsPath("Cursor enterprise adapter", adapterPath); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return "& " + powershellQuoteLiteral(adapterPath), nil
+	// Cursor can evaluate Windows command hooks through either PowerShell or
+	// Git Bash. Keep the outer command free of shell metacharacters, and encode
+	// the PowerShell wrapper so adapter paths cannot be reinterpreted by either
+	// host. The wrapper restores native stdin as the PowerShell pipeline objects
+	// consumed by the managed adapter.
+	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
+	script := "$input | & " + powershellQuoteLiteral(adapterPath)
+	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
+	return command, legacyCommand, nil
 }
 
 func validateAbsoluteLocalWindowsPath(label, value string) error {
@@ -570,10 +589,14 @@ func windowsCursorEnterpriseHookEntry(command string) map[string]interface{} {
 	}
 }
 
-func removeCursorHookCommand(entries []interface{}, command string) []interface{} {
+func removeCursorHookCommands(entries []interface{}, commands ...string) []interface{} {
+	owned := make(map[string]struct{}, len(commands))
+	for _, command := range commands {
+		owned[command] = struct{}{}
+	}
 	filtered := make([]interface{}, 0, len(entries))
 	for _, entry := range entries {
-		if cursorHookCommand(entry) == command {
+		if _, ok := owned[cursorHookCommand(entry)]; ok {
 			continue
 		}
 		filtered = append(filtered, entry)
