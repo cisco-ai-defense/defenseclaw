@@ -1269,6 +1269,21 @@
       "license_status": "approved",
       "redistribution": "download-only",
       "enabled": true
+    },
+    {
+      "id": "robustintelligence/augur_unsafe_tool_input_eval",
+      "purpose": [
+        "action",
+        "real-tool-arguments",
+        "security-positive-candidate"
+      ],
+      "source_url": "https://huggingface.co/datasets/robustintelligence/augur_unsafe_tool_input_eval",
+      "revision": "toolcall-security-intent-v1",
+      "fetch": "manual",
+      "license": "review-required",
+      "license_status": "review_required",
+      "redistribution": "aggregate-only",
+      "enabled": false
     }
   ]
 }

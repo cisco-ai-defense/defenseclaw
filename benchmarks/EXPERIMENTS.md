@@ -259,8 +259,8 @@ because the harness imports the reference driver's own `build_state` / `build_qu
 
 | model | params | licence | origin | class | status |
 |---|---|---|---|---|---|
-| `open-jev-qwen-2b` (anchor) | 2B | CC BY-NC 4.0 | Alibaba base | Jev | merged 30,310 |
-| `open-jev-qwen-27b` (anchor) | 27B | CC BY-NC 4.0 | Alibaba base | Jev | from board |
+| `open-jev-qwen-2b` (anchor) | 2B | apache-2.0 | Alibaba base | Jev | merged 30,310 |
+| `open-jev-qwen-27b` (anchor) | 27B | apache-2.0 | Alibaba base | Jev | from board |
 | `protectai/deberta-v3-base-prompt-injection-v2` | 184,423,682 | apache-2.0 | US | encoder | **30,310** |
 | `answerdotai/ModernBERT-base` | 149,655,232 | apache-2.0 | EU/US | **negative control** | **30,310** |
 | `answerdotai/ModernBERT-large` | 395,881,664 | apache-2.0 | EU/US | **negative control** | running |
@@ -568,12 +568,34 @@ previous upload, four of them from other work: manifests found 319 → 325, repo
 971, artifacts read 193 → 211. `_wordcount.json` was stale — it omitted two pages and predated
 three uploads — and was regenerated over all 14 pages (147,167 words).
 
-**Licence discrepancy, unresolved.** The Programme 2 cohort table below records
-`open-jev-qwen-2b` and `open-jev-qwen-27b` as **CC BY-NC 4.0**. `cardData.license` on
-`ZefanCai/Open-Jev-2B` and `ZefanCai/Open-Jev-27B-v1.1` reads **apache-2.0**, and the Space
-publishes the cardData value with the repo and revision it was read from, which is what the 2B
-row already did before this change. One of the two records is wrong and the Space is currently
-consistent with the cardData one. Resolve before any redistribution decision rests on it.
+**Licence discrepancy, resolved: the ledger was wrong, the Space was right.** The cohort table
+recorded `open-jev-qwen-2b` and `open-jev-qwen-27b` as CC BY-NC 4.0. That was a conflation of two
+different models that share a name. Read directly from the Hub:
+
+| board / cohort name | HF repo | weights licence | code | base |
+|---|---|---|---|---|
+| **OpenJev** (the incumbent) | `openjev/openjev` @ `5ec9e5fd2f80a6fff386779b1e5ac7e389971889` | **cc-by-nc-4.0** | `helper/`, `serve/` Apache-2.0 | "an Apache 2.0 open base model" |
+| `open-jev-qwen-2b` | `ZefanCai/Open-Jev-2B` | **apache-2.0** | MIT | `Qwen/Qwen3.5-2B` apache-2.0 |
+| `open-jev-qwen-9b` | `ZefanCai/Open-Jev-9B` | **apache-2.0** | MIT | `Qwen/Qwen3.5-9B` apache-2.0 |
+| `open-jev-qwen-27b` | `ZefanCai/Open-Jev-27B-v1.1` | **apache-2.0** | MIT | `Qwen/Qwen3.8-27B` apache-2.0 |
+
+Both the `cardData.license` field and the `license:` tag agree on every repo, and the prose
+confirms each: `openjev/openjev` reads "OpenJev weights are released under **CC BY-NC 4.0**: free
+for research and other non-commercial use, with attribution. For commercial use, open a discussion
+on this repository." The ZefanCai cards read "The trained adapter and head are released under
+**Apache-2.0**", with the upstream model and tokenizer to be obtained separately under their own
+terms. The 27B's training set `ZefanCai/Open-Jev-v1.1` is `license: other` and retains
+per-component terms, and its card states that dataset licences do not relicense model weights.
+
+The cohort table above is corrected to apache-2.0. The published Space needs no change: every
+CC BY-NC 4.0 mention on it attaches to `openjev/openjev`, and `index.html` already states that
+"the incumbent OpenJev on the leaderboard is a different model: `openjev/openjev` at revision
+`5ec9e5fd2f80a6fff386779b1e5ac7e389971889`, under CC BY-NC 4.0." The Space's other CC-BY-NC-4.0
+label is the `rogue-security/coding-agent-security-benchmark` source dataset (279 rows), flagged
+there as the only non-commercial source; that one is unrelated and correct.
+
+This ledger never recorded `openjev/openjev` as a distinct repo, which is how the two collapsed
+into one lineage. The rows above are the fix.
 
 **Not published.** `kev-9b`'s 0.6092050209205021 and the four other `P(block) − P(confirm)`
 ceilings, each named on the page beside the durable ceiling it exceeds. `decider-2b` remains off
@@ -593,14 +615,23 @@ row detail.
 
 - Publish further System One s3 rows as they settle. Only `bespoke-nimble-9b` has a settled s3
   counterpart on the board so far; the s3 section is built to take more.
-- Resolve the `open-jev-qwen-*` licence discrepancy above: cohort table CC BY-NC 4.0 against
-  `cardData.license` apache-2.0.
 - Decide whether `decider-2b` becomes a board row. Its artifacts are complete except for a
   scorecard with the deterministic node, which is one re-score away.
 - `Llama-Prompt-Guard-2-22M/86M` need a third gating group accepted (403, not 401).
 - Card affinity for `qadd`.
 - Four archive licence/secret-hygiene decisions (see task #54).
-- Whether the non-China provenance constraint applies to the board as well as the cohort.
-  OpenJev (rank 2) and `open-jev-qwen-27b` (best re-thresholded) are both Qwen derivatives
-  under CC BY-NC 4.0, so if the constraint is real for deployment, the two strongest results
-  in the programme are unshippable.
+- Whether the non-China provenance constraint applies to the board as well as the cohort. Both
+  OpenJev and the `open-jev-qwen-*` family sit on Alibaba bases, so a constraint read strictly
+  would reach the incumbent and the best re-thresholded arm alike.
+
+  The **licence** half of this item is settled and points the other way from how it was first
+  written. Only `openjev/openjev` — the incumbent, and first of the 11 ranked rows on block-only
+  F1 at 0.70231 — is CC BY-NC 4.0. `open-jev-qwen-27b`, which holds the best re-thresholded
+  figure, is apache-2.0. So a commercial-use constraint does not make the two strongest results
+  unshippable: it binds the incumbent while leaving the strongest challenger unencumbered. The
+  earlier claim that both were CC BY-NC 4.0, and the "two strongest results are unshippable"
+  conclusion drawn from it, are withdrawn.
+
+  One figure in the withdrawn sentence is also unverified: it called OpenJev "rank 2", while the
+  published Space calls it first of the 11 ranked rows on block-only F1. Nothing else in this
+  ledger assigns OpenJev a rank, so "rank 2" has no source here and is not restated.

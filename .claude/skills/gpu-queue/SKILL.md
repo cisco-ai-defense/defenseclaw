@@ -100,7 +100,50 @@ You cannot work around this from inside the job: overriding `CUDA_VISIBLE_DEVICE
 forbidden (see rules below), and exiting early when you see the wrong card burns the job,
 because the worker writes `done/<id>.json` on any exit code and will not retry it.
 
-If you need a specific card, pin directly and reserve it.
+**Until this is implemented: if you need a specific card, pin directly and reserve it.**
+
+#### The design, for whoever closes this gap
+
+Two new optional fields on the record. Both default to today's behaviour when absent, so
+existing queued lines and existing workers keep working.
+
+| field | meaning |
+|---|---|
+| `cards` | allowlist of card indices, e.g. `[2,3]`. Absent means any card. Covers "avoid card 0" by enumerating the complement. |
+| `min_free_mib` | require this much *free* VRAM on the card before launching. Absent means no check. |
+
+`min_free_mib` is the more valuable of the two, because card identity is almost never the
+real requirement — free memory is. It is what would have prevented the 2026-09-23 failure
+above, where a vLLM job was handed a card holding 127,841 of 143,771 MiB.
+
+Three constraints the implementation must respect, all of them load-bearing in the current
+design:
+
+1. **Never rewrite `QUEUE.jsonl`.** Appends are atomic only because they are single short
+   `O_APPEND` writes. Affinity is a *read-side filter* in the worker: skip records whose
+   `cards` excludes your own index. A skipped record stays at the head and is simply picked
+   up by the worker it names, so oldest-first ordering still holds per card.
+2. **Filter before `mkdir claims/<id>`.** The record is immutable once appended, so a
+   pre-claim check cannot go stale. Claiming first and then discovering the wrong card would
+   burn the job, because `done/<id>.json` is written on any exit and is never retried.
+3. **Check `min_free_mib` twice** — once before claiming, once again as the last thing
+   before `exec`. Two workers can both pass the first check, so the second one is what
+   actually protects you. This narrows the race to the window between the final check and
+   the child's first allocation; it does not eliminate it. Say so in the code rather than
+   implying the check is a guarantee.
+
+On a `min_free_mib` failure after the claim, do **not** silently write a normal result.
+Release the claim (`rmdir claims/<id>`) and leave no `done/` record, so the job is still
+queued. Add a `deferrals` counter to the log line; a job that defers more than a handful of
+times is a reservation problem, not a scheduling one, and should surface in `status.sh`.
+
+#### The failure mode this introduces
+
+A job pinned to a card whose worker is not running **waits forever with no signal**. That is
+new: today every queued job is eligible for every live worker. `status.sh` must grow a line
+for it — for each queued record with a `cards` field, whether any named card has a live
+worker, and if not, name the job as unschedulable. Without that line this feature converts
+a loud mistake into a silent one.
 
 ## Rules that keep this working for everybody
 
