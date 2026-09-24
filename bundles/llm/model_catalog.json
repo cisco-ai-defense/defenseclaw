@@ -108,8 +108,7 @@
       "env_keys": ["GROQ_API_KEY", "DEFENSECLAW_LLM_KEY"],
       "models": [
         "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        "qwen/qwen3.6-27b"
+        "openai/gpt-oss-20b"
       ]
     },
     {
