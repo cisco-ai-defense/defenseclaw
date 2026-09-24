@@ -18,13 +18,21 @@ Row-level data and per-arm metas are archived to the private HuggingFace dataset
 re-downloadable from the repos and revisions pinned in
 `harness/weights_manifest{,2,3,4}.json`.
 
-## Two things that will bite a future reader
+## Three things that will bite a future reader
 
-1. **Cohort metas carry neither `complete` nor `prediction_sha256`.** The System One driver
-   emits both; `harness/score_arm.py` emits neither and never hashes the prediction body. So
-   the usual completeness/integrity check does not apply to cohort arms - argue completeness
-   from `rows` against the expected request count plus `errors == 0`, and record a digest at
-   archive time rather than expecting one in the meta.
+1. **Integrity is a two-step process here, and the second step is not optional.**
+   `harness/score_arm.py` writes neither `complete` nor `prediction_sha256` and never hashes
+   the prediction body, so a freshly-written cohort meta cannot satisfy the programme's
+   integrity rule. **`harness/settle.py` retrofits both fields and re-verifies them**, and must
+   be run before an arm is archived or cited. An unsettled meta means the arm is incomplete
+   (settlement requires 30,310 untorn rows), not merely unchecked. Note that the retrofitted
+   digest is computed at settlement time, so it certifies "unchanged since settlement" rather
+   than "as the runner emitted it" — weaker than the System One driver's inline guarantee.
 2. **The CPU/laptop measurements are not reproducible from this tree.** `harness/build_llamacpp.sh`
    builds the toolchain, but the scripts that actually produced the RSS and throughput numbers
-   were never saved. Only their logs survive. See `harness/README.md`.
+   were never saved anywhere on the studio. Only their logs survive. See `harness/README.md`.
+3. **Never count running arms with `pgrep -f`, and never use `pkill`.** The pattern matches the
+   operator's own monitoring shells, which stalls the dispatcher's concurrency limiter. The
+   dispatchers walk `/proc` instead; `harness/vacate_and_dispatch.sh` stops processes by exact
+   PID. Also keep the `OMP/MKL/RAYON_NUM_THREADS=4` caps — without them the box ran out of
+   threads and could not fork a login shell. Both are documented in `harness/README.md`.
