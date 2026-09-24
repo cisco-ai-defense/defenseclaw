@@ -36,6 +36,28 @@ shard numbers.
 | `monitor.sh` | Detached recorder, one status line every 120s; honours `reshard/STOP_MONITOR`. |
 | `start_replicas.sh` | Brings up N extra `nimble_shim.py` replicas pinned to **card 3 only** (`CUDA_VISIBLE_DEVICES=3`), under identical serving conditions to the original card-2 server: same checkpoint, `--max-length 8192`, `--device cuda:0`, `attn_implementation="sdpa"`. Logs to `reshard/logs/serve-nimble-<port>.log`. |
 
+### Recovery and operational helpers
+
+These were written while the run was live, in response to a Lightning studio stop/restart, and
+were vendored later than the scripts above.
+
+| script | what it does |
+|---|---|
+| `reconcile.py` | Reconciles reshard state after the studio stop/restart, then verifies what survived. Two hazards it fixes: `claims/` is **empty** after rehydration, because those were empty directories and object storage does not preserve them — without re-creating claims for the already-completed chunks, `next_chunk.py` would hand them out again; and it re-verifies the bodies that did survive. |
+| `release_stale.py` | Releases claims that have no `done` record and no live driver, so the chunk gets re-run. The restart restored old empty claim directories, leaving chunks claimed with nobody working them — a silent coverage gap. A chunk counts as live only if a running driver is matched to it, never by pattern. |
+| `audit.py` | Independent audit of the settled artifact, re-derived from the cases file rather than from the merge's own bookkeeping. |
+| `check_recoverable.py` | (above) |
+| `release_res.py`, `upd_res.py` | Release and update card reservations on the shared studio. |
+| `retire_ports.sh` | Retires the shims on given ports, worker → driver → shim, each **by exact PID after matching its cmdline — never a pattern kill**. Needed because `nimble_shim` leaks host RAM (~0.21 GB/min/process; an 18 GB model reached 51 GB RSS at 2h35m), so retiring the two oldest reclaimed ~102 GB. |
+| `fix_note.py` | Corrects one provenance claim in the settled meta and re-verifies the body digest. The generated note had said `shard0`'s driver was "stopped at a case boundary it had passed"; it was not signalled at all — it was lost when the studio stopped. The correction is recorded rather than the note being quietly rewritten. |
+
+**`next_chunk.py` was superseded.** The earlier vendored copy claimed chunks on a
+strictly-descending frontier (`min(claimed) - 1`) and documented a "meeting guard". That cannot
+come back for a gap in the middle, and the studio restart produced exactly that: claimed chunks
+with no worker, restored out of order. The copy here claims the **highest unclaimed** chunk, which
+fills gaps first and then continues downward, and it stops when the frozen `shard0` prefix already
+covers the whole candidate chunk. This is the version the run actually finished under.
+
 ## When is a chunk "banked"?
 
 This is the term used in the archive manifests, and it is precise:

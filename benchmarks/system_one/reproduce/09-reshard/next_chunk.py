@@ -1,15 +1,20 @@
-"""Atomically claim the next chunk (highest unclaimed, descending) and materialise its slice.
+"""Atomically claim the next chunk and materialise its slice.
 
 stdout  "<chunk> <shard> <case_start> <req_start> <requests> <slice_path>"  -> claimed
-stdout  empty, exit 0                                                      -> met shard0 / exhausted
-exit != 0                                                                  -> transient error, caller retries
+stdout  empty, exit 0   -> shard0 already covers the rest; nothing useful left
+exit != 0               -> transient error, caller retries
 
-The meeting guard: the live shard0 only has to cover [0, case_start_of_lowest_claimed_chunk).
-Its target in requests is `boundary_req`. If shard0 has already written that many rows it has
-met the pool, so another claim would only duplicate rows shard0 already produced -> stop.
+Claim order is the HIGHEST UNCLAIMED chunk. That is deliberately not "min(claimed)-1":
+the studio restart restored some old empty claim directories out of order, leaving claimed
+chunks with no worker, and a strictly-descending frontier can never come back for a gap in
+the middle. Taking max(unclaimed) fills gaps first and then continues downward.
 
-The teamspace mount is networked and has been observed to fail an open() transiently, so the
-row count retries and a persistent failure exits NONZERO rather than looking like "met".
+Stop rule: if the frozen shard0 prefix already covers ALL of the candidate chunk
+(shard0_rows >= chunk.req_end) then that chunk is redundant, so stop. The merge separately
+asserts the completed chunks are contiguous to the end, so a gap can never pass silently.
+
+The teamspace mount is networked and has failed open() transiently, so the row count retries
+and a persistent failure exits NONZERO rather than looking like "nothing left".
 """
 import json, os, sys, time
 from pathlib import Path
@@ -71,16 +76,15 @@ for _ in range(len(chunks) + 2):
     except OSError as exc:
         sys.stderr.write(f"claims listing failed: {exc}\n")
         sys.exit(5)
-    c_min = min(claimed) if claimed else len(chunks)
-    boundary_req = chunks[c_min]["req_start"] if c_min < len(chunks) else 100001
-    rows = shard0_rows()
-    if rows >= boundary_req:
-        sys.stderr.write(f"met shard0: rows={rows} >= boundary_req={boundary_req} "
-                         f"(lowest claimed chunk {c_min})\n")
-        sys.exit(0)
-    c = c_min - 1
-    if c < 0:
+    unclaimed = [c["chunk"] for c in chunks if c["chunk"] not in claimed]
+    if not unclaimed:
         sys.stderr.write("pool exhausted\n")
+        sys.exit(0)
+    c = max(unclaimed)
+    ch = chunks[c]
+    rows = shard0_rows()
+    if rows >= ch["req_end"]:
+        sys.stderr.write(f"met shard0: rows={rows} >= chunk {c} req_end={ch['req_end']}\n")
         sys.exit(0)
     try:
         (CLAIMS / str(c)).mkdir()
@@ -89,7 +93,6 @@ for _ in range(len(chunks) + 2):
     except OSError as exc:
         sys.stderr.write(f"claim mkdir failed: {exc}\n")
         sys.exit(6)
-    ch = chunks[c]
     path = materialise(ch)
     print(f"{ch['chunk']} {ch['shard']} {ch['case_start']} {ch['req_start']} "
           f"{ch['requests']} {path}")
