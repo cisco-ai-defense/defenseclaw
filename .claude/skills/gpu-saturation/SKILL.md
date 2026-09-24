@@ -72,6 +72,26 @@ Note `utilization.memory` is memory *bandwidth*, not occupancy. At 100% SM it sa
 help — and that was independently A/B'd: `max-batch` 32 against 128 gave 291.8 vs 271.6
 rows/min.
 
+### The scaling curve, measured
+
+Adding workers to one card, same model, same slice size, measured over ~550 s windows:
+
+| replicas | aggregate rows/min | per replica |
+|---|---|---|
+| 2, card shared with another workload | 130.0 | 65.0 |
+| 3, card cleared | 270.4 | 90.1 |
+| 5, card cleared | 342.0 | 68.4 |
+
+Two things to read off it. **Per-replica throughput falls as you add** — 90.1 to 68.4 — so
+aggregate gains shrink while the card approaches 100% SM; going 3 to 5 bought only
++71.6 rows/min. And **evicting a foreign co-tenant was worth more than any replica**: 130.0
+to 342.0, a 2.6× gain, came from moving 73 GB of another workload off the card rather than
+from adding workers.
+
+So the order is: clear foreign tenants first, then add workers until SM pins, then stop. A
+6th replica here would not have fit anyway — 6 × 24.6 GiB projected peak against 143,771 MiB
+— which is the other reason to compute the projection rather than discover it with an OOM.
+
 ## Thread exhaustion, the failure that looks like everything else
 
 Symptom: **ssh completes key exchange, the server accepts your key, then closes the
@@ -114,6 +134,51 @@ for p in /proc/[0-9]*; do
   tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'score_arm.py' && n=$((n+1))
 done
 ```
+
+## Long-lived model servers leak host RAM, and this is the root cause
+
+Everything else in this file — thread exhaustion, cold hydration, idle shutdown — was
+downstream of one defect on the night this was written: **a server process that stays up
+grows its host RSS without bound.**
+
+Measured across four identical shims serving an 18 GB model at a fixed batch shape, with no
+restarts and no change in workload:
+
+| process age | RSS |
+|---|---|
+| at startup | ~20 GB |
+| 1h55m | 37.8 GB |
+| 2h06m | 43.5 GB |
+| 2h35m | 51.2 GB |
+| **3h30m** | **86.7 GB** |
+
+That is **~0.21 GB/min per process**, tracking age almost linearly and still linear at the
+end — **4.3× growth over 3.5 hours** to serve an 18 GB model. A separate 2B model's server
+reached **117 GB** before the first collapse, and a 9B's reached 69 GB.
+
+Retiring three such processes took the box from **247 GB used to 14 GB used / 418 GB
+available**. So on this machine the leak accounted for essentially the entire memory history
+of the night: what presented as thread exhaustion, cold S3 hydration and idle shutdown were
+all downstream of long-lived servers growing without bound.
+
+**`MemAvailable` is not an early warning — it is a post-mortem.** The kernel killed two
+running jobs at 243 GB of 432 GB with **zero cgroup OOM events recorded**
+(`memory.events` showed `oom 0 oom_kill 0 oom_group_kill 0`, and `memory.max` was
+unlimited), and their logs ended mid-progress with no error and no traceback. So a silent
+death with a clean log is the signature. Watch the **RSS trend per long-lived process**
+instead, and act on the slope rather than the level.
+
+Mitigations, in order of value:
+
+1. **Reap a server the instant its driver exits.** See below. Four reaps on one night
+   returned 117 GB, 48 GB, 70 GB and ~100 GB.
+2. **Retire the oldest and largest servers first** when memory tightens. Age predicts RSS,
+   so oldest-first is also biggest-first. Retiring 2 of 5 replicas reclaimed ~100 GB and cost
+   **9.5%** aggregate throughput, not the ~21% a naive reading of the scaling table
+   predicted — because the earlier 3-replica datapoint had been measured on a contended card
+   and was never a like-for-like comparison. Re-measure rather than extrapolating.
+3. **Stop there.** A rolling restart to reclaim memory you do not need costs work in flight
+   for nothing.
 
 ## Reap orphaned servers, every time
 
