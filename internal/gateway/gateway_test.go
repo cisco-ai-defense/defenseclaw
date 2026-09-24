@@ -435,6 +435,32 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("hybrid_proxy_mode_overrides_hookonly", func(t *testing.T) {
+		gc := &config.GuardrailConfig{ProxyMode: "hybrid"}
+		for _, name := range []string{"claudecode", "codex", "hermes", "cursor"} {
+			got := proxyShouldBindForConnector(&stubConnector{name: name}, gc)
+			if !got {
+				t.Errorf("proxyShouldBindForConnector(%s, proxy_mode=hybrid) = false, want true", name)
+			}
+		}
+	})
+
+	t.Run("hybrid_proxy_mode_case_insensitive", func(t *testing.T) {
+		gc := &config.GuardrailConfig{ProxyMode: " Hybrid "}
+		got := proxyShouldBindForConnector(&stubConnector{name: "claudecode"}, gc)
+		if !got {
+			t.Errorf("proxyShouldBindForConnector(claudecode, proxy_mode=' Hybrid ') = false, want true")
+		}
+	})
+
+	t.Run("empty_proxy_mode_preserves_default", func(t *testing.T) {
+		gc := &config.GuardrailConfig{ProxyMode: ""}
+		got := proxyShouldBindForConnector(&stubConnector{name: "claudecode"}, gc)
+		if got {
+			t.Errorf("proxyShouldBindForConnector(claudecode, proxy_mode='') = true, want false")
+		}
+	})
 }
 
 func TestProxyShouldBindForConfiguredConnector(t *testing.T) {

@@ -1671,6 +1671,12 @@ type GuardrailConfig struct {
 	// defaults to "openclaw" for backward compatibility.
 	Connector string `mapstructure:"connector"            yaml:"connector,omitempty"`
 
+	// ProxyMode overrides the connector's default LLM traffic mode.
+	// Set to "hybrid" on a hook-only connector (e.g. claudecode) to bind
+	// the guardrail proxy alongside hooks, enabling semantic routing and
+	// full request/response inspection. Empty uses the connector default.
+	ProxyMode string `mapstructure:"proxy_mode"           yaml:"proxy_mode,omitempty"`
+
 	// AllowEmptyProviders bypasses the boot-time ProviderProbe refusal
 	// (plan A4 / S0.12). The default behavior is to fail-closed when the
 	// active connector reports zero usable upstream providers — this

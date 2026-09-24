@@ -3443,6 +3443,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		AgentVersion:     agentVersion,
 		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
+		HybridProxyMode:  strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
@@ -3978,7 +3979,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Set-difference teardown: any connector active on a previous boot but
 	// absent from the current set is torn down once, before setup. Uses a
 	// base opts carrying just the fields Teardown needs.
-	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
+	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr,
+		HybridProxyMode: strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+	}
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	var failedRemoved []string
 	setupSeed := multiConnectorSetupTransaction{}
@@ -5096,6 +5099,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:         agentVersion,
 		AgentExecutable:      agentExecutable,
 		HookContractID:       contractResolution.Contract.ContractID,
+		HybridProxyMode:      strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
 	}, nil
 }
 
@@ -5281,9 +5285,15 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	if conn == nil {
 		return true
 	}
+	// Operator override: guardrail.proxy_mode=hybrid forces the proxy to
+	// bind even for hook-only connectors, enabling semantic routing and
+	// full request/response inspection alongside hooks.
+	if gc != nil && strings.EqualFold(strings.TrimSpace(gc.ProxyMode), "hybrid") {
+		return true
+	}
 	if provider, ok := conn.(connector.ConnectorCapabilityProvider); ok {
 		switch provider.Capabilities(connector.SetupOpts{}).LLMTrafficMode {
-		case connector.LLMTrafficModeProxy:
+		case connector.LLMTrafficModeProxy, connector.LLMTrafficModeHybrid:
 			return true
 		case connector.LLMTrafficModeHooksOnly:
 			return false

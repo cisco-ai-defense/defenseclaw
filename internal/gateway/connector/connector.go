@@ -70,6 +70,10 @@ type SetupOpts struct {
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken             string // gateway bearer token; baked into hook curl -H
+	// HybridProxyMode is true when guardrail.proxy_mode=hybrid, meaning a
+	// hook-only connector should also route LLM traffic through the proxy.
+	// When set, Setup injects ANTHROPIC_BASE_URL pointing at ProxyAddr.
+	HybridProxyMode bool
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -401,11 +405,12 @@ func ACPAgentCapabilityForConnector(name string) ACPCapability {
 	return ACPCapability{}
 }
 
-// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
-// ConnectorCapabilities.LLMTrafficMode.
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly / LLMTrafficModeHybrid are
+// the values of ConnectorCapabilities.LLMTrafficMode.
 const (
 	LLMTrafficModeProxy     = "proxy"
 	LLMTrafficModeHooksOnly = "hooks-only"
+	LLMTrafficModeHybrid    = "hybrid"
 )
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
