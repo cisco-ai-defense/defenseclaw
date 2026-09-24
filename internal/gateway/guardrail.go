@@ -490,6 +490,10 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		messages = []ChatMessage{{Role: "assistant", Content: content}}
 	}
 
+	if direction == "prompt" {
+		messages = trimAfterLastBlock(messages)
+	}
+
 	strategy := g.effectiveStrategy(direction)
 
 	// Open a span for the whole inspection — stage naming follows
@@ -2567,6 +2571,19 @@ func redactSecrets(text string) string {
 	})
 	text = kvRedactRe.ReplaceAllString(text, "${1}***REDACTED***")
 	return text
+}
+
+// trimAfterLastBlock scans messages in reverse for the last assistant message
+// whose content starts with "[DefenseClaw]" (the prefix blockMessage always
+// adds, regardless of custom message config). Returns only the messages after
+// that block. If no block is found, returns the original slice unmodified.
+func trimAfterLastBlock(messages []ChatMessage) []ChatMessage {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && strings.HasPrefix(messages[i].Content, "[DefenseClaw]") {
+			return messages[i+1:]
+		}
+	}
+	return messages
 }
 
 // blockMessage returns the message to send when a request/response is blocked.
