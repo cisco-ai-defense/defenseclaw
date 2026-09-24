@@ -367,12 +367,16 @@ func windowsCursorEnterpriseHookCommands(adapterPath string) (string, string, er
 	// Cursor can evaluate Windows command hooks through either PowerShell or
 	// Git Bash. Keep the outer command free of shell metacharacters, and encode
 	// the PowerShell wrapper so adapter paths cannot be reinterpreted by either
-	// host. Cursor writes hook JSON as UTF-8, so configure redirected stdin before
-	// enumerating $input; the wrapper then restores stdin as the PowerShell
-	// pipeline objects consumed by the managed adapter.
+	// host. Windows PowerShell decodes $input before an encoded command can set
+	// Console.InputEncoding, so reading $input would corrupt non-ASCII Cursor
+	// JSON on machines whose OEM code page is not UTF-8. Read the inherited
+	// standard-input stream as strict UTF-8 instead, then pass the decoded JSON
+	// to the managed adapter as one PowerShell pipeline object.
 	powerShell := strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/")
-	script := "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $input | & " +
-		powershellQuoteLiteral(adapterPath)
+	script := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
+		"[Text.UTF8Encoding]::new($false,$true),$false);" +
+		"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+		"$payload | & " + powershellQuoteLiteral(adapterPath)
 	command := powerShell + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 	legacyCommand := "& " + powershellQuoteLiteral(adapterPath)
 	return command, legacyCommand, nil

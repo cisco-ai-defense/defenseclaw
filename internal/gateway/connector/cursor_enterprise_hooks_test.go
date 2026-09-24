@@ -150,8 +150,10 @@ func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
 		if strings.Contains(command, "&") || strings.Contains(command, "'") || strings.Contains(command, `\`) {
 			t.Fatalf("Cursor enterprise command is not neutral to PowerShell and Bash parsing: %q", command)
 		}
-		wantScript := "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $input | & " +
-			powershellQuoteLiteral(adapterPath)
+		wantScript := "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput()," +
+			"[Text.UTF8Encoding]::new($false,$true),$false);" +
+			"try{$payload=$reader.ReadToEnd()}finally{$reader.Dispose()};" +
+			"$payload | & " + powershellQuoteLiteral(adapterPath)
 		if decoded := decodePowerShellEncodedCommandForTest(t, command); decoded != wantScript {
 			t.Fatalf("decoded Cursor enterprise command = %q, want %q", decoded, wantScript)
 		}
@@ -210,8 +212,15 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 
 	t.Run("PowerShell", func(t *testing.T) {
 		run(t, func(ctx context.Context) *exec.Cmd {
-			argv := strings.Fields(command)
-			return exec.CommandContext(ctx, argv[0], argv[1:]...)
+			return exec.CommandContext(
+				ctx,
+				"powershell.exe",
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				command,
+			)
 		})
 	})
 	t.Run("GitBash", func(t *testing.T) {
