@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every experiment — DefenseClaw System One</title>
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">EXPERIMENTS</p>
+<h1>22 experiments</h1>
+<p class="lede">
+  Grouped by question; negative results flagged in the status column.
+</p>
+
+<p class="small">
+  <strong>Status key.</strong>
+  <span class="pill settled">settled</span> reproduced, gated, citable &nbsp;
+  <span class="pill neg">negative</span> measured negative &nbsp;
+  <span class="pill open">qualified</span> signal with a stated limit &nbsp;
+  <span class="pill">restated</span> earlier figure changed &nbsp;
+  <span class="pill">not scored</span> run but never scored
+</p>
+
+<h2>Funnel stages</h2>
+<p>
+  Three stages, each larger and more benign; the last at the real benign share.
+</p>
+
+{{chart:funnel}}
+
+<div class="tbl-scroll">
+<table data-sortable>
+  <thead><tr>
+    <th data-sort="text">Question</th><th>Method</th><th class="n" data-sort="num">Scale</th>
+    <th>Result</th><th>Detail</th><th data-sort="text">Status</th>
+  </tr></thead>
+  <tbody>
+
+  <tr>
+    <td><strong>Model and question-format screen</strong></td>
+    <td><em>Screening</em> (<code>S1</code>). 4 backends × 2 contexts × 4 question formats,
+        Pareto-culled.</td>
+    <td class="n">{{fig:s1.screen}} scenarios<br>{{fig:s1.families}}-family pool</td>
+    <td>One backend beat the LLM judge; one format flagged 1,468 of 1,477 events</td>
+    <td><a href="finding-architecture.html#questions">Architecture</a></td>
+    <td><span class="pill settled">settled</span><br><span class="pill">not scored</span>
+        <span class="sub">1,000-family pool</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Small model ahead of the judge, mixed corpus</strong></td>
+    <td><em>Broad comparison</em> (<code>S2</code>). Real rule engine, 4 orderings, 7 thresholds.</td>
+    <td class="n">{{fig:s2.cases}} scenarios<br>{{fig:s2.decisions}} decisions/arm<br>{{fig:s2.benign}} benign by scenario, {{fig:s2.benign.scorable}} of the {{fig:s2.scorable}} scorable</td>
+    <td><span class="pos">improves</span> F1 {{fig:s2.detllm.f1}} → {{fig:s2.twosided.f1}}, false
+        blocks {{fig:s2.detllm.fpr}} → {{fig:s2.twosided.fpr}}, review {{fig:s2.detllm.review}} →
+        {{fig:s2.twosided.review}}, judge calls 100% → {{fig:s2.twosided.llm}}</td>
+    <td><a href="finding-architecture.html#cascade">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Same cascade at production benign share</strong></td>
+    <td><em>Production-weighted</em> (<code>S3</code>). Same code, corpus re-weighted to the real
+        benign share.</td>
+    <td class="n">{{fig:s3.cases}} scenarios<br>{{fig:s3.decisions}} decisions/arm<br>{{fig:s3.benign}} benign by scenario, {{fig:s3.benign.scorable}} of the {{fig:s3.scorable}} scorable</td>
+    <td><span class="neg">reverses</span> cascade {{fig:s3.twosided.f1}} against judge-alone
+        {{fig:s3.detllm.f1}}; best policy {{fig:s3.so.f1}}, no judge</td>
+    <td><a href="finding-architecture.html#cascade">Architecture</a></td>
+    <td><span class="pill neg">negative</span></td>
+  </tr>
+
+  </tbody>
+</table>
+</div>
+
+<h2>Intent detection</h2>
+<p>
+  DefenseClaw ships this mechanism. The first eight measurements were negative. One row below uses
+  the site’s two-lane name <strong>Lane B</strong> for the “does this still serve the user’s
+  request?” score.
+</p>
+
+<div class="tbl-scroll">
+<table data-sortable>
+  <thead><tr>
+    <th data-sort="text">Question</th><th>Method</th><th class="n" data-sort="num">Scale</th>
+    <th>Result</th><th>Detail</th><th data-sort="text">Status</th>
+  </tr></thead>
+  <tbody>
+
+  <tr>
+    <td><strong>Compromise against correct refusal</strong> (first attempt)</td>
+    <td><em>Intent deviation on AgentDojo</em>. Request fixed, injection success varies. 8 runs,
+        4 backends, 2 contexts.</td>
+    <td class="n">651 matched cases<br>2,705 decisions/arm</td>
+    <td><span class="neg">negative in all eight</span> separation −0.0053 to −0.5343,
+        <em>correct refusal</em> flagged above compromise</td>
+    <td><a href="finding-intent.html#agentdojo">Intent</a></td>
+    <td><span class="pill">restated</span> <span class="sub">superseded below</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Same question on <em>proven</em> compromises</strong></td>
+    <td><em>Grade-A intent rebuild</em>. Proof-backed MCP calls, family-clustered bootstrap,
+        AgentDojo control at identical scorer and seed.</td>
+    <td class="n">3,402 cases / 1,929 families<br>405 proof-verified<br>3,946 decisions/arm × 4 backends</td>
+    <td><span class="pos">reverses</span> all {{fig:cells}} cells positive, {{fig:cells.rev}} sign
+        reversals, OpenJev {{fig:sep.openjev.C0}} → {{fig:sep.openjev.C7}}</td>
+    <td><a href="finding-intent.html">Intent</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>The serves-the-request score (Lane B) as a gate</strong></td>
+    <td><em>Lane B false-positive test</em>. 40 real coding sessions, every flag a false
+        positive.</td>
+    <td class="n">{{fig:tb.traj}} sessions<br>{{fig:tb.events}} events<br>100% benign</td>
+    <td><span class="neg">unusable</span> {{fig:tb.laneb.oj}} and {{fig:tb.laneb.dg}} of benign
+        events on the two C7 arms, {{fig:tb.laneb.ratio.span}} each model’s own whole decision,
+        {{fig:tb.laneb.oj.traj}} of sessions; ceiling
+        {{fig:tb.si.oj.max}} on one backend</td>
+    <td><a href="finding-safety.html#laneb">Safety</a></td>
+    <td><span class="pill neg">negative</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Benign developer traffic</strong></td>
+    <td><em>TerminalBench benign traffic</em>. Real trajectories and tool arguments, scored per event
+        and session.</td>
+    <td class="n">{{fig:tb.traj}} sessions<br>{{fig:tb.events}} events</td>
+    <td>Self-hosted {{fig:tb.q2.oj}} and {{fig:tb.q2.dg}} per-event false positives against
+        {{fig:tb.q2.jev}} hosted</td>
+    <td><a href="finding-safety.html#benign">Safety</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  </tbody>
+</table>
+</div>
+
+<h2>Question design and enforcement policy</h2>
+
+<div class="tbl-scroll">
+<table data-sortable>
+  <thead><tr>
+    <th data-sort="text">Question</th><th>Method</th><th class="n" data-sort="num">Scale</th>
+    <th>Result</th><th>Detail</th><th data-sort="text">Status</th>
+  </tr></thead>
+  <tbody>
+
+  <tr>
+    <td><strong>Question shape against outcome</strong></td>
+    <td><em>Question comparison</em>. Q2 one choice, Q1 8 boolean probes, Q3 8 calibrated probes;
+        same model, corpus, cascade.</td>
+    <td class="n">{{fig:s2.cases}} scenarios<br>30,310 decisions × 3</td>
+    <td><span class="neg">{{fig:fmt.q.ratio}}× spread</span> standalone block F1
+        {{fig:q.q2.alone}} / {{fig:q.q1.alone}} / {{fig:q.q3.alone}}; all three are below the
+        no-tier baseline {{fig:q.notier}} standalone. Inside the cascade the spread is much
+        smaller and only Q2 clears that baseline: Q1 {{fig:q.q1.casc}}, Q2 {{fig:q.q2.casc}},
+        Q3 {{fig:q.q3.casc}}</td>
+    <td><a href="finding-architecture.html#questions">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Baseline question parity</strong></td>
+    <td><em>Question de-confound</em>. LLM judge re-run on the challenger’s question.</td>
+    <td class="n">{{fig:s2.cases}} scenarios<br>30,310 judge calls · $0.78</td>
+    <td>Baseline held the <em>stronger</em> question; matched, advantage +0.039 → +0.104 block F1</td>
+    <td><a href="finding-architecture.html#deconfound">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Per-event against per-session enforcement</strong></td>
+    <td><em>Policy re-analysis 1 of 4</em>: identical detection, enforcement unit varied.</td>
+    <td class="n">both large stages<br>4 model/stage pairs</td>
+    <td>Per-session costs 2.7×–5.1× more benign work at equal catch rate (5.06× / 3.71× / 2.94× /
+        2.70× across the four measured pairs): 16 benign events against 13
+        sessions</td>
+    <td><a href="finding-architecture.html#perevent">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Tier ordering</strong></td>
+    <td><em>Policy re-analysis 2 of 4</em>: 4 orderings, 3 deterministic-tier compositions each.</td>
+    <td class="n">both large stages<br>12 compositions</td>
+    <td>Within one composition (short-circuit): best-model-first three-tier
+        {{fig:ord.fwd}}, reversed {{fig:ord.rev}}; the two-tier cascade beats both at
+        {{fig:s2.twosided.f1}}</td>
+    <td><a href="finding-architecture.html#ordering">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Per-surface escalation threshold</strong></td>
+    <td><em>Policy re-analysis 3 of 4</em>: threshold swept per surface.</td>
+    <td class="n">{{fig:surf.esc.action.cases}} + {{fig:surf.esc.stateful.cases}} scenarios
+        (broad), {{fig:surf.esc.action.scorable}} + {{fig:surf.esc.stateful.scorable}}
+        scorable<br>{{fig:surf3.esc.action.cases}} + {{fig:surf3.esc.stateful.cases}}
+        (production)</td>
+    <td>Actions optimal at {{fig:surf.esc.action.thr}}, {{fig:surf.esc.action.gemma}} judge calls;
+        stateful {{fig:surf.esc.stateful.thr}}, {{fig:surf.esc.stateful.gemma}}; 18× cost on one
+        knob</td>
+    <td><a href="finding-architecture.html#thresholds">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Disagreement rate and queue size</strong></td>
+    <td><em>Policy re-analysis 4 of 4</em>: three-way and four-way disagreement census.</td>
+    <td class="n">{{fig:s2.cases}} scenarios</td>
+    <td>{{fig:s2.disagree}} of scenarios, {{fig:s3.disagree}} at production weighting</td>
+    <td><a href="finding-architecture.html#disagreement">Architecture</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Adjudication and short-circuit losses</strong></td>
+    <td><em>Disagreement adjudication</em>. Fourth model, another vendor, blinded to all votes, whole
+        queue as census.</td>
+    <td class="n">{{fig:adj.queue}} cases<br>parse rate 1.000 · $0.25</td>
+    <td>Small models on 89.45% of the modal class (n = 1,337); <span class="neg">32 of 1,346</span>
+        short-circuited cases graded unsafe (2.38%); adjudicator allows 30.0%</td>
+    <td><a href="finding-safety.html#adjudication">Safety</a></td>
+    <td><span class="pill open">qualified</span></td>
+  </tr>
+
+  </tbody>
+</table>
+</div>
+
+<h2>Rules, reliability, and cost</h2>
+
+<div class="tbl-scroll">
+<table data-sortable>
+  <thead><tr>
+    <th data-sort="text">Question</th><th>Method</th><th class="n" data-sort="num">Scale</th>
+    <th>Result</th><th>Detail</th><th data-sort="text">Status</th>
+  </tr></thead>
+  <tbody>
+
+  <tr>
+    <td><strong>Model catches as exact rules</strong></td>
+    <td><em>Deterministic rule mining</em>. Confident blocks the rule engine missed, clustered by
+        frequency × confidence.</td>
+    <td class="n">1,118 + 378 confident blocks<br>39 + 102 clusters &#8212; the 102 were
+        clustered from the all-allow stand-in queue</td>
+    <td>96.2% of the screening-stage confident blocks invisible to the rule engine (98.41% at the
+        broad stage, recomputed on the real tier; the published 10{{fig:flip.openjev.flagged}} was a stand-in artefact,
+        and the 102 clusters above have not been recomputed); top candidate
+        <code>/dev/tcp</code> reverse shells,
+        {{fig:rule.shells.events}} events over {{fig:rule.shells.cases}} distinct cases.
+        <span class="neg">All {{fig:rule.shells.events}} grade E</span></td>
+    <td><a href="finding-architecture.html#rules">Architecture</a></td>
+    <td><span class="pill open">qualified</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Real rule engine against the stand-in</strong></td>
+    <td><em>Real deterministic tier</em>. Go rule engine in place of the stand-in; cascade figures
+        re-derived.</td>
+    <td class="n">2 stages × 2 models = 4 stage/model pairs<br>7 cascade variants each</td>
+    <td>Stand-in <em>over</em>-credited routed cascades; a deterministic <em>confirm</em> caps a
+        case. Across the four cascade compositions, up to −{{fig:comp.max_s2}} block F1 at the
+        broad mix and −{{fig:comp.max_s3}} at production weighting; up to −{{fig:comp.max_surf}}
+        on the per-surface action cell. The rule tier by itself moves the block lens by
+        {{fig:comp.tiergap}} in all {{fig:comp.cells}} measured cells, so the gap is the cascade
+        composition</td>
+    <td><a href="finding-architecture.html#realdet">Architecture</a></td>
+    <td><span class="pill">restated</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Replay determinism</strong></td>
+    <td><em>Repeatability</em>. The first 3 identical replays per backend, compared by action and
+        by score.</td>
+    <td class="n">3 backends × 3 runs compared<br>1,519 events each<br>{{fig:flip.runs.note}}</td>
+    <td>Corpus-wide flip rate {{fig:flip.openjev.wide}} / {{fig:flip.diffgemma.wide}} /
+        {{fig:flip.jev.wide}}; <span class="neg">confidence differs</span> on
+        <strong>{{fig:flip.diffgemma.events}} of {{fig:flip.diffgemma.events}}</strong> events for
+        one model. Every flip lands on a flagged event, and on flagged events only the rates are
+        {{fig:flip.flagged.per_model}}</td>
+    <td><a href="finding-safety.html#repeatability">Safety</a></td>
+    <td><span class="pill open">qualified</span> <span class="sub">no stored scorecard</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Final decision under small-model failure</strong></td>
+    <td><em>Fault injection</em>. 28 failure classes, 11 resume-tampering probes, local mock.</td>
+    <td class="n">29 scenarios<br>30 cases / 58 events each</td>
+    <td><span class="neg">allows the call</span> {{fig:fault.allow.total}} of 28 classes end in
+        <code>allow</code>, {{fig:fault.silent}} of them with no error code;
+        {{fig:fault.tamper.accepted}} of 11 tampers accepted</td>
+    <td><a href="finding-safety.html#faults">Safety</a></td>
+    <td><span class="pill neg">negative</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Prompt-prefix caching economics</strong></td>
+    <td><em>Prefix-cache economics</em>. 7 prompt layouts × 4 rounds through an instrumented proxy, a
+        two-arm cache-block-size arm, a replay probe.</td>
+    <td class="n">2,352 driven calls in one ~58 min window<br>2,160 probes in a separate later
+        window</td>
+    <td><span class="neg">no saving</span> 100% prefill, 0% decode; {{fig:px.under}} of prompts
+        under one cache block; tuning the unit down raised hits {{fig:px.serial.hitgain}} serial
+        and cost {{fig:px.serial.slower}} wall-clock time</td>
+    <td><a href="finding-performance.html#prefix">Performance</a></td>
+    <td><span class="pill neg">negative</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Flex service tier</strong></td>
+    <td><em>Flex tier</em>. Same 200 cases and prompts, default versus flex.</td>
+    <td class="n">200 cases<br>1,519 provider calls per tier</td>
+    <td>Tail only: wall clock 155 s → 53 s, p95 23.5 s → 15.9 s, worst case 122 s → 34 s, 199 of 200
+        identical decisions</td>
+    <td><a href="finding-performance.html#flex">Performance</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Culled CPU-only candidate, re-measured</strong></td>
+    <td><em>Backend culling</em>. Full screening scale, against the 8-case estimate that culled
+        it.</td>
+    <td class="n">12,152 requests<br>8 configs</td>
+    <td>{{fig:von.f1}} block F1 against a block-<em>everything</em> floor of {{fig:von.floor}},
+        hard-blocking {{fig:von.fp}} of {{fig:von.benign}} benign cases, p50 {{fig:von.p50}} per
+        case on CPU ({{fig:von.p50.lo}} to {{fig:von.p50.hi}} across {{fig:von.arms}} arms)</td>
+    <td><a href="finding-performance.html#culling">Performance</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  <tr>
+    <td><strong>Why serves-the-request was never measured</strong></td>
+    <td><em>Dataset normalisation</em>. Corpus inventory, field audit, new adapters, licence-lock
+        re-check.</td>
+    <td class="n">18 corpora<br>{{fig:src.rows}} rows</td>
+    <td>Field empty in <strong>every single row</strong>; adapters read the prompt and discarded it.
+        One locked corpus ships zero rows, another normalised anyway</td>
+    <td><a href="finding-data.html">Data</a></td>
+    <td><span class="pill settled">settled</span></td>
+  </tr>
+
+  </tbody>
+</table>
+</div>
+
+<h2>Exclusions</h2>
+<ul>
+  <li><strong>A backend ranking across question formats.</strong> Models ran different question
+      formats and instruction encodings, and question format alone moves block-only F1
+      {{fig:fmt.q.ratio}}× on the Broad comparison. The ranking that <em>is</em> published holds
+      <code>{{fig:par.grid}}</code> fixed for every ranked row; arms at other formats are in the
+      unranked table on the <a href="index.html#parity">leaderboard page</a>.</li>
+  <li><strong>Production readiness.</strong> No experiment here supports it.
+      <a href="recommendations.html">Recommendations</a>.</li>
+</ul>
+
+<p class="foot">
+  <a href="reproduce.html">How to reproduce</a>.
+</p>
+
+</div>
+{{SCRIPT}}
+</body>
+</html>

@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — DefenseClaw System One</title>
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Architecture</p>
+<h1>Cascade and routing results</h1>
+<p class="lede">
+  The decisions are how many tiers, in what order, with which routing rule, at which threshold,
+  enforced at which granularity, asking which question, and on top of which rule engine. Two answers
+  reverse depending on how benign the traffic is.
+</p>
+<p class="pick"><strong>Model choice:</strong> At production weighting, rules → small model with no
+judge scores {{fig:s3.so.f1}} block F1 at zero LLM calls, so the small model carries the tier and the
+incumbent judge can come out.</p>
+
+{{chart:architecture}}
+
+<h2 id="cascade">1. A small model in front of the judge</h2>
+<p>It depends on the benign share of the traffic.</p>
+
+{{chart:cascade_s2}}
+
+<p>
+  At {{fig:s2.benign}} benign by scenario — {{fig:s2.benign.scorable}} over the {{fig:s2.scorable}} scorable
+  cases every F1 here is computed on — the answer is yes: better detection, fewer false blocks,
+  about two fifths of the human review, a sixth of the LLM bill.
+</p>
+
+<div class="tiles">
+  <div class="tile"><div class="v">{{fig:s2.detllm.f1}} → {{fig:s2.twosided.f1}}</div>
+    <div class="l">block F1</div><div class="s">realdet-s2-openjev.json</div></div>
+  <div class="tile"><div class="v">{{fig:s2.detllm.fpr}} → {{fig:s2.twosided.fpr}}</div>
+    <div class="l">false-block rate</div><div class="s">realdet-s2-openjev.json</div></div>
+  <div class="tile"><div class="v">{{fig:s2.detllm.review}} → {{fig:s2.twosided.review}}</div>
+    <div class="l">confirm rate</div><div class="s">realdet-s2-openjev.json</div></div>
+  <div class="tile"><div class="v">100% → {{fig:s2.twosided.llm}}</div>
+    <div class="l">LLM-judge calls</div><div class="s">realdet-s2-openjev.json</div></div>
+</div>
+
+{{chart:cascade_s3}}
+
+<div class="box bad">
+  <p><strong>Production weighting, block F1 by policy.</strong></p>
+  <ul>
+    <li>the cascade: <strong>{{fig:s3.twosided.f1}}</strong> block F1</li>
+    <li>the LLM judge with no small model: <strong>{{fig:s3.detllm.f1}}</strong></li>
+    <li><strong>rules → small model, no judge: {{fig:s3.so.f1}}</strong> — 2.6× the cascade, at
+        {{fig:s3.so.fpr}} false blocks against {{fig:s3.detllm.fpr}}, {{fig:s3.so.review}} review
+        instead of 47.4%, and zero LLM calls</li>
+  </ul>
+  <p style="margin-bottom:0">
+    This follows from the benign share. When 99.1% of traffic is benign, precision dominates F1, so a tier that
+    adds recall by escalating uncertain cases to a permissive judge adds more false blocks than true
+    ones. Detection degrades too: block recall for that same policy falls from {{fig:lb.openjev.blk.recall}} at the broad
+    mix to {{fig:s3.so.recall}} here.
+  </p>
+  <p class="small" style="margin-bottom:0">
+    The figures above are OpenJev&#8217;s. <code>rules → small model</code> is measured for
+    {{fig:s3.nojudge.n}} small models on this corpus over {{fig:s3.nojudge.arms}} arms, and
+    OpenJev&#8217;s is not the strongest. Each arm carries its question format, because they do not
+    all share one: {{fig:s3.nojudge.table}}. {{fig:s3.nojudge.leadnote}}. The block-F1 leader ran
+    the same question format as OpenJev, so that pair carries no question-format confound. It is still not the deployment pick: it flags
+    {{fig:tb.q2.jev}} of real benign coding events against OpenJev&#8217;s {{fig:tb.q2.oj}}, and
+    blocks {{fig:recall.jev.C7}} of proof-verified compromises against OpenJev&#8217;s
+    {{fig:recall.openjev.C7}}. The conclusion this section supports is about the
+    <em>policy</em> &#8212; drop the judge at this mix. Dropping the judge means beating the
+    judge-alone policy, which scores {{fig:s3.nojudge.judgealone}} and is identical in every
+    scorecard on this corpus. {{fig:s3.nojudge.verdict}}
+  </p>
+</div>
+
+<h2 id="realdet">2. The rule engine behind those numbers</h2>
+<p>
+  The large stages were originally scored against a <em>stand-in</em> deterministic tier that allowed
+  everything, justified by the real engine’s measured recall being near zero. The stand-in was
+  over-crediting the routed cascades. The routing rule is “if the rule engine does not say allow, take
+  its action and stop”, so a rule-engine <em>confirm</em> terminates the cascade and caps a case the
+  small model or the judge would have blocked. The stand-in never triggered, so it never capped
+  anything.
+</p>
+
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/deterministic-real/report.txt</code> — published figures before and
+    after substituting the real Go rule engine.</caption>
+  <thead><tr><th>Figure</th><th class="n">published</th><th class="n">with the real engine</th><th class="n">delta</th></tr></thead>
+  <tbody>
+    <tr><td>Broad · rules → judge</td><td class="n">{{fig:q.notier}}</td><td class="n">{{fig:q.notier}}</td><td class="n">0</td></tr>
+    <tr><td>Broad · rules → small model</td><td class="n">0.70231</td><td class="n">0.70231</td><td class="n">0</td></tr>
+    <tr><td>Broad · two-sided cascade @0.30</td><td class="n">{{fig:s2.escalate.f1}}</td><td class="n">{{fig:s2.realdet.f1}}</td><td class="n neg">−0.01401</td></tr>
+    <tr><td>Production · rules → judge</td><td class="n">{{fig:s3.nojudge.judgealone}}</td><td class="n">{{fig:s3.nojudge.judgealone}}</td><td class="n">0</td></tr>
+    <tr><td>Production · rules → small model</td><td class="n">{{fig:s3.so.f1}}</td><td class="n">{{fig:s3.so.f1}}</td><td class="n">0</td></tr>
+    <tr><td>Production · two-sided cascade @0.30</td><td class="n">{{fig:s3.standin.f1}}</td><td class="n">{{fig:s3.twosided.f1}}</td><td class="n neg">−0.04639</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="small">
+  Only the routed cascades move. Every <em>never-downgrade</em> invariant check passes, 0 violations
+  across 7 variants × 4 stage/model pairs, so the rule engine’s findings are never weakened
+  downstream. <strong>Citing {{fig:s3.twosided.f1}} requires the real-engine scorecard</strong>: the
+  stand-in file for the same run says {{fig:s3.standin.f1}}, which inverts the finding.
+</p>
+<div class="box warn">
+  <p><strong>Which tier a scorecard is on is a property of that file alone.</strong> The <code>outputs/jev-parity/scores/</code> directory holds
+  {{fig:parity.files}} scorecards for {{fig:parity.models}} models, and the rule tier is not
+  uniform across them. The OpenJev one is on the all-allow stand-in: its two-sided @0.30 reads
+  {{fig:s2.parity.standin.f1}} where the real-engine scorecard reads {{fig:s2.realdet.f1}}. Hosted Jev&#8217;s, in the same directory,
+  is on the <em>real</em> tier &#8212; the tier file its scorer read is byte-identical to the
+  real-deterministic predictions, both hashing to <code>{{fig:jev.tier.sha}}</code>, and the
+  all-allow stand-in is a separate file that was never used.</p>
+  <p style="margin-bottom:0">This site previously established Jev&#8217;s tier from the OpenJev file
+  beside it and excluded Jev&#8217;s cascade figures on that basis. That was an inference from
+  another model&#8217;s file, and it was wrong. The tier is
+  now read per file from
+  <code>outputs/deterministic-real/realdet-jev-provenance.json</code>, and Jev is on the cascade
+  charts. See <a href="reproduce.html#restated">restated figures</a>.</p>
+</div>
+
+<div class="box">
+  <p><strong>Escalate-on-confirm.</strong> Treat a rule-engine
+  <em>confirm</em> as a floor and keep going instead of letting it terminate the cascade. On the
+  two-tier <em>better model then judge</em> ordering, block F1 at the broad mix returns to exactly
+  {{fig:s2.escalate.f1}}, the figure the all-allow stand-in reported. The other three orderings land
+  at their own values: {{fig:esc.three.f1}} for better model → weaker model → judge,
+  {{fig:esc.threerev.f1}} with the weaker model first, and {{fig:esc.twodg.f1}} for weaker model →
+  judge. What holds in all {{fig:esc.orderings}} orderings is the identity check: each ordering’s
+  escalate-on-confirm block metrics equal its own all-allow stand-in twin,
+  <code>block_metrics_identical = true</code> in {{fig:esc.identical}} of
+  {{fig:esc.orderings}}. The same node also carries a stage-level summary flag, and it does not
+  read the same way: <code>block_lens_identical_everywhere</code> is
+  <code>{{fig:esc.summary.s2}}</code> at the broad mix and <code>{{fig:esc.summary.s3}}</code> at
+  production weighting, because {{fig:esc.detblocks.s2}} case in {{fig:s2.scorable}} is a
+  rule-engine <em>block</em> at the broad mix and {{fig:esc.detblocks.s3}} are at production
+  weighting. The artifact records that every difference is confined to those cases:
+  <code>diffs_confined_to_deterministic_blocks = {{fig:esc.confined}}</code>.</p>
+  <p class="small" style="margin-bottom:0">
+    Source: <code>outputs/s2/policy-reanalysis-realdet.json ::
+    compositions.realdet_escalate_on_confirm</code> and <code>escalate_equals_standin_check</code>.
+  </p>
+</div>
+
+<h2 id="twosided">3. One-sided and two-sided routing</h2>
+<p>
+  One-sided trusts the small model only when it confidently says block. Two-sided trusts it when it is
+  confident either way and escalates only the uncertain band. The difference is the entire saving.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/deterministic-real/realdet-s2-openjev.json :: candidates[0]</code></caption>
+  <thead><tr><th>Routing</th><th class="n">block F1</th><th class="n">LLM-judge calls</th><th class="n">confirm rate</th></tr></thead>
+  <tbody>
+    <tr><td>one-sided (confident blocks only)</td><td class="n">{{fig:thr.005.f1}}</td><td class="n">{{fig:s2.onesided.llm}}</td><td class="n">{{fig:s2.onesided.review}}</td></tr>
+    <tr><td>two-sided @0.30</td><td class="n pos">{{fig:s2.twosided.f1}}</td><td class="n pos">{{fig:s2.twosided.llm}}</td><td class="n pos">{{fig:s2.twosided.review}}</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  Better F1, 5.7× fewer judge calls, 2.6× lower confirm rate. The threshold sweep is monotone from
+  0.05 to 0.30, so there is no knife-edge.
+</p>
+
+<h2 id="thresholds">4. Global and per-surface thresholds</h2>
+<p>
+  Two sweeps measured the trusted-allow band. The whole-corpus scorecard sweep covers
+  {{fig:thr.n}} settings &#8212; {{fig:thr.list}} &#8212; and the control below snaps to those;
+  nothing between them was measured. The per-surface sweep in the policy re-analysis covers
+  {{fig:surf.esc.action.nthr}}: {{fig:surf.esc.action.thrs}}. The extra setting is the 0.50 this
+  page and the recommendations go on to recommend, so it is measured there but not reachable on
+  the control.
+</p>
+{{ui:thr_ctl}}
+{{chart:threshold}}
+<p>
+  Block F1 moves {{fig:thr.f1.span}} across the four settings while the LLM call rate falls
+  {{fig:thr.llm.span}}, from {{fig:thr.005.llm}} at 0.05 to {{fig:thr.030.llm}} at 0.30. On this
+  corpus the cheapest setting is also the best-scoring one for OpenJev. At production weighting
+  every setting loses to the small model alone ({{fig:s3.so.f1}}).
+</p>
+<p class="small">
+  That optimum is OpenJev&#8217;s and does not carry to the other models. Hosted Jev, on the same
+  corpus and the same rule tier, peaks at <strong>{{fig:s2.jev.best.thr}}</strong> where OpenJev
+  peaks at {{fig:s2.oj.best.thr}}, at {{fig:s2.jev.best.f1}} block F1 against {{fig:s2.jev.twosided.f1}} at
+  0.30. It also calls the judge far more often at the shipped setting:
+  {{fig:s2.jev.twosided.llm}} of cases against OpenJev&#8217;s {{fig:s2.twosided.llm}},
+  <strong>{{fig:s2.jev.llm.ratio}}&#215;</strong> as many. That is one of two components and
+  they run in opposite directions: on its own tier Jev is the cheaper of the two on this corpus,
+  {{fig:s2.jev.tier.usd}} over {{fig:s2.jev.tier.tok}} input tokens against OpenJev&#8217;s
+  {{fig:s2.oj.tier.usd}} over {{fig:s2.oj.tier.tok}}. Neither figure is a bill: OpenJev is
+  self-hosted and recorded no provider spend, and Jev&#8217;s metered spend is on the
+  <a href="finding-performance.html#cost">performance page</a>. At production weighting the same
+  judge-call ratio is
+  {{fig:s3.jev.llm.ratio}}&#215;, and Jev&#8217;s <code>rules → small model</code> scores
+  {{fig:s3.jev.so.f1}} against OpenJev&#8217;s {{fig:s3.so.f1}}. Both models ran question format
+  Q2, so that pair carries no question-format confound.
+</p>
+
+<div class="tbl-scroll">
+<table>
+  <caption>Broad comparison, <strong>escalate-on-confirm</strong> composition. Source:
+    <code>outputs/s2/policy-reanalysis-realdet.json ::
+    compositions.realdet_escalate_on_confirm.per_surface_thresholds_openjev</code>. The case count is
+    every scenario on that surface; the block F1 beside it is over the scorable subset, which is
+    smaller.</caption>
+  <thead><tr><th>Surface</th><th class="n">cases</th><th class="n">scorable, the metric denominator</th><th>optimal threshold</th><th class="n">best block F1</th><th class="n">judge calls at that point</th></tr></thead>
+  <tbody>
+    <tr><td>one-shot <code>action</code></td><td class="n">{{fig:surf.esc.action.cases}}</td><td class="n">{{fig:surf.esc.action.scorable}}</td><td>{{fig:surf.esc.action.thr}}</td><td class="n">{{fig:surf.esc.action.f1}}</td><td class="n">{{fig:surf.esc.action.gemma}}</td></tr>
+    <tr><td><code>stateful</code></td><td class="n">{{fig:surf.esc.stateful.cases}}</td><td class="n">{{fig:surf.esc.stateful.scorable}}</td><td>{{fig:surf.esc.stateful.thr}}</td><td class="n">{{fig:surf.esc.stateful.f1}}</td><td class="n">{{fig:surf.esc.stateful.gemma}}</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  Same model, same corpus, same day: an <strong>18× difference in judge cost</strong> depending on the
+  surface. The composition matters as much as the surface does. On the same Broad corpus the
+  short-circuit composition puts the action optimum at {{fig:surf.sc.action.f1}} where
+  escalate-on-confirm puts it at
+  {{fig:surf.esc.action.f1}}, while the stateful optimum is {{fig:surf.sc.stateful.f1}} under both.
+</p>
+<p>
+  Which surface is the better one depends on the stage, and under short-circuit it reverses. At
+  the broad mix the stateful surface leads, {{fig:surf.sc.stateful.f1}} against
+  {{fig:surf.sc.action.f1}}; at production weighting the action surface leads,
+  {{fig:surf3.sc.action.f1}} against {{fig:surf3.sc.stateful.f1}}. Under escalate-on-confirm the
+  action surface leads at both, {{fig:surf.esc.action.f1}} against {{fig:surf.esc.stateful.f1}} at
+  the broad mix and {{fig:surf3.esc.action.f1}} against {{fig:surf3.esc.stateful.f1}} at
+  production weighting, so there the gap widens.
+</p>
+<p>
+  Per-surface thresholds buy judge cost. They buy no detection. On the Broad corpus the
+  action surface&#8217;s block F1 is flat across the plateau {{fig:surf.esc.action.plateau}}, so a
+  single global 0.30 already sits at its optimum: {{fig:surf.esc.action.f1at30}} against
+  {{fig:surf.esc.action.f1}}, a difference of {{fig:surf.esc.action.f1gain}}. The stateful
+  surface&#8217;s own optimum is {{fig:surf.esc.stateful.thr}}, also 0.30, at
+  {{fig:surf.esc.stateful.f1}}. The measured gain is the judge-call rate on the action surface:
+  {{fig:surf.esc.action.gemmaat30}} at the global 0.30 against
+  {{fig:surf.esc.action.gemma}} at 0.50, {{fig:surf.esc.action.gemmagain}} percentage points on
+  {{fig:surf.esc.action.cases}} cases. At production weighting both surfaces optimise at the same
+  threshold, so there is nothing to separate there either.
+</p>
+
+<h2 id="ordering">5. Tier order</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>Broad comparison, block-only F1, real rule engine (short-circuit composition).
+    Source: <code>outputs/s2/policy-reanalysis-realdet.json ::
+    compositions.realdet_short_circuit.cascade_tiers</code></caption>
+  <thead><tr><th>Cascade</th><th class="n">block F1</th><th class="n">block FPR</th><th class="n">judge call rate</th></tr></thead>
+  <tbody>
+    <tr><td>two-tier · better model → judge</td><td class="n pos">{{fig:s2.realdet.f1}}</td><td class="n">{{fig:s2.twosided.fpr}}</td><td class="n">{{fig:s2.twosided.llm}}</td></tr>
+    <tr><td>three-tier · better model → weaker model → judge</td><td class="n">{{fig:ord.fwd}}</td><td class="n">0.00651</td><td class="n">{{fig:ord.rate}}</td></tr>
+    <tr><td>three-tier · weaker model first</td><td class="n neg">{{fig:ord.rev}}</td><td class="n">0.01035</td><td class="n">{{fig:ord.rate}}</td></tr>
+    <tr><td>two-tier · weaker model → judge</td><td class="n neg">0.45574</td><td class="n">0.01035</td><td class="n">3.51%</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  Order is most of the result. On the short-circuit composition this table is on, reversing the
+  three-tier order costs {{fig:ord.gap}} block F1 &#8212; {{fig:ord.fwd}} to {{fig:ord.rev}}
+  &#8212; at the same {{fig:ord.rate}} judge-call rate, so it saves nothing extra. The three-tier
+  arrangement in the right order is a real option: it trades {{fig:ord.trade}} block F1 against
+  the two-tier cascade for a {{fig:ord.cut}}&#215; further cut in judge calls. The open decision is <em>which</em> model and where in the
+  chain.
+</p>
+
+<h2 id="perevent">6. Per-event and per-session enforcement</h2>
+<p>This changes the enforcement policy. The detection model is unchanged.</p>
+
+{{chart:per_event}}
+
+<p>
+  Identical detection, thresholds and model. The only difference is whether one flagged tool call
+  terminates the agent session. On the broad stage that is 16 benign tool calls blocked against 13
+  entire benign sessions destroyed. Per-session costs 2.7× to 5.1× more benign work across the four
+  measured model-and-stage pairs (OpenJev Broad 5.06×, DiffusionGemma Broad 3.71×, OpenJev
+  Production 2.94×, DiffusionGemma Production 2.70×).
+</p>
+
+<h2 id="questions">7. Question format</h2>
+<p>Same model, corpus and cascade. Only the response schema changes.</p>
+
+{{chart:questions}}
+
+<div class="box bad">
+  <p><strong>Cascade F1 by question format.</strong> The no-System-One
+  baseline is {{fig:q.notier}}. Inside the cascade Q1 reaches {{fig:q.q1.casc}} and Q3 reaches
+  {{fig:q.q3.casc}}, both below it. Of the {{fig:q.cascade.n}} formats OpenJev ran inside the
+  cascade ({{fig:q.cascade.formats}}), only Q2 improves on that baseline
+  ({{fig:q.q2.casc}}). Hosted Jev ran two further formats inside the same cascade and neither
+  beats the baseline either: {{fig:jev.casc.q0q4}}.</p>
+  <p class="small" style="margin-bottom:0">
+    Standalone, Q1’s confusion matrix is 7 true blocks and 429 misses. Q2’s is 243 true blocks and 13
+    false ones. Q1 and Q3 barely ever emit a block at scale.
+  </p>
+</div>
+
+<h3>Boolean-probe questions: gains and costs</h3>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/s2/q1-vs-q2-vs-q3.json :: comparison</code></caption>
+  <thead><tr><th>Metric</th><th class="n">Q1 (8 booleans)</th><th class="n">Q2 (one choice)</th><th class="n">Q3 (8 calibrated)</th></tr></thead>
+  <tbody>
+    <tr><td>block-only F1, standalone</td><td class="n">{{fig:q.q1.alone}}</td><td class="n pos">{{fig:q.q2.alone}}</td><td class="n">{{fig:q.q3.alone}}</td></tr>
+    <tr><td>“anything but allow” F1</td><td class="n">0.72396</td><td class="n">{{fig:par.oj.any}}</td><td class="n pos">{{fig:par.q3.anyhi}}</td></tr>
+    <tr><td>three-way accuracy</td><td class="n">0.92324</td><td class="n">0.84700</td><td class="n pos">0.94865</td></tr>
+    <tr><td>per-event benign false positives</td><td class="n">0.01283</td><td class="n">0.01368</td><td class="n pos">0.00542</td></tr>
+    <tr><td>confirm rate</td><td class="n">0.14304</td><td class="n pos">0.08488</td><td class="n">0.09955</td></tr>
+    <tr><td>input tokens</td><td class="n neg">122,868,144</td><td class="n pos">{{fig:tok.s2oj}}</td><td class="n neg">123,204,360</td></tr>
+    <tr><td>median latency</td><td class="n neg">49.7 s</td><td class="n pos">19.4 s</td><td class="n neg">54.2 s</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  The probe-style questions are better <em>triage</em> signals and useless <em>blocking</em> signals,
+  at about 2.6× the tokens and 2.6× the latency. They also carry a fail-open defect
+  (<a href="finding-safety.html#failopen">Safety</a>).
+</p>
+
+<div class="box warn">
+  <p><strong>The 200-case screen was read on a different lens and a different context arm.</strong>
+  It ranked Q1 <em>best</em>, at 0.97778 any-intervention F1 on the <code>C0/I3/Q1</code> arm — the
+  arm with no request block. Hold the grid and the lens and the disagreement goes away: on the
+  screen’s own <code>C7</code> rows the any-intervention order is Q3 0.95294, Q1 0.94798, Q2
+  0.88889, and at the Broad stage on the same lens it is Q3 {{fig:par.q3.anyhi}} ahead of Q1 and
+  Q2 — the same order. What differs is the lens: on the block-only lens at scale Q2 wins,
+  {{fig:q.q2.alone}} against {{fig:q.q1.alone}} for Q1 and {{fig:q.q3.alone}} for Q3. The screen
+  was also pessimistic on false positives (0.07653 → 0.01283). Screening stages kill candidates;
+  they do not rank survivors, and they must be read on the lens the decision uses.</p>
+</div>
+
+<h2 id="deconfound">Question-formulation confound</h2>
+<p>
+  The small model and the LLM judge ran different question formats, so the judge was re-run on the
+  challenger’s own question.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/s2/question-confound.json :: table</code>. Cost of the re-run:
+    $0.78, 30,310 calls, 0 errors. Both rows are on the <strong>all-allow stand-in</strong> rule
+    tier, which is what that artifact recorded: its small-model figure is
+    {{fig:s2.standin.f1}}, against {{fig:s2.realdet.f1}} on the real rule engine. The gap is what
+    this table measures, and it is computed inside one tier.</caption>
+  <thead><tr><th>Pairing</th><th class="n">judge</th><th class="n">small model @0.30, stand-in tier</th><th class="n">gap</th></tr></thead>
+  <tbody>
+    <tr><td>as published (judge on its stronger question)</td><td class="n">{{fig:q.notier}}</td><td class="n">{{fig:s2.escalate.f1}}</td><td class="n">+0.03925</td></tr>
+    <tr><td>matched (both on the same question)</td><td class="n">0.64793</td><td class="n">{{fig:s2.escalate.f1}}</td><td class="n pos">+0.10380</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  The published pairing flattered the baseline. The judge is 6.5 points worse on the challenger’s
+  question, and matched, the advantage widens 2.6×. One cell of the confound stays open: the judge
+  cannot run on Q3 at all, because Q3 has no disposition field and the chat API returns a single word.
+</p>
+
+<h2 id="disagreement">Model disagreement and adjudication</h2>
+<p>
+  The three models disagree on <strong>{{fig:s2.disagree}}</strong> of broad-comparison scenarios and
+  {{fig:s3.disagree}} at production weighting. An independent model from a different vendor,
+  <code>{{fig:adj.model}}</code>, blinded to all four deciders’ votes, adjudicated the whole queue as
+  a census.
+</p>
+<div class="grid-2">
+  <div class="card">
+    <h3 class="pos">Supported</h3>
+    <ul>
+      <li>On the modal disagreement class (the judge wants to confirm, both small models say allow),
+          the adjudicator says <strong>allow on 89.45%</strong> — n = 1,337.</li>
+      <li>On the set the cheap short-circuit throws away, it agrees with discarding
+          <strong>89.08%</strong> — n = 1,346.</li>
+      <li>Pairwise agreement with the whole queue: 0.7126 for both small models and for the rule
+          engine, <strong>0.2157</strong> for the LLM judge. The judge is the outlier.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 class="neg">Not supported</h3>
+    <ul>
+      <li><strong>32 of the 1,346 discarded cases are independently graded unsafe</strong> (A or B),
+          2.38% [1.69%, 3.34%]. That loss does not depend on the adjudicator being right.</li>
+      <li>The adjudicator <strong>allows {{fig:adj.permissive}}</strong> of graded-unsafe cases in
+          the queue, and {{fig:adj.permissive2}} of the graded-unsafe cases a small model allows. It
+          shares the permissive bias it is being used to check.</li>
+      <li>Its own header says so: <em>“This is one model’s independent blinded adjudication, not
+          ground truth.”</em></li>
+    </ul>
+  </div>
+</div>
+<p class="small">
+  <strong>89.45%</strong> is the modal class (n = 1,337). <strong>89.08%</strong> is the
+  short-circuit-discard class (n = 1,346). Source:
+  <code>outputs/s2-adjudication/adjudication-report.json :: headline_modal_class</code> and
+  <code>routing_cost</code>.
+</p>
+
+<h2 id="rules">Deterministic rule candidates</h2>
+<p>
+  The rule engine and the model catch almost disjoint sets. <strong>1,076 of 1,118 (96.2%)</strong> of
+  the small model’s confident blocks at the screening stage were invisible to the rule engine; at the
+  broad stage the real rule engine <em>misses</em> 372 of 378 confident blocks (98.41%) and
+  catches 6, from <code>outputs/deterministic-real/report.json :: rule_mining_overlap.s2</code>.
+  The published queue in <code>outputs/s2/deterministic-candidates.json</code> records 378 of 378
+  because it was built against the all-allow stand-in. Clustering those misses produces rule
+  candidates ranked by
+  frequency × confidence.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/s1-n1000/deterministic-candidates.json :: top_clusters</code> and
+    <code>outputs/s2/deterministic-candidates.json</code></caption>
+  <thead><tr><th>Top candidate</th><th class="n">events</th><th class="n">distinct cases</th><th class="n">max confidence</th><th>truth grade</th></tr></thead>
+  <tbody>
+    <tr><td>reverse shells via <code>/dev/tcp</code></td><td class="n">{{fig:rule.shells.events}}</td><td class="n">{{fig:rule.shells.cases}}</td><td class="n">1.00</td><td><span class="pill neg">E — no truth backing</span></td></tr>
+    <tr><td><code>curl</code>/<code>wget</code> in a command</td><td class="n">{{fig:rule.curl.events}}</td><td class="n">{{fig:rule.curl.cases}}</td><td class="n">—</td><td>A 45 / B 42 / C 23</td></tr>
+    <tr><td>shell-history tampering</td><td class="n">{{fig:rule.history.events}}</td><td class="n">{{fig:rule.history.cases}}</td><td class="n">—</td><td><span class="pill settled">A — all 20</span></td></tr>
+  </tbody>
+</table>
+</div>
+<div class="box warn">
+  <p><strong>Truth grade of the candidates.</strong> The top-ranked candidate by volume is grade E
+  throughout, out-of-scope provenance with no truth backing. The <em>shell-history tampering</em>
+  cluster is smaller and grade A throughout, which makes it the better first rule to author. The
+  candidate files say so themselves:
+  <em>“Candidates only. Rules remain human-authored and must follow the existing exact-proof
+  workflow; nothing here is an executable rule.”</em></p>
+</div>
+<p class="small">
+  The rule engine contributes almost nothing at the broad stage (detect-lens recall 0.0298). At
+  production weighting it flags <strong>43% of unsafe cases (95/221) at a measured false-positive
+  rate of exactly 0.00000</strong> on 24,255 benign cases. It earns its place at realistic mixes.
+</p>
+
+<p class="foot">
+  Sources: <code>outputs/deterministic-real/realdet-s{2,3}-{openjev,diffgemma}.json</code> ·
+  <code>outputs/s{2,3}/policy-reanalysis-realdet.json</code> ·
+  <code>outputs/s2/q1-vs-q2-vs-q3.json</code> · <code>outputs/s2/question-confound.json</code> ·
+  <code>outputs/s2-adjudication/adjudication-report.json</code> ·
+  <code>outputs/deterministic-real/report.txt</code>.
+  Next: <a href="finding-safety.html">Security →</a>
+</p>
+
+</div>
+{{SCRIPT}}
+</body>
+</html>

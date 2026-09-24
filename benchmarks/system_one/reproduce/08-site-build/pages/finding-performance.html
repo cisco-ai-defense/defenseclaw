@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Performance and cost — DefenseClaw System One</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Performance</p>
+<h1>Cost: {{fig:spend.api}} of recorded provider spend, plus one GPU instance</h1>
+<p class="lede">
+  This is a one-token classifier. There is no generation to speed up and almost nothing to cache, so
+  the measured numbers point at batching and admission control.
+</p>
+<p class="pick"><strong>Model choice:</strong> The CPU-only candidate loses on every quality and
+latency axis on this page and <em>ties</em> on the two where both score perfectly &#8212; replay
+stability and reliability, where each records zero flips and zero errors over the replays each was
+given. It <em>wins</em> the one cost axis these artifacts carry: {{fig:von.pilot.cost}} at its
+cheapest arm ({{fig:von.pilot.cost.arm}}) against {{fig:ojp.pilot.cost}} at the leading
+candidate&#8217;s ({{fig:ojp.pilot.cost.arm}}), a factor of {{fig:pilot.cost.ratio}}. On latency,
+each model&#8217;s own best per-case p50 is {{fig:von.pilot.p50}} on CPU
+({{fig:von.pilot.p50.arm}}) against {{fig:ojp.pilot.p50}} ({{fig:ojp.pilot.p50.arm}}), a factor of
+{{fig:pilot.p50.ratio}}. A per-request p50 is in neither scorecard, so none is quoted. It still
+needs a GPU somewhere in the deployment.</p>
+
+<div class="tiles">
+  <div class="tile"><div class="v">g6e.12xlarge</div><div class="l">one self-hosted GPU instance</div>
+    <div class="s">ap-northeast-2 &#183; uptime not recorded in any artifact</div></div>
+  <div class="tile"><div class="v">{{fig:spend.api}}</div><div class="l">provider spend recorded in the run manifests</div>
+    <div class="s">summed over {{fig:spend.metas}} outputs/**/*.meta.json</div></div>
+  <div class="tile"><div class="v">100% / 0%</div><div class="l">prefill / decode share of GPU time</div>
+    <div class="s">gpu-host-evidence/cw/final.jsonl</div></div>
+  <div class="tile"><div class="v">{{fig:spend.req}}</div><div class="l">provider requests in those manifests</div>
+    <div class="s">summed over the same {{fig:spend.metas}} manifests</div></div>
+</div>
+
+<h2 id="cost">Cost</h2>
+<p>
+  The hosted-API line is metered per input token at <strong>{{fig:spend.jev.rate}} per
+  million</strong>. That is a per-manifest property and every priced manifest records exactly that
+  rate; the build aborts if any of them ever disagrees. The family total is {{fig:spend.jev}} over
+  {{fig:spend.jev.tokens}} recorded input tokens, which is a slightly different ratio because some
+  priced manifests record no <code>actual_input_tokens</code> key at all &#8212; over the
+  {{fig:spend.jev.paidtok}} tokens that do carry both fields the spend is {{fig:spend.jev.paid}}.
+  A $0.04906 per million planning figure has also circulated; against the metered
+  {{fig:spend.jev.rate}} it is about 17% high.
+</p>
+<p>
+  The self-hosted models ran on one <strong>g6e.12xlarge</strong> in <strong>ap-northeast-2</strong>,
+  whose published AWS on-demand rate is <strong>$12.90014 per hour</strong>. Instance uptime is not
+  recorded in any artifact on disk, so no GPU total is printed here: the rate and the instance type
+  are what can be stated. Recorded provider spend is {{fig:spend.api}}, summed over the
+  {{fig:spend.metas}} run manifests that carry an <code>estimated_usd</code> key, of which hosted Jev
+  is {{fig:spend.jev}} across {{fig:spend.jev.metas}} of them and the Gemma 4 judge
+  {{fig:spend.gemma4}}.
+</p>
+
+<div class="tbl-scroll">
+<table>
+  <caption>Recorded provider spend. Summed from {{fig:spend.method}}.</caption>
+  <thead><tr><th>Line</th><th class="n">amount</th><th>basis</th></tr></thead>
+  <tbody>
+    <tr><td>GPU, self-hosted models</td><td class="n">not totalled</td>
+        <td>$12.90014/h published AWS on-demand rate for g6e.12xlarge in ap-northeast-2; uptime
+            is not in any artifact, so the product is not printed</td></tr>
+    <tr><td>Jev, hosted API</td><td class="n">{{fig:spend.jev}}</td>
+        <td>summed across {{fig:spend.jev.metas}} <code>*.meta.json</code></td></tr>
+    <tr><td>Gemma 4, judge and labeller</td><td class="n">{{fig:spend.gemma4}}</td>
+        <td>recorded <code>estimated_usd</code> only — see the caveat below</td></tr>
+    <tr><td>Bedrock batch labelling</td><td class="n">not in the manifests</td>
+        <td>run outside the benchmark harness, so it records no <code>estimated_usd</code> and is
+            not included in {{fig:spend.api}}</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box warn">
+  <p><strong>The provider total excludes Gemma 4’s unlogged runs.</strong> Gemma 4’s Broad-comparison,
+  Production-weighted and intent runs logged <code>estimated_usd: 0.0</code>, so their true Bedrock cost
+  is not captured anywhere in these artifacts. The recorded {{fig:spend.gemma4}} therefore understates Gemma 4 by
+  an unknown amount.</p>
+  <p style="margin-bottom:0">AWS Cost Explorer lags 24–48 hours, so none of these figures could be
+  reconciled against billing inside the measurement window. {{fig:spend.api}} is the sum of what the
+  run manifests recorded. No GPU total and no GPU-to-provider ratio is stated, because instance
+  uptime is not recorded in any artifact on disk.</p>
+</div>
+
+<div class="tbl-scroll">
+<table>
+  <caption>Per-run scored volume and the scorer&#8217;s notional token cost.
+    Source: <code>outputs/deterministic-real/realdet-s{2,3}-*.json :: candidates[0].system_one</code>.
+    The decision and token counts here cover the <em>scorable</em> cases only, and the cost column is
+    the scorer&#8217;s list-price estimate for those tokens. It is not a bill: the self-hosted run
+    manifests all record <code>estimated_usd: 0.0</code>, and the GPU that served them is priced by
+    the hour.</caption>
+  <thead><tr><th>Run</th><th class="n">decisions scored</th><th class="n">input tokens over those decisions</th><th class="n">notional token cost at the scorer&#8217;s price</th><th class="n">errors</th></tr></thead>
+  <tbody>
+    <tr><td>Broad comparison · OpenJev</td><td class="n">{{fig:req.s2oj}}</td><td class="n">{{fig:tok.s2oj}}</td><td class="n">{{fig:cost.s2oj}}</td><td class="n">{{fig:err.s2oj}}</td></tr>
+    <tr><td>Broad comparison · DiffusionGemma</td><td class="n">{{fig:req.s2dg}}</td><td class="n">{{fig:tok.s2dg}}</td><td class="n">{{fig:cost.s2dg}}</td><td class="n">{{fig:err.s2dg}}</td></tr>
+    <tr><td>Production-weighted · OpenJev</td><td class="n">{{fig:req.s3oj}}</td><td class="n">{{fig:tok.s3oj}}</td><td class="n">{{fig:cost.s3oj}}</td><td class="n neg">{{fig:err.s3oj}}</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="small">
+  Two request bases coexist on this page and they measure different things. The Broad-comparison run
+  <em>manifests</em> record {{fig:man.s2oj.req}} requests and {{fig:man.s2oj.tok}} input tokens for
+  OpenJev and {{fig:man.s2dg.req}} / {{fig:man.s2dg.tok}} for DiffusionGemma, and
+  {{fig:man.s2oj.usd}} of provider spend for each. The table above counts
+  {{fig:req.s2oj}} <em>scored</em> decisions over the {{fig:s2.scorable}} scorable cases, because 460
+  grade-C scenarios are excluded from scoring.
+</p>
+<p class="small">
+  Summing the manifest request counters gives <strong>{{fig:spend.req}}</strong> real provider
+  requests across {{fig:spend.metas}} manifests. A further
+  {{fig:spend.mock}} manifests ran {{fig:spend.mockreq}} requests against a local mock with no
+  provider behind them and are excluded. Errors come from two places: the run manifests record
+  {{fig:spend.errors}}, and the Production-weighted OpenJev scorecard records a further
+  {{fig:spend.errors.scored}} on its own rows, which is what the culling gate rejected that candidate
+  for. That is {{fig:spend.errors.total}} errors in total, or {{fig:spend.errors.rate}} of the
+  {{fig:spend.req}} requests. An earlier write-up put this at “~700k requests at 0.0065%”; neither
+  half is reproducible from these artifacts. See
+  <a href="reproduce.html#restated">restated figures</a>.
+</p>
+
+<h2 id="shape">Prefill and decode shares</h2>
+<p>
+  On the serving process the experiment drove, port {{fig:pd.port}},
+  <code>request_prefill_time_seconds_sum</code> equals <code>request_inference_time_seconds_sum</code>
+  bit for bit and <code>request_decode_time_seconds_sum</code> is exactly <strong>0.0</strong> in
+  {{fig:pd.polls.match}} of {{fig:pd.polls}} one-second polls. Every one of those polls is that one
+  process. {{fig:pd.procs}} serving processes in total &#8212; ports {{fig:pd.ports}} &#8212; show
+  the same identity, in the {{fig:pd.samples}} lifetime samples recorded for each. The probe sends
+  <code>max_tokens = 1</code> and <code>generation_tokens_total == request_success_total</code>: one
+  token out per request.
+</p>
+<ul>
+  <li><strong>Speculative decoding, decode-side batching, KV-cache reuse across generation
+      steps</strong> — irrelevant, there is no decode phase.</li>
+  <li><strong>Output-token cost</strong> — negligible. The LLM judge emits two completion tokens per
+      call.</li>
+  <li><strong>Input-token cost</strong> — the whole bill. {{fig:man.s2oj.tok}} input tokens for
+      {{fig:man.s2oj.req}} requests at the broad stage, per the run manifest.</li>
+</ul>
+
+<h2 id="latency">Latency</h2>
+
+{{chart:latency}}
+
+<div class="box warn">
+  <p><strong>Measurement conditions.</strong> These are wall-clock times from a deliberately saturated
+  self-hosted GPU running a large batch to completion. A single in-line call would see less. A median
+  of {{fig:lat.s2oj.p50}} with a p99 of {{fig:lat.s2oj.p99}} is the signature of a queue, and the
+  <em>same model</em> has a {{fig:lat.s3oj.p50}} median on the larger run, which is what queueing
+  looks like.</p>
+  <p style="margin-bottom:0">They do give relative throughput between models, and they show the tail is
+  long enough that any in-line deployment needs an explicit timeout policy, which returns to
+  <a href="finding-safety.html#faults">what happens on timeout</a>: currently allow.</p>
+</div>
+
+<h2 id="prefix">Prefix caching</h2>
+<p>
+  Prefix caching was measured twice.
+</p>
+
+{{chart:prefix}}
+
+<div class="grid-2">
+  <div class="card">
+    <h3>Reason 1: prompt length against block size</h3>
+    <p>
+      The serving stack set its attention block size to <strong>{{fig:px.block}} tokens</strong>,
+      forced by the model’s mamba page size, which fixes it in place. The median upstream
+      prompt is <strong>{{fig:px.p50}} tokens</strong>.
+    </p>
+    <p>
+      <strong>{{fig:px.under}}</strong> of {{fig:px.calls}} measured upstream calls are shorter than
+      a single block, so they can never contribute a cacheable block. Only {{fig:px.over}} reach
+      {{fig:px.block}} tokens.
+    </p>
+    <p class="small muted">
+      p50 {{fig:px.p50}} · mean {{fig:px.mean}} · max {{fig:px.max}} tokens.
+      Source: <code>outputs/gpu-host-evidence/cw/runs/base-r{1..4}/calls.jsonl</code>.
+    </p>
+  </div>
+  <div class="card">
+    <h3>Reason 2: byte-identical replay</h3>
+    <p>
+      Replaying a byte-identical prompt caches well, at a <strong>89.06%</strong> hit rate, but that
+      figure belongs to the <strong>112-token</strong> cache-unit arm alone.
+    </p>
+    <p>
+      At the default 784-token block the same replay gets <strong>22.03%</strong>, which is exactly the
+      same cached-token count (42,336) as the merely-concurrent pattern. Replaying the same bytes
+      recovers nothing extra at that block size.
+    </p>
+    <p class="small neg">
+      Quoting 89.06% without its 22.03% counterpart misrepresents the result. Both are in the chart
+      above.
+    </p>
+  </div>
+</div>
+
+<h3>Hit rates in production-shaped traffic</h3>
+<div class="tbl-scroll">
+<table>
+  <caption>Lifetime prefix-cache hit rates on three serving processes at the end of the experiment
+    window. Source: <code>outputs/gpu-host-evidence/cw/final.jsonl</code> and
+    <code>lifetime.jsonl</code>.</caption>
+  <thead><tr><th>Serving process</th><th class="n">lifetime hit rate</th><th class="n">hit rate inside the 4,230 s window</th></tr></thead>
+  <tbody>
+    <tr><td>port 8000</td><td class="n">10.61%</td><td class="n">1.46%</td></tr>
+    <tr><td>port 8002 (driven by the experiment)</td><td class="n">10.45%</td><td class="n">18.95%</td></tr>
+    <tr><td>port 8003</td><td class="n">9.60%</td><td class="n">14.71%</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="small">
+  These are three <em>serving processes</em>, and they are lifetime
+  counters that moved during the window: 8002 went 7.90% → 10.45%. Reporting them as a stable ~10% is
+  fair for order of magnitude and wrong for anything finer.
+</p>
+
+<h3>Cache match unit, two-arm experiment</h3>
+<div class="tbl-scroll">
+<table>
+  <caption>Two-arm server experiment on the same 200-scenario workload, two passes each.
+    Source: <code>outputs/gpu-host-evidence/prefix-unit-test/metrics-8004.tsv</code> and the arm logs.</caption>
+  <thead><tr><th>Arm</th><th class="n">hit rate (pass 1 / pass 2)</th><th class="n">prefill tokens computed</th><th class="n">mean latency</th><th class="n">wall clock</th></tr></thead>
+  <tbody>
+    <tr><td>cache match unit 112</td><td class="n pos">10.03% / 9.97%</td><td class="n pos">4,316,554</td><td class="n neg">5,095.5 ms</td><td class="n neg">970.3 s</td></tr>
+    <tr><td>default (784)</td><td class="n">8.47% / 7.78%</td><td class="n">4,406,490</td><td class="n pos">5,059.9 ms</td><td class="n pos">963.4 s</td></tr>
+    <tr><td><strong>delta</strong></td><td class="n">+1.6 to +2.2 pp</td><td class="n pos">−2.04% work</td><td class="n neg">+0.70% slower</td><td class="n neg">+0.72% slower</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  More hits, about 2% less prefill compute, and still slower: the bookkeeping cost of the finer match
+  unit exceeds the compute it saves at this prompt length. One decision of 1,519 changed
+  (<code>{block 88, allow 1376, confirm 55}</code> against
+  <code>{block 89, allow 1374, confirm 56}</code>), so there is no hidden quality trade.
+</p>
+<p class="small">
+  <strong>16.67% is not a ceiling.</strong> That figure came from a 20-case pass and has been described
+  as a structural ceiling. It is exact — cold and warm give bit-identical 16.6677%, and the cached
+  tokens are exactly 30 × 784, i.e. only 30 complete reusable blocks across 252 requests, so warming
+  bought nothing. But the same arm scored 8.47% and 7.78% on the 200-case workload, both
+  <em>below</em> it. The accurate phrasing is “the 784-block arm plateaus at 16.67% on the 20-case
+  workload, cold and warm identically”.
+</p>
+
+<div class="box good">
+  <p><strong>Prompt layout.</strong> Reordering the prompt so the static part comes
+  first (<code>page_first</code>) raised the measured cache hit share at <strong>zero extra
+  tokens</strong> and 1.4% lower median latency. The raw measured window shares are
+  <strong>11.97%</strong> base, <strong>18.24%</strong> after the layout change and
+  <strong>33.00%</strong> after padding. A background-subtracted series of 25.89% → 44.65% → 62.69%
+  has also been quoted for the same three arms; it subtracts 3.12% for unrelated traffic on the
+  serving port, the subtraction is persisted in no artifact under <code>outputs/</code>, and it is
+  reproducible only by re-running the analyzer. The raw shares are what the window recorded.</p>
+  <p style="margin-bottom:0">Padding prompts up to the 784 boundary to force block alignment raised the
+  hit share, and cost <strong>+86.68% input tokens</strong> ({{fig:man.cache.base}} →
+  {{fig:man.cache.pad}} for the same workload), a straight loss since input tokens are the entire
+  bill. On the decision side the cache shims changed nothing discrete:
+  {{fig:cache.configs}} shim configurations over {{fig:cache.runs}} runs, of which
+  {{fig:cache.compared}} were compared against the <code>base-r1</code> reference, gave
+  {{fig:cache.action.diff}} action differences and {{fig:cache.detect.diff}} detection differences.
+  The probabilities did move: something changed on {{fig:cache.float.reqs}} of the
+  {{fig:cache.reqs}} requests, by at most {{fig:cache.float.max}} in absolute terms. A further
+  {{fig:cache.excluded}} <code>cs-*</code> runs send a different prompt
+  ({{fig:man.cache.cs}} input tokens against {{fig:man.cache.base}}) and are excluded; including
+  them the largest probability difference is {{fig:cache.float.max.all}}.</p>
+</div>
+
+<h2 id="flex">The cheap service tier</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>200 cases, 1,519 provider calls per tier, identical prompts.
+    Source: <code>outputs/flex/timing.txt</code>, <code>outputs/flex/gemma4-{default,flex}.jsonl.meta.json</code>
+    and the per-case rows of each prediction file.</caption>
+  <thead><tr><th>Metric</th><th class="n">default</th><th class="n">flex</th><th class="n">change</th></tr></thead>
+  <tbody>
+    <tr><td>wall clock for the run</td><td class="n">155 s</td><td class="n pos">53 s</td><td class="n pos">2.92× faster</td></tr>
+    <tr><td>median per-case latency</td><td class="n">844.6 ms</td><td class="n">813.8 ms</td><td class="n">−3.6%</td></tr>
+    <tr><td>p95 per-case latency</td><td class="n">23,502.7 ms</td><td class="n pos">15,908.9 ms</td><td class="n pos">−32.3%</td></tr>
+    <tr><td>worst case</td><td class="n neg">122,211 ms</td><td class="n pos">33,560 ms</td><td class="n pos">−72.5%</td></tr>
+    <tr><td>prompt / completion tokens</td><td class="n">993,812 / 3,038</td><td class="n">993,812 / 3,038</td><td class="n">identical</td></tr>
+    <tr><td>errors</td><td class="n">0</td><td class="n">0</td><td class="n">—</td></tr>
+    <tr><td>case decisions</td><td class="n" colspan="3">199 of 200 identical</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  The win is all tail, which is where it matters for an escalation tier. The median barely moves and
+  the worst case drops from two minutes to thirty-four seconds. Token counts are byte-identical, so it
+  is free.
+</p>
+<p class="small">
+  Flex was deliberately not used for the main comparisons, because the baseline ran on the default tier
+  and switching would swap one confound for another. That is the right call for measurement and the
+  wrong default for production.
+</p>
+
+<h2 id="culling">Von: rejected</h2>
+<p>
+  One candidate runs on CPU and occupies no GPU card, and was culled early on an 8-case estimate. It
+  was re-measured at full screening scale, because a CPU-only guard would change the deployment story.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/s1-n1000/metrics-von-questions.json</code> and
+    <code>.txt</code>, <code>lens-openjev-score.json</code>, <code>culling-von.json</code>,
+    <code>environment-von.json</code>. 12,152 requests, 8 configurations, 0 errors.
+    Each cell is the best value that model reached on that axis <em>across its own eight
+    configurations</em>, and the configuration is named, because the best value on each axis is not
+    always at the same configuration. Where one is: {{fig:pilot.multiaxis}}.</caption>
+  <thead><tr><th>Axis</th><th class="n">this candidate’s best, and the arm</th><th class="n">the leading candidate’s best, and the arm</th><th>verdict</th></tr></thead>
+  <tbody>
+    <tr><td>any-intervention F1</td><td class="n">0.72428 · C0/I3/Q0 (at FPR 0.95714)</td><td class="n">0.97778 · C0/I3/Q1 (at FPR 0.05714)</td><td class="neg">loses by 0.254</td></tr>
+    <tr><td>block-only F1</td><td class="n">{{fig:von.f1}} · C0/I3/Q1 and C0/I3/Q3, tied (at FPR 0.71429)</td><td class="n">0.78082 · C0/I3/Q2 (at FPR 0.01429)</td><td class="neg">loses</td></tr>
+    <tr><td>three-way accuracy</td><td class="n">0.53797 · C7/I3/Q1</td><td class="n">0.79114 · C0/I3/Q3 and C7/I3/Q3, tied</td><td class="neg">loses by 0.253</td></tr>
+    <tr><td>per-event benign FPR</td><td class="n">0.03061 · C7/I3/Q3</td><td class="n">0.01531 · C7/I3/Q2, matched by DiffusionGemma and hosted Jev</td><td class="neg">loses, and the artifact calls this cell degenerate: see below</td></tr>
+    <tr><td>calibration, Brier</td><td class="n">0.29665 · C0/I3/Q0</td><td class="n">0.04451 · C0/I3/Q1</td><td class="neg">loses 6.7×</td></tr>
+    <tr><td>calibration, ECE</td><td class="n">0.31267 · C0/I3/Q3</td><td class="n">0.05063 · C0/I3/Q0</td><td class="neg">loses 6.2×</td></tr>
+    <tr><td>p50 latency, per case</td><td class="n">{{fig:von.pilot.p50}} on CPU · {{fig:von.pilot.p50.arm}}</td><td class="n">{{fig:ojp.pilot.p50}} · {{fig:ojp.pilot.p50.arm}}</td><td class="neg">{{fig:pilot.p50.ratio}}× slower</td></tr>
+    <tr><td>estimated list-price cost, per configuration</td><td class="n pos">{{fig:von.pilot.cost}} · {{fig:von.pilot.cost.arm}}</td><td class="n">{{fig:ojp.pilot.cost}} · {{fig:ojp.pilot.cost.arm}}</td><td class="pos">wins by {{fig:pilot.cost.ratio}}×; neither run was billed</td></tr>
+    <tr><td>p50 latency, per request</td><td class="n">not recorded</td><td class="n">not recorded</td><td>the scorecards record one latency per case for either model. Neither records a per-request latency, so this row has no measurement on either side</td></tr>
+    <tr><td>replay stability</td><td class="n">0 flips / 804 repeated requests</td><td class="n">0 flips / 804 repeated requests</td><td>a tie, and from the same measurement: both cited scorecards record the identical <code>repeatability</code> block on this corpus. The three-replay flip rates on the broad corpus are a separate measurement and are on <a href="finding-safety.html#repeatability">the safety page</a></td></tr>
+    <tr><td>reliability</td><td class="n">0 errors / 12,152</td><td class="n">0 errors</td><td>tie</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="small">
+  The per-event benign FPR cell carries a caveat from the same artifact. The configuration that
+  reaches 0.03061 flags 24 of 1,477 events &#8212; 1.63% activity &#8212; and has block recall
+  0.06818. It reaches the low false-positive rate by almost never firing.
+</p>
+<div class="box bad">
+  <p><strong>Von fails against the block-everything floor.</strong> On this corpus a policy that blocks every
+  single case scores {{fig:von.floor}} block F1 (88 unsafe of 158 scorable). This candidate’s best block F1 is
+  {{fig:von.f1}}, only +0.052 over block-everything, and it gets there by hard-blocking <strong>50 of 70
+  benign cases</strong>. Three of its eight configurations hold a block false-positive rate at or
+  below 0.01429: C0/I3/Q0 at <strong>0.00000</strong>, which scores 0.02247 block F1, and C7/I3/Q1
+  and C7/I3/Q3 at 0.01429, which both score 0.12632. A fourth, C7/I3/Q0, scores 0.52381 at a block
+  FPR of 0.07143. The cited artifact names only the two 0.12632 arms.</p>
+  <p style="margin-bottom:0">It also needed a major dependency upgrade to answer a request at all. The
+  pinned artifact declares a tokenizer class that exists only in a newer library major version, so 80
+  of 80 requests had previously failed with HTTP 422. The environment was upgraded and the
+  artifact left as pinned, preserving model identity.</p>
+</div>
+
+<div class="box bad">
+  <p style="margin:0"><strong>The leading backend at the same gate.</strong> At production
+  weighting it produced {{fig:s3.errors}} provider errors, and the culling gate rejected it with
+  <code>reasons: [provider_or_schema_errors]</code>, so it never advanced from that stage. See
+  <a href="finding-safety.html#gate">the gate</a>.</p>
+</div>
+
+<h2>Cost projection</h2>
+<ol>
+  <li><strong>Two-sided routing.</strong> The largest measured reduction in judge calls:
+      {{fig:s2.onesided.llm}} → {{fig:s2.twosided.llm}} across the whole corpus, at better F1.</li>
+  <li><strong>Per-surface thresholds.</strong> The largest measured <em>ratio between surfaces</em>,
+      {{fig:surf.esc.action.gemma}} against {{fig:surf.esc.stateful.gemma}} judge-call rate at each
+      surface&#8217;s own optimum. Those are two different threshold settings, and adopting the
+      recommendation saves {{fig:surf.esc.action.gemmagain}} percentage points on
+      {{fig:surf.esc.action.cases}} cases.
+      <a href="finding-architecture.html#thresholds">Detail</a>.</li>
+  <li><strong>Remove the judge where it loses.</strong> At production weighting OpenJev&#8217;s
+      best policy needs zero judge calls and scores 2.6× its cascade. The same policy is measured
+      for {{fig:s3.nojudge.n}} small models and OpenJev&#8217;s is not the strongest
+      ({{fig:s3.nojudge.table}}).
+      <a href="finding-architecture.html#cascade">Detail</a>.</li>
+  <li><strong>Prompt layout.</strong> Putting the static part of the prompt first costs no tokens.
+      The cache-share figures previously quoted for it are persisted in no artifact and are
+      withdrawn.</li>
+  <li><strong>Flex tier for the judge.</strong> Free, and cuts the p95 by a third.</li>
+  <li><strong>Do not</strong> pad prompts for cache alignment (+86.68% input tokens). Tuning the
+      cache match unit down does raise the hit rate &#8212; {{fig:px.serial.hitgain}} serial,
+      {{fig:px.concurrent.hitgain}} at 4 concurrent, {{fig:px.repeat.hitgain}} on a replayed
+      byte-identical prompt &#8212; but it costs wall-clock time on the two realistic patterns:
+      {{fig:px.serial.slower}} serial and {{fig:px.concurrent.slower}} concurrent.</li>
+</ol>
+
+<p class="foot">
+  Sources: <code>outputs/gpu-host-evidence/cw/{final,lifetime,poll-8002}.jsonl</code> and
+  <code>runs/*/calls.jsonl</code> · <code>outputs/gpu-host-evidence/prefix-unit-test/</code> ·
+  <code>outputs/cache/*.meta.json</code> · <code>outputs/flex/</code> ·
+  <code>outputs/deterministic-real/realdet-s{2,3}-*.json</code> ·
+  <code>outputs/s1-n1000/metrics-von-questions.txt</code>.
+  Next: <a href="finding-data.html">Data →</a>
+</p>
+
+</div>
+</body>
+</html>

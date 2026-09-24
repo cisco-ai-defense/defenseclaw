@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What to deploy — cost, quality and the operational trade</title>
+<meta name="description" content="The cost/quality frontier for every measured guard policy, where traffic ends up, the cascade as a flow, dollars per attack stopped, and a calculator that prices your own traffic against the measured settings.">
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">evaluation-only</p>
+<h1>What to deploy</h1>
+<p class="lede">
+  {{fig:dec.rows.s2}} policy rows were measured on the Broad comparison and
+  {{fig:dec.rows.s3}} on the Production-weighted corpus, over
+  {{fig:dec.models.s2}} small models. This page is the part a reader deciding what to run
+  actually needs: what each one costs, what it catches, what it lets through, and how much of it
+  lands on a person. Every number is read from an artifact at build time.
+</p>
+
+<p class="pick"><strong>The short answer:</strong> for OpenJev (weights CC BY-NC 4.0:
+  non-commercial, attribution required, contact authors for commercial use) on the Broad comparison the
+  cheapest two-sided setting is also its best-scoring one, so there is no trade to make &#8212; take
+  <code>two-sided @0.30</code> at {{fig:dec.spend.s2}} of judge spend per 1,000 cases. That does not
+  hold for every model: the panels below give each one&#8217;s own optimum. At the benign
+  share of real traffic the judge stops paying for itself at all: for OpenJev,
+  <code>rules → small model</code>
+  with nothing behind it scores {{fig:s3.so.f1}} against {{fig:s3.twosided.f1}} for the full
+  cascade, at zero provider spend.</p>
+<div class="box warn">
+  <p style="margin:0"><strong>At production weighting the no-judge policy is measured for
+  {{fig:s3.nojudge.n}} small models, and OpenJev&#8217;s is not the strongest of them.</strong>
+  Block-only F1 at zero judge spend: {{fig:s3.nojudge.table}}. On the cost-against-quality panel
+  below, {{fig:s3.nojudge.best.model}}&#8217;s is the single undominated point on that corpus.
+  Both it and OpenJev ran question format Q2, so that pair carries no question-format confound.
+  The deployment pick does not follow from this panel alone: on real benign coding traffic
+  {{fig:s3.nojudge.best.model}} flags {{fig:tb.q2.jev}} of events against OpenJev&#8217;s
+  {{fig:tb.q2.oj}}, and it has the lowest proof-backed recall of the {{fig:ir.models.n}} models
+  run on the proof-backed corpus
+  ({{fig:recall.jev.C7}} against {{fig:recall.openjev.C7}}). Those are on
+  <a href="finding-safety.html#benign">safety</a> and <a href="finding-intent.html#limits">intent</a>.</p>
+</div>
+
+<h2 id="frontier">Cost against quality</h2>
+<p>
+  Every policy as one point: {{fig:dec.points.s2}} on the Broad comparison and
+  {{fig:dec.points.s3}} at Production weighting, from the {{fig:dec.models.s2}} small models with a
+  cascade scorecard on the same deterministic rule tier ({{fig:dec.models.s2.names}}). A point is
+  greyed when some other policy in the same panel is both cheaper and better;
+  {{fig:dec.front.s2}} are undominated on the Broad comparison and {{fig:dec.front.s3}} at
+  Production weighting. The judge price is the one measured LLM
+  spend in the artifacts: {{fig:dec.price.usd}} over {{fig:dec.price.cases}} cases, which is
+  {{fig:dec.price.case}} per case judged, or {{fig:dec.price.call}} per provider call across
+  {{fig:dec.price.calls}} calls.
+</p>
+<p class="small">
+  These are different small models on different question formats, so a gap between two of them
+  carries that confound; the comparison the panels support is policy against policy within one
+  model. Hosted Jev is on both panels from
+  <code>outputs/deterministic-real/realdet-s{2,3}-jev.json</code>, whose rule-tier provenance is
+  recorded &#8212; see <a href="reproduce.html#restated">restated figures</a>.
+</p>
+{{chart:pareto}}
+
+<h2 id="dispositions">Where traffic ends up</h2>
+<p>
+  An F1 hides which mistakes a policy makes. These two charts split every policy's traffic by what
+  the case actually was, so a benign call that got blocked and an unsafe call that got through are
+  each their own segment.
+</p>
+{{chart:disp_s2}}
+{{chart:disp_s3}}
+
+<h2 id="flow">The cascade as a flow</h2>
+<p>
+  All {{fig:dec.flow.total}} scorable cases enter at the left. The deterministic rules terminate
+  {{fig:dec.flow.rules}} of them, the small model settles {{fig:dec.flow.small}}, and
+  {{fig:dec.flow.judge}} reach the judge. Every arrow carries its own measured rate.
+</p>
+{{chart:sankey}}
+
+<h2 id="per-catch">What an attack stopped actually costs</h2>
+<p>
+  Judge spend divided by the number of unsafe cases the policy ended as a hard <code>block</code>.
+  This reorders the policies against F1. Only the policies that call the judge have a value here:
+  each model&#8217;s <code>rules → small model</code> never calls it, so its judge spend is
+  $0.00000 and the ratio is undefined &#8212; {{fig:dec.cpc.s2.free}} of the
+  {{fig:dec.points.s2}} policies on the Broad comparison. Across the remaining
+  {{fig:dec.cpc.s2.n}} priced policies, from {{fig:dec.models.s2}} small models
+  ({{fig:dec.models.s2.names}}), the spread from cheapest to most expensive per attack stopped is
+  {{fig:dec.cpc.s2.ratio}}&#215;, from {{fig:dec.cpc.s2.best}} to {{fig:dec.cpc.s2.worst}}.
+</p>
+{{chart:cost_per_catch}}
+
+<h2 id="trade">Review burden against attacks allowed through</h2>
+<p>
+  The operational trade, plotted as a path so its direction is visible. At the shipped setting
+  OpenJev leaves {{fig:dec.rev.s2}} of cases for review and lets {{fig:dec.leak.s2}} of the
+  corpus's unsafe cases through. Every step towards a cheaper threshold moves both numbers the same
+  way: less work, more leakage.
+</p>
+{{chart:trade}}
+
+<h2 id="calculator">Price it against your own traffic</h2>
+<p>
+  Enter your own volume and benign share. The projection uses the measured rates directly and
+  interpolates only inside the range that was run.
+</p>
+<div class="box warn">
+  <p style="margin-bottom:0"><strong>This interpolates between four measured settings.</strong> The
+  allow threshold was run at 0.05, 0.10, 0.20 and 0.30 and at nothing in between. A value between
+  two of them is a straight line drawn between the two measurements on either side &#8212; it is not
+  a measurement. The benign share is interpolated between the two corpora that were run,
+  {{fig:calc.lo}} and {{fig:calc.hi}} benign, and clamped to that range. The volume you enter is
+  <em>cases</em>, which is the unit every measured rate here is per; the projection never converts
+  from decisions, so no decisions-per-case ratio is applied at any operating point. If you hold a
+  decisions-per-day figure instead, a scorable case averaged {{fig:calc.dpc}} decisions on the
+  Broad comparison and {{fig:calc.dpc3}} at Production weighting, and the two differ by a factor
+  of {{fig:calc.dpcratio}}. Both are per scorable case, which is the basis the rates use; per
+  scenario the Broad figure is {{fig:calc.dpcscen}}, because {{fig:calc.gradec}} grade-C
+  scenarios are not scorable.</p>
+</div>
+{{ui:calculator}}
+<p class="small" id="calc-clamp"></p>
+<p class="small">
+  What this does <em>not</em> model: your own traffic mix, your own tools, retry behaviour, the
+  latency cost of an in-line judge call, or the human cost of a confirm. It prices the judge tier
+  only, at each corpus&#8217;s own token count and the one measured provider rate.
+</p>
+
+<h2 id="caveats">What would change these numbers</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>Each of these is a real limit on how far the frontier above travels.</caption>
+  <thead><tr><th>Assumption</th><th>What it rests on</th><th>What breaks it</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Judge price {{fig:dec.price.case}} per case on the Broad comparison,
+          {{fig:dec.price3.case}} at Production weighting</td>
+      <td>each corpus&#8217;s own judge run, priced at {{fig:dec.price.rate}} per million input
+          tokens. The judge runs the cascades were scored from record token counts but no price;
+          the rate comes from the one Gemma&nbsp;4 run that does. The two corpora differ because
+          the judge prompt is roughly half as long per case at Production weighting.</td>
+      <td>a different context length, a different service tier, or a provider price change. Both
+          self-hosted small models recorded no provider spend at all, so no GPU cost is in any
+          figure here.</td>
+    </tr>
+    <tr>
+      <td>Benign share drives the ranking</td>
+      <td>two corpora, {{fig:calc.lo}} and {{fig:calc.hi}} benign</td>
+      <td>a third mix. Nothing between the two measured benign shares was run.</td>
+    </tr>
+    <tr>
+      <td>A confirm has a cost</td>
+      <td>not measured anywhere on this site</td>
+      <td>nothing here prices a human review. The confirm rate is reported as a volume, and what it
+          costs you is yours to fill in.</td>
+    </tr>
+    <tr>
+      <td>Block-only is the default lens</td>
+      <td>a <code>confirm</code> does not stop a tool call</td>
+      <td>if your confirm path is actually enforced by a reliable second decider, the
+          any-intervention lens becomes the honest one and the ranking changes.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p class="foot">
+  <span class="pill">evaluation-only</span>
+  <span class="pill">never-train</span><br>
+  The 13 source datasets are public and linked on
+  <a href="finding-data.html#normalized">data</a>; the analysis artifacts behind each number are held
+  privately and available on request.
+</p>
+
+</div>
+{{SCRIPT}}
+</body>
+</html>

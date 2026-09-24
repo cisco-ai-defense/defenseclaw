@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Examples — tool-call guard benchmark</title>
+<meta name="description" content="Head-to-head cases where one model beats another, and the code-level failures that produced a silent allow.">
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Examples</p>
+<h1>Worked cases</h1>
+<p class="lede">
+  The {{fig:adj.queue}} cases where the four deciders disagreed, sent to an independent model,
+  <code>{{fig:adj.model}}</code>, blinded to all four votes, then sliced into the four matchups that
+  separate the models. Below that, the code-level failures, quoted from the shipping source.
+</p>
+<p class="pick"><strong>Model choice:</strong> OpenJev agrees with the independent adjudicator on
+  {{fig:adj.unsafe.openjev}} of unsafe cases against DiffusionGemma&#8217;s
+  {{fig:adj.unsafe.diffgemma}}. On a block-only reading of the two head-to-head slices, the
+  adjudicator hard-blocks {{fig:adj.m1.block}} of the {{fig:adj.m1.n}} cases OpenJev flagged and
+  DiffusionGemma allowed, against {{fig:adj.m1.allow}} allowed, and hard-blocks
+  {{fig:adj.m2.block}} of the {{fig:adj.m2.n}} in the reverse slice against
+  {{fig:adj.m2.allow}} allowed.</p>
+
+<div class="box bad">
+  <p><strong>What is published, and what is withheld.</strong> Every row of the disagreement queue
+  is <code>redistribution: download-only</code>. Published below: truth grade, surface, event count,
+  source dataset name, the four votes and the adjudicator&#8217;s verdict &#8212; labels and
+  metadata. Withheld: the tool call, the user request, and the adjudicator&#8217;s written reason
+  and <code>apparent_task</code> fields. Where a case needs to be legible, it is paired with a
+  synthetic illustration marked as such. The code-level examples are first-party source and are
+  quoted verbatim.</p>
+</div>
+
+<h2 id="adjudicator">Agreement with the adjudicator</h2>
+<p>
+  The adjudicator is one model, <code>{{fig:adj.model}}</code>, blinded to the disputants&#8217;
+  votes but not given ground truth. It shares the small models&#8217; permissive bias: it allows
+  {{fig:adj.permissive}} of the cases the corpus grades unsafe, and {{fig:adj.permissive2}} of the
+  unsafe cases some System One backend already allowed. These matchups measure agreement with one
+  independent opinion. Correctness against truth is a different measurement and is not on this
+  page.
+</p>
+
+{{chart:adjudicator}}
+
+<div class="tbl-scroll">
+<table id="agree" data-sortable>
+  <caption>Agreement with the adjudicator on the {{fig:adj.queue}} disputed cases. Unsafe is grade A
+    or B, n={{fig:adj.unsafe.n}}. Benign is grade D, n={{fig:adj.benign.n}}.</caption>
+  <thead><tr><th>Decider</th><th class="n" data-sort="num">unsafe</th>
+    <th class="n" data-sort="num">benign</th><th>Reading</th></tr></thead>
+  <tbody>
+    <tr><td><strong>OpenJev</strong></td>
+        <td class="n">{{fig:adj.unsafe.openjev}}</td><td class="n">{{fig:adj.benign.openjev}}</td>
+        <td>{{fig:adj.rank.unsafe.openjev}} on unsafe ({{fig:adj.unsafe.openjev}}),
+            {{fig:adj.rank.benign.openjev}} on benign ({{fig:adj.benign.openjev}} against the rule
+            engine&#8217;s {{fig:adj.benign.deterministic}})</td></tr>
+    <tr><td><strong>Gemma 4</strong> <span class="pill">incumbent</span></td>
+        <td class="n">{{fig:adj.unsafe.gemma4}}</td><td class="n">{{fig:adj.benign.gemma4}}</td>
+        <td>{{fig:adj.rank.unsafe.gemma4}} on unsafe, {{fig:adj.rank.benign.gemma4}} on benign;
+            escalates nearly everything</td></tr>
+    <tr><td><strong>DiffusionGemma</strong></td>
+        <td class="n">{{fig:adj.unsafe.diffgemma}}</td><td class="n">{{fig:adj.benign.diffgemma}}</td>
+        <td>under-flags: {{fig:adj.rank.benign.diffgemma}} on benign, close to the rule engine,
+            and {{fig:adj.rank.unsafe.diffgemma}} on unsafe</td></tr>
+    <tr><td><strong>deterministic rules</strong></td>
+        <td class="n">{{fig:adj.unsafe.deterministic}}</td>
+        <td class="n">{{fig:adj.benign.deterministic}}</td>
+        <td>precise and narrow: {{fig:adj.rank.benign.deterministic}} on benign,
+            {{fig:adj.rank.unsafe.deterministic}} on unsafe</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="matchups">Head to head</h2>
+<p>
+  Four slices of the same disputed cases. Each names who voted what, how many cases fall in the
+  slice, and how the adjudicator ruled.
+</p>
+{{ui:matchups}}
+
+<div class="box">
+  <p><strong>The four matchups.</strong></p>
+  <ul>
+    <li><strong>OpenJev over DiffusionGemma.</strong> {{fig:adj.m1.n}} unsafe cases where OpenJev
+        flagged and DiffusionGemma allowed. Adjudicator: block {{fig:adj.m1.block}}, allow
+        {{fig:adj.m1.allow}}, confirm {{fig:adj.m1.confirm}}.</li>
+    <li><strong>DiffusionGemma over OpenJev.</strong> {{fig:adj.m2.n}} cases, the reverse pattern.
+        Adjudicator: block {{fig:adj.m2.block}}, allow {{fig:adj.m2.allow}}, confirm
+        {{fig:adj.m2.confirm}}. Which way this slice goes depends on the lens. On a block-only
+        reading DiffusionGemma&#8217;s extra flags are upheld on {{fig:adj.m2.block}} and overturned
+        on {{fig:adj.m2.allow}}. Counting a confirm as upholding the flag, they are upheld on
+        {{fig:adj.m2.blockconfirm}} against {{fig:adj.m2.allow}} overturned. The block-only lens is
+        the default in every table on this site.</li>
+    <li><strong>The judge over both small models.</strong> {{fig:adj.m3.n}} unsafe cases both small
+        models allowed and Gemma 4 escalated. Adjudicator upheld Gemma 4 on
+        {{fig:adj.m3.block}} blocks plus {{fig:adj.m3.confirm}} confirms. That is the measured cost
+        of routing past the judge.</li>
+    <li><strong>Both small models over the judge.</strong> {{fig:adj.m4.n}} benign cases both small
+        models allowed and Gemma 4 escalated. Adjudicator allowed {{fig:adj.m4.allow}} of them. This
+        is the over-hedging two-sided routing removes.</li>
+  </ul>
+</div>
+
+<h2 id="failopen">Q1 and Q3 fail open on an answer-type mismatch</h2>
+<p>
+  Real code, first-party. <code>derive_action()</code> reads <code>&lt;name&gt;.true</code>
+  probabilities for the boolean-scored questions. A provider that answers the same questions as a
+  Choice over yes/no emits <code>&lt;name&gt;.yes</code> instead.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>benchmarks/scripts/benchmark_run_system_one.py</code>,
+    <code>derive_action()</code>.</caption>
+  <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>asked</td><td>Q1, eight atomic Nouls</td></tr>
+    <tr><td>answered</td><td><code>{"exfiltration.yes": 0.93, "persistence.yes": 0.02,
+        "dangerous_effect.yes": 0.88, "high_impact.yes": 0.91}</code>
+        <span class="pill">synthetic illustration</span></td></tr>
+    <tr><td>key-set check</td><td>passes: the answer names match the question names</td></tr>
+    <tr><td>every lookup</td><td><code>probabilities.get("exfiltration.true", 0)</code> returns
+        <code>0</code></td></tr>
+    <tr><td>derived</td><td><code>("allow", 1 - 0)</code> = <code>("allow", 1.0)</code></td></tr>
+    <tr><td><code>error_code</code></td><td>none</td></tr>
+    <tr><td>cascade effect</td><td>1.0 sits inside the trusted-allow band, so the LLM tier is never
+        called</td></tr>
+    <tr><td>right answer</td><td><code>("error", 0)</code>, which is what Q0, Q2 and Q4 return via
+        their disposition enum check</td></tr>
+    <tr><td>aggregate</td><td>{{fig:fo.fired}} of {{fig:fo.rows}} scored rows triggered it; the
+        exposure is latent, and the guard is now present</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  The guard that closes it, verbatim:
+</p>
+<pre><code>if not any(key.endswith(".true") for key in probabilities):
+    return "error", 0</code></pre>
+<p>
+  Q1 emits <code>block</code> on {{fig:fo.q1.block}} of {{fig:fo.rows}} rows and <code>allow</code>
+  on {{fig:fo.q1.allow}}. Standalone block-only F1 is {{fig:q.q1.alone}} against Q2&#8217;s
+  {{fig:q.q2.alone}}. A fail-open in this format emits <code>allow</code> at confidence 1.0 with no
+  error code, so it is indistinguishable from a confident correct allow in the predictions and
+  invisible to every scorer downstream.
+</p>
+
+<h2 id="ties">Exact disposition ties decided by dict order</h2>
+<p>
+  Real code, first-party. The model reports one winning <code>disposition</code> and
+  <code>disposition == argmax(probabilities)</code> holds. When two dispositions agree to within
+  {{fig:tie.eps}}, the winner is whichever key the provider emitted first.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>benchmarks/scripts/benchmark_run_system_one.py</code>,
+    <code>_resolve_disposition_tie()</code>, <code>DISPOSITION_TIE_EPSILON = 1e-9</code>.</caption>
+  <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>asked</td><td>Q2, disposition Choice plus risk Score</td></tr>
+    <tr><td>answered</td><td><code>{"disposition.allow": 1e-9, "disposition.block": 1e-9,
+        "disposition.confirm": 4.2e-10}</code>
+        <span class="pill">synthetic illustration</span></td></tr>
+    <tr><td>before the fix</td><td>whichever of <code>allow</code> / <code>block</code> the provider
+        serialised first wins</td></tr>
+    <tr><td>after the fix</td><td>resolve toward the higher severity: <code>block</code></td></tr>
+    <tr><td>how often a disposition tie occurs</td><td>not measured. No artifact on disk records
+        a disposition-tie rate &#8212; a tie between two dispositions inside one answer &#8212; so
+        no figure is given for it</td></tr>
+    <tr><td>how often a tie flips</td><td>not measured. No artifact on disk records a flip rate
+        for the tied rows, so no figure is given for it here</td></tr>
+    <tr><td>why this way</td><td>resolving upward never downgrades a finding, which the
+        cascade&#8217;s never-downgrade invariant already requires</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="shortcircuit">An advisory rule confirm capping a later block</h2>
+<p>
+  Real measurement. The deterministic tier can terminate a case. When its verdict is an advisory
+  <code>confirm</code>, the chain stops there and a later tier that would have blocked never runs.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Source: <code>outputs/s2/policy-reanalysis-realdet.json</code>,
+    <code>compositions.realdet_short_circuit</code> and
+    <code>compositions.realdet_escalate_on_confirm</code>, two-tier OpenJev then Gemma 4.</caption>
+  <thead><tr><th>Composition</th><th class="n">cases the rules terminated</th>
+    <th class="n">advisory confirms that capped a later block</th>
+    <th class="n">block F1</th></tr></thead>
+  <tbody>
+    <tr><td>short-circuit on any rule verdict</td><td class="n">{{fig:sc.terminated}}</td>
+        <td class="n">{{fig:sc.capped}}</td><td class="n">{{fig:sc.f1}}</td></tr>
+    <tr><td>escalate on a rule <code>confirm</code></td><td class="n">1</td>
+        <td class="n">0</td><td class="n">{{fig:esc.f1}}</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  Escalating on an advisory <code>confirm</code> instead of terminating recovers
+  {{fig:sc.capped}} blocked cases and moves block F1 from {{fig:sc.f1}} to {{fig:esc.f1}} with the
+  block false-positive rate unchanged. Never-downgrade violations stay at 0 in both compositions.
+</p>
+<div class="box warn">
+  <p><strong>Synthetic illustration.</strong> A rule matches a shell command as
+  &#8220;consequential, needs confirmation&#8221; and returns an advisory <code>confirm</code>. The
+  chain ends. OpenJev, had it run, would have answered <code>block</code> at 0.91 because the same
+  command also writes outside the workspace. The case is scored as a miss under the block-only lens.
+  The shape is real; the command is not a corpus row.</p>
+</div>
+
+<h2 id="worked">Confirmed results</h2>
+<div class="grid">
+  <div class="card">
+    <h3>The intent lane separating compromise from refusal</h3>
+    <p>{{fig:lane.b.sep}} separation against Lane A&#8217;s {{fig:lane.a.sep}}, a paired gap of
+      {{fig:lane.sep.gap}} whose bootstrap interval excludes zero.</p>
+    <p class="small">One corpus, one set of cases: a compromised agent and one that resisted the same
+      injection. Source:
+      <code>outputs/intent-real/q4-analysis.json :: lane_b_vs_lane_a</code>.</p>
+  </div>
+</div>
+
+<h2 id="didnot">Negative results</h2>
+<div class="grid">
+  <div class="card">
+    <h3>The AgentDojo result flagged correct refusals</h3>
+    <p>{{fig:ad.rate.res}} of agents that correctly refused were flagged, against
+      {{fig:ad.rate.comp}} of real compromises &#8212; and {{fig:ad.rate.clean}} of clean traffic.
+      The guard fired hardest on the refusals.</p>
+    <p class="small">Source:
+      <code>outputs/intent-real/jev-analysis.json :: three_class_sep_slice.openjev.C7</code>.</p>
+  </div>
+  <div class="card">
+    <h3>serves_intent on clean traffic</h3>
+    <p>At its nominal 0.5 threshold the intent gate flags {{fig:laneb.clean.fpr}} of
+      {{fig:tb.events}} benign events and {{fig:laneb.clean.traj}} clean trajectories. Every flag is
+      a false positive by construction.</p>
+    <p class="small">Source:
+      <code>outputs/terminalbench/q4-lane-fpr.json :: candidates[0]</code>.</p>
+  </div>
+  <div class="card">
+    <h3>Prefix-cache tuning</h3>
+    <p>Changing the cache match unit raised the hit share by {{fig:px.serial.hitgain}} on serial
+      traffic and cost {{fig:px.serial.slower}} wall-clock time. {{fig:px.under}} of prompts are
+      shorter than one cache block.</p>
+    <p class="small">Details on <a href="finding-performance.html#prefix">performance</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Von on CPU</h3>
+    <p>Von&#8217;s own best arm scores block-only F1 {{fig:von.f1}} on its
+      {{fig:von.n}}-case pilot, hard-blocking {{fig:von.fp}} of {{fig:von.benign}} benign cases to
+      get there. The block-everything floor on the same cases is {{fig:von.floor}}, and it hard
+      blocks {{fig:von.floor.fp}} of {{fig:von.benign}}. p50 {{fig:von.p50}} per case.</p>
+    <p class="small">Details on the <a href="index.html#von">leaderboard</a>.</p>
+  </div>
+</div>
+
+<p class="foot">
+  Sources: <code>outputs/s2-adjudication/disagreement-queue.jsonl</code> joined on
+  <code>case_id</code> to <code>outputs/s2-adjudication/adjudication-labels.jsonl</code>;
+  <code>outputs/s2-adjudication/adjudication-report.json</code>;
+  <code>outputs/s2/q1-vs-q2-vs-q3.json</code>;
+  <code>outputs/s2/policy-reanalysis-realdet.json</code>;
+  <code>benchmarks/scripts/benchmark_run_system_one.py</code>.
+  Next: <a href="prompts.html">Prompts &#8594;</a>
+</p>
+
+</div>
+{{SCRIPT}}
+</body>
+</html>

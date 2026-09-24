@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to reproduce — DefenseClaw System One</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Method</p>
+<h1>Reproduction</h1>
+<p class="lede">
+  Every figure comes from a JSON or text artifact produced by a named script, over a prediction file with
+  a recorded hash, at a fixed seed.
+</p>
+
+<h2 id="datasets">Sources</h2>
+<p>
+  The {{fig:src.count}} sources that supply rows are public and reachable without a token. Each is
+  <code>download-only</code>: the table links them and this site never republishes their rows.
+  Licences in use: {{fig:src.licences}}.
+</p>
+{{ui:sources}}
+{{ui:source_revisions}}
+
+<h2 id="artifacts">Evidence artifacts</h2>
+<p>
+  The analysis JSONs every figure is drawn from are held privately and are available on request.
+  Each number on this site carries its file and key path, in the form
+  <code>outputs/&#8230;.json :: key.path</code>, so a figure can be traced to its artifact by
+  whoever holds it. Each path names the artifact that holds the figure.
+</p>
+<p>
+  None of the derived evidence is approved for training, synthetic generation, teacher context,
+  distillation or redistribution.
+</p>
+
+<div class="box bad" id="withheld">
+  <p><strong>Withheld corpus.</strong> The proof-verified compromise corpus behind the headline
+  reversal carries <code>redistribution: aggregate-only</code> in the dataset lock and
+  <code>license: unresolved</code> in its own manifest, which records that the upstream
+  repository ships no LICENSE file. Publication is restricted to
+  “local evaluation only”. This site reports rates, counts and intervals for it, and publishes no
+  case, request, tool call or description from it. There is no upload inventory for that corpus on
+  disk, so the licence statement rests on the source catalogue.</p>
+  <p><strong>The carve-out the aggregate-only rule carries.</strong> One table on this site
+  publishes per-case structure: the disagreement queue on
+  <a href="compare.html#explorer">compare</a>. Each of its {{fig:exp.rows}} rows is
+  {{fig:exp.ints}} small integers indexing code tables printed beside it — truth grade, surface,
+  event count, source dataset, four votes and a verdict — and the rows collapse to
+  {{fig:exp.distinct}} distinct tuples. No <code>case_id</code>, no request, no tool call, no
+  argument value and no free-form rationale appears in it, and no row of it comes from the
+  aggregate-only or local-evaluation-only corpora. Coded contingency data carrying no identifier
+  and no text is permitted under the rule; this paragraph states that permission so the rule and
+  the payload agree.</p>
+  <p style="margin-bottom:0">The one upload inventory that does exist is the
+  <code>s1-n1000</code> screening stage&#8217;s. It classifies {{fig:inv.total}} files
+  &#8212; {{fig:inv.upload}} upload, {{fig:inv.review}} review, {{fig:inv.withhold}} withhold
+  &#8212; and the withheld entries are all source payloads, reason “redistribution not
+  established”. That is screening-stage bookkeeping about a different corpus and is quoted here as
+  such.</p>
+</div>
+
+<h2 id="code">Code paths</h2>
+{{ui:codepaths}}
+
+<h2 id="seeds">Seeds, replicates and model revisions</h2>
+<div class="grid-2">
+  <div class="card">
+    <h3>Randomness</h3>
+    <table>
+      <tbody>
+        <tr><td>seed, everywhere</td><td class="n"><code>741983</code></td></tr>
+        <tr><td>bootstrap replicates</td><td class="n">2,000</td></tr>
+        <tr><td>bootstrap unit</td><td class="n">family (<code>strata.split_group</code>)</td></tr>
+        <tr><td>resampling</td><td class="n">with replacement</td></tr>
+        <tr><td>paired comparisons</td><td class="n">common random numbers</td></tr>
+        <tr><td>single-proportion intervals</td><td class="n">Wilson 95%</td></tr>
+      </tbody>
+    </table>
+    <p class="small">
+      One seed covers corpus selection and every bootstrap, so re-running a selection manifest
+      reproduces the case set. Manifests record <code>output_sha256</code>.
+    </p>
+  </div>
+  <div class="card">
+    <h3>Model revisions</h3>
+    <table>
+      <tbody>
+        <tr><td>OpenJev</td><td class="n"><code>5ec9e5fd2f80a6fff386779b1e5ac7e389971889</code></td></tr>
+        <tr><td>DiffusionGemma</td><td class="n"><code>diffusiongemma-26B-A4B-it-FP8-dynamic</code></td></tr>
+        <tr><td>Jev (hosted)</td><td class="n"><code>jev-1.13.0</code></td></tr>
+        <tr><td>Gemma 4 (judge)</td><td class="n"><code>google.gemma-4-26b-a4b</code></td></tr>
+        <tr><td>Von (culled)</td><td class="n"><code>f6b268ff47b449b688a8052dfb3c37c9518b18f1</code></td></tr>
+        <tr><td>label / adjudicator model</td><td class="n"><code>openai.gpt-oss-120b-1:0</code></td></tr>
+        <tr><td>rule engine, baseline</td><td class="n"><code>de1ccab67f74633028a514f6c980e0c1a91edac4</code></td></tr>
+        <tr><td>rule engine, at measurement</td><td class="n"><code>a4e50bcdea829447bc8c97e9504de1e6bf379946</code></td></tr>
+      </tbody>
+    </table>
+    <p class="small">
+      The rule engine changed 18 files between those commits; the report verifies
+      <code>engine differs: False</code> and an identical policy digest
+      (<code>8adcd747…</code>) across all three stages.
+    </p>
+  </div>
+</div>
+
+<div class="box warn">
+  <p style="margin:0"><strong>Environment change.</strong> The culled CPU-only candidate would not answer
+  under the library versions its SDK declared: its pinned artifact names a tokenizer class from a newer
+  major version, so 80 of 80 requests failed with HTTP 422. The <em>environment</em> was upgraded
+  (transformers 4.57.6 → 5.17.0, plus tokenizers and hub) and the artifact left as pinned, to preserve model
+  identity. The record states <code>model_artifact_modified: false</code>.</p>
+</div>
+
+<h2 id="settled">Settled-file discipline</h2>
+<p>
+  Long provider runs write predictions incrementally, so without a gate an analysis can read a file still
+  being written. Four rules prevent that.
+</p>
+<ol>
+  <li>
+    <strong>Gate on completion <em>and</em> hash.</strong> Two provenance forms are accepted, and
+    nothing else. Either a prediction file has a <code>.meta.json</code> that says
+    <code>complete: true</code> <em>and</em> its on-disk SHA-256 equals the manifest’s recorded
+    <code>prediction_sha256</code>; or it is a merge of files that each satisfy that rule, and the
+    analysis that reads it records the merged hash and the merge as byte-reproduced. Two files on
+    this site take the second form &#8212; <code>outputs/s2/openjev-q1.jsonl</code> and
+    <code>outputs/s2/openjev-q3.jsonl</code>, whose halves each carry
+    <code>complete: true</code> and whose merged hashes are recorded in
+    <code>q1-vs-q2-vs-q3.json :: merge.merged_sha256</code>.
+    <p class="small">
+      The fourth-model intent analysis prints both hashes for both arms,
+      <code>sha256 matches meta: True</code> for each, then <code>GATE PASSED: True</code>. One in-flight
+      run was scored only after settling, against a recorded hash.
+    </p>
+  </li>
+  <li>
+    <strong>Reproduce before extending.</strong> Every analysis re-derives at least one already
+    published number through its own code path before emitting a new one, and prints the comparison.
+    <p class="small">
+      The four-model intent analysis re-scores the earlier single-model result from scratch, identical
+      <em>cell for cell</em> across all four unit/lens grids and all ten scopes. The
+      question-comparison analysis reproduces two published files <em>byte for byte</em> by SHA-256.
+    </p>
+  </li>
+  <li>
+    <strong>New paths only.</strong> No existing scorecard, prediction file, manifest or scorer was
+    modified by any analysis here. Re-analyses write to new filenames alongside.
+  </li>
+  <li>
+    <strong>Publish the integrity counters.</strong> Every analysis prints row counts, error rows,
+    unparsable rows, duplicate <code>(case_id, event_index)</code> pairs, rows missing probabilities, the
+    case-set intersection between arms, and the events-per-case histogram.
+  </li>
+</ol>
+
+<h2 id="walkthrough">Worked example: the headline reversal</h2>
+<div class="card">
+  <ol>
+    <li>
+      Take the corpus and the eight prediction arms from <code>outputs/intent-real/</code>.
+      Check <code>cases.jsonl</code> hashes to
+      <code>85dfc730d1337bb3…</code> and that all eight manifests report one
+      <code>cases_sha256</code>.
+    </li>
+    <li>
+      Per arm, verify <code>complete: true</code> and the on-disk SHA-256 against the manifest’s
+      <code>prediction_sha256</code>. Abort if either fails.
+    </li>
+    <li>
+      Run <code>benchmarks/scripts/score_intent_separation.py</code> unmodified, with
+      <code>--lens both --lane both --per-event --bootstrap 2000 --seed 741983 --question Q2
+      --context {C0|C7}</code>.
+    </li>
+    <li>
+      Confirm the control: the same script, flags and seed against the AgentDojo corpus gives
+      <code>{{fig:ad.jev.C0}}</code> and <code>{{fig:ad.jev.C7}}</code> for the hosted model on the
+      cell step 5 reads &#8212; grade-A lane, block-only lens, per case,
+      <code>sep_vs_resisted</code> &#8212; and six more figures matching the prior record to four
+      decimal places. Read a different lens or a different metric and you get a different number
+      from the same run, so match the axes before comparing. <strong>If the control does not
+      reproduce the old negative, stop</strong>: the scorer is not the one behind the published
+      figures.
+    </li>
+    <li>
+      Read the lead cell: grade-A verified lane, block-only lens, per case,
+      <code>sep_vs_resisted</code>. Expect {{fig:sep.openjev.C0}} → {{fig:sep.openjev.C7}} for OpenJev,
+      plus the other three rows from the <a href="finding-intent.html#reversal">reversal chart</a>.
+    </li>
+    <li>
+      The within-family paired contrast covers the {{fig:wf.families}} families with both a proven
+      compromise and a correct refusal, {{fig:wf.families}} versus {{fig:wf.families}}. All
+      {{fig:wf.cells}} cells should be positive with intervals excluding zero:
+      {{fig:wf.prior.cells}} for the three prior backends and {{fig:wf.jev.cells}} for the fourth.
+    </li>
+  </ol>
+</div>
+
+<h2 id="thissite">Site build</h2>
+<p>
+  One Python script, no third-party libraries: numpy, matplotlib and pandas are not in the evaluation
+  venv. It reads the analysis JSONs, renders every chart as hand-written inline SVG, and substitutes
+  values into the page templates. The stylesheet is inlined per page in a <code>&lt;style&gt;</code>
+  block, because a Space served through an authenticated wrapper answers 401 for a separate subresource
+  request. Every SVG element carries its own <code>fill</code> / <code>stroke</code>
+  / <code>font-size</code>, so no chart colour depends on a CSS class; the verifier re-checks the charts
+  with the style block stripped.
+</p>
+<ul>
+  <li><strong>{{fig:assertions}} assertion checks.</strong> Each is a (file, key path, expected value)
+      triple. If an artifact disagrees with an asserted figure, the build prints the mismatch and
+      <em>writes nothing</em>.</li>
+  <li><strong>Unresolved-token check.</strong> Any <code>&#123;&#123;fig:&hellip;&#125;&#125;</code> or
+      <code>&#123;&#123;chart:&hellip;&#125;&#125;</code> placeholder that has no value aborts the
+      build.</li>
+  <li><strong>Label-fit check.</strong> Every axis label’s rendered width is estimated against its
+      gutter; an overflow aborts the build.</li>
+  <li><strong>Payload guard.</strong> Before upload every file is scanned for the evaluation-only
+      corpus’s identifiers, CJK text, raw case ids and credential-shaped strings; a hit aborts it.</li>
+  <li><strong>Source under every chart.</strong> Each figure names the artifact and key path it came from
+      and carries a <em>Table view</em> of every plotted value.</li>
+</ul>
+<p class="small">
+  The build writes <code>_build-figures.json</code> alongside the pages: every substituted value, the
+  artifacts read, and the assertion count.
+</p>
+
+<h2 id="restated">Restated figures</h2>
+<p>The artifact is the record where an earlier figure disagreed.</p>
+<div class="tbl-scroll">
+<table>
+  <thead><tr><th>Earlier claim</th><th>Artifact</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Intent deviation does not work; separation negative for every backend.</td>
+      <td>True on AgentDojo, false on proof-backed data. {{fig:cells.pos}}/{{fig:cells}} cells positive,
+          {{fig:cells.rev}} sign reversals.</td>
+      <td><a href="finding-intent.html">Intent</a></td>
+    </tr>
+    <tr>
+      <td>Broad-comparison cascade block F1 <code>{{fig:s2.escalate.f1}}</code>.</td>
+      <td>{{fig:s2.realdet.f1}} with the real rule engine under short-circuit;
+          {{fig:s2.standin.f1}} against an all-allow stand-in. Escalate-on-confirm reproduces each
+          ordering&#8217;s own stand-in figure exactly, in all {{fig:esc.orderings}} of them; for
+          the two-tier better-model-then-judge ordering that figure is
+          {{fig:s2.escalate.f1}}.</td>
+      <td><a href="finding-architecture.html#realdet">Architecture</a></td>
+    </tr>
+    <tr>
+      <td>Production-weighted cascade block F1 <code>0.12854</code>.</td>
+      <td>{{fig:s3.twosided.f1}} with the real rule engine. Citing the stand-in file inverts the finding.</td>
+      <td><a href="finding-architecture.html#cascade">Architecture</a></td>
+    </tr>
+    <tr>
+      <td>Screening ran at 200 scenarios, then at 1,000.</td>
+      <td>Only the 200-scenario screen was <em>scored</em>. A {{fig:s1.families}}-family pool was selected
+          and launched: no completion manifest, no scorecard, partial predictions only. Every published
+          Screening number is from the 200.</td>
+      <td><a href="experiments.html">Experiments</a></td>
+    </tr>
+    <tr>
+      <td>Production-weighted stage is 24,476 decisions.</td>
+      <td>{{fig:s3.cases}} <em>scenarios</em>, {{fig:s3.decisions}} decisions. 99.1% benign at scenario
+          level, 99.60% at decision level.</td>
+      <td><a href="glossary.html#stages">Glossary</a></td>
+    </tr>
+    <tr>
+      <td>The blinded adjudicator allows 89.45% of the short-circuited class.</td>
+      <td>89.45% is the <em>modal disagreement</em> class (n = 1,337); the short-circuit-discard class
+          (n = 1,346) is <strong>89.08%</strong>.</td>
+      <td><a href="finding-architecture.html#disagreement">Architecture</a></td>
+    </tr>
+    <tr>
+      <td>341,828 previously-normalised rows had zero user intent; no adapter wrote the field.</td>
+      <td>341,828 over 12 corpora is the adapter-docstring figure; catalogs record <strong>413,180 over 18
+          corpora</strong>, field empty. One adapter read the user’s prompt as a language filter, then
+          discarded it.</td>
+      <td><a href="finding-data.html#missing">Data</a></td>
+    </tr>
+    <tr>
+      <td>587 new grade-A families versus a prior 16.</td>
+      <td>587 matches no family or grade count. <strong>405 new proof-verified families</strong> (802
+          cases pre-deduplication) against a prior inventory-wide grade-A total of <strong>333
+          rows</strong>, 16 in the development split.</td>
+      <td><a href="finding-data.html#rebuild">Data</a></td>
+    </tr>
+    <tr>
+      <td>All 21 fault classes produce allow.</td>
+      <td><strong>28</strong> fault classes covered. {{fig:fault.allow}} convert a System One
+          <em>error</em> into a cascade allow; <strong>{{fig:fault.allow.total}}</strong> are all-allow,
+          {{fig:fault.silent}} of them without raising an error. {{fig:fault.other}} classes are not
+          all-allow. One further class crashes the <em>runner</em> with an unhandled
+          <code>OverflowError</code> on a non-finite token-usage value and writes no prediction
+          file.</td>
+      <td><a href="finding-safety.html#faults">Safety</a></td>
+    </tr>
+    <tr>
+      <td>16.67% is a structural prefix-cache ceiling.</td>
+      <td>16.6677% is exact, cold-equals-warm bit-identically on a 20-case workload (30 × 784 tokens, 30
+          reusable blocks). It is not a ceiling: the same arm scored 8.47% and 7.78% on the 200-case
+          workload, both <em>below</em> it.</td>
+      <td><a href="finding-performance.html#prefix">Performance</a></td>
+    </tr>
+    <tr>
+      <td>Identical-prompt replay hits 89.06%.</td>
+      <td>True for the <strong>112-token</strong> cache-unit arm only. At the default 784-token block the
+          same replay gets <strong>22.03%</strong>, the cached-token count of the merely-concurrent
+          pattern.</td>
+      <td><a href="finding-performance.html#prefix">Performance</a></td>
+    </tr>
+    <tr>
+      <td>Prefix-cache hit rate 10.61 / 10.45 / 9.60%.</td>
+      <td>Three <em>serving processes</em>’ lifetime counters; they moved
+          during the window (one went 7.90% → 10.45%). In-window rates 1.46% / 18.95% / 14.71%.</td>
+      <td><a href="finding-performance.html#prefix">Performance</a></td>
+    </tr>
+    <tr>
+      <td>~700,000 provider requests at a 0.0065% error rate.</td>
+      <td><strong>{{fig:spend.req}}</strong> real provider requests across {{fig:spend.metas}}
+      manifests (a further {{fig:spend.mock}} manifests ran {{fig:spend.mockreq}}
+          against a local mock). Errors: {{fig:spend.errors}} in the run manifests plus
+          {{fig:spend.errors.scored}} on the Production-weighted OpenJev scorecard&#8217;s own rows,
+          which is {{fig:spend.errors.total}} in total, or {{fig:spend.errors.rate}}.
+          Neither half of the earlier figure is reproducible as stated.</td>
+      <td><a href="finding-performance.html#cost">Performance</a></td>
+    </tr>
+    <tr>
+      <td>Recorded provider spend is $23.953829, treated as the whole bill.</td>
+      <td>{{fig:spend.api}} is the provider spend recorded in the run manifests (hosted Jev
+          <strong>{{fig:spend.jev}}</strong>, Gemma 4 <strong>{{fig:spend.gemma4}}</strong>), summed
+          over {{fig:spend.method}}. Bedrock batch labelling ran outside the harness and records no
+          price, so it is not in that total. The GPU is the larger line but is not totalled here:
+          the published AWS on-demand rate is <strong>$12.90014/h</strong> for one g6e.12xlarge
+          in ap-northeast-2. Gemma 4’s Broad-comparison, Production-weighted and intent runs logged <code>estimated_usd: 0.0</code>;
+          Cost Explorer lags 24–48 h, so nothing reconciles against billing.</td>
+      <td><a href="finding-performance.html#cost">Performance</a></td>
+    </tr>
+    <tr>
+      <td>~10% of flagged events are unstable across replays.</td>
+      <td>No single computation gives it. Per model, measured on the events flagged in at least one
+          replay: {{fig:flip.flagged.per_model}}. Every flip lands on a flagged event, none in the
+          always-allow mass.</td>
+      <td><a href="finding-safety.html#repeatability">Safety</a></td>
+    </tr>
+    <tr>
+      <td>DiffusionGemma leads all five rows on any-intervention F1 at <code>0.75328</code>, and
+          scores <code>0.38765</code> block-only.</td>
+      <td><strong>Those are its <code>Q3</code> cells, and the leaderboard ranked them against
+          other models&#8217; <code>Q2</code> cells.</strong> Question format moves a result
+          {{fig:sweep.spread}}&#215; on the one model measured at all {{fig:sweep.n}} formats.
+          {{fig:sweep.vs}} A ranking that mixed formats was reporting the format as well as the
+          model, so {{fig:sf.n}} of the ranked rows are now read at
+          <code>{{fig:par.grid}}</code>, where DiffusionGemma scores
+          {{fig:par.dg.blk}} block-only and {{fig:par.dg.any}} any-intervention &#8212;
+          {{fig:sf.dg.blk.pos}} of the {{fig:sf.n}} on the block lens and
+          {{fig:sf.dg.any.pos}} on the looser one, and <em>below</em> its own block-only F1
+          there. The highest any-intervention F1 at that format is
+          {{fig:sf.hi.any.name}}&#8217;s {{fig:sf.hi.any}} and the lowest
+          {{fig:sf.lo.any.name}}&#8217;s {{fig:sf.lo.any}}, so the claim
+          that DiffusionGemma leads it is withdrawn: it was a property of <code>Q3</code>, where
+          every model run at that format lands between {{fig:par.q3.anylo}} and
+          {{fig:par.q3.anyhi}}. Its <code>Q3</code> arm is still published, in the unranked table.
+          Source: <code>outputs/s2/three-way-comparison.json :: grid_parity</code> and
+          <code>outputs/jev-parity/scores/s2__diffusiongemma__diffgemma-q2.json</code>.</td>
+      <td><a href="index.html#parity">Leaderboard</a></td>
+    </tr>
+    <tr>
+      <td>Hosted Jev&#8217;s cascade figures are excluded because its scorecard sits on the
+          all-allow stand-in rule tier.</td>
+      <td><strong>False.</strong> Jev&#8217;s predictions were scored against the <em>real</em>
+          rule tier throughout. The tier file the scorer read,
+          <code>outputs/s2/deterministic.jsonl</code>, is byte-identical to the
+          real-deterministic predictions &#8212; both hash to
+          <code>{{fig:jev.tier.sha}}</code> &#8212; and the all-allow stand-in
+          (<code>outputs/s2/deterministic-approx.jsonl</code>) is a different file that was
+          never used. The exclusion came from a proxy: the build established the tier by
+          comparing the <em>OpenJev</em> scorecard stored in the same directory against the
+          real-deterministic OpenJev scorecard. That file genuinely is on the stand-in, and its
+          result was generalised to every model in the directory. Jev is now on the cascade
+          charts, at {{fig:s2.jev.best.f1}} block F1 on the Broad comparison.
+          Source: <code>outputs/deterministic-real/realdet-jev-provenance.json</code>.</td>
+      <td><a href="finding-architecture.html#realdet">Architecture</a></td>
+    </tr>
+    <tr>
+      <td>Escalate-on-confirm restores 0.75173 in all 8 rows.</td>
+      <td>It restores {{fig:s2.escalate.f1}} in <em>one</em> ordering, two-tier better model → judge.
+          The other three reach {{fig:esc.three.f1}}, {{fig:esc.threerev.f1}} and
+          {{fig:esc.twodg.f1}}. What holds in all {{fig:esc.orderings}} is the identity check:
+          <code>block_metrics_identical = true</code> in {{fig:esc.identical}} of
+          {{fig:esc.orderings}}.</td>
+      <td><a href="finding-architecture.html#realdet">Architecture</a></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p class="foot">
+  <span class="pill">evaluation-only</span>
+  <span class="pill">never-train</span><br>
+  Upstream defects reported:
+  <a href="https://github.com/vllm-project/vllm/issues/58015"><code>vllm-project/vllm#58015</code></a>,
+  <a href="https://github.com/wfzyx/von/issues/11"><code>wfzyx/von#11</code></a>.
+</p>
+
+</div>
+</body>
+</html>

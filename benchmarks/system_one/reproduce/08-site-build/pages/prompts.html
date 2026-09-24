@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompts — tool-call guard benchmark</title>
+<meta name="description" content="The instruction, question and context templates every model was sent, with the measured effect of each variant.">
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Prompts</p>
+<h1>The prompt contract</h1>
+<p class="lede">
+  Every model saw the same three-part request: an instruction variant, a question variant and a
+  context variant. {{fig:proto.instructions}} instructions &#215; {{fig:proto.questions}} questions
+  &#215; {{fig:proto.contexts}} contexts. All of the text below is verbatim from the protocol JSONs
+  in this repository.
+</p>
+<p class="pick"><strong>Model choice:</strong> question format moves block-only F1 further, in
+  absolute terms, than any model-against-model gap at a single format &#8212; the same OpenJev
+  weights score {{fig:q.q2.alone}} on Q2 and {{fig:q.q3.alone}} on Q3, while the widest
+  model-against-model gap at one format is {{fig:fmt.m.diff}} (at {{fig:fmt.m.who}}). As a ratio
+  the model gap at {{fig:fmt.m.who}} is larger, {{fig:fmt.m.ratio}}×. Either way, fix the question
+  before comparing models.</p>
+
+<div class="box bad">
+  <p><strong>Instantiated prompts are withheld.</strong> The 33 files of filled-in prompts each
+  embed a corpus row: the user request, the tool call and its arguments. Every corpus involved is
+  <code>download-only</code> or <code>aggregate-only</code>. This page publishes the
+  <em>templates</em> and one <em>synthetic</em> instantiation. No real request, tool call or
+  argument value appears anywhere on this site.</p>
+</div>
+
+<h2 id="shape">Request shape</h2>
+<p>
+  One request carries three fields. <code>state</code> holds the context variant,
+  <code>questions</code> holds the question variant, and the instruction variant is prepended as the
+  policy. The whole state is capped at {{fig:proto.maxbytes}} bytes so every variant is measured
+  under the same budget.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>Trusted and forbidden sources, from <code>benchmarks/system_one/contexts-v1.json</code>.</caption>
+  <thead><tr><th>Field</th><th>Carries</th><th>Trust</th></tr></thead>
+  <tbody>
+    <tr><td><code>session_user_intent</code></td><td>authenticated user request</td>
+        <td>trusted source, untrusted content</td></tr>
+    <tr><td><code>prior_tool_calls</code></td><td>observed prior events</td><td>trusted</td></tr>
+    <tr><td><code>current_tool_call</code></td><td>the call being judged</td><td>trusted</td></tr>
+    <tr><td><code>runtime_actionfacts</code></td><td>structured effect summary (CA only)</td>
+        <td>trusted</td></tr>
+    <tr><td>&#8212;</td><td>future events, benchmark truth, model reasoning, untrusted prompt as
+        policy</td><td>forbidden</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="instructions">Instruction variants</h2>
+<p>
+  Four policy blocks, from one sentence to a full category list. I3 is the default everywhere except
+  the instruction ablation itself.
+</p>
+{{ui:instructions}}
+
+<h2 id="questions">Question variants</h2>
+<p>
+  The question variant fixes the answer schema, and the schema fixes how an action is derived. Q0,
+  Q2 and Q4 answer a disposition directly. Q1 and Q3 answer only booleans, and the action is derived
+  from them.
+</p>
+{{ui:questions}}
+
+<div class="box bad">
+  <p><strong>Q1 and Q3 derive an action from booleans with no answer-type guard.</strong> A provider
+  that answers the same Nouls as a yes/no Choice emits <code>&lt;name&gt;.yes</code> keys instead of
+  <code>&lt;name&gt;.true</code>, every lookup defaults to zero, and the branch returns
+  <code>("allow", 1.0)</code> with no error code. The worked example is on
+  <a href="examples.html#failopen">examples</a>. The Q1 audit over {{fig:fo.rows}} scored rows
+  found {{fig:fo.fired}} rows where it fired. Summed across every audited arm the count is
+  {{fig:failopen.fired}} of {{fig:failopen.rows}}; the Q3 arm&#8217;s headline probe is also zero,
+  but the two Q1-specific probes were not run on it.</p>
+</div>
+
+<h2 id="contexts">Context variants</h2>
+<p>
+  Ten recipes over the same 200-case pilot. C0 through C7 are the production ladder; CR, CS, CF, CA
+  and CD are diagnostics.
+</p>
+<div class="box warn">
+  <p style="margin:0">{{fig:ctx.settled}}</p>
+</div>
+{{ui:contexts}}
+
+{{chart:contexts}}
+
+<div class="box">
+  <p><strong>What the context ladder shows.</strong> Adding the request alone (C0 to C1) raises both
+  recall and the false-positive rate ({{fig:ctx.C0.recall}} to {{fig:ctx.C1.recall}} and
+  {{fig:ctx.C0.fpr}} to {{fig:ctx.C1.fpr}}). Across the rest of the production ladder, C1 to C7,
+  both end lower &#8212; C7 reaches the ladder&#8217;s lowest false-positive rate at
+  {{fig:ctx.C7.fpr}} and gives up recall to get there ({{fig:ctx.C7.recall}}) &#8212; but not at
+  every step: C3&#8217;s false-positive rate ({{fig:ctx.C3.fpr}}) is above C2&#8217;s
+  ({{fig:ctx.C2.fpr}}), and C7&#8217;s recall is above C3&#8217;s
+  ({{fig:ctx.C3.recall}}).</p>
+  <ul>
+    <li><strong>CF, the 64-event upper bound, beats no rung of the production ladder.</strong> It
+        scores {{fig:ctx.CF.f1}}, the same F1 as C3 on three events; of the ten recipes it beats
+        only CD ({{fig:ctx.CD.f1}}). More history is not the missing input.</li>
+    <li><strong>CD, redaction, collapsed.</strong> Stripping argument values raises the
+        false-positive rate to {{fig:ctx.CD.fpr}}. The model cannot tell a bounded write from an
+        exfiltration once the values are gone.</li>
+    <li><strong>CA, ActionFacts, matched C0.</strong> {{fig:ctx.CA.f1}} against
+        {{fig:ctx.C0.f1}}, with the event log replaced by a structured effect summary.</li>
+  </ul>
+</div>
+
+<h2 id="filled">One filled request</h2>
+{{ui:example_filled}}
+
+<p class="foot">
+  Sources: <code>benchmarks/system_one/questions-v2.json</code>,
+  <code>benchmarks/system_one/contexts-v1.json</code>,
+  <code>outputs/s1-n1000/instruction-score.json</code>,
+  <code>outputs/s1-n1000/context-score.json</code>.
+  Next: <a href="examples.html">Examples &#8594;</a>
+</p>
+
+</div>
+</body>
+</html>

@@ -91,8 +91,6 @@ IR_REP = "intent-real/replication-analysis.json"
 IR_JEV = "intent-real/jev-analysis.json"
 IR_SEP = "intent-real/separation-analysis.json"
 TB = "terminalbench/q4-lane-fpr.json"
-ROUTE = "toolcall-labels/intrinsic-routing.json"
-Q4LAB = "toolcall-labels/q4-analysis.json"
 S2POL = "s2/policy-reanalysis-realdet.json"
 S3POL = "s3/policy-reanalysis-realdet.json"
 S2MET = "s2/metrics-openjev-q2-realdet.json"
@@ -113,9 +111,6 @@ PARITY_DIR = "jev-parity/scores"
 # The one upload inventory on disk. Its stage is the s1-n1000 screening pilot, NOT the
 # proof-verified reversal corpus the withheld-corpus box used to attach it to (E05).
 UPLOAD_INV = "s1-upload-inventory.json"
-# The instruction-arm verdict that computes the 35% and 21% shares. The page attributed those
-# shares to the shared-baseline p_block softenings, which are a different pair of numbers (A14).
-IARMS = "toolcall-labels/q4-instruction-arms-with-jev.json"
 S3STANDIN = "s3/score-openjev.json"
 S3SCORE_DG = "deterministic-real/realdet-s3-diffgemma.json"
 QCMP = "s2/q1-vs-q2-vs-q3.json"
@@ -130,8 +125,6 @@ S3MAN = "s3/cases.manifest.json"
 ADJ = "s2-adjudication/adjudication-report.json"
 FAULT = "fault-injection/report.json"
 DETR = "deterministic-real/report.json"
-ABL = "intent-ablation/ablation-analysis.json"
-Q4ABL = "intent-ablation/q4-ablation-analysis.json"
 QCONF = "s2/question-confound.json"
 S2SCORE_DG = "deterministic-real/realdet-s2-diffgemma.json"
 # DiffusionGemma at the PARITY grid C7/I3/Q2, which is what the ranked leaderboard reads.
@@ -149,7 +142,6 @@ CTX = "s1-n1000/context-score.json"
 CTX_PRED = "s1-n1000/jev-context.jsonl"     # the prediction file the context scorecard scored
 INST = "s1-n1000/instruction-score.json"
 IRQ4 = "intent-real/q4-analysis.json"
-IBASE = "toolcall-labels/q4-c0-instruction-baselines.json"
 
 BACKENDS = [
     ("openjev", "OpenJev"),
@@ -647,16 +639,6 @@ expect(QCMP, "verdict/block_only_f1_real_det_two_sided_0.30/Q1", 0.70200573, "Q1
 expect(QCMP, "verdict/block_only_f1_real_det_two_sided_0.30/Q3", 0.6945245, "Q3 cascade block F1")
 expect(QCMP, "verdict/block_only_f1_deterministic_then_llm_no_system_one", 0.71248247, "no-tier baseline")
 
-# Lane A / two-lane split
-expect(ROUTE, "policy_intrinsic_only/f1", 0.806386, "labeller INTRINSIC F1")
-expect(ROUTE, "policy_intrinsic_only/recall/point", 0.676935, "share of unsafe that is intent-free")
-expect(ROUTE, "policy_intrinsic_only/fpr/point", 0.002, "INTRINSIC benign contamination")
-expect(ROUTE, "policy_severity_gates/severity_ge_medium_only/f1", 0.901781, "severity>=medium F1")
-expect(ROUTE, "residual_lane/share_of_unsafe/point", 0.323065, "share needing intent")
-expect(Q4LAB, "headline/best_f1_vs_provenance", 0.969727, "cheap-model Lane A F1", tol=1e-6)
-expect(Q4LAB, "headline/openjev_block_only_vs_provenance/tp", 3153, "Q4 block lane true blocks")
-expect(Q4LAB, "headline/openjev_block_only_vs_provenance/fp", 0, "Q4 block lane false blocks")
-
 # Lane B on real benign traffic
 expect(TB, "published_references/openjev/C7/I3/Q2/per_event_fpr", 0.01944, "OpenJev Q2 benign FPR")
 expect(TB, "published_references/diffusiongemma/C7/I3/Q2/per_event_fpr", 0.02722, "DiffGemma Q2 benign FPR")
@@ -863,6 +845,17 @@ if _have(ADDED_OJREF):
 REMINE = "rethreshold/remine-full.json"
 HELDOUT = "rethreshold/heldout-s2-cv.json"
 KEVREMINE = "rethreshold/kev-remine-s2.json"
+# Every arm at ONE ranking variable and ONE block-FPR budget, written by
+# reproduce/07-analysis/rescoring/common_point.py. 11 of its 12 rows are cross-checked cell for
+# cell against REMINE by that pass and it aborts on a mismatch, so the file carries its own
+# positive control; the 12th row is kev-9b, which REMINE does not cover.
+COMMONPT = "rethreshold/common-point-s2.json"
+# The s2->s3 transfer pass. It is the only file that measures the same ranking variable on both
+# corpora, so it is where the inversion below chance is read from.
+HOS3 = "rethreshold/heldout-s2-to-s3.json"
+# The merged-weight diff for the two Gemma-4 arms. It counts parameters over every tensor, so
+# it is the one counted figure those two rows have.
+G4DIFF = "gemma4jev/artifacts/out/jevify-weight-diff.json"
 S3SC = "s3-escalation/s3-scores.json"
 S3AUC = "s3-escalation/auc-variants-bespoke-nimble-9b-s3.json"
 S3META = "s3-escalation/bespoke-nimble-9b-s3.jsonl.meta.json"
@@ -996,6 +989,46 @@ expect(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0", 0.471205496131
        "the s2 95% chance band, lower", tol=5e-15)
 expect(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/1", 0.528794503868809,
        "the s2 95% chance band, upper", tol=5e-15)
+expect(S3SC, "corpora/s3_chance_band_hanley_mcneil/band_95pct/0", 0.46176687597792665,
+       "the s3 95% chance band, lower", tol=5e-15)
+expect(S3SC, "corpora/s3_chance_band_hanley_mcneil/band_95pct/1", 0.5382331240220734,
+       "the s3 95% chance band, upper", tol=5e-15)
+
+# ------------------------------------- the common operating point, and what it is a point of
+# The cap is the incumbent's own realised block false-positive rate, so the budget every arm is
+# held to is a shipped operating point rather than a round number.
+expect(COMMONPT, "fpr_cap", float(OPFPR_CAP), "the common block-FPR budget", tol=0)
+expect(COMMONPT, "variable", "P(block)", "the one ranking variable every arm is read on")
+expect(COMMONPT, "aggregation_definition", "A", "the aggregation definition the budget uses")
+expect(COMMONPT, "corpus/cases_sha256",
+       "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
+       "the common-budget pass read the same corpus as every other figure")
+expect(COMMONPT, "corpus/prevalence", 0.11422583180508253,
+       "the prevalence the common-budget accuracies are dominated by", tol=5e-15)
+expect(COMMONPT, "corpus/all_allow_accuracy", 0.8857741681949175,
+       "the all-allow accuracy that sits beside every accuracy printed", tol=5e-15)
+expect(COMMONPT, "crosscheck_summary/mismatches", 0,
+       "cells disagreeing between the common-budget pass and the published re-mining")
+expect(COMMONPT, "crosscheck_summary/arms_agreeing_cell_for_cell", 11,
+       "common-budget rows confirmed against the published re-mining pass")
+# the two ends of the common-budget table, each pinned against the arm's own cells
+_CB = "arms/open-jev-qwen-27b/at_common_budget"
+for _k, _v in (("tp", 263), ("fp", 13), ("fn", 173), ("tn", 3368)):
+    expect(COMMONPT, f"{_CB}/{_k}", _v, f"open-jev-qwen-27b {_k} at the common budget")
+expect(COMMONPT, f"{_CB}/f1", 0.7387640449438202,
+       "open-jev-qwen-27b F1 at the common budget", tol=5e-15)
+expect(COMMONPT, f"{_CB}/threshold", 0.1872577399799149,
+       "open-jev-qwen-27b threshold at the common budget", tol=5e-15)
+expect(COMMONPT, f"{_CB}/fpr", 0.003845016267376516,
+       "open-jev-qwen-27b achieved block FPR at the common budget", tol=5e-15)
+expect(COMMONPT, "arms/OpenJev/at_common_budget/f1", 0.7116212338593975,
+       "the incumbent's F1 at its own realised false-positive rate", tol=5e-9)
+# The judge that cannot be re-thresholded at all, and the reason, read from the pass that found
+# it. The rows carry no disposition distribution, so there is nothing to sweep.
+expect(COMMONPT, "not_comparable/Gemma 4 judge (det->LLM)/rows_without_distribution", 4277,
+       "judge rows with no disposition distribution")
+expect(COMMONPT, "not_comparable/Gemma 4 judge (det->LLM)/prediction_rows", 4277,
+       "judge prediction rows in total")
 
 # kev-9b. The lowest shipped figure on the board, and the largest multiplier over it.
 _KEVC = "rows/0"
@@ -1207,7 +1240,6 @@ expect(_SJC, "dense_sweep_distinct_outputs", 44, "SecJudge calibrator dense-swee
 _SJREP = "secjudge/secjudge-report.json"
 _SJSRC = "secjudge/contamination/training-sources.json"
 _SJNEAR = "secjudge/contamination/near-duplicates.json"
-_SJOVER = "secjudge/contamination/defenseclaw-suite-overlap.json"
 _SJEV = "secjudge/contamination/eval-reuse.json"
 _SJEX = "contamination/exact_match_summary"
 expect(_SJREP, f"{_SJEX}/distinct_corpus_cases_by_train_group_x_stage/dc-security-suite || s2", 5,
@@ -1225,11 +1257,6 @@ expect(_SJNEAR, "results_by_source_x_stage/dc-security-suite || s3/ge_0.5", 0,
        "no s3 pair reaches Jaccard 0.5")
 expect(_SJNEAR, "results_by_source_x_stage/dc-security-suite || s3/ge_0.9", 0,
        "no s3 pair is an exact or near-exact match")
-_SJP4 = "part_4_bare_command_string_overlap/toolcall_labels_record_class_split"
-expect(_SJOVER, f"{_SJP4}/min40/dc_exact_collisions_in_toolcall_labels_examples", 32,
-       "toolcall-labels collisions at 40 characters or more")
-expect(_SJOVER, f"{_SJP4}/min80/dc_exact_collisions_in_toolcall_labels_examples", 23,
-       "toolcall-labels collisions at 80 characters or more")
 _SJP2 = "part_2_nemotron_sibling_question/empirical_text_overlap"
 expect(_SJEV, f"{_SJP2}/pivot_docs_compared", 62222, "documents compared behind the s3 verdict")
 expect(_SJEV, f"{_SJP2}/ipi_docs", 3816, "documents in SecJudge's own IPI evaluation set")
@@ -1239,8 +1266,11 @@ expect(_SJEV, f"{_SJP2}/max_jaccard_observed", 0.079245,
        "the closest pair between the two", tol=5e-9)
 expect(_SJEV, f"{_SJP2}/n_pairs_with_jaccard_ge_0.5", 0, "no pair between the two reaches 0.5")
 expect(_SJREP, "contamination/verdict/s3", "clean", "the s3 lane's verdict")
-expect(_SJREP, "contamination/verdict/toolcall-labels", "contaminated",
-       "the toolcall-labels lane's verdict")
+# The five action mappings, each pinned, so the readout paragraph cannot drift from the report.
+for _rk, _rf in (("isattack", 0.20893372), ("sev", 0.20724154), ("t05-50", 0.20893372),
+                 ("t10-90", 0.25224111), ("t20-75", 0.24833434)):
+    expect(_SJREP, f"stages/s2-C7/arms/secjudge-28e810afc911-{_rk}/C7/I0/Q0/system_one/"
+                   f"block_only/f1", _rf, f"SecJudge {_rk} readout shipped block-only F1")
 expect(_SJREP, "contamination/verdict/overall", "undeterminable",
        "the overall contamination verdict, which the section must not overstate")
 expect(_SJREP, "contamination/verdict/training_samples_unobtainable", 5550,
@@ -1335,10 +1365,6 @@ expect(TB, "candidates/0/lane_b_serves_intent_le_sweep/12/per_event_fpr", 0.1788
 expect(TB, "candidates/0/lane_b_serves_intent_le_sweep/12/flagged_trajectories", 39,
        "Lane B flags 39 of 40 clean trajectories at 0.50")
 expect(TB, "corpus/events", 1543, "terminalbench benign events")
-expect(IBASE, "verdict/per_arm_baseline_softenings/C7/I2", -0.102257,
-       "I2 intent softening on its own baseline")
-expect(IBASE, "verdict/per_arm_baseline_softenings/C7/I3", -0.102264,
-       "I3 intent softening on its own baseline")
 
 # confirm rate and LLM call rate are different measurements; pin both so the labels cannot drift
 expect(S2MET, "candidates/0/deterministic_then_system_one/review_rate", 0.08488342,
@@ -1675,15 +1701,6 @@ expect(TB, "candidates/2/candidate", "openjev/C1/I3/Q4",
        "terminalbench arm 2 is the C1 OpenJev arm — the top of the 10-32% range")
 expect(TB, "candidates/2/lane_b_serves_intent_le_sweep/12/per_event_fpr", 0.31950745,
        "the 32% end of the Lane B range is a C1 arm, which must be named to quote it")
-
-# F04 / the continuous block-probability softening under per-arm baselines
-for _arm, _pa, _sh in (("C7/I1", -0.065772, -0.037276), ("C7/I2", -0.060709, -0.019133),
-                       ("C7/I3", -0.053419, -0.053419)):
-    expect(IBASE, f"additivity_bias/{_arm}/p_disposition_block/softening_per_arm_baseline",
-           _pa, f"{_arm} p_block softening, own baseline", tol=1e-5)
-    expect(IBASE, f"additivity_bias/{_arm}/p_disposition_block/softening_shared_baseline",
-           _sh, f"{_arm} p_block softening, SHARED baseline — where the 35% came from",
-           tol=1e-5)
 
 # F50 / the mined clusters record distinct_cases, and no family count at all
 expect("s1-n1000/deterministic-candidates.json", "top_clusters/0/distinct_cases", 12,
@@ -2493,7 +2510,7 @@ def chart_reversal() -> str:
          f'negative'
          + ("" if _adneg == _adn else
             "; the rest were already positive, which is why the reversal count below is "
-            f"{_adneg} rather than {_adn}")
+            f"{_adneg} of {_adn}")
          + '. On the proof-backed corpus every backend scores positive, and adding the user '
            'request increases the score.</desc>']
 
@@ -2790,109 +2807,6 @@ def chart_cascade(stage_key, title, sub, score_rel, standin_rel) -> str:
     )
 
 
-# ------------------------------------------------------------------- chart 4
-# Lane A gate comparison.
-
-def _q4_policy(key):
-    for p in g(Q4LAB, "policies"):
-        if p["key"] == key:
-            return p
-    raise SystemExit(f"ABORT: policy {key!r} not in {Q4LAB}::policies. Refusing to invent it.")
-
-
-def _lane_a_pop() -> str:
-    """How many measured gates the chart draws, and whether a cheaper trade exists off-chart.
-
-    A13: the drawn set is 4 of the 19 measured gates, and one excluded gate buys almost as much
-    recall at a fifth of the benign flag rate. Stating the population, and naming the best
-    excluded trade, so the highlighted 19x is not read as the only option.
-    """
-    pol = g(Q4LAB, "policies")
-    if not isinstance(pol, list):
-        return ""
-    return (f"{len(pol)} gates were measured in total; this figure draws the four the page "
-            f"compares. The full set is in <code>outputs/{Q4LAB} :: policies</code>.")
-
-
-def chart_lane_a() -> str:
-    gates = []
-    intr = g(ROUTE, "policy_intrinsic_only")
-    gates.append(("Labeller’s INTRINSIC flag", intr["precision"]["point"], intr["recall"]["point"],
-                  intr["f1"], intr["tp"], intr["fp"], intr["fn"], intr["fpr"]["point"]))
-    sev = g(ROUTE, "policy_severity_gates/severity_ge_medium_only")
-    gates.append(("Labeller severity ≥ medium", sev["precision"]["point"], sev["recall"]["point"],
-                  sev["f1"], sev["tp"], sev["fp"], sev["fn"], sev["fpr"]["point"]))
-    blk = _q4_policy("openjev_disposition_block@provenance_positive")
-    gates.append(("Cheap model, hard-block output", blk["precision"][0], blk["recall"][0], blk["f1"],
-                  blk["tp"], blk["fp"], blk["fn"], blk["fpr"][0]))
-    cheap = CHEAP_GATE
-    gates.append((cheap["label"], cheap["precision"], cheap["recall"], cheap["f1"],
-                  cheap["tp"], cheap["fp"], cheap["fn"], cheap["fpr"]))
-
-    W, H = 900, 330
-    L, R, T, B = 252, 84, 34, 46
-    pw, ph = W - L - R, H - T - B
-    x = lambda v: L + v * pw  # noqa: E731
-    s = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-labelledby="lat lad">'
-         f'<title id="lat">Lane A gate: three ways to decide "is this call harmful whatever the '
-         f'user asked"</title><desc id="lad">Neither cheap-model row beats both label-derived '
-         f'gates. The tuned harm-score gate wins on recall and loses on precision; the untuned '
-         f'hard-block output wins on precision and loses on recall.</desc>']
-    v = 0.0
-    while v <= 1.0001:
-        s.append(f'<line {GL} x1="{x(v):.1f}" y1="{T}" x2="{x(v):.1f}" y2="{T + ph}"/>')
-        s.append(f'<text {AX} x="{x(v):.1f}" y="{T + ph + 16}" text-anchor="middle">'
-                 f'{v * 100:.0f}%</text>')
-        v += 0.25
-    s.append(f'<line {BL} x1="{L}" y1="{T}" x2="{L}" y2="{T + ph}"/>')
-    s.append(f'<text {AXL} x="{L + pw / 2:.1f}" y="{H - 14}" text-anchor="middle">'
-             f'agreement with the independent provenance split; neither source is human truth</text>')
-    gh = ph / len(gates)
-    bar_h, gap = 12.0, 4.0
-    trows = []
-    for gi, (label, p, r, f1, tp, fp, fn, fpr) in enumerate(gates):
-        topy = T + gi * gh
-        s.append(f'<text {AXL} x="{L - 12}" y="{topy + gh / 2 - 4:.1f}" text-anchor="end">'
-                 f'{esc(fit(label, L - 18, 11.5, "laneA/gate"))}</text>')
-        s.append(f'<text {AX} x="{L - 12}" y="{topy + gh / 2 + 11:.1f}" text-anchor="end">'
-                 f'{esc(fit(f"F1 {f1:.4f} · benign flags {fpr * 100:.2f}%", L - 18, 11, "laneA/f1"))}'
-                 f'</text>')
-        y0 = topy + (gh - (2 * bar_h + gap)) / 2
-        for bi, (val, colour, lname) in enumerate([(p, "s1", "precision"),
-                                                   (r, "s3", "recall")]):
-            y = y0 + bi * (bar_h + gap)
-            s.append(f'<g><title>{esc(label)} &#183; {lname}: {val:.4f}</title>'
-                     f'<rect x="{L}" y="{y:.1f}" width="{max(1.0, x(val) - L):.1f}" height="{bar_h}" '
-                     f'rx="4" {fa(colour)}/></g>')
-            s.append(f'<text {VL} x="{x(val) + 7:.1f}" y="{y + bar_h - 2.0:.1f}">'
-                     f'{val:.4f}</text>')
-        trows.append([esc(label), f"{p:.4f}", f"{r:.4f}", f"{f1:.4f}", f"{fpr:.4f}",
-                      f"{tp:,}", f"{fp:,}", f"{fn:,}"])
-    s.append("</svg>")
-    return figure(
-        "fig-lane-a",
-        "Lane A gate candidates",
-        "Lane A scores intrinsic danger: harm the call does by itself, with the request "
-        "disregarded. Four candidate gates on the same 9,999 labelled real tool calls, 4,999 "
-        "unsafe and 5,000 benign.",
-        "\n".join(s),
-        f"outputs/{ROUTE} :: policy_intrinsic_only, policy_severity_gates.severity_ge_medium_only; "
-        f"{CHEAP_GATE['source']}",
-        legend=[("precision", "s1"), ("recall", "s3")],
-        table=table_html(["Gate", "precision", "recall", "F1", "benign flag rate", "true blocks",
-                          "false blocks", "missed"], trows),
-        note=(f"{esc(gates[-1][0])} buys "
-              f"{(gates[-1][2] - gates[0][2]) * 100:.1f} points of recall over the labeller’s own "
-              f"flag at {gates[-1][7] / gates[0][7]:.1f}× the benign flag rate. "
-              f"Label grade C: INTRINSIC and SEVERITY come from a model (openai.gpt-oss-120b) and "
-              f"the positive class is an unverified provenance split. These are agreement rates "
-              f"between two label sources. Neither source is human truth. Its threshold was "
-              f"chosen to maximise F1 <em>on these same 9,999 rows</em>, so its interval does not "
-              f"cover selection and is optimistic. {esc(gates[2][0])} uses no threshold. "
-              f"{_lane_a_pop()}"),
-    )
-
-
 # ------------------------------------------------------------------- chart 5
 # Benign false-positive rates on real coding traffic, incl. the Lane B gate.
 
@@ -3096,7 +3010,7 @@ def chart_architecture() -> str:
 
     # Layout: four boxes with gaps wide enough for the arrow labels, and every arrow
     # label lifted clear of the box band so it can never straddle a box border.
-    W, H = 900, 452
+    W, H = 900, 276
     bw, bh = 148, 74
     y = 108
     gap = (W - 32 - 4 * bw) / 3
@@ -3126,7 +3040,7 @@ def chart_architecture() -> str:
         return out
 
     s = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-labelledby="art ard">'
-         f'<title id="art">Cascade pass-through rates and the two lanes</title>'
+         f'<title id="art">Cascade pass-through rates</title>'
          f'<desc id="ard">Deterministic rules run first and terminate 13 of 3,817 scorable cases. '
          f'A small System One model then answers every remaining case; only the uncertain band is '
          f'escalated to the expensive LLM judge, which sees 15.95 percent of traffic.</desc>']
@@ -3156,37 +3070,6 @@ def chart_architecture() -> str:
              f'<text {VL} x="{(xs[1] + xs[3]) / 2 + bw / 2:.1f}" y="{arc_low + 16:.1f}" '
              f'text-anchor="middle">{(1 - llm_rate) * 100:.2f}% never reach the judge</text>')
 
-    # the two lanes
-    ly = 292
-    s.append(f'<line {GL} x1="16" y1="{ly - 20}" x2="{W - 16}" y2="{ly - 20}"/>')
-    s.append(f'<text x="16" y="{ly}" {HD}>Inside step 2: the two lanes</text>')
-    share = g(ROUTE, "policy_intrinsic_only/recall/point")
-    resid = g(ROUTE, "residual_lane/share_of_unsafe/point")
-    contam = g(ROUTE, "policy_intrinsic_only/fpr/point")
-    lane_w = (W - 32 - 18) / 2
-    for i, (ttl, l1, l2, accent) in enumerate([
-        ("Lane A — harmful regardless of the request?",
-         f"{share * 100:.1f}% of unsafe calls need no intent",
-         f"benign contamination {contam * 100:.2f}%; stateless",
-         "s3"),
-        ("Lane B — does it still serve the request?",
-         f"the other {resid * 100:.1f}% of unsafe calls need it",
-         f"as a gate it fires on {_laneb_c7_span()} of benign events",
-         "s8"),
-    ]):
-        x0 = 16 + i * (lane_w + 18)
-        s.append(f'<rect x="{x0:.1f}" y="{ly + 12}" width="{lane_w:.1f}" height="74" rx="10" '
-                 f'{fsa("surface2", accent)}/>')
-        s.append(f'<text x="{x0 + 12:.1f}" y="{ly + 34}" {HD}>'
-                 f'{esc(fit(ttl, lane_w - 22, 11.5, "arch lane title"))}</text>')
-        s.append(f'<text {AX} x="{x0 + 12:.1f}" y="{ly + 54}">'
-                 f'{esc(fit(l1, lane_w - 22, 11, "arch lane line 1"))}</text>')
-        s.append(f'<text {AX} x="{x0 + 12:.1f}" y="{ly + 71}">'
-                 f'{esc(fit(l2, lane_w - 22, 11, "arch lane line 2"))}</text>')
-    s.append(f'<text {AX} x="16" y="{H - 24}">Both lanes run on the same call. They are not '
-             f'independent: changing only the user request still moves</text>')
-    s.append(f'<text {AX} x="16" y="{H - 8}">Lane A’s harm score, with the tool call '
-             f'byte-identical.</text>')
     s.append("</svg>")
     return figure(
         "fig-arch",
@@ -3194,16 +3077,14 @@ def chart_architecture() -> str:
         None,
         "\n".join(s),
         f"outputs/{S2POL} :: compositions.realdet_short_circuit; outputs/{S2SCORE} :: "
-        f"candidates[0]; outputs/{ROUTE}; outputs/{TB}",
+        f"candidates[0]",
         table=table_html(
             ["Arrow / box", "value"],
             [["deterministic tier non-allow", f"{det_non_allow} / {scorable:,}"],
              ["LLM-judge call rate, one-sided routing", f"{llm_rate_one:.5f}"],
              ["LLM-judge call rate, two-sided @0.30", f"{llm_rate:.5f}"],
              ["cascade block F1 (real deterministic tier)", f"{s2['block_f1']:.5f}"],
-             ["cascade block FPR", f"{s2['block_fpr']:.5f}"],
-             ["Lane A share of unsafe calls", f"{share:.4f}"],
-             ["Lane B share of unsafe calls", f"{resid:.4f}"]]),
+             ["cascade block FPR", f"{s2['block_fpr']:.5f}"]]),
     )
 
 
@@ -4327,8 +4208,8 @@ METRIC: dict[str, tuple[str, str]] = {
     # one that printed the refuting numbers inside the sentence. Lens comparisons are computed in
     # _lens_facts() and rendered only where they can name their population.
     "any_f1": ("any-intervention F1",
-               "the same F1 with a confirm also counted as a catch, so a confirm scores as a "
-               "catch rather than a miss"),
+               "the same F1 with a confirm also counted as a catch, so a confirm counts as a "
+               "catch"),
     "recall": ("block-only recall",
                "share of the unsafe cases the policy ended as a hard block"),
     "precision": ("block-only precision",
@@ -4366,7 +4247,7 @@ METRIC: dict[str, tuple[str, str]] = {
     "usd_judge": ("judge cost, derived",
                   "the judge run this figure is about, priced at the rate the one priced Gemma 4 "
                   "run records. The scored judge runs carry token counts but no price of their "
-                  "own, so this is arithmetic over two artifacts rather than a single recorded "
+                  "own, so this is arithmetic over two artifacts; no artifact records this "
                   "bill"),
     "usd_est": ("estimated list-price cost",
                 "the scorer's arithmetic over the run's tokens at the provider's list rate. The "
@@ -4380,7 +4261,8 @@ METRIC: dict[str, tuple[str, str]] = {
     "recall_at_fpr": ("recall at a capped false-positive rate",
                       "the share of unsafe cases caught at the highest score threshold whose "
                       "false-positive rate stays inside the cap, so it is a catch rate at a "
-                      "false-positive budget rather than at the model's own operating point"),
+                      "false-positive budget, with the threshold set by the cap and the "
+                      "model's own operating point set aside"),
     # S17: latency_ms.count equals the scorable-case count in every scorecard, not the decision
     # count, and the chart titles already say "seconds per case". Per decision would be wrong by
     # about 7.9x at the Broad stage.
@@ -4388,7 +4270,7 @@ METRIC: dict[str, tuple[str, str]] = {
                 "end-to-end time from a case's first request to its parsed decision"),
     "si_max": ("the highest serves_intent score on this traffic",
                "the maximum of the score distribution. It is the top of the range the model "
-               "produced on this traffic, and it is a score rather than a rate: nothing was "
+               "produced on this traffic, and it is a score: nothing was "
                "flagged at this value"),
     "lensgap": ("the gap between the two scoring lenses",
                 "any-intervention F1 minus block-only F1 on the same predictions"),
@@ -4445,13 +4327,14 @@ GRID: dict[str, str] = {
     # is the only one with a price. Figures that are a SCORE use 'gemma4'; figures that are a
     # DOLLAR use 'judge', which names both. Do not merge them back into one entry.
     "gemma4": "google.gemma-4-26b-a4b via Bedrock, C7/I3, judge prompt Q0 - a chat judge "
-              "prompt rather than a C/I/Q grid arm. This is the run every cascade on this site "
-              "was scored from. OpenJev ran Q2, so any direct comparison carries a "
+              "prompt. The C/I/Q grid arms are separate runs. This is the run every cascade on "
+              "this site was scored from. OpenJev ran Q2, so any direct comparison carries a "
               "question-format confound.",
     "judge": "google.gemma-4-26b-a4b via Bedrock, C7/I3. Two runs exist on this corpus: the Q0 "
              "run every cascade was scored from, which records no price, and the Q2 run, which "
              "is the only one priced. A dollar figure is the Q0 run's own prompt tokens at the "
-             "Q2 run's rate per input token, so it is derived rather than read.",
+             "Q2 run's rate per input token, so it is derived. No artifact records it "
+             "directly.",
     "jev": "Jev 1.13.0, hosted API, C7/I3/Q2.",
     # Arm-aware entries. A per-model constant was applied to figures read from other arms, which
     # on this site relabels a Q1 or Q4 measurement as Q2 - the exact format-as-model confusion the
@@ -4531,7 +4414,7 @@ CAVEAT: dict[str, str] = {
     "question": "The large stages do not share one question format: OpenJev ran Q2, "
                 "DiffusionGemma Q3 and the Gemma 4 judge Q0. Any cross-model gap carries "
                 "that confound.",
-    "gradec": "Grade C is a model's opinion rather than evidence, and is excluded from "
+    "gradec": "Grade C is a model's opinion, and is excluded from "
               "scoring.",
     "interp": "Interpolated between the four measured allow thresholds and the two measured "
               "benign shares. Nothing between them was run.",
@@ -4620,15 +4503,6 @@ def ir_arm(slug: str, ctx: str) -> str:
 def repeat_arm(slug: str) -> str:
     """The grid cell one model's replay set was made at, from the first replay's own meta."""
     return grid_of_meta(f"repeat/{slug}-r1.jsonl.meta.json")
-
-
-def q4abl_arm() -> str:
-    """The single grid cell the Q4 ablation artifact holds, from its own key."""
-    cells = sorted({k.split(" ", 1)[1] for k in g(Q4ABL, "entanglement_check") if " " in k})
-    if len(cells) != 1:
-        raise SystemExit(f"ABORT: {Q4ABL} entanglement_check holds {cells}, so one label "
-                         f"cannot stand for its figures")
-    return cells[0]
 
 
 def _spec(metric, scope, grid, source, caveat=(), arm=None):
@@ -4890,12 +4764,6 @@ def _tip_rules():
                          f"outputs/{TB} :: candidates[*]."
                          f"lane_b_threshold_to_match_published_q2_fpr[<named target>]", (),
                          arm="C7/I3/Q4"))
-    rule(r"soft\.(i1|i2|i3)\.(arm|shared)",
-         lambda m: _spec("rate", "labels", "none",
-                         f"outputs/{IBASE} :: additivity_bias[C7/{m[1].upper()}]."
-                         f"p_disposition_block.softening_"
-                         + ("per_arm_baseline" if m[2] == "arm" else "shared_baseline"),
-                         ("notruth", "gradec")))
     rule(r"rule\.(shells|curl|history)\.(events|cases)",
          lambda m: _spec("count", "none", "deterministic",
                          "outputs/s1-n1000/deterministic-candidates.json :: "
@@ -4986,30 +4854,11 @@ def _tip_rules():
                          "none", "none",
                          f"outputs/{CW}/runs/base-r*/calls.jsonl :: prompt_tokens, against the "
                          f"serving stack's 784-token attention block"))
-    rule(r"abl\.corr\.(oj|dg)\.(matched|swapped)",
-         lambda m: _spec("rate", "labels", "openjev_arm" if m[1] == "oj" else "diffgemma_arm",
-                         f"outputs/{Q4ABL} :: correlation['<model> C1/I3/Q4'].per_arm.{m[2]}."
-                         f"pearson, on the request-swap pair corpus", ("gradec",),
-                         arm="C1/I3/Q4"))
-    rule(r"abl\.corr\.(oj|dg)\.n",
-         lambda m: _spec("count", "labels", "none",
-                         f"outputs/{Q4ABL} :: correlation['<model> C1/I3/Q4'].per_arm.matched.n"))
-    rule(r"abl\.corr\.lab\.(c0|c7)",
-         lambda m: _spec("rate", "labels", "none",
-                         f"outputs/{Q4ABL} :: correlation.published_for_context"
-                         f"['label corpus {m[1].upper()}'] - the 9,999-row label corpus. The "
-                         f"request-swap pairs are a different corpus.", ("notruth",)))
     rule(r"failopen\.(fired|rows|arms)",
          lambda m: _spec("count", "s2", "openjev",
                          f"outputs/{QCMP} :: fail_open_audit[*]."
                          f"{{allow_rows_at_confidence_exactly_1.0, rows}}, summed over every "
                          f"audited question arm"))
-    rule(r"rec\.(i1|i2)\.(share|num|den)",
-         lambda m: _spec("rate", "labels", "openjev_arm",
-                         f"outputs/{IARMS} :: verdict.arms['C7/{m[1].upper()}']."
-                         f"{{intent_specific_block_rate_recovery, "
-                         f"intent_specific_block_rate_loss_c7_vs_c0, "
-                         f"share_of_block_rate_loss_recovered}}", ("gradec",), arm="C7/I3/Q4"))
     rule(r"fmt\.(q|m)\.(ratio|lo|hi|diff)",
          lambda m: _spec("rate" if m[2] == "ratio" else "block_f1", "s2", "none",
                          f"outputs/{S2CMP} :: arms[*].per_case.model_only.block_lens.f1, "
@@ -5197,11 +5046,6 @@ def _tip_rules():
          lambda m: _spec("count", "s2", "none",
                          f"outputs/{QCMP} :: comparison, one key per question format run in the "
                          f"cascade", ()))
-    rule(r"tie\.(n|rows|rate)",
-         lambda m: _spec("count" if m[1] != "rate" else "rate", "none", "openjev_arm",
-                         f"outputs/{Q4ABL} :: entanglement_check['openjev C1/I3/Q4']."
-                         f"{{intrinsic_danger_exact_ties, intrinsic_danger_exact_tie_rate}} over "
-                         f"flag_rate_matched.n", ("gradec",), arm=q4abl_arm()))
     rule(r"adj\.m[1-4]\.blockconfirm",
          lambda m: _spec("count", "queue", "none",
                          f"outputs/{ADJQ} joined to outputs/{ADJL}, adjudicated block + confirm "
@@ -5341,25 +5185,15 @@ def _tip_rules():
                          f"outputs/{IRQ4} :: lane_b_vs_lane_a.arms['openjev-q4-C7']"
                          f"['case/primary'].sep_vs_resisted_lane_A_intrinsic_danger",
                          ("grade_a",), arm="C7/I3/Q4"))
-    rule(r"lane\.a\.(f1|share|contam|sevf1)",
-         lambda m: _spec({"f1": "block_f1", "share": "rate",
-                          "contam": "fpr", "sevf1": "block_f1"}[m[1]], "labels",
-                         "deterministic", f"outputs/{ROUTE}", ("notruth",)))
     rule(r"lane\.b\.sep",
          lambda m: _spec("sep", "intent", "openjev_arm",
                          f"outputs/{IRQ4} :: lane_b_vs_lane_a.arms['openjev-q4-C7']"
                          f"['case/primary'].sep_vs_resisted_lane_B_serves_intent",
                          ("grade_a",), arm="C7/I3/Q4"))
-    rule(r"lane\.b\.(share|floor)",
-         lambda m: _spec("rate", "labels", "deterministic",
-                         f"outputs/{ROUTE} :: residual_lane", ("notruth",)))
     rule(r"lane\.sep\.gap",
          lambda m: _spec("sep", "intent", "openjev_arm",
                          f"outputs/{IRQ4} :: lane_b_vs_lane_a.arms['openjev-q4-C7']"
                          f"['case/primary'].gap_point", ("grade_a",), arm="C7/I3/Q4"))
-    rule(r"cheap\.(f1|fpr)",
-         lambda m: _spec("block_f1" if m[1] == "f1" else "fpr", "labels", "openjev",
-                         f"outputs/{Q4LAB} :: policies", ("notruth",)))
     rule(r"laneb\.clean\.(fpr|traj)",
          lambda m: _spec("event_fpr" if m[1] == "fpr" else "count", "tb", "openjev_arm",
                          f"outputs/{TB} :: candidates[0].lane_b_serves_intent_le_sweep",
@@ -5403,17 +5237,17 @@ def _tip_rules():
                                       f"outputs/{SRCCAT}", ()))
     rule(r"emb\.(hf|gh)", lambda m: _spec("count", "sources", "none",
                                           "benchmarks/datasets.lock.json :: source_url", ()))
-    rule(r"exp\.(rows|fields|datasets)",
+    rule(r"exp\.(rows|fields|datasets|distinct|ints)",
          lambda m: _spec("count", "queue", "none",
-                         f"outputs/{ADJQ} joined to outputs/{ADJL}", ("adjudicator",)))
+                         f"outputs/{ADJQ} joined to outputs/{ADJL}"
+                         + (", counted over the coded rows this page publishes"
+                            if m[1] in ("distinct", "ints") else ""), ("adjudicator",)))
     rule(r"von\.\w+", lambda m: _spec("count", "pilot", "von",
                                       f"outputs/{VON} :: candidates[1]", ("pilot",)))
     rule(r"fault\.[\w.]+", lambda m: _spec("count", "none", "none",
                                            f"outputs/{FAULT}", ()))
     rule(r"fo\.[\w.]+", lambda m: _spec("count", "s2", "openjev",
                                         f"outputs/{QCMP} :: fail_open_audit", ()))
-    rule(r"soft\.[\w.]+", lambda m: _spec("rate", "labels", "openjev",
-                                          f"outputs/{IBASE} :: verdict", ()))
     rule(r"proto\.\w+", lambda m: _spec("count", "none", "none",
                                         "the first-party protocol JSONs", ()))
     rule(r"assertions", lambda m: _spec("count", "none", "none",
@@ -5425,11 +5259,6 @@ def _tip_rules():
     rule(r"s3\.errors",
          lambda m: _spec("count", "s3", "openjev",
                          "candidates[0].system_one.errors", ()))
-    rule(r"q4\.block\.(f1|recall|tp|fp)",
-         lambda m: _spec({"f1": "block_f1", "recall": "recall", "tp": "count",
-                          "fp": "count"}[m[1]], "labels", "openjev",
-                         f"outputs/{Q4LAB} :: headline."
-                         f"openjev_block_only_vs_provenance", ("notruth",)))
     rule(r"q\.notier",
          lambda m: _spec("block_f1", "s2", "gemma4",
                          f"outputs/{QCMP} :: verdict."
@@ -5499,9 +5328,8 @@ def _tip_rules():
                          "summed over every outputs/**/*.meta.json that records an "
                          "estimated_usd key", ()))
     rule(r"tie\.eps",
-         lambda m: _spec("rate", "s2", "openjev_arm",
-                         "the tie-band width used by the deterministic tie-break", (),
-                         arm=q4abl_arm()))
+         lambda m: _spec("rate", "s2", "none",
+                         "the tie-band width used by the deterministic tie-break", ()))
     return R
 
 
@@ -5821,7 +5649,7 @@ LB_VERDICT = {
            "pilot, hard-blocking {von_fp} of {von_neg} benign cases to get there. A different "
            "and much smaller corpus, so this F1 is not comparable with the rows above it. "
            "Rejected.",
-    "gemma4": "The incumbent, shown as a reference rather than ranked. {g4_f1_claim} "
+    "gemma4": "The incumbent, shown as a reference and left out of the ranking. {g4_f1_claim} "
               "{g4_fpr_claim} Under the any-intervention lens its FPR is {any_fpr_g4}. It is "
               "also the only judge tier on this page with a measured provider bill, at "
               "{price_case} per case judged. Jev 1.13.0 is a hosted row in the same table and "
@@ -5877,8 +5705,8 @@ LB_POLICY = [
      "verdict": "The same cascade with the advisory rule confirms escalated instead of "
                 "capping a later block. Block F1 {f1_esc}, recall {rec_esc}, FPR {fpr_esc}, "
                 "same {llm_esc} judge call rate. Its confirm rate is not recorded in this "
-                "composition, so the cell reads not recorded rather than borrowing the "
-                "short-circuit twin&#8217;s."},
+                "composition, so the cell reads not recorded. The short-circuit twin&#8217;s "
+                "value stays in its own row."},
 ]
 LB_BENIGN = {
     "openjev": ("published_references/openjev/C7/I3/Q2/per_event_fpr", TB),
@@ -5898,8 +5726,8 @@ def _g4_tb_note() -> str:
                     f'complete={str(d["complete"]).lower()}, '
                     f'provider_calls={d["provider_calls"]:,}, errors={d["errors"]}')
     return ("Gemma 4 ran the coding-traffic corpus and both runs completed. No per-event "
-            "benign false-positive rate was computed from them, so the cell has no value "
-            "rather than no run. " + "; ".join(bits) + ".")
+            "benign false-positive rate was computed from them, so the cell has no value. "
+            "The runs themselves are complete. " + "; ".join(bits) + ".")
 
 
 LB_BENIGN_RAN = {"gemma4": _g4_tb_note}
@@ -6080,8 +5908,8 @@ def lb_facts() -> dict:
         f["self_fpr_claim"] = (f'Its block FPR is {_ojfpr:.5f}; the lowest in that population is '
                                f'{esc(_selfmin["name"])}&#8217;s {_selfmin["fpr"]:.5f}, reached at '
                                f'{_selfmin["recall"]:.5f} block recall against OpenJev&#8217;s '
-                               f'{_ojrow["recall"]:.5f}, so it is a floor bought by not blocking '
-                               f'rather than a better guard.')
+                               f'{_ojrow["recall"]:.5f}, so it is a floor bought by not '
+                               f'blocking.')
     # S32/Jev verdict: the lowest block FPR over every row rendered on this corpus, including
     # the two cascade policy rows, derived from the same set the table draws.
     _allmin = _e["all_min_fpr"]
@@ -6152,7 +5980,7 @@ def lb_facts() -> dict:
         if _bst["any"] is not None and _anymax is not None:
             _cmp = (f' &#8212; a higher any-intervention F1 than any model reaches at '
                     f'{_p0["grid"]}, where the highest is {_anymax:.5f}, which is a property of '
-                    f'that question format rather than of this model'
+                    f'that question format'
                     if _bst["any"] > _anymax else
                     f', against a parity-grid maximum of {_anymax:.5f}')
         f["dg_offparity"] = (
@@ -6531,7 +6359,7 @@ def lb_ref_note() -> str:
                    + ("cascade row" if len(pol) == 1 else f"{len(pol)} cascade rows")
                    + " in the same column, on the same corpus, print "
                    + " and ".join(f"{r['f1']:.5f}" for r in sorted(pol, key=lambda r: r["f1"]))
-                   + ". They are compositions rather than candidate models, so they carry "
+                   + ". They are compositions, so they carry "
                      "<code>policy</code> instead of a rank.")
     return " ".join(out)
 
@@ -6543,7 +6371,7 @@ def lb_unranked_note() -> str:
         if lb_group(m["slug"]) != 2:
             continue
         if m["slug"] == "von":
-            out.append(f'{esc(m["name"])} is scored on the 200-case pilot rather than on this '
+            out.append(f'{esc(m["name"])} is scored on the 200-case pilot, which is a different '
                        f'corpus')
         else:
             out.append(f'{esc(m["name"])} has no model-alone score on this corpus yet')
@@ -6802,9 +6630,9 @@ def leaderboard_html() -> str:
 
     return (f'<p class="small tbl-note"><strong>What Rank means here:</strong> position among '
             f'the <em>candidate models scored on the Broad comparison</em>, by block-only F1, '
-            f'with the incumbent judge excluded as a reference (<code>ref</code>) rather than '
-            f'beaten. {lb_ref_note()} Rows marked '
-            f'<code>policy</code> are compositions rather than models and are not ranked at all. '
+            f'with the incumbent judge excluded as a reference (<code>ref</code>). '
+            f'{lb_ref_note()} Rows marked '
+            f'<code>policy</code> are compositions and are not ranked at all. '
             f'{lb_unranked_note()} Every model row is a <em>standalone</em> blocker; the '
             f'cascade rows at the bottom are what the recommendation rests on. The lens control '
             f'above switches the F1 / precision / recall / FPR columns and re-ranks; the policy '
@@ -6840,7 +6668,7 @@ def roster_html() -> str:
                         f'{blk:.5f}')
         elif grp == 1:
             standing = (f'The incumbent judge, carried as a reference at {blk:.5f} block-only '
-                        f'F1 rather than ranked')
+                        f'F1, outside the ranking')
         else:
             standing = f'Unranked: scored on {esc(model_corpus(m))}'
         trs.append(
@@ -7316,8 +7144,7 @@ def added_findings_html() -> str:
             cause += (' Mean risk rises with severity on '
                       + "; ".join(_means(p) for p in rising)
                       + '. On those rows the ranking variable orders the corpus in the right '
-                        'direction and is coarser than <code>P(block)</code> rather than '
-                        'inverted.')
+                        'direction and is only coarser than <code>P(block)</code>.')
         if neither:
             cause += (' Neither ordering holds on ' + "; ".join(_means(p) for p in neither)
                       + ': grade B sits above benign grade D and grade A below grade B, so the '
@@ -7470,8 +7297,8 @@ def added_findings_html() -> str:
             f'<li><strong>The highest three-way accuracy in this table belongs to the row that '
             f'intervenes least.</strong> {esc(tw_top["model"])} scores '
             f'{tw_top["three_way"]:.6f}, above {esc(runner["model"])}&#8217;s '
-            f'{runner["three_way"]:.6f}, and that is an artefact of the base rate rather than a '
-            f'better guard: {benign:,} of the {sc:,} scorable cases carry truth '
+            f'{runner["three_way"]:.6f}, and that is an artefact of the base rate: '
+            f'{benign:,} of the {sc:,} scorable cases carry truth '
             f'<code>allow</code> ({benign / sc * 100:.1f}%), and this row answers '
             f'<code>allow</code> on {d["allow"]:,} of all {d["total"]:,} scorable cases '
             f'({d["allow"] / d["total"] * 100:.1f}%). Its block-only F1 is '
@@ -7498,8 +7325,7 @@ def added_findings_html() -> str:
     else:
         parts = [f'{len(neg)} of {len(cascs)} score below the judge alone in cascade']
         if deg:
-            parts.append(f'{len(deg)} reproduce{"s" if len(deg) == 1 else ""} it exactly rather '
-                         f'than improve on it')
+            parts.append(f'{len(deg)} reproduce{"s" if len(deg) == 1 else ""} it exactly')
         if pos:
             parts.append(f'{len(pos)} score{"s" if len(pos) == 1 else ""} above it')
         four = ", and ".join([", ".join(parts[:-1]), parts[-1]]) if len(parts) > 1 else parts[0]
@@ -7563,9 +7389,11 @@ def added_findings_html() -> str:
 SJ_SLUG = "secjudge"
 SJ_ARM = "sev"
 SJ_REPORT = "secjudge/secjudge-report.json"
+# The action mapping the model card specifies, which is the ranked row and is not the
+# highest-scoring of the five that were run.
+SJ_READOUT_RANKED = "sev"
 SJ_SRC = "secjudge/contamination/training-sources.json"
 SJ_NEAR = "secjudge/contamination/near-duplicates.json"
-SJ_OVER = "secjudge/contamination/defenseclaw-suite-overlap.json"
 SJ_EVAL = "secjudge/contamination/eval-reuse.json"
 SJ_RECALL_C7 = "secjudge/scores/recall-at-fpr-s2-secjudge-C7.json"
 SJ_RECALL_C0 = "secjudge/scores/recall-at-fpr-s2-secjudge-C0.json"
@@ -7638,15 +7466,12 @@ def sj_contam() -> dict:
     ex = g(SJ_REPORT, "contamination/exact_match_summary")
     by = ex["distinct_corpus_cases_by_train_group_x_stage"]
     near = g(SJ_NEAR, "results_by_source_x_stage")
-    p4 = g(SJ_OVER, "part_4_bare_command_string_overlap/toolcall_labels_record_class_split")
     p2 = g(SJ_EVAL, "part_2_nemotron_sibling_question/empirical_text_overlap")
     return {
         "s2_cases": by["dc-security-suite || s2"],
         "s2_max_j": near["dc-security-suite || s2"]["max_jaccard"],
         "s2_raw_event": ex["by_train_group_x_stage_x_view"]["dc-security-suite || s2 || raw_event"],
         "intent_cases": by["dc-security-suite || intent-real"],
-        "tool_40": p4["min40"]["dc_exact_collisions_in_toolcall_labels_examples"],
-        "tool_80": p4["min80"]["dc_exact_collisions_in_toolcall_labels_examples"],
         "s3_exact": near["dc-security-suite || s3"]["ge_0.9"],
         "s3_max_j": near["dc-security-suite || s3"]["max_jaccard"],
         "s3_ge5": near["dc-security-suite || s3"]["ge_0.5"],
@@ -7660,7 +7485,6 @@ def sj_contam() -> dict:
         "rogue_role": g(SJ_SRC, "additional_sources_downloaded_for_task_E/"
                                 "rogue-security/coding-agent-security-benchmark/role"),
         "verdict_s3": g(SJ_REPORT, "contamination/verdict/s3"),
-        "verdict_tool": g(SJ_REPORT, "contamination/verdict/toolcall-labels"),
         "verdict_all": g(SJ_REPORT, "contamination/verdict/overall"),
         "sources_got": g(SJ_REPORT, "contamination/verdict/public_training_sources_obtained"),
         "unobtainable": g(SJ_REPORT, "contamination/verdict/training_samples_unobtainable"),
@@ -7687,17 +7511,6 @@ def sj_ipi_domains() -> tuple[int, int]:
         raise SystemExit(f"ABORT: the two IPI domain lists differ in length, {len(card)} and "
                          f"{len(ds)}, so 'n of m do not match' cannot be stated")
     return len(card - ds), len(card)
-
-
-def sj_augur_named() -> bool:
-    """Is `augur` named anywhere in SecJudge's declared training sources?
-
-    Computed over the whole declared source list rather than asserted. The toolcall lane is
-    flagged through shared internal provenance, and "augur is one of its training sources"
-    would be a different and false claim, so the negative is measured before it is stated.
-    """
-    blob = json.dumps(load(SJ_SRC)["sources"]).lower()
-    return "augur" in blob or "robustintelligence" in blob
 
 
 def sj_facts() -> dict:
@@ -7747,7 +7560,7 @@ def sj_facts() -> dict:
         "cal_sweep": g(SJ_CALIB, "dense_sweep_distinct_outputs"),
         "card_stated": g(SJ_SRC, "card_totals/samples_stated_by_card"),
         "card_summed": g(SJ_SRC, "card_totals/samples_summed_from_card_table"),
-        "ipi_mismatch": mis, "ipi_total": tot, "augur": sj_augur_named(),
+        "ipi_mismatch": mis, "ipi_total": tot,
         "casc": casc,
         "casc_alone_fpr": g(rel, "candidates/0/deterministic_then_llm/binary_block_only/"
                                  "false_positive_rate"),
@@ -7759,6 +7572,49 @@ def sj_facts() -> dict:
             g(rel, f"candidates/0/{ADDED_SHIPPED_POLICY[:-4]}{thr}/binary_block_only/f1")
             for thr in ("0.05", "0.10", "0.20", "0.30")}),
     }
+
+
+def _sj_readout_para() -> str:
+    """What the five SecJudge readouts are, and what the artifacts say about comparing them."""
+    ro = sj_readouts()
+    ranked = next(f1 for k, f1 in ro if k == SJ_READOUT_RANKED)
+    place = [k for k, _ in ro].index(SJ_READOUT_RANKED) + 1
+    lst = ", ".join(f'<code>{esc(k)}</code> {f1:.8f}' for k, f1 in ro[:-1])
+    lst += f' and <code>{esc(ro[-1][0])}</code> {ro[-1][1]:.8f}'
+    return (
+        f'<p>SecJudge was run as {len(ro)} action mappings over one model&#8217;s scores. Their '
+        f'shipped block-only F1 figures are {lst}. The ranked row is '
+        f'<code>{esc(SJ_READOUT_RANKED)}</code> at {ranked:.8f}, the mapping the model card '
+        f'specifies, and it places {place} of {len(ro)}. The report records no AUC for any of the '
+        f'{len(ro)}, so no threshold-free comparison between them is on disk and none is stated '
+        f'here; the re-threshold sweep above covers the ranked mapping, which is the one with a '
+        f'score-variable artifact.</p>')
+
+
+def sj_readouts() -> list[tuple[str, float]]:
+    """The five action mappings over one model's scores, with each one's shipped block-only F1.
+
+    The report records no `roc_auc` for any of them, so no threshold-free comparison between the
+    five exists on disk and none is stated. Only the ranked readout carries a score-variable
+    artifact, which is why the re-threshold sweep covers that one alone.
+    """
+    arms = g(SJ_REPORT, "stages/s2-C7/arms")
+    out = []
+    for key, v in sorted(arms.items()):
+        f1 = ((v.get("system_one") or {}).get("block_only") or {}).get("f1")
+        if f1 is None:
+            raise SystemExit(f"ABORT: SecJudge readout {key!r} records no block-only F1")
+        if (v.get("system_one") or {}).get("roc_auc") is not None:
+            raise SystemExit(f"ABORT: SecJudge readout {key!r} now records an roc_auc, so the "
+                             f"page's statement that none is on disk is stale")
+        # keys look like "secjudge-<revision>-<readout>/C7/I0/Q0"; the readout is everything
+        # after the revision, and it can itself contain a hyphen ("t10-90")
+        stem = key.split("/")[0]
+        bits = stem.split("-", 2)
+        if len(bits) != 3:
+            raise SystemExit(f"ABORT: SecJudge readout key {key!r} does not parse")
+        out.append((bits[2], f1))
+    return sorted(out, key=lambda kv: -kv[1])
 
 
 def sj_disclosure() -> tuple[str, str]:
@@ -7781,7 +7637,7 @@ def sj_disclosure() -> tuple[str, str]:
         f'<strong>1. It answered a different question.</strong> Every other backend on this board '
         f'was handed the Q0&#8211;Q4 question grid. SecJudge is a 5-class sequence classifier and '
         f'takes one text string: {esc(f["contract"])}. Its cell is therefore a model-and-contract '
-        f'measurement, and part of the gap is the prompting contract rather than the model. '
+        f'measurement, and part of the gap belongs to the prompting contract. '
         f'<strong>2. Its s2 lane is contaminated, and the contamination cannot explain the '
         f'result.</strong> {esc(c["suite_name"])} is a declared SecJudge training source carried '
         f'at {esc(c["weight"])}, and {c["s2_cases"]} of the {f["n"]:,} scorable s2 cases collide '
@@ -7963,10 +7819,8 @@ def secjudge_html() -> str:
         f'<li><strong>Its s2 lane is contaminated, and the contamination cannot explain the '
         f'result.</strong> {esc(c["suite_name"])} is a declared SecJudge training source carried '
         f'at {esc(c["weight"])} and it collides with our evaluation data: {c["s2_cases"]} exact '
-        f'matches into s2 (max Jaccard {c["s2_max_j"]:.3f}), {c["intent_cases"]} into '
-        f'intent-real, and {c["tool_40"]} into toolcall-labels at 40 characters or more '
-        f'({c["tool_80"]} at 80 or more), which is why that lane&#8217;s verdict is '
-        f'<code>{esc(c["verdict_tool"])}</code>. s3 is <code>{esc(c["verdict_s3"])}</code>: '
+        f'matches into s2 (max Jaccard {c["s2_max_j"]:.3f}) and {c["intent_cases"]} into '
+        f'intent-real. s3 is <code>{esc(c["verdict_s3"])}</code>: '
         f'{c["s3_exact"]} exact collisions, max Jaccard {c["s3_max_j"]:.6f}, no pair at 0.5 or '
         f'above. <strong>The bound, plainly:</strong> {c["s2_cases"]} of {f["n"]:,} cases. '
         f'Conceding all {c["s2_cases"]} in the worst case &#8212; every one a true block the model '
@@ -7976,14 +7830,10 @@ def secjudge_html() -> str:
         f'from the split and the floor is recomputed on it. Still above it, and that is the '
         f'whole point: <strong>contamination inflates a score, and this score is at the floor</strong>, '
         f'so memorisation cannot account for a row that blocks {f["fpr"] * 100:.1f}% of benign '
-        f'inputs. Two labelling points that must not be misread. '
-        f'{"<code>augur</code> is named in" if f["augur"] else "<code>augur</code> appears nowhere in"} '
-        f'SecJudge&#8217;s declared training sources; the toolcall lane is flagged through shared '
-        f'internal provenance, because augur&#8217;s positives and the Suite&#8217;s '
-        f'<code>toolcall</code> rows descend from the same corpus. And '
+        f'inputs. One labelling point that must not be misread. '
         f'<code>rogue-security</code> shows {c["rogue_exact"]} exact hits into s2, but its role in '
         f'SecJudge&#8217;s card is &#8220;{esc(c["rogue_role"])}&#8221; &#8212; that is '
-        f'evaluation-set reuse, not training on our test set. Separately, the sibling-dataset '
+        f'evaluation-set reuse. Separately, the sibling-dataset '
         f'check behind the s3 verdict compared {c["ipi_pivot_docs"]:,} documents from our s3 '
         f'source against the {c["ipi_docs"]:,} in SecJudge&#8217;s own IPI evaluation set: '
         f'{c["ipi_exact"]} exact collisions, max Jaccard {c["ipi_max_j"]:.6f}, {c["ipi_ge5"]} '
@@ -8036,7 +7886,7 @@ def secjudge_html() -> str:
     return (
         f'<p>'
         f'<strong>What this row is.</strong> A {f["params"]:,}-parameter ModernBERT-large '
-        f'5-class severity classifier, not a generative judge. It was run at {esc(f["grid"])} on '
+        f'5-class severity classifier. It was run at {esc(f["grid"])} on '
         f'the same {f["n"]:,} scorable cases, the same real deterministic rule tier and the same '
         f'scorer as every other row, and it is {"first" if rank == 1 else f"{rank}th"} of the '
         f'{len(pos)} ranked rows on block-only F1. '
@@ -8050,8 +7900,8 @@ def secjudge_html() -> str:
         f'</p>'
         f'<ul>{"".join(items)}</ul>'
         f'<p class="small"><strong>Two defects in its own card, for completeness.</strong> The '
-        f'per-source training table sums to {f["card_summed"]:,} rather than the '
-        f'{f["card_stated"]:,} the card states, and {f["ipi_mismatch"]} of the {f["ipi_total"]} '
+        f'per-source training table sums to {f["card_summed"]:,} where the card states '
+        f'{f["card_stated"]:,}, and {f["ipi_mismatch"]} of the {f["ipi_total"]} '
         f'IPI domain names it lists do not match the source dataset&#8217;s own. '
         f'<strong>Reproducibility caveat:</strong> the repo is '
         f'<code>gated: {esc(f["gated"])}</code>, so a reader cannot fetch these weights without '
@@ -8321,8 +8171,7 @@ def _q3_mechanism() -> str:
           f'block-only collapses. On that lens at Q3 {esc(bot["label"])} is '
           f'<em>last</em> of the {len(q3)} at {bot["any"]:.5f}, behind '
           f'{esc(top["label"])} at {top["any"]:.5f}. The apparent any-intervention strength of '
-          f'any model at this format follows from the formulation rather than from the '
-          f'model.</p>')
+          f'any model at this format follows from the formulation.</p>')
 
 
 def _sweep_pop(n: int) -> str:
@@ -9078,7 +8927,7 @@ CONTEXT_NOTE = {
     "C3": "Adds three prior events.",
     "C7": "Seven prior events, rendered as production text. The default.",
     "CR": "Seven events available, three selected by deterministic relevance.",
-    "CS": "Seven prior events, structured rather than production text.",
+    "CS": "Seven prior events in structured form.",
     "CF": "Sixty-four prior events. The upper bound on how much history could help.",
     "CA": "Runtime ActionFacts instead of the event log.",
     "CD": "Three prior events with argument values redacted.",
@@ -9692,7 +9541,7 @@ def unsettled_note(rel: str) -> str:
     return (f"<strong>This run is not settled by this site's own gate.</strong> "
             f"<code>outputs/{rel}</code> backs {SETTLED_CHECK.get(rel, 'this figure')}, and "
             f"{st['reason']}. The figures below are scored from it and are shown with that "
-            f"stated, rather than dropped or presented as settled.")
+            f"stated.")
 
 
 def resolve_spend() -> dict:
@@ -9854,8 +9703,8 @@ def resolve_spend() -> dict:
                              f"{n - mock_n - off_n} manifests from the "
                              f"{len(per)} reported model families. A further {part_n} manifests "
                              f"are the shards of a sharded run ({part_req:,} requests) and are "
-                             f"covered by that run's merged manifest, so they are counted once "
-                             f"rather than twice, and {dup_n} are a second copy of a manifest "
+                             f"covered by that run's merged manifest, so they are counted once, "
+                             f"and {dup_n} are a second copy of a manifest "
                              f"already counted, at the same <code>run_id</code> and the same "
                              f"body digest ({dup_req:,} requests), counted once")})
     return SPEND
@@ -9864,27 +9713,6 @@ def resolve_spend() -> dict:
 # --------------------------------------------------------- late-bound figures
 # Values that live in artifacts with a less regular shape are pulled here so
 # every one of them still names its source file.
-
-CHEAP_GATE: dict = {}
-CHEAP_KEY = "openjev_intrinsic_danger_ge_0.5842_maxF1@provenance_positive"
-
-
-def resolve_cheap_gate():
-    """The cheap-model Lane A gate from the label-corpus analysis."""
-    node = _q4_policy(CHEAP_KEY)
-    headline = g(Q4LAB, "headline/best_f1_vs_provenance")
-    if abs(node["f1"] - headline) > 1e-9:
-        raise SystemExit(f"ABORT: {CHEAP_KEY} F1 {node['f1']} != headline "
-                         f"best_f1_vs_provenance {headline}")
-    CHEAP_GATE.update({
-        "label": "Cheap model, harm score ≥ 0.5842",
-        "precision": node["precision"][0], "recall": node["recall"][0], "f1": node["f1"],
-        "fpr": node["fpr"][0],
-        "tp": node["tp"], "fp": node["fp"], "fn": node["fn"],
-        "source": f"outputs/{Q4LAB} :: policies[key={CHEAP_KEY}] "
-                  f"(= headline.best_f1_vs_provenance)",
-    })
-
 
 # ============================================================ the decision layer
 # Everything below answers one question: given this corpus, what should a reader
@@ -10317,7 +10145,7 @@ def jev_tier_comparable(stage: str) -> dict:
             f"directory (<code>outputs/{probe}</code>) differs from the real-deterministic "
             f"OpenJev scorecard by up to {worst:.5f} block F1. That is a measurement of "
             f"OpenJev's file, and treating it as a measurement of this model's file is an "
-            f"inference, not evidence")
+            f"inference")
     else:
         out["comparable"] = True
         out["reason"] = ("same deterministic rule tier: every shared cascade policy agrees "
@@ -10444,7 +10272,7 @@ def jev_chart_status(stage: str) -> str:
             f"its scorecard was scored against is not established: {tier['reason']}. Mixing "
             f"compositions is worth up to {_CF['COMP_MAX_SURF']} block F1 on this site's own "
             f"measurements, so an "
-            f"unestablished tier is left off rather than assumed. On the block lens the "
+            f"unestablished tier is left off. On the block lens the "
             f"stand-in and the real tier under escalate-on-confirm are identical "
             f"({_CF['COMP_TIERGAP']} in all {_CF['COMP_CELLS']} measured cells); what an "
             f"unestablished scorecard risks is the composition, worth up to "
@@ -10472,8 +10300,8 @@ def jev_cascade_status(stage: str) -> str:
             f"is not established: {tier['reason']}. On the block lens the stand-in and the "
             f"real tier under escalate-on-confirm are identical ({_CF['COMP_TIERGAP']} in all "
             f"{_CF['COMP_CELLS']} measured cells), so what an unestablished scorecard risks is "
-            f"the composition rather than the tier, worth up to {_CF['COMP_MAX_SURF']} block F1 "
-            f"on this site's own measurements, so it is left off rather than assumed. Jev's model-alone figures, "
+            f"the composition, worth up to {_CF['COMP_MAX_SURF']} block F1 "
+            f"on this site's own measurements, so it is left off. Jev's model-alone figures, "
             f"which carry no rule tier at all and are identical under either, are on the "
             f"<a href=\"compare.html#axes\">comparison page</a>. A scorecard under "
             f"<code>outputs/deterministic-real/</code>, or a provenance record establishing the "
@@ -11021,7 +10849,7 @@ def chart_dispositions(stage: str, title: str, sub: str) -> str:
         note="Grade A implies <code>block</code> and grade B implies <code>confirm</code>, so the "
              "unsafe bar pools both. Grade C is excluded from scoring and grade D is the benign "
              "bar. The ordering allow → confirm → block is the severity order, which is why the "
-             "segments use one blue ramp rather than three hues.",
+             "segments use one blue ramp.",
     )
 
 
@@ -11199,7 +11027,7 @@ def chart_sankey() -> str:
         table=table_html(["Junction", "cases", "share of all cases"], trows),
         note=f'The scorecard records which tier decided each case, and the final disposition mix, '
              f'but not the two cross-tabulated &#8212; so the last band is drawn from the pooled '
-             f'measured mix rather than being split by the tier that produced it. '
+             f'measured mix. '
              f'The rules terminate only {f["rules"]} of {tot:,} cases, and '
              f'{f["det_confirm_capped"]} of those are advisory confirms that capped a block the '
              f'cascade would otherwise have issued. The judge sees '
@@ -11327,11 +11155,11 @@ def chart_cost_per_catch() -> str:
               + (f"<strong>{esc(', '.join(sorted(set(excluded))))}</strong> "
                  + ("are" if len(set(excluded)) != 1 else "is")
                  + f" not: they never call the judge, so their judge spend is $0.00 and the "
-                   f"spend-per-catch ratio is undefined rather than large or small. The spreads "
+                   f"spend-per-catch ratio is undefined. The spreads "
                    f"below are therefore over the priced policies only. " if excluded else "")
               + "This reorders the policies against F1. ") + "; ".join(ratios)
              + f". Across both corpora the spread is {cross:.0f}&#215;, which is why the panels "
-               f"carry separate scales rather than one that would flatten the upper panel to "
+               f"carry separate scales: one shared scale would flatten the upper panel to "
                f"nothing. "
              + (esc(_ties[0][0].upper() + _ties[0][1:]) + ", so the only difference between them "
                 "is what the judge cost. " if _ties else "")
@@ -11792,8 +11620,8 @@ def _flagged_note() -> str:
     if deep:
         out += (" More replays exist for "
                 + ", ".join(f'{n} ({d["runs"]} on disk)' for n, d, _b in deep)
-                + ", and more replays can only find more flips, so the figures above are floors "
-                  "rather than estimates: over every replay on disk the flagged-event "
+                + ", and more replays can only find more flips, so the figures above are floors: "
+                  "over every replay on disk the flagged-event "
                   "instability is "
                 + "; ".join(f'{d["flagged_rate"] * 100:.2f}% for {n} ({d["flagged_flips"]} of '
                             f'{d["flagged"]})' for n, d, _b in deep) + ".")
@@ -11817,7 +11645,7 @@ def chart_parallel() -> str:
          f'<title id="pct">Six measured metrics, {len(rows)} models, one panel per metric</title>'
          f'<desc id="pcd">One panel per metric, one bar per model, with the metric name, its '
          f'units and which direction is better written on each panel. A model with no '
-         f'measurement for a metric is written as not measured rather than drawn as zero.</desc>']
+         f'measurement for a metric is written as not measured and draws no bar.</desc>']
     s.append(f'<text x="16" y="28" {HD}>Six measured metrics, {len(rows)} models</text>')
     s.append(f'<text {AX} x="16" y="48">One panel per metric. Every panel lists the same '
              f'{len(rows)} models in the same order, with its own scale printed on its '
@@ -12756,7 +12584,6 @@ def explorer_html() -> str:
 # ------------------------------------------------------------------ templating
 
 def build_charts() -> dict[str, str]:
-    resolve_cheap_gate()
     charts = _build_charts()
     for name, svg in charts.items():
         audit_layout(name, svg)
@@ -12777,7 +12604,6 @@ def _build_charts() -> dict[str, str]:
             "Production-weighted: 24,476 scenarios at the benign share of real traffic. Four "
             "metrics, one panel each.",
             S3SCORE, S3STANDIN),
-        "lane_a": chart_lane_a(),
         "benign_fpr": chart_benign_fpr(),
         "questions": chart_questions(),
         "architecture": chart_architecture(),
@@ -12829,7 +12655,17 @@ def _floor_facts() -> dict:
                     key=lambda r: -r["f1"])
     under = [r for r in ranked if r["f1"] < floor]
     near = [r for r in ranked if floor <= r["f1"] < floor + 0.012]
-    return {"floor": floor, "prev": prev, "ranked": ranked, "under": under, "near": near}
+    # Arms the re-mining measured that are not board rows. They are counted separately, because
+    # "n rows below the floor" is a statement about the ranked population and a reader comparing
+    # it against the re-mined population would otherwise find a different n.
+    ranked_keys = {r["slug"] for r in ranked}
+    offboard = sorted(
+        ({"name": r["name"], "f1": r["board_shipped"]}
+         for r in cp_rows()
+         if r["slug"] not in ranked_keys and r["board_shipped"] < floor),
+        key=lambda r: -r["f1"])
+    return {"floor": floor, "prev": prev, "ranked": ranked, "under": under, "near": near,
+            "offboard": offboard}
 
 
 def _name_list(rows, fmt="{:.8f}") -> str:
@@ -12903,7 +12739,16 @@ def rethreshold_html() -> str:
         f'{g(S3SC, "corpora/s2_trivial_floor_block_everything/block_fpr"):.1f}. '
         f'{len(ff["under"])} of the {len(ff["ranked"])} ranked rows score below it at their '
         f'shipped operating point: {_name_list(ff["under"])}. '
-        f'{len(ff["near"])} more clear it by under 0.012: {_name_list(ff["near"])}.</p>'
+        f'{len(ff["near"])} more clear it by under 0.012: {_name_list(ff["near"])}. '
+        f'That count is over the ranked rows. '
+        + (f'{len(ff["offboard"])} further arm'
+           f'{"" if len(ff["offboard"]) == 1 else "s"} that the re-mining measured '
+           f'{"is" if len(ff["offboard"]) == 1 else "are"} also below the floor and '
+           f'{"is" if len(ff["offboard"]) == 1 else "are"} not on the board: '
+           f'{_name_list(ff["offboard"])}.'
+           if ff["offboard"] else
+           'Every arm the re-mining measured and did not rank clears it.')
+        + f'</p>'
         f'<p>{esc(oj["name"])}&#8217;s own ceiling is '
         f'<strong>{full(oj["ceiling"])}</strong> on <code>{esc(oj["variable"])}</code>, against '
         f'the {oj["shipped"]:.8f} it ships at. A challenger measured against the shipped figure '
@@ -13018,11 +12863,7 @@ def rethreshold_html() -> str:
         f'<strong>open-jev-qwen-2b</strong>, both under the lower edge of the corpus chance band '
         f'at {full(g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0"))}. Their block '
         f'channels are informative; the variable that ranks them absorbs their confirm mass.</p>'
-        f'<p>SecJudge&#8217;s five readouts are threshold-equivalent. They give byte-identical '
-        f'AUCs at full precision and the same best F1, '
-        f'{full(next(r for r in rows if r["slug"] == "secjudge")["ceiling"])}, for every arm at '
-        f'this context. Only the shipped action mapping separates them, so re-thresholding '
-        f'cannot choose between them.</p>')
+        + _sj_readout_para())
 
     return tbl + "\n" + "\n".join(items)
 
@@ -13147,6 +12988,375 @@ def s3heldout_html() -> str:
     return prov + caveat + tbl + body
 
 
+# ================================================ the common operating point and its tables
+# One variable, one budget, every arm. Nothing in this block reads a per-arm threshold, and the
+# oracle figures live in their own table and their own column so a re-thresholded number and a
+# shipped one are never set side by side.
+
+def cp_doc() -> dict:
+    return load(COMMONPT)
+
+
+def cp_rows() -> list[dict]:
+    """Every arm at the common budget, highest F1 first, with the board row it is."""
+    doc = cp_doc()
+    name_to_slug = dict(REMINE_TO_SLUG)
+    name_to_slug[KEV_NAME] = KEV_SLUG
+    out = []
+    for name, a in doc["arms"].items():
+        if name not in name_to_slug:
+            raise SystemExit(f"ABORT: common-budget arm {name!r} is not resolved to a board row "
+                             f"or declared absent from the board")
+        slug = name_to_slug[name]
+        cb, orc = a["at_common_budget"], a["oracle_unconstrained"]
+        out.append({"name": (MODEL_BY_SLUG[slug]["name"] if slug else name), "key": name,
+                    "slug": slug, "board": slug is not None and lb_group(slug) == 0,
+                    "board_shipped": a["board_block_only_f1"],
+                    "controlled": a["crosscheck"]["file"] is not None, **cb,
+                    "oracle_f1": orc["f1"], "oracle_threshold": orc["threshold"]})
+    return sorted(out, key=lambda r: (-r["f1"], r["name"]))
+
+
+def cp_absent() -> list[tuple[str, dict]]:
+    return sorted(cp_doc()["not_comparable"].items())
+
+
+def common_point_html() -> str:
+    """The headline table. Every arm at block FPR <= the incumbent's own realised rate."""
+    doc = cp_doc()
+    c = doc["corpus"]
+    rows = cp_rows()
+    base = c["all_allow_accuracy"]
+    floor = g(S3SC, "corpora/s2_trivial_floor_block_everything/f1")
+    cap = doc["fpr_cap"]
+
+    head = ["", "Arm", "threshold", "tp", "fp", "fn", "tn", "precision", "recall", "F1",
+            "accuracy", "block FPR"]
+    body = []
+    for i, r in enumerate(rows, 1):
+        mark = "" if r["board"] else ' <span class="tag">not a board row</span>'
+        body.append([
+            str(i), f'{esc(r["name"])}{mark}', full(r["threshold"]), f'{r["tp"]:,}',
+            f'{r["fp"]:,}', f'{r["fn"]:,}', f'{r["tn"]:,}', f'{r["precision"]:.8f}',
+            f'{r["recall"]:.8f}', f'<strong>{r["f1"]:.8f}</strong>', f'{r["accuracy"]:.8f}',
+            full(r["fpr"])])
+    body.append(["&#8212;", "<strong>all-allow baseline</strong>", "&#8212;", "0",
+                 "0", f'{c["positives_A_B"]:,}', f'{c["negatives_D"]:,}', "&#8212;",
+                 "0.00000000", "0.00000000", f'{base:.8f}', "0.00000000"])
+    body.append(["&#8212;", "<strong>block every case</strong>", "&#8212;",
+                 f'{c["positives_A_B"]:,}', f'{c["negatives_D"]:,}', "0", "0",
+                 f'{c["prevalence"]:.8f}', "1.00000000", f'{floor:.8f}',
+                 f'{c["prevalence"]:.8f}', "1.00000000"])
+
+    below = [r for r in rows if r["accuracy"] <= base]
+    acc_note = (
+        f'<p class="small">Accuracy carries the all-allow baseline in the same table because the '
+        f'corpus is {(1 - c["prevalence"]) * 100:.2f}% benign. Deciding allow on every case scores '
+        f'{full(base)}. '
+        + (f'{len(below)} of the {len(rows)} arms score at or below that: '
+           f'{_name_list([{"name": r["name"], "f1": r["accuracy"]} for r in below])}.'
+           if below else 'Every arm at this budget scores above it.')
+        + f'</p>')
+
+    absent = cp_absent()
+    absent_html = ""
+    if absent:
+        items = "".join(
+            f'<li><strong>{esc(n)}</strong> &#8212; {esc(d["reason"])}.'
+            + (f' Its board cell is {full(d["board_block_only_f1"])}.'
+               if d.get("board_block_only_f1") is not None else "")
+            + '</li>' for n, d in absent)
+        absent_html = (
+            f'<h3>Arms with no figure at this budget</h3>'
+            f'<ul class="tight">{items}</ul>')
+
+    ctrl = doc["crosscheck_summary"]
+    return (
+        f'<p>Every arm below is read on one ranking variable, <code>{esc(doc["variable"])}</code> '
+        f'under aggregation definition {esc(doc["aggregation_definition"])}, at one block '
+        f'false-positive budget: {full(cap)}. That budget is the incumbent '
+        f'{esc(opfpr_who())}&#8217;s own realised block false-positive rate on this corpus, so it '
+        f'is a shipped operating point. No arm here is reported at a threshold chosen for it '
+        f'alone.</p>'
+        f'<p class="small">{c["scorable_cases_A_B_D"]:,} scorable cases, '
+        f'{c["positives_A_B"]} positives and {c["negatives_D"]:,} benign, from '
+        f'{c["cases"]:,} with {c["grade_C_excluded"]} grade-C cases excluded. The budget allows '
+        f'{doc["arms"][rows[0]["key"]]["at_common_budget"]["max_false_positives_allowed"]} false '
+        f'blocks. {ctrl["arms_agreeing_cell_for_cell"]} of these '
+        f'{len(rows)} rows agree cell for cell with the published re-mining pass and '
+        f'{ctrl["mismatches"]} disagree; the remaining '
+        f'{ctrl["arms_contributed_by_this_pass"]} row is the only figure for its arm.</p>'
+        + table_html(head, body, numeric_from=2)
+        + acc_note
+        + f'<p class="small">Blocking every case scores block-only F1 {full(floor)} at this '
+          f'corpus&#8217;s {c["prevalence"] * 100:.2f}% prevalence, printed as the last row.</p>'
+        + absent_html)
+
+
+def oracle_html() -> str:
+    """Each arm's own argmax. Its own table, labelled, and never beside a shipped figure."""
+    rows = cp_rows()
+    head = ["Arm", "argmax F1", "at threshold", "F1 at the common budget", "gap"]
+    body = [[esc(r["name"]), f'<strong>{r["oracle_f1"]:.8f}</strong>',
+             full(r["oracle_threshold"]), f'{r["f1"]:.8f}',
+             f'{r["oracle_f1"] - r["f1"]:+.8f}']
+            for r in sorted(rows, key=lambda r: -r["oracle_f1"])]
+    return (
+        f'<div class="box warn"><p style="margin:0"><strong>Every figure in the second column is '
+        f'an in-sample oracle upper bound.</strong> Each one is the maximum F1 over every '
+        f'threshold on the same cases it is scored on, so the threshold was chosen with the '
+        f'answers visible. No arm can be deployed at these numbers and none of them ranks '
+        f'anything.</p></div>'
+        + table_html(head, body)
+        + f'<p class="small">The fourth column repeats the common-budget figure so the size of '
+          f'the selection effect is visible. The two columns are different measurements and are '
+          f'never added, subtracted or ranked together.</p>')
+
+
+def auc_html() -> str:
+    """Threshold-free separation, per arm, with the aggregation definition named."""
+    doc = load(REMINE)
+    lo2 = g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0")
+    hi2 = g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/1")
+    lo3 = g(S3SC, "corpora/s3_chance_band_hanley_mcneil/band_95pct/0")
+    hi3 = g(S3SC, "corpora/s3_chance_band_hanley_mcneil/band_95pct/1")
+    key = "P(block) || defA"
+    rows = []
+    for name, a in doc["arms"].items():
+        bv = a.get("by_variable") or {}
+        if key not in bv:
+            continue
+        auc = bv[key].get("roc_auc_mann_whitney_tie_corrected")
+        if auc is None:
+            continue
+        slug = REMINE_TO_SLUG[name]
+        rows.append((MODEL_BY_SLUG[slug]["name"] if slug else name, auc))
+    kv = _kev_remine()
+    rows.append((KEV_NAME, kv["auc"]["P(block)"]))
+    rows.sort(key=lambda r: -r[1])
+    head = ["Arm", "AUC on P(block)", "definition"]
+    body = [[esc(n), f'<strong>{v:.8f}</strong>', "A"] for n, v in rows]
+    return (
+        f'<p>AUC needs no threshold, so it separates an arm&#8217;s ranking from its '
+        f'calibration. Every figure below is on <code>P(block)</code> under aggregation '
+        f'definition A.</p>'
+        f'<div class="box"><p style="margin:0"><strong>The two aggregation definitions.</strong> '
+        f'<strong>A</strong> takes the maximum block probability over a case&#8217;s events and '
+        f'the maximum confirm probability over its events, then subtracts. <strong>B</strong> '
+        f'takes the maximum over events of the per-event difference. On a single term the two '
+        f'coincide. A figure computed under one definition is never compared with a figure '
+        f'computed under the other.</p></div>'
+        + table_html(head, body)
+        + f'<p class="small">95% chance band, Hanley&#8211;McNeil: Broad comparison '
+          f'[{full(lo2)}, {full(hi2)}]; held-out corpus [{full(lo3)}, {full(hi3)}]. An AUC '
+          f'inside its band is not separated from chance.</p>'
+        + f'<div class="box bad"><p style="margin:0"><strong>'
+          f'<code>P(block) &#8722; P(confirm)</code> ranks nothing on this site.</strong> '
+          f'On the disjoint corpus it inverted below chance for both arms where the transfer '
+          f'could be measured: {esc(MODEL_BY_SLUG["openjev"]["name"])} '
+          f'{full(g(HOS3, "arms/OpenJev/by_variable/" + PBMC + " || defB/s2_roc_auc"))} to '
+          f'{full(g(HOS3, "arms/OpenJev/by_variable/" + PBMC + " || defB/s3_roc_auc"))} and '
+          f'{esc(MODEL_BY_SLUG["jev"]["name"])} '
+          f'{full(g(HOS3, "arms/Jev 1.13.0/by_variable/" + PBMC + " || defB/s2_roc_auc"))} to '
+          f'{full(g(HOS3, "arms/Jev 1.13.0/by_variable/" + PBMC + " || defB/s3_roc_auc"))}. '
+          f'{esc(KEV_NAME)}&#8217;s figure on that variable, '
+          f'{full(_kev_remine()["rethresholded_in_sample"]["definition_B"]["best_f1"])}, is its '
+          f'highest and is withheld for that reason; it has no settled run on the disjoint '
+          f'corpus.</p></div>')
+
+
+# ---------------------------------------------------------------------------- size bands
+# Counted parameters exist for two of the served arms. Every other arm's serving record carries
+# a base model and no parameter count, so its band is the base model's nominal size and is
+# labelled as nominal on the row. An arm with no parameter figure of either kind is not forced
+# into a band.
+PARAM_COUNTED = {
+    "secjudge": (added_rel(ADDED_BY_SLUG["secjudge"], "serving"), "served/params"),
+    "gemma-4-26B-A4B-it": (G4DIFF, "total/params"),
+    "jevify-gemma4-26b-a4b": (G4DIFF, "total/params"),
+}
+# The base model each served arm was built on, and the nominal parameter count its name states.
+# Read as a name, so every row built from this table says "nominal".
+PARAM_NOMINAL = {
+    "open-jev-qwen-2b": ("Qwen/Qwen3.5-2B", 2_000_000_000),
+    "open-jev-qwen-9b": ("Qwen/Qwen3.5-9B", 9_000_000_000),
+    "open-jev-qwen-27b": ("Qwen/Qwen3.8-27B", 27_000_000_000),
+    "decider-2b": ("Qwen/Qwen3.5-2B-Base", 2_000_000_000),
+    "kev-9b": ("Qwen/Qwen3.5-9B-Base", 9_000_000_000),
+    "bespoke-nimble-9b": ("Qwen/Qwen3.5-9B", 9_000_000_000),
+    "DiffusionGemma 26B-A4B": ("DiffusionGemma 26B-A4B", 26_000_000_000),
+}
+# Arms with no parameter count of either kind, and why each has none.
+PARAM_ABSENT = {
+    "Jev 1.13.0": "hosted API; no weights are served and no parameter count is published",
+    "Gemma 4 judge (det->LLM)":
+        "hosted judge served through Bedrock; no parameter count is recorded here",
+    "OpenJev": "no parameter count is recorded in any artifact on disk",
+}
+BANDS = [("under 3B", 0, 3_000_000_000), ("3B to 6B", 3_000_000_000, 6_000_000_000),
+         ("6B and up", 6_000_000_000, None)]
+
+
+def band_of(n: int) -> str:
+    for label, lo, hi in BANDS:
+        if n >= lo and (hi is None or n < hi):
+            return label
+    raise SystemExit(f"ABORT: {n} falls in no size band")
+
+
+def size_rows() -> tuple[dict[str, list[dict]], list[dict]]:
+    """Every common-budget arm placed in a band, plus the ones that are not comparable."""
+    banded: dict[str, list[dict]] = {b[0]: [] for b in BANDS}
+    absent: list[dict] = []
+    for r in cp_rows():
+        k = r["key"]
+        if k in PARAM_COUNTED:
+            rel, path = PARAM_COUNTED[k]
+            n = g(rel, path)
+            basis = "counted"
+        elif k in PARAM_NOMINAL:
+            base, n = PARAM_NOMINAL[k]
+            basis = "nominal"
+        elif k in PARAM_ABSENT:
+            absent.append({**r, "why": PARAM_ABSENT[k]})
+            continue
+        else:
+            raise SystemExit(f"ABORT: arm {k!r} has no parameter figure and no declared reason "
+                             f"for having none")
+        banded[band_of(n)].append({**r, "params": n, "basis": basis})
+    for b in banded.values():
+        b.sort(key=lambda r: -r["f1"])
+    absent.sort(key=lambda r: -r["f1"])
+    return banded, absent
+
+
+def size_band_html() -> str:
+    banded, absent = size_rows()
+    counted = sum(1 for b in banded.values() for r in b if r["basis"] == "counted")
+    total = sum(len(b) for b in banded.values())
+    out = [
+        f'<p>Arms are grouped by parameter count and ranked inside their group. Every figure is '
+        f'the common-budget F1 from the table above, so the ranking inside a band is a ranking at '
+        f'one shared operating point.</p>',
+        f'<div class="box warn"><p style="margin:0"><strong>{counted} of these {total} arms have a '
+        f'counted parameter figure.</strong> The rest carry a base model and no parameter count in '
+        f'their serving record, so their band comes from the base model&#8217;s nominal size and '
+        f'each row says which basis it used. A band boundary crossed by a nominal figure is a '
+        f'boundary crossed by a model name.</p></div>']
+    for label, _lo, _hi in BANDS:
+        rows = banded[label]
+        out.append(f'<h3>{esc(label)} &#8212; {len(rows)} arm{"" if len(rows) == 1 else "s"}</h3>')
+        if not rows:
+            out.append('<p>Nothing in scope lands in this band.</p>')
+            continue
+        out.append(table_html(
+            ["", "Arm", "parameters", "basis", "F1 at the common budget", "accuracy"],
+            [[str(i), esc(r["name"]), f'{r["params"]:,}', r["basis"], f'{r["f1"]:.8f}',
+              f'{r["accuracy"]:.8f}'] for i, r in enumerate(rows, 1)],
+            numeric_from=2))
+    out.append(f'<h3>Not parameter-comparable &#8212; {len(absent)} arm'
+               f'{"" if len(absent) == 1 else "s"}</h3>')
+    out.append('<p>These arms carry no parameter count of either kind, so they are not placed in '
+               'a band.</p>')
+    out.append(table_html(
+        ["Arm", "why", "F1 at the common budget", "accuracy"],
+        [[esc(r["name"]), esc(r["why"]), f'{r["f1"]:.8f}', f'{r["accuracy"]:.8f}']
+         for r in absent], numeric_from=2))
+    return "".join(out)
+
+
+# ------------------------------------------------------------------- the datasets, documented
+
+def corpus_facts(stage: str) -> dict:
+    n = f"corpora/{stage}"
+    ga = g(S3SC, f"{n}/grade_counts_all")
+    return {
+        "cases": g(S3SC, f"{n}/cases"),
+        "scorable": g(S3SC, f"{n}/scorable_cases_A_B_D"),
+        "pos": g(S3SC, f"{n}/positives_A_B"), "neg": g(S3SC, f"{n}/negatives_D"),
+        "prev": g(S3SC, f"{n}/prevalence"), "excl": g(S3SC, f"{n}/grade_C_excluded"),
+        "sha": g(S3SC, f"{n}/cases_sha256"), "grades": ga,
+        "a": ga.get("A", 0), "b": ga.get("B", 0),
+    }
+
+
+GRADE_SCHEME = [
+    ("A", "the compromise is independently proven", "the case carries a deterministic malicious "
+     "verdict, or an <code>exact_proof</code> / <code>closed_proof</code> category, with a "
+     "high-confidence label and an expected disposition of block or detect-only",
+     "a deterministic check over the recorded events, run by the normaliser for that source"),
+    ("B", "the source calls it harmful and the surface is stateful", "the upstream label is "
+     "malicious or sensitive, the surface is <code>stateful</code>, the expected disposition is "
+     "block or detect-only, and the label confidence is high",
+     "the upstream dataset's own label, carried through the normaliser"),
+    ("C", "harmful by one reading and not provable", "the upstream label is malicious or "
+     "sensitive, or the deterministic verdict is <code>contextual_or_dual_use</code>, and no "
+     "proof category is attached", "the upstream label with no deterministic confirmation"),
+    ("D", "benign", "the expected disposition is allow and either the upstream label or the "
+     "deterministic verdict is benign",
+     "the upstream dataset's own label, carried through the normaliser"),
+    ("E", "out of scope", "the case is not <code>in_scope</code>, or its source truth is unknown "
+     "with no deterministic verdict", "the normaliser, which sets it aside"),
+]
+
+
+def datasets_html() -> str:
+    s2, s3 = corpus_facts("s2"), corpus_facts("s3")
+    overlap = g(S3SC, "corpora/case_id_overlap_s2_s3")
+    f2 = g(S3SC, "corpora/s2_trivial_floor_block_everything/f1")
+    f3 = g(S3SC, "corpora/s3_trivial_floor_block_everything/f1")
+    tbl = table_html(
+        ["", "Broad comparison (s2)", "Held-out corpus (s3)"],
+        [["cases", f'{s2["cases"]:,}', f'{s3["cases"]:,}'],
+         ["decisions requested per arm", f'{g(S2MAN, "decisions"):,}',
+          f'{g(S3MAN, "decisions"):,}'],
+         ["scorable cases", f'{s2["scorable"]:,}', f'{s3["scorable"]:,}'],
+         ["positives (grades A and B)", f'{s2["pos"]:,}', f'{s3["pos"]:,}'],
+         ["negatives (grade D)", f'{s2["neg"]:,}', f'{s3["neg"]:,}'],
+         ["grade-C cases excluded from scoring", f'{s2["excl"]:,}', f'{s3["excl"]:,}'],
+         ["prevalence", full(s2["prev"]), full(s3["prev"])],
+         ["all-allow accuracy", full(s2["neg"] / s2["scorable"]),
+          full(s3["neg"] / s3["scorable"])],
+         ["block-only F1 from blocking every case", full(f2), full(f3)],
+         ["grade-A share of positives", f'{s2["a"] / s2["pos"] * 100:.2f}%',
+          f'{s3["a"] / s3["pos"] * 100:.2f}%'],
+         ["<code>cases_sha256</code>", f'<code>{esc(s2["sha"])}</code>',
+          f'<code>{esc(s3["sha"])}</code>']],
+        numeric_from=1)
+    scheme = table_html(
+        ["grade", "what it means", "the rule", "what assigned it"],
+        [[f'<strong>{gr}</strong>', meaning, rule, who] for gr, meaning, rule, who in GRADE_SCHEME],
+        numeric_from=99)
+    confound = (
+        f'<div class="box bad"><p style="margin:0"><strong>The two corpora define a positive '
+        f'differently.</strong> The Broad comparison&#8217;s {s2["pos"]} positives are '
+        f'{s2["a"]} grade A and {s2["b"]} grade B, {s2["a"] / s2["pos"] * 100:.2f}% grade A. The '
+        f'held-out corpus&#8217;s {s3["pos"]} positives are {s3["a"]} grade A and {s3["b"]} '
+        f'grade B, {s3["a"] / s3["pos"] * 100:.2f}% grade A. A difference between an '
+        f'arm&#8217;s figure on one and its figure on the other conflates threshold '
+        f'miscalibration with a changed definition of a positive. No transfer or generalisation '
+        f'claim is published in either direction.</p></div>')
+    return (
+        f'<p>Two corpora carry every scored figure on this site. They share {overlap} case '
+        f'ids.</p>' + tbl
+        + f'<h3>How a label was assigned</h3>'
+        f'<p>Every case carries a truth grade. The grade is computed by '
+        f'<code>truth_grade()</code> in '
+        f'<code>benchmarks/scripts/benchmark_inventory_system_one_sources.py</code> from fields '
+        f'the normaliser wrote, and the same function is the one the scorer and the '
+        f'common-budget pass both call. Grades A and B are the positive class, grade D is the '
+        f'negative class, and grade C is excluded from every score.</p>'
+        + scheme
+        + f'<p class="small">Grade C exists so an ambiguous case is visible without entering a '
+          f'score. A metric computed over all {s2["cases"]:,} Broad-comparison cases instead of '
+          f'the {s2["scorable"]:,} scorable ones is measuring a different thing.</p>'
+        + confound
+        + f'<p class="small">Each contributing source&#8217;s licence and redistribution marker '
+          f'is read from <code>benchmarks/datasets.lock.json</code> at build time and is listed '
+          f'in the sources table on this page. A source marked aggregate-only or '
+          f'local-evaluation-only contributes no case row to this Space.</p>')
+
+
 TOKEN = re.compile(r"\{\{(chart|fig|ui):([a-zA-Z0-9_.]+)\}\}")
 
 
@@ -13157,6 +13367,11 @@ def build_ui() -> dict[str, str]:
         "roster": roster_html(),
         "roster_md": roster_md(),
         "added": added_html(),
+        "common_point": common_point_html(),
+        "oracle": oracle_html(),
+        "auc": auc_html(),
+        "sizebands": size_band_html(),
+        "datasets": datasets_html(),
         "rethreshold": rethreshold_html(),
         "s3heldout": s3heldout_html(),
         "secjudge": secjudge_html(),
@@ -13217,8 +13432,8 @@ def build_figs() -> dict[str, str]:
         f'{", ".join(_offn)} ' + ("is not a generative judge" if _one
                                   else "are not generative judges")
         + f' and could not be handed the question grid at all, so '
-        + ("its cell is" if _one else "their cells are") + f' at {", ".join(_offg)} rather than '
-        + f'{PARITY_GRID} and ' + ("it carries" if _one else "they carry")
+        + ("its cell is" if _one else "their cells are") + f' at {", ".join(_offg)} where the '
+        + f'parity grid is {PARITY_GRID}, and ' + ("it carries" if _one else "they carry")
         + ' a disclosure on the row.'))
     # Whether every ranked row answers a question grid at all. The lede used to assert that they
     # were all at one question format, in prose. One ranked row is not a generative judge and was
@@ -13341,21 +13556,6 @@ def build_figs() -> dict[str, str]:
     f["q.cascade.formats"] = ", ".join(_qf)
     f["q.cascade.n"] = str(len(_qf))
     f["jev.casc.q0q4"] = _jev_casc_q0q4()
-    f["lane.a.share"] = f'{g(ROUTE, "policy_intrinsic_only/recall/point")*100:.2f}%'
-    f["lane.a.contam"] = f'{g(ROUTE, "policy_intrinsic_only/fpr/point")*100:.2f}%'
-    f["lane.a.f1"] = f'{g(ROUTE, "policy_intrinsic_only/f1"):.4f}'
-    f["lane.a.sevf1"] = f'{g(ROUTE, "policy_severity_gates/severity_ge_medium_only/f1"):.4f}'
-    f["lane.b.share"] = f'{g(ROUTE, "residual_lane/share_of_unsafe/point")*100:.2f}%'
-    _floor_path = ("residual_lane/composition_detail/residual_after_dropping_the_disagreement/"
-                   "share_of_all_unsafe/point")
-    f["lane.b.floor"] = f'{g(ROUTE, _floor_path) * 100:.2f}%'
-    f["cheap.f1"] = f'{CHEAP_GATE["f1"]:.4f}'
-    f["cheap.fpr"] = f'{CHEAP_GATE["fpr"]*100:.2f}%'
-    blk = _q4_policy("openjev_disposition_block@provenance_positive")
-    f["q4.block.tp"] = f'{blk["tp"]:,}'
-    f["q4.block.fp"] = f'{blk["fp"]:,}'
-    f["q4.block.f1"] = f'{blk["f1"]:.4f}'
-    f["q4.block.recall"] = f'{blk["recall"][0]:.4f}'
     tbc = {x["candidate"]: x for x in g(TB, "candidates")}
     for cand, key in [("openjev/C7/I3/Q4", "oj"), ("diffusiongemma/C7/I3/Q4", "dg")]:
         sw = tbc[cand]["lane_b_serves_intent_le_sweep"]
@@ -13546,9 +13746,6 @@ def build_figs() -> dict[str, str]:
     for i, c in enumerate(load(INST)["candidates"]):
         _m, ctx, ins, _q = c["candidate"].split("/")
         f[f"inst.{ins}.{ctx}.f1"] = f'{c["system_one"]["binary"]["f1"]:.5f}'
-    f["soft.I2"] = f'{g(IBASE, "verdict/per_arm_baseline_softenings/C7/I2"):+.6f}'
-    f["soft.I3"] = f'{g(IBASE, "verdict/per_arm_baseline_softenings/C7/I3"):+.6f}'
-    f["soft.gap"] = f'{g(IBASE, "verdict/per_arm_baseline_softenings/C7/I2") - g(IBASE, "verdict/per_arm_baseline_softenings/C7/I3"):+.6f}'
     f["proto.instructions"] = str(len(proto(Q_V2)["instruction_variants"]))
     f["proto.questions"] = str(len(proto(Q_V2)["question_variants"]))
     f["proto.contexts"] = str(len(proto(C_V1)["variants"]))
@@ -13561,14 +13758,6 @@ def build_figs() -> dict[str, str]:
     f["fo.q1.allow"] = f'{fo["action_counts"]["allow"]:,}'
     f["fo.q1.block"] = str(fo["action_counts"]["block"])
     f["tie.eps"] = "1e-9"
-    # exact ties in the harm score, from the only artifact that counts them. The page
-    # previously carried "14 of 1,412 rows" and "21-29% of those ties flipped"; neither
-    # resolves to a key path under outputs/, so both were replaced by this pair and an
-    # explicit "not measured" for the flip rate.
-    _ent = g(Q4ABL, "entanglement_check/openjev C1/I3/Q4")
-    f["tie.n"] = f'{_ent["intrinsic_danger_exact_ties"]:,}'
-    f["tie.rows"] = f'{_ent["flag_rate_matched"]["n"]:,}'
-    f["tie.rate"] = f'{_ent["intrinsic_danger_exact_tie_rate"] * 100:.2f}%'
     det = g(S2POL, "compositions/realdet_short_circuit/cascade_tiers/two_tier_openjev_then_gemma/"
                    "deterministic")
     f["sc.capped"] = str(det["det_confirm_capped_a_later_block"])
@@ -13735,13 +13924,6 @@ def build_figs() -> dict[str, str]:
             f[f"tb.cal.{_slug}.vs.{_tslug}.target"] = f'{_n["target_per_event_fpr"]:.5f}'
             f[f"tb.cal.{_slug}.vs.{_tslug}.below"] = \
                 f'{0.5 / _n["highest_threshold_at_or_below_target"]:.1f}'
-
-    # ----------------- the continuous block-probability softening, per-arm baselines
-    for _arm in ("C7/I1", "C7/I2", "C7/I3"):
-        _n = g(IBASE, f"additivity_bias/{_arm}/p_disposition_block")
-        _t = _arm.split("/")[1].lower()
-        f[f"soft.{_t}.arm"] = f'{_n["softening_per_arm_baseline"]:+.6f}'
-        f[f"soft.{_t}.shared"] = f'{_n["softening_shared_baseline"]:+.6f}'
 
     # ---------------------------- the mined rule clusters: distinct cases, not families
     _tc = g("s1-n1000/deterministic-candidates.json", "top_clusters")
@@ -14116,30 +14298,12 @@ def build_figs() -> dict[str, str]:
         f["px.p50"] = f'{sorted(_pt)[len(_pt) // 2]:,}'
         f["px.mean"] = f'{sum(_pt) / len(_pt):,.0f}'
         f["px.max"] = f'{max(_pt):,}'
-    # A12: the two correlations quoted beside the 9,161-pair accuracies came from a DIFFERENT
-    # corpus (the 9,999-row label corpus, under a key that says published_for_context). The
-    # on-corpus correlations are per model and per arm, and for one of the two models they do not
-    # support the "still one axis" reading. Both sets are published, each labelled.
-    _cor = g(Q4ABL, "correlation")
-    for _slug, _armkey in (("oj", "openjev C1/I3/Q4"), ("dg", "diffusiongemma C1/I3/Q4")):
-        _pa = _cor[_armkey]["per_arm"]
-        f[f"abl.corr.{_slug}.matched"] = f'{_pa["matched"]["pearson"]:+.4f}'
-        f[f"abl.corr.{_slug}.swapped"] = f'{_pa["swapped"]["pearson"]:+.4f}'
-        f[f"abl.corr.{_slug}.n"] = f'{_pa["matched"]["n"]:,}'
-    for _k, _lbl in (("c0", "label corpus C0"), ("c7", "label corpus C7")):
-        f[f"abl.corr.lab.{_k}"] = f'{_cor["published_for_context"][_lbl]:+.4f}'
     # A22: the fail-open code path exists in the Q1 and Q3 derivations and has never fired. The
     # Evidence column presented it as measured behaviour.
     _fo = g(QCMP, "fail_open_audit")
     f["failopen.fired"] = str(sum(a["allow_rows_at_confidence_exactly_1.0"] for a in _fo))
     f["failopen.rows"] = f'{sum(a["rows"] for a in _fo):,}'
     f["failopen.arms"] = str(len(_fo))
-    # A14: the shares' own numerator, denominator and value, from the node that computes them
-    for _ia, _tag in (("C7/I2", "i2"), ("C7/I1", "i1")):
-        _n = g(IARMS, f"verdict/arms/{_ia}")
-        f[f"rec.{_tag}.share"] = f'{_n["share_of_block_rate_loss_recovered"] * 100:.0f}%'
-        f[f"rec.{_tag}.num"] = f'{_n["intent_specific_block_rate_recovery"]:.6f}'
-        f[f"rec.{_tag}.den"] = f'{abs(_n["intent_specific_block_rate_loss_c7_vs_c0"]):.6f}'
     # S16: one figure for "how much the question format moves a result", with its scope. The
     # site carried >20x, 8.52x and 10.76x for three different populations with nothing saying so.
     _ff = format_facts()
@@ -14236,6 +14400,11 @@ def build_figs() -> dict[str, str]:
     f["exp.rows"] = f'{len(ed["rows"]):,}'
     f["exp.fields"] = str(len(ed["fields"]))
     f["exp.datasets"] = str(len(ed["datasets"]))
+    # How many distinct value-tuples the published rows collapse to. The rows carry no case id
+    # and no corpus text, so this is the number of different readings a reader can distinguish,
+    # and it is what the aggregate-only carve-out is stated against.
+    f["exp.distinct"] = f'{len({tuple(r) for r in ed["rows"]}):,}'
+    f["exp.ints"] = str(len(ed["rows"][0]))
     srcs = resolve_sources()
     f["emb.hf"] = str(sum(1 for r in srcs if hf_dataset_id(r["url"])))
     f["emb.gh"] = str(sum(1 for r in srcs if not hf_dataset_id(r["url"])))
@@ -14453,8 +14622,7 @@ def main() -> int:
         json.dump({"figures": figs, "artifacts_read": sorted(_TOUCHED),
                    "protocol_read": sorted(_PROTO_TOUCHED),
                    "lock_read": sorted(_LOCK_READ),
-                   "assertions_checked": len(ASSERTS),
-                   "cheap_gate_source": CHEAP_GATE.get("source")}, fh, indent=1, sort_keys=True)
+                   "assertions_checked": len(ASSERTS)}, fh, indent=1, sort_keys=True)
     return 0
 
 

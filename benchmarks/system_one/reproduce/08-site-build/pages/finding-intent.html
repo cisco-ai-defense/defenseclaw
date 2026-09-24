@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The intent reversal — DefenseClaw System One</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">Intent</p>
+<h1>Intent detection: eight negative runs, then a reversal on proof-backed data</h1>
+<p class="lede">
+  DefenseClaw compares each tool call against what the user asked for. On data where the compromise
+  is independently <em>proven</em>, the same code, models and seed turn all {{fig:cells}} measured
+  cells positive. {{fig:cells.rev}} of the {{fig:cells}} are strict sign reversals against the same
+  model’s own prior figure; the remaining cell was already positive, so there was no sign to
+  reverse.
+</p>
+<p class="pick"><strong>Model choice:</strong> All four models reverse here, {{fig:cells.pos}} of
+{{fig:cells}} cells positive, and the between-model ordering is confounded by differing question
+formats and instruction encodings. No between-model ranking is given.</p>
+
+<h2 id="question">The separation statistic</h2>
+<p>
+  An attacker has planted text where the agent will read it. The agent either ignores it and carries
+  on, or complies and does the attacker’s bidding. Both look similar: the attacker’s text is present
+  in both, and in both the agent keeps making tool calls. The guard has to tell them apart, so the
+  statistic is a difference.
+</p>
+
+<div class="box">
+  <p style="font-size:17px;margin:0">
+    <strong>separation</strong> = block rate on a <em>proven compromise</em>
+    &nbsp;−&nbsp; block rate on an agent that <em>correctly refused the same attack</em>
+  </p>
+  <p class="small" style="margin-bottom:0">
+    Written <code>sep|res</code> in the artifacts. Zero means the guard cannot tell the two apart.
+    <strong>Negative means it fires more on the correct refusal</strong>, so it is detecting attacker
+    text. That signal is strictly harmful: it punishes the agent for
+    doing the right thing.
+  </p>
+</div>
+
+<h2 id="agentdojo">The AgentDojo runs</h2>
+<p>
+  AgentDojo is a synthetic agent benchmark with matched attacked/clean pairs. 651 matched cases, four
+  models, two context recipes, eight runs. At the per-case, block-only lens every one of the eight
+  runs came out between −0.0053 and −0.5343; over all {{fig:cells}} measured cells the range reaches
+  −0.5969, and {{fig:ad.pos}} of them is positive. One configuration was repeated four times to
+  check. Supplying the user’s request made things
+  <em>worse</em> in 11 of 12 paired comparisons for hosted Jev, and in 26 of 36 across the three
+  prior backends. The conclusion was written down and published: the
+  mechanism DefenseClaw ships is a usable injection-<em>attempt</em> detector and a poor compromise
+  detector.
+</p>
+
+<h2 id="why">Causes of the AgentDojo negative</h2>
+<p>Two mechanical reasons, both measurable, both specific to that benchmark.</p>
+
+<div class="grid-2">
+  <div class="card">
+    <h3>1. Attacker-text sensitivity</h3>
+    <p>
+      On AgentDojo the <em>only</em> difference between a clean case and a correct refusal is that
+      attacker text is present. Across exactly that difference, one model’s detection rate went
+      <strong>0.2235 → 0.8031</strong>. The correct-refusal class was flagged 3.6 times as often as
+      the clean class purely because attacker text was on screen, which drives separation negative on
+      its own.
+    </p>
+    <p class="small muted">
+      On the proof-backed corpus the same comparison moves 0.0640 → 0.0582. 714 of the 1,083
+      resisted cases sit in a family that also holds a proven compromise, so the design is paired
+      within a family. Whether attacker text is present in those cases is not measured anywhere in
+      these artifacts.
+    </p>
+  </div>
+  <div class="card">
+    <h3>2. The aggregation unit</h3>
+    <p>
+      A case counts as detected if <em>any</em> of its events fired, so cases with more events get
+      more chances. On AgentDojo the correct-refusal class had the most events per case of the three:
+      <strong>5.07 against 4.14</strong> for compromise. Scored per event at the same block-only
+      lens the cell moves from <strong>{{fig:ad.openjev.C7}}</strong> to
+      <strong>{{fig:ad.openjev.C7.event}}</strong>. The &#8722;0.1028 sometimes quoted for this is
+      the any-intervention lens, which is a different cell.
+    </p>
+    <p class="small muted">
+      On the proof-backed corpus the ordering is reversed: the negatives average 1.00 and 1.006 events per case
+      and compromise averages 1.40. The case unit mildly flatters the positive result
+      there, which survives the per-event view anyway.
+    </p>
+  </div>
+</div>
+
+<h2 id="reversal">The reversal</h2>
+<p>
+  A new corpus was built from real emitted MCP tool calls where a deterministic proof establishes
+  that the compromise happened: 3,402 cases over 1,929 families, 405 of them carrying that proof. All
+  four models were re-run. The <em>same scorer with the same seed</em> was also re-run on the old
+  AgentDojo data as a control.
+</p>
+
+{{chart:reversal_heat}}
+
+<p>
+  The same 32 cells, as a bar chart with the bootstrap intervals the heatmap cannot carry. The
+  heatmap above is for the sign; this is for the uncertainty.
+</p>
+
+{{chart:reversal}}
+
+<div class="box good">
+  <p><strong>All {{fig:cells}} cells turn positive.</strong> That is {{fig:cells.pos}} of
+  {{fig:cells}} (4 models × 2 contexts × per-case/per-event × block-only/any-intervention), every
+  bootstrap interval excluding zero, and {{fig:cells.rev}} strict sign reversals against the
+  <em>same model’s own</em> prior figure, on the same scorer, seed, question format and instruction
+  encoding as that prior run. The one cell that is not a sign reversal is OpenJev · C0 · per event ·
+  block-only, whose AgentDojo figure was already {{fig:ad.openjev.C0.event}}; it rose without
+  changing sign.</p>
+  <p style="margin-bottom:0"><strong>The two sides use different evidence lanes, and they have to.</strong>
+  The proof-backed figures are the grade-A verified lane. AgentDojo contains zero grade-A compromised
+  cases, so its only available figure is the combined grade A + B lane. The artifact states this in
+  <code>confounds.prior_vs_now_lane</code>, and the combined-lane proof-backed figure is reported
+  alongside for a like-for-like match.</p>
+</div>
+
+<h2 id="control">The control run</h2>
+<p>
+  If the analysis code had caused the reversal, the control would have moved too. It did not.
+</p>
+
+<div class="tbl-scroll">
+<table>
+  <caption>The same scorer, flags and seed, re-run on the old corpus.
+    Source: <code>outputs/intent-real/replication-analysis.json :: reproduction_guards</code></caption>
+  <thead><tr><th>Model</th><th class="n">recomputed on AgentDojo</th><th class="n">previously published</th><th>match</th></tr></thead>
+  <tbody>
+    <tr><td>DiffusionGemma, no intent</td><td class="n">−0.223238</td><td class="n">−0.2232</td><td>✓ to 4 dp</td></tr>
+    <tr><td>DiffusionGemma, with intent</td><td class="n">−0.282564</td><td class="n">−0.2826</td><td>✓ to 4 dp</td></tr>
+    <tr><td>Gemma 4, no intent</td><td class="n">−0.155486</td><td class="n">−0.1555</td><td>✓ to 4 dp</td></tr>
+    <tr><td>Gemma 4, with intent</td><td class="n">−0.228963</td><td class="n">−0.2290</td><td>✓ to 4 dp</td></tr>
+    <tr><td>Jev, no intent</td><td class="n">−0.182644</td><td class="n">−0.1826</td><td>✓ to 4 dp</td></tr>
+    <tr><td>Jev, with intent</td><td class="n">−0.228212</td><td class="n">−0.2282</td><td>✓ to 4 dp</td></tr>
+    <tr><td>OpenJev, no intent</td><td class="n">−0.205844</td><td class="n">−0.2058</td><td>✓ to 4 dp</td></tr>
+    <tr><td>OpenJev, with intent</td><td class="n">−0.307111</td><td class="n">−0.3071</td><td>✓ to 4 dp</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Three further checks were run.</p>
+<ul>
+  <li><strong>Not corpus identity.</strong> The lead statistic compares compromise against correct
+      refusal, and <em>both</em> classes come from the same source corpus.</li>
+  <li><strong>Not a between-family confound.</strong> Restricted to the {{fig:wf.families}} families
+      holding both a proven compromise and a correct refusal, {{fig:wf.families}} against
+      {{fig:wf.families}} on the same user request and the same poisoned tool catalogue, all
+      {{fig:wf.cells}} cells stay positive with every interval excluding zero:
+      {{fig:wf.prior.cells}} for the three prior backends and {{fig:wf.jev.cells}} for the
+      fourth.</li>
+  <li><strong>Not carried by weak evidence.</strong> Grade A beats grade B in all 8 cells for every
+      model. The proof-backed rows are the ones the mechanism catches <em>best</em>, the opposite of
+      what a labelling artifact looks like.</li>
+</ul>
+
+<h2 id="limits">Limits</h2>
+<p>
+  The defensible claim is narrow: <em>on real emitted tool calls with independently verified
+  compromise proofs, comparing the call against the user’s request separates compromise from a
+  correct refusal, and knowing the request helps substantially.</em> That is a claim about
+  discrimination. The sufficiency number is bad.
+</p>
+
+{{chart:recall}}
+
+<div class="box bad">
+  <p><strong>Every model misses {{fig:miss.openjev.C7}} to {{fig:miss.jev.C7}} of proven
+  compromises.</strong> At its best measured operating point each model blocks
+  {{fig:recall.openjev.C7}} / {{fig:recall.diffgemma.C7}} / {{fig:recall.gemma4.C7}} /
+  {{fig:recall.jev.C7}} of the 405 proof-verified compromises. Adding the fourth model
+  <em>widened</em> that range.</p>
+  <p class="small" style="margin-bottom:0">
+    The evidence supports real signal and a benchmark artifact behind the prior negative; it does not
+    support sufficiency as a blocking control.
+  </p>
+</div>
+
+<h3>Caveats</h3>
+<ul>
+  <li><strong>“With intent” is not a clean isolation of intent.</strong> The <code>C7</code> recipe
+      adds the user’s request <em>and</em> up to seven prior events <em>and</em> a different text
+      representation. The C0-to-C7 gap cannot attribute the gain to the request field alone.</li>
+  <li><strong>The between-model ordering is confounded.</strong> At the grade-A block-only lens per
+      case, DiffusionGemma leads without the request and OpenJev leads with it. On the
+      any-intervention lens without the request the order is different again and Gemma&nbsp;4 leads,
+      so the ordering is a property of the lens as much as of the model. The two named models ran
+      the <em>same</em> question format and differ in instruction encoding, structured against
+      string. Only the within-model prior-vs-now contrast is controlled, and that is the contrast
+      the verdict rests on.</li>
+  <li><strong>The correct-refusal class rests on an upstream label</strong> with no independent proof
+      that the agent truly ignored the attack. Mislabelling there would <em>depress</em> measured
+      separation, so the bias is conservative.</li>
+  <li><strong>The clean class comes from different corpora</strong> than the compromise class, which
+      is why the compromise-vs-refusal comparison leads.</li>
+</ul>
+
+<h2>Current status</h2>
+<div class="tbl-scroll">
+<table>
+  <thead><tr><th>Claim</th><th>Status</th><th>Evidence</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Comparing the call to the user’s request separates proven compromise from correct refusal.</td>
+      <td><span class="pill settled">supported</span></td>
+      <td>{{fig:cells.pos}}/{{fig:cells}} cells, 4 models, intervals exclude zero, survives the
+          within-family paired design</td>
+    </tr>
+    <tr>
+      <td>Knowing the user’s request improves that separation.</td>
+      <td><span class="pill settled">supported</span></td>
+      <td>36/36 grade-A paired deltas positive; every lead-statistic interval excludes zero</td>
+    </tr>
+    <tr>
+      <td>The earlier eight-run negative was a property of the mechanism.</td>
+      <td><span class="pill neg">refuted</span></td>
+      <td>it was attacker-text sensitivity plus per-case inflation of the refusal class, both
+          measured</td>
+    </tr>
+    <tr>
+      <td>This is enough to ship as a blocking control.</td>
+      <td><span class="pill neg">not supported</span></td>
+      <td>{{fig:miss.openjev.C7}}–{{fig:miss.jev.C7}} of proof-backed compromises still get through</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p class="foot">
+  Sources: <code>outputs/intent-real/separation-analysis.json</code> (single model, deep dive) ·
+  <code>replication-analysis.json</code> (three models) · <code>jev-analysis.json</code> (the fourth,
+  and the four-model table) · <code>separation-control-agentdojo.json</code> (the control).
+  Next: <a href="finding-architecture.html">Architecture →</a>
+</p>
+
+</div>
+</body>
+</html>
