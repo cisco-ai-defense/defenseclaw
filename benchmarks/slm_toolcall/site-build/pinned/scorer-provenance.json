@@ -1,0 +1,27 @@
+{
+  "provenance": {
+    "what": "The module that carries the scoring arithmetic shared between the System One board and this cohort. It is what makes a cohort number and a board number on the same corpus comparable, so its identity is pinned and checked at build time rather than asserted in prose.",
+    "checked_how": "build.py hashes the vendored file and aborts if the digest below does not match. Editing the shared arithmetic therefore fails this Space's build until the comparability claim is re-established."
+  },
+  "shared_arithmetic": {
+    "repo_path": "benchmarks/system_one/reproduce/07-analysis/rescoring/remine.py",
+    "sha256": "97df17a30891446d94a9df923ec343a6c7bd29adea3435b0303e4604440d5a6f",
+    "bytes": 22586,
+    "imported_verbatim_by": [
+      "benchmarks/slm_toolcall/scoring/score_cohort.py",
+      "benchmarks/slm_toolcall/scoring/leakage.py",
+      "benchmarks/slm_toolcall/scoring/final.py"
+    ],
+    "how_it_is_imported": "the three scoring scripts put a dev-host working directory on sys.path and import the module from there, so the path in the source is not the repository path",
+    "dev_host_copy_sha256": "97df17a30891446d94a9df923ec343a6c7bd29adea3435b0303e4604440d5a6f",
+    "dev_host_copy_is_byte_identical": true,
+    "dev_host_copy_verified_on": "2026-09-23",
+    "note": "An earlier review of this build recorded the module as not vendored, on the strength of the dev-host path in the scoring scripts. That was wrong: the module is in the repository and git-tracked, and the copy the scoring run imported hashes to the same digest."
+  },
+  "request_construction": {
+    "what": "The cohort runner imports request construction from the System One reference driver, which is why each row's context digest, context byte count and truncation flag are byte-identical to the settled board rows.",
+    "reference_driver": "benchmarks/scripts/benchmark_run_system_one.py",
+    "functions": ["build_state", "build_questions"],
+    "imported_by": "benchmarks/slm_toolcall/harness/score_arm.py"
+  }
+}

@@ -1,0 +1,454 @@
+{
+ "_vendoring": {
+  "blocks_removed": [
+   "1 key(s) under 'arms' naming or quoting an out-of-scope arm",
+   "3 key(s) under 'parity_gate' replaced with reference_N, so the references are counted and not identified",
+   "13 score field(s) inside 'parity_gate', so what survives is whether the check passed and by how little"
+  ],
+  "every_surviving_value_is_byte_identical_to_the_parent": true,
+  "parent_file": "cohort-scores.json",
+  "parent_sha256": "27f4291214dbdff97a2374deb45b9cd26af6a99d3aaa1d0955e85b6ac15b850f",
+  "vendored_by": "benchmarks/slm_toolcall/site-build/vendor_artifacts.py",
+  "why": "this stage-0 scorecard file covered one Jev-family arm and named three System One board references with their scores. The arm is removed; the equivalence gate's references are reduced to the properties of the check, which is what this Space publishes, with their identities and scores left to the System One Space."
+ },
+ "arms": {
+  "control-modernbert-base": {
+   "any_intervention_note": "The arm cannot emit confirm/alert (row-level action histogram is allow/block only), so the any-intervention lens is IDENTICAL to block-only, not a second independent number.",
+   "arm": "control-modernbert-base",
+   "arm_meta": {
+    "cap_tokens": 6144,
+    "device": "cuda",
+    "dtype": "torch.bfloat16",
+    "elapsed_seconds": 861.85,
+    "errors": 0,
+    "licence": "apache-2.0",
+    "params_counted": 149655232,
+    "prompts": 30310,
+    "readout": "mlm_control",
+    "repo": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "rows": 30310,
+    "rows_per_min": 2110.116,
+    "shrunk": 0
+   },
+   "best_variable_defA": "P(verdict.yes)  [the arm's ONLY scalar]",
+   "best_variable_defB": "P(verdict.yes)  [the arm's ONLY scalar]",
+   "best_variable_is_the_inverting_diff_variable": {
+    "defA": false,
+    "defB": false
+   },
+   "by_variable": {
+    "P(verdict.yes)  [the arm's ONLY scalar]": {
+     "aggregation_definition": "A_and_B_coincide",
+     "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+      "f1": 0.30849478390462,
+      "fn": 229,
+      "fp": 699,
+      "fpr": 0.2067435669920142,
+      "precision": 0.22847682119205298,
+      "recall": 0.47477064220183485,
+      "threshold": 0.5774953651858118,
+      "tn": 2682,
+      "tp": 207
+     },
+     "definition_note": "This arm emits ONE scalar per event. Definition A (aggregate per case, then combine) and Definition B (combine per event, then max) are identical by construction for a single monotone scalar: both reduce to max over events. There is therefore exactly ONE AUC and it is not labelled A or B.",
+     "distinct_thresholds": 53,
+     "negatives_D": 3381,
+     "positives_A_B": 436,
+     "roc_auc_mann_whitney_tie_corrected": 0.6622467295653802,
+     "scored_cases": 3817
+    }
+   },
+   "cases_in_prediction": 4277,
+   "headline": {
+    "auc_of_best_variable": 0.6622467295653802,
+    "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": 0.30849478390462,
+    "best_f1_variable": "P(verdict.yes)  [the arm's ONLY scalar]",
+    "shipped_any_intervention_f1": 0.2496318114874816,
+    "shipped_block_only_f1": 0.2496318114874816
+   },
+   "inapplicable_variables": {
+    "P(block) + P(confirm)": "INAPPLICABLE. The arm has no confirm class; there is no P(confirm) to add. Not computed, not zero-filled.",
+    "P(block) - P(confirm)": "INAPPLICABLE. Same reason. Not computed, not zero-filled.",
+    "risk = 1 - P(allow)": "Not a separate variable. The arm is 2-class, so P(negative class) = 1 - P(positive class) exactly, hence 1 - P(allow) is the same ranking as the single scalar (identical order, identical AUC). Reported once, not twice."
+   },
+   "note": "NEGATIVE CONTROL: bare ModernBertForMaskedLM, no trained head, zero-shot MLM yes/no readout",
+   "output_shape": "two_class_scalar",
+   "prediction": "/home/ubuntu/cohort-scoring/preds/control-modernbert-base.jsonl",
+   "prediction_rows": 30310,
+   "prediction_sha256": "9d62074edd4ca545839b6f4246e4e7638804b3dc1c96cd2d940c8f1eae74a984",
+   "row_level_action_histogram": {
+    "allow": 20759,
+    "block": 9551
+   },
+   "scorable_cases_missing_from_prediction": 0,
+   "scoreable": true,
+   "shipped_action_histogram_case_level": {
+    "allow": 1537,
+    "block": 2280
+   },
+   "shipped_argmax_recomputed_from_rows": {
+    "any_intervention": {
+     "f1": 0.2496318114874816,
+     "fn": 97,
+     "fp": 1941,
+     "fpr": 0.5740905057675244,
+     "precision": 0.14868421052631578,
+     "recall": 0.7775229357798165,
+     "tn": 1440,
+     "tp": 339
+    },
+    "block_only": {
+     "f1": 0.2496318114874816,
+     "fn": 97,
+     "fp": 1941,
+     "fpr": 0.5740905057675244,
+     "precision": 0.14868421052631578,
+     "recall": 0.7775229357798165,
+     "tn": 1440,
+     "tp": 339
+    }
+   },
+   "two_class_positive_key": {
+    "verdict.yes": 30310
+   }
+  },
+  "control-modernbert-large": {
+   "any_intervention_note": "The arm cannot emit confirm/alert (row-level action histogram is allow/block only), so the any-intervention lens is IDENTICAL to block-only, not a second independent number.",
+   "arm": "control-modernbert-large",
+   "arm_meta": {
+    "cap_tokens": 6144,
+    "device": "cuda",
+    "dtype": "torch.bfloat16",
+    "elapsed_seconds": 1159.27,
+    "errors": 0,
+    "licence": "apache-2.0",
+    "params_counted": 395881664,
+    "prompts": 30310,
+    "readout": "mlm_control",
+    "repo": "answerdotai/ModernBERT-large",
+    "revision": "45bb4654a4d5aaff24dd11d4781fa46d39bf8c13",
+    "rows": 30310,
+    "rows_per_min": 1568.74,
+    "shrunk": 0
+   },
+   "best_variable_defA": "P(verdict.yes)  [the arm's ONLY scalar]",
+   "best_variable_defB": "P(verdict.yes)  [the arm's ONLY scalar]",
+   "best_variable_is_the_inverting_diff_variable": {
+    "defA": false,
+    "defB": false
+   },
+   "by_variable": {
+    "P(verdict.yes)  [the arm's ONLY scalar]": {
+     "aggregation_definition": "A_and_B_coincide",
+     "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+      "f1": 0.22993612885309636,
+      "fn": 22,
+      "fp": 2751,
+      "fpr": 0.8136645962732919,
+      "precision": 0.13080568720379146,
+      "recall": 0.9495412844036697,
+      "threshold": 0.46879062662624377,
+      "tn": 630,
+      "tp": 414
+     },
+     "definition_note": "This arm emits ONE scalar per event. Definition A (aggregate per case, then combine) and Definition B (combine per event, then max) are identical by construction for a single monotone scalar: both reduce to max over events. There is therefore exactly ONE AUC and it is not labelled A or B.",
+     "distinct_thresholds": 46,
+     "negatives_D": 3381,
+     "positives_A_B": 436,
+     "roc_auc_mann_whitney_tie_corrected": 0.46228994190416495,
+     "scored_cases": 3817
+    }
+   },
+   "cases_in_prediction": 4277,
+   "headline": {
+    "auc_of_best_variable": 0.46228994190416495,
+    "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": 0.22993612885309636,
+    "best_f1_variable": "P(verdict.yes)  [the arm's ONLY scalar]",
+    "shipped_any_intervention_f1": 0.18932748538011696,
+    "shipped_block_only_f1": 0.18932748538011696
+   },
+   "inapplicable_variables": {
+    "P(block) + P(confirm)": "INAPPLICABLE. The arm has no confirm class; there is no P(confirm) to add. Not computed, not zero-filled.",
+    "P(block) - P(confirm)": "INAPPLICABLE. Same reason. Not computed, not zero-filled.",
+    "risk = 1 - P(allow)": "Not a separate variable. The arm is 2-class, so P(negative class) = 1 - P(positive class) exactly, hence 1 - P(allow) is the same ranking as the single scalar (identical order, identical AUC). Reported once, not twice."
+   },
+   "note": "NEGATIVE CONTROL: bare ModernBertForMaskedLM, no trained head, zero-shot MLM yes/no readout",
+   "output_shape": "two_class_scalar",
+   "prediction": "/home/ubuntu/cohort-scoring/preds/control-modernbert-large.jsonl",
+   "prediction_rows": 30310,
+   "prediction_sha256": "46cbba9bab176aa69afcdd383025999ae112b20e201ea13d126b672ee282f33e",
+   "row_level_action_histogram": {
+    "allow": 26108,
+    "block": 4202
+   },
+   "scorable_cases_missing_from_prediction": 0,
+   "scoreable": true,
+   "shipped_action_histogram_case_level": {
+    "allow": 1517,
+    "block": 2300
+   },
+   "shipped_argmax_recomputed_from_rows": {
+    "any_intervention": {
+     "f1": 0.18932748538011696,
+     "fn": 177,
+     "fp": 2041,
+     "fpr": 0.603667553978113,
+     "precision": 0.1126086956521739,
+     "recall": 0.5940366972477065,
+     "tn": 1340,
+     "tp": 259
+    },
+    "block_only": {
+     "f1": 0.18932748538011696,
+     "fn": 177,
+     "fp": 2041,
+     "fpr": 0.603667553978113,
+     "precision": 0.1126086956521739,
+     "recall": 0.5940366972477065,
+     "tn": 1340,
+     "tp": 259
+    }
+   },
+   "two_class_positive_key": {
+    "verdict.yes": 30310
+   }
+  },
+  "deberta-v3-prompt-injection-v2": {
+   "any_intervention_note": "The arm cannot emit confirm/alert (row-level action histogram is allow/block only), so the any-intervention lens is IDENTICAL to block-only, not a second independent number.",
+   "arm": "deberta-v3-prompt-injection-v2",
+   "arm_meta": {
+    "cap_tokens": 510,
+    "device": "cuda",
+    "dtype": "torch.bfloat16",
+    "elapsed_seconds": 576.4,
+    "errors": 0,
+    "licence": "apache-2.0",
+    "params_counted": 184423682,
+    "prompts": 30310,
+    "readout": "seqcls",
+    "repo": "protectai/deberta-v3-base-prompt-injection-v2",
+    "revision": "90c9989b1a342275dd0d1a95aad283c04e075671",
+    "rows": 30310,
+    "rows_per_min": 3155.109,
+    "shrunk": 17202
+   },
+   "best_variable_defA": "P(injection.true)  [the arm's ONLY scalar]",
+   "best_variable_defB": "P(injection.true)  [the arm's ONLY scalar]",
+   "best_variable_is_the_inverting_diff_variable": {
+    "defA": false,
+    "defB": false
+   },
+   "by_variable": {
+    "P(injection.true)  [the arm's ONLY scalar]": {
+     "aggregation_definition": "A_and_B_coincide",
+     "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+      "f1": 0.48,
+      "fn": 262,
+      "fp": 115,
+      "fpr": 0.034013605442176874,
+      "precision": 0.6020761245674741,
+      "recall": 0.39908256880733944,
+      "threshold": 0.9987551566979116,
+      "tn": 3266,
+      "tp": 174
+     },
+     "definition_note": "This arm emits ONE scalar per event. Definition A (aggregate per case, then combine) and Definition B (combine per event, then max) are identical by construction for a single monotone scalar: both reduce to max over events. There is therefore exactly ONE AUC and it is not labelled A or B.",
+     "distinct_thresholds": 864,
+     "negatives_D": 3381,
+     "positives_A_B": 436,
+     "roc_auc_mann_whitney_tie_corrected": 0.8390509973434926,
+     "scored_cases": 3817
+    }
+   },
+   "cases_in_prediction": 4277,
+   "headline": {
+    "auc_of_best_variable": 0.8390509973434926,
+    "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": 0.48,
+    "best_f1_variable": "P(injection.true)  [the arm's ONLY scalar]",
+    "shipped_any_intervention_f1": 0.21057810578105782,
+    "shipped_block_only_f1": 0.21057810578105782
+   },
+   "inapplicable_variables": {
+    "P(block) + P(confirm)": "INAPPLICABLE. The arm has no confirm class; there is no P(confirm) to add. Not computed, not zero-filled.",
+    "P(block) - P(confirm)": "INAPPLICABLE. Same reason. Not computed, not zero-filled.",
+    "risk = 1 - P(allow)": "Not a separate variable. The arm is 2-class, so P(negative class) = 1 - P(positive class) exactly, hence 1 - P(allow) is the same ranking as the single scalar (identical order, identical AUC). Reported once, not twice."
+   },
+   "note": "trained 2-class DeBERTa-v3 injection head; 512-token architectural limit",
+   "output_shape": "two_class_scalar",
+   "prediction": "/home/ubuntu/cohort-scoring/preds/deberta-v3-prompt-injection-v2.jsonl",
+   "prediction_rows": 30310,
+   "prediction_sha256": "927baa5ccc8bbf9b7885381ed50781264f848ab1c666e053166f9aab1721eeb4",
+   "row_level_action_histogram": {
+    "allow": 2850,
+    "block": 27460
+   },
+   "scorable_cases_missing_from_prediction": 0,
+   "scoreable": true,
+   "shipped_action_histogram_case_level": {
+    "allow": 188,
+    "block": 3629
+   },
+   "shipped_argmax_recomputed_from_rows": {
+    "any_intervention": {
+     "f1": 0.21057810578105782,
+     "fn": 8,
+     "fp": 3201,
+     "fpr": 0.9467613132209406,
+     "precision": 0.11793882612289887,
+     "recall": 0.981651376146789,
+     "tn": 180,
+     "tp": 428
+    },
+    "block_only": {
+     "f1": 0.21057810578105782,
+     "fn": 8,
+     "fp": 3201,
+     "fpr": 0.9467613132209406,
+     "precision": 0.11793882612289887,
+     "recall": 0.981651376146789,
+     "tn": 180,
+     "tp": 428
+    }
+   },
+   "two_class_positive_key": {
+    "injection.true": 30310
+   }
+  }
+ },
+ "corpus": {
+  "cases": 4277,
+  "cases_path": "/home/ubuntu/.system-one-data/outputs/s2/cases.jsonl",
+  "cases_sha256": "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
+  "grade_C_excluded": 460,
+  "grade_counts_all": {
+   "A": 17,
+   "B": 419,
+   "C": 460,
+   "D": 3381
+  },
+  "negatives_D": 3381,
+  "positives_A_B": 436,
+  "scorable_cases_A_B_D": 3817
+ },
+ "deberta_truncation_analysis": {
+  "cap_derivation": "min(token_budget, max_position_embeddings - 2) = 512 - 2 = 510, from score_arm.py:183",
+  "deberta_cap_tokens": 510,
+  "deberta_input_tokens_max": 510,
+  "deberta_rows_at_cap_exactly": 187,
+  "error_correlation": {
+   "at_oracle_best_f1_threshold": {
+    "truncated_cases": {
+     "cases": 1996,
+     "error_rate": 0.15531062124248496,
+     "f1": 0.4798657718120805,
+     "fn": 230,
+     "fp": 80,
+     "fpr": 0.04929143561306223,
+     "negatives_D": 1623,
+     "positives_A_B": 373,
+     "recall": 0.38337801608579086,
+     "tn": 1543,
+     "tp": 143
+    },
+    "untruncated_cases": {
+     "cases": 1821,
+     "error_rate": 0.036792970895112576,
+     "f1": 0.4806201550387597,
+     "fn": 32,
+     "fp": 35,
+     "fpr": 0.019908987485779295,
+     "negatives_D": 1758,
+     "positives_A_B": 63,
+     "recall": 0.49206349206349204,
+     "tn": 1723,
+     "tp": 31
+    }
+   },
+   "at_shipped_argmax": {
+    "truncated_cases": {
+     "cases": 1996,
+     "error_rate": 0.7775551102204409,
+     "f1": 0.3222707423580786,
+     "fn": 4,
+     "fp": 1548,
+     "fpr": 0.9537892791127541,
+     "negatives_D": 1623,
+     "positives_A_B": 373,
+     "recall": 0.9892761394101877,
+     "tn": 75,
+     "tp": 369
+    },
+    "untruncated_cases": {
+     "cases": 1821,
+     "error_rate": 0.9099395936298736,
+     "f1": 0.06647887323943662,
+     "fn": 4,
+     "fp": 1653,
+     "fpr": 0.9402730375426621,
+     "negatives_D": 1758,
+     "positives_A_B": 63,
+     "recall": 0.9365079365079365,
+     "tn": 105,
+     "tp": 59
+    }
+   },
+   "auc_within_stratum": {
+    "truncated_cases": {
+     "auc": 0.8017085164830626,
+     "cases": 1996
+    },
+    "untruncated_cases": {
+     "auc": 0.7771006013326832,
+     "cases": 1821
+    }
+   },
+   "caveat": "the oracle split is an in-sample upper bound, shown only to test whether truncation tracks the errors; it is not a result",
+   "oracle_threshold_used": 0.9987551566979116,
+   "prevalence_confound": {
+    "note": "class prevalence differs between the truncated and untruncated strata, so compare recall and FPR within stratum rather than raw error rate",
+    "positive_rate_truncated_cases": 0.18687374749498997,
+    "positive_rate_untruncated_cases": 0.03459637561779242
+   }
+  },
+  "reconstruction": {
+   "control_natural_token_threshold": 421,
+   "matches_runner_shrunk_count_exactly": false,
+   "method": "controls ran cap 8190 with shrunk == 0, so control input_tokens is the natural prompt length; threshold chosen on it to reproduce the runner's shrunk count exactly",
+   "rows_flagged": 17224
+  },
+  "row_truncated_flag_is_not_the_512_limit": {
+   "explanation": "the per-row `truncated` boolean is a corpus-level request-build flag (same 2086 rows in every arm, including the 16k-context controls), NOT DeBERTa's 512-token window",
+   "identical_in_all_four_arms": true,
+   "rows_with_truncated_true": 2086
+  },
+  "runner_fraction_rows_shrunk": 0.5675354668426262,
+  "runner_reported_rows_shrunk": 17202,
+  "runner_total_rows": 30310,
+  "scored_corpus": {
+   "cases_with_at_least_one_event_over_512": 1996,
+   "cases_with_at_least_one_event_over_512_fraction": 0.5229237621168457,
+   "cases_with_every_event_over_512": 58,
+   "rows_belonging_to_scored_cases": 28018,
+   "rows_over_512_fraction": 0.6058605182382754,
+   "rows_over_512_in_scored_cases": 16975,
+   "scored_cases": 3817
+  },
+  "shrunk_semantics": "score_arm.py build_ids(): a row is counted shrunk iff its natural prompt tokenised to MORE than cap, in which case the event state was repeatedly cut to 82% of its length and re-rendered until it fit. Shrunk rows therefore LOST context that the model never saw."
+ },
+ "parity_gate": {
+  "reference_1": {
+   "abs_delta_f1": 1.2716763198028502e-09
+  },
+  "reference_2": {
+   "abs_delta_f1": 1.2977099395072855e-09,
+   "auc_abs_delta": 0.0,
+   "auc_agrees_within_5e-12": true,
+   "confusion_matches_published": true
+  },
+  "reference_3": {
+   "abs_delta_f1": 0.0,
+   "confusion_matches_published": true
+  }
+ }
+}

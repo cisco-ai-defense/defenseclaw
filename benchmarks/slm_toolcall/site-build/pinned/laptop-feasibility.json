@@ -1,0 +1,162 @@
+{
+  "provenance": {
+    "source": "benchmarks/EXPERIMENTS.md, laptop-feasibility section",
+    "raw_artifacts_location": "the Lightning studio",
+    "raw_artifacts_read_for_this_build": false,
+    "why": "a GPU sweep and a reshard were running on the Lightning studio and its drive was at about 80% I/O stall, so nothing was run there for this build. Every value below is a primitive transcribed from the ledger; every derived figure on the site is recomputed from these primitives at build time.",
+    "measurement_conditions": {
+      "device": "CPU only, CUDA_VISIBLE_DEVICES empty",
+      "threads": 8,
+      "thread_placement": "pinned",
+      "decoder_quantization": "GGUF Q4_K_M under llama.cpp",
+      "encoder_quantization": "dynamic int8 under transformers",
+      "latency_model": "row_latency = 1200/pp1200 + 1/tg32",
+      "bench_command": "llama-bench -t 8 -p 1200 -n 32 -r 3",
+      "bench_deviation": "under 4%",
+      "generated_token_share_of_latency": "under 1% in every case",
+      "conversions_attempted": {
+        "decoders": 11,
+        "encoders": 3
+      },
+      "conversions_succeeded": {
+        "decoders": 11,
+        "encoders": 3
+      }
+    },
+    "caveats": [
+      {
+        "id": "rss-not-additive",
+        "text": "peak RSS came from the kernel's VmHWM high-water mark polled every 5 ms and cross-checked against getrusage, because the host carries no /usr/bin/time. The figure already includes the weights, so it is not additive with the Q4_K_M file size."
+      },
+      {
+        "id": "optimistic-ceiling",
+        "text": "the host carried about 31 of its 96 cores of foreign load throughout, so there is memory-bandwidth contention that could not be removed. A real laptop also thermally throttles. Every throughput figure here is an optimistic ceiling."
+      }
+    ],
+    "reproducibility": "harness/build_llamacpp.sh builds the CPU benchmarking toolchain, and no script in the harness runs it or writes the CPU results. The measurements were ad-hoc invocations that were never saved to a file, so the logs on the studio survive and the measurement step does not. These figures are archived rather than reproducible from vendored code. Recorded in benchmarks/slm_toolcall/harness/README.md."
+  },
+  "decoder_throughput_rows_per_min": [
+    {
+      "arm": "olmo-2-1b-instruct",
+      "label": "OLMo-2-1B",
+      "rows_per_min": 30.38
+    },
+    {
+      "arm": "falcon3-1b-instruct",
+      "label": "Falcon3-1B",
+      "rows_per_min": 27.67
+    },
+    {
+      "arm": "smollm2-1.7b-instruct",
+      "label": "SmolLM2-1.7B",
+      "rows_per_min": 19.35
+    },
+    {
+      "arm": "granite-4.0-1b",
+      "label": "granite-4.0-1b",
+      "rows_per_min": 18.83
+    },
+    {
+      "arm": "falcon3-3b-instruct",
+      "label": "Falcon3-3B",
+      "rows_per_min": 13.68
+    },
+    {
+      "arm": "granite-guardian-3.1-2b",
+      "label": "granite-guardian-3.1-2b",
+      "rows_per_min": 12.45
+    },
+    {
+      "arm": "granite-guardian-3.2-3b-a800m",
+      "label": "granite-guardian-3.2-3b-a800m",
+      "rows_per_min": 11.98
+    },
+    {
+      "arm": "smollm3-3b",
+      "label": "SmolLM3-3B",
+      "rows_per_min": 11.4
+    },
+    {
+      "arm": "phi-4-mini-instruct",
+      "label": "Phi-4-mini",
+      "rows_per_min": 10.08
+    },
+    {
+      "arm": "shieldstral-1.0-3b",
+      "label": "Shieldstral (text tower)",
+      "rows_per_min": 9.91
+    },
+    {
+      "arm": "granite-4.0-micro",
+      "label": "granite-4.0-micro",
+      "rows_per_min": 9.61
+    }
+  ],
+  "encoder_throughput_rows_per_min": [
+    {
+      "arm": "deberta-v3-prompt-injection-v2",
+      "label": "DeBERTa-v3-base",
+      "rows_per_min": 186.7,
+      "context_tokens": 512,
+      "context_note": "its architectural maximum, so a longer prompt is truncated"
+    },
+    {
+      "arm": "control-modernbert-base",
+      "label": "ModernBERT-base",
+      "rows_per_min": 44.6,
+      "context_tokens": 1200,
+      "context_note": "the full prompt budget"
+    }
+  ],
+  "throughput_coverage": {
+    "arms_converted_or_quantized": 14,
+    "arms_with_a_published_rows_per_min": 13,
+    "gap": "the third quantized encoder has no rows/min figure in the ledger. The gap is named on the site."
+  },
+  "memory": {
+    "q4_k_m_gib_min": {
+      "arm": "olmo-2-1b-instruct",
+      "label": "OLMo-2-1B",
+      "gib": 0.871
+    },
+    "q4_k_m_gib_max": {
+      "arm": "phi-4-mini-instruct",
+      "label": "Phi-4-mini",
+      "gib": 2.323
+    },
+    "peak_rss_hungriest": {
+      "arm": "phi-4-mini-instruct",
+      "label": "Phi-4-mini",
+      "irreducible_gib": 3.137,
+      "worst_observed_under_mmap_gib": 5.048
+    },
+    "reference_lines_gib": [
+      8,
+      24
+    ]
+  },
+  "multimodal_splits": [
+    {
+      "arm": "shieldstral-1.0-3b",
+      "label": "Shieldstral-1.0-3B",
+      "architecture": "Mistral3ForConditionalGeneration",
+      "vision_params": 403305472,
+      "projector_params": 16778240,
+      "text_tower_params": 3429006336,
+      "converter_behaviour": "llama.cpp emits the text tower only for `mistral3`: 236 tensors, exactly 3,429,006,336 elements, matching `language_model` to the parameter, and zero vision tensors",
+      "text_tower_tensors": 236,
+      "text_only_q4_k_m_bytes": 2146497312,
+      "mmproj_bytes": 840284704,
+      "mmproj_note": "the vision side exports separately as an mmproj that is never built"
+    },
+    {
+      "arm": "gemma-3-4b-it",
+      "label": "gemma-3-4b-it",
+      "architecture": "Gemma3ForConditionalGeneration",
+      "vision_params": 416866032,
+      "projector_params": 2950272,
+      "text_tower_params": 3880263168,
+      "full_checkpoint_bytes": 8600277880
+    }
+  ]
+}

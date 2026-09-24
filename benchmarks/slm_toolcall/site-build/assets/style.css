@@ -1,0 +1,407 @@
+/* DefenseClaw System One - private evaluation Space
+   One stylesheet. No external assets, no CDN, no JS frameworks.
+   Palette: dataviz reference instance (validated categorical order + status tokens). */
+
+:root{
+  color-scheme: light;
+  /* surfaces & ink */
+  --page:#f9f9f7;
+  --surface:#fcfcfb;
+  --surface-2:#f2f1ed;
+  --ink:#0b0b0b;
+  --ink-2:#52514e;
+  --muted:#898781;
+  --grid:#e1e0d9;
+  --axis:#c3c2b7;
+  --border:rgba(11,11,11,.10);
+  --link:#184f95;
+  /* categorical slots (fixed order, never cycled) */
+  --series-1:#2a78d6;
+  --series-2:#eb6834;
+  --series-3:#1baf7a;
+  --series-4:#eda100;
+  --series-5:#e87ba4;
+  --series-6:#008300;
+  --series-7:#4a3aa7;
+  --series-8:#e34948;
+  /* ordinal steps of the sequential blue (light: no lighter than step 250) */
+  --seq-1:#86b6ef;
+  --seq-2:#3987e5;
+  --seq-3:#256abf;
+  --seq-4:#104281;
+  /* diverging poles: blue <-> red, neutral gray midpoint */
+  --pos-1:#86b6ef;
+  --pos-2:#2a78d6;
+  --neg-1:#f2a2a1;
+  --neg-2:#d03b3b;
+  --mid:#f0efec;
+  /* status (reserved, never a series) */
+  --good:#0ca30c;
+  --warning:#fab219;
+  --serious:#ec835a;
+  --critical:#d03b3b;
+  --good-text:#006300;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    color-scheme: dark;
+    --page:#0d0d0d;
+    --surface:#1a1a19;
+    --surface-2:#232321;
+    --ink:#ffffff;
+    --ink-2:#c3c2b7;
+    --muted:#898781;
+    --grid:#2c2c2a;
+    --axis:#383835;
+    --border:rgba(255,255,255,.10);
+    --link:#86b6ef;
+    --series-1:#3987e5;
+    --series-2:#d95926;
+    --series-3:#199e70;
+    --series-4:#c98500;
+    --series-5:#d55181;
+    --series-6:#008300;
+    --series-7:#9085e9;
+    --series-8:#e66767;
+    --seq-1:#86b6ef;
+    --seq-2:#3987e5;
+    --seq-3:#256abf;
+    --seq-4:#184f95;
+    --pos-1:#86b6ef;
+    --pos-2:#3987e5;
+    --neg-1:#e66767;
+    --neg-2:#d03b3b;
+    --mid:#383835;
+    --good-text:#0ca30c;
+  }
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--page);color:var(--ink);
+  font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+
+/* ---------- nav ---------- */
+.nav{
+  position:sticky;top:0;z-index:20;background:var(--surface);
+  border-bottom:1px solid var(--border);
+}
+.nav-in{max-width:1040px;margin:0 auto;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.nav-brand{font-weight:650;letter-spacing:-.01em;margin-right:6px;white-space:nowrap}
+.nav a{color:var(--ink-2);text-decoration:none;font-size:14px;padding:3px 0;white-space:nowrap}
+.nav a:hover{color:var(--ink);text-decoration:underline}
+.nav a[aria-current="page"]{color:var(--ink);font-weight:600;box-shadow:inset 0 -2px 0 var(--series-1)}
+.nav .tag{
+  margin-left:auto;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-2);border:1px solid var(--border);border-radius:99px;padding:2px 9px;white-space:nowrap
+}
+
+/* ---------- layout ---------- */
+.wrap{max-width:1040px;margin:0 auto;padding:34px 20px 90px}
+h1{font-size:30px;line-height:1.2;margin:0 0 8px;letter-spacing:-.02em}
+h2{font-size:21px;margin:44px 0 10px;letter-spacing:-.01em;scroll-margin-top:70px}
+h3{font-size:16px;margin:26px 0 6px}
+.eyebrow{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+.lede{font-size:18px;color:var(--ink-2);margin:0 0 26px;max-width:72ch}
+p{margin:11px 0;max-width:78ch}
+ul,ol{margin:10px 0;padding-left:22px;max-width:78ch}
+li{margin:5px 0}
+a{color:var(--link)}
+code{
+  background:var(--surface-2);padding:1px 5px;border-radius:4px;
+  font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace
+}
+hr{border:0;border-top:1px solid var(--border);margin:36px 0}
+.small{font-size:13.5px;color:var(--ink-2)}
+.muted{color:var(--muted)}
+
+/* ---------- boxes ---------- */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:16px 0}
+.card h3{margin-top:0}
+.box{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--series-1);
+     border-radius:10px;padding:14px 18px;margin:18px 0}
+.box.warn{border-left-color:var(--warning)}
+.box.bad{border-left-color:var(--critical)}
+.box.good{border-left-color:var(--good)}
+.box > :first-child{margin-top:0}
+.box > :last-child{margin-bottom:0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));margin:18px 0}
+.grid-2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));margin:18px 0}
+
+/* finding cards on the front page */
+.fcard{
+  display:block;background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:16px 18px;text-decoration:none;color:inherit
+}
+.fcard:hover{border-color:var(--series-1)}
+.fcard .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.fcard .t{font-weight:640;margin:5px 0 4px;font-size:16.5px;letter-spacing:-.01em}
+.fcard .n{font-size:26px;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin:2px 0}
+.fcard .d{font-size:13.5px;color:var(--ink-2)}
+.fcard .go{font-size:13px;color:var(--link);margin-top:8px}
+
+/* stat tiles - the number IS the chart */
+.tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin:16px 0}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px 15px}
+.tile .v{font-size:25px;letter-spacing:-.02em;line-height:1.15}
+.tile .l{font-size:12.5px;color:var(--ink-2);margin-top:3px}
+.tile .s{font-size:11px;color:var(--muted);margin-top:5px;word-break:break-all}
+
+/* ---------- tables ---------- */
+.tbl-scroll{
+  overflow-x:auto;margin:14px 0;
+  /* a right-edge fade that only shows while there is more table off-screen, so a clipped
+     column announces itself instead of being silently cut. Pure CSS: it needs no script. */
+  background:
+    linear-gradient(to left, var(--page) 0, transparent 14px) right / 24px 100% no-repeat,
+    linear-gradient(to left, rgba(0,0,0,.10), transparent 12px) right / 12px 100% no-repeat;
+  background-attachment:local, scroll
+}
+.tbl-note{max-width:78ch;margin:14px 0 0}
+/* A table wider than the prose column may bleed out to the viewport instead of being clipped
+   inside it. The leaderboard is the only table this is applied to: it carries nine columns and a
+   Verdict column that has to stay readable. Capped so it never introduces page-level horizontal
+   overflow, and the wrapper still scrolls if a narrow viewport needs it. */
+.tbl-wide{
+  /* bleed symmetrically into whatever space exists outside the prose column, keeping a 20px
+     gutter on each side and never more than 150px per side. At or below the prose column's own
+     width the bleed evaluates to zero, so this cannot introduce page-level horizontal overflow
+     at any viewport. */
+  --bleed:clamp(0px, (100vw - 40px - 100%) / 2, 150px);
+  margin-left:calc(-1 * var(--bleed));
+  margin-right:calc(-1 * var(--bleed))
+}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:520px}
+caption{text-align:left;font-size:13px;color:var(--ink-2);padding:0 0 8px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+thead th{
+  color:var(--muted);font-weight:620;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
+  border-bottom:1px solid var(--axis)
+}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+/* A revision or path in a numeric cell is an identifier, not a number. `nowrap`
+   inherits into it and suppresses every soft-wrap opportunity, which set one table's
+   min-content width to a 40-character sha and pushed it off the viewport. The digits
+   in the same column still do not wrap. */
+td.n code,th.n code{white-space:normal;overflow-wrap:anywhere}
+/* A long header on a numeric column forced the whole column to that width, because th.n is
+   nowrap. The DATA still must not wrap (it is tabular numbers); the header may. */
+thead th.n{white-space:normal}
+tbody tr:hover{background:var(--surface-2)}
+.pos{color:var(--good-text);font-weight:600}
+.neg{color:var(--critical);font-weight:600}
+.sub{font-size:12.5px;color:var(--muted)}
+
+/* ---------- charts ---------- */
+figure.chart{
+  margin:22px 0;background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:16px 16px 12px
+}
+figure.chart svg{display:block;width:100%;height:auto;overflow:visible}
+figure.chart .ftitle{font-weight:620;font-size:15px;margin:0 0 2px}
+figure.chart .fsub{font-size:13px;color:var(--ink-2);margin:0 0 10px;max-width:80ch}
+figcaption{font-size:12px;color:var(--muted);margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
+figcaption code{background:none;padding:0;font-size:12px;color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0 0 10px;font-size:12.5px;color:var(--ink-2)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+figure.chart svg.sw{width:11px;height:11px;flex:0 0 auto;display:inline-block}
+details.tv{margin-top:8px}
+details.tv summary{font-size:12.5px;color:var(--link);cursor:pointer}
+details.tv table{font-size:13px;margin-top:8px}
+svg text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+
+/* Chart classes carry COLOUR ONLY. Every geometry value (font-size, stroke-width,
+   dash pattern) is a presentation attribute on the element itself, and so is the
+   light-mode colour — a chart renders correctly with this whole stylesheet removed.
+   These rules exist so dark mode is a selected palette rather than an automatic
+   flip; a CSS declaration outranks a presentation attribute, so they win where
+   they apply. build.py asserts the light values below match its own table. */
+.ax{fill:var(--muted)}
+.axl{fill:var(--ink-2)}
+.vl{fill:var(--ink);font-variant-numeric:tabular-nums}
+.hd{fill:var(--ink)}
+.gl{stroke:var(--grid)}
+.bl{stroke:var(--axis)}
+.eb{stroke:var(--ink-2)}
+.ref{stroke:var(--ink-2)}
+.f-s1{fill:var(--series-1)}       .k-s1{stroke:var(--series-1)}
+.f-s2{fill:var(--series-2)}       .k-s2{stroke:var(--series-2)}
+.f-s3{fill:var(--series-3)}       .k-s3{stroke:var(--series-3)}
+.f-s4{fill:var(--series-4)}       .k-s4{stroke:var(--series-4)}
+.f-s5{fill:var(--series-5)}       .k-s5{stroke:var(--series-5)}
+.f-s6{fill:var(--series-6)}       .k-s6{stroke:var(--series-6)}
+.f-s7{fill:var(--series-7)}       .k-s7{stroke:var(--series-7)}
+.f-s8{fill:var(--series-8)}       .k-s8{stroke:var(--series-8)}
+.f-seq1{fill:var(--seq-1)}        .k-seq1{stroke:var(--seq-1)}
+.f-seq2{fill:var(--seq-2)}        .k-seq2{stroke:var(--seq-2)}
+.f-seq3{fill:var(--seq-3)}        .k-seq3{stroke:var(--seq-3)}
+.f-seq4{fill:var(--seq-4)}        .k-seq4{stroke:var(--seq-4)}
+.f-pos1{fill:var(--pos-1)}        .k-pos1{stroke:var(--pos-1)}
+.f-pos2{fill:var(--pos-2)}        .k-pos2{stroke:var(--pos-2)}
+.f-neg1{fill:var(--neg-1)}        .k-neg1{stroke:var(--neg-1)}
+.f-neg2{fill:var(--neg-2)}        .k-neg2{stroke:var(--neg-2)}
+.f-good{fill:var(--good)}         .k-good{stroke:var(--good)}
+.f-warning{fill:var(--warning)}   .k-warning{stroke:var(--warning)}
+.f-serious{fill:var(--serious)}   .k-serious{stroke:var(--serious)}
+.f-critical{fill:var(--critical)} .k-critical{stroke:var(--critical)}
+.f-surface{fill:var(--surface)}   .k-surface{stroke:var(--surface)}
+.f-surface2{fill:var(--surface-2)}.k-surface2{stroke:var(--surface-2)}
+.f-axis{fill:var(--axis)}         .k-axis{stroke:var(--axis)}
+.f-ink{fill:var(--ink)}           .k-ink{stroke:var(--ink)}
+.f-mid{fill:var(--mid)}           .k-mid{stroke:var(--mid)}
+
+/* ---------- pills / statuses ---------- */
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--border);
+      color:var(--ink-2);white-space:nowrap}
+.pill.settled{border-color:var(--good);color:var(--good-text)}
+.pill.neg{border-color:var(--critical);color:var(--critical)}
+.pill.open{border-color:var(--warning);color:var(--ink-2)}
+
+/* ---------- model-choice line under a page lede ---------- */
+.pick{
+  background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--series-3);
+  border-radius:10px;padding:11px 15px;margin:0 0 24px;font-size:14.5px;color:var(--ink-2);
+  max-width:80ch
+}
+.pick strong{color:var(--ink)}
+
+/* ---------- the plain-language line on a recommendation card ---------- */
+.prac{
+  margin:12px 0 0;padding:11px 14px;border-radius:9px;
+  background:var(--surface-2);border-left:3px solid var(--series-3);
+  font-size:14px;color:var(--ink-2);max-width:none
+}
+.prac strong{color:var(--ink)}
+
+/* ---------- interactive controls (progressive enhancement) ---------- */
+.ctl{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:16px 0 10px;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 15px
+}
+.ctl-l{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:620}
+.ctl-n{flex:1 1 100%;font-size:12.5px;color:var(--muted);margin:0}
+.seg{
+  font:inherit;font-size:13.5px;padding:5px 12px;border-radius:8px;cursor:pointer;
+  background:var(--surface-2);color:var(--ink-2);border:1px solid var(--border)
+}
+.seg:hover{border-color:var(--series-1);color:var(--ink)}
+.seg.on,.seg[aria-pressed="true"]{
+  background:var(--seq-4);border-color:var(--seq-4);color:#ffffff;font-weight:600
+}
+.ctl input[type="range"]{flex:0 1 240px;accent-color:var(--seq-3);min-width:160px}
+.ctl output{
+  font-variant-numeric:tabular-nums;font-size:16px;font-weight:640;
+  min-width:3.6em;text-align:center;color:var(--ink)
+}
+.tile .tl{font-size:12.5px;color:var(--ink-2)}
+.tile .tv2{font-size:25px;letter-spacing:-.02em;line-height:1.15;font-variant-numeric:tabular-nums}
+.tile .tn{font-size:11px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
+th[data-sort]{cursor:pointer;user-select:none}
+th[data-sort]:hover{color:var(--ink)}
+th[data-sort]:focus-visible{outline:2px solid var(--series-1);outline-offset:-2px}
+th[data-sort]::after{content:" \2195";color:var(--axis)}
+
+/* ---------- head-to-head matchup cards ---------- */
+/* leaderboard verdict column: a short phrase, the full scope on hover ---------- */
+th.vcol,td.vcol{max-width:27ch;min-width:19ch}
+/* chart provenance: the artifact path lives on hover, never under the graph ----- */
+figcaption .prov{margin-left:.4em;font-size:12px;color:var(--muted);
+  text-decoration-color:var(--muted)}
+figcaption .prov .ttv::before{content:"\2139\00a0"}
+/* explained numbers ---------------------------------------------------------- */
+/* The description is ALWAYS in the DOM and always in the accessibility tree; the
+   popover is the same node restyled on hover, focus or tap. Nothing here is the only
+   route to the content, and opening it shifts no layout. */
+.tt{position:relative;display:inline-block;cursor:help;
+  text-decoration:underline dotted;text-decoration-thickness:1px;text-underline-offset:2px;
+  text-decoration-color:var(--muted)}
+.tt:focus-visible{outline:2px solid var(--series-1);outline-offset:2px;border-radius:3px}
+.ttv{font-variant-numeric:tabular-nums}
+.ttd{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;
+  clip-path:inset(50%);white-space:nowrap;border:0}
+.tt:hover > .ttd,.tt:focus > .ttd,.tt:focus-within > .ttd,.tt[data-open="1"] > .ttd{
+  position:absolute;left:0;right:auto;top:calc(100% + 7px);z-index:60;
+  width:min(324px,78vw);height:auto;padding:11px 13px;margin:0;overflow:visible;
+  clip-path:none;white-space:normal;
+  background:var(--surface);color:var(--ink-2);border:1px solid var(--border);
+  border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,.18);
+  font-size:12.5px;line-height:1.5;font-weight:400;text-decoration:none;text-align:left}
+.tt[data-edge="right"]:hover > .ttd,.tt[data-edge="right"]:focus > .ttd,
+.tt[data-edge="right"]:focus-within > .ttd,.tt[data-edge="right"][data-open="1"] > .ttd{
+  left:auto;right:0}
+.ttd strong{color:var(--ink)}
+.ttd code{font-size:11.5px;word-break:break-all}
+/* A path has no spaces to break at, so an unwrapped one widens the document
+   rather than the element. Measured at 390px: three pages scrolled the page
+   itself because of one <code> run. */
+code{overflow-wrap:anywhere}
+.ttd a{color:var(--link)}
+/* Only the numeric columns. The unscoped `td .tt` right-aligned prose too: a
+   multi-line disclosure in the model cell rendered flush-right and ragged-left,
+   which reads as an indent. */
+td.n .tt,th.n .tt{text-align:right}
+@media print{.ttd{position:static!important;width:auto!important;height:auto!important;
+  clip-path:none!important;white-space:normal!important;display:block;font-size:11px}}
+/* calculator & explorer controls -------------------------------------------- */
+.clab{font-size:12.5px;color:var(--ink-2)}
+.ctl input[type="number"],.ctl select{
+  font:inherit;font-size:13.5px;padding:5px 8px;border-radius:8px;
+  border:1px solid var(--border);background:var(--surface);color:var(--ink);
+  font-variant-numeric:tabular-nums}
+.ctl input[type="number"]{width:9.5em}
+.ctl input[type="number"]:focus-visible,.ctl select:focus-visible{outline:2px solid var(--series-1);outline-offset:1px}
+#calc-clamp:empty{display:none}
+#calc-clamp{color:var(--critical);font-weight:600}
+#exp-table{min-width:880px}
+#exp-table td,#exp-table th{font-size:13px}
+/* dataset viewer embeds: collapsed by default, so nothing loads until asked ---- */
+details.emb{margin-top:10px}
+details.emb summary{font-size:12.5px;color:var(--link);cursor:pointer}
+details.emb iframe{width:100%;border:1px solid var(--border);border-radius:10px;
+  margin-top:8px;background:var(--surface);display:block}
+.mgrid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));margin:18px 0}
+.mcard{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:15px 17px}
+.mcard .mh{display:flex;flex-wrap:wrap;gap:6px 9px;align-items:baseline;font-size:15px}
+.mcard .mv{font-size:13.5px;color:var(--ink-2);margin:9px 0 6px;font-variant-numeric:tabular-nums}
+.mcard details summary{font-size:12.5px;color:var(--link);cursor:pointer}
+.mcard table{min-width:0;font-size:13px;margin-top:8px}
+/* `table{min-width:520px}` is there so a wide table scrolls inside .tbl-scroll
+   rather than collapsing. A table that is a direct child of a card has no such
+   wrapper, so the floor made it punch through the card border and off the
+   viewport instead. */
+.card>table{min-width:0}
+.mcard .tbl-scroll{overflow-x:auto}
+
+/* ---------- prompt contract ---------- */
+td.pol{font-size:13px;color:var(--ink-2);max-width:46ch}
+ul.slots{margin:0;padding-left:18px;font-size:13px;max-width:none}
+ul.slots li{margin:4px 0}
+pre{
+  background:var(--surface-2);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;overflow-x:auto;margin:12px 0;max-width:100%
+}
+pre code{background:none;padding:0;font-size:12.5px;line-height:1.55}
+
+/* ---------- footer ---------- */
+.foot{margin-top:56px;border-top:1px solid var(--border);padding-top:18px;font-size:13px;color:var(--muted)}
+.foot a{color:var(--link)}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:8px;top:8px;background:var(--surface);padding:8px;z-index:50}
+@media (max-width:640px){
+  h1{font-size:25px}.lede{font-size:16.5px}body{font-size:15.5px}
+}
+
+/* disclosure blocks used for the leaderboard's caveats and its two format tables. Native
+   <details>, so the content is in the DOM and expandable with scripting off. */
+details.disc{margin:14px 0;border:1px solid var(--border);border-radius:10px;
+  background:var(--surface-2)}
+details.disc>summary{cursor:pointer;padding:11px 14px;font-size:14px;font-weight:600;
+  color:var(--ink)}
+details.disc>summary:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+details.disc[open]>summary{border-bottom:1px solid var(--border)}
+details.disc>div.dbody{padding:2px 14px 12px}
+details.disc>div.dbody>p:first-child{margin-top:10px}
+p.answer{font-size:17px;margin:10px 0 6px}
+p.changed{font-size:13.5px;color:var(--muted);margin:6px 0 16px}

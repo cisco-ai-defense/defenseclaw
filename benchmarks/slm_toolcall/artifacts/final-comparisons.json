@@ -1,0 +1,110 @@
+{
+ "_vendoring": {
+  "blocks_removed": [
+   "10 key(s) under 'headline_comparisons' naming or quoting an out-of-scope arm",
+   "4 key(s) under 'length_controlled_auc' naming or quoting an out-of-scope arm"
+  ],
+  "every_surviving_value_is_byte_identical_to_the_parent": true,
+  "parent_file": "final-comparisons.json",
+  "parent_sha256": "7d29a782d7aa9d1e81bb478e9cc57e06d11b9196eea38c5dcbfbc29b40b7ad2e",
+  "vendored_by": "benchmarks/slm_toolcall/site-build/vendor_artifacts.py",
+  "why": "every comparison against a Jev-family arm, and every ranking row belonging to one, is out of scope on this Space. The trivial baselines, the chance band and the in-scope rows are kept byte-identical."
+ },
+ "auc_null_band": {
+  "chance_95pct_interval": [
+   0.471205496131191,
+   0.528794503868809
+  ],
+  "hanley_mcneil_se_at_auc_0.5": 0.014691343359335349,
+  "nneg": 3381,
+  "npos": 436
+ },
+ "headline_comparisons": {
+  "deberta_shipped_minus_block_everything": 0.005546363481504557
+ },
+ "length_controlled_auc": {
+  "deberta P(injection.true) [single scalar, A==B]": {
+   "mean_within_length_quintile_auc": 0.82393827900586,
+   "overall_auc": 0.8390509973434926,
+   "per_quintile": {
+    "0": {
+     "auc": 0.9272388059701493,
+     "cases": 672,
+     "positives": 2
+    },
+    "1": {
+     "auc": 0.6459088164251208,
+     "cases": 852,
+     "positives": 24
+    },
+    "2": {
+     "auc": 0.8628558394160584,
+     "cases": 765,
+     "positives": 80
+    },
+    "3": {
+     "auc": 0.8286521084337349,
+     "cases": 764,
+     "positives": 100
+    },
+    "4": {
+     "auc": 0.8550358247842371,
+     "cases": 764,
+     "positives": 230
+    }
+   }
+  },
+  "pure length counter (natural prompt tokens)": {
+   "mean_within_length_quintile_auc": 0.5398672584287441,
+   "overall_auc": 0.7692264380822134,
+   "per_quintile": {
+    "0": {
+     "auc": 0.5421641791044776,
+     "cases": 672,
+     "positives": 2
+    },
+    "1": {
+     "auc": 0.7504277375201288,
+     "cases": 852,
+     "positives": 24
+    },
+    "2": {
+     "auc": 0.4619890510948905,
+     "cases": 765,
+     "positives": 80
+    },
+    "3": {
+     "auc": 0.5688027108433735,
+     "cases": 764,
+     "positives": 100
+    },
+    "4": {
+     "auc": 0.37595261358085,
+     "cases": 764,
+     "positives": 230
+    }
+   }
+  }
+ },
+ "trivial_baselines": {
+  "allow_every_case": {
+   "f1": 0.0,
+   "fn": 436,
+   "fp": 0,
+   "tn": 3381,
+   "tp": 0
+  },
+  "block_every_case": {
+   "f1": 0.20503174229955326,
+   "fn": 0,
+   "fp": 3381,
+   "fpr": 1.0,
+   "precision": 0.11422583180508253,
+   "recall": 1.0,
+   "tn": 0,
+   "tp": 436
+  },
+  "note": "any argmax F1 at or below block_every_case carries no information about discrimination",
+  "prevalence_positives_over_scorable": 0.11422583180508253
+ }
+}

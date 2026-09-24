@@ -1,0 +1,2231 @@
+{
+  "binding_constraint": {
+    "mean_share_of_variance_from_the_221_positives": 0.9868433696194504,
+    "per_arm": {
+      "deberta-v3-prompt-injection-v2": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9995972238335219,
+        "total_variance": 0.0008390229069094069,
+        "variance_from_benign_S01_over_n": 3.3793843003225506e-07,
+        "variance_from_positives_S10_over_m": 0.0008386849684793746
+      },
+      "granite-guardian-3.2-3b-a800m": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9764877776589599,
+        "total_variance": 0.0002088745908570146,
+        "variance_from_benign_S01_over_n": 4.911105821623908e-06,
+        "variance_from_positives_S10_over_m": 0.0002039634850353907
+      },
+      "prompt-guard-2-22m": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9942157213886643,
+        "total_variance": 0.0003434443199994313,
+        "variance_from_benign_S01_over_n": 1.9865776343574413e-06,
+        "variance_from_positives_S10_over_m": 0.00034145774236507385
+      },
+      "prompt-guard-2-86m": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9788026524006571,
+        "total_variance": 0.00023475378574698026,
+        "variance_from_benign_S01_over_n": 4.976157596740425e-06,
+        "variance_from_positives_S10_over_m": 0.00022977762815023985
+      },
+      "shieldgemma-2b": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9728899547205518,
+        "total_variance": 7.509368419836205e-05,
+        "variance_from_benign_S01_over_n": 2.035793178818172e-06,
+        "variance_from_positives_S10_over_m": 7.305789101954388e-05
+      },
+      "shieldstral-1.0-3b": {
+        "negatives_n": 24255,
+        "positives_m": 221,
+        "share_of_variance_from_positives": 0.9990668877143468,
+        "total_variance": 0.00011249739961667019,
+        "variance_from_benign_S01_over_n": 1.0497270568635023e-07,
+        "variance_from_positives_S10_over_m": 0.00011239242691098384
+      }
+    },
+    "verdict": "The positive count is the binding constraint, not the case count.  On average 98.68% of each arm's AUC variance comes from the S10/m term -- the 221 positives -- and only the remainder from the 24,255 benign cases.  Collecting more benign traces is therefore nearly worthless for separating arms: it shrinks the small half of the variance.  Positives are 110x rarer and carry the error."
+  },
+  "deployment_at_fpr_budget": {
+    "arms_retaining_zero_recall_at_a_zero_fp_gate_on_s3": [
+      "granite-guardian-3.2-3b-a800m",
+      "prompt-guard-2-86m"
+    ],
+    "best_s3_arm_at_the_cap": {
+      "arm": "shieldstral-1.0-3b",
+      "block_fpr": 0.003463203463203463,
+      "f1": 0.7318087318087318,
+      "fn": 45,
+      "fp": 84,
+      "max_false_positives_allowed": 93,
+      "precision": 0.676923076923077,
+      "recall": 0.7963800904977375,
+      "recall_wilson95": {
+        "lower": 0.7384376928503353,
+        "upper": 0.8441950684166579
+      },
+      "recall_wilson95_width": 0.10575737556632259,
+      "threshold": 0.5621765008857981,
+      "tn": 24171,
+      "tp": 176
+    },
+    "count_zero_recall_at_zero_fp_on_s3": 2,
+    "per_arm_s3": {
+      "deberta-v3-prompt-injection-v2": {
+        "0.00384502": {
+          "block_fpr": 0.003793032364460936,
+          "f1": 0.4389027431421446,
+          "fn": 133,
+          "fp": 92,
+          "max_false_positives_allowed": 93,
+          "precision": 0.4888888888888889,
+          "recall": 0.39819004524886875,
+          "recall_wilson95": {
+            "lower": 0.3359198760433999,
+            "upper": 0.4639390990938923
+          },
+          "recall_wilson95_width": 0.1280192230504924,
+          "threshold": 0.999989216687777,
+          "tn": 24163,
+          "tp": 88
+        },
+        "0.005": {
+          "block_fpr": 0.004823747680890538,
+          "f1": 0.42424242424242425,
+          "fn": 130,
+          "fp": 117,
+          "max_false_positives_allowed": 121,
+          "precision": 0.4375,
+          "recall": 0.4117647058823529,
+          "recall_wilson95": {
+            "lower": 0.3489250883495306,
+            "upper": 0.477619356769456
+          },
+          "recall_wilson95_width": 0.12869426841992537,
+          "threshold": 0.9999852610180254,
+          "tn": 24138,
+          "tp": 91
+        },
+        "zero_fp_gate": {
+          "attainable": true,
+          "f1": 0.09482758620689655,
+          "fn": 210,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.049773755656108594,
+          "retains_zero_recall": false,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": 0.9999997542006405,
+          "tp": 11
+        }
+      },
+      "granite-guardian-3.2-3b-a800m": {
+        "0.00384502": {
+          "block_fpr": 4.1228612657184085e-05,
+          "f1": 0.0,
+          "fn": 221,
+          "fp": 1,
+          "max_false_positives_allowed": 93,
+          "precision": 0.0,
+          "recall": 0.0,
+          "recall_wilson95": {
+            "lower": 0.0,
+            "upper": 0.017085189007591345
+          },
+          "recall_wilson95_width": 0.017085189007591345,
+          "threshold": 0.9045848132478289,
+          "tn": 24254,
+          "tp": 0
+        },
+        "0.005": {
+          "block_fpr": 4.1228612657184085e-05,
+          "f1": 0.0,
+          "fn": 221,
+          "fp": 1,
+          "max_false_positives_allowed": 121,
+          "precision": 0.0,
+          "recall": 0.0,
+          "recall_wilson95": {
+            "lower": 0.0,
+            "upper": 0.017085189007591345
+          },
+          "recall_wilson95_width": 0.017085189007591345,
+          "threshold": 0.9045848132478289,
+          "tn": 24254,
+          "tp": 0
+        },
+        "zero_fp_gate": {
+          "attainable": false,
+          "f1": 0.0,
+          "fn": 221,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.0,
+          "retains_zero_recall": true,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": null,
+          "tp": 0
+        }
+      },
+      "prompt-guard-2-22m": {
+        "0.00384502": {
+          "block_fpr": 0.0036693465264893838,
+          "f1": 0.15476190476190477,
+          "fn": 195,
+          "fp": 89,
+          "max_false_positives_allowed": 93,
+          "precision": 0.22608695652173913,
+          "recall": 0.11764705882352941,
+          "recall_wilson95": {
+            "lower": 0.0815624569431324,
+            "upper": 0.1667968052391433
+          },
+          "recall_wilson95_width": 0.08523434829601091,
+          "threshold": 0.00956980682814216,
+          "tn": 24166,
+          "tp": 26
+        },
+        "0.005": {
+          "block_fpr": 0.0043702329416615135,
+          "f1": 0.15774647887323945,
+          "fn": 193,
+          "fp": 106,
+          "max_false_positives_allowed": 121,
+          "precision": 0.208955223880597,
+          "recall": 0.12669683257918551,
+          "recall_wilson95": {
+            "lower": 0.08913090653358692,
+            "upper": 0.17701866896981833
+          },
+          "recall_wilson95_width": 0.0878877624362314,
+          "threshold": 0.009236681774107093,
+          "tn": 24149,
+          "tp": 28
+        },
+        "zero_fp_gate": {
+          "attainable": true,
+          "f1": 0.009009009009009009,
+          "fn": 220,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.004524886877828055,
+          "retains_zero_recall": false,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": 0.6619228758499942,
+          "tp": 1
+        }
+      },
+      "prompt-guard-2-86m": {
+        "0.00384502": {
+          "block_fpr": 0.0037105751391465678,
+          "f1": 0.01910828025477707,
+          "fn": 218,
+          "fp": 90,
+          "max_false_positives_allowed": 93,
+          "precision": 0.03225806451612903,
+          "recall": 0.013574660633484163,
+          "recall_wilson95": {
+            "lower": 0.00462715613632305,
+            "upper": 0.03914350285296265
+          },
+          "recall_wilson95_width": 0.0345163467166396,
+          "threshold": 0.049600530585276685,
+          "tn": 24165,
+          "tp": 3
+        },
+        "0.005": {
+          "block_fpr": 0.0037105751391465678,
+          "f1": 0.01910828025477707,
+          "fn": 218,
+          "fp": 90,
+          "max_false_positives_allowed": 121,
+          "precision": 0.03225806451612903,
+          "recall": 0.013574660633484163,
+          "recall_wilson95": {
+            "lower": 0.00462715613632305,
+            "upper": 0.03914350285296265
+          },
+          "recall_wilson95_width": 0.0345163467166396,
+          "threshold": 0.049600530585276685,
+          "tn": 24165,
+          "tp": 3
+        },
+        "zero_fp_gate": {
+          "attainable": false,
+          "f1": 0.0,
+          "fn": 221,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.0,
+          "retains_zero_recall": true,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": null,
+          "tp": 0
+        }
+      },
+      "shieldgemma-2b": {
+        "0.00384502": {
+          "block_fpr": 0.0,
+          "f1": 0.009009009009009009,
+          "fn": 220,
+          "fp": 0,
+          "max_false_positives_allowed": 93,
+          "precision": 1.0,
+          "recall": 0.004524886877828055,
+          "recall_wilson95": {
+            "lower": 0.0007992007057196163,
+            "upper": 0.025181144962436508
+          },
+          "recall_wilson95_width": 0.024381944256716893,
+          "threshold": 0.9046505351008906,
+          "tn": 24255,
+          "tp": 1
+        },
+        "0.005": {
+          "block_fpr": 0.0,
+          "f1": 0.009009009009009009,
+          "fn": 220,
+          "fp": 0,
+          "max_false_positives_allowed": 121,
+          "precision": 1.0,
+          "recall": 0.004524886877828055,
+          "recall_wilson95": {
+            "lower": 0.0007992007057196163,
+            "upper": 0.025181144962436508
+          },
+          "recall_wilson95_width": 0.024381944256716893,
+          "threshold": 0.9046505351008906,
+          "tn": 24255,
+          "tp": 1
+        },
+        "zero_fp_gate": {
+          "attainable": true,
+          "f1": 0.009009009009009009,
+          "fn": 220,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.004524886877828055,
+          "retains_zero_recall": false,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": 0.9046505351008906,
+          "tp": 1
+        }
+      },
+      "shieldstral-1.0-3b": {
+        "0.00384502": {
+          "block_fpr": 0.003463203463203463,
+          "f1": 0.7318087318087318,
+          "fn": 45,
+          "fp": 84,
+          "max_false_positives_allowed": 93,
+          "precision": 0.676923076923077,
+          "recall": 0.7963800904977375,
+          "recall_wilson95": {
+            "lower": 0.7384376928503353,
+            "upper": 0.8441950684166579
+          },
+          "recall_wilson95_width": 0.10575737556632259,
+          "threshold": 0.5621765008857981,
+          "tn": 24171,
+          "tp": 176
+        },
+        "0.005": {
+          "block_fpr": 0.004906204906204906,
+          "f1": 0.6872586872586872,
+          "fn": 43,
+          "fp": 119,
+          "max_false_positives_allowed": 121,
+          "precision": 0.5993265993265994,
+          "recall": 0.8054298642533937,
+          "recall_wilson95": {
+            "lower": 0.7482048522109525,
+            "upper": 0.8522182223771705
+          },
+          "recall_wilson95_width": 0.10401337016621803,
+          "threshold": 0.5,
+          "tn": 24136,
+          "tp": 178
+        },
+        "zero_fp_gate": {
+          "attainable": true,
+          "f1": 0.017937219730941704,
+          "fn": 219,
+          "fpr_wilson95_at_0_of_n": {
+            "lower": 0.0,
+            "upper": 0.00015835293813247386
+          },
+          "recall": 0.00904977375565611,
+          "retains_zero_recall": false,
+          "rule_of_three_upper_bound": 0.00012368583797155226,
+          "threshold": 0.9770226300899744,
+          "tp": 2
+        }
+      }
+    },
+    "s2_finding_being_tested": {
+      "arms_considered": 20,
+      "arms_with_zero_recall_at_a_zero_fp_gate": 13,
+      "best_arm_f1_on_s2": 0.10548523,
+      "best_arm_recall_on_s2": 0.05733944954128441,
+      "best_arm_tp_on_s2": 25,
+      "fpr_cap": 0.00384502,
+      "s2_positives": 436,
+      "s2_recall_wilson95": {
+        "lower": 0.039137016728024596,
+        "upper": 0.08327404239553826
+      }
+    },
+    "what_more_corpus_buys": {
+      "consequence": "Extra corpus tightens the error bars on recall-at-cap and does not move its point estimate.  Scaling the corpus by k shrinks a Wilson width by roughly sqrt(k), so a 4x corpus halves the bar and a 100x corpus gives a 10x tighter bar around the SAME unusable number.",
+      "even_the_optimistic_end_is_unusable": true,
+      "mechanism": "An FPR cap is a RATE, so a bigger benign pool does not buy a bigger absolute false-positive budget -- the budget grows in lockstep and the operating point stays at the same place on the arm's ROC curve.  Recall at a fixed FPR is a property of that curve.  More traces estimate the same curve more precisely; they do not bend it.",
+      "s2_ci_upper_bound_on_recall": 0.08327404239553826
+    }
+  },
+  "design": {
+    "cases": 24476,
+    "chance_band_95pct": [
+      0.46176687597792665,
+      0.5382331240220734
+    ],
+    "chance_se_at_auc_0.5": 0.01950705437633106,
+    "corpus": "s3, held out from s2 with zero case_id overlap",
+    "cross_check_method": "paired stratified percentile bootstrap, 2000 replicates",
+    "negatives_D": 24255,
+    "positives_A_B": 221,
+    "prevalence": 0.009029253145938878,
+    "primary_interval_method": "DeLong (1988) with Sun-Xu placement values -- exact closed form, no resampling noise, and it gives the paired covariance needed to compare two AUCs measured on the SAME cases.",
+    "why_paired_matters": "All arms scored the identical 24,476 cases, so their AUC errors are strongly positively correlated.  Two independent CIs that overlap can still belong to a difference that is significant; only the paired test settles it.  Both are reported."
+  },
+  "dropping_worst_performers": {
+    "all_quintile_cuts_unchanged": true,
+    "context_bytes_identical_across_all_six_arms": true,
+    "ladder": {
+      "dropped_0_worst": {
+        "dropped": [],
+        "quintile_cuts": [
+          234,
+          274,
+          1123,
+          2041
+        ],
+        "quintile_cuts_unchanged": true,
+        "survivor_order_by_auc_length_controlled": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "prompt-guard-2-86m",
+          "deberta-v3-prompt-injection-v2",
+          "granite-guardian-3.2-3b-a800m"
+        ],
+        "survivor_order_by_auc_raw": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2",
+          "prompt-guard-2-86m",
+          "granite-guardian-3.2-3b-a800m"
+        ],
+        "survivors": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2",
+          "prompt-guard-2-86m",
+          "granite-guardian-3.2-3b-a800m"
+        ],
+        "values": {
+          "deberta-v3-prompt-injection-v2": {
+            "auc_length_controlled": 0.6286988149016008,
+            "auc_raw": 0.6334767939809957
+          },
+          "granite-guardian-3.2-3b-a800m": {
+            "auc_length_controlled": 0.46431153282355647,
+            "auc_raw": 0.3993688850831708
+          },
+          "prompt-guard-2-22m": {
+            "auc_length_controlled": 0.7503353724484123,
+            "auc_raw": 0.7246413717001953
+          },
+          "prompt-guard-2-86m": {
+            "auc_length_controlled": 0.7138067474353211,
+            "auc_raw": 0.5640260766311187
+          },
+          "shieldgemma-2b": {
+            "auc_length_controlled": 0.8275024878535456,
+            "auc_raw": 0.8954606551245207
+          },
+          "shieldstral-1.0-3b": {
+            "auc_length_controlled": 0.8508075579538582,
+            "auc_raw": 0.9452326385099494
+          }
+        }
+      },
+      "dropped_1_worst": {
+        "dropped": [
+          "granite-guardian-3.2-3b-a800m"
+        ],
+        "quintile_cuts": [
+          234,
+          274,
+          1123,
+          2041
+        ],
+        "quintile_cuts_unchanged": true,
+        "survivor_order_by_auc_length_controlled": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "prompt-guard-2-86m",
+          "deberta-v3-prompt-injection-v2"
+        ],
+        "survivor_order_by_auc_raw": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2",
+          "prompt-guard-2-86m"
+        ],
+        "survivors": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2",
+          "prompt-guard-2-86m"
+        ],
+        "values": {
+          "deberta-v3-prompt-injection-v2": {
+            "auc_length_controlled": 0.6286988149016008,
+            "auc_raw": 0.6334767939809957
+          },
+          "prompt-guard-2-22m": {
+            "auc_length_controlled": 0.7503353724484123,
+            "auc_raw": 0.7246413717001953
+          },
+          "prompt-guard-2-86m": {
+            "auc_length_controlled": 0.7138067474353211,
+            "auc_raw": 0.5640260766311187
+          },
+          "shieldgemma-2b": {
+            "auc_length_controlled": 0.8275024878535456,
+            "auc_raw": 0.8954606551245207
+          },
+          "shieldstral-1.0-3b": {
+            "auc_length_controlled": 0.8508075579538582,
+            "auc_raw": 0.9452326385099494
+          }
+        }
+      },
+      "dropped_2_worst": {
+        "dropped": [
+          "granite-guardian-3.2-3b-a800m",
+          "prompt-guard-2-86m"
+        ],
+        "quintile_cuts": [
+          234,
+          274,
+          1123,
+          2041
+        ],
+        "quintile_cuts_unchanged": true,
+        "survivor_order_by_auc_length_controlled": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2"
+        ],
+        "survivor_order_by_auc_raw": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2"
+        ],
+        "survivors": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m",
+          "deberta-v3-prompt-injection-v2"
+        ],
+        "values": {
+          "deberta-v3-prompt-injection-v2": {
+            "auc_length_controlled": 0.6286988149016008,
+            "auc_raw": 0.6334767939809957
+          },
+          "prompt-guard-2-22m": {
+            "auc_length_controlled": 0.7503353724484123,
+            "auc_raw": 0.7246413717001953
+          },
+          "shieldgemma-2b": {
+            "auc_length_controlled": 0.8275024878535456,
+            "auc_raw": 0.8954606551245207
+          },
+          "shieldstral-1.0-3b": {
+            "auc_length_controlled": 0.8508075579538582,
+            "auc_raw": 0.9452326385099494
+          }
+        }
+      },
+      "dropped_3_worst": {
+        "dropped": [
+          "granite-guardian-3.2-3b-a800m",
+          "prompt-guard-2-86m",
+          "deberta-v3-prompt-injection-v2"
+        ],
+        "quintile_cuts": [
+          234,
+          274,
+          1123,
+          2041
+        ],
+        "quintile_cuts_unchanged": true,
+        "survivor_order_by_auc_length_controlled": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m"
+        ],
+        "survivor_order_by_auc_raw": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m"
+        ],
+        "survivors": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b",
+          "prompt-guard-2-22m"
+        ],
+        "values": {
+          "prompt-guard-2-22m": {
+            "auc_length_controlled": 0.7503353724484123,
+            "auc_raw": 0.7246413717001953
+          },
+          "shieldgemma-2b": {
+            "auc_length_controlled": 0.8275024878535456,
+            "auc_raw": 0.8954606551245207
+          },
+          "shieldstral-1.0-3b": {
+            "auc_length_controlled": 0.8508075579538582,
+            "auc_raw": 0.9452326385099494
+          }
+        }
+      },
+      "dropped_4_worst": {
+        "dropped": [
+          "granite-guardian-3.2-3b-a800m",
+          "prompt-guard-2-86m",
+          "deberta-v3-prompt-injection-v2",
+          "prompt-guard-2-22m"
+        ],
+        "quintile_cuts": [
+          234,
+          274,
+          1123,
+          2041
+        ],
+        "quintile_cuts_unchanged": true,
+        "survivor_order_by_auc_length_controlled": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b"
+        ],
+        "survivor_order_by_auc_raw": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b"
+        ],
+        "survivors": [
+          "shieldstral-1.0-3b",
+          "shieldgemma-2b"
+        ],
+        "values": {
+          "shieldgemma-2b": {
+            "auc_length_controlled": 0.8275024878535456,
+            "auc_raw": 0.8954606551245207
+          },
+          "shieldstral-1.0-3b": {
+            "auc_length_controlled": 0.8508075579538582,
+            "auc_raw": 0.9452326385099494
+          }
+        }
+      }
+    },
+    "method": "drop the worst arm, then the two worst, and so on, recomputing every surviving arm's raw AUC and length-controlled AUC from scratch each time -- values compared for bit-identity, not for closeness",
+    "survivor_order_identical_at_every_step": true,
+    "verdict": "Confirmed by recomputation, not asserted.  Every surviving arm's raw AUC and length-controlled AUC is bit-identical at every rung of the ladder, and the survivor ordering never changes.  The reason is structural: an AUC is a function of one arm's scores and the corpus labels only, and the length quintile cuts come from context_bytes, a CORPUS field that is byte-identical in all six arms' rows.  Neither quantity can see the arm pool.  So pruning the cohort cannot rescue or demote a survivor, and no published comparison changes.  The one real caveat is on s2, not s3: there the length control uses natural prompt tokens taken from control-modernbert-base, so dropping that negative control would remove the s2 length variable itself.  That is a dependency on one specific arm as an INSTRUMENT, not on the arm pool as a comparison set, and it does not arise on s3, which uses context_bytes."
+  },
+  "grade_composition_confound": {
+    "per_arm": {
+      "deberta-v3-prompt-injection-v2": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.43523316062176165,
+          "grade_A_tp": 84,
+          "grade_B_recall": 0.0,
+          "grade_B_tp": 0,
+          "threshold": 0.9999945777810301
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.6823207222911146,
+        "auc_grade_B_positives_vs_all_benign": 0.29680257384339015,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      },
+      "granite-guardian-3.2-3b-a800m": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.8134715025906736,
+          "grade_A_tp": 157,
+          "grade_B_recall": 1.0,
+          "grade_B_tp": 28,
+          "threshold": 0.147804184469409
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.3635557221789642,
+        "auc_grade_B_positives_vs_all_benign": 0.6462239008157376,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      },
+      "prompt-guard-2-22m": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.20725388601036268,
+          "grade_A_tp": 40,
+          "grade_B_recall": 0.0,
+          "grade_B_tp": 0,
+          "threshold": 0.008178992868565311
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.7200357172229859,
+        "auc_grade_B_positives_vs_all_benign": 0.7563874900609594,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      },
+      "prompt-guard-2-86m": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.015544041450777202,
+          "grade_A_tp": 3,
+          "grade_B_recall": 0.17857142857142858,
+          "grade_B_tp": 5,
+          "threshold": 0.026861202807657865
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.5236643691862048,
+        "auc_grade_B_positives_vs_all_benign": 0.8422335600907029,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      },
+      "shieldgemma-2b": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.689119170984456,
+          "grade_A_tp": 133,
+          "grade_B_recall": 0.14285714285714285,
+          "grade_B_tp": 4,
+          "threshold": 0.07585818002124356
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.9185511667376952,
+        "auc_grade_B_positives_vs_all_benign": 0.7363010572194245,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      },
+      "shieldstral-1.0-3b": {
+        "at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT": {
+          "grade_A_recall": 0.8652849740932642,
+          "grade_A_tp": 167,
+          "grade_B_recall": 0.03571428571428571,
+          "grade_B_tp": 1,
+          "threshold": 0.679178699175393
+        },
+        "auc_grade_A_positives_vs_all_benign": 0.993005875611353,
+        "auc_grade_B_positives_vs_all_benign": 0.6159385399181317,
+        "grade_A_positive_count": 193,
+        "grade_B_positive_count": 28
+      }
+    },
+    "s2_positive_composition": {
+      "A": 17,
+      "B": 419,
+      "grade_A_share_of_positives": 0.0389908256880734
+    },
+    "s3_positive_composition": {
+      "A": 193,
+      "B": 28,
+      "grade_A_share_of_positives": 0.8733031674208145
+    },
+    "verdict": "s2 and s3 are NOT the same corpus at a different prevalence.  s2's positives are 17 grade A and 419 grade B -- 3.90% grade A.  s3's are 193 grade A and 28 grade B -- 87.33% grade A.  A grade-A positive is an unambiguous attack; a grade-B one is a judgement call.  So the s2 -> s3 'transfer penalty' is NOT purely threshold miscalibration: part of it is that the definition of a positive changed underneath the threshold.  Every arm separates grade A from benign far better than it separates grade B from benign, which is why arms look better on s3's easier positive mix even as their fitted thresholds transfer badly.  Any statement of the form 'the cohort does/does not generalise' must name which grade mix it means.  This is a corpus-design finding and no amount of extra s3-like data fixes it."
+  },
+  "orderings": {
+    "by_published_s2_rank": [
+      {
+        "arm": "deberta-v3-prompt-injection-v2",
+        "published_s2_rank": 1,
+        "s3_auc": 0.6334767939809957
+      },
+      {
+        "arm": "shieldgemma-2b",
+        "published_s2_rank": 2,
+        "s3_auc": 0.8954606551245207
+      },
+      {
+        "arm": "granite-guardian-3.2-3b-a800m",
+        "published_s2_rank": 3,
+        "s3_auc": 0.3993688850831708
+      },
+      {
+        "arm": "shieldstral-1.0-3b",
+        "published_s2_rank": 8,
+        "s3_auc": 0.9452326385099494
+      },
+      {
+        "arm": "prompt-guard-2-22m",
+        "published_s2_rank": 11,
+        "s3_auc": 0.7246413717001953
+      },
+      {
+        "arm": "prompt-guard-2-86m",
+        "published_s2_rank": 14,
+        "s3_auc": 0.5640260766311187
+      }
+    ],
+    "by_s3_auc_descending": [
+      {
+        "arm": "shieldstral-1.0-3b",
+        "published_s2_rank": 8,
+        "s3_auc": 0.9452326385099494
+      },
+      {
+        "arm": "shieldgemma-2b",
+        "published_s2_rank": 2,
+        "s3_auc": 0.8954606551245207
+      },
+      {
+        "arm": "prompt-guard-2-22m",
+        "published_s2_rank": 11,
+        "s3_auc": 0.7246413717001953
+      },
+      {
+        "arm": "deberta-v3-prompt-injection-v2",
+        "published_s2_rank": 1,
+        "s3_auc": 0.6334767939809957
+      },
+      {
+        "arm": "prompt-guard-2-86m",
+        "published_s2_rank": 14,
+        "s3_auc": 0.5640260766311187
+      },
+      {
+        "arm": "granite-guardian-3.2-3b-a800m",
+        "published_s2_rank": 3,
+        "s3_auc": 0.3993688850831708
+      }
+    ],
+    "spearman_note": "the two orderings are not the same; see rank_reshuffle below"
+  },
+  "pairwise_delong_all_pairs": {
+    "deberta-v3-prompt-injection-v2  vs  granite-guardian-3.2-3b-a800m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "deberta-v3-prompt-injection-v2",
+      "arm_b": "granite-guardian-3.2-3b-a800m",
+      "auc_a": 0.6334767939809957,
+      "auc_b": 0.3993688850831708,
+      "auc_difference": 0.23410790889782485,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.1698881324091408,
+          0.29911477411477405
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.23439329111598015,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.16801802076009464,
+        0.30019779703555505
+      ],
+      "correlation_of_placements_negatives": 0.4020169674414528,
+      "correlation_of_placements_positives": -0.10901158314460699,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.06608988813773022,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 3.542265170882842,
+      "p_two_sided": 3.846478691116317e-12,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0797x this size -- about 18 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 114.05349985813378,
+          "positives_needed": 17.55279014322741,
+          "positives_needed_ceiling": 18,
+          "variance_floor_from_benign_s01_over_n": 4.213227772635685e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 1934,
+          "k_multiplier_on_whole_corpus": 0.07969624546957219,
+          "positives_needed": 17.612870248775454,
+          "positives_needed_ceiling": 18,
+          "total_cases_needed_ceiling": 1951
+        },
+        "s01_of_difference": 0.10219183962527854,
+        "s10_of_difference": 0.250353622240316,
+        "z_observed": 6.94271215862099
+      },
+      "se_of_difference": 0.033719950294515015,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0011370350478645632,
+      "z": 6.94271215862099
+    },
+    "deberta-v3-prompt-injection-v2  vs  prompt-guard-2-86m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "deberta-v3-prompt-injection-v2",
+      "arm_b": "prompt-guard-2-86m",
+      "auc_a": 0.6334767939809957,
+      "auc_b": 0.5640260766311187,
+      "auc_difference": 0.06945071734987696,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.011494206074038078,
+          0.12836151710101287
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0115,
+        "median": 0.06951409934603209,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.008168382060628462,
+        0.13073305263912544
+      ],
+      "correlation_of_placements_negatives": 0.25160279032505545,
+      "correlation_of_placements_positives": 0.1087663023171202,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.061282335289248493,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 1.1332909723833835,
+      "p_two_sided": 0.026336775741741647,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.7786x this size -- about 173 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 32.167075114098175,
+          "positives_needed": 171.88936043313677,
+          "positives_needed_ceiling": 172,
+          "variance_floor_from_benign_s01_over_n": 4.661549769588857e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 18886,
+          "k_multiplier_on_whole_corpus": 0.7786049160277351,
+          "positives_needed": 172.07168644212945,
+          "positives_needed_ceiling": 173,
+          "total_cases_needed_ceiling": 19058
+        },
+        "s01_of_difference": 0.11306588966137773,
+        "s10_of_difference": 0.2150259832963436,
+        "z_observed": 2.2212094898758084
+      },
+      "se_of_difference": 0.03126707213634319,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0009776297999792884,
+      "z": 2.2212094898758084
+    },
+    "prompt-guard-2-22m  vs  deberta-v3-prompt-injection-v2": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "prompt-guard-2-22m",
+      "arm_b": "deberta-v3-prompt-injection-v2",
+      "auc_a": 0.7246413717001953,
+      "auc_b": 0.6334767939809957,
+      "auc_difference": 0.09116457771919961,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.04666313378498256,
+          0.13473787417064728
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.09140910443431449,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.04500501374629328,
+        0.13732414169210594
+      ],
+      "correlation_of_placements_negatives": 0.3714852493554724,
+      "correlation_of_placements_positives": 0.5860123376048062,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.04615956397290633,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 1.974987843748032,
+      "p_two_sided": 0.00010843202684451825,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.2564x this size -- about 57 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 69.59817075365784,
+          "positives_needed": 56.52784976641579,
+          "positives_needed_ceiling": 57,
+          "variance_floor_from_benign_s01_over_n": 1.7157602372505494e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 6219,
+          "k_multiplier_on_whole_corpus": 0.25637232757371714,
+          "positives_needed": 56.65828439379149,
+          "positives_needed_ceiling": 57,
+          "total_cases_needed_ceiling": 6275
+        },
+        "s01_of_difference": 0.041615764554512075,
+        "s10_of_difference": 0.12220078035112807,
+        "z_observed": 3.8709050436505623
+      },
+      "se_of_difference": 0.023551230704751253,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0005546604677084182,
+      "z": 3.8709050436505623
+    },
+    "prompt-guard-2-22m  vs  granite-guardian-3.2-3b-a800m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "prompt-guard-2-22m",
+      "arm_b": "granite-guardian-3.2-3b-a800m",
+      "auc_a": 0.7246413717001953,
+      "auc_b": 0.3993688850831708,
+      "auc_difference": 0.32527248661702446,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.27880446817421606,
+          0.37140110123303405
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.32589376076771037,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.27909603166393543,
+        0.3714489415701135
+      ],
+      "correlation_of_placements_negatives": 0.6849417913893056,
+      "correlation_of_placements_positives": -0.013312457140784594,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.04617645495308905,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 7.044119929679981,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0202x this size -- about 5 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 200.99839314113075,
+          "positives_needed": 4.433290663725356,
+          "positives_needed_ceiling": 5,
+          "variance_floor_from_benign_s01_over_n": 2.6188431524967684e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 489,
+          "k_multiplier_on_whole_corpus": 0.02015331611708499,
+          "positives_needed": 4.453882861875782,
+          "positives_needed_ceiling": 5,
+          "total_cases_needed_ceiling": 494
+        },
+        "s01_of_difference": 0.06352004066380912,
+        "s10_of_difference": 0.1220909258083854,
+        "z_observed": 13.806221364953581
+      },
+      "se_of_difference": 0.023559848710141124,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0005550664712447383,
+      "z": 13.806221364953581
+    },
+    "prompt-guard-2-22m  vs  prompt-guard-2-86m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "prompt-guard-2-22m",
+      "arm_b": "prompt-guard-2-86m",
+      "auc_a": 0.7246413717001953,
+      "auc_b": 0.5640260766311187,
+      "auc_difference": 0.16061529506907657,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.12779391010483454,
+          0.19448103017430748
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.16026205353936446,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.12683184235591255,
+        0.1943987477822406
+      ],
+      "correlation_of_placements_negatives": 0.7910140078021255,
+      "correlation_of_placements_positives": 0.49288078966313237,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.033783452713164006,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 4.754259324313867,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0442x this size -- about 10 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 113.89605971600702,
+          "positives_needed": 9.714903741389014,
+          "positives_needed_ceiling": 10,
+          "variance_floor_from_benign_s01_over_n": 1.988641051588919e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 1074,
+          "k_multiplier_on_whole_corpus": 0.04424195056487446,
+          "positives_needed": 9.777471074837257,
+          "positives_needed_ceiling": 10,
+          "total_cases_needed_ceiling": 1083
+        },
+        "s01_of_difference": 0.04823448870628923,
+        "s10_of_difference": 0.06522100610264281,
+        "z_observed": 9.318177048818912
+      },
+      "se_of_difference": 0.017236772195633986,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0002971063157241808,
+      "z": 9.318177048818912
+    },
+    "prompt-guard-2-86m  vs  granite-guardian-3.2-3b-a800m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "prompt-guard-2-86m",
+      "arm_b": "granite-guardian-3.2-3b-a800m",
+      "auc_a": 0.5640260766311187,
+      "auc_b": 0.3993688850831708,
+      "auc_difference": 0.1646571915479479,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.12920030016668677,
+          0.20134846712577803
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.16476721224620383,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.12926113655376056,
+        0.20005324654213522
+      ],
+      "correlation_of_placements_negatives": 0.7569984608283052,
+      "correlation_of_placements_positives": 0.25405040849962063,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.03539605499418732,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 4.651851500823683,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0462x this size -- about 11 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 106.22420713126179,
+          "positives_needed": 10.140914042943374,
+          "positives_needed_ceiling": 11,
+          "variance_floor_from_benign_s01_over_n": 2.4027822276967055e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 1121,
+          "k_multiplier_on_whole_corpus": 0.04621131372092386,
+          "positives_needed": 10.212700332324173,
+          "positives_needed_ceiling": 11,
+          "total_cases_needed_ceiling": 1132
+        },
+        "s01_of_difference": 0.058279482932783594,
+        "s10_of_difference": 0.07154749739257356,
+        "z_observed": 9.117461403043015
+      },
+      "se_of_difference": 0.018059543580079475,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.00032614711432078975,
+      "z": 9.117461403043015
+    },
+    "shieldgemma-2b  vs  deberta-v3-prompt-injection-v2": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldgemma-2b",
+      "arm_b": "deberta-v3-prompt-injection-v2",
+      "auc_a": 0.8954606551245207,
+      "auc_b": 0.6334767939809957,
+      "auc_difference": 0.261983861143525,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.20947935351296693,
+          0.3182574218498588
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.2611120438851531,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.20574498684563347,
+        0.31822273544141655
+      ],
+      "correlation_of_placements_negatives": 0.040684776235288996,
+      "correlation_of_placements_positives": 0.18323459064356976,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.056238874297891525,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 4.658412253343186,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0461x this size -- about 11 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 172.51317001955445,
+          "positives_needed": 10.156738944252691,
+          "positives_needed_ceiling": 11,
+          "variance_floor_from_benign_s01_over_n": 2.306240347326732e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 1118,
+          "k_multiplier_on_whole_corpus": 0.04608124043352642,
+          "positives_needed": 10.183954135809339,
+          "positives_needed_ceiling": 11,
+          "total_cases_needed_ceiling": 1128
+        },
+        "s01_of_difference": 0.055937859624409884,
+        "s10_of_difference": 0.18144755632763443,
+        "z_observed": 9.13032024169272
+      },
+      "se_of_difference": 0.028693830469078307,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0008233359069882066,
+      "z": 9.13032024169272
+    },
+    "shieldgemma-2b  vs  granite-guardian-3.2-3b-a800m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldgemma-2b",
+      "arm_b": "granite-guardian-3.2-3b-a800m",
+      "auc_a": 0.8954606551245207,
+      "auc_b": 0.3993688850831708,
+      "auc_difference": 0.49609177004134986,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.46065084075588275,
+          0.530938305392087
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.4967660257576224,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.46128825501855414,
+        0.5308952850641456
+      ],
+      "correlation_of_placements_negatives": 0.17423137663305252,
+      "correlation_of_placements_positives": -0.13292541659272206,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.03480351502279574,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 14.25407088095607,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0049x this size -- about 2 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 205.19512360083235,
+          "positives_needed": 1.067647759170436,
+          "positives_needed_ceiling": 2,
+          "variance_floor_from_benign_s01_over_n": 5.8450734546664275e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 120,
+          "k_multiplier_on_whole_corpus": 0.004921779713269209,
+          "positives_needed": 1.087713316632495,
+          "positives_needed_ceiling": 2,
+          "total_cases_needed_ceiling": 121
+        },
+        "s01_of_difference": 0.1417722566429342,
+        "s10_of_difference": 0.06839372074099542,
+        "z_observed": 27.93746555975502
+      },
+      "se_of_difference": 0.01775722171290974,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.00031531892296143306,
+      "z": 27.93746555975502
+    },
+    "shieldgemma-2b  vs  prompt-guard-2-22m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldgemma-2b",
+      "arm_b": "prompt-guard-2-22m",
+      "auc_a": 0.8954606551245207,
+      "auc_b": 0.7246413717001953,
+      "auc_difference": 0.1708192834243254,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.13193909032144335,
+          0.21107646555125537
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.17085267673502963,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.1313132439310952,
+        0.2103253229175556
+      ],
+      "correlation_of_placements_negatives": 0.21671954171177624,
+      "correlation_of_placements_positives": 0.036029719505133416,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.0395060394932302,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 4.323877706182043,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0535x this size -- about 12 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 96.23492233332742,
+          "positives_needed": 11.733959932262207,
+          "positives_needed_ceiling": 12,
+          "variance_floor_from_benign_s01_over_n": 3.150709707900939e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 1298,
+          "k_multiplier_on_whole_corpus": 0.05348761037790234,
+          "positives_needed": 11.820761893516417,
+          "positives_needed_ceiling": 12,
+          "total_cases_needed_ceiling": 1310
+        },
+        "s01_of_difference": 0.07642046396513727,
+        "s10_of_difference": 0.08909268157616138,
+        "z_observed": 8.474644577672468
+      },
+      "se_of_difference": 0.020156512979242883,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0004062850154823868,
+      "z": 8.474644577672468
+    },
+    "shieldgemma-2b  vs  prompt-guard-2-86m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldgemma-2b",
+      "arm_b": "prompt-guard-2-86m",
+      "auc_a": 0.8954606551245207,
+      "auc_b": 0.5640260766311187,
+      "auc_difference": 0.33143457849340197,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.29662929973854346,
+          0.3665336577521452
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.3318093671034848,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.2963068268210011,
+        0.3665623301658028
+      ],
+      "correlation_of_placements_negatives": 0.2501078129562071,
+      "correlation_of_placements_positives": -0.05003697658978433,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.035127751672400856,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 9.43512074397301,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0112x this size -- about 3 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 142.36533995195126,
+          "positives_needed": 2.441121867345675,
+          "positives_needed_ceiling": 3,
+          "variance_floor_from_benign_s01_over_n": 5.419847833922635e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 273,
+          "k_multiplier_on_whole_corpus": 0.011233240972211083,
+          "positives_needed": 2.4825462548586494,
+          "positives_needed_ceiling": 3,
+          "total_cases_needed_ceiling": 275
+        },
+        "s01_of_difference": 0.13145840921179353,
+        "s10_of_difference": 0.06979215206855116,
+        "z_observed": 18.492496847973865
+      },
+      "se_of_difference": 0.017922651614766433,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.00032122144090428986,
+      "z": 18.492496847973865
+    },
+    "shieldstral-1.0-3b  vs  deberta-v3-prompt-injection-v2": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldstral-1.0-3b",
+      "arm_b": "deberta-v3-prompt-injection-v2",
+      "auc_a": 0.9452326385099494,
+      "auc_b": 0.6334767939809957,
+      "auc_difference": 0.3117558445289538,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.25893454817824574,
+          0.36594261947203116
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.3113943013102677,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.2578279894457018,
+        0.36568369961220576
+      ],
+      "correlation_of_placements_negatives": 0.22195132317004865,
+      "correlation_of_placements_positives": 0.3165534027061946,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.053927855083251985,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 5.780979867411299,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0299x this size -- about 7 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 520.0962686515795,
+          "positives_needed": 6.609815855024155,
+          "positives_needed_ceiling": 7,
+          "variance_floor_from_benign_s01_over_n": 3.5930373518683836e-07
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 726,
+          "k_multiplier_on_whole_corpus": 0.029922445604440424,
+          "positives_needed": 6.612860478581334,
+          "positives_needed_ceiling": 7,
+          "total_cases_needed_ceiling": 733
+        },
+        "s01_of_difference": 0.008714912096956764,
+        "s10_of_difference": 0.1672307813338275,
+        "z_observed": 11.330512335477282
+      },
+      "se_of_difference": 0.027514717366557768,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0007570596717615556,
+      "z": 11.330512335477282
+    },
+    "shieldstral-1.0-3b  vs  granite-guardian-3.2-3b-a800m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldstral-1.0-3b",
+      "arm_b": "granite-guardian-3.2-3b-a800m",
+      "auc_a": 0.9452326385099494,
+      "auc_b": 0.3993688850831708,
+      "auc_difference": 0.5458637534267786,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.5056654526612511,
+          0.5861001370245067
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.5474658861213484,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.5053864692713872,
+        0.58634103758217
+      ],
+      "correlation_of_placements_negatives": 0.2728071814006534,
+      "correlation_of_placements_positives": -0.3484892986232556,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.04047728415539137,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 13.485681285612447,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0055x this size -- about 2 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 253.84003161998763,
+          "positives_needed": 1.202092577701511,
+          "positives_needed_ceiling": 2,
+          "variance_floor_from_benign_s01_over_n": 4.624324350116609e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 134,
+          "k_multiplier_on_whole_corpus": 0.0054986264510627275,
+          "positives_needed": 1.2151964456848627,
+          "positives_needed_ceiling": 2,
+          "total_cases_needed_ceiling": 135
+        },
+        "s01_of_difference": 0.11216298711207835,
+        "s10_of_difference": 0.09323615504573035,
+        "z_observed": 26.431449626786208
+      },
+      "se_of_difference": 0.020652055075843754,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.00042650737885568376,
+      "z": 26.431449626786208
+    },
+    "shieldstral-1.0-3b  vs  prompt-guard-2-22m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldstral-1.0-3b",
+      "arm_b": "prompt-guard-2-22m",
+      "auc_a": 0.9452326385099494,
+      "auc_b": 0.7246413717001953,
+      "auc_difference": 0.22059126680975416,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.17908382467205997,
+          0.2636479883328623
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.2204242069788288,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.17900514873224738,
+        0.26217738488726094
+      ],
+      "correlation_of_placements_negatives": 0.34025924231428933,
+      "correlation_of_placements_positives": 0.013874453892424744,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.04158611807750677,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 5.304444776466603,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0355x this size -- about 8 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 165.30364252614194,
+          "positives_needed": 7.82442028106409,
+          "positives_needed_ceiling": 8,
+          "variance_floor_from_benign_s01_over_n": 1.7807862041249654e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 863,
+          "k_multiplier_on_whole_corpus": 0.0355402219096204,
+          "positives_needed": 7.854389042026107,
+          "positives_needed_ceiling": 8,
+          "total_cases_needed_ceiling": 870
+        },
+        "s01_of_difference": 0.043192969381051036,
+        "s10_of_difference": 0.09909952185970268,
+        "z_observed": 10.39652071985616
+      },
+      "se_of_difference": 0.021217797064401574,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.00045019491226612804,
+      "z": 10.39652071985616
+    },
+    "shieldstral-1.0-3b  vs  prompt-guard-2-86m": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldstral-1.0-3b",
+      "arm_b": "prompt-guard-2-86m",
+      "auc_a": 0.9452326385099494,
+      "auc_b": 0.5640260766311187,
+      "auc_difference": 0.38120656187883073,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.3392386488394891,
+          0.4239992966883723
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.38206028332078756,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.3388545879103354,
+        0.42355853584732606
+      ],
+      "correlation_of_placements_negatives": 0.3425576269101022,
+      "correlation_of_placements_positives": -0.37390006243167656,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.0423519739684953,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 9.00091604141998,
+      "p_two_sided": 0.0,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0123x this size -- about 3 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 178.01021680014495,
+          "positives_needed": 2.701375629615963,
+          "positives_needed_ceiling": 3,
+          "variance_floor_from_benign_s01_over_n": 4.585966492591493e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 300,
+          "k_multiplier_on_whole_corpus": 0.012343166250799332,
+          "positives_needed": 2.7278397414266524,
+          "positives_needed_ceiling": 3,
+          "total_cases_needed_ceiling": 303
+        },
+        "s01_of_difference": 0.11123261727780667,
+        "s10_of_difference": 0.10217787790766687,
+        "z_observed": 17.641471269051994
+      },
+      "se_of_difference": 0.02160854704604894,
+      "significant_at_0.05": true,
+      "var_of_difference": 0.0004669293054413104,
+      "z": 17.641471269051994
+    },
+    "shieldstral-1.0-3b  vs  shieldgemma-2b": {
+      "already_significant_so_no_extra_corpus_is_required": true,
+      "arm_a": "shieldstral-1.0-3b",
+      "arm_b": "shieldgemma-2b",
+      "auc_a": 0.9452326385099494,
+      "auc_b": 0.8954606551245207,
+      "auc_difference": 0.049771983385428764,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.030940749260077012,
+          0.0686715502051637
+        ],
+        "excludes_zero": true,
+        "fraction_of_replicates_with_sign_flip": 0.0,
+        "median": 0.050221906944595995,
+        "method": "paired stratified percentile bootstrap",
+        "reps": 2000,
+        "seed": 20260924
+      },
+      "ci95_of_difference": [
+        0.03106562285613361,
+        0.06847834391472392
+      ],
+      "correlation_of_placements_negatives": 0.35019229962545023,
+      "correlation_of_placements_positives": 0.5306759959117422,
+      "minimum_detectable_auc_difference_at_this_corpus": 0.018706360529295155,
+      "negatives_n": 24255,
+      "observed_difference_as_multiple_of_the_minimum_detectable": 2.660698392265197,
+      "p_two_sided": 1.8394319312164953e-07,
+      "positives_m": 221,
+      "sample_size_to_significance": {
+        "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.1413x this size -- about 32 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+        "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+        "positives_only_growth": {
+          "attainable_by_adding_positives_alone": true,
+          "max_attainable_abs_z_with_infinite_positives": 36.92397273811858,
+          "positives_needed": 30.681463994505496,
+          "positives_needed_ceiling": 31,
+          "variance_floor_from_benign_s01_over_n": 1.8169921527182016e-06
+        },
+        "proportional_growth": {
+          "benign_needed_ceiling": 3427,
+          "k_multiplier_on_whole_corpus": 0.14125658598059654,
+          "positives_needed": 31.217705501711833,
+          "positives_needed_ceiling": 32,
+          "total_cases_needed_ceiling": 3458
+        },
+        "s01_of_difference": 0.04407114466417998,
+        "s10_of_difference": 0.01972987783541474,
+        "z_observed": 5.2148730225634115
+      },
+      "se_of_difference": 0.00954423687213058,
+      "significant_at_0.05": true,
+      "var_of_difference": 9.109245747133694e-05,
+      "z": 5.2148730225634115
+    }
+  },
+  "per_arm_auc_intervals": {
+    "deberta-v3-prompt-injection-v2": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.6334767939809957,
+      "auc_identity_abs_delta": 0.0,
+      "auc_recovered_from_negative_placements": 0.6334767939809957,
+      "below_chance": false,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.5752334267040149,
+          0.6888352590453429
+        ],
+        "mean": 0.6336364772482419,
+        "median": 0.6346347396767564,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.028257395448332768,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.5750897258874942,
+        0.6881908753776604
+      ],
+      "ci95_wald": [
+        0.5767046886253585,
+        0.6902488993366328
+      ],
+      "ci95_wald_excludes_chance_band": true,
+      "delong_S01": 0.008196696620432346,
+      "delong_S10": 0.1853493780339418,
+      "delong_se": 0.028965892130390303,
+      "delong_var": 0.0008390229069094069,
+      "house_auc_mann_whitney": 0.6334767939809957,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 4.064282038029887e-06,
+      "positives_m": 221,
+      "primary_variable": "single positive scalar || defA==defB",
+      "published_s2_rank": 1,
+      "z_vs_chance_0.5": 4.6080677708854365
+    },
+    "granite-guardian-3.2-3b-a800m": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.3993688850831708,
+      "auc_identity_abs_delta": 0.0,
+      "auc_recovered_from_negative_placements": 0.3993688850831708,
+      "below_chance": true,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.3706116152754808,
+          0.4264597400731855
+        ],
+        "mean": 0.39906314418541305,
+        "median": 0.3989640611489351,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.01442286310914152,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.37140728214115076,
+        0.4280022488331014
+      ],
+      "ci95_wald": [
+        0.3710425168114252,
+        0.4276952533549164
+      ],
+      "ci95_wald_excludes_chance_band": true,
+      "delong_S01": 0.11911887170348788,
+      "delong_S10": 0.04507593019282134,
+      "delong_se": 0.014452494278048154,
+      "delong_var": 0.0002088745908570146,
+      "house_auc_mann_whitney": 0.3993688850831708,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 3.33377769834442e-12,
+      "positives_m": 221,
+      "primary_variable": "P(block) || defA==defB",
+      "published_s2_rank": 3,
+      "z_vs_chance_0.5": -6.962889102795042
+    },
+    "prompt-guard-2-22m": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.7246413717001953,
+      "auc_identity_abs_delta": 1.1102230246251565e-16,
+      "auc_recovered_from_negative_placements": 0.7246413717001952,
+      "below_chance": false,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.687782334378973,
+          0.7596016028789138
+        ],
+        "mean": 0.7245566104763584,
+        "median": 0.725194133597495,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.018553988357291752,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.6868788409126774,
+        0.759444667908462
+      ],
+      "ci95_wald": [
+        0.6883188275646435,
+        0.7609639158357471
+      ],
+      "ci95_wald_excludes_chance_band": true,
+      "delong_S01": 0.04818444052133974,
+      "delong_S10": 0.07546216106268132,
+      "delong_se": 0.018532250807698217,
+      "delong_var": 0.0003434443199994313,
+      "house_auc_mann_whitney": 0.7246413717001953,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 0.0,
+      "positives_m": 221,
+      "primary_variable": "single positive scalar || defA==defB",
+      "published_s2_rank": 11,
+      "z_vs_chance_0.5": 12.121645343094547
+    },
+    "prompt-guard-2-86m": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.5640260766311187,
+      "auc_identity_abs_delta": 1.1102230246251565e-16,
+      "auc_recovered_from_negative_placements": 0.5640260766311186,
+      "below_chance": false,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.5336010814582244,
+          0.5948302910907953
+        ],
+        "mean": 0.5640361937315719,
+        "median": 0.5640006118997716,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.015250231467941602,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.5337973424074233,
+        0.5937863385726343
+      ],
+      "ci95_wald": [
+        0.5339961415504517,
+        0.5940560117117857
+      ],
+      "ci95_wald_excludes_chance_band": false,
+      "delong_S01": 0.120696702508939,
+      "delong_S10": 0.05078085582120301,
+      "delong_se": 0.01532167698873006,
+      "delong_var": 0.00023475378574698026,
+      "house_auc_mann_whitney": 0.5640260766311187,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 2.9306362391956498e-05,
+      "positives_m": 221,
+      "primary_variable": "single positive scalar || defA==defB",
+      "published_s2_rank": 14,
+      "z_vs_chance_0.5": 4.178790394694616
+    },
+    "shieldgemma-2b": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.8954606551245207,
+      "auc_identity_abs_delta": 0.0,
+      "auc_recovered_from_negative_placements": 0.8954606551245207,
+      "below_chance": false,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.8773974881327822,
+          0.9114622632269691
+        ],
+        "mean": 0.895506057574545,
+        "median": 0.8961243238554163,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.008694817154935038,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.8772173155477427,
+        0.9112675434734424
+      ],
+      "ci95_wald": [
+        0.878476271251615,
+        0.9124450389974263
+      ],
+      "ci95_wald_excludes_chance_band": true,
+      "delong_S01": 0.04937816355223477,
+      "delong_S10": 0.016145793915319197,
+      "delong_se": 0.008665661209530525,
+      "delong_var": 7.509368419836205e-05,
+      "house_auc_mann_whitney": 0.8954606551245207,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 0.0,
+      "positives_m": 221,
+      "primary_variable": "single positive scalar || defA==defB",
+      "published_s2_rank": 2,
+      "z_vs_chance_0.5": 45.63536994610309
+    },
+    "shieldstral-1.0-3b": {
+      "agrees_with_house_arithmetic": true,
+      "auc": 0.9452326385099494,
+      "auc_identity_abs_delta": 1.1102230246251565e-16,
+      "auc_recovered_from_negative_placements": 0.9452326385099495,
+      "below_chance": false,
+      "bootstrap_cross_check": {
+        "ci95_percentile": [
+          0.9256861952240104,
+          0.9657808741212102
+        ],
+        "mean": 0.9455649332926643,
+        "median": 0.9458743870508577,
+        "method": "stratified percentile bootstrap",
+        "reps": 2000,
+        "sd": 0.010510613789453647,
+        "seed": 20260924
+      },
+      "ci95_logit": [
+        0.920324847074009,
+        0.9626696765984322
+      ],
+      "ci95_wald": [
+        0.9244443214048395,
+        0.9660209556150594
+      ],
+      "ci95_wald_excludes_chance_band": true,
+      "delong_S01": 0.002546112976422425,
+      "delong_S10": 0.02483872634732743,
+      "delong_se": 0.010606479133844096,
+      "delong_var": 0.00011249739961667019,
+      "house_auc_mann_whitney": 0.9452326385099494,
+      "negatives_n": 24255,
+      "p_two_sided_vs_chance_0.5": 0.0,
+      "positives_m": 221,
+      "primary_variable": "P(block) || defA==defB",
+      "published_s2_rank": 8,
+      "z_vs_chance_0.5": 41.977420866200696
+    }
+  },
+  "rank_reshuffle_s2_to_s3": {
+    "note": "Dropping arms does not reshuffle anything, but CHANGING CORPUS does.  The s2 rank-8 arm is the best arm on s3 and the s2 rank-3 arm falls below chance on s3.  That is the finding the cohort ranking cannot survive, and it is not a sample-size problem.",
+    "published_s2_rank_to_s3_auc_rank": {
+      "deberta-v3-prompt-injection-v2": {
+        "published_s2_rank": 1,
+        "s3_auc": 0.6334767939809957,
+        "s3_auc_rank": 4
+      },
+      "granite-guardian-3.2-3b-a800m": {
+        "published_s2_rank": 3,
+        "s3_auc": 0.3993688850831708,
+        "s3_auc_rank": 6
+      },
+      "prompt-guard-2-22m": {
+        "published_s2_rank": 11,
+        "s3_auc": 0.7246413717001953,
+        "s3_auc_rank": 3
+      },
+      "prompt-guard-2-86m": {
+        "published_s2_rank": 14,
+        "s3_auc": 0.5640260766311187,
+        "s3_auc_rank": 5
+      },
+      "shieldgemma-2b": {
+        "published_s2_rank": 2,
+        "s3_auc": 0.8954606551245207,
+        "s3_auc_rank": 2
+      },
+      "shieldstral-1.0-3b": {
+        "published_s2_rank": 8,
+        "s3_auc": 0.9452326385099494,
+        "s3_auc_rank": 1
+      }
+    }
+  },
+  "resolution_of_the_current_corpus": {
+    "all_pairs_separable": true,
+    "benign": 24255,
+    "caveat": "This is a statement about RANKING precision only.  The positive count still carries 98.68% of the AUC variance, so it is the binding constraint on every per-positive quantity -- recall at a fixed FPR, and the per-grade breakdowns, where grade B has only 28 positives on s3.  'Enough to rank' and 'enough to measure recall precisely' are different questions with different answers.",
+    "median_minimum_detectable_auc_difference": 0.04158611807750677,
+    "minimum_detectable_auc_difference_per_pair": {
+      "deberta-v3-prompt-injection-v2  vs  granite-guardian-3.2-3b-a800m": 0.06608988813773022,
+      "deberta-v3-prompt-injection-v2  vs  prompt-guard-2-86m": 0.061282335289248493,
+      "prompt-guard-2-22m  vs  deberta-v3-prompt-injection-v2": 0.04615956397290633,
+      "prompt-guard-2-22m  vs  granite-guardian-3.2-3b-a800m": 0.04617645495308905,
+      "prompt-guard-2-22m  vs  prompt-guard-2-86m": 0.033783452713164006,
+      "prompt-guard-2-86m  vs  granite-guardian-3.2-3b-a800m": 0.03539605499418732,
+      "shieldgemma-2b  vs  deberta-v3-prompt-injection-v2": 0.056238874297891525,
+      "shieldgemma-2b  vs  granite-guardian-3.2-3b-a800m": 0.03480351502279574,
+      "shieldgemma-2b  vs  prompt-guard-2-22m": 0.0395060394932302,
+      "shieldgemma-2b  vs  prompt-guard-2-86m": 0.035127751672400856,
+      "shieldstral-1.0-3b  vs  deberta-v3-prompt-injection-v2": 0.053927855083251985,
+      "shieldstral-1.0-3b  vs  granite-guardian-3.2-3b-a800m": 0.04047728415539137,
+      "shieldstral-1.0-3b  vs  prompt-guard-2-22m": 0.04158611807750677,
+      "shieldstral-1.0-3b  vs  prompt-guard-2-86m": 0.0423519739684953,
+      "shieldstral-1.0-3b  vs  shieldgemma-2b": 0.018706360529295155
+    },
+    "narrowest_minimum_detectable_difference": {
+      "pair": "shieldstral-1.0-3b  vs  shieldgemma-2b",
+      "value": 0.018706360529295155
+    },
+    "pairs_significant_at_0.05": 15,
+    "pairs_tested": 15,
+    "positives": 221,
+    "smallest_observed_gap_among_the_top_three_by_s3_auc": 0.049771983385428764,
+    "verdict": "s3 at 221 positives resolves every one of the 15 pairwise AUC comparisons among the six arms, including the tightest gap among the top three (shieldstral vs shieldgemma, 0.0498 AUC, p = 1.84e-07).  The paired DeLong minimum detectable difference is about 0.019-0.066 AUC depending on the pair, so the corpus can resolve gaps down to roughly two AUC points.  MORE POSITIVES ARE NOT NEEDED TO SEPARATE THE TOP THREE -- about 32 positives would have sufficed for the tightest of those gaps, and 221 is roughly 7x that.  Extra positives would only be required to resolve gaps NARROWER than about 0.019 AUC, and no gap among these arms is that narrow.",
+    "widest_minimum_detectable_difference": {
+      "pair": "deberta-v3-prompt-injection-v2  vs  granite-guardian-3.2-3b-a800m",
+      "value": 0.06608988813773022
+    }
+  },
+  "top_three_by_published_s2_rank": {
+    "all_three_mutually_separable": true,
+    "definition": "ranks 1, 2 and 3 of the published s2 cohort ranking",
+    "each_separable_from_chance_band": {
+      "deberta-v3-prompt-injection-v2": true,
+      "granite-guardian-3.2-3b-a800m": true,
+      "shieldgemma-2b": true
+    },
+    "pairs": {
+      "deberta-v3-prompt-injection-v2  vs  granite-guardian-3.2-3b-a800m": {
+        "auc_difference": 0.23410790889782485,
+        "bootstrap_ci95": [
+          0.1698881324091408,
+          0.29911477411477405
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.16801802076009464,
+          0.30019779703555505
+        ],
+        "p_two_sided": 3.846478691116317e-12,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0797x this size -- about 18 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 114.05349985813378,
+            "positives_needed": 17.55279014322741,
+            "positives_needed_ceiling": 18,
+            "variance_floor_from_benign_s01_over_n": 4.213227772635685e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 1934,
+            "k_multiplier_on_whole_corpus": 0.07969624546957219,
+            "positives_needed": 17.612870248775454,
+            "positives_needed_ceiling": 18,
+            "total_cases_needed_ceiling": 1951
+          },
+          "s01_of_difference": 0.10219183962527854,
+          "s10_of_difference": 0.250353622240316,
+          "z_observed": 6.94271215862099
+        },
+        "significant_at_0.05": true,
+        "z": 6.94271215862099
+      },
+      "deberta-v3-prompt-injection-v2  vs  shieldgemma-2b": {
+        "auc_difference": 0.261983861143525,
+        "bootstrap_ci95": [
+          0.20947935351296693,
+          0.3182574218498588
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.20574498684563347,
+          0.31822273544141655
+        ],
+        "p_two_sided": 0.0,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0461x this size -- about 11 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 172.51317001955445,
+            "positives_needed": 10.156738944252691,
+            "positives_needed_ceiling": 11,
+            "variance_floor_from_benign_s01_over_n": 2.306240347326732e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 1118,
+            "k_multiplier_on_whole_corpus": 0.04608124043352642,
+            "positives_needed": 10.183954135809339,
+            "positives_needed_ceiling": 11,
+            "total_cases_needed_ceiling": 1128
+          },
+          "s01_of_difference": 0.055937859624409884,
+          "s10_of_difference": 0.18144755632763443,
+          "z_observed": 9.13032024169272
+        },
+        "significant_at_0.05": true,
+        "z": 9.13032024169272
+      },
+      "shieldgemma-2b  vs  granite-guardian-3.2-3b-a800m": {
+        "auc_difference": 0.49609177004134986,
+        "bootstrap_ci95": [
+          0.46065084075588275,
+          0.530938305392087
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.46128825501855414,
+          0.5308952850641456
+        ],
+        "p_two_sided": 0.0,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0049x this size -- about 2 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 205.19512360083235,
+            "positives_needed": 1.067647759170436,
+            "positives_needed_ceiling": 2,
+            "variance_floor_from_benign_s01_over_n": 5.8450734546664275e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 120,
+            "k_multiplier_on_whole_corpus": 0.004921779713269209,
+            "positives_needed": 1.087713316632495,
+            "positives_needed_ceiling": 2,
+            "total_cases_needed_ceiling": 121
+          },
+          "s01_of_difference": 0.1417722566429342,
+          "s10_of_difference": 0.06839372074099542,
+          "z_observed": 27.93746555975502
+        },
+        "significant_at_0.05": true,
+        "z": 27.93746555975502
+      }
+    },
+    "pairs_significant_at_0.05": 3,
+    "pairs_total": 3,
+    "which_three": [
+      "deberta-v3-prompt-injection-v2",
+      "shieldgemma-2b",
+      "granite-guardian-3.2-3b-a800m"
+    ]
+  },
+  "top_three_by_s3_auc": {
+    "all_three_mutually_separable": true,
+    "definition": "the three highest s3 raw AUCs actually observed on the held-out corpus",
+    "each_separable_from_chance_band": {
+      "prompt-guard-2-22m": true,
+      "shieldgemma-2b": true,
+      "shieldstral-1.0-3b": true
+    },
+    "pairs": {
+      "shieldgemma-2b  vs  prompt-guard-2-22m": {
+        "auc_difference": 0.1708192834243254,
+        "bootstrap_ci95": [
+          0.13193909032144335,
+          0.21107646555125537
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.1313132439310952,
+          0.2103253229175556
+        ],
+        "p_two_sided": 0.0,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0535x this size -- about 12 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 96.23492233332742,
+            "positives_needed": 11.733959932262207,
+            "positives_needed_ceiling": 12,
+            "variance_floor_from_benign_s01_over_n": 3.150709707900939e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 1298,
+            "k_multiplier_on_whole_corpus": 0.05348761037790234,
+            "positives_needed": 11.820761893516417,
+            "positives_needed_ceiling": 12,
+            "total_cases_needed_ceiling": 1310
+          },
+          "s01_of_difference": 0.07642046396513727,
+          "s10_of_difference": 0.08909268157616138,
+          "z_observed": 8.474644577672468
+        },
+        "significant_at_0.05": true,
+        "z": 8.474644577672468
+      },
+      "shieldstral-1.0-3b  vs  prompt-guard-2-22m": {
+        "auc_difference": 0.22059126680975416,
+        "bootstrap_ci95": [
+          0.17908382467205997,
+          0.2636479883328623
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.17900514873224738,
+          0.26217738488726094
+        ],
+        "p_two_sided": 0.0,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.0355x this size -- about 8 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 165.30364252614194,
+            "positives_needed": 7.82442028106409,
+            "positives_needed_ceiling": 8,
+            "variance_floor_from_benign_s01_over_n": 1.7807862041249654e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 863,
+            "k_multiplier_on_whole_corpus": 0.0355402219096204,
+            "positives_needed": 7.854389042026107,
+            "positives_needed_ceiling": 8,
+            "total_cases_needed_ceiling": 870
+          },
+          "s01_of_difference": 0.043192969381051036,
+          "s10_of_difference": 0.09909952185970268,
+          "z_observed": 10.39652071985616
+        },
+        "significant_at_0.05": true,
+        "z": 10.39652071985616
+      },
+      "shieldstral-1.0-3b  vs  shieldgemma-2b": {
+        "auc_difference": 0.049771983385428764,
+        "bootstrap_ci95": [
+          0.030940749260077012,
+          0.0686715502051637
+        ],
+        "bootstrap_excludes_zero": true,
+        "ci95_of_difference": [
+          0.03106562285613361,
+          0.06847834391472392
+        ],
+        "p_two_sided": 1.8394319312164953e-07,
+        "sample_size_to_significance": {
+          "interpretation": "k < 1 means this gap was ALREADY significant and would still have been significant on a corpus 0.1413x this size -- about 32 positives instead of 221.  The figure is HEADROOM, not a shortfall.",
+          "note": "var(diff) = s10/m + s01/n.  Scaling the whole corpus by k scales both m and n by k, so var scales as 1/k and |z| as sqrt(k).  Holding the benign count fixed and adding only positives has a variance FLOOR of s01/n, which caps the attainable |z| no matter how many positives are added.",
+          "positives_only_growth": {
+            "attainable_by_adding_positives_alone": true,
+            "max_attainable_abs_z_with_infinite_positives": 36.92397273811858,
+            "positives_needed": 30.681463994505496,
+            "positives_needed_ceiling": 31,
+            "variance_floor_from_benign_s01_over_n": 1.8169921527182016e-06
+          },
+          "proportional_growth": {
+            "benign_needed_ceiling": 3427,
+            "k_multiplier_on_whole_corpus": 0.14125658598059654,
+            "positives_needed": 31.217705501711833,
+            "positives_needed_ceiling": 32,
+            "total_cases_needed_ceiling": 3458
+          },
+          "s01_of_difference": 0.04407114466417998,
+          "s10_of_difference": 0.01972987783541474,
+          "z_observed": 5.2148730225634115
+        },
+        "significant_at_0.05": true,
+        "z": 5.2148730225634115
+      }
+    },
+    "pairs_significant_at_0.05": 3,
+    "pairs_total": 3,
+    "which_three": [
+      "shieldstral-1.0-3b",
+      "shieldgemma-2b",
+      "prompt-guard-2-22m"
+    ]
+  }
+}

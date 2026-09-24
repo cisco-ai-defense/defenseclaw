@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roster &#8212; SLM tool-call security</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">ROSTER</p>
+<h1>The {{fig:roster.n}} arms</h1>
+<p class="lede">
+  {{fig:roster.general}} general decoders, {{fig:roster.safety}} purpose-built safety
+  classifiers, {{fig:roster.encoder}} trained encoder classifiers, {{fig:roster.control}} MLM
+  negative controls.
+  Repository, pinned revision, parameter count, licence, origin and readout family come from the
+  harness's arm registry; on-disk snapshot sizes come from the weight download manifests.
+  {{fig:roster.candidates}} of the {{fig:roster.n}} are candidates and {{fig:roster.control}} are
+  negative controls, over {{fig:roster.snapshot.gib}} GiB of downloaded weights.
+  All {{fig:arms.scored}} have a ranking record; <code>{{fig:arms.noshipped}}</code> additionally
+  lacks a shipped-argmax row, because its prediction body landed after the run that recorded
+  those.
+</p>
+
+{{ui:roster_table}}
+
+{{chart:roster}}
+
+<h2 id="gating">Gating</h2>
+<p>
+  {{fig:roster.gated}} of {{fig:roster.n}} arms need a licence-accepted HuggingFace token,
+  across {{fig:roster.groups}} separate acceptance groups: the Gemma family, Llama 3.2, and a
+  third group covering Llama Prompt Guard 2 at licence <code>other</code>. All three were
+  accepted on {{fig:gate.cleared}}. A 403 is the signal that the token is valid and that repo's
+  group is unaccepted; a 401 means the token itself is not. {{fig:roster.ungated}} arms fetch
+  with no acceptance.
+</p>
+<p>
+  Anyone repeating the cohort has to accept three separate licences before {{fig:roster.gated}} of
+  the arms will fetch. Community re-uploads of the gated weights were refused: a mirror launders
+  the provenance the licence column records.
+</p>
+
+{{chart:gating}}
+
+<h2 id="backbones">Encoder backbones</h2>
+<p>
+  The encoder arm of the cohort is {{fig:roster.encoder}} trained classifiers against
+  {{fig:roster.control}} untrained MLM controls. Both Prompt Guard 2 sizes are
+  <code>DebertaV2ForSequenceClassification</code> with default LABEL_0 / LABEL_1 heads, so all
+  three trained encoders share the DeBERTa-v2 backbone family. That is three checkpoints inside
+  one family.
+</p>
+<p>
+  An earlier framing held that Prompt Guard 2 supplied an encoder backbone independent of DeBERTa.
+  That was wrong and is withdrawn. The only independent encoder backbone in the cohort is
+  ModernBERT, and both ModernBERT arms are controls. A trained-encoder result from this cohort can
+  be shown to be non-checkpoint-specific inside the DeBERTa-v2 family; it cannot be separated from
+  a DeBERTa-family result.
+</p>
+<p>
+  The evidence is in the download record. The weight manifest for both Prompt Guard 2 sizes
+  records <code>architectures</code> as <code>{{fig:pg2.arch}}</code> and
+  <code>max_position_embeddings</code> as {{fig:pg2.maxpos}}, which is the same backbone family
+  and the same window as the DeBERTa candidate.
+</p>
+<p class="small">
+  Prompt Guard 2's repo names understate its size. The headline 22M is
+  {{fig:pg2.22}} parameters and the headline 86M is {{fig:pg2.86}}, because the published
+  figures exclude embeddings.
+</p>
+
+{{chart:backbones}}
+
+<h2 id="taxonomy">Taxonomy coverage in the safety classifiers</h2>
+<p>
+  Three of the {{fig:roster.safety}} purpose-built safety classifiers carry a policy surface. One
+  has a mismatch with this task.
+</p>
+
+{{ui:taxonomy_table}}
+
+<h3>Llama Guard 3 1B's default categories</h3>
+{{ui:lg_categories}}
+<p>
+  ShieldGemma's chat template takes a <code>guideline</code> argument, so it is policy-adaptable
+  and closer to Shieldstral on this axis than expected. The I3 policy and the Q2 block criterion
+  were passed as the guideline and recorded verbatim, reading P(Yes) against P(No). Shieldstral
+  takes a policy argument and was treated the same way. Llama Guard 3 1B is the only arm in the
+  cohort with the taxonomy mismatch.
+</p>
+
+<h2 id="dropped">Qwen3</h2>
+<p>
+  Qwen3 at 0.6B, 1.7B and 4B was dropped on a non-China provenance constraint. The download
+  record for those {{fig:qwen.n}} repositories totals {{fig:qwen.bytes}} bytes,
+  {{fig:qwen.gib}} GiB, and no GPU time was spent. They were the strongest ungated general
+  models at their sizes.
+</p>
+<p>
+  With Gemma 3 and Llama 3.2 both gated, the ungated non-China general field in this cohort
+  contains nothing that is simultaneously best-in-class for its size and permissively licensed.
+</p>
+
+<h2 id="licences">Licence column</h2>
+<p>
+  Both Falcon3 arms are licence <code>other</code>, the Falcon LLM licence, and neither is
+  Apache-2.0. Prompt Guard 2 is licence <code>other</code> at both sizes. The table records each
+  arm's licence as its publisher declares it.
+</p>
+
+<div class="foot">
+  <p>Source: <code>benchmarks/EXPERIMENTS.md</code> on branch
+    <code>feat/system-one-benchmarks</code>, staged into
+    <code>pinned/roster.json</code> and cross-checked by
+    <code>conform_to_space_contract.py</code>. See <a href="reproduce.html">Reproduce</a>.</p>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reproduce &#8212; SLM tool-call security</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">REPRODUCE</p>
+<h1>Every script and artifact behind this Space</h1>
+<p class="lede">
+  All links point at branch <code>feat/system-one-benchmarks</code> of
+  <code>cisco-ai-defense/defenseclaw</code>. The corpora and the prediction files are held in
+  private data repositories; the scoring artifacts this Space reads are vendored into the public
+  repository at the paths below.
+</p>
+
+<h2 id="ledger">Ledger and corpus</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/EXPERIMENTS.md"><code>benchmarks/EXPERIMENTS.md</code></a>
+      &#8212; the experiment ledger. Every figure on this Space traces to an entry in it.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/datasets.lock.json"><code>benchmarks/datasets.lock.json</code></a>
+      &#8212; the source inventory the corpus was built from.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/schema/system-one-prediction-v1.schema.json"><code>benchmarks/schema/system-one-prediction-v1.schema.json</code></a>
+      &#8212; the prediction row schema every arm's output validates against.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/contexts-v1.json"><code>benchmarks/system_one/contexts-v1.json</code></a>
+      and
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/questions-v2.json"><code>questions-v2.json</code></a>
+      &#8212; the C7 context template and the Q2 question format.</li>
+</ul>
+
+<h2 id="running">Running an arm</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_prepare_system_one.py"><code>benchmarks/scripts/benchmark_prepare_system_one.py</code></a>
+      &#8212; corpus assembly.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_run_system_one.py"><code>benchmarks/scripts/benchmark_run_system_one.py</code></a>
+      &#8212; the reference driver. The cohort harness imports its <code>build_state</code> and
+      <code>build_questions</code>, which is what makes the prompts byte-exact.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_score_system_one.py"><code>benchmarks/scripts/benchmark_score_system_one.py</code></a>
+      &#8212; the System One scorer the cohort pipeline is checked against.</li>
+</ul>
+<div class="box warn">
+  <p>
+    <code>benchmark_run_system_one.py</code> defaults to
+    <code>--max-input-tokens 200_000_000</code>. A full 100,001-request s3 pass needs about
+    282M, and the cap is enforced after every request has completed, so the driver raises and
+    writes no metadata. The budget is per driver, so sharding avoids the cap. A run that hit it
+    is recoverable in place with <code>--resume --resume-retry-errors</code>, because the error
+    rows still pass the prediction schema and carry a valid recomputed
+    <code>request_sha256</code>.
+  </p>
+</div>
+
+<h2 id="harness">The cohort harness</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/README.md"><code>benchmarks/slm_toolcall/README.md</code></a>
+      and
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/README.md"><code>harness/README.md</code></a>
+      &#8212; what ran where, the prediction and metadata schemas, and the two schema gaps that
+      govern how a cohort run may be checked.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/arms.py"><code>harness/arms.py</code></a>
+      &#8212; the arm registry. Every repository, pinned revision, parameter count, licence,
+      origin and readout family on the <a href="roster.html">Roster</a> page is read out of this
+      file at build time.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/score_arm.py"><code>harness/score_arm.py</code></a>
+      &#8212; the runner. It imports request construction from the reference driver, which is why
+      the request bytes match the board runs. Pinned to the single cell C7/I3/Q2.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/weights_manifest.json"><code>harness/weights_manifest.json</code></a>,
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/weights_manifest2.json"><code>2</code></a>,
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/weights_manifest3.json"><code>3</code></a>,
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/weights_manifest4.json"><code>4</code></a>
+      &#8212; the download records. Which revision of which repository was fetched, its size on
+      disk, and for the two Prompt Guard 2 repositories the architecture class and position
+      limit that the <a href="roster.html#backbones">backbone</a> section rests on.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/build_llamacpp.sh"><code>harness/build_llamacpp.sh</code></a>
+      &#8212; the CPU toolchain. Nothing in the harness runs it, and the scripts that produced
+      the CPU figures were never saved; see
+      <a href="footprint.html#reproducibility">Footprint</a>.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/analyse.py"><code>harness/analyse.py</code></a>
+      and <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/report.py"><code>report.py</code></a>
+      &#8212; the harness-side scoring and text tables, including its own
+      <code>--validate-27b</code> self-check.</li>
+</ul>
+
+<h2 id="scoring">Scoring the cohort</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/score_cohort.py"><code>benchmarks/slm_toolcall/scoring/score_cohort.py</code></a>
+      &#8212; per-arm scorecards behind the parity gate, the by-variable AUC sweep, the
+      inapplicable-variable records and the truncation analysis. It will not report a cohort
+      arm until it has re-derived three reference arms from their settled bodies and matched
+      the published numbers. Produces <code>cohort-scores.json</code>.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/leakage.py"><code>benchmarks/slm_toolcall/scoring/leakage.py</code></a>
+      &#8212; the surface-cue diagnostic: the counting variables, each control's Spearman
+      correlation against prompt length, AUC within length quintiles, and the Pearson
+      agreement between the two controls. Produces <code>leakage-diagnostic.json</code>.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/final.py"><code>benchmarks/slm_toolcall/scoring/final.py</code></a>
+      &#8212; the trivial baselines, the null band, the length-controlled table and the headline
+      comparisons. Produces <code>final-comparisons.json</code>.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/README.md"><code>scoring/README.md</code></a>
+      &#8212; the parity gate the three scripts run behind, and the caveats that qualify every
+      number they produce.</li>
+</ul>
+<p class="small">
+  The three scripts carry the dev host's absolute paths as they ran. Their arithmetic is imported
+  verbatim from the board's re-mining module, which is what makes cohort numbers and board
+  numbers comparable; that module is reached through a path on the dev host rather than through
+  this directory. They are published in the form that produced the artifacts.
+</p>
+
+<h2 id="arithmetic">The arithmetic both programmes run</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/reproduce/07-analysis/rescoring/remine.py"><code>benchmarks/system_one/reproduce/07-analysis/rescoring/remine.py</code></a>
+      &#8212; the shared scoring arithmetic, {{fig:arith.bytes}} bytes at sha256
+      <code>{{fig:arith.sha}}</code>. All {{fig:arith.importers}} cohort scoring scripts
+      import it verbatim, and this build re-hashes it and aborts on a mismatch. It is the
+      load-bearing claim behind <a href="results.html#arithmetic">comparability</a>.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/reproduce/07-analysis/rescoring/README.md"><code>rescoring/README.md</code></a>
+      &#8212; the two AUC definitions and their formulas.</li>
+</ul>
+
+<h2 id="artifacts">Artifacts this Space reads</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/cohort-scores.json"><code>benchmarks/slm_toolcall/artifacts/cohort-scores.json</code></a></li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/leakage-diagnostic.json"><code>benchmarks/slm_toolcall/artifacts/leakage-diagnostic.json</code></a></li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/final-comparisons.json"><code>benchmarks/slm_toolcall/artifacts/final-comparisons.json</code></a></li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/roster.json"><code>site-build/pinned/roster.json</code></a>
+      &#8212; the roster, transcribed from the ledger and cross-checked against each scored arm's
+      run metadata.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/laptop-feasibility.json"><code>site-build/pinned/laptop-feasibility.json</code></a>
+      &#8212; the CPU throughput and memory primitives, with their provenance block.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/scorer-provenance.json"><code>site-build/pinned/scorer-provenance.json</code></a>
+      &#8212; the pinned digest of the shared arithmetic and of the reference driver's role in
+      request construction.</li>
+</ul>
+
+<h2 id="site">Building this Space</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/build.py"><code>site-build/build.py</code></a>
+      &#8212; the generator. It checks {{fig:gate.asserts}} figures against their artifacts, then
+      renders {{fig:gate.charts}} charts as inline SVG.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/conform_to_space_contract.py"><code>site-build/conform_to_space_contract.py</code></a>
+      &#8212; stages the artifacts at the paths the build resolves and re-checks each scored
+      arm's digest, row count, corpus and metadata against the roster.</li>
+</ul>
+
+<h2 id="gates">Gates before an upload</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/guard.py"><code>site-build/guard.py</code></a>
+      &#8212; the payload guard, byte-identical to the System One Space's copy at
+      <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/reproduce/08-site-build/guard.py"><code>system_one/reproduce/08-site-build/guard.py</code></a>.
+      Five checks over the payload: corpus case ids, sensitive-text shingles, CJK codepoints,
+      credential shapes, and file size and type. Allowed extensions are
+      <code>.html .css .md .json .txt</code> and the per-file ceiling is 1 MiB.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/verify.py"><code>site-build/verify.py</code></a>
+      &#8212; structure, link resolution, SVG bounds, inline-stylesheet and no-subresource checks,
+      plus this programme's disclosure and retired-figure lists.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/wc.py"><code>site-build/wc.py</code></a>
+      &#8212; the visible-word counter, byte-identical to the System One Space's copy.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/publish.py"><code>site-build/publish.py</code></a>
+      &#8212; five sequential gates: re-run the guard, run the verifier, read and record the
+      repository's visibility, upload, then read the visibility again and abort if it changed in
+      either direction. <code>create_repo</code> is reached only when the Space does not exist.
+      No credential is ever read into a printable variable.</li>
+</ul>
+
+<h2 id="privacy">Repository visibility</h2>
+<p>
+  This Space is public. The four data repositories that hold the corpora, the prediction files
+  and the serving records stay private. Nothing in the publish path moves a repository between
+  visibilities in either direction, and the post-upload check aborts if one moved.
+</p>
+
+<div class="foot">
+  <p>Corpus <code>cases_sha256 {{fig:corpus.sha}}</code>, grid cell C7/I3/Q2,
+    <code>--instruction-format structured</code>.</p>
+</div>
+</div>
+</body>
+</html>

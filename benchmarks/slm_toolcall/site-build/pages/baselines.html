@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baselines &#8212; SLM tool-call security</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">BASELINES</p>
+<h1>The two baselines</h1>
+<p class="lede">
+  The corpus carries a trivial operating point worth block-only F1 {{fig:floor.f1}} and a length
+  signal worth AUC {{fig:cue.tokens}}, both with no model. Every F1 and every AUC here sits
+  against those two.
+</p>
+
+<h2 id="floor">The trivial floor</h2>
+<p>
+  Blocking every case scores block-only F1 <strong>{{fig:floor.f1}}</strong> at
+  {{fig:corpus.prevalence}} prevalence: tp {{fig:floor.tp}}, fp {{fig:floor.fp}}, fn
+  {{fig:floor.fn}}, tn {{fig:floor.tn}}, precision {{fig:floor.precision}}, recall
+  {{fig:floor.recall}}, block FPR {{fig:floor.fpr}}. Allowing every case scores
+  {{fig:floor.allow.f1}}.
+</p>
+<p>
+  A false-positive rate of {{fig:floor.fpr}} fails any deployment gate, so this is not a claim
+  that trivial blocking competes with a model. It is a claim about what an F1 below the floor
+  tells you: the operating point is broken, and the figure says nothing about whether the model
+  can discriminate.
+</p>
+<p>
+  {{fig:arms.under.floor}} of the {{fig:arms.candidates}} candidates score below the floor at
+  their shipped operating point, and {{fig:arms.zero.f1}} score exactly zero there, blocking no
+  positive case at all. <code>{{fig:top.f1.arm}}</code> has the highest shipped F1 at
+  {{fig:top.f1}}.
+</p>
+
+{{chart:floor}}
+
+<div class="box warn">
+  <p>
+    Argmax F1 is a calibration diagnostic here. An in-sample best F1 found by sweeping thresholds
+    on the same rows it is scored on is an oracle upper bound, and is labelled as one wherever it
+    appears.
+  </p>
+</div>
+
+<h2 id="length">The length cue</h2>
+<p>
+  Five scalars read off the request, containing no model, reach AUC {{fig:cue.tokens}} (prompt
+  tokens, max over events), {{fig:cue.events}} (event count), {{fig:cue.ctxevents}}
+  (<code>context_events</code>) and {{fig:cue.ctxbytes}} (<code>context_bytes</code>).
+  Destructive multi-step trajectories in this corpus are longer than benign ones, so this is a
+  property of the data-generating process and not a labelling artifact.
+</p>
+
+{{chart:cues}}
+
+<p>
+  Every arm's headline AUC therefore contains a length component. Each arm carries a
+  length-controlled AUC beside its raw AUC: the corpus is stratified into five prompt-length
+  quintiles, the AUC is computed inside each, and the five are averaged unweighted.
+</p>
+<p>
+  The pure length counter falls from {{fig:cue.tokens}} to {{fig:cue.tokens.controlled}} under
+  that stratification.
+</p>
+
+{{chart:quintiles}}
+
+<h2 id="band">The chance band</h2>
+<p>
+  For {{fig:corpus.positives}} positives and {{fig:corpus.negatives}} negatives the
+  Hanley&#8211;McNeil standard error at AUC 0.5 is {{fig:band.se}}, so the 95% chance interval is
+  <strong>[{{fig:band.lo}}, {{fig:band.hi}}]</strong>. It is shaded on every AUC chart here.
+</p>
+<p class="small">
+  Both MLM controls land inside or below that band under length control:
+  <code>control-modernbert-base</code> at {{fig:cb.controlled}} and
+  <code>control-modernbert-large</code> at {{fig:cl.controlled}}. Raw figures are {{fig:cb.auc}}
+  and {{fig:cl.auc}}; the decomposition is on <a href="results.html#gate">Results</a>.
+</p>
+
+<div class="foot">
+  <p>Computed by <code>scoring/final.py</code> and <code>scoring/leakage.py</code> over
+    <code>cases_sha256 {{fig:corpus.sha}}</code>.</p>
+</div>
+</div>
+</body>
+</html>

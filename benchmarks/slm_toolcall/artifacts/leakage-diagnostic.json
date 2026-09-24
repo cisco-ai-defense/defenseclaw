@@ -1,0 +1,231 @@
+{
+  "controls": {
+    "control-modernbert-base": {
+      "auc_overall": 0.6622467295653802,
+      "auc_within_length_quintile": {
+        "length_quintile_0": {
+          "auc": 0.7541044776119403,
+          "cases": 672,
+          "positives": 2,
+          "token_range": [
+            71,
+            89
+          ]
+        },
+        "length_quintile_1": {
+          "auc": 0.349813808373591,
+          "cases": 852,
+          "positives": 24,
+          "token_range": [
+            90,
+            236
+          ]
+        },
+        "length_quintile_2": {
+          "auc": 0.4300729927007299,
+          "cases": 765,
+          "positives": 80,
+          "token_range": [
+            237,
+            673
+          ]
+        },
+        "length_quintile_3": {
+          "auc": 0.5635015060240964,
+          "cases": 764,
+          "positives": 100,
+          "token_range": [
+            674,
+            1077
+          ]
+        },
+        "length_quintile_4": {
+          "auc": 0.49171144764696306,
+          "cases": 764,
+          "positives": 230,
+          "token_range": [
+            1078,
+            3379
+          ]
+        }
+      },
+      "mean_within_stratum_auc": 0.5178408464714641,
+      "score_distribution": {
+        "distinct_values": 53,
+        "interquartile_width": 0.09338587425955441,
+        "max": 0.7185943925708562,
+        "median": 0.5,
+        "min": 0.2689414213699951,
+        "p05": 0.4073334000459302,
+        "p95": 0.6370307944803831
+      },
+      "spearman_score_vs_natural_prompt_length": 0.597867523607295
+    },
+    "control-modernbert-large": {
+      "auc_overall": 0.46228994190416495,
+      "auc_within_length_quintile": {
+        "length_quintile_0": {
+          "auc": 0.6992537313432836,
+          "cases": 672,
+          "positives": 2,
+          "token_range": [
+            71,
+            89
+          ]
+        },
+        "length_quintile_1": {
+          "auc": 0.6719001610305958,
+          "cases": 852,
+          "positives": 24,
+          "token_range": [
+            90,
+            236
+          ]
+        },
+        "length_quintile_2": {
+          "auc": 0.4368978102189781,
+          "cases": 765,
+          "positives": 80,
+          "token_range": [
+            237,
+            673
+          ]
+        },
+        "length_quintile_3": {
+          "auc": 0.27423192771084337,
+          "cases": 764,
+          "positives": 100,
+          "token_range": [
+            674,
+            1077
+          ]
+        },
+        "length_quintile_4": {
+          "auc": 0.3804307116104869,
+          "cases": 764,
+          "positives": 230,
+          "token_range": [
+            1078,
+            3379
+          ]
+        }
+      },
+      "mean_within_stratum_auc": 0.49254286838283756,
+      "score_distribution": {
+        "distinct_values": 46,
+        "interquartile_width": 0.07794752535837007,
+        "max": 0.6370307944803832,
+        "median": 0.5,
+        "min": 0.2337063569140403,
+        "p05": 0.42250463481418826,
+        "p95": 0.5774953651858118
+      },
+      "spearman_score_vs_natural_prompt_length": 0.20358749603263615
+    },
+    "deberta-v3-prompt-injection-v2": {
+      "auc_overall": 0.8390509973434926,
+      "auc_within_length_quintile": {
+        "length_quintile_0": {
+          "auc": 0.9272388059701493,
+          "cases": 672,
+          "positives": 2,
+          "token_range": [
+            71,
+            89
+          ]
+        },
+        "length_quintile_1": {
+          "auc": 0.6459088164251208,
+          "cases": 852,
+          "positives": 24,
+          "token_range": [
+            90,
+            236
+          ]
+        },
+        "length_quintile_2": {
+          "auc": 0.8628558394160584,
+          "cases": 765,
+          "positives": 80,
+          "token_range": [
+            237,
+            673
+          ]
+        },
+        "length_quintile_3": {
+          "auc": 0.8286521084337349,
+          "cases": 764,
+          "positives": 100,
+          "token_range": [
+            674,
+            1077
+          ]
+        },
+        "length_quintile_4": {
+          "auc": 0.8550358247842371,
+          "cases": 764,
+          "positives": 230,
+          "token_range": [
+            1078,
+            3379
+          ]
+        }
+      },
+      "mean_within_stratum_auc": 0.82393827900586,
+      "spearman_score_vs_natural_prompt_length": 0.26290315529268854
+    }
+  },
+  "controls_agree_with_each_other": {
+    "base_auc": 0.6622467295653802,
+    "large_auc": 0.46228994190416495,
+    "note": "a genuine corpus-level label leak would be visible to BOTH untrained backbones in the same direction; divergence points at idiosyncratic readout behaviour",
+    "pearson_base_vs_large": 0.1435084459826658
+  },
+  "structural_cue_auc": {
+    "context_bytes (max over events)": {
+      "at_threshold": 2875,
+      "auc": 0.7266059794480217,
+      "best_f1_ORACLE": 0.34593209481101855,
+      "fn": 166,
+      "fp": 855,
+      "tn": 2526,
+      "tp": 270
+    },
+    "context_events": {
+      "at_threshold": 7,
+      "auc": 0.7445374041120237,
+      "best_f1_ORACLE": 0.34049409237379163,
+      "fn": 119,
+      "fp": 1109,
+      "tn": 2272,
+      "tp": 317
+    },
+    "event_count_in_prediction": {
+      "at_threshold": 17,
+      "auc": 0.7772553177633239,
+      "best_f1_ORACLE": 0.3870192307692308,
+      "fn": 275,
+      "fp": 235,
+      "tn": 3146,
+      "tp": 161
+    },
+    "natural_prompt_tokens (max over events)": {
+      "at_threshold": 1085,
+      "auc": 0.7692264380822134,
+      "best_f1_ORACLE": 0.38519764507989906,
+      "fn": 207,
+      "fp": 524,
+      "tn": 2857,
+      "tp": 229
+    },
+    "natural_prompt_tokens (sum over events)": {
+      "at_threshold": 8454,
+      "auc": 0.7665974048175314,
+      "best_f1_ORACLE": 0.3431372549019608,
+      "fn": 261,
+      "fp": 409,
+      "tn": 2972,
+      "tp": 175
+    }
+  }
+}

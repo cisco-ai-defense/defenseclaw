@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLM tool-call security &#8212; DefenseClaw</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">OVERVIEW</p>
+<h1>Small and local models on destructive tool-call classification</h1>
+<p class="lede">
+  {{fig:roster.n}} arms scored on one question: given an agent's trajectory so far and the tool
+  call it is about to make, does that call have to be blocked. Corpus s2, {{fig:corpus.scorable}}
+  scorable cases, {{fig:corpus.positives}} of them positive.
+</p>
+
+<div class="box" id="two-spaces">
+  <h3>Scope</h3>
+  <p>
+    This Space carries small and local models measured on destructive tool-call classification.
+    Cascade guardrail models on the DefenseClaw parity grid, and the Jev-family models, are
+    published on the <a href="{{fig:other.space}}">System One Space</a> and appear nowhere here.
+  </p>
+  <p>
+    A model can be measured under both protocols. <strong>The numbers across the two Spaces are
+    not interchangeable.</strong> The corpora differ and the label sets differ.
+  </p>
+</div>
+
+<h2 id="deployment">At a deployable false-positive budget</h2>
+<p>
+  Re-thresholded so every arm blocks benign cases at the same rate as the incumbent cascade, a
+  block false-positive rate of {{fig:cap.value}}, the best arm in the cohort is
+  <code>{{fig:cap.best.arm}}</code> at recall {{fig:cap.best.recall}} &#8212;
+  {{fig:cap.best.tp}} of {{fig:corpus.positives}} positives, F1 {{fig:cap.best.f1}}.
+</p>
+
+{{chart:deploy}}
+
+<p>
+  The arms that lead on discrimination are not the arms that lead here.
+  <code>{{fig:rank1.arm}}</code> ranks first on length-controlled AUC and catches
+  {{fig:cap.deberta.tp}} positive at this budget.
+</p>
+<p>
+  Under a zero-false-positive gate, {{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates
+  retain zero recall: they catch nothing at all without blocking something benign. The best is
+  <code>{{fig:zfp.best.arm}}</code> at recall {{fig:zfp.best.recall}}, {{fig:zfp.best.tp}} true
+  blocks. <a href="results.html#deployment">Both gates in full</a>.
+</p>
+
+<div class="box bad">
+  <p>
+    This is the question the Space exists to ask, and the answer is negative. No arm in this
+    cohort reaches a recall at a deployable false-positive budget that would make it useful on its
+    own. Every threshold at both gates is re-fitted, so none of those figures is any arm's
+    shipped behaviour.
+  </p>
+</div>
+
+<h2 id="ranking">The ranking</h2>
+<p>
+  <code>{{fig:rank1.arm}}</code> leads at length-controlled AUC {{fig:rank1.lc}}, raw
+  {{fig:rank1.raw}}, at a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk.
+  <code>{{fig:rank2.arm}}</code> at {{fig:rank2.lc}} ran at cap {{fig:rank2.cap}} with no rows
+  shrunk. Rank 3 is <code>{{fig:est.rank3}}</code>. The published length-controlled AUC is the
+  {{fig:est.published}} figure, which weights each length bin by the comparisons it holds; an
+  earlier revision used an unweighted mean that gave a bin holding {{fig:est.q0.pos}} of
+  {{fig:corpus.positives}} positives {{fig:est.q0.wunw}} of the weight, and that estimator is
+  retracted. <a href="results.html#estimators">Why this estimator</a>.
+</p>
+<p>
+  {{fig:beat.control}} of the {{fig:arms.candidates}} candidates score above the untrained
+  <code>control-modernbert-base</code>, and {{fig:under.band}} fall below the chance band, which
+  puts them anti-correlated with the label.
+  <a href="results.html#ranking">All {{fig:arms.scored}} rows</a>.
+</p>
+
+<h2 id="hand">What is measured</h2>
+<div class="tiles">
+  <div class="tile"><div class="v">{{fig:arms.scored}} of {{fig:roster.n}}</div>
+    <div class="l">arms with a ranking record</div>
+    <div class="s">{{fig:arms.deploy}} have deployment figures</div></div>
+  <div class="tile"><div class="v">{{fig:arms.under.floor}} of {{fig:arms.candidates}}</div>
+    <div class="l">candidates below the trivial floor</div>
+    <div class="s">{{fig:arms.over.floor}} clear it; {{fig:arms.zero.f1}} score exactly zero at
+      their own argmax</div></div>
+  <div class="tile"><div class="v">{{fig:lap.published}} of {{fig:roster.n}}</div>
+    <div class="l">arms with a measured rows/min on CPU</div>
+    <div class="s">{{fig:lap.arms}} were converted or quantized</div></div>
+  <div class="tile"><div class="v">{{fig:settle.settled}} of {{fig:arms.scored}}</div>
+    <div class="l">arms settled with a matching digest</div>
+    <div class="s">{{fig:settle.rows}} rows each, 0 errors</div></div>
+</div>
+
+<h3>Complete</h3>
+<ul>
+  <li><a href="methodology.html#corpus">The corpus</a> and its grade split.</li>
+  <li><a href="baselines.html">The two baselines</a>: the trivial floor and the length cue.</li>
+  <li><a href="results.html#deployment">Deployability</a> at an FPR cap and at a zero-FP
+      gate.</li>
+  <li><a href="results.html#ranking">The ranking</a> on length-controlled AUC.</li>
+  <li><a href="results.html#control">What an untrained backbone scores</a>.</li>
+  <li><a href="results.html#metrics">Precision, recall, F1 and block FPR</a> for every arm at
+      every operating point, counted from rows.</li>
+  <li><a href="results.html#gate">The leakage gate</a> over both MLM controls.</li>
+  <li><a href="results.html#parity">Scorer equivalence</a> against published System One board
+      scorecards.</li>
+  <li><a href="footprint.html">Laptop footprint</a> for {{fig:lap.published}} arms.</li>
+  <li><a href="roster.html">The roster</a>, with licence, origin and gating group.</li>
+</ul>
+
+<h3>Not in this revision</h3>
+<ul>
+  <li>Any transfer figure. {{fig:s3.arms}} arms are scored on a held-out corpus, and its positives
+      are {{fig:s3.gradeA.share}} grade A against s2's {{fig:s2.gradeA.share}}, so a difference
+      between the two conflates miscalibration with a changed definition of a positive. The
+      <a href="results.html#corpora">composition and the per-grade separation</a> are published;
+      no transfer penalty is.</li>
+  <li><code>{{fig:arms.noshipped}}</code> is ranked and has both deployment gates, and has no
+      shipped-argmax row: its prediction body landed after the run that recorded those.</li>
+  <li>A rows/min figure for the third quantized encoder.</li>
+</ul>
+
+<h2 id="disclosures">Disclosures</h2>
+<div class="grid-2">
+  <div class="card">
+    <h3>Gating</h3>
+    <p class="small">{{fig:roster.gated}} of {{fig:roster.n}} arms need a licence-accepted
+      HuggingFace token, across {{fig:roster.groups}} separate acceptance groups.
+      <a href="roster.html#gating">Detail</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Encoder backbones</h3>
+    <p class="small">All {{fig:roster.encoder}} trained encoder classifiers are
+      <code>DebertaV2ForSequenceClassification</code>: three checkpoints inside one backbone
+      family. The only independent encoder backbone is ModernBERT, and both ModernBERT arms are
+      negative controls. <a href="roster.html#backbones">Detail</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Llama Guard 3 1B's taxonomy</h3>
+    <p class="small">Its shipped template hardcodes {{fig:lg.categories}} categories and none
+      covers code execution or system damage. A custom category built from the I3 policy was used
+      through the template's documented hook, with
+      <code>llamaguard_default_taxonomy_covers_task: false</code> in the run metadata.
+      <a href="roster.html#taxonomy">Detail</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Qwen3</h3>
+    <p class="small">Qwen3 at 0.6B, 1.7B and 4B was dropped on a non-China provenance
+      constraint, after {{fig:qwen.gib}} GiB of weights had been downloaded and before any GPU
+      time was spent. <a href="roster.html#dropped">Detail</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Run integrity</h3>
+    <p class="small">The cohort runner writes neither <code>complete</code> nor
+      <code>prediction_sha256</code>. A settlement step retrofits both and re-verifies, with two
+      residual limits. <a href="methodology.html#validity">Detail</a>.</p>
+  </div>
+  <div class="card">
+    <h3>Aggregates only</h3>
+    <p class="small">No per-case detail is published. Every figure is an aggregate over the
+      corpus or a stratum of it. <a href="methodology.html#publication">Detail</a>.</p>
+  </div>
+</div>
+
+<div class="foot">
+  <p>Corpus s2, cell C7/I3/Q2, <code>--instruction-format structured</code>,
+    <code>cases_sha256 {{fig:corpus.sha}}</code>. Scripts and artifacts are on
+    <a href="reproduce.html">Reproduce</a>.</p>
+</div>
+</div>
+</body>
+</html>
