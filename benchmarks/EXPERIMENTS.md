@@ -317,6 +317,12 @@ The base control's excess is **entirely the length cue**, and length is not a la
 
 **No surface-cue or label-leakage signal. The escalation ladder is clear to proceed.**
 
+**Nine of 19 candidates fail to clear the trivial floor at their shipped operating point** —
+`olmo-2-1b-instruct`, `smollm3-3b`, `prompt-guard-2-22m`, `prompt-guard-2-86m` and
+`granite-guardian-3.1-2b` all score exactly **0.0**, plus `llama-guard-3-1b`,
+`shieldstral-1.0-3b`, `shieldgemma-2b` and `falcon3-3b-instruct`. An earlier count of eight
+here was wrong.
+
 Ranked on length-controlled AUC, the only measure here that is neither an oracle, nor a
 trivial-baseline artifact, nor the flagged variable:
 
@@ -355,7 +361,13 @@ point, so the gap is not a tuning problem.
 
 **DeBERTa's 512-token limit: severe in extent, not the binding constraint.** The real cap is
 `min(token_budget, max_position_embeddings − 2) = 510`. **17,202 of 30,310 rows (56.75%)**
-exceeded it; within the scored set 16,975 of 28,018 rows (60.59%) and **1,996 of 3,817 cases
+exceeded it and were re-rendered to fit, losing context the model never saw.
+
+Do not conflate that with the row-level `truncated` boolean, which is true for only **2,086
+rows (6.88%)** and records something else entirely — it is a corpus request-build flag, and it
+is byte-identical across all arms including the cap-6144 controls. A reader checking the field
+named `truncated` against a claim of 56.75% would conclude the claim was wrong. The 56.75%
+figure is the runner's own `shrunk` count. within the scored set 16,975 of 28,018 rows (60.59%) and **1,996 of 3,817 cases
 (52.29%)** have at least one truncated event, 58 cases have every event truncated. But
 truncation does **not** correlate with its errors: AUC 0.8017085164830626 within the truncated
 stratum against 0.7771006013326832 untruncated — the truncated stratum is marginally *better*,

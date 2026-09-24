@@ -1,0 +1,201 @@
+{
+ "archived_at_utc": "2026-09-24T07:48:00+00:00",
+ "source_hosts": [
+  "Lightning 4xH200 studio s_01m37s22w78v9j8pnsf687m8be (all artifacts read from persistent /teamspace)",
+  "defenseclaw-dev (CPU dev host; ranking tranche, and the host every push was made from)"
+ ],
+ "note": "Second pass. Clears the ~491 MB the first pass deferred for correctness, now that the 22-arm s2 sweep, the 6-arm s3 sweep and the nimble reshard have all settled. Studio artifacts were streamed studio -> operator workstation -> dev host (the studio cannot resolve the dev host, and the studio holds only a read token), then pushed from the dev host using that host's own token resolved in place. Neither token was printed, echoed, copied or moved.",
+ "code_commit": "1b521741f",
+ "deadline": {
+  "studio_session_holder_expiry_utc": "2026-09-24T08:41:00Z",
+  "transfer_off_studio_completed_utc": "~2026-09-24T07:40:00Z",
+  "finished_before_studio_became_unreachable": true,
+  "studio_reachable_at_end_of_task": true,
+  "gpus_at_start_and_end": "all four cards 0 MiB; nothing was launched, killed or disturbed"
+ },
+ "verification": {
+  "method": "For every prediction body: meta complete == true AND on-disk sha256 == meta prediction_sha256 AND row count == expected request count. Computed on the studio before transfer, then every staged file re-hashed on the dev host and compared file-by-file against the studio digests.",
+  "bodies_checked": 31,
+  "bodies_verified": 31,
+  "bodies_failed": 0,
+  "unusable_bodies": [],
+  "lock_files_present": 0,
+  "studio_vs_dev_files_compared": 399,
+  "studio_vs_dev_identical": 397,
+  "studio_vs_dev_differing": [
+   {
+    "path": "sysone/supervisor/state.json",
+    "why": "live file; the supervisor process is still running and rewrote it between staging and transfer. Archived as a point-in-time snapshot. Not a prediction body."
+   },
+   {
+    "path": "sysone/supervisor/supervisor.log",
+    "why": "live append-only log, same cause. Archived as a point-in-time snapshot. Not a prediction body."
+   }
+  ],
+  "digests_cross_checked_against_brief": "all 9 stated digest prefixes matched on disk, and bespoke-nimble-9b matched its full 64-char digest and its stated 117167927 bytes exactly",
+  "post_upload_refetch": {
+   "files_refetched_from_hub": 12,
+   "digest_matches": 12,
+   "mismatches": 0
+  }
+ },
+ "datasets": {
+  "Vineethsain/defenseclaw-slm-toolcall-v1": {
+   "action": "extended with the settled cohort tranche; 3 previously UNVERIFIABLE bodies re-archived from settled metas; card corrected",
+   "private_before": true,
+   "private_after": true,
+   "sha_before": "f742d4cef3a59cc6b061ce09c344ddc9e460fc33",
+   "sha_after_data_push": "e1a7b5a760a140d6e7e2e41a3bf76028a9dd22d4",
+   "sha_after_card_push": "833417af26aa812aa039970ac7653432768e8ff4",
+   "sha": "53e5a47303baefd5fcf567ff1e4fb0436ab624ce",
+   "files_in_repo_before": 14,
+   "files_in_repo": 248,
+   "content_files_uploaded": 238,
+   "manifest_files_uploaded": 2,
+   "files_overwritten": 6,
+   "net_new_paths": 234,
+   "bytes_uploaded": 1197690616,
+   "contents": {
+    "predictions/": "22 s2 cohort arms, 30310 rows each, all settled and digest-verified (supersedes the 3 arms archived UNVERIFIABLE in the first pass)",
+    "predictions-s3/": "6 s3 cohort arms, 100001 rows each, all settled and digest-verified",
+    "ranking/": "cohort-rank.json, ranking-analysis.json, reconcile.json, rank.log from /home/ubuntu/cohort-rank/out/",
+    "cpu/": "112 CPU/laptop measurement logs and inventories (no weights)",
+    "logs/": "66 cohort run logs",
+    "MANIFEST-cohort-settled-2026-09-24.json": "per-file path, bytes, rows, sha256, verification status",
+    "SHA256SUMS-cohort-settled-2026-09-24.txt": "sha256sum -c compatible"
+   }
+  },
+  "Vineethsain/defenseclaw-system-one-predictions-v1": {
+   "action": "extended with the System One s3 tranche plus the reshard audit trail and supervisor record",
+   "private_before": true,
+   "private_after": true,
+   "sha_before": "d4ade41ef9e3be16b4ecf16148edf942be05347d",
+   "sha_after_data_push": "fadad1d9b79800bd7935b8649e7db57ccf1050e2",
+   "sha": "1cce3ae119da5cccfbb3e350bfdc4d44c76d7d5e",
+   "files_in_repo_before": 882,
+   "files_in_repo": 1049,
+   "content_files_uploaded": 165,
+   "manifest_files_uploaded": 2,
+   "files_overwritten": 1,
+   "net_new_paths": 167,
+   "bytes_uploaded": 345766528,
+   "contents": {
+    "runs/nimble-s3/settled/": "bespoke-nimble-9b.jsonl (117167927 bytes, 100001 rows, digest b34651649b668c069dc02253c0e79682305ab57c4277d233fb189a6ad57a3842) with its meta, which carries the full merge provenance",
+    "runs/2b-s3/": "open-jev-qwen-2b-shard0, 100001 rows, e6112a4c4c6cae2e...",
+    "runs/9b-s3/": "open-jev-qwen-9b-shard0, 100001 rows, 2de9342740d540a3...",
+    "reshard/": "chunks.json, case_index.json, claims/, done/ (52 records) and the tooling - the chunk plan that makes the merge auditable",
+    "supervisor/": "state.json, alerts.log, supervisor.log"
+   },
+   "nimble_provenance_confirmed": {
+    "chunk_shards": 52,
+    "shards_including_shard0": 53,
+    "each_chunk_shard_carries": "prediction_sha256, case range, request count and a distinct run_id (s3-bespoke-nimble-9b-h200-shard1..shard52)",
+    "shard0_role": "produced by the original live driver PID 92139 at canonical serving conditions; lost (not deliberately stopped) when the studio stopped at ~00:15Z, frozen at 23096 rows, first 22535 revalidated row-by-row as an ordered prefix of the 100001-request plan",
+    "actual_input_tokens": 270881394,
+    "per_driver_cap": 200000000,
+    "over_cap_by": 70881394,
+    "conclusion": "a single driver could not have produced this artifact; it is a merge and the meta proves it"
+   }
+  }
+ },
+ "untouched_datasets": {
+  "Vineethsain/defenseclaw-system-one-evaluations-v1": {
+   "private": true,
+   "sha": "553896191c4b995473fd414dfd73556b2dec1597",
+   "files": 1191,
+   "why_untouched": "The rescoring-remine tranche it was extended with in the first pass is already complete. The only items still unuploaded from /home/ubuntu/rescoring-remine/ are 6 .py analysis scripts, which live in git at benchmarks/system_one/reproduce/07-analysis/rescoring/ - code belongs in the repository, not the dataset."
+  },
+  "Vineethsain/defenseclaw-system-one-corpora-v1": {
+   "private": true,
+   "sha": "b46628023bb03399f60908017b573e480605dbf0",
+   "files": 92
+  },
+  "Vineethsain/defenseclaw-system-one-contamination-v1": {
+   "private": true,
+   "sha": "343fb13c9970c6047d3336953320fb377fb811e8",
+   "files": 181
+  }
+ },
+ "routing_judgement": {
+  "cohort_ranking_to_slm_toolcall_not_evaluations": "The brief routes 'scoring and ranking outputs' to evaluations-v1, but the cohort's own scoring artifacts were already placed in slm-toolcall-v1/scoring/ by the first pass. Putting the cohort ranking in evaluations-v1 would split one cohort result across two repositories and break that precedent, so cohort-rank/out/ went to slm-toolcall-v1/ranking/. evaluations-v1 holds System One board evaluations; the cohort is a separate programme.",
+  "reshard_and_supervisor_to_predictions": "Neither is rows, predictions, scoring nor ranking. reshard/ is the provenance of a prediction body and supervisor/ is the operational record of the runs that produced them, so both were co-located with the artifacts they attest in predictions-v1. The brief's own reason - 'the chunk plan is what makes the merge auditable' - argues for keeping plan and artifact in one repository."
+ },
+ "licence_gate": {
+  "method": "Re-verified rather than assumed. A literal case-insensitive scan for 'mcptox' and 'augur' across all 399 staged studio files, plus inspection of the prediction row schema.",
+  "mcptox_hits": 0,
+  "augur_hits": 0,
+  "source_field_in_prediction_rows": "null - prediction rows carry no source.dataset field, so row-level gating was not applicable; the literal scan over the archived bytes is the stronger check",
+  "payload_field_present_in_any_uploaded_file": false,
+  "conclusion": "No filtering was required. mcptox remains LOCAL-EVALUATION-ONLY and augur_unsafe_tool_input_eval aggregate-only; neither contributes a row to s2 or s3."
+ },
+ "credential_scan": {
+  "scanner": "benchmarks/archive/scan_credentials.py",
+  "files_scanned": 403,
+  "findings": 0,
+  "also_scanned": "both rewritten dataset cards, 0 findings",
+  "positive_control": "PASS - 11 findings, all 11 seeded credential classes fired (hf_token, aws_access_key_id, aws_secret_access_key, authorization_header, bearer_token, private_key_pem, openai_key, github_token, jwt, secret_assignment, provider_rationale)",
+  "negative_control": "PASS - 0 false positives on sha256 digests, revisions, case ids and redacted/templated secret-shaped strings",
+  "why_the_controls_matter": "On a previous run the positive control caught a genuinely broken rule: a zero-width \\s* branch inside a negative lookahead meant secret_assignment never fired at all. The controls are load-bearing, not ceremony."
+ },
+ "exclusions": {
+  "model_weights": "Never archived. ~238 GB (~222 GiB) measured across laptopguard/weights, sysone/hf, laptopguard/cpu/{gguf,scratch} and sysone/checkpoints. All re-downloadable from the pinned repo+revision in the arm registry. The staging file list was built explicitly and then screened with a weight-shaped-path guard (safetensors/gguf/bin/pt/pth/ckpt/onnx plus /gguf/, /scratch/, /weights/, /checkpoints/, /hf/) which returned clean before any transfer.",
+  "laptopguard_anchors": "Anchor shard bodies not archived. The merged anchor body is already verified in predictions-v1 with a stronger inline attestation, so the per-shard bodies would duplicate existing evidence.",
+  "open-jev-qwen-2b-merged.jsonl": "33760188 bytes still not duplicated; equivalence to the archived merged anchor was proven in the first pass and is recorded in predictions/open-jev-qwen-2b-merged.EXCLUDED.json.",
+  "rescoring_remine_and_cohort_scoring_python": "Analysis and scoring code kept in git, not the datasets, matching the first pass.",
+  "sysone_supervisor_boot_log": "Zero bytes, skipped."
+ },
+ "card_corrections": [
+  {
+   "what": "slm-toolcall-v1: removed the UNVERIFIABLE integrity claim.",
+   "why": "All 28 cohort bodies now pass meta complete == true AND on-disk sha256 == prediction_sha256. The 3 arms recorded UNVERIFIABLE in the first pass were re-archived from settled metas; STAGING-MANIFEST.json is now marked superseded."
+  },
+  {
+   "what": "slm-toolcall-v1: corrected the trivial-floor count from 8 of 19 to 9 of 19.",
+   "why": "Recomputed from ranking/ranking-analysis.json against the s2 block-only floor 0.20503174229955326. Nine candidates sit at or below it at their shipped point (olmo-2-1b-instruct, smollm3-3b, prompt-guard-2-22m, prompt-guard-2-86m, granite-guardian-3.1-2b all exactly 0.0; llama-guard-3-1b, shieldstral-1.0-3b, shieldgemma-2b, falcon3-3b-instruct below it). The brief and the earlier caveat both said 8."
+  },
+  {
+   "what": "slm-toolcall-v1: disambiguated deberta's 56.75% figure.",
+   "why": "56.75% (17202 of 30310) is the runner's *shrunk* count - rows whose context was repeatedly cut to 82% and re-rendered to fit the 510-token cap, so they lost context the model never saw. The row-level `truncated` boolean is true for only 6.88% (2086 rows) and means something different. A reader checking the wrong field would have concluded the card was wrong."
+  },
+  {
+   "what": "slm-toolcall-v1: recorded that the length cue is corpus-specific.",
+   "why": "~0.77 AUC on s2 (event count 0.7772553177633239, prompt tokens 0.7692264380822134) but chance on s3 (context_bytes 0.504185543681342, context_events 0.34604723008084354). Length-controlled AUC is the right s2 ranking metric; an s2->s3 drop partly reflects the cue leaving with the corpus."
+  },
+  {
+   "what": "slm-toolcall-v1: corrected the excluded-weights figure from ~97 GiB to ~238 GB measured, and replaced the stale 'Known incompleteness' section."
+  },
+  {
+   "what": "slm-toolcall-v1: added the untrained-control, FPR-cap and zero-FP caveats.",
+   "why": "An untrained ModernBERT control beats 7 of 19 candidates on oracle F1 and 12 of 19 on shipped F1 while blocking 39.36% fewer benign cases than rank 1 (1941 vs 3201) - all three verified against ranking-analysis.json. At FPR cap 0.00384502 the best arm (falcon3-1b-instruct) scores F1 0.10548523206751055 catching 25 of 436 positives; at a zero-FP gate 13 of 20 candidates retain nothing. Both verified against reconcile.json."
+  },
+  {
+   "what": "predictions-v1: documented the s3 tranche, the 53-shard nimble merge provenance, the 270881394-token / 200M-cap arithmetic, and the ranking caveats; attestation count updated 104 -> 107."
+  }
+ ],
+ "claims_verified_against_data": {
+  "length_cue_s3_context_bytes": "0.504185543681342 (brief said 0.5042) - match",
+  "length_cue_s3_context_events": "0.34604723008084354 (brief said 0.3460) - match",
+  "untrained_control_beats_on_oracle_f1": "7 of 19 - match",
+  "untrained_control_beats_on_shipped_f1": "12 of 19 - match",
+  "benign_blocking_reduction_vs_rank1": "0.3936269915651359 (brief said 39.36%) - match",
+  "fpr_cap_best_arm_f1": "0.10548523206751055 with tp 25 of 436 (brief said 0.10548523, 25 of 436) - match",
+  "zero_fp_gate_retain_nothing": "13 of 20 candidates - match",
+  "deberta_shrunk_fraction": "0.5675354668426262 (brief said 56.75%) - match, but see card_corrections on which field it is",
+  "nimble_input_tokens": "270881394 (brief said 270,881,394) - match",
+  "trivial_floor_failures": "9 of 19, NOT the 8 the brief stated - corrected in the card"
+ },
+ "constraints_honoured": {
+  "no_pkill_or_killall": true,
+  "tunnel_ports_untouched": "8011, 8765, 8767, 8768, 8831-8834, 8841-8845, 8921, 8922, 3100 - never contacted",
+  "no_space_published": true,
+  "no_git_push": true,
+  "tokens_never_printed_copied_or_moved": true,
+  "all_five_repos_private_after_every_push": true,
+  "gpu_work_untouched": "all four cards read 0 MiB at start and at end; nothing launched or stopped"
+ },
+ "staging_paths_on_dev_host": {
+  "transferred_tree": "/home/ubuntu/archive-stage-2026-09-24/ (399 files, 1542961351 bytes as staged on the studio)",
+  "per_repo_upload_trees": "/home/ubuntu/hf-stage/{toolcall,predictions}/",
+  "note": "Left in place for audit. Safe to delete; every file is now in a private HuggingFace dataset with a recorded digest."
+ }
+}
