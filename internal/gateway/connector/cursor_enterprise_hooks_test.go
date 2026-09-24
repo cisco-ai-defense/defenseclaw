@@ -18,9 +18,15 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -144,7 +150,8 @@ func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
 		if strings.Contains(command, "&") || strings.Contains(command, "'") || strings.Contains(command, `\`) {
 			t.Fatalf("Cursor enterprise command is not neutral to PowerShell and Bash parsing: %q", command)
 		}
-		wantScript := "$input | & " + powershellQuoteLiteral(adapterPath)
+		wantScript := "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $input | & " +
+			powershellQuoteLiteral(adapterPath)
 		if decoded := decodePowerShellEncodedCommandForTest(t, command); decoded != wantScript {
 			t.Fatalf("decoded Cursor enterprise command = %q, want %q", decoded, wantScript)
 		}
@@ -152,6 +159,70 @@ func TestWindowsCursorEnterpriseHookCommandIsShellNeutral(t *testing.T) {
 			t.Fatalf("legacy Cursor enterprise command = %q, want %q", legacyCommand, wantLegacy)
 		}
 	}
+}
+
+func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell and Git Bash invocation semantics are Windows-specific")
+	}
+
+	root := t.TempDir()
+	adapterPath := filepath.Join(root, "cursor-hook.ps1")
+	adapter := strings.Join([]string{
+		`$ErrorActionPreference = 'Stop'`,
+		`$payload = (@($input | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)`,
+		`[IO.File]::WriteAllText($env:DC_CURSOR_UTF8_OUTPUT, $payload, [Text.UTF8Encoding]::new($false))`,
+	}, "\r\n")
+	if err := os.WriteFile(adapterPath, []byte(adapter), 0o600); err != nil {
+		t.Fatalf("write Cursor UTF-8 probe adapter: %v", err)
+	}
+	command, _, err := windowsCursorEnterpriseHookCommands(adapterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"path":"C:\\用户\\résumé.txt","prompt":"東京 – café 🚀"}`
+
+	run := func(t *testing.T, commandForHost func(context.Context) *exec.Cmd) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		outputPath := filepath.Join(t.TempDir(), "payload.json")
+		cmd := commandForHost(ctx)
+		cmd.Env = append(os.Environ(),
+			"DC_CURSOR_UTF8_OUTPUT="+outputPath,
+			"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
+		)
+		cmd.Stdin = strings.NewReader(payload)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("run Cursor enterprise command: %v\ncommand: %s\noutput: %s", err, command, output)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("Cursor enterprise command timed out: %v", ctx.Err())
+		}
+		got, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatalf("read Cursor UTF-8 probe output: %v", err)
+		}
+		if string(got) != payload {
+			t.Fatalf("Cursor enterprise payload = %q, want %q", got, payload)
+		}
+	}
+
+	t.Run("PowerShell", func(t *testing.T) {
+		run(t, func(ctx context.Context) *exec.Cmd {
+			argv := strings.Fields(command)
+			return exec.CommandContext(ctx, argv[0], argv[1:]...)
+		})
+	})
+	t.Run("GitBash", func(t *testing.T) {
+		bash, err := exec.LookPath("bash")
+		if err != nil {
+			t.Skip("Git Bash is not installed")
+		}
+		run(t, func(ctx context.Context) *exec.Cmd {
+			return exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-lc", command)
+		})
+	})
 }
 
 func TestMergeVerifyAndRemoveWindowsCursorEnterpriseHooks(t *testing.T) {
