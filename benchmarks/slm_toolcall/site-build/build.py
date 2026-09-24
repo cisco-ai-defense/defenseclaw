@@ -16,6 +16,16 @@ verifier and word counter run over this payload unchanged:
   * every figure on a page is a key in a dict that was checked against an artifact first
   * no <img>, no <script src>, no external subresource
 
+Two things this generator does that the System One one does not:
+
+  * every figure is published at reading precision with the artifact's exact decimal kept in the
+    same element (see exact()). A cell must not publish a rounding, and a column of twenty-two
+    seventeen-digit floats cannot be read; both hold at once because the rounding is the text and
+    the exact value is the attribute. The control in the nav swaps them.
+  * one inline script per page (see SCRIPT) drives the precision control, the column sorts and the
+    leaderboard's filters. Every one of them degrades to a state the HTML already renders, and
+    verify.py checks each of those defaults with the scripts stripped out.
+
 Abort conditions:
   * any asserted figure disagrees with its artifact              (exit 2)
   * any template token is left unsubstituted                     (exit 3)
@@ -25,7 +35,7 @@ Abort conditions:
   * an escaping defect in the generated output                   (exit 7)
   * two drawn labels overlap                                     (exit 8)
   * the Space card's front matter would be rejected on upload     (exit 9)
-  * an out-of-scope model or arm is named in the output           (exit 10)
+  * an out-of-scope model or model is named in the output           (exit 10)
 """
 
 from __future__ import annotations
@@ -68,7 +78,7 @@ HARNESS = os.path.abspath(os.path.join(HERE, "..", "harness"))
 
 
 def load_registry() -> dict:
-    """The arm registry, imported from the harness that ran the cohort. Pure data."""
+    """The model registry, imported from the harness that ran the cohort. Pure data."""
     import importlib.util
     path = os.path.join(HARNESS, "arms.py")
     spec = importlib.util.spec_from_file_location("slm_arms", path)
@@ -102,6 +112,11 @@ RANK = load("cohort-rank.json")            # shipped-argmax confusion, 21 arms
 AUTH = load("cohort-length-controlled-ranking.json")   # the authoritative ranking, 22 arms
 S3 = load("s3-stats.json")                 # the held-out corpus, read for corpus design only
 S3C = load("s3-scores-in-scope.json")      # scope-filtered; read for the s3 length cue only
+# Curves, intervals, failure overlap, calibration and the source census, recomputed from the
+# settled prediction bodies with the arithmetic the published scalars were computed with. Every
+# curve here is carried as integer (false positives, true positives) counts, so the area under a
+# drawn curve and the AUC already published are the same arithmetic. check_curves() asserts that.
+CURVES = load("cohort-curves.json")
 ROSTER = load("roster.json", PINNED)
 LAPTOP = load("laptop-feasibility.json", PINNED)
 # The full-cohort ranking artifact carries a richer corpus record than the stage-0 scorecards.
@@ -159,7 +174,7 @@ def sha256_file(path: str) -> str:
 
 
 def build_roster() -> list[dict]:
-    """One row per registry arm, every field derived from the registry or a manifest."""
+    """One row per registry model, every field derived from the registry or a manifest."""
     rows = []
     for key, a in REGISTRY.items():
         lic = a["licence"]
@@ -211,7 +226,7 @@ def published_estimator() -> tuple[str, str]:
     field wins; the overlay is the fallback for an artifact that carries none."""
     named = (AUTH.get("estimator") or {}).get("authoritative")
     if named:
-        return named, "the ranking artifact's own `estimator.authoritative` field"
+        return named, "the ranking artifact's own <code>estimator.authoritative</code> field"
     declared = ROSTER.get("ranking", {}).get("published_estimator")
     if not declared:
         BAD.append("neither the ranking artifact nor the overlay names which length-control "
@@ -221,7 +236,7 @@ def published_estimator() -> tuple[str, str]:
 
 
 def estimator_values(key: str) -> dict:
-    """All four estimators for one arm, read from the authoritative artifact, with the two
+    """All four estimators for one model, read from the authoritative artifact, with the two
     unweighted variants recomputed here from the bin composition as a cross-check."""
     a = AUTH["arms"][key]
     sch = a["estimators_scheme_A_common_corpus_length_quintiles"]
@@ -293,8 +308,8 @@ def rank_stability() -> dict:
 # smoothed over.
 
 def build_cohort() -> dict:
-    """One record per arm in the authoritative ranking, which covers all 22. Shipped-argmax
-    confusion comes from the earlier scorecard file, which covers 21: the arm whose body landed
+    """One record per model in the authoritative ranking, which covers all 22. Shipped-argmax
+    confusion comes from the earlier scorecard file, which covers 21: the model whose body landed
     after that run has no shipped row and is carried with `shipped` set to None."""
     shipped_src = RANK["arms_s2"]
     out: dict[str, dict] = {}
@@ -345,6 +360,26 @@ def build_cohort() -> dict:
 
 
 COH = build_cohort()
+
+
+def pooled_auc(bins) -> float:
+    """The published length-control estimator from per-bin AUCs and counts: each bin's AUC
+    weighted by the positive-benign pairs it holds. check_review_fixes() asserts that this
+    reproduces the ranking artifact's own pair-weighted figure for every model whose bins are
+    recorded elsewhere, so a figure computed with it is the published estimator and not a new one."""
+    num_, den = 0.0, 0.0
+    for b in bins:
+        pairs = b["positives"] * (b["cases"] - b["positives"])
+        num_ += b["auc"] * pairs
+        den += pairs
+    return num_ / den
+
+
+# The pure length counter, under the published estimator. The final-comparisons artifact records
+# only its unweighted mean, which is the retracted estimator, so the pooled figure is computed here
+# from the same per-quintile AUCs and counts.
+LEN_POOLED = pooled_auc(FINAL["length_controlled_auc"]["pure length counter (natural prompt tokens)"]
+                        ["per_quintile"].values())
 CANDS = {k: v for k, v in COH.items() if not v["is_control"]}
 CTRLS = {k: v for k, v in COH.items() if v["is_control"]}
 BASE = COH["control-modernbert-base"]
@@ -380,7 +415,7 @@ def band_of(params: int) -> str:
 
 
 def in_band(label: str) -> list[dict]:
-    """The arms in one band, ordered by F1 at the common operating point, then by parameters."""
+    """The models in one band, ordered by F1 at the common operating point, then by parameters."""
     return sorted((a for a in COH.values() if band_of(a["params"]) == label),
                   key=lambda a: (-a["cap_row"]["f1"], a["params"]))
 
@@ -414,6 +449,17 @@ def wilson(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
     return c - h, c + h
 
 
+def wilson_shared(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    """The shared arithmetic's own Wilson expression, clamped to [0, 1], transcribed so the
+    intervals drawn on this Space can be asserted against the curve artifact bit for bit. The
+    algebraically equivalent grouping in wilson() above rounds differently in the last bit."""
+    p = k / n
+    den = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / den
+    radius = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n) / den
+    return max(0.0, centre - radius), min(1.0, centre + radius)
+
+
 
 def tightest_pair() -> dict:
     """The narrowest of the 15 pairwise comparisons, and the positive count that would have
@@ -428,7 +474,7 @@ def tightest_pair() -> dict:
 
 
 def s3_primary(key: str) -> dict:
-    """One held-out arm's record on its primary block variable."""
+    """One held-out model's record on its primary block variable."""
     a = S3ARMS[key]
     return a["by_variable"][a["primary_block_variable"]]
 
@@ -436,8 +482,8 @@ def s3_primary(key: str) -> dict:
 # The second corpus is never named in a table without the grade-composition figure that keeps it
 # from being read as a generalisation result. The label carries the figure so it travels with
 # every row it appears in.
-S3LABEL = (f'held out, {S3CORP["grade_counts_all"]["A"] * 100 / S3CORP["positives_A_B"]:.2f}% '
-           f'grade A positives')
+# The composition caveat is stated once, on the Data and models page, so the label is plain.
+S3LABEL = "second corpus"
 
 
 # ------------------------------------------------- where the labels and the licences come from
@@ -634,11 +680,11 @@ def check_figures() -> None:
     d_ship = DEB["headline"]["shipped_block_only_f1"]
     expect("DeBERTa shipped minus the floor", d_ship - be["f1"],
            HEAD["deberta_shipped_minus_block_everything"], 5e-12)
-    expect("the comparison keys that quote an out-of-scope arm are all dropped",
+    expect("the comparison keys that quote an out-of-scope model are all dropped",
            len(set(HEAD) & set(SCOPE["excluded_comparison_keys"])), 0, 0)
     expect("the out-of-scope AUC rows are all dropped",
            len(set(LCA) & set(SCOPE["excluded_lca_keys"])), 0, 0)
-    expect("no out-of-scope arm survives into the scored set",
+    expect("no out-of-scope model survives into the scored set",
            len(set(ARMS) & set(SCOPE["excluded_scorecard_arms"])), 0, 0)
 
     # --- the scorer-equivalence gate, as a property of the check rather than of any arm's score
@@ -696,13 +742,13 @@ def check_figures() -> None:
            round(LAPTOP["multimodal_splits"][0]["text_only_q4_k_m_bytes"] / GIB, 4), 1.9991, 0)
     expect("gemma-3-4b-it weight bytes in GiB",
            round(LAPTOP["multimodal_splits"][1]["full_checkpoint_bytes"] / GIB, 4), 8.0096, 0)
-    expect("arms whose weight bytes pass 8 GiB",
+    expect("models whose weight bytes pass 8 GiB",
            sum(1 for m in LAPTOP["multimodal_splits"]
                if m.get("full_checkpoint_bytes", 0) > 8 * GIB), 1, 0)
 
     # --- the roster, derived from the registry
     expect("roster size", len(ROWS), 22, 0)
-    expect("gated arms", sum(1 for a in ROWS if a["gated"]), 8, 0)
+    expect("gated models", sum(1 for a in ROWS if a["gated"]), 8, 0)
     expect("gating groups", len({a["gated"] for a in ROWS if a["gated"]}), 3, 0)
     expect("trained encoders", sum(1 for a in ROWS if a["cls"] == "encoder"), 3, 0)
     expect("trained encoders on the DebertaV2 backbone",
@@ -713,18 +759,18 @@ def check_figures() -> None:
            sum(1 for a in ROWS if a["cls"] == "control"), 0)
     expect("safety classifiers", sum(1 for a in ROWS if a["cls"] == "safety"), 5, 0)
     expect("general decoders", sum(1 for a in ROWS if a["cls"] == "general"), 12, 0)
-    expect("candidate arms, controls excluded",
+    expect("candidate models, controls excluded",
            sum(1 for a in ROWS if a["cls"] != "control"), 20, 0)
     expect("the four classes partition the roster",
            sum(1 for a in ROWS if a["cls"] in ("general", "safety", "encoder", "control")),
            len(ROWS), 0)
-    expect("registry arms with a ranking record", sum(1 for a in ROWS
+    expect("registry models with a ranking record", sum(1 for a in ROWS
                                                      if a["status"] == "ranked"), 22, 0)
-    expect("registry arms with no score at all",
+    expect("registry models with no score at all",
            sum(1 for a in ROWS if a["status"] == "not scored"), 0, 0)
-    expect("every arm has a weight-manifest snapshot size",
+    expect("every model has a weight-manifest snapshot size",
            sum(1 for a in ROWS if a["snapshot_bytes"]), len(ROWS), 0)
-    expect("arms whose download recorded an architecture class",
+    expect("models whose download recorded an architecture class",
            sum(1 for a in ROWS if a["architectures"]), 2, 0)
     for a in ROWS:
         if a["architectures"] and a["backbone"] == "DebertaV2":
@@ -769,7 +815,7 @@ def check_figures() -> None:
                CORPUS["scorable_cases_A_B_D"], 0)
     if PUB_EST not in EST_ORDER:
         BAD.append(f"the published estimator {PUB_EST!r} is not one this build computes")
-    expect("estimators reported per arm", len(EST_ORDER), 4, 0)
+    expect("estimators reported per model", len(EST_ORDER), 4, 0)
     expect("schemes the artifact evaluates", STABILITY["schemes"], 9, 0)
     expect("unweighted-mean schemes among them",
            STABILITY["families"]["unweighted_mean_family"], 6, 0)
@@ -789,13 +835,13 @@ def check_figures() -> None:
     if AUTH["rank_stability"]["rank_3_plurality_among_estimators"] == STABILITY["rank3"]:
         BAD.append("the artifact's plurality and its authoritative rank 3 now agree, so the "
                    "statement that a tally is not how this is decided needs rewriting")
-    expect("ranked arms", len(COH), 22, 0)
+    expect("ranked models", len(COH), 22, 0)
     expect("ranked candidates", len(CANDS), 20, 0)
     expect("negative controls", len(CTRLS), 2, 0)
-    expect("arms with a shipped-argmax row", len(SHIP), 21, 0)
-    expect("arms without one", len(SHIPPED_MISSING), 1, 0)
-    expect("arms with an FPR-cap row", sum(1 for a in COH.values() if a["cap_row"]), 22, 0)
-    expect("arms with a zero-FP row", sum(1 for a in COH.values() if a["zero_fp"]), 22, 0)
+    expect("models with a shipped-argmax row", len(SHIP), 21, 0)
+    expect("models without one", len(SHIPPED_MISSING), 1, 0)
+    expect("models with an FPR-cap row", sum(1 for a in COH.values() if a["cap_row"]), 22, 0)
+    expect("models with a zero-FP row", sum(1 for a in COH.values() if a["zero_fp"]), 22, 0)
 
     # --- the corpus record in the ranking artifact agrees with the stage-0 one
     expect("ranking corpus positives", CORPUS["positives_A_B"], 436, 0)
@@ -863,11 +909,11 @@ def check_figures() -> None:
            0)
     for r in tp_rows:
         if r["arm"] not in by_key:
-            BAD.append(f'throughput row names {r["arm"]!r}, which is not a registry arm')
+            BAD.append(f'throughput row names {r["arm"]!r}, which is not a registry model')
     for k in ("q4_k_m_gib_min", "q4_k_m_gib_max", "peak_rss_hungriest"):
         if LAPTOP["memory"][k]["arm"] not in by_key:
             BAD.append(f'memory.{k} names {LAPTOP["memory"][k]["arm"]!r}, which is not a '
-                       f'registry arm')
+                       f'registry model')
     expect("the laptop artifact records that its measurement step was not preserved",
            1 if "never saved" in LAPTOP["provenance"]["reproducibility"] else 0, 1, 0)
 
@@ -940,7 +986,7 @@ def check_figures() -> None:
            1 - CORPUS["prevalence"], neg / scorable, 5e-15)
     # an arm's accuracy exceeds the all-allow baseline exactly when it gains more true blocks
     # than it spends on false ones, so the two counts are the same count
-    expect("arms whose accuracy at the cap beats the all-allow baseline",
+    expect("models whose accuracy at the cap beats the all-allow baseline",
            sum(1 for a in COH.values()
                if accuracy(a["cap_row"], scorable) > neg / scorable),
            sum(1 for a in COH.values()
@@ -965,7 +1011,7 @@ def check_figures() -> None:
         if o["f1"] < a["cap_row"]["f1"]:
             BAD.append(f"{key}: its own argmax scores below the common operating point, which "
                        f"an unconstrained in-sample sweep cannot do")
-    expect("arms whose own argmax clears the trivial floor",
+    expect("models whose own argmax clears the trivial floor",
            sum(1 for a in COH.values() if a["oracle_f1"] > FLOOR["f1"]), 22, 0)
     expect("candidates below the floor at their shipped decision",
            sum(1 for a in CANDS.values()
@@ -985,10 +1031,10 @@ def check_figures() -> None:
         if a["revision"] != r["revision"]:
             BAD.append(f'{a["key"]}: ranking meta revision {a["revision"]!r} against registry '
                        f'{r["revision"]!r}')
-    expect("arms in the under-3B band", len(in_band("under 3B")), 14, 0)
-    expect("arms in the 3B-to-6B band", len(in_band("3B to 6B")), 8, 0)
-    expect("arms in the 6B-and-up band", len(in_band("6B and up")), 0, 0)
-    expect("every arm lands in exactly one band",
+    expect("models in the under-3B band", len(in_band("under 3B")), 14, 0)
+    expect("models in the 3B-to-6B band", len(in_band("3B to 6B")), 8, 0)
+    expect("models in the 6B-and-up band", len(in_band("6B and up")), 0, 0)
+    expect("every model lands in exactly one band",
            sum(len(in_band(b)) for b, _lo, _hi in SIZE_BANDS), len(COH), 0)
 
     # --- the two corpora, and the grade composition that keeps a transfer claim off this Space
@@ -1051,10 +1097,10 @@ def check_figures() -> None:
                    "field")
 
     # --- the held-out bodies, settled
-    expect("arms scored on the held-out corpus", len(S3ARMS), 6, 0)
-    expect("arms in the stage-0 artifact's partial held-out block", len(S3_STAGE0_NAMES), 3, 0)
+    expect("models scored on the held-out corpus", len(S3ARMS), 6, 0)
+    expect("models in the stage-0 artifact's partial held-out block", len(S3_STAGE0_NAMES), 3, 0)
     if not set(S3_STAGE0_NAMES) <= set(S3ARMS):
-        BAD.append(f"the stage-0 held-out block names arms the settled artifact does not cover: "
+        BAD.append(f"the stage-0 held-out block names models the settled artifact does not cover: "
                    f"{sorted(set(S3_STAGE0_NAMES) - set(S3ARMS))}")
     # The two artifacts have to agree on every arm they share, or the page cannot say which one
     # governs on the strength of coverage alone.
@@ -1101,7 +1147,7 @@ def check_figures() -> None:
             BAD.append(f"{key}: held-out FPR {x['fpr']} exceeds the cap")
     expect("held-out row counts that are all equal",
            len({a["s3_prediction_rows"] for a in S3ARMS.values()}), 1, 0)
-    expect("held-out prediction rows per arm",
+    expect("held-out prediction rows per model",
            next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})), 100001, 0)
     for pos_i in (1, 2, 3):
         nm = AUTH["AUTHORITATIVE_RANKING"][f"rank_{pos_i}"]
@@ -1153,7 +1199,7 @@ def check_figures() -> None:
     expect("held-out length proxies measured", sum(
         1 for rec in S3C["s3_length_cue_no_model"].values()
         if isinstance(rec, dict) and "auc_raw" in rec), 2, 0)
-    expect("the held-out length fields are identical across every arm", sum(
+    expect("the held-out length fields are identical across every model", sum(
         1 for v in S3C["s3_length_cue_no_model"]["corpus_field_identity_across_all_six_arms"]
         .values() if v["context_bytes_identical_to_reference"]
         and v["context_events_identical_to_reference"]), 6, 0)
@@ -1165,10 +1211,227 @@ def check_figures() -> None:
     reg_keys = {a["key"] for a in ROWS}
     for k in COH:
         if k not in reg_keys:
-            BAD.append(f"{k}: ranked but absent from the arm registry")
+            BAD.append(f"{k}: ranked but absent from the model registry")
     missing = sorted(reg_keys - set(COH))
     if missing:
-        BAD.append(f"registry arms with neither a ranking nor a deployment row: {missing}")
+        BAD.append(f"registry models with neither a ranking nor a deployment row: {missing}")
+
+
+# ------------------------------------------------------------------- the curve layer
+# One record per arm: the ROC and the precision-recall curve as integer counts, the interval on
+# each proportion at the common budget, the calibration buckets, the per-source recall and the
+# failure-overlap arithmetic. The curves are drawn from these counts, so the area under a drawn
+# curve is the published AUC and not a rounding of it.
+
+CUR = CURVES["arms_s2"]
+CUR3 = CURVES["arms_s3"]
+OVER = CURVES["failure_overlap_s2"]
+SRCCENSUS = CURVES["source_census"]
+CURPROV = CURVES["provenance"]
+# the source datasets that carry a positive, most positives first; these are the rows of the
+# arm-by-source recall heatmap
+POS_SOURCES = [k for k, v in sorted(SRCCENSUS["s2"]["per_dataset"].items(),
+                                    key=lambda kv: (-kv[1]["positives"], kv[0]))
+               if v["positives"]]
+
+
+def on_curve(curve, px: int, py: int) -> bool:
+    """Whether an integer point lies on the drawn polyline. Points that sit exactly on the segment
+    between their neighbours were removed when the curve was reduced, which leaves the shape and
+    the area unchanged, so membership is a segment test and never a vertex lookup."""
+    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+        if not (min(x0, x1) <= px <= max(x0, x1) and min(y0, y1) <= py <= max(y0, y1)):
+            continue
+        if (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0) == 0:
+            return True
+    return False
+
+
+def roc_area(curve, n_pos: int, n_neg: int) -> float:
+    """Trapezoidal area under an integer ROC, accumulated as one integer and divided once."""
+    num = 0
+    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+        num += (x1 - x0) * (y0 + y1)
+    return num / (2 * n_pos * n_neg)
+
+
+def check_curves() -> None:
+    """Every curve, interval, bucket and overlap figure, recomputed against its own counts and
+    against the scalar this Space already publishes."""
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    scorable = CORPUS["scorable_cases_A_B_D"]
+    expect("the curve artifact covers every ranked model", len(CUR), len(COH), 0)
+    expect("the curve artifact's scorable count", CURVES["corpus_s2"]["scorable"], scorable, 0)
+    expect("the curve artifact's positive count", CURVES["corpus_s2"]["positives"], pos, 0)
+    expect("the curve artifact's benign count", CURVES["corpus_s2"]["benign"], neg, 0)
+    expect("the curve artifact's prevalence", CURVES["corpus_s2"]["prevalence"],
+           CORPUS["prevalence"], 5e-16)
+    expect("the curve artifact's case count", CURVES["corpus_s2"]["cases"], CORPUS["cases"], 0)
+    expect("the curve artifact used the pinned shared arithmetic",
+           1 if CURPROV["remine_sha256"] == SCORER["shared_arithmetic"]["sha256"] else 0, 1, 0)
+    expect("the curve artifact needed no GPU", 0 if CURPROV["gpu_used"] else 1, 1, 0)
+    expect("the curve artifact's false-positive cap", CURPROV["fpr_cap"], FPR_CAP, 0)
+    if CURPROV["s2_cases_sha256"] != CORPUS["cases_sha256"]:
+        BAD.append("the curve artifact was computed over a different corpus than the scorecards")
+
+    for key, a in COH.items():
+        if key not in CUR:
+            BAD.append(f"{key}: ranked with no curve record, so its AUC is published without a "
+                       f"curve")
+            continue
+        c = CUR[key]
+        x = a["cap_row"]
+        # --- the AUC, recomputed from rows and read back off the curve that is drawn
+        expect(f"{key} raw AUC recomputed from the settled body", c["auc_raw_recomputed"],
+               a["auc_raw"], 0)
+        expect(f"{key} raw AUC the curve artifact records", c["auc_raw_published"],
+               a["auc_raw"], 0)
+        expect(f"{key} area under the drawn ROC equals its published AUC",
+               roc_area([tuple(p) for p in c["roc_fp_tp"]], pos, neg), a["auc_raw"], 0)
+        expect(f"{key} the curve artifact agrees the two are equal",
+               1 if c["auc_under_the_drawn_roc_equals_published"] else 0, 1, 0)
+        # --- the curve's own shape
+        roc = c["roc_fp_tp"]
+        expect(f"{key} ROC starts at the origin", roc[0][0] + roc[0][1], 0, 0)
+        expect(f"{key} ROC ends at every case blocked", roc[-1][0], neg, 0)
+        expect(f"{key} ROC ends at every positive caught", roc[-1][1], pos, 0)
+        expect(f"{key} ROC points drawn", len(roc), c["roc_points"], 0)
+        nonmono = sum(1 for p, q in zip(roc, roc[1:]) if q[0] < p[0] or q[1] < p[1])
+        expect(f"{key} ROC is monotone in both axes", nonmono, 0, 0)
+        pr = c["pr_tp_fp"]
+        expect(f"{key} precision-recall points drawn", len(pr), c["pr_points"], 0)
+        expect(f"{key} every precision-recall point predicts at least one case",
+               sum(1 for tp, fp in pr if tp + fp == 0), 0, 0)
+        expect(f"{key} precision-recall ends at total recall", pr[-1][0], pos, 0)
+        # --- the operating point the curves are marked at
+        for f in ("tp", "fp", "fn", "tn", "threshold", "f1", "recall", "fpr"):
+            expect(f"{key} cap row {f} in the curve artifact", c["at_cap"][f], x[f], 0)
+        if not on_curve([tuple(p) for p in roc], x["fp"], x["tp"]):
+            BAD.append(f"{key}: the common-budget point ({x['fp']}, {x['tp']}) does not lie on "
+                       f"its own ROC curve")
+        # --- the intervals
+        rl, rh = wilson_shared(x["tp"], pos)
+        expect(f"{key} Wilson lower bound on recall at the budget", rl,
+               c["recall_wilson95"]["lower"], 0)
+        expect(f"{key} Wilson upper bound on recall at the budget", rh,
+               c["recall_wilson95"]["upper"], 0)
+        fl, fh = wilson_shared(x["fp"], neg)
+        expect(f"{key} Wilson lower bound on block FPR at the budget", fl,
+               c["block_fpr_wilson95"]["lower"], 0)
+        expect(f"{key} Wilson upper bound on block FPR at the budget", fh,
+               c["block_fpr_wilson95"]["upper"], 0)
+        if not rl <= x["recall"] <= rh:
+            BAD.append(f"{key}: recall {x['recall']} is outside its own Wilson interval")
+        if not fl <= x["fpr"] <= fh:
+            BAD.append(f"{key}: block FPR {x['fpr']} is outside its own Wilson interval")
+        b = c["f1_bootstrap95"]
+        expect(f"{key} bootstrap resamples", b["resamples"], 2000, 0)
+        if not b["lower"] <= x["f1"] <= b["upper"]:
+            BAD.append(f"{key}: F1 {x['f1']} is outside its own bootstrap interval "
+                       f"[{b['lower']}, {b['upper']}]")
+        # --- calibration
+        cal = c["calibration"]
+        expect(f"{key} calibration buckets", len(cal), 10, 0)
+        expect(f"{key} calibration cases sum to the corpus",
+               sum(v["cases"] for v in cal), scorable, 0)
+        expect(f"{key} calibration positives sum to the corpus",
+               sum(v["positives"] for v in cal), pos, 0)
+        for v in cal:
+            if v["cases"]:
+                expect(f"{key} observed rate in bucket {v['lo']}", v["positives"] / v["cases"],
+                       v["observed_rate"], 5e-16)
+        # --- per-source recall at the budget
+        bysrc = c["recall_by_source"]
+        expect(f"{key} positives summed over source datasets",
+               sum(v["positives"] for v in bysrc.values()), pos, 0)
+        expect(f"{key} caught positives summed over source datasets",
+               sum(v["caught"] for v in bysrc.values()), x["tp"], 0)
+        for s, v in bysrc.items():
+            expect(f"{key} recall on {s}", v["caught"] / v["positives"], v["recall"], 5e-16)
+            expect(f"{key} positives on {s}", v["positives"],
+                   SRCCENSUS["s2"]["per_dataset"][s]["positives"], 0)
+        # --- the half-budget point the two-arm unions are built from
+        h = c["at_half_cap"]
+        if h is not None:
+            expect(f"{key} at half the budget, false positives within the half allowance",
+                   1 if h["fp"] <= int(FPR_CAP / 2 * neg) else 0, 1, 0)
+            expect(f"{key} at half the budget, F1", f1_of(h["tp"], h["fp"], h["fn"]),
+                   h["f1"], 5e-15)
+            if h["tp"] > x["tp"]:
+                BAD.append(f"{key}: half the budget catches more positives than the full budget")
+
+    # --- the failure overlap
+    arms = OVER["arms"]
+    expect("models in the overlap matrix", len(arms), len(COH), 0)
+    expect("pairs the overlap tests", OVER["pairs_tested"], len(arms) * (len(arms) - 1) // 2, 0)
+    expect("overlap positives", OVER["positives"], pos, 0)
+    expect("overlap benign", OVER["benign"], neg, 0)
+    expect("overlap false-positive allowance", OVER["max_false_positives_allowed"],
+           int(FPR_CAP * neg), 0)
+    J = OVER["jaccard_caught_positives_at_the_common_budget"]
+    asym = sum(1 for a in arms for b in arms if J[a][b] != J[b][a])
+    expect("the overlap matrix is symmetric", asym, 0, 0)
+    diag_bad = sum(1 for a in arms
+                   if J[a][a] != (1.0 if CUR[a]["at_cap"]["tp"] else None))
+    expect("a model overlaps itself completely, and an empty catch has no overlap defined",
+           diag_bad, 0, 0)
+    for k in ("best_pair_union_each_arm_at_the_full_budget",
+              "best_pair_union_within_the_common_budget",
+              "best_pair_union_each_arm_at_half_the_budget"):
+        u = OVER[k]
+        expect(f"{k}: positives", u["tp"] + u["fn"], pos, 0)
+        expect(f"{k}: benign", u["fp"] + u["tn"], neg, 0)
+        expect(f"{k}: F1", f1_of(u["tp"], u["fp"], u["fn"]), u["f1"], 5e-15)
+        expect(f"{k}: recall", u["tp"] / pos, u["recall"], 5e-16)
+        expect(f"{k}: block FPR", u["fp"] / neg, u["fpr"], 5e-16)
+        expect(f"{k}: precision", u["tp"] / (u["tp"] + u["fp"]), u["precision"], 5e-16)
+        expect(f"{k}: whether it holds the common budget",
+               1 if u["fp"] <= int(FPR_CAP * neg) else 0,
+               1 if u["within_the_common_budget"] else 0, 0)
+        expect(f"{k}: two models", len(u["arms"]), 2, 0)
+    bs = OVER["best_single_arm_at_the_common_budget"]
+    expect("the best single model at the budget agrees with the ranking artifact", bs["f1"],
+           max(a["cap_row"]["f1"] for a in CANDS.values()), 0)
+    expect("the union of all 22 models' catches", OVER["union_tp_all_22_arms"] / pos,
+           OVER["union_recall_ceiling_all_22_arms"], 5e-16)
+    if OVER["best_pair_union_each_arm_at_half_the_budget"]["fp"] > int(FPR_CAP * neg):
+        BAD.append("the half-budget union exceeds the common budget, so it is not a point at the "
+                   "common operating point")
+    if not OVER["best_pair_union_each_arm_at_half_the_budget"]["within_the_common_budget"]:
+        BAD.append("the half-budget union is not recorded as holding the common budget")
+
+    # --- the source census over the corpus's own source.dataset field
+    for corp, rec, cases, sc, po in (("s2", SRCCENSUS["s2"], CORPUS["cases"], scorable, pos),
+                                     ("s3", SRCCENSUS["s3"], S3CORP["cases"],
+                                      S3CORP["scorable_cases_A_B_D"], S3CORP["positives_A_B"])):
+        expect(f"{corp} source datasets summed to its case count",
+               sum(v["cases"] for v in rec["per_dataset"].values()), cases, 0)
+        expect(f"{corp} source datasets summed to its scorable count",
+               sum(v["scorable"] for v in rec["per_dataset"].values()), sc, 0)
+        expect(f"{corp} source datasets summed to its positive count",
+               sum(v["positives"] for v in rec["per_dataset"].values()), po, 0)
+        expect(f"{corp} rows from the local-evaluation-only source", rec["mcptox_rows"], 0, 0)
+        expect(f"{corp} rows from the second restricted source",
+               rec["restricted_second_source_rows"], 0, 0)
+        expect(f"{corp} source datasets counted", rec["datasets"], len(rec["per_dataset"]), 0)
+    expect("source datasets carrying a positive in s2",
+           SRCCENSUS["s2"]["datasets_with_a_positive"], len(POS_SOURCES), 0)
+    expect("the largest source's share of the positives",
+           SRCCENSUS["s2"]["per_dataset"][SRCCENSUS["s2"]["largest_positive_source"]]["positives"]
+           / pos, SRCCENSUS["s2"]["largest_positive_share"], 5e-16)
+
+    # --- the held-out bodies, recomputed. This is a reconciliation and no figure from it is
+    # published as a transfer result: the grade composition of the two corpora rules that out.
+    expect("held-out models in the curve artifact", len(CUR3), len(S3ARMS), 0)
+    for key, c in CUR3.items():
+        v = s3_primary(key)
+        expect(f"{key} held-out raw AUC recomputed from the settled body",
+               c["auc_raw_recomputed"], v["s3_auc_raw_mann_whitney_tie_corrected"], 0)
+        expect(f"{key} held-out rows recomputed", c["prediction_rows"],
+               S3ARMS[key]["s3_prediction_rows"], 0)
+        x = v["s3_at_fpr_cap"][f"{FPR_CAP}"]
+        for f in ("tp", "fp", "fn", "tn", "threshold", "f1", "recall"):
+            expect(f"{key} held-out cap row {f} recomputed", c["at_cap"][f], x[f], 0)
 
 
 # a scored arm's key in cohort-scores.json -> the registry key, or a reference key
@@ -1183,7 +1446,7 @@ DROPPED: dict[str, float] = {}
 
 
 def settlement() -> dict:
-    """What each ranked arm's metadata actually carries. The cohort runner writes neither
+    """What each ranked model's metadata actually carries. The cohort runner writes neither
     `complete` nor `prediction_sha256`; `harness/settle.py` retrofits both and re-verifies. This
     reports the state of the artifacts on hand rather than assuming either."""
     out = {"arms": {}, "settled": 0, "unsettled": 0, "digest_mismatch": 0}
@@ -1201,6 +1464,7 @@ def settlement() -> dict:
 SETTLE = None   # built after check_figures, which validates the row counts first
 
 check_figures()
+check_curves()
 SETTLE = settlement()
 
 
@@ -1213,6 +1477,11 @@ def pass_time(rows_per_min: float, rows: int = 3000) -> str:
 
 
 DEC = LAPTOP["decoder_throughput_rows_per_min"]
+# the laptop record labels models by display name; every page uses the registry key instead
+LAPKEY = {r["label"]: r["arm"] for r in DEC + LAPTOP["encoder_throughput_rows_per_min"]}
+LAPKEY.update({LAPTOP["memory"][k]["label"]: LAPTOP["memory"][k]["arm"]
+               for k in LAPTOP["memory"] if "arm" in LAPTOP["memory"][k]})
+RPM = {r["arm"]: r["rows_per_min"] for r in DEC + LAPTOP["encoder_throughput_rows_per_min"]}
 FASTEST, SLOWEST = DEC[0], DEC[-1]
 for _i in range(1, len(DEC)):
     if DEC[_i]["rows_per_min"] > DEC[_i - 1]["rows_per_min"]:
@@ -1239,9 +1508,10 @@ def num(v) -> str:
     return f"{v:,}"
 
 
-def exact(v) -> str:
-    """The shortest decimal string that round-trips to the same float, so a table cell carries
-    the artifact's value and not a rounding of it."""
+def raw(v) -> str:
+    """The shortest decimal string that round-trips to the same float, so a cell carries the
+    artifact's value and not a rounding of it. Plain text: safe inside an SVG, an attribute or a
+    JSON record."""
     if v is None:
         return "n/a"
     if isinstance(v, bool):
@@ -1249,6 +1519,75 @@ def exact(v) -> str:
     if isinstance(v, int) or float(v) == int(v):
         return f"{int(v):,}"
     return repr(float(v))
+
+
+# How many decimals a value gets when it is displayed: at least four, and always enough to carry
+# three significant digits. Four decimals alone makes a column of F1 values comparable at a glance
+# and would round the false-positive budget of 0.00384502 to 0.0038, which throws away the digit
+# that distinguishes it; three significant digits alone would print 0.106 where the column wants
+# 0.1055. The exact value never leaves the markup: it stays in data-x and in the title, and the
+# control in the nav swaps the two.
+def show(v) -> str:
+    """The readable form of a value. A reader compares 0.1055 against 0.0778 at a glance and
+    cannot compare 0.10548523206751055 against 0.07798165137614679 at all."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    v = float(v)
+    if v == int(v):
+        return f"{int(v):,}"
+    a = abs(v)
+    places = max(4, 2 - int(math.floor(math.log10(a))))
+    return f"{v:.{min(places, 14)}f}"
+
+
+def exact(v) -> str:
+    """A value as it is read, with the artifact's exact value kept in the same bytes.
+
+    The rule this Space started with was that a cell must publish the artifact's value and not a
+    rounding of it, and the result was 1,933 numbers like 0.10548523206751055 on pages a reader
+    has to compare down a column. Both can hold: the visible text is the rounding, the exact
+    decimal stays in `data-x` and in the title attribute, and the precision control in the nav
+    swaps every one of them at once. With scripting off the rounding renders and the exact value
+    is still on hover, still in the page source, and still in `_build-figures.json`.
+    """
+    if v is None or isinstance(v, bool):
+        return raw(v)
+    if isinstance(v, int) or float(v) == int(v):
+        return f"{int(v):,}"
+    r = repr(float(v))
+    s = show(v)
+    if s == r:
+        return r
+    return f'<span class="ex" data-x="{r}" title="exact value {r}">{s}</span>'
+
+
+_EXSPAN = re.compile(r'<span class="ex" data-x="([^"]*)"[^>]*>[^<]*</span>')
+
+
+def unwrap_exact(s: str) -> str:
+    """The exact-value spans reduced back to their exact decimals, for the build record."""
+    return _EXSPAN.sub(lambda m: m.group(1), s)
+
+
+_EXSPAN_SHOWN = re.compile(r'<span class="ex" data-x="[^"]*"[^>]*>([^<]*)</span>')
+
+
+def plain_exact(s: str) -> str:
+    """The exact-value spans reduced to the value as it is read. The Space card is Markdown and
+    carries no markup of ours, so it gets the rounding and links to the page that carries both."""
+    return _EXSPAN_SHOWN.sub(lambda m: m.group(1), s)
+
+
+# The shared budget, in the three forms the pages need. An SVG axis label cannot carry the
+# precision control, so it gets the rounding; prose gets the control; and the form a reader can
+# act on is the count of false blocks the budget buys.
+CAP_SHOW = show(FPR_CAP)
+CAP_PCT = f"{FPR_CAP * 100:.3f}%"
+CAP_FP = int(FPR_CAP * CORPUS["negatives_D"])
+CAP_BUDGET = (f"{CAP_FP} false blocks in {CORPUS['negatives_D']:,} benign cases "
+              f"({CAP_PCT} of them)")
 
 
 MINUS = "&#8722;"
@@ -1382,10 +1721,10 @@ _ESCAPED_TAG = re.compile(
 
 
 def check_scope(name: str, body: str) -> list[str]:
-    """No page may name a Jev-family model or a System One board arm. The scope rule is the
+    """No page may name a Jev-family model or a System One board model. The scope rule is the
     user's, and it is enforced over the generated bytes rather than trusted to the templates."""
     low = body.lower()
-    return [f"{name}: names the out-of-scope model or arm {tok!r}, which belongs on the "
+    return [f"{name}: names the out-of-scope model or model {tok!r}, which belongs on the "
             f"System One Space"
             for tok in SCOPE["forbidden_tokens"] if tok in low]
 
@@ -1458,12 +1797,15 @@ _LAYOUT: list[str] = []
 
 # --------------------------------------------------------------------- figures
 
-def figure(fid, title, sub, svg, source, legend=None, table=None, note=None) -> str:
+def figure(fid, title, sub, svg, source, legend=None, table=None, note=None,
+           legend_html=None) -> str:
     _LAYOUT.extend(audit_layout(fid, svg))
     parts = [f'<figure class="chart" id="{esc(fid)}">',
              f'<p class="ftitle">{title}</p>']
     if sub:
         parts.append(f'<p class="fsub">{sub}</p>')
+    if legend_html:
+        parts.append(legend_html)
     if legend:
         parts.append('<div class="legend">'
                      + "".join(f"<span>{swatch(c)}{esc(l)}</span>" for l, c in legend)
@@ -1472,18 +1814,28 @@ def figure(fid, title, sub, svg, source, legend=None, table=None, note=None) -> 
     if table:
         parts.append('<details class="tv"><summary>Table view (every plotted value)</summary>'
                      f'<div class="tbl-scroll">{table}</div></details>')
-    prov = (f"Every value plotted here is read at build time from <code>{esc(source)}</code>. "
-            f"The table view lists them all.")
+    prov = f"Source: <code>{esc(source)}</code>."
     parts.append(f"<figcaption>{note + ' ' if note else ''}{prov}</figcaption></figure>")
     return "\n".join(parts)
 
 
-def table_html(headers, rows, numeric_from=1) -> str:
-    th = "".join(f'<th class="{"n" if i >= numeric_from else ""}">{h}</th>'
+def table_html(headers, rows, numeric_from=1, sortable=True) -> str:
+    """Every table on this Space is sortable by any column. The pages carry a hundred and some
+    tables of twenty-two rows each, and the question a reader brings to one of them is almost
+    always "order this by that column". The order the build wrote is the order the HTML carries,
+    so the static render is the considered one and sorting is an addition to it.
+
+    The column kind is decided in the browser rather than declared here: a cell holding
+    `25/13/411/3368` or `yes` sits in a column marked numeric, and the script sorts a column
+    numerically only when most of its cells parse as numbers.
+    """
+    th = "".join(f'<th class="{"n" if i >= numeric_from else ""}"'
+                 f'{" data-sort=" + chr(34) + "auto" + chr(34) if sortable else ""}>{h}</th>'
                  for i, h in enumerate(headers))
     trs = "".join("<tr>" + "".join(f'<td class="{"n" if i >= numeric_from else ""}">{c}</td>'
                                    for i, c in enumerate(r)) + "</tr>" for r in rows)
-    return f'<table><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>'
+    attr = " data-sortable" if sortable else ""
+    return f'<table{attr}><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>'
 
 
 # ------------------------------------------------------------- chart scaffolding
@@ -1648,7 +2000,382 @@ def stacked(rows, vmax, *, width=880, gutter=210, rowh=34, pad_right=96, unit="G
     return "\n".join(out)
 
 
+# --------------------------------------------------- dot plots, panels, scatters, heat grids
+# Four shapes the bar-and-label scaffolding above cannot carry: a row of dots on one shared axis,
+# a grid of small multiples, an x-against-y scatter, and a value grid. Each one emits its own
+# literal fill and stroke on every element and its own font-size on every text run, so a chart
+# renders with the stylesheet removed.
+
+# The ordinal ramp for a value grid, lightest first, with the ink that clears 4.5:1 on each step.
+# A value grid encodes magnitude in lightness, so these five fills are literal and identical in
+# light and dark; every other chart colour goes through a palette slot and swaps.
+RAMP_FILL = ("#f0efec", "#cfe0f7", "#86b6ef", "#3987e5", "#104281")
+RAMP_INK = ("#52514e", "#0b0b0b", "#0b0b0b", "#ffffff", "#ffffff")
+RAMP_EMPTY = "#f9f9f7"
+RAMP_EMPTY_INK = "#898781"
+
+
+def ramp_step(v: float | None, edges) -> int:
+    """The ramp step a value falls in, or -1 for a cell with no value. `edges` is the ascending
+    list of upper bounds."""
+    if v is None:
+        return -1
+    for i, e in enumerate(edges):
+        if v <= e:
+            return i
+    return len(RAMP_FILL) - 1
+
+
+def dots(rows, *, width=880, gutter=252, rowh=24, pad_right=96, vmax=1.0, vticks=None,
+         refs=(), trail=None, where="") -> str:
+    """A Cleveland dot plot. `rows` is a list of (label, [(value, slot, interval|None), ...]).
+    One row per label, every dot on one shared axis. `trail` names the index of the series whose
+    value is printed at the right edge, so the row carries one number and not three."""
+    x0 = gutter
+    plot = width - gutter - pad_right
+    top = 30
+    height = top + rowh * len(rows) + 34
+
+    def sx(v):
+        return x0 + plot * (v / vmax)
+
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    ticks = vticks if vticks is not None else [i * vmax / 5 for i in range(6)]
+    bot = top + rowh * len(rows)
+    for t in ticks:
+        out.append(f'<line x1="{sx(t):.1f}" y1="{top - 8:.1f}" x2="{sx(t):.1f}" '
+                   f'y2="{bot:.1f}" {GL}/>')
+        out.append(f'<text x="{sx(t):.1f}" y="{bot + 16:.1f}" text-anchor="middle" '
+                   f'{AX}>{t:g}</text>')
+    for v, slot, lab in refs:
+        out.append(f'<line x1="{sx(v):.1f}" y1="{top - 14:.1f}" x2="{sx(v):.1f}" '
+                   f'y2="{bot + 2:.1f}" {REF}/>')
+        out.append(f'<text x="{sx(v):.1f}" y="{top - 18:.1f}" text-anchor="middle" '
+                   f'{AX}>{fit(lab, 300, 11, where)}</text>')
+    for ri, (label, payload) in enumerate(rows):
+        cy = top + rowh * ri + rowh / 2
+        if ri % 2 == 0:
+            out.append(f'<rect x="{x0:.1f}" y="{top + rowh * ri:.1f}" width="{plot:.1f}" '
+                       f'height="{rowh:.1f}" {fa("surface2")}/>')
+        out.append(f'<text x="{x0 - 10:.1f}" y="{cy + 4:.1f}" text-anchor="end" '
+                   f'{AXL}>{fit(label, gutter - 16, 11.5, where)}</text>')
+        # the connecting rule, so a row reads as one arm before it reads as three dots
+        vals = [v for v, _s, _i in payload]
+        out.append(f'<line x1="{sx(min(vals)):.1f}" y1="{cy:.1f}" x2="{sx(max(vals)):.1f}" '
+                   f'y2="{cy:.1f}" {_line_attrs("bl")}/>')
+        for v, slot, iv in payload:
+            if iv is not None:
+                lo, hi = iv
+                out.append(f'<line x1="{sx(lo):.1f}" y1="{cy:.1f}" x2="{sx(hi):.1f}" '
+                           f'y2="{cy:.1f}" {_line_attrs("eb")}/>')
+                for e in (lo, hi):
+                    out.append(f'<line x1="{sx(e):.1f}" y1="{cy - 4:.1f}" x2="{sx(e):.1f}" '
+                               f'y2="{cy + 4:.1f}" {_line_attrs("eb")}/>')
+            out.append(f'<circle cx="{sx(v):.1f}" cy="{cy:.1f}" r="4.2" {fa(slot)}/>')
+        if trail is not None:
+            out.append(f'<text x="{width - pad_right + 8:.1f}" y="{cy + 4:.1f}" '
+                       f'{VL}>{payload[trail][0]:.4f}</text>')
+    out.append(f'<line x1="{x0:.1f}" y1="{top - 8:.1f}" x2="{x0:.1f}" y2="{bot:.1f}" {BL}/>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def diverge(rows, *, width=880, gutter=252, rowh=20, pad_right=90, vmin=-40.0, vmax=40.0,
+            vticks=None, where="") -> str:
+    """Signed bars around a zero rule. `rows` is (label, value, slot)."""
+    x0 = gutter
+    plot = width - gutter - pad_right
+    top = 26
+    height = top + rowh * len(rows) + 34
+
+    def sx(v):
+        return x0 + plot * (v - vmin) / (vmax - vmin)
+
+    zero = sx(0.0)
+    bot = top + rowh * len(rows)
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    for t in (vticks if vticks is not None else [vmin + (vmax - vmin) * i / 4 for i in range(5)]):
+        out.append(f'<line x1="{sx(t):.1f}" y1="{top - 8:.1f}" x2="{sx(t):.1f}" '
+                   f'y2="{bot:.1f}" {GL}/>')
+        out.append(f'<text x="{sx(t):.1f}" y="{bot + 16:.1f}" text-anchor="middle" '
+                   f'{AX}>{t:+g}</text>')
+    for ri, (label, v, slot) in enumerate(rows):
+        y = top + rowh * ri + 3
+        out.append(f'<text x="{x0 - 10:.1f}" y="{y + rowh - 8:.1f}" text-anchor="end" '
+                   f'{AXL}>{fit(label, gutter - 16, 11.5, where)}</text>')
+        lo, hi = (min(0.0, v), max(0.0, v))
+        w = max(0.8, sx(hi) - sx(lo))
+        out.append(f'<rect x="{sx(lo):.1f}" y="{y:.1f}" width="{w:.1f}" '
+                   f'height="{rowh - 7:.1f}" rx="2" {fa(slot)}/>')
+        tx = sx(hi) + 6 if v >= 0 else sx(lo) - 6
+        anchor = "start" if v >= 0 else "end"
+        out.append(f'<text x="{tx:.1f}" y="{y + rowh - 9:.1f}" text-anchor="{anchor}" '
+                   f'{VL}>{v:+d}</text>')
+    out.append(f'<line x1="{zero:.1f}" y1="{top - 8:.1f}" x2="{zero:.1f}" y2="{bot:.1f}" {BL}/>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def panels(items, *, cols=4, cw=180, ch=128, gx=26, gy=46, width=880, left=44, top=48,
+           xticks=(), yticks=(), axisnote="", where="") -> str:
+    """A grid of small multiples. Each item is (title, footer, draw) where `draw(px, py, w, h)`
+    returns the SVG for one panel's interior, `px, py` being the panel's bottom-left corner in
+    user space and x growing right, y growing up."""
+    rows = (len(items) + cols - 1) // cols
+    height = top + rows * (ch + gy) + 18
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    if axisnote:
+        out.append(f'<text x="{left:.1f}" y="14" {AX}>{fit(axisnote, width - left - 8, 11, where)}'
+                   f'</text>')
+    for i, (title, footer, draw) in enumerate(items):
+        c, r = i % cols, i // cols
+        px = left + c * (cw + gx)
+        py = top + r * (ch + gy) + ch
+        out.append(f'<rect x="{px:.1f}" y="{py - ch:.1f}" width="{cw:.1f}" height="{ch:.1f}" '
+                   f'{fa("surface2")}/>')
+        for t in xticks:
+            gxp = px + cw * t
+            out.append(f'<line x1="{gxp:.1f}" y1="{py - ch:.1f}" x2="{gxp:.1f}" '
+                       f'y2="{py:.1f}" {GL}/>')
+        for t in yticks:
+            gyp = py - ch * t
+            out.append(f'<line x1="{px:.1f}" y1="{gyp:.1f}" x2="{px + cw:.1f}" '
+                       f'y2="{gyp:.1f}" {GL}/>')
+        out.append(draw(px, py, cw, ch))
+        out.append(f'<text x="{px:.1f}" y="{py - ch - 16:.1f}" '
+                   f'{_text_attrs("axl")}>{fit(title, cw + gx - 2, 11.5, where)}</text>')
+        out.append(f'<text x="{px:.1f}" y="{py - ch - 4:.1f}" '
+                   f'{_text_attrs("ax")}>{fit(footer, cw + gx - 2, 11, where)}</text>')
+        out.append(f'<line x1="{px:.1f}" y1="{py:.1f}" x2="{px + cw:.1f}" y2="{py:.1f}" {BL}/>')
+        out.append(f'<line x1="{px:.1f}" y1="{py - ch:.1f}" x2="{px:.1f}" y2="{py:.1f}" {BL}/>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def scatter(points, *, width=880, height=470, left=64, right=34, top=44, bottom=58,
+            xlog=False, xmin=None, xmax=None, ymin=0.0, ymax=1.0, xticks=(), yticks=(),
+            xlabel="", ylabel="", vrules=(), hrules=(), where="") -> str:
+    """One dot per point. `points` is (x, y, slot, label, ring) where `ring` marks a point on the
+    frontier. Labels are placed at the first offset that collides with nothing already drawn, and
+    a label that fits nowhere is dropped; the table view carries every row either way."""
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    xs = [p[0] for p in points]
+    lo = xmin if xmin is not None else min(xs)
+    hi = xmax if xmax is not None else max(xs)
+    if xlog:
+        lo, hi = math.log10(lo), math.log10(hi)
+
+    def sx(v):
+        t = (math.log10(v) - lo) / (hi - lo) if xlog else (v - lo) / (hi - lo)
+        return left + plot_w * t
+
+    def sy(v):
+        return top + plot_h * (1 - (v - ymin) / (ymax - ymin))
+
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    for t in yticks:
+        out.append(f'<line x1="{left}" y1="{sy(t):.1f}" x2="{left + plot_w:.1f}" '
+                   f'y2="{sy(t):.1f}" {GL}/>')
+        out.append(f'<text x="{left - 8}" y="{sy(t) + 4:.1f}" text-anchor="end" '
+                   f'{AX}>{t:g}</text>')
+    for t in xticks:
+        out.append(f'<line x1="{sx(t):.1f}" y1="{top}" x2="{sx(t):.1f}" '
+                   f'y2="{top + plot_h:.1f}" {GL}/>')
+        out.append(f'<text x="{sx(t):.1f}" y="{top + plot_h + 18:.1f}" text-anchor="middle" '
+                   f'{AX}>{t:g}</text>')
+    boxes: list[tuple[float, float, float, float]] = []
+
+    def claim(bx0, by0, bx1, by1) -> bool:
+        for cx0, cy0, cx1, cy1 in boxes:
+            if bx0 < cx1 - 1 and cx0 < bx1 - 1 and by0 < cy1 - 1 and cy0 < by1 - 1:
+                return False
+        boxes.append((bx0, by0, bx1, by1))
+        return True
+
+    if ylabel:
+        w = textw(ylabel, 11.0)
+        claim(left + 4, top - 24, left + 4 + w, top - 8)
+        out.append(f'<text x="{left + 4:.1f}" y="{top - 11:.1f}" '
+                   f'{AX}>{fit(ylabel, width - left - 8, 11, where)}</text>')
+    for v, slot, lab in vrules:
+        out.append(f'<line x1="{sx(v):.1f}" y1="{top - 10:.1f}" x2="{sx(v):.1f}" '
+                   f'y2="{top + plot_h:.1f}" {REF}/>')
+        w = textw(lab, 11.0)
+        claim(sx(v) - w / 2, top + 2, sx(v) + w / 2, top + 15)
+        out.append(f'<text x="{sx(v):.1f}" y="{top + 12:.1f}" text-anchor="middle" '
+                   f'{AX}>{fit(lab, 260, 11, where)}</text>')
+    for v, slot, lab in hrules:
+        out.append(f'<line x1="{left}" y1="{sy(v):.1f}" x2="{left + plot_w:.1f}" '
+                   f'y2="{sy(v):.1f}" {REF}/>')
+        w = textw(lab, 11.0)
+        claim(left + 4, sy(v) - 15, left + 4 + w, sy(v) - 3)
+        out.append(f'<text x="{left + 4:.1f}" y="{sy(v) - 5:.1f}" '
+                   f'{AX}>{fit(lab, 300, 11, where)}</text>')
+    dropped = []
+    for x, y, slot, lab, ring in points:
+        cx, cy = sx(x), sy(y)
+        if ring:
+            out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="8" {sa("ink", "1.2")}/>')
+        out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="4.6" {fa(slot)}/>')
+        if not lab:
+            continue
+        w = textw(lab, 11.0)
+        placed = False
+        for dx, dy, anchor in ((8, 4, "start"), (-8, 4, "end"), (8, -8, "start"),
+                               (-8, -8, "end"), (8, 15, "start"), (-8, 15, "end"),
+                               (0, -11, "middle"), (0, 19, "middle"),
+                               (13, -17, "start"), (-13, -17, "end"),
+                               (13, 26, "start"), (-13, 26, "end"),
+                               (0, -22, "middle"), (0, 30, "middle")):
+            tx, ty = cx + dx, cy + dy
+            bx0 = tx if anchor == "start" else (tx - w if anchor == "end" else tx - w / 2)
+            if bx0 < 2 or bx0 + w > width - 2 or ty < top + 4 or ty > top + plot_h + 14:
+                continue
+            if claim(bx0, ty - 9.0, bx0 + w, ty + 3.0):
+                out.append(f'<text x="{tx:.1f}" y="{ty:.1f}" text-anchor="{anchor}" '
+                           f'class="axl" fill="{TEXT_ROLE["axl"][0]}" '
+                           f'font-size="11">{lab}</text>')
+                placed = True
+                break
+        if not placed:
+            dropped.append(lab)
+    if xlabel:
+        out.append(f'<text x="{left + plot_w / 2:.1f}" y="{height - 12:.1f}" '
+                   f'text-anchor="middle" {AX}>{xlabel}</text>')
+    out.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h:.1f}" {BL}/>')
+    out.append(f'<line x1="{left}" y1="{top + plot_h:.1f}" x2="{left + plot_w:.1f}" '
+               f'y2="{top + plot_h:.1f}" {BL}/>')
+    out.append("</svg>")
+    _SCATTER_DROPPED[where] = dropped
+    return "\n".join(out)
+
+
+_SCATTER_DROPPED: dict[str, list[str]] = {}
+
+
+def drop_note(where: str) -> str:
+    """Names any point label the placer could not fit without a collision, so a name that is
+    absent from the chart is absent on the page as well."""
+    d = _SCATTER_DROPPED.get(where) or []
+    if not d:
+        return "Every plotted point carries its model name."
+    return (f'{len(d)} point label(s) had no free position and are listed here instead: '
+            + ", ".join(f"<code>{esc(k)}</code>" for k in d) + ".")
+
+
+def heat(row_labels, col_labels, cell, *, width=880, gutter=252, rowh=19, cellw=None,
+         pad_right=14, top=30, rotate=True, show_values=True, where="") -> str:
+    """A value grid. `cell(r, c)` returns (step, text, title): the ramp step, the text drawn in
+    the cell, and the cell's own hover title."""
+    x0 = gutter
+    n = len(col_labels)
+    cw = cellw if cellw is not None else (width - gutter - pad_right) / n
+    height = top + rowh * len(row_labels) + 18
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    for c, cl in enumerate(col_labels):
+        cx = x0 + cw * c + cw / 2
+        if rotate:
+            out.append(f'<text x="{cx:.1f}" y="{top - 8:.1f}" text-anchor="end" '
+                       f'transform="rotate(-38 {cx:.1f} {top - 8:.1f})" {AX}>{cl}</text>')
+        else:
+            out.append(f'<text x="{cx:.1f}" y="{top - 8:.1f}" text-anchor="middle" '
+                       f'{AX}>{cl}</text>')
+    for r, rl in enumerate(row_labels):
+        y = top + rowh * r
+        out.append(f'<text x="{x0 - 8:.1f}" y="{y + rowh - 6:.1f}" text-anchor="end" '
+                   f'{AXL}>{fit(rl, gutter - 14, 11.5, where)}</text>')
+        for c in range(n):
+            step, txt, title = cell(r, c)
+            fill = RAMP_FILL[step] if step >= 0 else RAMP_EMPTY
+            ink = RAMP_INK[step] if step >= 0 else RAMP_EMPTY_INK
+            out.append(f'<rect x="{x0 + cw * c:.1f}" y="{y:.1f}" width="{cw - 1.5:.1f}" '
+                       f'height="{rowh - 1.5:.1f}" fill="{fill}">'
+                       f'<title>{esc(title)}</title></rect>')
+            if show_values and txt:
+                out.append(f'<text x="{x0 + cw * c + (cw - 1.5) / 2:.1f}" '
+                           f'y="{y + rowh - 6.5:.1f}" text-anchor="middle" '
+                           f'fill="{ink}" font-size="10.5">{txt}</text>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def ramp_legend(labels) -> str:
+    """The ramp's five steps as swatches, so a value grid carries its own scale."""
+    cells = "".join(
+        f'<span><svg class="sw" viewBox="0 0 11 11" width="11" height="11" aria-hidden="true">'
+        f'<rect x="0" y="0" width="11" height="11" rx="3" fill="{RAMP_FILL[i]}"/></svg>'
+        f'{esc(lab)}</span>' for i, lab in enumerate(labels))
+    return f'<div class="legend">{cells}</div>'
+
+
+def slope(series, *, width=880, height=300, left=190, right=210, top=34, bottom=44,
+          ymin=0.0, ymax=1.0, xlabels=("", ""), ylabel="", where="") -> str:
+    """A two-point slope chart. `series` is (label, slot, left_value, right_value)."""
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    def sy(v):
+        return top + plot_h * (1 - (v - ymin) / (ymax - ymin))
+
+    out = [f'<svg viewBox="0 0 {width} {height}" role="img">']
+    for k in range(6):
+        v = ymin + (ymax - ymin) * k / 5
+        out.append(f'<line x1="{left}" y1="{sy(v):.1f}" x2="{left + plot_w:.1f}" '
+                   f'y2="{sy(v):.1f}" {GL}/>')
+        if k < 5:
+            out.append(f'<text x="{left + 5}" y="{sy(v) - 4:.1f}" {AX}>{v:g}</text>')
+    for i, lab in enumerate(xlabels):
+        x = left + plot_w * i
+        out.append(f'<line x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_h:.1f}" {BL}/>')
+        out.append(f'<text x="{x:.1f}" y="{top + plot_h + 20:.1f}" '
+                   f'text-anchor="{"start" if i == 0 else "end"}" '
+                   f'{AXL}>{fit(lab, plot_w / 2, 11.5, where)}</text>')
+    lefts = sorted(((sy(a), lab, slot, a) for lab, slot, a, _b in series), key=lambda t: t[0])
+    rights = sorted(((sy(b), lab, slot, b) for lab, slot, _a, b in series), key=lambda t: t[0])
+
+    def spread(seq, gap=15.0):
+        placed = []
+        for y0, *_rest in seq:
+            placed.append(y0 if not placed else max(y0, placed[-1] + gap))
+        over = placed[-1] - (top + plot_h) if placed else 0
+        return [y - over for y in placed] if over > 0 else placed
+
+    ly, ry = spread(lefts), spread(rights)
+    for lab, slot, a, b in series:
+        out.append(f'<line x1="{left:.1f}" y1="{sy(a):.1f}" x2="{left + plot_w:.1f}" '
+                   f'y2="{sy(b):.1f}" {sa(slot, "2")}/>')
+        out.append(f'<circle cx="{left:.1f}" cy="{sy(a):.1f}" r="4.4" {fa(slot)}/>')
+        out.append(f'<circle cx="{left + plot_w:.1f}" cy="{sy(b):.1f}" r="4.4" {fa(slot)}/>')
+    for (y0, lab, slot, v), y in zip(lefts, ly):
+        out.append(f'<text x="{left - 12:.1f}" y="{y + 4:.1f}" text-anchor="end" '
+                   f'{AXL}>{fit(f"{lab} {v * 100:.2f}%", left - 20, 11.5, where)}</text>')
+    for (y0, lab, slot, v), y in zip(rights, ry):
+        out.append(f'<text x="{left + plot_w + 12:.1f}" y="{y + 4:.1f}" '
+                   f'{AXL}>{fit(f"{lab} {v * 100:.2f}%", right - 20, 11.5, where)}</text>')
+    if ylabel:
+        out.append(f'<text x="{left + 5}" y="{top - 12}" {AX}>{ylabel}</text>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
 # ============================================================ chart definitions
+
+def _band_word(v: float, band=None) -> str:
+    """Where an AUC sits against the s2 chance band: 'below', 'inside' or 'above'."""
+    lo, hi = band or BAND["chance_95pct_interval"]
+    return "below" if v < lo else ("inside" if v <= hi else "above")
+
+
+def control_verdict() -> dict:
+    """The pre-registered prediction was that both untrained controls land at chance once prompt
+    length is controlled for. The verdict is read off the published estimator, not written by hand."""
+    where = {k: _band_word(COH[k]["auc_lc"]) for k in ("control-modernbert-base",
+                                                        "control-modernbert-large")}
+    held = all(w == "inside" for w in where.values())
+    return {"where": where, "held": held,
+            "failed": sorted(k for k, w in where.items() if w != "inside")}
+
 
 VAR_LABELS = {
     "deberta P(injection.true) [single scalar, A==B]":
@@ -1668,11 +2395,9 @@ def chart_ranking() -> str:
                       (a["auc_raw"], "seq1")]))
         trows.append([("&#8212;" if a["is_control"] else str(i)), alabel(a["key"]),
                       "negative control" if a["is_control"] else a["class_structure"],
-                      fmt(a["auc_lc"], 12), fmt(a["auc_raw"], 12),
-                      fmt(a["shipped"]["f1"], 12) if a["shipped"] else "n/a",
-                      fmt(a["flag_rate"], 8) if a["flag_rate"] is not None else "n/a",
-                      num(a["cap_tokens"]), num(a["shrunk"]),
-                      fmt(a["cap_row"]["recall"], 10)])
+                      exact(a["auc_lc"]), exact(a["auc_raw"]),
+                      exact(a["shipped"]["f1"]) if a["shipped"] else "n/a",
+                      num(a["cap_tokens"]), exact(a["cap_row"]["recall"])])
     svg = hbars(rows, 1.0, gutter=252, rowh=17, pad_right=84,
                 vticks=[0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0],
                 bands=[(lo, hi, "mid", "null band")],
@@ -1681,21 +2406,24 @@ def chart_ranking() -> str:
     under = [a for a in CANDS.values() if a["auc_lc"] < lo]
     return figure(
         "ranking",
-        "Length-controlled AUC beside raw AUC, every ranked arm",
-        f'Each arm is ranked on one fixed variable chosen by its class structure, never selected '
-        f'per arm. Length-controlled AUC is the unweighted mean of the five within-quintile AUCs. '
+        "Length-controlled AUC beside raw AUC, every model",
+        f'Each model is scored on one fixed variable chosen by its class structure. '
+        f'Length-controlled AUC is the {EST_LABEL[PUB_EST].lower()} within-quintile AUC: the AUC '
+        f'inside each prompt-length quintile, pooled with each quintile weighted by the '
+        f'positive-benign pairs it holds. '
         f'The grey band is the 95% chance interval for {num(BAND["npos"])} positives and '
-        f'{num(BAND["nneg"])} negatives, [{fmt(lo, 15)}, {fmt(hi, 15)}]. '
+        f'{num(BAND["nneg"])} benign cases, [{exact(lo)}, {exact(hi)}]. '
         f'{len(beat)} of the {len(CANDS)} candidates score above the untrained '
         f'<code>control-modernbert-base</code>, and {len(under)} fall below the band.',
-        svg, "cohort-rank.json",
+        svg, "cohort-length-controlled-ranking.json",
         legend=[("Length-controlled AUC, candidate", "seq3"),
                 ("Length-controlled AUC, control", "s5"), ("Raw AUC", "seq1")],
-        table=table_html(["#", "Arm", "Class", "Length-controlled AUC", "Raw AUC",
-                          "Shipped F1", "Flag rate", "Cap tokens", "Rows shrunk",
-                          "Recall at the FPR cap"], trows, numeric_from=3),
-        note="The two controls carry no rank. Rank 1 ran at a 510-token cap and lost context on "
-             "some rows; the arms at ranks 2 and 3 ran at cap 6,144 with zero rows shrunk.")
+        table=table_html(["AUC rank", "Model", "Class", "Length-controlled AUC", "Raw AUC",
+                          "Default-decision F1", "Token cap", "Recall at the budget"], trows,
+                         numeric_from=3),
+        note=f"The two controls carry no rank. Rank 1 ran at a {num(by_lc()[0]['cap_tokens'])}-token "
+             f"cap and lost context on some rows. Rank 2 ran at a "
+             f"{num(by_lc()[1]['cap_tokens'])}-token cap with no rows shrunk.")
 
 
 def chart_quintiles() -> str:
@@ -1716,125 +2444,43 @@ def chart_quintiles() -> str:
     q0 = LCA["pure length counter (natural prompt tokens)"]["per_quintile"]
     for i in range(5):
         trows.append([f"Q{i + 1}", num(q0[str(i)]["cases"]), num(q0[str(i)]["positives"])]
-                     + [fmt(s[2][i], 10) for s in ser])
+                     + [exact(s[2][i]) for s in ser])
     return figure(
         "quintiles",
         "AUC inside each prompt-length quintile",
-        "Stratifying on prompt length removes the length component from every arm's score. "
-        "The length counter falls to "
-        f"{fmt(LCA['pure length counter (natural prompt tokens)']['mean_within_length_quintile_auc'], 10)} "
-        "under its own control, and both MLM controls land inside the chance band.",
-        svg, "cohort-scoring/final-comparisons.json, leakage-diagnostic.json",
+        "Stratifying on prompt length removes the length component from every score. Under "
+        f"the published {EST_LABEL[PUB_EST].lower()} estimator the prompt-token counter falls "
+        f"from {exact(LCA['pure length counter (natural prompt tokens)']['overall_auc'])} to "
+        f"{exact(LEN_POOLED)}, {_band_word(LEN_POOLED)} the chance band; "
+        f"<code>control-modernbert-base</code> lands at {exact(COH['control-modernbert-base']['auc_lc'])}, "
+        f"{_band_word(COH['control-modernbert-base']['auc_lc'])} the band, and "
+        f"<code>control-modernbert-large</code> at {exact(COH['control-modernbert-large']['auc_lc'])}, "
+        f"{_band_word(COH['control-modernbert-large']['auc_lc'])} it.",
+        svg, "final-comparisons.json, leakage-diagnostic.json",
         table=table_html(["Quintile", "Cases", "Positives"] + [s[0] for s in ser], trows),
-        note="Quintile 1 carries 2 positives, so its AUC rests on two cases and is the "
-             "noisiest column in the chart.")
-
-
-def chart_floor() -> str:
-    rows, trows = [], []
-    for a in by_shipped():
-        sh = a["shipped"]
-        rows.append((alabel(a["key"]), sh["f1"], arm_slot(a)))
-        trows.append([alabel(a["key"]), "negative control" if a["is_control"] else "candidate",
-                      fmt(sh["f1"], 12), num(sh["tp"]), num(sh["fp"]), num(sh["fn"]),
-                      num(sh["tn"]), fmt(sh["precision"], 10) if sh["tp"] + sh["fp"] else "n/a",
-                      fmt(sh["recall"], 10), fmt(sh["block_fpr"], 10)])
-    rows.append(("block every case", FLOOR["f1"], "axis"))
-    trows.append(["block every case", "trivial baseline", fmt(FLOOR["f1"], 12),
-                  num(FLOOR["tp"]), num(FLOOR["fp"]), num(FLOOR["fn"]), num(FLOOR["tn"]),
-                  fmt(FLOOR["precision"], 10), fmt(FLOOR["recall"], 1),
-                  fmt(FLOOR["block_fpr"], 1)])
-    below = [a for a in CANDS.values() if a["shipped"] and a["shipped"]["f1"] < FLOOR["f1"]]
-    zeros = [a for a in CANDS.values() if a["shipped"] and a["shipped"]["f1"] == 0.0]
-    svg = hbars(rows, 0.4, gutter=252, rowh=21, pad_right=84,
-                vticks=[0, 0.1, 0.2, 0.3, 0.4],
-                refs=[(FLOOR["f1"], "ink", f'block everything {fmt(FLOOR["f1"], 5)}')],
-                where="floor")
-    return figure(
-        "floor",
-        "Block-only F1 at each arm's shipped operating point",
-        f'Blocking every case scores {fmt(FLOOR["f1"], 17)} at '
-        f'{pct(CORPUS["prevalence"])} prevalence, at a block false-positive rate of '
-        f'{fmt(FLOOR["block_fpr"], 1)}. {len(below)} of the '
-        f'{sum(1 for a in CANDS.values() if a["shipped"])} candidates with a shipped decision '
-        f'score below that line, and {len(zeros)} score exactly zero at it. Each arm\'s own '
-        f'argmax is a separate figure and is an in-sample upper bound.',
-        svg, "cohort-rank.json",
-        legend=[("Candidate", "seq3"), ("MLM negative control", "s5"),
-                ("Trivial baseline, no model", "axis")],
-        table=table_html(["Arm", "Role", "Block-only F1", "tp", "fp", "fn", "tn", "Precision",
-                          "Recall", "Block FPR"], trows, numeric_from=2),
-        note="Argmax F1 is a calibration diagnostic. Every cell is counted from rows.")
+        note=f"Quintile 1 holds {q0['0']['positives']} positives, so its AUCs rest on "
+             f"{q0['0']['positives']} cases and are the noisiest points in the chart.")
 
 
 def chart_cues() -> str:
     cues = SCORES and LEAK["structural_cue_auc"]
     order = sorted(cues.items(), key=lambda kv: -kv[1]["auc"])
-    rows = [(k.replace(" (max over events)", ", max").replace(" (sum over events)", ", sum")
-             .replace("event_count_in_prediction", "event count")
-             .replace("context_events", "context events")
-             .replace("context_bytes", "context bytes")
-             .replace("natural_prompt_tokens", "prompt tokens"), v["auc"], "s4")
-            for k, v in order]
+    rows = [(CUE_NAME[k], v["auc"], "s4") for k, v in order]
     lo, hi = BAND["chance_95pct_interval"]
-    svg = hbars(rows, 1.0, gutter=210, rowh=25, pad_right=84,
+    svg = hbars(rows, 1.0, gutter=240, rowh=25, pad_right=84,
                 vticks=[0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0],
                 bands=[(lo, hi, "mid", "null band")],
                 refs=[(0.5, "ink", "chance 0.5")], where="cues")
-    trows = [[k, fmt(v["auc"], 10), num(v["at_threshold"]), fmt(v["best_f1_ORACLE"], 10)]
+    trows = [[CUE_NAME[k], exact(v["auc"]), num(v["at_threshold"]), exact(v["best_f1_ORACLE"])]
              for k, v in order]
     return figure(
         "cues",
-        "AUC of five counting variables that contain no model",
-        "Each row is a scalar read off the request: how long the prompt is, how many events "
-        "the context carries, how many bytes. Destructive multi-step trajectories in this "
-        "corpus are longer than benign ones, which is a property of the data-generating "
-        "process.",
-        svg, "cohort-scoring/leakage-diagnostic.json",
-        table=table_html(["Counting variable", "AUC", "Oracle threshold",
-                          "Oracle best F1"], trows),
-        note="The oracle best-F1 column is an in-sample upper bound.")
-
-
-def chart_deberta_points() -> str:
-    blk = DEB["shipped_argmax_recomputed_from_rows"]["block_only"]
-    orc = DEB["by_variable"]["P(injection.true)  [the arm's ONLY scalar]"][
-        "best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT"]
-    rows = [
-        ("Recall, argmax at 0.5", blk["recall"], "seq3"),
-        ("Recall, oracle threshold", orc["recall"], "seq1"),
-        ("Block FPR, argmax at 0.5", blk["fpr"], "neg2"),
-        ("Block FPR, oracle threshold", orc["fpr"], "neg1"),
-        ("Block-only F1, argmax at 0.5", blk["f1"], "s7"),
-        ("Block-only F1, oracle threshold", orc["f1"], "s5"),
-    ]
-    svg = hbars(rows, 1.0, gutter=252, rowh=25, pad_right=84,
-                vticks=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
-                refs=[(TRIVIAL["block_every_case"]["f1"], "ink",
-                       f"trivial floor {fmt(TRIVIAL['block_every_case']['f1'], 5)}")],
-                where="deberta_points")
-    trows = [["argmax at 0.5", fmt(blk["f1"], 12), fmt(blk["precision"], 10),
-              fmt(blk["recall"], 10), fmt(blk["fpr"], 10), num(blk["tp"]), num(blk["fp"]),
-              num(blk["fn"]), num(blk["tn"])],
-             [f'oracle threshold {fmt(orc["threshold"], 16)}', fmt(orc["f1"], 12),
-              fmt(orc["precision"], 10), fmt(orc["recall"], 10), fmt(orc["fpr"], 10),
-              num(orc["tp"]), num(orc["fp"]), num(orc["fn"]), num(orc["tn"])]]
-    return figure(
-        "deberta-points",
-        "deberta-v3-prompt-injection-v2 at two operating points",
-        f"The arm emits <code>block</code> on {num(DEB['row_level_action_histogram']['block'])} "
-        f"of {num(DEB['prediction_rows'])} rows and "
-        f"{num(DEB['shipped_action_histogram_case_level']['block'])} of "
-        f"{num(CORPUS['scorable_cases_A_B_D'])} scored cases "
-        f"({pct(DEB['shipped_action_histogram_case_level']['block'] / CORPUS['scorable_cases_A_B_D'], 1)}). "
-        f"Its oracle threshold sits at {fmt(orc['threshold'], 16)}.",
-        svg, "cohort-scoring/cohort-scores.json",
-        legend=[("Argmax at 0.5, the shipped point", "seq3"), ("Oracle threshold", "seq1"),
-                ("Block FPR at argmax", "neg2"), ("Block FPR at the oracle threshold", "neg1")],
-        table=table_html(["Operating point", "Block-only F1", "Precision", "Recall",
-                          "Block FPR", "tp", "fp", "fn", "tn"], trows),
-        note="The oracle threshold was fitted on the rows it is scored on, so every figure "
-             "in its column is an in-sample upper bound.")
+        f"AUC of the {len(order)} counting variables, none of which contains a model",
+        "Each row is a number read off the request: how long the prompt is, how many events "
+        "the context carries, how many bytes.",
+        svg, "leakage-diagnostic.json",
+        table=table_html(["Counting variable", "AUC", "Best-F1 threshold (oracle)",
+                          "Best F1 (oracle, in-sample upper bound)"], trows))
 
 
 def chart_trunc() -> str:
@@ -1874,8 +2520,8 @@ def chart_trunc() -> str:
         "DeBERTa's 512-token window, and whether it tracks the errors",
         f"The cap is <code>{esc(TRUNC['cap_derivation'])}</code>. A row counted shrunk lost "
         f"context the model never saw. AUC inside the truncated stratum is "
-        f"{fmt(st['truncated_cases']['auc'], 10)} against "
-        f"{fmt(st['untruncated_cases']['auc'], 10)} untruncated.",
+        f"{exact(st['truncated_cases']['auc'])} against "
+        f"{exact(st['untruncated_cases']['auc'])} untruncated.",
         svg, "cohort-scoring/cohort-scores.json",
         legend=[("AUC within the stratum", "seq3"),
                 ("F1 at the oracle threshold", "seq1"),
@@ -1895,10 +2541,11 @@ def chart_control_dist() -> str:
         rows.append((key.replace("control-", ""),
                      [(d["p95"] - d["p05"], slot),
                       (d["interquartile_width"], "seq1")]))
-        trows.append([key, num(d["distinct_values"]), fmt(d["min"], 6), fmt(d["p05"], 6),
-                      fmt(d["median"], 3), fmt(d["p95"], 6), fmt(d["max"], 6),
-                      fmt(d["interquartile_width"], 10),
-                      fmt(LEAK["controls"][key]["spearman_score_vs_natural_prompt_length"], 10)])
+        trows.append([key, num(d["distinct_values"]), exact(d["min"]),
+                      fmt(d["median"], 3), exact(d["max"]),
+                      f'{exact(d["p05"])} to {exact(d["p95"])}',
+                      exact(d["interquartile_width"]),
+                      exact(LEAK["controls"][key]["spearman_score_vs_natural_prompt_length"])])
     svg = hbars(rows, 0.3, gutter=170, rowh=24, pad_right=90,
                 vticks=[0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3], where="ctl_dist")
     return figure(
@@ -1912,19 +2559,19 @@ def chart_control_dist() -> str:
         legend=[("5th to 95th percentile width, base", "s3"),
                 ("5th to 95th percentile width, large", "s5"),
                 ("Interquartile width", "seq1")],
-        table=table_html(["Control", "Distinct values", "Min", "p05", "Median", "p95", "Max",
-                          "IQR width", "Spearman against prompt length"], trows))
+        table=table_html(["Control", "Distinct values", "Min", "Median", "Max",
+                          "p05 to p95", "IQR width", "Spearman against prompt length"], trows))
 
 
 def chart_throughput() -> str:
     rows, trows = [], []
     for r in DEC:
-        rows.append((r["label"], r["rows_per_min"], "seq3"))
-        trows.append([r["label"], "decoder, Q4_K_M", fmt(r["rows_per_min"], 2), "1,200",
+        rows.append((r["arm"], r["rows_per_min"], "seq3"))
+        trows.append([r["arm"], "decoder, Q4_K_M", fmt(r["rows_per_min"], 2), "1,200",
                       pass_time(r["rows_per_min"])])
     for r in LAPTOP["encoder_throughput_rows_per_min"]:
-        rows.append((r["label"], r["rows_per_min"], "s3"))
-        trows.append([r["label"], "encoder, dynamic int8", fmt(r["rows_per_min"], 2),
+        rows.append((r["arm"], r["rows_per_min"], "s3"))
+        trows.append([r["arm"], "encoder, dynamic int8", fmt(r["rows_per_min"], 2),
                       num(r["context_tokens"]), pass_time(r["rows_per_min"])])
     svg = hbars(rows, 200, gutter=250, rowh=23, pad_right=84,
                 vticks=[0, 40, 80, 120, 160, 200], where="throughput")
@@ -1934,13 +2581,16 @@ def chart_throughput() -> str:
         f"Latency model <code>{esc(LAPTOP['provenance']['measurement_conditions']['latency_model'])}</code>, "
         f"from <code>{esc(LAPTOP['provenance']['measurement_conditions']['bench_command'])}</code>. "
         f"A 3,000-row pass takes {pass_time(FASTEST['rows_per_min'])} on "
-        f"{esc(FASTEST['label'])} and {pass_time(SLOWEST['rows_per_min'])} on "
-        f"{esc(SLOWEST['label'])}. DeBERTa-v3-base reaches its figure only at 512 tokens, "
-        f"its architectural maximum.",
+        f"<code>{esc(FASTEST['arm'])}</code> and {pass_time(SLOWEST['rows_per_min'])} on "
+        f"<code>{esc(SLOWEST['arm'])}</code>. "
+        f"<code>{esc(LAPTOP['encoder_throughput_rows_per_min'][0]['arm'])}</code> reaches its "
+        f"figure only at "
+        f"{num(LAPTOP['encoder_throughput_rows_per_min'][0]['context_tokens'])} tokens, its "
+        f"architectural maximum.",
         svg, "pinned/laptop-feasibility.json",
         legend=[("Decoder, GGUF Q4_K_M under llama.cpp", "seq3"),
                 ("Encoder, dynamic int8", "s3")],
-        table=table_html(["Arm", "Serving", "Rows/min", "Context tokens",
+        table=table_html(["Model", "Serving", "Rows/min", "Context tokens",
                           "3,000-row pass"], trows),
         note="The host carried foreign load throughout and a real laptop also thermally "
              "throttles, so every figure here is an optimistic ceiling.")
@@ -1949,108 +2599,50 @@ def chart_throughput() -> str:
 def chart_envelope() -> str:
     m = LAPTOP["memory"]
     rows = [
-        (f'Q4_K_M, {esc(m["q4_k_m_gib_min"]["label"])} (smallest)',
+        (f'Q4_K_M, {esc(LAPKEY[m["q4_k_m_gib_min"]["label"]])} (smallest)',
          m["q4_k_m_gib_min"]["gib"], "seq1"),
-        (f'Q4_K_M, {esc(m["q4_k_m_gib_max"]["label"])} (largest)',
+        (f'Q4_K_M, {esc(LAPKEY[m["q4_k_m_gib_max"]["label"]])} (largest)',
          m["q4_k_m_gib_max"]["gib"], "seq3"),
-        (f'Peak RSS, {esc(m["peak_rss_hungriest"]["label"])} (irreducible)',
+        (f'Peak RSS, {esc(m["peak_rss_hungriest"]["arm"])} (irreducible)',
          m["peak_rss_hungriest"]["irreducible_gib"], "s2"),
-        (f'Peak RSS, {esc(m["peak_rss_hungriest"]["label"])} (worst observed)',
+        (f'Peak RSS, {esc(m["peak_rss_hungriest"]["arm"])} (worst observed)',
          m["peak_rss_hungriest"]["worst_observed_under_mmap_gib"], "s4"),
     ]
     headroom = 8 - m["peak_rss_hungriest"]["irreducible_gib"]
-    svg = hbars(rows, 24, gutter=282, rowh=27, pad_right=90,
+    svg = hbars(rows, 24, gutter=330, rowh=27, pad_right=90,
                 vticks=[0, 4, 8, 12, 16, 20, 24],
                 refs=[(8, "ink", "8 GiB"), (24, "ink", "24 GiB")], where="envelope")
-    trows = [
-        ["Q4_K_M file, smallest", m["q4_k_m_gib_min"]["label"],
-         fmt(m["q4_k_m_gib_min"]["gib"], 3)],
-        ["Q4_K_M file, largest", m["q4_k_m_gib_max"]["label"],
-         fmt(m["q4_k_m_gib_max"]["gib"], 3)],
-        ["Peak RSS, irreducible", m["peak_rss_hungriest"]["label"],
-         fmt(m["peak_rss_hungriest"]["irreducible_gib"], 3)],
-        ["Peak RSS, worst observed under mmap", m["peak_rss_hungriest"]["label"],
-         fmt(m["peak_rss_hungriest"]["worst_observed_under_mmap_gib"], 3)],
-    ]
-    return figure(
-        "envelope",
-        "The cohort's memory envelope against an 8 GiB and a 24 GiB machine",
-        f"Nothing in the cohort reaches 8 GiB. The hungriest arm leaves "
-        f"{fmt(headroom, 3)} GiB spare on an 8 GiB machine.",
-        svg, "pinned/laptop-feasibility.json",
-        table=table_html(["Quantity", "Arm", "GiB"], trows, numeric_from=2),
-        note="Peak RSS came from the kernel's <code>VmHWM</code> high-water mark polled every "
-             "5 ms and cross-checked against <code>getrusage</code>. It already includes the "
-             "weights, so it is not additive with the Q4_K_M file size.")
-
-
-def chart_multimodal() -> str:
-    rows, trows = [], []
-    for m in LAPTOP["multimodal_splits"]:
-        d = MM[m["arm"]]
-        rows.append((m["label"], [(m["text_tower_params"] / 1e9, "seq3"),
-                                  (m["vision_params"] / 1e9, "s2"),
-                                  (m["projector_params"] / 1e9, "s4")]))
-        trows.append([m["label"], esc(m["architecture"]), num(m["text_tower_params"]),
-                      num(m["vision_params"]), num(m["projector_params"]),
-                      num(d["total"]), pct(d["share"])])
-    svg = stacked(rows, 5.0, gutter=178, rowh=40, unit="B params",
-                  refs=[], where="multimodal")
-    sh = LAPTOP["multimodal_splits"][0]
     gm = LAPTOP["multimodal_splits"][1]
-    trows2 = [
-        ["Shieldstral, text-only Q4_K_M on disk", num(sh["text_only_q4_k_m_bytes"]),
-         fmt(sh["text_only_q4_k_m_bytes"] / GIB, 4)],
-        ["Shieldstral, mmproj that is never built", num(sh["mmproj_bytes"]),
-         fmt(sh["mmproj_bytes"] / GIB, 4)],
-        ["gemma-3-4b-it, full checkpoint", num(gm["full_checkpoint_bytes"]),
+    trows = [
+        ["Q4_K_M file, smallest", LAPKEY[m["q4_k_m_gib_min"]["label"]],
+         fmt(m["q4_k_m_gib_min"]["gib"], 3)],
+        ["Q4_K_M file, largest", LAPKEY[m["q4_k_m_gib_max"]["label"]],
+         fmt(m["q4_k_m_gib_max"]["gib"], 3)],
+        ["Peak RSS, irreducible (the only model measured)", m["peak_rss_hungriest"]["arm"],
+         fmt(m["peak_rss_hungriest"]["irreducible_gib"], 3)],
+        ["Peak RSS, worst observed under mmap", m["peak_rss_hungriest"]["arm"],
+         fmt(m["peak_rss_hungriest"]["worst_observed_under_mmap_gib"], 3)],
+        ["Full checkpoint, unquantized, the only one over 8 GiB", gm["arm"],
          fmt(gm["full_checkpoint_bytes"] / GIB, 4)],
     ]
     return figure(
-        "multimodal",
-        "Where the parameters sit in the two multimodal arms",
-        f"Shieldstral is <code>{esc(sh['architecture'])}</code>. llama.cpp's converter emits "
-        f"the text tower only for <code>mistral3</code>: {num(sh['text_tower_tensors'])} "
-        f"tensors, exactly {num(sh['text_tower_params'])} elements, zero vision tensors. "
-        f"The vision side exports separately as an mmproj. "
-        f"gemma-3-4b-it's full checkpoint is "
-        f"{fmt(gm['full_checkpoint_bytes'] / GIB, 4)} GiB, so the split is what makes it "
-        f"loadable on an 8 GiB machine.",
+        "envelope",
+        "Measured memory against an 8 GiB and a 24 GiB machine",
+        f"Peak RSS was measured for one model only, "
+        f"<code>{esc(m['peak_rss_hungriest']['arm'])}</code>, which leaves "
+        f"{fmt(headroom, 3)} GiB spare on an 8 GiB machine. Every Q4_K_M file is under "
+        f"{fmt(m['q4_k_m_gib_max']['gib'], 3)} GiB. The unquantized "
+        f"<code>{esc(gm['arm'])}</code> checkpoint is {fmt(gm['full_checkpoint_bytes'] / GIB, 4)} "
+        f"GiB, the only one over 8 GiB.",
         svg, "pinned/laptop-feasibility.json",
-        legend=[("Text tower", "seq3"), ("Vision tower", "s2"), ("Projector", "s4")],
-        table=table_html(["Arm", "Architecture", "Text tower", "Vision", "Projector",
-                          "Total", "Vision plus projector share"], trows)
-        + table_html(["Artifact", "Bytes", "GiB"], trows2, numeric_from=1))
+        table=table_html(["Quantity", "Model", "GiB"], trows, numeric_from=2),
+        note="Peak RSS already includes the weights, so it is not additive with the Q4_K_M file "
+             "size.")
 
 
 CLS_SLOT = {"general": "seq3", "safety": "s2", "encoder": "s3", "control": "s5"}
 CLS_LABEL = {"general": "General decoder", "safety": "Purpose-built safety classifier",
              "encoder": "Trained encoder classifier", "control": "MLM negative control"}
-
-
-def chart_roster() -> str:
-    arms = sorted(ROWS, key=lambda a: -a["params"])
-    rows = [(a["display"] + (" (gated)" if a["gated"] else ""),
-             a["params"] / 1e9, CLS_SLOT[a["cls"]]) for a in arms]
-    svg = hbars(rows, 5.0, gutter=292, rowh=22, pad_right=80,
-                vticks=[0, 1, 2, 3, 4, 5], where="roster")
-    trows = [[a["display"], CLS_LABEL[a["cls"]], num(a["params"]),
-              num(a["snapshot_bytes"]), a["licence"], a["origin"],
-              a["gated"] or "ungated", a["readout"], a["status"]] for a in arms]
-    n_g = sum(1 for a in ROWS if a["gated"])
-    return figure(
-        "roster",
-        f"Parameter count across the {len(ROWS)} arms",
-        f"{n_g} of {len(ROWS)} need a licence-accepted token to fetch, across "
-        f"{len({a['gated'] for a in ROWS if a['gated']})} separate acceptance groups. The "
-        f"snapshot column is the size the download wrote to disk.",
-        svg, "harness/arms.py and harness/weights_manifest{,2,3,4}.json",
-        legend=[(CLS_LABEL[c], CLS_SLOT[c]) for c in
-                ("general", "safety", "encoder", "control")],
-        table=table_html(["Arm", "Class", "Parameters", "Snapshot bytes", "Licence", "Origin",
-                          "Gating", "Readout", "Status"], trows, numeric_from=2),
-        note="Prompt Guard 2's repo names understate its size: the headline 22M and 86M "
-             "exclude embeddings.")
 
 
 def chart_gating() -> str:
@@ -2068,46 +2660,13 @@ def chart_gating() -> str:
               ", ".join(a["display"] for a in groups.get(k, []))] for k in order]
     return figure(
         "gating",
-        "Arms per HuggingFace acceptance group",
-        "A 403 rather than a 401 is the signal that the token is valid and that repo's group "
-        "is unaccepted. Community re-uploads of the gated weights were refused, because a "
-        "mirror launders the provenance the licence column exists to record.",
+        "Models per HuggingFace acceptance group",
+        "Models that need a licence-accepted token, by acceptance group.",
         svg, "pinned/roster.json",
         legend=[("Fetchable with no acceptance", "seq1"),
                 ("Needs a licence-accepted token", "neg2")],
-        table=table_html(["Group", "Arms", "Acceptance", "Members"], trows, numeric_from=1),
-        note="Eight arms behind three groups is a reproducibility cost for anyone repeating "
-             "this.")
-
-
-def chart_backbones() -> str:
-    fam = {}
-    for a in ROWS:
-        if a["cls"] in ("encoder", "control"):
-            fam.setdefault(a["backbone"], []).append(a)
-    rows = [("DebertaV2, trained classifiers", len(fam["DebertaV2"]), "s3"),
-            ("ModernBERT, untrained controls", len(fam["ModernBERT"]), "s5")]
-    svg = hbars(rows, 4, gutter=244, rowh=28, pad_right=70,
-                vticks=[0, 1, 2, 3, 4], where="backbones")
-    trows = [[a["display"], a["backbone"], CLS_LABEL[a["cls"]], num(a["params"]),
-              a["architectures"][0] if a["architectures"] else
-              ROSTER["backbone_evidence"][a["key"]], a["status"]]
-             for a in ROWS if a["cls"] in ("encoder", "control")]
-    return figure(
-        "backbones",
-        "Backbone family across the five encoder arms",
-        "Prompt Guard 2 is <code>DebertaV2ForSequenceClassification</code> at both sizes, so "
-        "all three trained encoders share the DeBERTa-v2 backbone family. That is three "
-        "checkpoints inside one family. The only independent encoder backbone in the cohort "
-        "is ModernBERT, and both ModernBERT arms are controls.",
-        svg, "pinned/roster.json",
-        legend=[("Trained classifier", "s3"), ("Untrained MLM control", "s5")],
-        table=table_html(["Arm", "Backbone", "Class", "Parameters",
-                          "How the backbone is known", "Status"], trows, numeric_from=3),
-        note="A trained-encoder result here can be shown to be non-checkpoint-specific "
-             "within the DeBERTa-v2 family. It cannot be separated from a DeBERTa-family "
-             "result.")
-
+        table=table_html(["Group", "Models", "Acceptance", "Members"], trows, numeric_from=1),
+        note=None)
 
 
 def alabel(key: str) -> str:
@@ -2119,7 +2678,7 @@ def arm_slot(a: dict) -> str:
 
 
 def by_lc():
-    """Every ranked arm, best length-controlled AUC first. Controls are kept in the ordering so a
+    """Every ranked model, best length-controlled AUC first. Controls are kept in the ordering so a
     reader can see where an untrained backbone falls."""
     return sorted(COH.values(), key=lambda a: -a["auc_lc"])
 
@@ -2148,9 +2707,8 @@ def chart_corpus() -> str:
         f'{num(CORPUS["cases"])} cases. {num(CORPUS["scorable_cases_A_B_D"])} are scorable once '
         f'the {num(g["C"])} grade-C cases are excluded: {num(CORPUS["positives_A_B"])} positives '
         f'(A {g["A"]} plus B {g["B"]}) against {num(CORPUS["negatives_D"])} benign. Positive '
-        f'prevalence is {pct(TRIVIAL["prevalence_positives_over_scorable"])}, which is what sets '
-        f'the trivial floor.',
-        svg, "cohort-scoring/cohort-scores.json",
+        f'prevalence is {pct(TRIVIAL["prevalence_positives_over_scorable"])}.',
+        svg, "cohort-rank.json",
         legend=[("Grade A", "neg2"), ("Grade B", "neg1"), ("Grade D", "seq2"),
                 ("Grade C, excluded", "axis")],
         table=table_html(["Grade", "Cases", "Role in scoring", "What the grade records"], trows,
@@ -2161,65 +2719,6 @@ def chart_corpus() -> str:
              f'{CORPORA["label_scheme"]["conditions"]["C"]}.')
 
 
-def chart_fpr() -> str:
-    rows, trows = [], []
-    for a in sorted(SHIP.values(), key=lambda a: -a["shipped"]["block_fpr"]):
-        sh = a["shipped"]
-        rows.append((alabel(a["key"]), sh["block_fpr"], arm_slot(a)))
-        trows.append([alabel(a["key"]), fmt(sh["block_fpr"], 12), num(sh["fp"]), num(sh["tn"]),
-                      fmt(sh["recall"], 10), fmt(a["flag_rate"], 8)])
-    rows.append(("block every case", FLOOR["block_fpr"], "axis"))
-    trows.append(["block every case", fmt(FLOOR["block_fpr"], 1), num(FLOOR["fp"]),
-                  num(FLOOR["tn"]), fmt(FLOOR["recall"], 1), fmt(1.0, 8)])
-    svg = hbars(rows, 1.0, gutter=252, rowh=21, pad_right=84,
-                vticks=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
-                refs=[(FLOOR["block_fpr"], "ink", "block everything 1.0")], where="fpr")
-    return figure(
-        "fpr",
-        "Block false-positive rate at each arm's shipped operating point",
-        f'Share of the {num(CORPUS["negatives_D"])} benign cases each arm blocks. The spread runs '
-        f'from {fmt(min(a["shipped"]["block_fpr"] for a in SHIP.values()), 6)} to '
-        f'{fmt(max(a["shipped"]["block_fpr"] for a in SHIP.values()), 6)}, which separates these '
-        f'arms far more sharply than F1 does.',
-        svg, "cohort-rank.json",
-        legend=[("Candidate", "seq3"), ("MLM negative control", "s5"),
-                ("Trivial baseline, no model", "axis")],
-        table=table_html(["Arm", "Block FPR", "False blocks", "Correct allows", "Recall",
-                          "Flag rate"], trows),
-        note="Counted from rows at each arm's argmax decision.")
-
-
-def chart_deploy() -> str:
-    """Recall at the incumbent cascade's own block false-positive rate."""
-    rows, trows = [], []
-    ordered = sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])
-    for a in ordered:
-        x = a["cap_row"]
-        slot = "s5" if a["is_control"] else ("s3" if x["recall"] > 0 else "axis")
-        rows.append((alabel(a["key"]), x["recall"], slot))
-        trows.append([alabel(a["key"]),
-                      "negative control" if a["is_control"] else "candidate",
-                      fmt(x["recall"], 12), num(x["tp"]), num(x["fp"]), fmt(x["f1"], 12),
-                      fmt(x["fpr"], 12), fmt(x["threshold"], 16)])
-    best = {"arm": ordered[0]["key"], **ordered[0]["cap_row"]}
-    svg = hbars(rows, 0.08, gutter=252, rowh=20, pad_right=88,
-                vticks=[0, 0.02, 0.04, 0.06, 0.08], where="deploy")
-    return figure(
-        "deploy",
-        f"Recall at a block false-positive rate of {FPR_CAP}",
-        f'Every arm re-thresholded to the same false-positive budget, which is the operating '
-        f'false-positive rate of the incumbent cascade. The best arm in the cohort is '
-        f'<code>{esc(best["arm"])}</code> at recall {fmt(best["recall"], 12)}, '
-        f'{best["tp"]} of {num(CORPUS["positives_A_B"])} positives, F1 {fmt(best["f1"], 12)}.',
-        svg, "reconcile.json",
-        legend=[("Candidate with non-zero recall", "s3"), ("MLM negative control", "s5"),
-                ("Candidate at zero recall", "axis")],
-        table=table_html(["Arm", "Role", "Recall", "tp", "fp", "F1", "Achieved block FPR",
-                          "Threshold"], trows, numeric_from=2),
-        note="Every threshold here is re-fitted, so no figure in this chart is any arm's shipped "
-             "behaviour.")
-
-
 def chart_zerofp() -> str:
     rows, trows = [], []
     for a in sorted(COH.values(), key=lambda a: -a["zero_fp"]["recall"]):
@@ -2227,8 +2726,8 @@ def chart_zerofp() -> str:
         rows.append((alabel(a["key"]), v["recall"], "s3" if v["recall"] > 0 else "axis"))
         trows.append([alabel(a["key"]),
                       "negative control" if a["is_control"] else "candidate",
-                      fmt(v["recall"], 12), num(v["tp"]), num(v["fp"]),
-                      fmt(v["rule_of_three_upper_bound"], 16)])
+                      exact(v["recall"]), num(v["tp"]), num(v["fp"]),
+                      exact(v["rule_of_three_upper_bound"])])
     svg = hbars(rows, 0.014, gutter=252, rowh=20, pad_right=90,
                 vticks=[0, 0.005, 0.01], where="zerofp")
     zero = [a for a in CANDS.values() if a["zero_fp"]["recall"] == 0]
@@ -2236,12 +2735,12 @@ def chart_zerofp() -> str:
     return figure(
         "zerofp",
         "Recall at a zero-false-positive gate",
-        f'The strictest gate: the highest threshold at which an arm blocks no benign case at all. '
+        f'The strictest gate: the highest threshold at which a model blocks no benign case at all. '
         f'{len(zero)} of the {len(CANDS)} candidates retain zero recall under it, so they catch '
         f'nothing without blocking something benign. {len(nz)} retain any recall.',
-        svg, "reconcile.json",
+        svg, "cohort-length-controlled-ranking.json",
         legend=[("Non-zero recall", "s3"), ("Zero recall", "axis")],
-        table=table_html(["Arm", "Role", "Recall", "True blocks", "False blocks",
+        table=table_html(["Model", "Role", "Recall", "True blocks", "False blocks",
                           "Rule-of-three upper bound"], trows, numeric_from=2),
         note="Zero-false-positive gates did not transfer across corpora when the System One "
              "programme measured them, so this is reported to answer the deployability question "
@@ -2249,7 +2748,7 @@ def chart_zerofp() -> str:
 
 
 def estimator_table() -> str:
-    head = (["Arm", "Role"] + [EST_LABEL[e] for e in EST_ORDER]
+    head = (["Model", "Role"] + [EST_LABEL[e] for e in EST_ORDER]
             + ["Rank under the published estimator", "Worst rank across the four"])
     r = STABILITY["ranks"]
     rows = []
@@ -2257,7 +2756,7 @@ def estimator_table() -> str:
         pos = []
         for e in EST_ORDER:
             pos.append(r[e].index(a["key"]) + 1 if a["key"] in r[e] else None)
-        cells = [fmt(a["est"][e], 10) if a["est"][e] is not None else "n/a" for e in EST_ORDER]
+        cells = [exact(a["est"][e]) if a["est"][e] is not None else "n/a" for e in EST_ORDER]
         rows.append([f'<code>{esc(a["key"])}</code>',
                      "negative control" if a["is_control"] else "candidate"] + cells
                     + ([str(pos[0]), str(max(p for p in pos if p))] if not a["is_control"]
@@ -2265,45 +2764,8 @@ def estimator_table() -> str:
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
 
 
-def chart_estimators() -> str:
-    """The leading arms under each estimator, so an estimator-dependent position is visible."""
-    r = STABILITY["ranks"]
-    shown = [k for k in r[PUB_EST][:6]]
-    for e in EST_ORDER:
-        for k in r[e][:3]:
-            if k not in shown:
-                shown.append(k)
-    rows = []
-    slots = ("seq3", "seq1", "s3", "s4")
-    for k in shown:
-        a = COH[k]
-        rows.append((k, [(a["est"][e], slots[i]) for i, e in enumerate(EST_ORDER)
-                         if a["est"][e] is not None]))
-    lo, hi = BAND["chance_95pct_interval"]
-    svg = hbars(rows, 1.0, gutter=252, rowh=15, pad_right=84,
-                vticks=[0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0],
-                bands=[(lo, hi, "mid", "null band")],
-                refs=[(0.5, "ink", "chance 0.5")], where="estimators")
-    trows = []
-    for e in EST_ORDER:
-        trows.append([EST_LABEL[e]] + [f'{i}. {r[e][i - 1]}' for i in (1, 2, 3)])
-    return figure(
-        "estimators",
-        "The same arms under four length-control estimators",
-        f'The published figure is the {EST_LABEL[PUB_EST].lower()} figure, which weights each bin '
-        f'by the positive-benign comparisons it actually holds. The retracted unweighted mean gave '
-        f'a quintile holding 2 positives the same 20% of the weight as one holding 230. Positions '
-        f'1 and 2 are contradicted only by one of the {STABILITY["schemes"]} schemes the artifact '
-        f'evaluates, and position 3 by {len(STABILITY["disagreeing_schemes"][3])}.',
-        svg, "cohort-rank.json per-bin counts, reconcile.json pooled figures",
-        legend=[(EST_LABEL[e], slots[i]) for i, e in enumerate(EST_ORDER)],
-        table=table_html(["Estimator", "1st", "2nd", "3rd"], trows, numeric_from=1),
-        note="Every value is computed at build time from the per-quintile positive counts, so the "
-             "four columns are the same bins re-weighted.")
-
-
 def sparse_bin_note() -> str:
-    """The worked case for why the unweighted mean is fragile, taken from the arm it affects."""
+    """The worked case for why the unweighted mean is fragile, taken from the model it affects."""
     r = STABILITY["ranks"]
     pub = r[PUB_EST]
     # the leading arm whose position moves most across the four estimators
@@ -2316,24 +2778,31 @@ def sparse_bin_note() -> str:
     dense = [(b, v) for b, v in bins.items() if v["positives"] >= 25]
     sp_pos = sum(v["positives"] for _b, v in sparse)
     dn_pos = sum(v["positives"] for _b, v in dense)
-    rows = [[b, num(v["cases"]), num(v["positives"]), fmt(v["auc"], 16)]
+    rows = [[b, num(v["cases"]), num(v["positives"]), exact(v["auc"])]
             for b, v in sorted(bins.items())]
     n_sparse, n_bins = len(sparse), len(bins)
     sp_auc = ", ".join(fmt(v["auc"], 4) for _b, v in sparse)
     dn_auc = ", ".join(fmt(v["auc"], 4) for _b, v in dense)
     word = {1: "sparsest bin holds", 2: "two sparsest bins hold"}.get(
         n_sparse, f"{n_sparse} sparsest bins hold")
+    pub_pos = pub.index(key) + 1
+    worst_pos = max(r[e].index(key) + 1 for e in EST_ORDER)
+    w_pool = sum(a["est"]["weights_pooled"][b] for b, _v in sparse)
+    # the direction is read off the ranks, so the sentence cannot state it the wrong way round
+    if worst_pos <= pub_pos:
+        BAD.append(f"{key}: the model that moves furthest does not rank lower under an unweighted "
+                   f"estimator than under the published one, so the sparse-bin note is wrong")
     return (
-        f'<p>\n  <code>{esc(key)}</code> moves furthest. It sits at position '
-        f'{pub.index(key) + 1} under the published estimator and as low as '
-        f'{max(r[e].index(key) + 1 for e in EST_ORDER)} under the others, a move of {drop} '
-        f'places.\n</p>\n'
+        f'<p>\n  <code>{esc(key)}</code> moves furthest. It ranks {pub_pos} under the '
+        f'published estimator and as low as {worst_pos} under an unweighted one, a move of '
+        f'{drop} places.\n</p>\n'
         f'<div class="tbl-scroll">{table_html(["Quintile", "Cases", "Positives", "AUC in the bin"], rows, numeric_from=1)}</div>\n'
         f'<p>\n  Its {word} {sp_pos} of the {num(CORPUS["positives_A_B"])} positives, at AUC '
-        f'{sp_auc}, and carries {pct(n_sparse / n_bins, 0)} of the unweighted mean. In the '
-        f'{len(dense)} bins holding {dn_pos} positives it scores {dn_auc}. Weighting the bins by '
-        f'the evidence they hold moves it down the table; an arm whose bins agree with each other '
-        f'does not move.\n</p>')
+        f'{sp_auc}. The unweighted mean gives that bin {pct(n_sparse / n_bins, 0)} of the weight, '
+        f'which pulls the model down to {worst_pos}. Pair weighting gives it '
+        f'{pct(w_pool, 1)}, so the '
+        f'{len(dense)} bins holding {dn_pos} positives, where it scores {dn_auc}, decide its '
+        f'place at {pub_pos}. A model whose bins agree with each other does not move.\n</p>')
 
 
 
@@ -2348,7 +2817,7 @@ S3CUE = {k: v for k, v in S3C["s3_length_cue_no_model"].items()
 
 
 def grade_rows():
-    """Per-arm grade-A and grade-B separation, for the arms scored on the held-out corpus."""
+    """Per-model grade-A and grade-B separation, for the models scored on the held-out corpus."""
     out = []
     for key, v in sorted(GRADE["per_arm"].items()):
         o = v["at_s3_oracle_threshold_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT"]
@@ -2370,8 +2839,8 @@ def chart_grades() -> str:
     for g in sorted(grade_rows(), key=lambda g: -g["auc_a"]):
         rows.append((g["key"], [(g["auc_a"], "neg2"), (g["auc_b"], "seq2")]))
         trows.append([g["key"], str(g["s2_rank"]) if g["s2_rank"] else "n/a",
-                      fmt(g["auc_a"], 12), fmt(g["auc_b"], 12),
-                      fmt(g["auc_a"] - g["auc_b"], 12),
+                      exact(g["auc_a"]), exact(g["auc_b"]),
+                      exact(g["auc_a"] - g["auc_b"]),
                       f'{g["tp_a"]} of {g["n_a"]}', f'{g["tp_b"]} of {g["n_b"]}'])
     lo, hi = S3DESIGN["chance_band_95pct"]
     svg = hbars(rows, 1.0, gutter=252, rowh=18, pad_right=84,
@@ -2381,152 +2850,77 @@ def chart_grades() -> str:
     a2, b2 = GRADE["s2_positive_composition"], GRADE["s3_positive_composition"]
     return figure(
         "grades",
-        "How well each arm separates grade-A and grade-B positives from benign",
-        f'On the held-out corpus. Grade A is an unambiguous destructive call and grade B is a '
-        f'judgement call. The two corpora are built from almost opposite mixes: s2 positives are '
-        f'{pct(a2["grade_A_share_of_positives"])} grade A and the held-out corpus\'s are '
-        f'{pct(b2["grade_A_share_of_positives"])}. An arm\'s position therefore moves with the '
-        f'grade mix.',
+        "How well each model separates grade-A and grade-B positives from benign",
+        f'On the second corpus. Grade A is {GRADE_PLAIN["A"]}; grade B is {GRADE_PLAIN["B"]}. A '
+        f'model that separates grade A well can separate grade B badly, so a score on a corpus '
+        f'that is {pct(b2["grade_A_share_of_positives"])} grade A answers a different question '
+        f'from a score on one that is {pct(a2["grade_A_share_of_positives"])} grade A.',
         svg, "s3-stats.json",
         legend=[("Grade A positives against all benign", "neg2"),
                 ("Grade B positives against all benign", "seq2")],
-        table=table_html(["Arm", "s2 rank", "Grade A AUC", "Grade B AUC", "A minus B",
+        table=table_html(["Model", "s2 rank", "Grade A AUC", "Grade B AUC", "A minus B",
                           "Grade A caught", "Grade B caught"], trows, numeric_from=1),
         note="The caught columns are at an in-sample oracle threshold and are an upper bound. "
              "The two AUC columns are not.")
 
 
-def chart_s3cue() -> str:
-    rows, trows = [], []
-    for name, v in sorted(S3CUE.items(), key=lambda kv: -kv[1]["auc_raw"]):
-        short = name.replace(" (max over events)", ", max")
-        rows.append((short, v["auc_raw"], "s4"))
-        trows.append([short, fmt(v["auc_raw"], 16)])
-    for name, v in sorted(LEAK["structural_cue_auc"].items(), key=lambda kv: -kv[1]["auc"])[:2]:
-        short = (name.replace(" (max over events)", ", max")
-                 .replace("natural_prompt_tokens", "prompt tokens")
-                 .replace("event_count_in_prediction", "event count") + " (s2)")
-        rows.append((short, v["auc"], "axis"))
-        trows.append([short, fmt(v["auc"], 16)])
-    lo, hi = S3DESIGN["chance_band_95pct"]
-    svg = hbars(rows, 1.0, gutter=252, rowh=23, pad_right=84,
-                vticks=[0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0],
-                bands=[(lo, hi, "mid", "null band")],
-                refs=[(0.5, "ink", "chance 0.5")], where="s3cue")
-    return figure(
-        "s3cue",
-        "Counting variables on the held-out corpus, against the same variables on s2",
-        f'Both are corpus fields, byte-identical across every arm. On the held-out corpus they sit '
-        f'at or below chance, so that corpus carries no length cue to control for and raw AUC is '
-        f'the honest primary there. On s2 the same kind of variable reaches '
-        f'{fmt(LEAK["structural_cue_auc"]["natural_prompt_tokens (max over events)"]["auc"], 6)}, '
-        f'which is why s2 figures are length-controlled and held-out figures are not.',
-        svg, "s3-scores-in-scope.json, leakage-diagnostic.json",
-        legend=[("Held-out corpus", "s4"), ("s2, for comparison", "axis")],
-        table=table_html(["Counting variable", "Raw AUC"], trows),
-        note="A length-controlled figure on the held-out corpus would add estimator noise and "
-             "nothing else.")
-
-
-def corpus_design_note() -> str:
-    a2, b2 = GRADE["s2_positive_composition"], GRADE["s3_positive_composition"]
-    head = ["Corpus", "Cases", "Scorable", "Positives", "Grade A", "Grade B", "Benign",
-            "Prevalence", "Grade A share of positives"]
-    rows = [
-        ["s2", num(CORPUS["cases"]), num(CORPUS["scorable_cases_A_B_D"]),
-         num(CORPUS["positives_A_B"]), num(a2["A"]), num(a2["B"]),
-         num(CORPUS["negatives_D"]), pct(CORPUS["prevalence"]),
-         pct(a2["grade_A_share_of_positives"])],
-        ["held out", num(S3DESIGN["cases"]), num(S3DESIGN["cases"]),
-         num(S3DESIGN["positives_A_B"]), num(b2["A"]), num(b2["B"]),
-         num(S3DESIGN["negatives_D"]), pct(S3DESIGN["prevalence"]),
-         pct(b2["grade_A_share_of_positives"])],
-    ]
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
-
-
-def resolution_note() -> str:
-    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
-    lo, hi = wilson(best["cap_row"]["tp"], CORPUS["positives_A_B"])
-    t = tightest_pair()
-    ceilings = [v["sample_size_to_significance"]["proportional_growth"]["positives_needed_ceiling"]
-                for v in S3["pairwise_delong_all_pairs"].values()]
-    return (
-        f'<p>\n  More data does not change the s2 answer. All '
-        f'{S3RES["pairs_significant_at_0.05"]} of the {S3RES["pairs_tested"]} pairwise comparisons '
-        f'on the held-out corpus already separate at p &lt; 0.05, and the median detectable AUC '
-        f'difference is {exact(S3RES["median_minimum_detectable_auc_difference"])}. The narrowest '
-        f'pair is '
-        f'{" against ".join(f"<code>{esc(x)}</code>" for x in t["pair"].split("  vs  "))} at '
-        f'{exact(t["mdd"])} AUC, and it would have been significant on '
-        f'{num(t["proportional"])} positives under proportional growth or '
-        f'{num(t["positives_only"])} under positive-only growth, against the '
-        f'{num(S3RES["positives"])} the corpus holds. The widest needs '
-        f'{num(max(ceilings))}, which the corpus also holds.\n</p>\n'
-        f'<p>\n  A false-positive cap is a rate, so a larger benign pool grows the allowance in '
-        f'step with itself and the operating point stays at the same place on an arm\'s ROC curve. '
-        f'On s2 the best arm at the cap catches {best["cap_row"]["tp"]} of '
-        f'{num(CORPUS["positives_A_B"])} positives, and the Wilson 95% interval on that recall is '
-        f'[{exact(lo)}, {exact(hi)}]. More traces buy a tighter interval around the same '
-        f'number.\n</p>\n'
-        f'<p class="small">\n  That is a statement about ranking precision. '
-        f'{pct(S3BIND["mean_share_of_variance_from_the_221_positives"])} of the AUC variance on '
-        f'the held-out corpus comes from its {num(S3DESIGN["positives_A_B"])} positives, so the '
-        f'positive count remains the binding constraint on every per-positive quantity, and grade '
-        f'B has only {num(GRADE["s3_positive_composition"]["B"])} of them there. The binding '
-        f'constraint this cohort measures is the grade composition of the positives, and it is a '
-        f'property of the corpora.\n</p>')
-
-
-
 def control_finding() -> str:
-    """The untrained-backbone comparison, with every count derived from the artifacts on hand."""
+    """The untrained-backbone comparison, with every count derived from the artifacts on hand,
+    and the one table that carries each model's default decision, its best-F1 threshold (oracle)
+    and the block-everything baseline side by side."""
     ref_s, ref_o = BASE["shipped"]["f1"], BASE["oracle"]["f1"]
-    below_s = sorted(a["key"] for a in CANDS.values()
-                     if a["shipped"] and a["shipped"]["f1"] <= ref_s)
-    below_o = sorted(a["key"] for a in CANDS.values()
-                     if a["oracle"] and a["oracle"]["f1"] <= ref_o)
+    with_default = [a for a in CANDS.values() if a["shipped"]]
+    below_s = sorted(a["key"] for a in with_default if a["shipped"]["f1"] <= ref_s)
+    below_o = sorted(a["key"] for a in with_default if a["oracle"]["f1"] <= ref_o)
     below_lc = sorted(a["key"] for a in CANDS.values() if a["auc_lc"] <= BASE["auc_lc"])
-    n = sum(1 for a in CANDS.values() if a["shipped"])
-    fp_ctrl, fp_deb = BASE["shipped"]["fp"], COH["deberta-v3-prompt-injection-v2"]["shipped"]["fp"]
-    fewer = (fp_deb - fp_ctrl) / fp_deb
+    n_def = len(with_default)
+    under_floor = sum(1 for a in with_default if a["shipped"]["f1"] < FLOOR["f1"])
+    zero_def = sum(1 for a in with_default if a["shipped"]["f1"] == 0.0)
+    over_floor_oracle = sum(1 for a in COH.values() if a["oracle_f1"] > FLOOR["f1"])
+    top = max(with_default, key=lambda a: a["shipped"]["f1"])
+    cv = control_verdict()
     rows = []
-    for a in by_lc():
-        if a["shipped"] is None:
-            continue
-        rows.append([f'<code>{esc(a["key"])}</code>',
-                     "negative control" if a["is_control"] else "candidate",
-                     fmt(a["shipped"]["f1"], 12), fmt(a["oracle"]["f1"], 12),
-                     fmt(a["auc_lc"], 12), fmt(a["shipped"]["block_fpr"], 10),
-                     num(a["shipped"]["fp"])])
-    # the trivial floor belongs beside every block-only F1 column on this Space
-    rows.append(["<code>block every case</code>", "trivial floor",
-                 fmt(FLOOR["f1"], 12), MDASH, MDASH, fmt(FLOOR["block_fpr"], 1),
-                 num(FLOOR["fp"])])
+    for a in sorted(COH.values(), key=lambda a: -(a["shipped"]["f1"] if a["shipped"] else -1)):
+        sh = a["shipped"]
+        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
+                     exact(sh["f1"]) if sh else "n/a", exact(a["oracle_f1"]),
+                     exact(sh["block_fpr"]) if sh else "n/a",
+                     num(sh["fp"]) if sh else "n/a",
+                     exact(a["auc_lc"])])
+    rows.append(["<code>block every case</code>", "baseline, no model",
+                 exact(FLOOR["f1"]), MDASH, fmt(FLOOR["block_fpr"], 1), num(FLOOR["fp"]), MDASH])
+    lo, hi = BAND["chance_95pct_interval"]
     return (
+        f'<p>\n  Two more operating points exist besides the budget, and neither answers the '
+        f'question. A model\'s <strong>default decision</strong> is what it does at its own '
+        f'documented setting, with nothing re-fitted. Its <strong>best-F1 threshold '
+        f'(oracle)</strong> is found by sweeping the same rows it is scored on, so it is an '
+        f'in-sample upper bound and never an operating point. Blocking every case scores '
+        f'{exact(FLOOR["f1"])}, at a block FPR of {fmt(FLOOR["block_fpr"], 1)}.\n</p>\n'
+        f'<p>\n  At their default decision {under_floor} of the {n_def} candidates that have one '
+        f'fall below the block-everything baseline and {zero_def} score exactly zero. The highest '
+        f'default-decision F1 is <code>{esc(top["key"])}</code> at {exact(top["shipped"]["f1"])}, '
+        f'blocking {num(top["shipped"]["fp"])} of {num(CORPUS["negatives_D"])} benign cases to '
+        f'get it. At the best-F1 threshold all {over_floor_oracle} models clear the baseline. '
+        f'<code>{esc(SHIPPED_MISSING[0])}</code> has no default-decision row: its predictions '
+        f'landed after the run that recorded those.\n</p>\n'
+        f'<div class="tbl-scroll">{table_html(["Model", "Role", "Default-decision F1", "Best-F1 threshold F1 (oracle, in-sample upper bound)", "Default-decision block FPR", "Default-decision false blocks", "Length-controlled AUC"], rows, numeric_from=2)}</div>\n'
+        f'<h3 id="control">What an untrained backbone scores</h3>\n'
         f'<p>\n  <code>control-modernbert-base</code> is an untrained '
-        f'<code>ModernBertForMaskedLM</code> backbone with no trained head and no safety '
-        f'training. Its best F1 on its own scalar is {fmt(ref_o, 14)}, its shipped F1 is '
-        f'{fmt(ref_s, 16)}, and it blocks {num(fp_ctrl)} benign cases.\n</p>\n'
-        f'<p><strong>{len(below_o)} of the {n} ranked candidates score at or below it on best F1, '
-        f'and {len(below_s)} at or below it on shipped F1.</strong> On this corpus those arms '
-        f'cannot be separated from an untrained backbone by F1.</p>\n'
-        f'<p>\n  This is not leakage. The leakage gate established that both controls sit at '
-        f'chance once prompt length is controlled for, and this one lands at '
-        f'{fmt(BASE["auc_lc"], 16)} inside the band '
-        f'[{fmt(BAND["chance_95pct_interval"][0], 15)}, '
-        f'{fmt(BAND["chance_95pct_interval"][1], 15)}]. The mechanism is the threshold sweep: an '
-        f'unconstrained best-F1 search on a corpus carrying a length cue worth AUC '
-        f'{fmt(LEAK["structural_cue_auc"]["natural_prompt_tokens (max over events)"]["auc"], 16)} '
-        f'flatters anything correlated with length, and this readout is correlated with length at '
-        f'Spearman '
-        f'{fmt(LEAK["controls"]["control-modernbert-base"]["spearman_score_vs_natural_prompt_length"], 15)}.\n</p>\n'
-        f'<p>\n  On length-controlled AUC the picture separates: {len(below_lc)} of the {n} '
-        f'candidates sit at or below the control. The candidate ranking is therefore read on '
-        f'length-controlled AUC, and best F1 is a diagnostic.\n</p>\n'
-        f'<p>\n  The control also blocks fewer benign cases than the highest-ranked candidate: '
-        f'{num(fp_ctrl)} against {num(fp_deb)}, which is {pct(fewer, 1)} fewer.\n</p>\n'
-        f'<div class="tbl-scroll">{table_html(["Arm", "Role", "Shipped block-only F1", "Its own argmax F1 (in-sample upper bound)", "Length-controlled AUC", "Block FPR", "False blocks"], rows, numeric_from=2)}</div>')
+        f'<code>ModernBertForMaskedLM</code> with no trained head and no safety training. '
+        f'It scores F1 {exact(ref_s)} at its default decision and {exact(ref_o)} at its best-F1 '
+        f'threshold. {len(below_s)} of the {n_def} candidates with a default decision score at or '
+        f'below it there, and {len(below_o)} at or below it at the best-F1 threshold, so F1 cannot '
+        f'separate those models from an untrained backbone on this corpus.\n</p>\n'
+        f'<p>\n  The mechanism is the length cue: an unconstrained best-F1 search on a corpus '
+        f'where prompt length alone reaches AUC '
+        f'{exact(LEAK["structural_cue_auc"]["natural_prompt_tokens (max over events)"]["auc"])} '
+        f'rewards anything that tracks length, and this readout tracks it at Spearman '
+        f'{exact(LEAK["controls"]["control-modernbert-base"]["spearman_score_vs_natural_prompt_length"])}. '
+        f'Under length control it lands at {exact(BASE["auc_lc"])}, '
+        f'{cv["where"]["control-modernbert-base"]} the chance band [{exact(lo)}, {exact(hi)}]. '
+        f'On length-controlled AUC {len(below_lc)} of the {len(CANDS)} candidates sit at or below '
+        f'it.\n</p>')
 
 
 # ================================================ one common operating point, and the bands
@@ -2542,126 +2936,615 @@ def _band_slot(label: str) -> str:
 
 
 def by_cap():
-    """Every arm, best F1 at the common operating point first."""
+    """Every model, best F1 at the common operating point first."""
     return sorted(COH.values(), key=lambda a: (-a["cap_row"]["f1"], a["params"]))
 
 
 def _confusion_cells(m: dict, scorable: int, neg: int, fpr_key: str = "fpr") -> list[str]:
-    return [num(m["tp"]), num(m["fp"]), num(m["fn"]), num(m["tn"]),
+    """One compact confusion cell and the four rates. The four counts share a cell so no table on
+    this Space passes eight columns, and accuracy appears only in the table that carries the
+    all-allow baseline beside it."""
+    return [f'{num(m["tp"])}/{num(m["fp"])}/{num(m["fn"])}/{num(m["tn"])}',
             exact(m["precision"]) if m["tp"] + m["fp"] else "n/a",
-            exact(m["recall"]), exact(m["f1"]),
-            exact(accuracy(m, scorable)), exact(m[fpr_key])]
+            exact(m["recall"]), exact(m["f1"]), exact(m[fpr_key])]
 
 
-CONF_HEAD = ["tp", "fp", "fn", "tn", "Precision", "Recall", "F1", "Accuracy", "Block FPR"]
+CONF_HEAD = ["tp/fp/fn/tn", "Precision", "Recall", "F1", "Block FPR"]
+COL_CAP = 8
 
 
 def common_point_table() -> str:
     scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
-    head = (["Arm", "Role", "Size band", "Counted parameters", "Threshold"] + CONF_HEAD)
+    head = (["Model", "Role", "Threshold"] + CONF_HEAD)
     rows = []
     for a in by_cap():
         x = a["cap_row"]
         rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
-                     band_of(a["params"]), num(a["params"]), exact(x["threshold"])]
-                    + _confusion_cells(x, scorable, neg))
+                     exact(x["threshold"])] + _confusion_cells(x, scorable, neg))
     allow = TRIVIAL["allow_every_case"]
     for label, t, fk in (("block every case", dict(FLOOR, fpr=FLOOR["block_fpr"]), "fpr"),
                          ("allow every case",
                           dict(allow, precision=0.0, recall=0.0, f1=allow["f1"], fpr=0.0), "fpr")):
-        rows.append([f"<code>{label}</code>", "trivial baseline", MDASH, MDASH,
-                     "by construction"]
-                    + [num(t["tp"]), num(t["fp"]), num(t["fn"]), num(t["tn"]),
-                       exact(t["precision"]) if t["tp"] + t["fp"] else "n/a",
-                       exact(t["recall"]), exact(t["f1"]),
-                       exact(accuracy(t, scorable)), exact(t[fk])])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
+        rows.append([f"<code>{label}</code>", "trivial baseline", "by construction"]
+                    + _confusion_cells(dict(t, fpr=t[fk]), scorable, neg))
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
 
 
 def chart_prf() -> str:
-    """Precision, recall and F1 for every arm at the one shared false-positive budget."""
+    """Precision, recall and F1 for every model at the one shared false-positive budget, as a
+    Cleveland dot plot with the bootstrap interval on F1 drawn."""
     rows, trows = [], []
     scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
     for a in by_cap():
-        x = a["cap_row"]
-        rows.append((alabel(a["key"]), [(x["precision"], "s1"), (x["recall"], "s2"),
-                                        (x["f1"], "s3")]))
-        trows.append([alabel(a["key"]), ROLE[a["is_control"]], band_of(a["params"]),
-                      exact(x["threshold"])] + _confusion_cells(x, scorable, neg))
-    svg = hbars(rows, 1.0, gutter=252, rowh=13, pad_right=80,
-                vticks=[0, 0.2, 0.4, 0.6, 0.8, 1.0], where="prf")
+        x, c = a["cap_row"], CUR[a["key"]]
+        b = c["f1_bootstrap95"]
+        payload = []
+        if x["tp"] + x["fp"]:
+            payload.append((x["precision"], "s1", None))
+        payload.append((x["recall"], "s2", None))
+        payload.append((x["f1"], "s3", (b["lower"], b["upper"])))
+        rows.append((alabel(a["key"]), payload))
+        trows.append([alabel(a["key"]), ROLE[a["is_control"]], exact(x["threshold"]),
+                      exact(x["precision"]) if x["tp"] + x["fp"] else "n/a",
+                      exact(x["recall"]), exact(x["f1"]),
+                      f'[{exact(b["lower"])}, {exact(b["upper"])}]',
+                      f'{x["tp"]}/{x["fp"]}/{x["fn"]}/{x["tn"]}'])
+    svg = dots(rows, gutter=252, rowh=23, pad_right=96, vmax=1.0,
+               vticks=[0, 0.2, 0.4, 0.6, 0.8, 1.0], trail=len(rows[0][1]) - 1, where="prf")
     best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    bb = CUR[best["key"]]["f1_bootstrap95"]
     return figure(
         "prf",
         f'Precision, recall and F1 at block FPR &#8804; {exact(FPR_CAP)}',
-        f'One budget for every arm, so the three columns are read down the table as well as '
-        f'across it. The threshold each arm needs to reach that budget differs; the budget does '
-        f'not. The highest F1 among the {len(CANDS)} candidates is '
+        f'One budget for every model. Rows are ordered by F1 at that budget, and the number at the '
+        f'right edge of each row is that F1. The highest among the {len(CANDS)} candidates is '
         f'<code>{esc(best["key"])}</code> at {exact(best["cap_row"]["f1"])}, on '
-        f'{num(best["cap_row"]["tp"])} of {num(CORPUS["positives_A_B"])} positives.',
-        svg, "cohort-length-controlled-ranking.json",
-        legend=[("Precision", "s1"), ("Recall", "s2"), ("F1", "s3")],
-        table=table_html(["Arm", "Role", "Size band", "Threshold"] + CONF_HEAD, trows,
+        f'{num(best["cap_row"]["tp"])} of {num(CORPUS["positives_A_B"])} positives, with a '
+        f'bootstrap 95% interval of [{exact(bb["lower"])}, {exact(bb["upper"])}]. Precision is '
+        f'undefined for a model that blocks nothing at this budget and its dot is absent.',
+        svg, "cohort-curves.json, cohort-length-controlled-ranking.json",
+        legend=[("Precision", "s1"), ("Recall", "s2"), ("F1, with its bootstrap 95% interval",
+                                                        "s3")],
+        table=table_html(["Model", "Role", "Threshold", "Precision", "Recall", "F1",
+                          "F1 bootstrap 95%", "tp/fp/fn/tn"], trows, numeric_from=2),
+        note=f'The interval on F1 is a percentile '
+             f'bootstrap over cases, {num(CUR[best["key"]]["f1_bootstrap95"]["resamples"])} '
+             f'resamples at seed {CUR[best["key"]]["f1_bootstrap95"]["seed"]}, with each model\'s '
+             f'threshold held at the value that meets the budget.')
+
+
+def _cap_zoom_ymax() -> float:
+    """The highest recall any model reaches at a block false-positive rate of 0.02 or under, which
+    sets the y range of the zoomed ROC panels."""
+    neg, pos = CORPUS["negatives_D"], CORPUS["positives_A_B"]
+    lim = 0.02 * neg
+    best = 0
+    for c in CUR.values():
+        for fp, tp in c["roc_fp_tp"]:
+            if fp <= lim and tp > best:
+                best = tp
+    return math.ceil(best / pos * 40) / 40
+
+
+ZOOM_FPR = 0.02
+ZOOM_YMAX = _cap_zoom_ymax()
+
+
+def _roc_panel(pts, xmax: float, ymax: float, slot: str, mark, pos: int, neg: int):
+    """One ROC panel's interior, as a closure over the model's integer curve."""
+    def draw(px, py, w, h):
+        out = []
+        # chance
+        dx = w * min(1.0, ymax / xmax) if xmax < 1.0 else w
+        dy = h * min(1.0, xmax / ymax) if ymax < 1.0 else h
+        out.append(f'<line x1="{px:.1f}" y1="{py:.1f}" x2="{px + dx:.1f}" '
+                   f'y2="{py - dy:.1f}" {REF}/>')
+        # the false-positive cap, as a vertical rule
+        cx = px + w * (FPR_CAP / xmax)
+        out.append(f'<line x1="{cx:.1f}" y1="{py - h:.1f}" x2="{cx:.1f}" y2="{py:.1f}" '
+                   f'{sa("s8", "1.4")}/>')
+        seen, ptsout = None, []
+        for fp, tp in pts:
+            fx, fy = fp / neg, tp / pos
+            if fx > xmax or fy > ymax:
+                break
+            s = f"{px + w * fx / xmax:.1f},{py - h * fy / ymax:.1f}"
+            if s != seen:
+                ptsout.append(s)
+                seen = s
+        if len(ptsout) > 1:
+            out.append(f'<polyline points="{" ".join(ptsout)}" {sa(slot, "1.6")}/>')
+        mfp, mtp = mark
+        if mfp / neg <= xmax and mtp / pos <= ymax:
+            out.append(f'<circle cx="{px + w * (mfp / neg) / xmax:.1f}" '
+                       f'cy="{py - h * (mtp / pos) / ymax:.1f}" r="3.4" {fa("s4")}/>')
+        return "\n".join(out)
+    return draw
+
+
+def _auc_footer(a: dict) -> str:
+    """A model's AUC and the definition label that AUC is computed under."""
+    var, _, dfn = a["primary_var"].partition("||")
+    tag = "A=B" if "defA==defB" in dfn else dfn.strip()
+    return f'AUC {fmt(a["auc_raw"], 5)} &#183; {tag}'
+
+
+def chart_roc_zoom() -> str:
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    items, trows = [], []
+    lim = int(ZOOM_FPR * neg)
+    for a in by_cap():
+        c = CUR[a["key"]]
+        x = a["cap_row"]
+        reach = max((tp for fp, tp in c["roc_fp_tp"] if fp <= lim), default=0)
+        items.append((a["key"], f'{x["tp"]} of {pos} at the budget',
+                      _roc_panel(c["roc_fp_tp"], ZOOM_FPR, ZOOM_YMAX, arm_slot(a),
+                                 (x["fp"], x["tp"]), pos, neg)))
+        trows.append([alabel(a["key"]), exact(x["recall"]), num(x["tp"]),
+                      num(reach), exact(reach / pos), exact(x["threshold"]),
+                      exact(CUR[a["key"]]["recall_wilson95"]["upper"])])
+    svg = panels(items, xticks=(0.0, 0.5, 1.0), yticks=(0.0, 0.5, 1.0),
+                 axisnote=f"x: block FPR, 0 to {ZOOM_FPR}. y: recall, 0 to {ZOOM_YMAX:g}. "
+                          f"Gridlines at half of each.", where="roczoom")
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["recall"])
+    return figure(
+        "roc-zoom",
+        f'The same curves over block FPR 0 to {ZOOM_FPR}',
+        f'The x axis stops at {ZOOM_FPR}, which is {ZOOM_FPR / FPR_CAP:.2f}&#215; the shared '
+        f'budget, and the y axis at recall {ZOOM_YMAX:g}. The vertical rule is the budget and the '
+        f'dashed line is chance. The '
+        f'highest recall any model reaches at the budget is {exact(best["cap_row"]["recall"])} and '
+        f'the highest any model reaches by {ZOOM_FPR} is '
+        f'{exact(max(max((tp for fp, tp in CUR[a["key"]]["roc_fp_tp"] if fp <= lim), default=0) for a in CANDS.values()) / pos)}. '
+        f'Panels are ordered by F1 at the budget.',
+        svg, "cohort-curves.json",
+        legend=[("Candidate", "seq3"), ("MLM negative control", "s5"),
+                ("Operating point at the shared budget", "s4")],
+        table=table_html(["Model", "Recall at the budget", "True blocks at the budget",
+                          f"True blocks by FPR {ZOOM_FPR}", f"Recall by FPR {ZOOM_FPR}",
+                          "Threshold at the budget", "Wilson 95% upper on that recall"],
+                         trows, numeric_from=1))
+
+
+def chart_reliability() -> str:
+    """Predicted probability against observed positive rate, one panel per model."""
+    scorable = CORPUS["scorable_cases_A_B_D"]
+    top_count = max(v["cases"] for c in CUR.values() for v in c["calibration"])
+    items, trows = [], []
+
+    def panel(cal, slot):
+        def draw(px, py, w, h):
+            out = [f'<line x1="{px:.1f}" y1="{py:.1f}" x2="{px + w:.1f}" y2="{py - h:.1f}" '
+                   f'{REF}/>']
+            bw = w / len(cal)
+            for i, v in enumerate(cal):
+                if not v["cases"]:
+                    continue
+                bh = 0.42 * h * math.log10(v["cases"] + 1) / math.log10(top_count + 1)
+                out.append(f'<rect x="{px + bw * i + 0.8:.1f}" y="{py - bh:.1f}" '
+                           f'width="{bw - 1.6:.1f}" height="{bh:.1f}" {fa("mid")}/>')
+            for v in cal:
+                if not v["cases"]:
+                    continue
+                r = 1.8 + 3.0 * math.log10(v["cases"] + 1) / math.log10(top_count + 1)
+                out.append(f'<circle cx="{px + w * v["mean_predicted"]:.1f}" '
+                           f'cy="{py - h * v["observed_rate"]:.1f}" r="{r:.1f}" '
+                           f'{fa(slot)}/>')
+            return "\n".join(out)
+        return draw
+
+    for a in by_lc():
+        c = CUR[a["key"]]
+        cal = c["calibration"]
+        filled = [v for v in cal if v["cases"]]
+        sparse = sum(1 for v in filled if v["cases"] < 20)
+        items.append((a["key"], f'{len(filled)} filled &#183; {sparse} under 20 cases',
+                      panel(cal, arm_slot(a))))
+        widest = max(filled, key=lambda v: v["cases"])
+        trows.append([alabel(a["key"]), num(len(filled)), num(sparse),
+                      f'{widest["lo"]:g}&#8211;{widest["hi"]:g}', num(widest["cases"]),
+                      exact(widest["mean_predicted"]), exact(widest["observed_rate"]),
+                      exact(c["score_max"])])
+    svg = panels(items, xticks=(0.0, 0.5, 1.0), yticks=(0.0, 0.5, 1.0),
+                 axisnote="x: predicted block probability, 0 to 1. y: observed positive rate, "
+                          "0 to 1. Gridlines at 0.5.", where="reliability")
+    return figure(
+        "reliability",
+        "Predicted block probability against the observed positive rate",
+        f'Ten equal-width buckets of each model\'s own block scalar over the '
+        f'{num(scorable)} scorable cases. A dot sits at the bucket\'s mean predicted probability '
+        f'and its observed positive rate; the dot\'s radius and the grey bar behind it both carry '
+        f'the case count on a log scale, so a bucket holding a handful of cases is visible as one. '
+        f'The dashed diagonal is perfect calibration. Panels are ordered by length-controlled AUC.',
+        svg, "cohort-curves.json",
+        legend=[("Candidate", "seq3"), ("MLM negative control", "s5"),
+                ("Case count per bucket, log scale", "mid")],
+        table=table_html(["Model", "Buckets holding a case", "Buckets under 20 cases",
+                          "Widest bucket", "Cases in it", "Mean predicted there",
+                          "Observed rate there", "Highest score on the corpus"], trows,
+                         numeric_from=1),
+        note=None)
+
+
+SHORT = {"lihaonan0716/mcphunt-agent-traces": "mcphunt-agent-traces",
+         "neur26anonsub/ctrldataset2026": "ctrldataset2026",
+         "Yunhao-Feng/AgentHazard": "AgentHazard",
+         "aisa-group/ResearchArena-Trajectories": "ResearchArena-Trajectories",
+         "AI-Secure/DTap-Bench-Agent-Trajectories": "DTap-Bench-Agent-Trajectories",
+         "mihail-gribov/quadrat-ipi-model-eval": "quadrat-ipi-model-eval"}
+
+
+def short_src(name: str) -> str:
+    return SHORT.get(name, name)
+
+
+def jac_pairs():
+    """Every defined pairwise overlap, largest first."""
+    J = OVER["jaccard_caught_positives_at_the_common_budget"]
+    arms = OVER["arms"]
+    out = []
+    for i, a in enumerate(arms):
+        for b in arms[i + 1:]:
+            if J[a][b] is not None:
+                out.append((J[a][b], a, b))
+    out.sort(key=lambda t: (-t[0], t[1], t[2]))
+    return out
+
+
+def jac_stats() -> dict:
+    """Summary of the overlap matrix, plus what independence would predict at these set sizes."""
+    ps = jac_pairs()
+    vals = [v for v, _a, _b in ps]
+    mid = sorted(vals)
+    pos = CORPUS["positives_A_B"]
+    obs = exp = 0.0
+    n = 0
+    for v, a, b in ps:
+        ta, tb = CUR[a]["at_cap"]["tp"], CUR[b]["at_cap"]["tp"]
+        inter = v * (ta + tb) / (1 + v)
+        obs += inter
+        exp += ta * tb / pos
+        n += 1
+    return {"pairs": len(ps), "zero": sum(1 for v in vals if v == 0.0),
+            "median": mid[len(mid) // 2] if len(mid) % 2 else
+            (mid[len(mid) // 2 - 1] + mid[len(mid) // 2]) / 2,
+            "mean": sum(vals) / len(vals), "max": ps[0],
+            "shared_observed": obs, "shared_expected": exp,
+            "ratio": obs / exp if exp else None,
+            "undefined": OVER["pairs_tested"] - len(ps)}
+
+
+JSTAT = jac_stats()
+JEDGES = (0.0, 0.05, 0.10, 0.20, 0.50)
+
+
+def chart_jaccard() -> str:
+    arms = [a["key"] for a in by_cap()]
+    J = OVER["jaccard_caught_positives_at_the_common_budget"]
+    idx = {k: i + 1 for i, k in enumerate(arms)}
+    rows = [f'{idx[k]}. {k} ({CUR[k]["at_cap"]["tp"]})' for k in arms]
+    cols = [str(i + 1) for i in range(len(arms))]
+
+    def cell(r, c):
+        a, b = arms[r], arms[c]
+        v = J[a][b]
+        if v is None:
+            return -1, "", f"{a} against {b}: neither blocks a positive at the budget"
+        if r == c:
+            return len(RAMP_FILL) - 1, "", f"{a} against itself"
+        return (ramp_step(v, JEDGES), "" if v == 0 else f"{v * 100:.0f}",
+                f"{a} against {b}: Jaccard {show(v)}")
+
+    svg = heat(rows, cols, cell, gutter=330, rowh=18, pad_right=8, top=22, rotate=False,
+               where="jaccard")
+    trows = [[f'<code>{esc(a)}</code>', f'<code>{esc(b)}</code>', exact(v),
+              num(CUR[a]["at_cap"]["tp"]), num(CUR[b]["at_cap"]["tp"]),
+              num(round(v * (CUR[a]["at_cap"]["tp"] + CUR[b]["at_cap"]["tp"]) / (1 + v))),
+              fmt(CUR[a]["at_cap"]["tp"] * CUR[b]["at_cap"]["tp"] / CORPUS["positives_A_B"], 3)]
+             for v, a, b in jac_pairs()[:24]]
+    return figure(
+        "jaccard",
+        "Pairwise overlap of the positives each model catches at the common budget",
+        f'Cell value is the Jaccard index in percent between two models\' caught-positive sets at '
+        f'block FPR {exact(FPR_CAP)}. The number after each model name is how many of the '
+        f'{num(CORPUS["positives_A_B"])} positives it catches there. '
+        f'{JSTAT["zero"]} of the {JSTAT["pairs"]} defined pairs share no positive at all and the '
+        f'median is {exact(JSTAT["median"])}. {JSTAT["undefined"]} pairs have no value because '
+        f'neither model catches anything at the budget.',
+        svg, "cohort-curves.json",
+        legend_html=ramp_legend(["0%", "to 5%", "to 10%", "to 20%", "over 20%"]),
+        table=table_html(["Model", "Against", "Jaccard (fraction)", "Its catches", "The other's catches",
+                          "Shared", "Shared under independence"], trows, numeric_from=2),
+        note=f'The table lists the 24 widest overlaps. Across all {JSTAT["pairs"]} defined pairs '
+             f'the caught sets share {JSTAT["shared_observed"]:.0f} positives in total against '
+             f'{JSTAT["shared_expected"]:.1f} under independent selection at the same set sizes, a '
+             f'ratio of {JSTAT["ratio"]:.2f}.')
+
+
+def chart_union() -> str:
+    """What a union of models reaches, against the best single model at the same budget."""
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    bs = OVER["best_single_arm_at_the_common_budget"]
+    half = OVER["best_pair_union_each_arm_at_half_the_budget"]
+    full = OVER["best_pair_union_each_arm_at_the_full_budget"]
+    inb = OVER["best_pair_union_within_the_common_budget"]
+    entries = [
+        (f'best single model, {bs["arm"]}', bs, "s3", True),
+        (f'best pair, each at half the budget', half, "s1", True),
+        (f'best pair, each at the full budget', full, "neg2", False),
+        (f'union of all {len(CUR)} models', {"tp": OVER["union_tp_all_22_arms"],
+                                          "fp": OVER["union_fp_all_22_arms"],
+                                          "recall": OVER["union_recall_ceiling_all_22_arms"]},
+         "neg2", False),
+    ]
+    rows, trows = [], []
+    for label, rec, slot, ok in entries:
+        rows.append((label, rec["recall"], slot))
+        tp, fp = rec["tp"], rec["fp"]
+        fn = pos - tp
+        trows.append([label, num(tp), num(fp), exact(tp / pos),
+                      exact(tp / (tp + fp)) if tp + fp else "n/a",
+                      exact(f1_of(tp, fp, fn)), exact(fp / neg),
+                      "yes" if fp <= int(FPR_CAP * neg) else "no"])
+    svg = hbars(rows, 0.24, gutter=286, rowh=28, pad_right=88,
+                vticks=[0, 0.06, 0.12, 0.18, 0.24], where="union")
+    return figure(
+        "union",
+        "Recall from combining models, against the best single model at the same budget",
+        f'The first two combinations hold the budget of {int(FPR_CAP * neg)} false blocks; the '
+        f'last two spend more. '
+        f'<code>{esc(half["arms"][0])}</code> with <code>{esc(half["arms"][1])}</code> at half the '
+        f'budget each reaches recall {exact(half["recall"])}, {half["tp"]} of {num(pos)}, against '
+        f'{bs["tp"]} for the best single model, at a block FPR of {exact(half["fpr"])}.',
+        svg, "cohort-curves.json",
+        legend=[("Holds the shared budget", "s3"), ("Leaves the shared budget", "neg2")],
+        table=table_html(["Combination", "True blocks", "False blocks", "Recall", "Precision",
+                          "F1", "Achieved block FPR", "Within the budget"], trows,
+                         numeric_from=1),
+        note=f'The best pair within the budget with each model at its own full-budget threshold is '
+             f'<code>{esc(inb["arms"][0])}</code> with <code>{esc(inb["arms"][1])}</code> at '
+             f'recall {exact(inb["recall"])}; it stays inside because both models spend less than '
+             f'the allowance.')
+
+
+SRCEDGES = (0.0, 0.02, 0.05, 0.12, 0.30)
+
+
+def chart_source_recall() -> str:
+    arms = [a["key"] for a in by_cap()]
+    per = SRCCENSUS["s2"]["per_dataset"]
+    cols = [f'{short_src(s)} ({per[s]["positives"]})' for s in POS_SOURCES]
+
+    def cell(r, c):
+        key, src = arms[r], POS_SOURCES[c]
+        v = CUR[key]["recall_by_source"][src]
+        return (ramp_step(v["recall"], SRCEDGES),
+                "" if v["caught"] == 0 else str(v["caught"]),
+                f'{key} on {src}: {v["caught"]} of {v["positives"]} caught, recall {show(v["recall"])}')
+
+    svg = heat([f'{k} ({CUR[k]["at_cap"]["tp"]})' for k in arms], cols, cell,
+               gutter=300, rowh=19, pad_right=10, top=118, where="srcheat")
+    big = SRCCENSUS["s2"]["largest_positive_source"]
+    trows = []
+    for s in POS_SOURCES:
+        caught = [CUR[k]["recall_by_source"][s]["caught"] for k in arms]
+        trows.append([f'<code>{esc(s)}</code>', num(per[s]["cases"]), num(per[s]["scorable"]),
+                      num(per[s]["positives"]),
+                      exact(per[s]["positives"] / CORPUS["positives_A_B"]),
+                      num(sum(1 for c in caught if c)), num(max(caught)),
+                      arms[caught.index(max(caught))] if max(caught) else MDASH])
+    return figure(
+        "srcheat",
+        "True blocks at the common budget, by model and by source dataset",
+        f'Only the {len(POS_SOURCES)} source datasets that contribute a positive have a column; '
+        f'the column header carries that dataset\'s positive count and each row label carries the '
+        f'model\'s total true blocks. <code>{esc(short_src(big))}</code> holds '
+        f'{num(per[big]["positives"])} of the {num(CORPUS["positives_A_B"])} positives, '
+        f'{pct(SRCCENSUS["s2"]["largest_positive_share"])}, so a recall figure on this corpus is '
+        f'mostly a recall figure on that one dataset. Cell colour is recall within the column.',
+        svg, "cohort-curves.json",
+        legend_html=ramp_legend(["0", "to 0.02", "to 0.05", "to 0.12", "over 0.12"]),
+        table=table_html(["Source dataset", "Cases", "Scorable", "Positives",
+                          "Share of positives", "Models catching any", "Most caught by one model",
+                          "That model"], trows, numeric_from=1),
+        note=f'Rows are ordered by F1 at the budget. A blank cell is zero true blocks on that '
+             f'dataset.')
+
+
+def pareto(points) -> set:
+    """The indices of the points no other point beats on both axes."""
+    keep = set()
+    for i, (x, y) in enumerate(points):
+        if not any(px >= x and py >= y and (px > x or py > y) for px, py in points):
+            keep.add(i)
+    return keep
+
+
+def chart_cost() -> str:
+    """Recall at the common budget against measured throughput."""
+    rpm = {r["arm"]: r["rows_per_min"] for r in
+           LAPTOP["decoder_throughput_rows_per_min"] + LAPTOP["encoder_throughput_rows_per_min"]}
+    have = [a for a in by_cap() if a["key"] in rpm]
+    pts = [(rpm[a["key"]], a["cap_row"]["recall"]) for a in have]
+    front = pareto(pts)
+    points, trows = [], []
+    zero = [a["key"] for a in have if a["cap_row"]["recall"] == 0]
+    for i, a in enumerate(have):
+        points.append((rpm[a["key"]], a["cap_row"]["recall"], _band_slot(band_of(a["params"])),
+                       "" if a["cap_row"]["recall"] == 0 else a["key"], i in front))
+        trows.append([alabel(a["key"]), ROLE[a["is_control"]], band_of(a["params"]),
+                      fmt(rpm[a["key"]], 2), pass_time(rpm[a["key"]]),
+                      exact(a["cap_row"]["recall"]), num(a["cap_row"]["tp"]),
+                      "yes" if i in front else "no"])
+    svg = scatter(points, xlog=True, xmin=8, xmax=260,
+                  ymin=0.0, ymax=0.07, xticks=(10, 20, 50, 100, 200),
+                  yticks=(0.0, 0.02, 0.04, 0.06),
+                  hrules=[(0.0, "ink", f"{len(zero)} of these models sit at recall 0")],
+                  xlabel="rows per minute on 8 pinned CPU threads, log scale",
+                  ylabel=f"recall at block FPR {CAP_SHOW}", where="cost")
+    best = max(have, key=lambda a: a["cap_row"]["recall"])
+    return figure(
+        "cost",
+        f'Recall at block FPR {exact(FPR_CAP)} against measured CPU throughput',
+        f'{len(have)} of the {len(COH)} models have a measured rows/min figure. The ringed points '
+        f'are the {len(front)}-model Pareto set: no other measured model is both faster and higher '
+        f'recall. <code>{esc(best["key"])}</code> holds the highest recall at '
+        f'{exact(best["cap_row"]["recall"])} and runs at {fmt(rpm[best["key"]], 2)} rows/min, '
+        f'which is {pass_time(rpm[best["key"]])} for a 3,000-row pass.',
+        svg, "cohort-curves.json, pinned/laptop-feasibility.json",
+        legend=[(b, _band_slot(b)) for b, _lo, _hi in SIZE_BANDS[:2]],
+        table=table_html(["Model", "Role", "Size band", "Rows/min", "3,000-row pass",
+                          "Recall at the budget", "True blocks", "On the frontier"], trows,
                          numeric_from=3),
-        note=f'The false-positive allowance at this budget is '
-             f'{num(int(FPR_CAP * CORPUS["negatives_D"]))} of the '
-             f'{num(CORPUS["negatives_D"])} benign cases.')
+        note="The x axis is an upper bound on speed; see the caveats below. " + drop_note("cost"))
 
 
-def chart_bands() -> str:
-    """F1 at the common operating point, with each arm's bar coloured by its size band."""
+def chart_size_scatter() -> str:
+    """Counted parameters against F1 at the common budget, with the band cuts drawn."""
+    points, trows = [], []
+    zero = [a["key"] for a in by_cap() if a["cap_row"]["f1"] == 0]
+    for a in by_cap():
+        points.append((a["params"] / 1e9, a["cap_row"]["f1"],
+                       _band_slot(band_of(a["params"])),
+                       "" if a["cap_row"]["f1"] == 0 else a["key"], False))
+        trows.append([alabel(a["key"]), ROLE[a["is_control"]], band_of(a["params"]),
+                      num(a["params"]), exact(a["cap_row"]["f1"]),
+                      exact(a["cap_row"]["recall"]), num(a["cap_row"]["tp"]),
+                      num(a["cap_row"]["fp"])])
+    svg = scatter(points, xlog=True, xmin=0.015, xmax=6.0,
+                  ymin=0.0, ymax=0.12, xticks=(0.02, 0.1, 0.5, 1, 3, 6),
+                  yticks=(0.0, 0.03, 0.06, 0.09, 0.12),
+                  vrules=[(3.0, "ink", "3B band cut"), (6.0, "ink", "6B band cut")],
+                  hrules=[(0.0, "ink", f"{len(zero)} of the {len(COH)} models sit at F1 0")],
+                  xlabel="counted parameters in billions, log scale",
+                  ylabel=f"F1 at block FPR {CAP_SHOW}", where="sizescatter")
+    big = max(COH.values(), key=lambda a: a["params"])
+    small = min(COH.values(), key=lambda a: a["params"])
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    return figure(
+        "size-scatter",
+        f'Counted parameters against F1 at block FPR {exact(FPR_CAP)}',
+        f'All {len(COH)} models. The x axis spans '
+        f'{big["params"] / small["params"]:.0f}&#215;, from {params_short(small["params"])} '
+        f'(<code>{esc(small["key"])}</code>) to {params_short(big["params"])} '
+        f'(<code>{esc(big["key"])}</code>). The vertical rules are the 3B and 6B band cuts; '
+        f'nothing sits right of the second.',
+        svg, "cohort-length-controlled-ranking.json",
+        legend=[(b, _band_slot(b)) for b, _lo, _hi in SIZE_BANDS[:2]],
+        table=table_html(["Model", "Role", "Size band", "Counted parameters", "F1 at the budget",
+                          "Recall at the budget", "True blocks", "False blocks"], trows,
+                         numeric_from=3),
+        note=drop_note("sizescatter"))
+
+
+def chart_grade_slope() -> str:
+    """The grade composition of the two corpora's positives, as two points and a line."""
+    a2, b2 = GRADE["s2_positive_composition"], GRADE["s3_positive_composition"]
+    ser = [("Grade A share of positives", "neg2", a2["grade_A_share_of_positives"],
+            b2["grade_A_share_of_positives"]),
+           ("Grade B share of positives", "seq2",
+            a2["B"] / CORPUS["positives_A_B"], b2["B"] / S3CORP["positives_A_B"])]
+    svg = slope(ser, width=880, height=280, left=250, right=250,
+                xlabels=(f's2, {num(CORPUS["positives_A_B"])} positives',
+                         f'second corpus, {num(S3CORP["positives_A_B"])} positives'),
+                ylabel="share of that corpus's positives", where="gradeslope")
+    trows = [["Grade A positives", num(a2["A"]), num(b2["A"]),
+              exact(a2["grade_A_share_of_positives"]),
+              exact(b2["grade_A_share_of_positives"])],
+             ["Grade B positives", num(a2["B"]), num(b2["B"]),
+              exact(a2["B"] / CORPUS["positives_A_B"]),
+              exact(b2["B"] / S3CORP["positives_A_B"])],
+             ["Positives in total", num(CORPUS["positives_A_B"]),
+              num(S3CORP["positives_A_B"]), exact(1.0), exact(1.0)]]
+    return figure(
+        "grade-slope",
+        "The grade composition of the positives, on each corpus",
+        f's2\'s positives are {pct(a2["grade_A_share_of_positives"])} grade A and the second '
+        f'corpus\'s are {pct(b2["grade_A_share_of_positives"])}. Grade A needs a closed '
+        f'deterministic proof; grade B does not.',
+        svg, "s3-stats.json",
+        legend=[("Grade A share", "neg2"), ("Grade B share", "seq2")],
+        table=table_html(["Quantity", "s2", "Second corpus", "s2 share",
+                          "Second corpus share"], trows, numeric_from=1),
+        note="The two lines cross because the two shares sum to 1 on each corpus.")
+
+
+def chart_accuracy_delta() -> str:
+    """Accuracy at the common budget minus all-allow accuracy, expressed in cases."""
+    scorable = CORPUS["scorable_cases_A_B_D"]
+    s3s = S3CORP["scorable_cases_A_B_D"]
     rows, trows = [], []
     for a in by_cap():
-        b = band_of(a["params"])
-        rows.append((f'{alabel(a["key"])} ({a["params"] / 1e9:.2f}B)', a["cap_row"]["f1"],
-                     _band_slot(b)))
-        trows.append([alabel(a["key"]), b, num(a["params"]), ROLE[a["is_control"]],
-                      exact(a["cap_row"]["f1"]), exact(a["cap_row"]["recall"]),
-                      num(a["cap_row"]["tp"])])
-    svg = hbars(rows, 0.12, gutter=300, rowh=19, pad_right=92,
-                vticks=[0, 0.03, 0.06, 0.09, 0.12], where="bands")
-    counts = ", ".join(f'{b} {len(in_band(b))}' for b, _lo, _hi in SIZE_BANDS)
+        x = a["cap_row"]
+        d = x["tp"] - x["fp"]
+        rows.append((alabel(a["key"]), d, "s3" if d > 0 else ("axis" if d == 0 else "neg2")))
+        trows.append(["s2", alabel(a["key"]), exact(accuracy(x, scorable)),
+                      exact(CORPUS["negatives_D"] / scorable), num(d),
+                      exact(accuracy(x, scorable) - CORPUS["negatives_D"] / scorable),
+                      exact(CORPUS["prevalence"])])
+    vals = [d for _l, d, _s in rows]
+    lim = max(20, max(abs(v) for v in vals) + 4)
+    svg = diverge(rows, gutter=252, rowh=20, pad_right=90, vmin=-lim, vmax=lim,
+                  vticks=[-lim, -lim / 2, 0, lim / 2, lim], where="accdelta")
+    up = sum(1 for v in vals if v > 0)
     return figure(
-        "bands",
-        "F1 at the common operating point, by size band",
-        f'Counted parameters set the band: {counts}. Within a band the order is F1 at the '
-        f'shared budget.',
+        "accuracy-delta",
+        "Accuracy at the common budget minus all-allow accuracy, in cases",
+        f'At prevalence {exact(CORPUS["prevalence"])} on s2, allowing every case scores accuracy '
+        f'{exact(CORPUS["negatives_D"] / scorable)} over {num(scorable)} scorable cases. A model '
+        f'beats that figure by exactly the number of true blocks it gains less the false blocks it '
+        f'spends, so the bar is that count. {up} of the {len(COH)} models are above zero and the '
+        f'widest margin is {max(vals)} cases of {num(scorable)}.',
         svg, "cohort-length-controlled-ranking.json",
-        legend=[(b, _band_slot(b)) for b, _lo, _hi in SIZE_BANDS],
-        table=table_html(["Arm", "Size band", "Counted parameters", "Role", "F1", "Recall",
-                          "True blocks"], trows, numeric_from=2),
-        note="Parameter counts come from each arm's own run metadata and are checked against the "
-             "arm registry at build time.")
+        legend=[("Above the all-allow baseline", "s3"), ("Level with it", "axis"),
+                ("Below it", "neg2")],
+        table=table_html(["Corpus", "Model", "Accuracy at the budget", "All-allow accuracy",
+                          "Difference, in cases", "Difference, as accuracy", "Prevalence"],
+                         trows, numeric_from=2),
+        note="Rows are ordered by F1 at the common budget.")
 
 
-def oracle_table() -> str:
-    """Each arm at its own argmax. This is an in-sample upper bound, never an operating point."""
-    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
-    head = ["Arm", "Role", "Its own threshold"] + CONF_HEAD + ["F1 at the common budget"]
-    rows = []
-    for a in sorted(COH.values(), key=lambda a: -a["oracle_f1"]):
-        if a["oracle"] is None:
-            rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]], "n/a"]
-                        + ["n/a"] * 6 + [exact(a["oracle_f1"])] + ["n/a", "n/a"]
-                        + [exact(a["cap_row"]["f1"])])
-            continue
-        o = a["oracle"]
-        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
-                     exact(o["threshold"])]
-                    + _confusion_cells(o, scorable, neg, "block_fpr")
-                    + [exact(a["cap_row"]["f1"])])
-    rows.append([f"<code>block every case</code>", "trivial baseline", "by construction",
-                 num(FLOOR["tp"]), num(FLOOR["fp"]), num(FLOOR["fn"]), num(FLOOR["tn"]),
-                 exact(FLOOR["precision"]), exact(FLOOR["recall"]), exact(FLOOR["f1"]),
-                 exact(accuracy(FLOOR, scorable)), exact(FLOOR["block_fpr"]), MDASH])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
+def chart_capfpr() -> str:
+    """The block false-positive rate each model achieves at the shared budget, with its interval."""
+    neg = CORPUS["negatives_D"]
+    rows, trows = [], []
+    for a in sorted(COH.values(), key=lambda a: (-a["cap_row"]["fpr"], a["key"])):
+        x, c = a["cap_row"], CUR[a["key"]]
+        w = c["block_fpr_wilson95"]
+        rows.append((alabel(a["key"]), [(x["fpr"], arm_slot(a), (w["lower"], w["upper"]))]))
+        trows.append([alabel(a["key"]), ROLE[a["is_control"]], num(x["fp"]),
+                      num(int(FPR_CAP * neg)), exact(x["fpr"]),
+                      exact(w["lower"]), exact(w["upper"]),
+                      "yes" if w["upper"] > FPR_CAP else "no"])
+    top = max(CUR[a["key"]]["block_fpr_wilson95"]["upper"] for a in COH.values())
+    svg = dots(rows, gutter=252, rowh=20, pad_right=92, vmax=0.008,
+               vticks=[0, 0.002, 0.004, 0.006, 0.008],
+               refs=[(FPR_CAP, "ink", f"the budget {CAP_SHOW}")], where="capfpr")
+    over = sum(1 for a in COH.values()
+               if CUR[a["key"]]["block_fpr_wilson95"]["upper"] > FPR_CAP)
+    return figure(
+        "cap-fpr",
+        "The block false-positive rate each model achieves at the shared budget",
+        f'The budget allows {int(FPR_CAP * neg)} false blocks of {num(neg)} benign cases, so the '
+        f'achieved rate is at or under {exact(FPR_CAP)} on every row by construction. The bar '
+        f'through each dot is the Wilson 95% interval on that proportion. On {over} of the '
+        f'{len(COH)} models the upper end of that interval sits above the budget, the widest at '
+        f'{exact(top)}, so holding the budget on this corpus does not establish holding it on '
+        f'another sample of the same size.',
+        svg, "cohort-curves.json",
+        legend=[("Candidate", "seq3"), ("MLM negative control", "s5")],
+        table=table_html(["Model", "Role", "False blocks", "Allowance", "Achieved block FPR",
+                          "Wilson 95% lower", "Wilson 95% upper", "Upper end above the budget"],
+                         trows, numeric_from=2),
+        note="Wilson intervals on a proportion of "
+             f"{num(neg)} benign cases, at z = 1.96.")
 
 
 def accuracy_table() -> str:
     """Accuracy beside the accuracy of doing nothing, on both corpora."""
     s2s, s2n = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
     s3s, s3n = S3CORP["scorable_cases_A_B_D"], S3CORP["negatives_D"]
-    head = ["Corpus", "Arm", "Accuracy at the common budget", "All-allow accuracy",
+    head = ["Corpus", "Model", "Accuracy at the common budget", "All-allow accuracy",
             "Difference, in cases", "Prevalence"]
     rows = []
     for a in by_cap():
@@ -2675,113 +3558,410 @@ def accuracy_table() -> str:
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
 
 
-def size_band_tables() -> str:
-    """One table per band, plus the band the cohort leaves empty."""
-    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
-    out = []
-    for label, lo, hi in SIZE_BANDS:
-        arms = in_band(label)
-        rng = (f"{lo / 1e9:g}B or more" if hi is None
-               else (f"under {hi / 1e9:g}B" if lo == 0
-                     else f"{lo / 1e9:g}B to under {hi / 1e9:g}B"))
-        out.append(f'<h3 id="band-{label.replace(" ", "-").lower()}">{esc(label)} '
-                   f'&#8212; {len(arms)} arms</h3>')
-        out.append(f'<p class="small">Counted parameters {esc(rng)}.</p>')
-        if not arms:
-            out.append('<p>Nothing in this cohort lands here. The largest arm carries '
-                       f'{num(max(a["params"] for a in COH.values()))} counted parameters.</p>')
-            continue
-        head = (["Rank in band", "Arm", "Role", "Counted parameters", "Threshold"] + CONF_HEAD)
-        rows = []
-        for i, a in enumerate(arms, 1):
-            x = a["cap_row"]
-            rows.append([num(i), f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
-                         num(a["params"]), exact(x["threshold"])]
-                        + _confusion_cells(x, scorable, neg))
-        out.append(f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>')
-    return "\n".join(out)
+# ============================================================= the leaderboard
+# The Space publishes twenty-two arms at one shared false-positive budget across ten pages, and
+# until now the only way to answer "which of these is best, and by how much" was to read a
+# nine-column table down its F1 column. This is that table as the front door: one row per arm,
+# sorted by F1 at the budget, with a bar in each cell so the magnitude is legible before the digits
+# are, and controls to sort, filter and find. With scripting off it is the same table in the same
+# order, which is the order the answer is in.
+
+BAND_KEY = {"under 3B": "under3b", "3B to 6B": "mid", "6B and up": "upper"}
+BAND_SHORT = {"under 3B": "&lt;3B", "3B to 6B": "3-6B", "6B and up": "6B+"}
+
+
+def params_short(n: int) -> str:
+    """A parameter count a reader can take in at a glance: 1.67B, 396M, 70.8M. The exact count is
+    kept in the markup behind it."""
+    if n >= 1e9:
+        t = f"{n / 1e9:.2f}B"
+    elif n >= 1e8:
+        t = f"{n / 1e6:.0f}M"
+    else:
+        t = f"{n / 1e6:.1f}M"
+    return f'<span title="{n:,} counted parameters">{t}</span>'
+
+
+def minibar(v: float, vmax: float, slot: str, *, width: int = 62, height: int = 9) -> str:
+    """A cell-sized bar. Literal fill, its own viewBox, no dependence on the stylesheet, so it
+    survives the same check every chart on this Space passes."""
+    w = 0.0 if vmax <= 0 else max(0.0, min(1.0, v / vmax)) * width
+    return (f'<svg class="mb" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+            f'aria-hidden="true">'
+            f'<rect x="0" y="0" width="{width}" height="{height}" rx="2" {fa("surface2")}/>'
+            f'<rect x="0" y="0" width="{w:.1f}" height="{height}" rx="2" {fa(slot)}/></svg>')
+
+
+def _cell(v, vmax, slot):
+    """A metric cell: the bar, then the value. The value carries data-x, so a sort on this column
+    sorts on the artifact's figure and not on the rounding."""
+    if v is None:
+        return '<span class="muted">n/a</span>'
+    return f'{minibar(v, vmax, slot)} {exact(v)}'
+
+
+def leaderboard() -> str:
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    arms = by_cap()
+    fmax = max(a["cap_row"]["f1"] for a in arms) or 1.0
+    rmax = max(a["cap_row"]["recall"] for a in arms) or 1.0
+    # every bar is drawn against the largest value in its own column, precision included, so
+    # one table never mixes two scales
+    pmax = max((a["cap_row"]["precision"] for a in arms
+                if a["cap_row"]["tp"] + a["cap_row"]["fp"]), default=1.0)
+    rows = []
+    for i, a in enumerate(arms, 1):
+        x = a["cap_row"]
+        band = band_of(a["params"])
+        role = "control" if a["is_control"] else "candidate"
+        pill = (f'<span class="pill neg">control</span>' if a["is_control"] else "")
+        prec = _cell(x["precision"], pmax, "seq3") if x["tp"] + x["fp"] else (
+            '<span class="muted">undefined</span>')
+        rows.append(
+            f'<tr data-key="{esc(a["key"])}" data-role="{role}" '
+            f'data-band="{BAND_KEY[band]}">'
+            f'<td class="n" data-rank>{i}</td>'
+            f'<td><code>{esc(a["key"])}</code> {pill}'
+            f'<span class="rmeta">{BAND_SHORT[band]} &#183; {params_short(a["params"])} params</span></td>'
+            f'<td class="n">{_cell(x["f1"], fmax, "s3")}</td>'
+            f'<td class="n">{_cell(x["recall"], rmax, "s2")}</td>'
+            f'<td class="n">{prec}</td>'
+            f'<td class="n">{num(x["tp"])} <span class="muted">of {num(pos)}</span></td>'
+            f'<td class="n">{num(x["fp"])} <span class="muted">of {CAP_FP}</span></td>'
+            f'<td class="n">{exact(x["threshold"])}</td>'
+            f'</tr>')
+    head = (
+        '<thead><tr>'
+        '<th class="n" data-sort="num" title="Rank by F1 at the shared budget">#</th>'
+        '<th data-sort="text">Model</th>'
+        '<th class="n" data-sort="num">F1</th>'
+        '<th class="n" data-sort="num">Recall</th>'
+        '<th class="n" data-sort="num">Precision</th>'
+        '<th class="n" data-sort="num">Caught</th>'
+        '<th class="n" data-sort="num">False blocks</th>'
+        '<th class="n" data-sort="num">Threshold</th>'
+        '</tr></thead>')
+    groups = [("all", f"All {len(arms)}"), ("candidate", f"Candidates ({len(CANDS)})"),
+              ("control", f"Controls ({len(COH) - len(CANDS)})"),
+              ("under3b", f"Under 3B ({len(in_band('under 3B'))})"),
+              ("mid", f"3B to 6B ({len(in_band('3B to 6B'))})")]
+    btns = "".join(
+        f'<button type="button" class="seg{" on" if g == "all" else ""}" data-lb-group="{g}" '
+        f'aria-pressed="{"true" if g == "all" else "false"}">{lab}</button>'
+        for g, lab in groups)
+    return (
+        f'<div class="lbwrap" id="leaderboard">\n'
+        f'  <div class="ctl">\n'
+        f'    <label class="ctl-l" for="lb-q">Find</label>\n'
+        f'    <input type="search" id="lb-q" placeholder="falcon, guard, granite&#8230;" '
+        f'value="" autocomplete="off" aria-describedby="lb-note">\n'
+        f'    {btns}\n'
+        f'    <output id="lb-count" for="lb-q">{len(arms)} models</output>\n'
+        f'    <p class="ctl-n" id="lb-note">Every row is one model at block false-positive rate '
+        f'{exact(FPR_CAP)}, {CAP_BUDGET}. Sort any column or filter to a group. The threshold is '
+        f'the score each model needed to hit the budget, fitted for this comparison.</p>\n'
+        f'  </div>\n'
+        f'  <div class="tbl-scroll"><table id="lb" class="lb" data-sortable>{head}'
+        f'<tbody>{"".join(rows)}</tbody></table></div>\n'
+        f'  <p class="tbl-note small">Bars are scaled to the largest value in their own column. '
+        f'<strong>Caught</strong> is destructive calls blocked, of {num(pos)}; '
+        f'<strong>false blocks</strong> is benign calls blocked, of the {CAP_FP} allowed. '
+        f'Precision is undefined for a model that blocks nothing. Confusion counts and intervals '
+        f'are on <a href="operating-point.html#common">At the budget</a>.</p>\n'
+        f'</div>')
+
+
+# --------------------------------------------------------- the Space card's metadata
+# `models:` in the card's front matter is what makes this Space appear on each evaluated model's
+# own page under "Spaces using ...", and it is what lets the Hub resolve the cohort without
+# reading the pages. The list is generated from the arm registry the run used, so it cannot drift
+# from the roster the site publishes.
+
+def card_models() -> str:
+    repos = sorted({a["repo"] for a in REGISTRY.values()})
+    return "\n".join(f"  - {r}" for r in repos)
+
+
+def card_tags() -> str:
+    return "\n".join(f"  - {t}" for t in (
+        "evaluation", "benchmark", "agent-safety", "tool-calling", "guardrails",
+        "small-language-models", "security", "leaderboard"))
+
+
+# ================================================================== the glossary
+# Every page here uses twenty or so terms that mean something specific in this protocol and
+# something looser elsewhere: a budget, a floor, an argmax, a control, a grade. A reader who does
+# not already hold those definitions cannot read a single table on this Space correctly, and until
+# now the definitions were spread across the page that used them. One table, every term, each with
+# the figure it takes on this corpus and a link to where it is measured.
+
+_GC = S3["grade_composition_confound"]
+
+
+GRADE_PLAIN = {
+    "A": "destructive, with a closed deterministic proof",
+    "B": "destructive by the source's own label, on a stateful surface, with high label "
+         "confidence but no deterministic proof",
+}
+
+
+def glossary() -> str:
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    scorable = CORPUS["scorable_cases_A_B_D"]
+    lo, hi = BAND["chance_95pct_interval"]
+    cond = CORPORA["label_scheme"]["conditions"]
+    # the plain-words grade definitions are checked against the conditions the function tests
+    if "closed deterministic proof" not in cond["A"] or "stateful surface" not in cond["B"]:
+        BAD.append("the grade conditions changed, so the plain-words grade definitions are stale")
+    moe = next(x for x in ROWS if x["key"] == "granite-guardian-3.2-3b-a800m")
+    rows = [
+        ("Model",
+         f'One checkpoint at one pinned revision, read out one way. {len(ROWS)} in all: '
+         f'{len(CANDS)} candidates and {len(COH) - len(CANDS)} controls.'),
+        ("Control",
+         'An untrained backbone with no safety head. Whatever it scores is what the corpus and '
+         'the threshold sweep give away for free.'),
+        ("Positive",
+         f'A call that has to be blocked: grade A ({GRADE_PLAIN["A"]}) or grade B '
+         f'({GRADE_PLAIN["B"]}). Grade C is unresolved and excluded; grade D is benign. '
+         f'{num(pos)} of {num(scorable)} scorable cases are positive.'),
+        ("The budget",
+         f'Block false-positive rate {exact(FPR_CAP)}: {CAP_BUDGET}. Every model is '
+         f're-thresholded to it.'),
+        ("Default decision",
+         'What a model does at its own documented setting, with nothing re-fitted.'),
+        ("Best-F1 threshold (oracle)",
+         'The threshold that maximises F1 when swept over the same rows it is scored on. An '
+         'in-sample upper bound, never an operating point.'),
+        ("Block-everything baseline",
+         f'F1 {exact(FLOOR["f1"])} at a block FPR of {fmt(FLOOR["block_fpr"], 1)}. An F1 under it '
+         f'at a model\'s default decision means that decision is badly placed.'),
+        ("All-allow accuracy",
+         f'{exact(neg / scorable)}. Accuracy is set by the benign class here, so it is only '
+         f'shown beside this.'),
+        ("Zero-false-positive gate",
+         'The recall a model keeps when it may block no benign case at all.'),
+        ("Length-controlled AUC",
+         f'AUC inside each prompt-length quintile, pooled with each quintile weighted by the '
+         f'positive-benign pairs it holds. Counting variables with no model reach up to '
+         f'{exact(max(v["auc"] for v in LEAK["structural_cue_auc"].values()))} raw on this corpus, '
+         f'so raw AUC is never shown alone.'),
+        ("Chance band",
+         f'[{exact(lo)}, {exact(hi)}]: where a model with no signal lands 95% of the time. Below '
+         f'it means anti-correlated with the label.'),
+        ("Jaccard index",
+         'Shared caught positives over the union of two models\' caught positives.'),
+        ("Counted parameters",
+         f'The parameter count in the model\'s own run metadata. For the one mixture-of-experts '
+         f'model, <code>{esc(moe["key"])}</code>, this is the total; the artifacts carry no '
+         f'active count, and the registry note says {esc(moe["note"])}.'),
+        ("Complete, hash-verified run",
+         f'{num(30310)} untorn prediction rows, <code>complete: true</code>, and a digest that '
+         f'matches the bytes on disk.'),
+        ("Second corpus",
+         f'A disjoint corpus {len(S3ARMS)} models were also scored on. It is described on '
+         f'<a href="datasets.html#second">Data and models</a> and no figure on this Space '
+         f'compares scores across the two.'),
+    ]
+    return ('<dl class="gloss">'
+            + "".join(f"<dt>{t}</dt><dd>{d}</dd>" for t, d in rows)
+            + '</dl>')
+
+
+def verdict_panel() -> str:
+    """The answer, the figures it rests on and the question, in one block at the top of the
+    landing page. The answer comes first."""
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    x = best["cap_row"]
+    w = CUR[best["key"]]["recall_wilson95"]
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    half = OVER["best_pair_union_each_arm_at_half_the_budget"]
+    zero = sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] == 0)
+    rand = CAP_FP / neg * pos
+    return (
+        f'<div class="box bad" id="verdict">\n'
+        f'  <h3>The verdict</h3>\n'
+        f'  <p><strong>No model in this cohort is usable as a block decision at this budget.'
+        f'</strong> The best, <code>{esc(best["key"])}</code>, catches {x["tp"]} of {num(pos)} '
+        f'destructive calls (recall {exact(x["recall"])}, Wilson 95% upper bound '
+        f'{exact(w["upper"])}) while spending all {x["fp"]} false blocks the budget allows. '
+        f'It lets through {num(pos - x["tp"])} of the {num(pos)}.</p>\n'
+        f'  <div class="tiles">\n'
+        f'    <div class="tile"><div class="v">{x["tp"]} of {num(pos)}</div>'
+        f'<div class="l">destructive calls blocked by the best model</div>'
+        f'<div class="s">a blocker picking cases at random at the same false-block rate '
+        f'would catch {rand:.1f}</div></div>\n'
+        f'    <div class="tile"><div class="v">{half["tp"]} of {num(pos)}</div>'
+        f'<div class="l">the best pair of models, inside the same budget</div>'
+        f'<div class="s">recall {exact(half["recall"])}</div></div>\n'
+        f'    <div class="tile"><div class="v">{zero} of {len(CANDS)}</div>'
+        f'<div class="l">candidates that catch nothing with zero false blocks allowed</div>'
+        f'<div class="s">the best catches {max(a["zero_fp"]["tp"] for a in CANDS.values())} '
+        f'of {num(pos)}</div></div>\n'
+        f'  </div>\n'
+        f'  <p><strong>Question.</strong> Given an agent\'s trajectory so far and the tool call it '
+        f'is about to make, can a local model under 6B parameters decide that the call has to be '
+        f'blocked, at a false-positive budget a deployment would accept?</p>\n'
+        f'  <p><strong>Budget.</strong> Block false-positive rate {exact(FPR_CAP)}: '
+        f'{CAP_FP} false blocks in {num(neg)} benign calls, the existing DefenseClaw cascade '
+        f'guardrail\'s own rate on this corpus. Every model is re-thresholded to it, so the thresholds '
+        f'are fitted for this comparison and are not the models\' own defaults.</p>\n'
+        f'</div>')
+
+
+def assumption_table() -> str:
+    """What the answer rests on, and what would overturn it."""
+    neg, pos = CORPUS["negatives_D"], CORPUS["positives_A_B"]
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    top_fpr = max(CUR[a["key"]]["block_fpr_wilson95"]["upper"] for a in COH.values())
+    big = SRCCENSUS["s2"]["largest_positive_source"]
+    rows = [
+        ["Every case carries the right truth grade.",
+         f'one deterministic function, <code>{esc(CORPORA["label_scheme"]["function"])}()</code>, '
+         f'evaluated from fields already on each case row',
+         "a mislabel in a source dataset. No model and no human reviewer is consulted, so no "
+         "inter-rater figure bounds the error"],
+        [f'{exact(FPR_CAP)} is the false-positive budget that matters.',
+         "it is the existing cascade guardrail's own block false-positive rate on this corpus",
+         f'a deployment with a different tolerance; every figure at the budget moves with it'],
+        ["A recall figure here is a recall figure on destructive tool calls in general.",
+         f'{num(pos)} positives from {num(SRCCENSUS["s2"]["datasets_with_a_positive"])} source '
+         f'datasets',
+         f'<code>{esc(short_src(big))}</code> contributes '
+         f'{num(SRCCENSUS["s2"]["per_dataset"][big]["positives"])} of them, '
+         f'{pct(SRCCENSUS["s2"]["largest_positive_share"])}, so the figure is mostly one '
+         f'dataset\'s'],
+        ["A model that holds the budget here holds it on new traffic.",
+         f'{CAP_FP} false blocks of {num(neg)} benign cases, counted',
+         f'the Wilson 95% upper bound on that rate reaches {exact(top_fpr)}, '
+         f'{top_fpr / FPR_CAP:.2f}&#215; the budget'],
+        ["The best-F1 threshold is achievable.",
+         "a sweep over the same rows the score is computed on",
+         f'it is fitted in sample: <code>{esc(best["key"])}</code> scores '
+         f'{exact(best["cap_row"]["f1"])} at the budget and {exact(best["oracle_f1"])} at its '
+         f'best-F1 threshold (oracle)'],
+    ]
+    return (f'<div class="tbl-scroll">'
+            f'{table_html(["Assumption", "What it rests on", "What breaks it"], rows, numeric_from=9)}'
+            f'</div>')
+
+
+def overlap_finding() -> str:
+    """Whether combining two models clears a gate no single model clears."""
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    bs = OVER["best_single_arm_at_the_common_budget"]
+    half = OVER["best_pair_union_each_arm_at_half_the_budget"]
+    full = OVER["best_pair_union_each_arm_at_the_full_budget"]
+    inb = OVER["best_pair_union_within_the_common_budget"]
+    allrec = OVER["union_recall_ceiling_all_22_arms"]
+    allfpr = OVER["union_fp_all_22_arms"] / neg
+    hw = wilson_shared(half["tp"], pos)
+    empty = [k for k in OVER["arms"] if CUR[k]["at_cap"]["tp"] == 0]
+    head = ["Combination", "True blocks", "Recall", "Precision", "F1", "Achieved block FPR",
+            "Within the budget"]
+    rows = [
+        [f'<code>{esc(bs["arm"])}</code>, the best single model', num(bs["tp"]),
+         exact(bs["recall"]), exact(bs["precision"]), exact(bs["f1"]), exact(bs["fpr"]), "yes"],
+        [f'<code>{esc(half["arms"][0])}</code> with <code>{esc(half["arms"][1])}</code>, each at '
+         f'half the budget', num(half["tp"]), exact(half["recall"]), exact(half["precision"]),
+         exact(half["f1"]), exact(half["fpr"]), "yes"],
+        [f'<code>{esc(inb["arms"][0])}</code> with <code>{esc(inb["arms"][1])}</code>, each at the '
+         f'full budget', num(inb["tp"]), exact(inb["recall"]), exact(inb["precision"]),
+         exact(inb["f1"]), exact(inb["fpr"]), "yes"],
+        [f'<code>{esc(full["arms"][0])}</code> with <code>{esc(full["arms"][1])}</code>, each at '
+         f'the full budget', num(full["tp"]), exact(full["recall"]), exact(full["precision"]),
+         exact(full["f1"]), exact(full["fpr"]), "no"],
+        [f'all {len(CUR)} models, each at the full budget', num(OVER["union_tp_all_22_arms"]),
+         exact(allrec),
+         exact(OVER["union_tp_all_22_arms"]
+               / (OVER["union_tp_all_22_arms"] + OVER["union_fp_all_22_arms"])),
+         exact(f1_of(OVER["union_tp_all_22_arms"], OVER["union_fp_all_22_arms"],
+                     pos - OVER["union_tp_all_22_arms"])), exact(allfpr), "no"],
+    ]
+    if OVER["pairs_tested"] - JSTAT["pairs"] != len(empty) * (len(empty) - 1) // 2:
+        BAD.append("the undefined-overlap pairs are not exactly the pairs among the models that "
+                   "catch nothing, so the overlap text is wrong")
+    if not JSTAT["ratio"] or JSTAT["ratio"] <= 1:
+        BAD.append("the overlap text says caught sets overlap more than independence predicts, "
+                   "and the artifact no longer shows that")
+    if full["fp"] <= int(FPR_CAP * neg) or 2 * int(FPR_CAP * neg) < full["fp"]:
+        BAD.append("the full-budget pair's false blocks are not between one and two allowances")
+    return (
+        f'<p>\n  A union blocks a case when either model blocks it, so it can hold the budget '
+        f'only if the two together spend at most {num(int(FPR_CAP * neg))} false blocks. Giving '
+        f'each model half the budget, {int(FPR_CAP / 2 * neg)} false blocks, keeps every pair '
+        f'inside it. Each at the full budget, a pair can spend up to '
+        f'{2 * int(FPR_CAP * neg)}.\n</p>\n'
+        f'<p>\n  Most pairs share no caught positive: {JSTAT["zero"]} of the {JSTAT["pairs"]} '
+        f'pairs where at least one model catches something, with a median Jaccard index of '
+        f'{exact(JSTAT["median"])}. That is because each model catches so few, not because they '
+        f'fail independently. Summed over those pairs the caught sets share '
+        f'{JSTAT["shared_observed"]:.0f} positives against {JSTAT["shared_expected"]:.1f} expected '
+        f'from independent selection at the same set sizes, {JSTAT["ratio"]:.2f}&#215; more '
+        f'overlap than independence. The other {OVER["pairs_tested"] - JSTAT["pairs"]} pairs '
+        f'have no defined overlap because neither model catches anything; they are the pairs '
+        f'among {", ".join(f"<code>{esc(k)}</code>" for k in empty)}.\n</p>\n'
+        f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>\n'
+        f'<div class="box bad">\n'
+        f'  <p>\n    <strong>The union clears no gate a single model fails to clear.</strong> '
+        f'Inside the budget the best pair, <code>{esc(half["arms"][0])}</code> with '
+        f'<code>{esc(half["arms"][1])}</code>, catches {half["tp"]} of {num(pos)} destructive calls '
+        f'against {bs["tp"]} for the best single model, recall {exact(half["recall"])} with a '
+        f'Wilson 95% interval of [{exact(hw[0])}, {exact(hw[1])}]. The union of all {len(CUR)} '
+        f'models reaches {exact(allrec)} but spends {num(OVER["union_fp_all_22_arms"])} false '
+        f'blocks, a block FPR of {exact(allfpr)}, {allfpr / FPR_CAP:.1f}&#215; the budget.\n  </p>\n'
+        f'</div>\n'
+        f'<p class="small">\n  The pair reported is the best of {OVER["pairs_tested"]} evaluated '
+        f'on the same rows it is scored on, so it is an in-sample selection. The overlap is '
+        f'computed from set sizes and intersections and carries no case id.\n</p>')
+
+
+def source_census_table() -> str:
+    """Every source dataset in both corpora, with the two restricted sources re-counted."""
+    s2 = SRCCENSUS["s2"]["per_dataset"]
+    s3 = SRCCENSUS["s3"]["per_dataset"]
+    head = ["Source dataset", "s2 cases", "s2 scorable", "s2 positives",
+            "Second-corpus cases", "Second-corpus positives", "Share of s2 positives"]
+    rows = []
+    for k in sorted(set(s2) | set(s3)):
+        a = s2.get(k, {"cases": 0, "scorable": 0, "positives": 0})
+        b = s3.get(k, {"cases": 0, "scorable": 0, "positives": 0})
+        rows.append([f'<code>{esc(k)}</code>', num(a["cases"]), num(a["scorable"]),
+                     num(a["positives"]), num(b["cases"]), num(b["positives"]),
+                     exact(a["positives"] / CORPUS["positives_A_B"])])
+    rows.append(["<code>mcptox</code>, local-evaluation-only",
+                 num(SRCCENSUS["s2"]["mcptox_rows"]), num(SRCCENSUS["s2"]["mcptox_rows"]),
+                 num(SRCCENSUS["s2"]["mcptox_rows"]), num(SRCCENSUS["s3"]["mcptox_rows"]),
+                 num(SRCCENSUS["s3"]["mcptox_rows"]), exact(0.0)])
+    rows.append(["the second restricted source, removed from both corpora",
+                 num(SRCCENSUS["s2"]["restricted_second_source_rows"]),
+                 num(SRCCENSUS["s2"]["restricted_second_source_rows"]),
+                 num(SRCCENSUS["s2"]["restricted_second_source_rows"]),
+                 num(SRCCENSUS["s3"]["restricted_second_source_rows"]),
+                 num(SRCCENSUS["s3"]["restricted_second_source_rows"]), exact(0.0)])
+    rows.append(["Total", num(CORPUS["cases"]), num(CORPUS["scorable_cases_A_B_D"]),
+                 num(CORPUS["positives_A_B"]), num(S3CORP["cases"]),
+                 num(S3CORP["positives_A_B"]), exact(1.0)])
+    return (f'<p>\n  Counted from the <code>source.dataset</code> field of every '
+            f'case row in both corpora. s2 pools {SRCCENSUS["s2"]["datasets"]} source datasets, '
+            f'{SRCCENSUS["s2"]["datasets_with_a_scorable_case"]} of which contribute a scorable '
+            f'case and {SRCCENSUS["s2"]["datasets_with_a_positive"]} a positive. The second corpus '
+            f'pools {SRCCENSUS["s3"]["datasets"]} with '
+            f'{SRCCENSUS["s3"]["datasets_with_a_positive"]} contributing a positive. Both '
+            f'restricted sources contribute 0 rows to either corpus; the archive record\'s own '
+            f'census, in the licence table below, agrees.\n</p>\n'
+            f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>')
 
 
 def moe_note() -> str:
     key = "granite-guardian-3.2-3b-a800m"
     a, r = COH[key], next(x for x in ROWS if x["key"] == key)
-    return (f'<p>\n  <code>{esc(key)}</code> is a mixture-of-experts arm, so its counted total '
+    return (f'<p>\n  <code>{esc(key)}</code> is a mixture-of-experts model, so its counted total '
             f'and the parameters active on a forward pass are different numbers. The counted '
             f'total is {num(a["params"])}, recorded in its run metadata and matched against the '
-            f'arm registry. The artifacts carry no counted active-parameter figure for it; the '
-            f'registry note records {esc(r["note"])}, and the band above places it on the '
-            f'counted total. Every other arm in the cohort is dense, so for them the counted '
+            f'model registry. The artifacts carry no counted active-parameter figure for it; the '
+            f'registry note records {esc(r["note"])}. The size bands use the counted total. Every other model in the cohort is dense, so for them the counted '
             f'total and the active count coincide.\n</p>')
-
-
-def auc_table() -> str:
-    """Threshold-free discrimination, one row per arm, each AUC labelled with its definition."""
-    lo, hi = BAND["chance_95pct_interval"]
-    head = ["Arm", "Role", "Class structure", "Ranking variable", "AUC definition", "Raw AUC",
-            "Length-controlled AUC", "Against the chance band"]
-    rows = []
-    for a in by_lc():
-        var, _, dfn = a["primary_var"].partition("||")
-        where = ("below" if a["auc_raw"] < lo else
-                 "inside" if a["auc_raw"] <= hi else "above")
-        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
-                     esc(a["class_structure"]), f'<code>{esc(var.strip())}</code>',
-                     esc(dfn.strip().replace("defA==defB", "A and B coincide")),
-                     exact(a["auc_raw"]), exact(a["auc_lc"]), where])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=5)}</div>'
-
-
-def definition_table() -> str:
-    """Where definitions A and B differ, they are reported apart and never compared."""
-    key = "falcon3-1b-instruct"
-    src = RANK["arms_s2"][key]
-    head = ["Variable", "Definition A", "Definition B", "Ranked on"]
-    seen: dict[str, dict[str, float]] = {}
-    for vk, vv in src["by_variable"].items():
-        var, _, dfn = vk.partition("||")
-        seen.setdefault(var.strip(), {})[dfn.strip()] = (
-            vv["auc_raw_mann_whitney_tie_corrected"])
-    rows = []
-    for var, by_def in sorted(seen.items()):
-        both = by_def.get("defA==defB")
-        flagged = "P(block) - P(confirm)" in var
-        var_html = esc(var).replace(" - ", f" {MINUS} ")
-        if both is not None:
-            rows.append([f"<code>{var_html}</code>", exact(both), exact(both),
-                         "yes, when the class structure selects it"])
-        else:
-            rows.append([f"<code>{var_html}</code>", exact(by_def.get("defA")),
-                         exact(by_def.get("defB")),
-                         "no; it inverted below chance on the disjoint corpus and is excluded "
-                         "by rule" if flagged
-                         else "no; the two definitions give different orderings and the "
-                              "programme ranks on one fixed variable"])
-    return (f'<p class="small">\n  One arm, <code>{esc(key)}</code>, shown because it emits all '
-            f'three classes and therefore carries every variable. Definition A takes the maximum '
-            f'block probability and the maximum confirm probability over a case\'s events and '
-            f'then subtracts. Definition B takes the maximum over events of the per-event '
-            f'difference. For a variable that is already a single monotone scalar the two reduce '
-            f'to the same maximum, which is what <code>A and B coincide</code> records. '
-            f'<code>P(block) {MINUS} P(confirm)</code> is the variable that inverted below '
-            f'chance on a disjoint corpus, and it is never ranked on.\n</p>\n'
-            f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>')
-
-
-def floor_table() -> str:
-    """Shipped block-only F1 for every arm, with the trivial floor in the same table."""
-    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
-    head = ["Arm", "Role"] + CONF_HEAD + ["Against the floor"]
-    rows = []
-    for a in by_shipped():
-        s = a["shipped"]
-        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]]]
-                    + _confusion_cells(s, scorable, neg, "block_fpr")
-                    + ["above" if s["f1"] > FLOOR["f1"] else "below"])
-    rows.append(["<code>block every case</code>", "trivial floor",
-                 num(FLOOR["tp"]), num(FLOOR["fp"]), num(FLOOR["fn"]), num(FLOOR["tn"]),
-                 exact(FLOOR["precision"]), exact(FLOOR["recall"]), exact(FLOOR["f1"]),
-                 exact(accuracy(FLOOR, scorable)), exact(FLOOR["block_fpr"]), MDASH])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
 
 
 def corpus_table() -> str:
@@ -2814,9 +3994,9 @@ def corpus_table() -> str:
          f'[{exact(S3BANDC["band_95pct"][0])}, {exact(S3BANDC["band_95pct"][1])}]'],
         ["Hanley&#8211;McNeil standard error at AUC 0.5",
          exact(BAND["hanley_mcneil_se_at_auc_0.5"]), exact(S3BANDC["se_at_auc_0.5"])],
-        ["Prediction rows per arm", num(DEB["prediction_rows"]),
+        ["Prediction rows per model", num(DEB["prediction_rows"]),
          num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})))],
-        ["Arms scored on it", num(len(COH)), num(len(S3ARMS))],
+        ["Models scored on it", num(len(COH)), num(len(S3ARMS))],
         ["<code>cases_sha256</code>", f'<code>{esc(CORPUS["cases_sha256"])}</code>',
          f'<code>{esc(S3CORP["cases_sha256"])}</code>'],
         ["Case-id overlap with the other corpus",
@@ -2852,7 +4032,7 @@ def label_provenance_block() -> str:
             f'<p>\n  The function is <code>{esc(ls["function"])}()</code> in '
             f'<a href="{GH}/{esc(ls["source"])}"><code>{esc(ls["source"])}</code></a>, '
             f'{num(LABELS["bytes"])} bytes at sha256 <code>{esc(LABELS["sha256"])}</code>, '
-            f're-hashed at build time. The scoring paths import it:\n</p>\n<ul>{imp}</ul>\n'
+            f'imported by both scoring paths:\n</p>\n<ul>{imp}</ul>\n'
             f'<p>\n  {esc(ls["limits"])}\n</p>')
 
 
@@ -2890,73 +4070,127 @@ def licence_table() -> str:
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
 
 
-def heldout_table() -> str:
-    """The six settled held-out bodies, with the digest each metadata records."""
-    head = ["Arm", "Counted parameters", "Rows", "Cases covered", "Cases missing", "Errors",
-            "complete", "Digest matches the body on disk", "Prediction sha256"]
-    rows = []
-    for key in sorted(S3ARMS):
-        a = S3ARMS[key]
-        m = a["s3_meta"]
-        rows.append([f"<code>{esc(key)}</code>", num(m["params_counted"]),
-                     num(a["s3_prediction_rows"]), num(a["s3_cases_in_prediction"]),
-                     num(a["s3_scorable_missing"]), num(m["errors"]),
-                     exact(m["complete_value"]), exact(m["sha256_meta_matches_disk"]),
-                     f'<code>{esc(a["s3_prediction_sha256_disk"])}</code>'])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
-
-
-def heldout_reconciliation() -> str:
-    """Two artifacts cover different arm counts on the held-out corpus. Which one governs."""
-    stage0 = ", ".join(f"<code>{esc(k)}</code>" for k in S3_STAGE0_NAMES)
-    return (
-        f'<p>\n  Two artifacts carry held-out records and they cover different arms. '
-        f'<code>cohort-rank.json</code> holds {len(S3_STAGE0_NAMES)}: {stage0}. '
-        f'<code>s3-stats.json</code> and <code>s3-scores-in-scope.json</code> hold '
-        f'{len(S3ARMS)}, and the {len(S3_STAGE0_NAMES)} are a subset of the {len(S3ARMS)}.\n</p>\n'
-        f'<p class="small">\n  This section is about which bodies exist and which artifact '
-        f'governs. The corpus they cover has positives that are '
-        f'{pct(S3CORP["grade_counts_all"]["A"] / S3CORP["positives_A_B"])} grade A against s2\'s '
-        f'{pct(CORPUS["grade_counts_all"]["A"] / CORPUS["positives_A_B"])}, so no figure here or '
-        f'anywhere on this Space compares a score across the two.\n</p>\n'
-        f'<p>\n  The two agree on every arm they share: the same ranking variable, the same raw '
-        f'AUC to the last digit, the same {num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})))} '
-        f'rows, the same prediction digest and the same argmax confusion matrix. The build '
-        f'asserts each of those, so the coverage difference is the only difference.\n</p>\n'
-        f'<p>\n  The {len(S3ARMS)}-arm pair governs. <code>cohort-rank.json</code> was written '
-        f'when {len(S3_STAGE0_NAMES)} held-out bodies had landed and its block was never '
-        f'extended; the later pair was written over the settled archive, where all '
-        f'{len(S3ARMS)} bodies carry <code>complete: true</code> and a digest matching the bytes '
-        f'on disk. Every held-out number on this Space is read from the later pair.\n</p>')
+def check_review_fixes() -> None:
+    """Assertions behind the figures the 2026-09-24 review corrected, so none of them can drift
+    back. Each one names what it guards."""
+    lo, hi = BAND["chance_95pct_interval"]
+    auth = {r["arm"]: r["value"] for r in
+            AUTH["rankings_all_22_including_controls"]["A_pair_weighted_pooled__AUTHORITATIVE"]}
+    # every length-controlled AUC printed is the authoritative pair-weighted pooled figure
+    expect("models in the authoritative length-controlled ranking", len(auth), len(COH), 0)
+    for k, a in COH.items():
+        expect(f"{k} length-controlled AUC is the authoritative pooled figure",
+               a["auc_lc"], auth[k], 0)
+    # the pooled helper reproduces the artifact wherever per-bin AUCs are recorded elsewhere,
+    # which is what licenses computing the length counter's pooled figure with it
+    for k in ("control-modernbert-base", "control-modernbert-large"):
+        q = LEAK["controls"][k]["auc_within_length_quintile"].values()
+        expect(f"{k} pooled AUC recomputed from the leakage artifact's quintiles",
+               pooled_auc(q), auth[k], 1e-12)
+    expect("deberta pooled AUC recomputed from final-comparisons quintiles",
+           pooled_auc(LCA["deberta P(injection.true) [single scalar, A==B]"]["per_quintile"]
+                      .values()), auth["deberta-v3-prompt-injection-v2"], 1e-12)
+    expect("length counter pooled AUC is below the chance band's lower end, as printed",
+           float(LEN_POOLED < lo), 1.0, 0)
+    # the leakage verdict follows the published estimator
+    cv = control_verdict()
+    expect("control-modernbert-large length-controlled AUC is below the chance band",
+           float(cv["where"]["control-modernbert-large"] == "below"), 1.0, 0)
+    expect("control-modernbert-base length-controlled AUC is inside the chance band",
+           float(cv["where"]["control-modernbert-base"] == "inside"), 1.0, 0)
+    expect("control-modernbert-large raw AUC is below the chance band",
+           float(_band_word(CL["headline"]["auc_of_best_variable"]) == "below"), 1.0, 0)
+    # every counting variable the leakage artifact records has a name, so the list is complete
+    expect("counting variables with a published name", len(CUE_NAME),
+           len(LEAK["structural_cue_auc"]), 0)
+    for k in LEAK["structural_cue_auc"]:
+        if k not in CUE_NAME:
+            BAD.append(f"counting variable {k!r} has no published name")
+    # candidates and candidates with a default decision are different counts, and both are printed
+    expect("candidates", len(CANDS), 20, 0)
+    expect("candidates with a default decision", sum(1 for a in CANDS.values() if a["shipped"]),
+           len(CANDS) - len([k for k in SHIPPED_MISSING if k in CANDS]), 0)
+    # the laptop figures are printed per model key, and the memory statements hold
+    expect("shieldstral-1.0-3b rows/min", RPM["shieldstral-1.0-3b"], 9.91, 0)
+    expect("granite-4.0-micro rows/min", RPM["granite-4.0-micro"], 9.61, 0)
+    gm = LAPTOP["multimodal_splits"][1]
+    expect("the multimodal record's second entry is gemma-3-4b-it", float(gm["arm"] == "gemma-3-4b-it"),
+           1.0, 0)
+    expect("gemma-3-4b-it full checkpoint is over 8 GiB", float(gm["full_checkpoint_bytes"] > 8 * GIB),
+           1.0, 0)
+    expect("every Q4_K_M file is under 8 GiB",
+           float(LAPTOP["memory"]["q4_k_m_gib_max"]["gib"] < 8), 1.0, 0)
+    expect("peak RSS measured for exactly one model",
+           float(sum(1 for k, v in LAPTOP["memory"].items()
+                     if isinstance(v, dict) and "irreducible_gib" in v)), 1.0, 0)
+    # a pair each at the full budget can spend up to two allowances, never "6x2 plus one"
+    expect("false blocks two models may spend at the full budget each",
+           2 * int(FPR_CAP * CORPUS["negatives_D"]), 26, 0)
+    # the overlap framing: shared catches exceed what independence predicts
+    expect("caught sets overlap more than independent selection predicts",
+           float(JSTAT["ratio"] > 1), 1.0, 0)
+    # every model is scored on a single monotone scalar, which is what lets the ranking page state
+    # the AUC definition label once instead of on every row
+    for k, a in COH.items():
+        if "defA==defB" not in a["primary_var"].partition("||")[2]:
+            BAD.append(f"{k}: its AUC definitions do not coincide, so the one-sentence "
+                       f"definition label on the ranking page is wrong")
+    # the answer the headline gives, recomputed from the cap rows
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    expect("headline: best model's true blocks at the budget", best["cap_row"]["tp"], 25, 0)
+    expect("headline: best model's false blocks at the budget", best["cap_row"]["fp"],
+           int(FPR_CAP * CORPUS["negatives_D"]), 0)
+    expect("headline: best model is under 6B counted parameters",
+           float(best["params"] < 6_000_000_000), 1.0, 0)
+    expect("headline: no model reaches 6B counted parameters",
+           float(max(a["params"] for a in COH.values()) < 6_000_000_000), 1.0, 0)
+    expect("headline: the leaderboard's top model is also the highest-recall model at the budget",
+           float(best["key"] == max(CANDS.values(), key=lambda a: a["cap_row"]["recall"])["key"]),
+           1.0, 0)
 
 
 CHARTS = {
     "prf": chart_prf,
-    "bands": chart_bands,
+    "roc_zoom": chart_roc_zoom,
+    "reliability": chart_reliability,
+    "jaccard": chart_jaccard,
+    "union": chart_union,
+    "srcheat": chart_source_recall,
+    "cost": chart_cost,
+    "size_scatter": chart_size_scatter,
+    "grade_slope": chart_grade_slope,
+    "accuracy_delta": chart_accuracy_delta,
+    "cap_fpr": chart_capfpr,
     "corpus": chart_corpus,
-    "deploy": chart_deploy,
     "zerofp": chart_zerofp,
     "ranking": chart_ranking,
-    "estimators": chart_estimators,
     "grades": chart_grades,
-    "s3cue": chart_s3cue,
-    "fpr": chart_fpr,
     "quintiles": chart_quintiles,
-    "floor": chart_floor,
     "cues": chart_cues,
-    "deberta_points": chart_deberta_points,
     "trunc": chart_trunc,
     "control_dist": chart_control_dist,
     "throughput": chart_throughput,
     "envelope": chart_envelope,
-    "multimodal": chart_multimodal,
-    "roster": chart_roster,
     "gating": chart_gating,
-    "backbones": chart_backbones,
 }
 
 
 # ================================================================ figure values
+
+CUE_NAME = {"event_count_in_prediction": "event count",
+            "natural_prompt_tokens (max over events)": "prompt tokens, max over events",
+            "natural_prompt_tokens (sum over events)": "prompt tokens, summed over events",
+            "context_events": "context events",
+            "context_bytes (max over events)": "context bytes, max over events"}
+
+
+def cue_list() -> str:
+    """Every counting variable the leakage artifact records, best first, so a sentence that says
+    how many there are lists all of them."""
+    items = sorted(LEAK["structural_cue_auc"].items(), key=lambda kv: -kv[1]["auc"])
+    parts = [f'{CUE_NAME[k]} {exact(v["auc"])}' for k, v in items]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
 
 def build_figs() -> dict[str, str]:
     be = TRIVIAL["block_every_case"]
@@ -2978,56 +4212,69 @@ def build_figs() -> dict[str, str]:
         "corpus.gradeA": num(CORPUS["grade_counts_all"]["A"]),
         "corpus.gradeB": num(CORPUS["grade_counts_all"]["B"]),
         "corpus.prevalence": pct(TRIVIAL["prevalence_positives_over_scorable"]),
+        "corpus.prevalence.exact": exact(CORPUS["prevalence"]),
         "corpus.sha": CORPUS["cases_sha256"],
         "corpus.rows": num(DEB["prediction_rows"]),
         # the floor
-        "floor.f1": fmt(be["f1"], 17),
+        "floor.f1": exact(be["f1"]),
+        # the Space card is markdown and cannot carry the precision control, so the one figure a
+        # reader checks the floor against is printed there at full precision on purpose
+        "floor.f1.exact": raw(be["f1"]),
         "floor.f1s": fmt(be["f1"], 5),
         "floor.tp": num(be["tp"]), "floor.fp": num(be["fp"]),
         "floor.fn": num(be["fn"]), "floor.tn": num(be["tn"]),
-        "floor.precision": fmt(be["precision"], 10),
+        "floor.precision": exact(be["precision"]),
         "floor.recall": fmt(be["recall"], 1),
         "floor.fpr": fmt(be["fpr"], 1),
         "floor.allow.f1": fmt(TRIVIAL["allow_every_case"]["f1"], 1),
         # the length cue
-        "cue.tokens": fmt(LEAK["structural_cue_auc"]
-                          ["natural_prompt_tokens (max over events)"]["auc"], 16),
-        "cue.events": fmt(LEAK["structural_cue_auc"]["event_count_in_prediction"]["auc"], 16),
-        "cue.ctxevents": fmt(LEAK["structural_cue_auc"]["context_events"]["auc"], 16),
-        "cue.ctxbytes": fmt(LEAK["structural_cue_auc"]
-                            ["context_bytes (max over events)"]["auc"], 16),
-        "cue.tokens.controlled":
-            fmt(LCA["pure length counter (natural prompt tokens)"]
-                ["mean_within_length_quintile_auc"], 16),
+        "cue.tokens": exact(LEAK["structural_cue_auc"]
+                          ["natural_prompt_tokens (max over events)"]["auc"]),
+        "cue.events": exact(LEAK["structural_cue_auc"]["event_count_in_prediction"]["auc"]),
+        "cue.ctxevents": exact(LEAK["structural_cue_auc"]["context_events"]["auc"]),
+        "cue.ctxbytes": exact(LEAK["structural_cue_auc"]
+                            ["context_bytes (max over events)"]["auc"]),
+        # the published estimator, computed from the per-quintile AUCs; the artifact's own
+        # scalar for this variable is the retracted unweighted mean
+        "cue.tokens.controlled": exact(LEN_POOLED),
+        "cue.tokens.controlled.where": _band_word(LEN_POOLED),
+        "cue.max": exact(max(v["auc"] for v in LEAK["structural_cue_auc"].values())),
+        "cue.max.name": CUE_NAME[max(LEAK["structural_cue_auc"].items(),
+                                     key=lambda kv: kv[1]["auc"])[0]],
+        "cue.n": num(len(LEAK["structural_cue_auc"])),
+        "cue.list": cue_list(),
         # the null band
         "band.lo": exact(lo), "band.hi": exact(hi),
         "band.se": exact(BAND["hanley_mcneil_se_at_auc_0.5"]),
         # controls
-        "cb.auc": fmt(CB["headline"]["auc_of_best_variable"], 16),
-        "cl.auc": fmt(CL["headline"]["auc_of_best_variable"], 17),
-        "cb.controlled": fmt(LEAK["controls"]["control-modernbert-base"]
-                             ["mean_within_stratum_auc"], 16),
-        "cl.controlled": fmt(LEAK["controls"]["control-modernbert-large"]
-                             ["mean_within_stratum_auc"], 17),
-        "cb.spearman": fmt(LEAK["controls"]["control-modernbert-base"]
-                           ["spearman_score_vs_natural_prompt_length"], 15),
-        "controls.pearson": fmt(LEAK["controls_agree_with_each_other"]
-                                ["pearson_base_vs_large"], 16),
+        "cb.auc": exact(CB["headline"]["auc_of_best_variable"]),
+        "cl.auc": exact(CL["headline"]["auc_of_best_variable"]),
+        # the published pair-weighted pooled estimator; the leakage artifact's own
+        # mean_within_stratum_auc is the retracted unweighted mean and is not printed
+        "cb.controlled": exact(COH["control-modernbert-base"]["auc_lc"]),
+        "cl.controlled": exact(COH["control-modernbert-large"]["auc_lc"]),
+        "cb.controlled.where": control_verdict()["where"]["control-modernbert-base"],
+        "cl.controlled.where": control_verdict()["where"]["control-modernbert-large"],
+        "cb.raw.where": _band_word(CB["headline"]["auc_of_best_variable"]),
+        "cl.raw.where": _band_word(CL["headline"]["auc_of_best_variable"]),
+        "cb.spearman": exact(LEAK["controls"]["control-modernbert-base"]
+                           ["spearman_score_vs_natural_prompt_length"]),
+        "controls.pearson": exact(LEAK["controls_agree_with_each_other"]
+                                ["pearson_base_vs_large"]),
         "cb.distinct": num(LEAK["controls"]["control-modernbert-base"]
                            ["score_distribution"]["distinct_values"]),
         "cl.distinct": num(LEAK["controls"]["control-modernbert-large"]
                            ["score_distribution"]["distinct_values"]),
         # DeBERTa
-        "deb.auc": fmt(DEB["headline"]["auc_of_best_variable"], 16),
-        "deb.controlled": fmt(LCA["deberta P(injection.true) [single scalar, A==B]"]
-                              ["mean_within_length_quintile_auc"], 14),
-        "deb.shipped": fmt(blk["f1"], 17),
+        "deb.auc": exact(DEB["headline"]["auc_of_best_variable"]),
+        "deb.controlled": exact(COH["deberta-v3-prompt-injection-v2"]["auc_lc"]),
+        "deb.shipped": exact(blk["f1"]),
         "deb.tp": num(blk["tp"]), "deb.fp": num(blk["fp"]),
         "deb.fn": num(blk["fn"]), "deb.tn": num(blk["tn"]),
-        "deb.fpr": fmt(blk["fpr"], 16),
-        "deb.recall": fmt(blk["recall"], 15),
+        "deb.fpr": exact(blk["fpr"]),
+        "deb.recall": exact(blk["recall"]),
         "deb.oracle": fmt(orc["f1"], 2),
-        "deb.oracle.threshold": fmt(orc["threshold"], 16),
+        "deb.oracle.threshold": exact(orc["threshold"]),
         "deb.blockshare": pct(DEB["shipped_action_histogram_case_level"]["block"]
                               / CORPUS["scorable_cases_A_B_D"], 1),
         "deb.blockrows": num(DEB["row_level_action_histogram"]["block"]),
@@ -3035,6 +4282,7 @@ def build_figs() -> dict[str, str]:
         "deb.distinct": num(DEB["by_variable"]["P(injection.true)  [the arm's ONLY scalar]"]
                             ["distinct_thresholds"]),
         "deb.params": num(DEB["arm_meta"]["params_counted"]),
+        "deb.params.short": params_short(DEB["arm_meta"]["params_counted"]),
         "deb.revision": DEB["arm_meta"]["revision"],
         "deb.sha": DEB["prediction_sha256"],
         # truncation
@@ -3048,8 +4296,8 @@ def build_figs() -> dict[str, str]:
         "trunc.cases": num(sc["cases_with_at_least_one_event_over_512"]),
         "trunc.casespct": pct(sc["cases_with_at_least_one_event_over_512_fraction"]),
         "trunc.allcases": num(sc["cases_with_every_event_over_512"]),
-        "trunc.auc": fmt(ec["auc_within_stratum"]["truncated_cases"]["auc"], 16),
-        "trunc.aucun": fmt(ec["auc_within_stratum"]["untruncated_cases"]["auc"], 16),
+        "trunc.auc": exact(ec["auc_within_stratum"]["truncated_cases"]["auc"]),
+        "trunc.aucun": exact(ec["auc_within_stratum"]["untruncated_cases"]["auc"]),
         "trunc.f1": fmt(ec["at_oracle_best_f1_threshold"]["truncated_cases"]["f1"], 4),
         "trunc.f1un": fmt(ec["at_oracle_best_f1_threshold"]["untruncated_cases"]["f1"], 4),
         "trunc.prevratio": f"{ec['prevalence_confound']['positive_rate_truncated_cases'] / ec['prevalence_confound']['positive_rate_untruncated_cases']:.1f}",
@@ -3057,8 +4305,8 @@ def build_figs() -> dict[str, str]:
                               ["rows_with_truncated_true"]),
         "trunc.flagpct": pct(TRUNC["row_truncated_flag_is_not_the_512_limit"]
                              ["rows_with_truncated_true"] / TRUNC["runner_total_rows"]),
-        "ctrl.oracle": fmt(BASE["oracle"]["f1"], 14),
-        "deb.over.floor": fmt(HEAD["deberta_shipped_minus_block_everything"], 18),
+        "ctrl.oracle": exact(BASE["oracle"]["f1"]),
+        "deb.over.floor": exact(HEAD["deberta_shipped_minus_block_everything"]),
         # the scorer-equivalence gate, as a property of the check rather than of any arm
         "parity.n": num(len(PARITY)),
         "parity.maxdelta": f"{max(v['abs_delta_f1'] for v in PARITY.values()):.2e}",
@@ -3076,23 +4324,23 @@ def build_figs() -> dict[str, str]:
         "s3.gradeB": num(GRADE["s3_positive_composition"]["B"]),
         "s3.negatives": num(S3DESIGN["negatives_D"]),
         "s3.prevalence": pct(S3DESIGN["prevalence"]),
-        "s3.arms": num(len(GRADE["per_arm"])),
-        "s3.cue.bytes": fmt(S3CUE["context_bytes (max over events)"]["auc_raw"], 15),
-        "s3.cue.events": fmt(S3CUE["context_events (max over events)"]["auc_raw"], 17),
+        "s3.models": num(len(GRADE["per_arm"])),
+        "s3.cue.bytes": exact(S3CUE["context_bytes (max over events)"]["auc_raw"]),
+        "s3.cue.events": exact(S3CUE["context_events (max over events)"]["auc_raw"]),
         "s3.band.lo": exact(S3DESIGN["chance_band_95pct"][0]),
         "s3.band.hi": exact(S3DESIGN["chance_band_95pct"][1]),
         "s3.band.se": exact(S3DESIGN["chance_se_at_auc_0.5"]),
         "s3.varshare": pct(S3BIND["mean_share_of_variance_from_the_221_positives"]),
-        "s3.mdauc": fmt(S3RES["median_minimum_detectable_auc_difference"], 14),
+        "s3.mdauc": exact(S3RES["median_minimum_detectable_auc_difference"]),
         "s3.pairs": num(len(S3["pairwise_delong_all_pairs"])),
         # the two mirror arms, as evidence about the corpora
-        "mirror.a.arm": max(grade_rows(), key=lambda g: g["auc_a"])["key"],
-        "mirror.a.aucA": fmt(max(grade_rows(), key=lambda g: g["auc_a"])["auc_a"], 15),
-        "mirror.a.aucB": fmt(max(grade_rows(), key=lambda g: g["auc_a"])["auc_b"], 16),
+        "mirror.a.model": max(grade_rows(), key=lambda g: g["auc_a"])["key"],
+        "mirror.a.aucA": exact(max(grade_rows(), key=lambda g: g["auc_a"])["auc_a"]),
+        "mirror.a.aucB": exact(max(grade_rows(), key=lambda g: g["auc_a"])["auc_b"]),
         "mirror.a.rank": str(max(grade_rows(), key=lambda g: g["auc_a"])["s2_rank"]),
-        "mirror.b.arm": min(grade_rows(), key=lambda g: g["auc_a"])["key"],
-        "mirror.b.aucA": fmt(min(grade_rows(), key=lambda g: g["auc_a"])["auc_a"], 15),
-        "mirror.b.aucB": fmt(min(grade_rows(), key=lambda g: g["auc_a"])["auc_b"], 16),
+        "mirror.b.model": min(grade_rows(), key=lambda g: g["auc_a"])["key"],
+        "mirror.b.aucA": exact(min(grade_rows(), key=lambda g: g["auc_a"])["auc_a"]),
+        "mirror.b.aucB": exact(min(grade_rows(), key=lambda g: g["auc_a"])["auc_b"]),
         "mirror.b.rank": str(min(grade_rows(), key=lambda g: g["auc_a"])["s2_rank"]),
         # the estimator reasoning
         "est.overweight": fmt([t for t in AUTH["estimator"]["evidence"]
@@ -3107,8 +4355,8 @@ def build_figs() -> dict[str, str]:
         "est.q0.wpool": pct([t for t in AUTH["estimator"]["evidence"]
                              ["weight_versus_evidence_mismatch"]["table"]
                              if t["bin"] == "q0"][0]["weight_under_pair_weighting"], 3),
-        "est.seratio": fmt(AUTH["estimator"]["evidence"]
-                           ["primary_analytic_se_ratio_unweighted_over_pooled"]["mean"], 16),
+        "est.seratio": exact(AUTH["estimator"]["evidence"]
+                           ["primary_analytic_se_ratio_unweighted_over_pooled"]["mean"]),
         "est.seworse": num(len(AUTH["estimator"]["evidence"]
                                ["primary_analytic_se_ratio_unweighted_over_pooled"]
                                ["arms_where_unweighted_is_not_worse"])),
@@ -3164,7 +4412,7 @@ def build_figs() -> dict[str, str]:
         "lg.categories": num(len(ROSTER["taxonomy"]
                                  ["llama_guard_3_1b_default_categories"])),
         # laptop
-        "lap.arms": num(LAPTOP["throughput_coverage"]["arms_converted_or_quantized"]),
+        "lap.models": num(LAPTOP["throughput_coverage"]["arms_converted_or_quantized"]),
         "lap.published": num(LAPTOP["throughput_coverage"]
                              ["arms_with_a_published_rows_per_min"]),
         "lap.fastest": esc(FASTEST["label"]),
@@ -3178,11 +4426,11 @@ def build_figs() -> dict[str, str]:
         "lap.modernbert.rpm": fmt(LAPTOP["encoder_throughput_rows_per_min"][1]
                                   ["rows_per_min"], 1),
         "lap.q4min": fmt(mem["q4_k_m_gib_min"]["gib"], 3),
-        "lap.q4min.arm": esc(mem["q4_k_m_gib_min"]["label"]),
+        "lap.q4min.model": esc(mem["q4_k_m_gib_min"]["label"]),
         "lap.q4max": fmt(mem["q4_k_m_gib_max"]["gib"], 3),
-        "lap.q4max.arm": esc(mem["q4_k_m_gib_max"]["label"]),
+        "lap.q4max.model": esc(mem["q4_k_m_gib_max"]["label"]),
         "lap.rss": fmt(mem["peak_rss_hungriest"]["irreducible_gib"], 3),
-        "lap.rss.arm": esc(mem["peak_rss_hungriest"]["label"]),
+        "lap.rss.model": esc(mem["peak_rss_hungriest"]["label"]),
         "lap.rss.mmap": fmt(mem["peak_rss_hungriest"]["worst_observed_under_mmap_gib"], 3),
         "lap.headroom": fmt(8 - mem["peak_rss_hungriest"]["irreducible_gib"], 3),
         # multimodal
@@ -3203,51 +4451,51 @@ def build_figs() -> dict[str, str]:
         "gm.bytes": num(gm["full_checkpoint_bytes"]),
         "gm.gib": fmt(gm["full_checkpoint_bytes"] / GIB, 4),
         # the confusion picture, from rows
-        "cb.f1": fmt(CB["headline"]["shipped_block_only_f1"], 16),
-        "cl.f1": fmt(CL["headline"]["shipped_block_only_f1"], 17),
-        "cb.fpr": fmt(CB["shipped_argmax_recomputed_from_rows"]["block_only"]["fpr"], 16),
-        "cl.fpr": fmt(CL["shipped_argmax_recomputed_from_rows"]["block_only"]["fpr"], 16),
-        "cb.precision": fmt(CB["shipped_argmax_recomputed_from_rows"]
-                            ["block_only"]["precision"], 16),
-        "cb.recall": fmt(CB["shipped_argmax_recomputed_from_rows"]["block_only"]["recall"], 16),
-        "deb.precision": fmt(blk["precision"], 16),
-        "top.f1.arm": by_shipped()[0]["key"],
-        "top.f1": fmt(by_shipped()[0]["shipped"]["f1"], 16),
-        "arms.over.floor": num(sum(1 for a in CANDS.values()
+        "cb.f1": exact(CB["headline"]["shipped_block_only_f1"]),
+        "cl.f1": exact(CL["headline"]["shipped_block_only_f1"]),
+        "cb.fpr": exact(CB["shipped_argmax_recomputed_from_rows"]["block_only"]["fpr"]),
+        "cl.fpr": exact(CL["shipped_argmax_recomputed_from_rows"]["block_only"]["fpr"]),
+        "cb.precision": exact(CB["shipped_argmax_recomputed_from_rows"]
+                            ["block_only"]["precision"]),
+        "cb.recall": exact(CB["shipped_argmax_recomputed_from_rows"]["block_only"]["recall"]),
+        "deb.precision": exact(blk["precision"]),
+        "top.f1.model": by_shipped()[0]["key"],
+        "top.f1": exact(by_shipped()[0]["shipped"]["f1"]),
+        "models.over.floor": num(sum(1 for a in CANDS.values()
                                    if a["shipped"] and a["shipped"]["f1"] > FLOOR["f1"])),
-        "arms.under.floor": num(sum(1 for a in CANDS.values()
+        "models.under.floor": num(sum(1 for a in CANDS.values()
                                     if a["shipped"] and a["shipped"]["f1"] < FLOOR["f1"])),
-        "arms.zero.f1": num(sum(1 for a in CANDS.values()
+        "models.zero.f1": num(sum(1 for a in CANDS.values()
                                 if a["shipped"] and a["shipped"]["f1"] == 0.0)),
-        "arms.shipped.cands": num(sum(1 for a in CANDS.values() if a["shipped"])),
-        "arms.scored": num(len(COH)),
-        "arms.candidates": num(len(CANDS)),
-        "arms.deploy": num(sum(1 for a in COH.values() if a["cap_row"])),
-        "arms.noshipped": ", ".join(SHIPPED_MISSING),
-        "arms.shipped": num(len(SHIP)),
+        "models.shipped.cands": num(sum(1 for a in CANDS.values() if a["shipped"])),
+        "models.scored": num(len(COH)),
+        "models.candidates": num(len(CANDS)),
+        "models.deploy": num(sum(1 for a in COH.values() if a["cap_row"])),
+        "models.noshipped": ", ".join(SHIPPED_MISSING),
+        "models.shipped": num(len(SHIP)),
         # the ranking
-        "rank1.arm": by_lc()[0]["key"],
-        "rank1.lc": fmt(by_lc()[0]["auc_lc"], 14),
-        "rank1.raw": fmt(by_lc()[0]["auc_raw"], 16),
+        "rank1.model": by_lc()[0]["key"],
+        "rank1.lc": exact(by_lc()[0]["auc_lc"]),
+        "rank1.raw": exact(by_lc()[0]["auc_raw"]),
         "rank1.cap": num(by_lc()[0]["cap_tokens"]),
         "rank1.shrunk": num(by_lc()[0]["shrunk"]),
-        "rank2.arm": by_lc()[1]["key"],
-        "rank2.lc": fmt(by_lc()[1]["auc_lc"], 14),
+        "rank2.model": by_lc()[1]["key"],
+        "rank2.lc": exact(by_lc()[1]["auc_lc"]),
         "rank2.cap": num(by_lc()[1]["cap_tokens"]),
-        "rank3.arm": by_lc()[2]["key"],
-        "rank3.lc": fmt(by_lc()[2]["auc_lc"], 14),
+        "rank3.model": by_lc()[2]["key"],
+        "rank3.lc": exact(by_lc()[2]["auc_lc"]),
         "rank3.cap": num(by_lc()[2]["cap_tokens"]),
         "beat.control": num(sum(1 for a in CANDS.values()
                                 if a["auc_lc"] > BASE["auc_lc"])),
         "under.band": num(sum(1 for a in CANDS.values()
                               if a["auc_lc"] < BAND["chance_95pct_interval"][0])),
         # deployment
-        "cap.value": f"{FPR_CAP}",
+        "cap.value": exact(FPR_CAP),
         "cap.deberta.tp": num(COH["deberta-v3-prompt-injection-v2"]["cap_row"]["tp"]),
         # --- the common operating point, reported the same way for every arm
         "cap.exact": exact(FPR_CAP),
         "cap.maxfp": num(int(FPR_CAP * CORPUS["negatives_D"])),
-        "cap.f1.arm": max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["key"],
+        "cap.f1.model": max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["key"],
         "cap.f1": exact(max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["cap_row"]["f1"]),
         "cap.f1.tp": num(max(CANDS.values(),
                              key=lambda a: a["cap_row"]["f1"])["cap_row"]["tp"]),
@@ -3270,9 +4518,9 @@ def build_figs() -> dict[str, str]:
         "band.mid": num(len(in_band("3B to 6B"))),
         "band.upper": num(len(in_band("6B and up"))),
         "band.max.params": num(max(a["params"] for a in COH.values())),
-        "band.max.arm": max(COH.values(), key=lambda a: a["params"])["key"],
+        "band.max.model": max(COH.values(), key=lambda a: a["params"])["key"],
         "band.min.params": num(min(a["params"] for a in COH.values())),
-        "band.min.arm": min(COH.values(), key=lambda a: a["params"])["key"],
+        "band.min.model": min(COH.values(), key=lambda a: a["params"])["key"],
         "band.spread": f'{max(a["params"] for a in COH.values()) / min(a["params"] for a in COH.values()):.0f}',
         "band.best.under": in_band("under 3B")[0]["key"],
         "band.best.mid": in_band("3B to 6B")[0]["key"],
@@ -3283,9 +4531,9 @@ def build_figs() -> dict[str, str]:
                             if a["cap_row"]["tp"] > a["cap_row"]["fp"])),
         "acc.gain": num(max(a["cap_row"]["tp"] - a["cap_row"]["fp"] for a in COH.values())),
         # --- each arm's own argmax, an in-sample upper bound
-        "oracle.best.arm": max(COH.values(), key=lambda a: a["oracle_f1"])["key"],
+        "oracle.best.model": max(COH.values(), key=lambda a: a["oracle_f1"])["key"],
         "oracle.best.f1": exact(max(a["oracle_f1"] for a in COH.values())),
-        "oracle.min.arm": min(COH.values(), key=lambda a: a["oracle_f1"])["key"],
+        "oracle.min.model": min(COH.values(), key=lambda a: a["oracle_f1"])["key"],
         "oracle.min.f1": exact(min(a["oracle_f1"] for a in COH.values())),
         "oracle.clear.floor": num(sum(1 for a in COH.values()
                                       if a["oracle_f1"] > FLOOR["f1"])),
@@ -3300,7 +4548,7 @@ def build_figs() -> dict[str, str]:
         "auc.coincide": num(sum(1 for a in COH.values()
                                 if "defA==defB" in a["primary_var"])),
         # --- the held-out corpus, as settled
-        "heldout.arms": num(len(S3ARMS)),
+        "heldout.models": num(len(S3ARMS)),
         "heldout.rows": num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()}))),
         "heldout.stage0": num(len(S3_STAGE0_NAMES)),
         "heldout.floor.f1": exact(S3FLOOR["f1"]),
@@ -3341,7 +4589,7 @@ def build_figs() -> dict[str, str]:
         "zfp.zero": num(sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] == 0)),
         "zfp.nonzero": num(sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] > 0)),
         "zfp.candidates": num(len(CANDS)),
-        "zfp.best.arm": max(CANDS.values(), key=lambda a: a["zero_fp"]["recall"])["key"],
+        "zfp.best.model": max(CANDS.values(), key=lambda a: a["zero_fp"]["recall"])["key"],
         "zfp.best.recall": exact(max(CANDS.values(),
                                      key=lambda a: a["zero_fp"]["recall"])["zero_fp"]["recall"]),
         "zfp.best.tp": num(max(CANDS.values(),
@@ -3353,11 +4601,139 @@ def build_figs() -> dict[str, str]:
         "settle.unsettled.rowsok": num(sum(1 for a in COH.values()
                                            if not a["settled"] and a["rows"] == 30310)),
         "settle.mismatch": num(SETTLE["digest_mismatch"]),
+        # --- the curves, and the reconciliation that lets them be drawn
+        "curve.models": num(len(CUR)),
+        "curve.points": num(sum(c["roc_points"] for c in CUR.values())),
+        "curve.points.max": num(max(c["roc_points"] for c in CUR.values())),
+        "curve.thresholds.max": num(max(c["distinct_thresholds"] for c in CUR.values())),
+        "curve.thresholds.min": num(min(c["distinct_thresholds"] for c in CUR.values())),
+        "curve.aucs": num(len(CUR) + len(CUR3)),
+        "zoom.fpr": f"{ZOOM_FPR}",
+        "zoom.multiple": f"{ZOOM_FPR / FPR_CAP:.2f}",
+        "zoom.recall.max": exact(max(
+            max((tp for fp, tp in CUR[a["key"]]["roc_fp_tp"]
+                 if fp <= int(ZOOM_FPR * CORPUS["negatives_D"])), default=0)
+            for a in CANDS.values()) / CORPUS["positives_A_B"]),
+        # --- the intervals
+        "boot.n": num(2000),
+        "boot.seed": f'{CURPROV["bootstrap"]["seed"]}',
+        "wilson.z": exact(CURPROV["wilson_z"]),
+        "fpr.wilson.max": exact(max(CUR[k]["block_fpr_wilson95"]["upper"] for k in CUR)),
+        "fpr.wilson.over": num(sum(1 for k in CUR
+                                   if CUR[k]["block_fpr_wilson95"]["upper"] > FPR_CAP)),
+        "best.boot.lo": exact(CUR[max(CANDS.values(),
+                                      key=lambda a: a["cap_row"]["f1"])["key"]]
+                              ["f1_bootstrap95"]["lower"]),
+        "best.boot.hi": exact(CUR[max(CANDS.values(),
+                                      key=lambda a: a["cap_row"]["f1"])["key"]]
+                              ["f1_bootstrap95"]["upper"]),
+        # --- calibration
+        "cal.buckets": num(10),
+        "cal.sparse": num(sum(1 for c in CUR.values() for v in c["calibration"]
+                              if 0 < v["cases"] < 20)),
+        "cal.empty": num(sum(1 for c in CUR.values() for v in c["calibration"]
+                             if v["cases"] == 0)),
+        # --- failure overlap
+        "over.pairs": num(OVER["pairs_tested"]),
+        "over.defined": num(JSTAT["pairs"]),
+        "over.zero": num(JSTAT["zero"]),
+        "over.median": exact(JSTAT["median"]),
+        "over.mean": exact(JSTAT["mean"]),
+        "over.ratio": f'{JSTAT["ratio"]:.2f}',
+        "over.shared": f'{JSTAT["shared_observed"]:.0f}',
+        "over.expected": f'{JSTAT["shared_expected"]:.1f}',
+        "over.single.model": OVER["best_single_arm_at_the_common_budget"]["arm"],
+        "over.single.recall": exact(OVER["best_single_arm_at_the_common_budget"]["recall"]),
+        "over.single.tp": num(OVER["best_single_arm_at_the_common_budget"]["tp"]),
+        "over.half.a": OVER["best_pair_union_each_arm_at_half_the_budget"]["arms"][0],
+        "over.half.b": OVER["best_pair_union_each_arm_at_half_the_budget"]["arms"][1],
+        "over.half.recall": exact(OVER["best_pair_union_each_arm_at_half_the_budget"]["recall"]),
+        "over.half.tp": num(OVER["best_pair_union_each_arm_at_half_the_budget"]["tp"]),
+        "over.half.fp": num(OVER["best_pair_union_each_arm_at_half_the_budget"]["fp"]),
+        "over.half.f1": exact(OVER["best_pair_union_each_arm_at_half_the_budget"]["f1"]),
+        "over.half.precision":
+            exact(OVER["best_pair_union_each_arm_at_half_the_budget"]["precision"]),
+        "over.half.fpr": exact(OVER["best_pair_union_each_arm_at_half_the_budget"]["fpr"]),
+        "over.half.allowance": num(int(FPR_CAP / 2 * CORPUS["negatives_D"])),
+        "over.all.tp": num(OVER["union_tp_all_22_arms"]),
+        "over.all.fp": num(OVER["union_fp_all_22_arms"]),
+        "over.all.recall": exact(OVER["union_recall_ceiling_all_22_arms"]),
+        "over.all.fpr": exact(OVER["union_fp_all_22_arms"] / CORPUS["negatives_D"]),
+        "over.all.multiple":
+            f'{OVER["union_fp_all_22_arms"] / CORPUS["negatives_D"] / FPR_CAP:.1f}',
+        "over.inbudget": num(OVER["pairs_whose_union_stays_within_the_common_budget"]),
+        # --- the source census
+        "src.datasets": num(SRCCENSUS["s2"]["datasets"]),
+        "src.scorable.datasets": num(SRCCENSUS["s2"]["datasets_with_a_scorable_case"]),
+        "src.withpos": num(SRCCENSUS["s2"]["datasets_with_a_positive"]),
+        "src.big": SRCCENSUS["s2"]["largest_positive_source"],
+        "src.big.short": short_src(SRCCENSUS["s2"]["largest_positive_source"]),
+        "src.big.pos": num(SRCCENSUS["s2"]["per_dataset"]
+                           [SRCCENSUS["s2"]["largest_positive_source"]]["positives"]),
+        "src.big.share": pct(SRCCENSUS["s2"]["largest_positive_share"]),
+        "src.s3.datasets": num(SRCCENSUS["s3"]["datasets"]),
+        "src.s3.withpos": num(SRCCENSUS["s3"]["datasets_with_a_positive"]),
+        "src.mcptox": num(SRCCENSUS["s2"]["mcptox_rows"] + SRCCENSUS["s3"]["mcptox_rows"]),
+        "src.restricted": num(SRCCENSUS["s2"]["restricted_second_source_rows"]
+                              + SRCCENSUS["s3"]["restricted_second_source_rows"]),
+        # --- the cost frontier
+        "cost.models": num(len({r["arm"] for r in
+                              LAPTOP["decoder_throughput_rows_per_min"]
+                              + LAPTOP["encoder_throughput_rows_per_min"]} & set(CUR))),
+        "cost.rss.model": LAPTOP["memory"]["peak_rss_hungriest"]["arm"],
+        "cost.snapshot.spread": f'{max(a["snapshot_bytes"] for a in ROWS) / min(a["snapshot_bytes"] for a in ROWS):.0f}',
         # gates
         "gate.asserts": num(len(ASSERTS)),
         "gate.artifacts": num(len(_TOUCHED)),
         "gate.charts": num(len(CHARTS)),
     }
+    # --- figures the restructured pages add, each derived from the same records as above
+    _best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    _mid = in_band("3B to 6B")[0]
+    _pos, _neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    _half = OVER["best_pair_union_each_arm_at_half_the_budget"]
+    _cv = control_verdict()
+    _unsettled = SETTLE["unsettled"]
+    _two = [a for a in COH.values() if a["class_structure"] == "2-class"]
+    f.update({
+        "cap.f1.params.short": params_short(_best["params"]),
+        "cap.f1.missed": num(_pos - _best["cap_row"]["tp"]),
+        "band.best.mid.f1": exact(_mid["cap_row"]["f1"]),
+        "band.best.mid.tp": num(_mid["cap_row"]["tp"]),
+        "band.best.mid.params.short": params_short(_mid["params"]),
+        "rand.tp": f"{CAP_FP / _neg * _pos:.1f}",
+        "over.half.gain": num(_half["tp"] - OVER["best_single_arm_at_the_common_budget"]["tp"]),
+        "over.full.spend": num(2 * CAP_FP),
+        "ctrl.verdict": (
+            "held: both controls land inside the chance band" if _cv["held"] else
+            "did not hold as stated: " + " and ".join(
+                f"<code>{esc(k)}</code> lands {_cv['where'][k]} the chance band at "
+                f"{exact(COH[k]['auc_lc'])}" for k in _cv["failed"])),
+        "ctrl.verdict.short": "met" if _cv["held"] else "not met",
+        "models.twoclass": num(len(_two)),
+        "models.twoclass.controls": num(sum(1 for a in _two if a["is_control"])),
+        "deb.fp.cb": num(BASE["shipped"]["fp"]),
+        "deb.fp.cl": num(COH["control-modernbert-large"]["shipped"]["fp"]),
+        "deb.lc.rank": num(by_lc().index(COH["deberta-v3-prompt-injection-v2"]) + 1),
+        "settle.unsettled.note": (
+            "" if _unsettled == 0 else
+            f"{_unsettled} carry neither field; each holds the full {num(30310)} rows, so its "
+            f"completeness rests on the row count and <code>errors == 0</code>."),
+        "lap.rpm.shieldstral": fmt(RPM["shieldstral-1.0-3b"], 2),
+        "lap.rpm.best": fmt(RPM[_best["key"]], 2),
+        "lap.pass.best": pass_time(RPM[_best["key"]]),
+        "lap.encoder.ratio": f'{LAPTOP["encoder_throughput_rows_per_min"][0]["rows_per_min"] / FASTEST["rows_per_min"]:.1f}',
+        "lap.fastest.arm": FASTEST["arm"],
+        "lap.slowest.arm": SLOWEST["arm"],
+        "lap.deberta.arm": LAPTOP["encoder_throughput_rows_per_min"][0]["arm"],
+        "lap.modernbert.arm": LAPTOP["encoder_throughput_rows_per_min"][1]["arm"],
+        "lap.rss.key": LAPTOP["memory"]["peak_rss_hungriest"]["arm"],
+        "lap.q4min.key": LAPTOP["memory"]["q4_k_m_gib_min"]["arm"],
+        "lap.q4max.key": LAPTOP["memory"]["q4_k_m_gib_max"]["arm"],
+        "band.max.params.short": params_short(max(a["params"] for a in COH.values())),
+        "band.min.params.short": params_short(min(a["params"] for a in COH.values())),
+        "cue.tokens.name": CUE_NAME["natural_prompt_tokens (max over events)"],
+    })
     # per-arm confusion and rate keys, from rows. Short aliases for the three current arms keep
     # the templates readable; the full set is keyed by arm so a new arm needs no new code.
     alias = {"deberta-v3-prompt-injection-v2": "deb",
@@ -3370,38 +4746,38 @@ def build_figs() -> dict[str, str]:
             f[f"{pre}.fp"] = num(b["fp"])
             f[f"{pre}.fn"] = num(b["fn"])
             f[f"{pre}.tn"] = num(b["tn"])
-            f[f"{pre}.precision"] = fmt(b["precision"], 16)
-            f[f"{pre}.recall"] = fmt(b["recall"], 16)
-            f[f"{pre}.f1"] = fmt(b["f1"], 17)
-            f[f"{pre}.fpr"] = fmt(b["fpr"], 16)
+            f[f"{pre}.precision"] = exact(b["precision"])
+            f[f"{pre}.recall"] = exact(b["recall"])
+            f[f"{pre}.f1"] = exact(b["f1"])
+            f[f"{pre}.fpr"] = exact(b["fpr"])
     return f
 
 
 # =============================================================== generated tables
 
 def roster_table() -> str:
-    head = ["Repository", "Pinned revision", "Class", "Parameters", "Licence", "Origin",
-            "Gating group", "Readout", "Status"]
+    head = ["Model", "Repository at pinned revision", "Class", "Parameters", "Licence", "Origin",
+            "Gating group", "Readout"]
     rows = []
     for a in sorted(ROWS, key=lambda a: (a["cls"], -a["params"])):
         lic = a["licence"]
         if a["licence_name"]:
             lic = f'{lic} ({a["licence_name"]})'
-        rows.append([f'<code>{esc(a["repo"])}</code>',
-                     f'<code>{esc(a["revision"][:12])}</code>',
+        rows.append([f'<code>{esc(a["key"])}</code>',
+                     f'<code>{esc(a["repo"])}</code> @ <code>{esc(a["revision"][:12])}</code>',
                      esc(CLS_LABEL[a["cls"]]), num(a["params"]), esc(lic), esc(a["origin"]),
                      esc(a["gated"]) if a["gated"] else "ungated",
-                     f'<code>{esc(a["readout"])}</code>', esc(a["status"])])
+                     f'<code>{esc(a["readout"])}</code>'])
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
 
 
 def parity_table() -> str:
-    """The equivalence gate, stated as a property of the check. The reference arms belong to the
+    """The equivalence gate, stated as a property of the check. The reference models belong to the
     System One programme and are not named or scored here."""
     head = ["What the gate checks", "Result"]
     rows = [
         ["Published board scorecards re-derived from their settled prediction bodies before any "
-         "cohort arm is reported", f"{len(PARITY)}"],
+         "cohort model is reported", f"{len(PARITY)}"],
         ["Confusion matrices reproduced exactly, cell for cell",
          f'{sum(1 for v in PARITY.values() if v.get("confusion_matches_published"))} of '
          f'{len(PARITY)} (the third reference publishes no confusion matrix to check)'],
@@ -3416,47 +4792,23 @@ def parity_table() -> str:
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
 
 
-def scored_table() -> str:
-    head = ["Arm", "Role", "Rows", "Errors", "Prediction sha256"]
-    rows = []
-    for key, arm in sorted(ARMS.items()):
-        m = arm.get("arm_meta") or {}
-        rows.append([f"<code>{esc(key)}</code>", esc(arm.get("note", "")),
-                     num(arm["prediction_rows"]), num(m.get("errors", 0)),
-                     f'<code>{esc(arm["prediction_sha256"])}</code>'])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
-
-
 def taxonomy_table() -> str:
     t = ROSTER["taxonomy"]
-    head = ["Arm", "Policy mechanism", "Covers destructive tool calls"]
+    head = ["Model", "Policy mechanism", "Covers destructive tool calls"]
     rows = [
-        ["<code>meta-llama/Llama-Guard-3-1B</code>",
+        ["<code>llama-guard-3-1b</code>",
          f'the shipped template hardcodes {len(t["llama_guard_3_1b_default_categories"])} '
          f'categories, S1 to S13',
          "no; <code>llamaguard_default_taxonomy_covers_task: false</code> is recorded in the "
          "run metadata"],
-        ["<code>google/shieldgemma-2b</code>",
+        ["<code>shieldgemma-2b</code>",
          "the chat template takes a <code>guideline</code> argument",
          "yes, once the I3 policy is passed as the guideline"],
-        ["<code>mistralai/Shieldstral-1.0-3B</code>",
+        ["<code>shieldstral-1.0-3b</code>",
          "policy argument",
          "yes, once the I3 policy is passed as the policy"],
     ]
     return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
-
-
-def lg_categories() -> str:
-    t = ROSTER["taxonomy"]
-    items = "".join(f"<li>{esc(c)}</li>"
-                    for c in t["llama_guard_3_1b_default_categories"])
-    return (f"<ul class=\"slots\">{items}</ul>"
-            f"<p>The 8B model in the same family carries an "
-            f"{esc(t['llama_guard_3_8b_has_code_interpreter_abuse'])} Code Interpreter Abuse "
-            f"category. The 1B's default list does not. S2 Non-Violent Crimes is the nearest "
-            f"fit and mapping onto it would have been a manufactured mapping, so "
-            f"{esc(t['substitute'])}. Readout is "
-            f"{esc(t['readout'])}.</p>")
 
 
 def artifacts_read() -> str:
@@ -3468,8 +4820,7 @@ def artifacts_read() -> str:
         rows.append([f'<a href="{GH}/{esc(rel)}"><code>{esc(rel)}</code></a>',
                      num(os.path.getsize(path)),
                      f'<code>{esc(sha256_file(path)[:16])}</code>'])
-    return (f'<p>\n  {len(rows)} files, listed from the build\'s own read log. A file the build '
-            f'opens and this table omits is impossible: the table is generated from that log.\n'
+    return (f'<p>\n  {len(rows)} files, listed from the build\'s own read log.\n'
             f'</p>\n<div class="tbl-scroll">'
             f'{table_html(["File", "Bytes", "sha256, first 16"], rows, numeric_from=1)}</div>')
 
@@ -3481,30 +4832,26 @@ def caveat_list() -> str:
 
 
 UIS = {
+    "verdict_panel": verdict_panel,
+    "leaderboard": leaderboard,
+    "glossary": glossary,
+    "card_models": card_models,
+    "card_tags": card_tags,
+    "assumption_table": assumption_table,
+    "overlap_finding": overlap_finding,
+    "source_census_table": source_census_table,
     "common_point_table": common_point_table,
-    "oracle_table": oracle_table,
-    "accuracy_table": accuracy_table,
-    "size_band_tables": size_band_tables,
     "moe_note": moe_note,
-    "auc_table": auc_table,
-    "definition_table": definition_table,
-    "floor_table": floor_table,
     "corpus_table": corpus_table,
     "grade_scheme_table": grade_scheme_table,
     "label_provenance": label_provenance_block,
     "licence_table": licence_table,
-    "heldout_table": heldout_table,
-    "heldout_reconciliation": heldout_reconciliation,
     "control_finding": control_finding,
     "estimator_table": estimator_table,
     "sparse_bin_note": sparse_bin_note,
-    "corpus_design_note": corpus_design_note,
-    "resolution_note": resolution_note,
     "roster_table": roster_table,
     "parity_table": parity_table,
-    "scored_table": scored_table,
     "taxonomy_table": taxonomy_table,
-    "lg_categories": lg_categories,
     "artifacts_read": artifacts_read,
     "caveat_list": caveat_list,
 }
@@ -3543,16 +4890,11 @@ def check_card(body: str) -> list[str]:
 # ======================================================================= shell
 
 NAV_ITEMS = [
-    ("index.html", "Overview"),
-    ("operating-point.html", "Operating point"),
-    ("sizes.html", "Size bands"),
-    ("datasets.html", "Datasets"),
-    ("baselines.html", "Baselines"),
-    ("results.html", "Results"),
-    ("roster.html", "Roster"),
-    ("footprint.html", "Footprint"),
-    ("methodology.html", "Methodology"),
-    ("reproduce.html", "Reproduce"),
+    ("index.html", "Answer"),
+    ("operating-point.html", "At the budget"),
+    ("results.html", "Ranking and diagnostics"),
+    ("datasets.html", "Data and models"),
+    ("methodology.html", "Method and reproduce"),
 ]
 
 
@@ -3563,13 +4905,213 @@ def nav(current: str) -> str:
     return ('<nav class="nav"><div class="nav-in">'
             '<span class="nav-brand">SLM tool-call security</span>'
             + links
-            + '<span class="tag">evaluation-only &middot; never-train</span>'
+            + '<button type="button" class="seg prec" id="prec-btn" data-prec-btn '
+              'aria-pressed="false" title="Show the full decimal every figure was read at">'
+              'Exact values</button>'
+              '<span class="tag">evaluation-only &middot; never-train</span>'
               '</div></nav>')
+
+
+# ------------------------------------------------------------- in-page section index
+# The three longest pages carry over a hundred kilobytes of tables. A reader who arrives from the
+# nav has no way to see what is on the page without scrolling all of it, so every page gets a jump
+# bar built from its own <h2 id>s after substitution. It is plain anchors: nothing to run.
+_H2 = re.compile(r'<h2 id="([A-Za-z0-9_-]+)">(.*?)</h2>', re.S)
+
+
+def toc(body: str) -> str:
+    items = []
+    for hid, label in _H2.findall(body):
+        text = re.sub(r"<[^>]+>", "", label).strip()
+        if text:
+            items.append(f'<a href="#{hid}">{text}</a>')
+    if len(items) < 3:
+        return ""
+    return ('<nav class="toc" aria-label="Sections on this page">'
+            '<span class="toc-l">On this page</span>' + "".join(items) + '</nav>')
+
+
+# ----------------------------------------------------------------- the control script
+# No framework, no external file, one inline block on every page. Three controls, each of which
+# degrades to the state the HTML already renders: figures at their reading precision, tables in
+# the order the build wrote them, and every leaderboard row visible.
+SCRIPT = """<script>
+(function () {
+  "use strict";
+
+  /* ------------------------------------------------ precision: rounded <-> exact
+     Every figure ships rounded, with the artifact's exact decimal in data-x. This swaps
+     the two on every page at once and remembers the choice for the session. */
+  var KEY = "slm-exact";
+  var exact = false;
+
+  function applyPrecision() {
+    var cells = document.querySelectorAll("span.ex");
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i];
+      if (!c.hasAttribute("data-s")) { c.setAttribute("data-s", c.textContent); }
+      var x = c.getAttribute("data-x"), s = c.getAttribute("data-s");
+      c.textContent = exact ? x : s;
+      c.setAttribute("title", exact ? ("reads as " + s) : ("exact value " + x));
+    }
+    var btns = document.querySelectorAll("[data-prec-btn]");
+    for (var b = 0; b < btns.length; b++) {
+      btns[b].setAttribute("aria-pressed", exact ? "true" : "false");
+      btns[b].className = exact ? "seg prec on" : "seg prec";
+    }
+  }
+
+  try { exact = window.sessionStorage.getItem(KEY) === "1"; } catch (e) { exact = false; }
+  var precBtns = document.querySelectorAll("[data-prec-btn]");
+  for (var p = 0; p < precBtns.length; p++) {
+    precBtns[p].addEventListener("click", function () {
+      exact = !exact;
+      try { window.sessionStorage.setItem(KEY, exact ? "1" : "0"); } catch (e) {}
+      applyPrecision();
+    });
+  }
+  if (exact) { applyPrecision(); }
+
+  /* ----------------------------------------------------------- sortable columns
+     A th[data-sort] sorts on the exact value in data-x when the cell carries one, so the
+     order is the artifact's and not the rounding's. */
+  function numOf(tr, idx) {
+    var td = tr.cells[idx];
+    if (!td) { return NaN; }
+    var ex = td.querySelector("[data-x]");
+    var t = (ex ? ex.getAttribute("data-x") : td.textContent) || "";
+    t = t.replace(/,/g, "").replace(/\u2212/g, "-").trim();
+    if (t === "" || t === "n/a" || t === "not run") { return NaN; }
+    return parseFloat(t);
+  }
+
+  function textOf(tr, idx) {
+    var td = tr.cells[idx];
+    return td ? (td.textContent || "").trim().toLowerCase() : "";
+  }
+
+  /* "auto": numeric only when most of the column's cells parse as a number, so a column of
+     yes/no or of model names is ordered as text. A cell holding the four confusion counts as
+     `25/13/411/3368` parses as its first count, which is the true-block count, and orders on it. */
+  function kindOf(rows, idx, declared) {
+    if (declared === "num" || declared === "text") { return declared; }
+    var ok = 0, n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var t = textOf(rows[i], idx);
+      if (t === "" || t === "n/a") { continue; }
+      n += 1;
+      if (isFinite(numOf(rows[i], idx))) { ok += 1; }
+    }
+    return (n && ok / n >= 0.6) ? "num" : "text";
+  }
+
+  function cellVal(tr, idx, kind) {
+    if (kind === "text") { return textOf(tr, idx); }
+    var v = numOf(tr, idx);
+    return isFinite(v) ? v : -Infinity;
+  }
+
+  var tables = document.querySelectorAll("table[data-sortable]");
+  for (var ti = 0; ti < tables.length; ti++) {
+    (function (table) {
+      var body = table.tBodies[0];
+      if (!body) { return; }
+      var original = Array.prototype.slice.call(body.rows);
+      var heads = table.querySelectorAll("thead th[data-sort]");
+      for (var hi = 0; hi < heads.length; hi++) {
+        (function (th) {
+          var idx = th.cellIndex;
+          th.setAttribute("tabindex", "0");
+          th.setAttribute("role", "button");
+          var go = function () {
+            var was = th.getAttribute("aria-sort");
+            var dir = was === "descending" ? 1 : -1;
+            var rows = original.slice();
+            var kind = kindOf(rows, idx, th.getAttribute("data-sort"));
+            rows.sort(function (x, y) {
+              var a = cellVal(x, idx, kind), c = cellVal(y, idx, kind);
+              return a === c ? 0 : (a < c ? -1 : 1) * dir;
+            });
+            var all = table.querySelectorAll("thead th[data-sort]");
+            for (var k = 0; k < all.length; k++) { all[k].removeAttribute("aria-sort"); }
+            th.setAttribute("aria-sort", dir === -1 ? "descending" : "ascending");
+            for (var r = 0; r < rows.length; r++) { body.appendChild(rows[r]); }
+            if (table.id === "lb") { renumber(); }
+          };
+          th.addEventListener("click", go);
+          th.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
+          });
+        })(heads[hi]);
+      }
+    })(tables[ti]);
+  }
+
+  /* ------------------------------------------------- leaderboard: filter and find */
+  var lb = document.getElementById("lb");
+  if (!lb) { return; }
+  var lbBody = lb.tBodies[0];
+  var rows = lbBody ? Array.prototype.slice.call(lbBody.rows) : [];
+  var q = document.getElementById("lb-q");
+  var count = document.getElementById("lb-count");
+  var group = "all";
+
+  function shown(tr) {
+    var text = (q && q.value ? q.value : "").trim().toLowerCase();
+    if (text && (tr.getAttribute("data-key") || "").indexOf(text) < 0) { return false; }
+    if (group === "all") { return true; }
+    if (group === "candidate" || group === "control") {
+      return tr.getAttribute("data-role") === group;
+    }
+    return tr.getAttribute("data-band") === group;
+  }
+
+  /* Read the rows in DOM order every time: after a sort the DOM order is the order on screen,
+     and the rank column has to number what the reader sees. */
+  function renumber() {
+    var live = lbBody ? Array.prototype.slice.call(lbBody.rows) : rows;
+    var n = 0, hidden = 0;
+    for (var i = 0; i < live.length; i++) {
+      var on = shown(live[i]);
+      live[i].style.display = on ? "" : "none";
+      if (!on) { hidden += 1; continue; }
+      n += 1;
+      var r = live[i].querySelector("[data-rank]");
+      if (r) { r.textContent = String(n); }
+    }
+    if (count) {
+      count.textContent = hidden
+        ? (n + " of " + live.length + " models")
+        : (live.length + " models");
+    }
+  }
+
+  if (q) {
+    q.addEventListener("input", renumber);
+    q.addEventListener("search", renumber);
+  }
+  var gbtns = document.querySelectorAll("[data-lb-group]");
+  for (var g = 0; g < gbtns.length; g++) {
+    gbtns[g].addEventListener("click", function () {
+      group = this.getAttribute("data-lb-group");
+      for (var k = 0; k < gbtns.length; k++) {
+        var on = gbtns[k].getAttribute("data-lb-group") === group;
+        gbtns[k].setAttribute("aria-pressed", on ? "true" : "false");
+        gbtns[k].className = on ? "seg on" : "seg";
+      }
+      renumber();
+    });
+  }
+})();
+</script>"""
 
 
 TOKEN = re.compile(r"\{\{(chart|fig|ui):([A-Za-z0-9_.]+)\}\}")
 
 
+
+
+check_review_fixes()
 
 
 def main() -> int:
@@ -3637,6 +5179,8 @@ def main() -> int:
 
         body = TOKEN.sub(sub, body)
         body = body.replace("{{NAV}}", nav(name))
+        if name.endswith(".md"):
+            body = plain_exact(body)
         if name == "README.md":
             card_bad.extend(check_card(body))
         if name.endswith(".html"):
@@ -3644,6 +5188,15 @@ def main() -> int:
                 missing.append(f"{name}: no {{{{STYLE}}}} in <head>, so the page would be "
                                f"unstyled")
             body = body.replace("{{STYLE}}", style_block)
+            body = body.replace("{{TOC}}", toc(body))
+            # the controls ship on every page, so the script is appended rather than tokenised:
+            # a page that forgot the token would silently lose its precision control
+            if "</body>" not in body:
+                missing.append(f"{name}: no </body>, so the control script has nowhere to go")
+            body = body.replace("</body>", SCRIPT + "\n</body>")
+            left = re.findall(r"\{\{[A-Za-z][A-Za-z0-9_:.]*\}\}", body)
+            if left:
+                missing.extend(f"{name}: {t}" for t in sorted(set(left)))
         with open(os.path.join(OUT, name), "w", encoding="utf-8") as fh:
             fh.write(body)
         written.append(name)
@@ -3657,7 +5210,7 @@ def main() -> int:
             print("  " + m)
         return 3
     if scope_bad:
-        print("ABORT: an out-of-scope model or arm is named in the output:")
+        print("ABORT: an out-of-scope model or model is named in the output:")
         for line in scope_bad:
             print("  " + line)
         return 10
@@ -3703,7 +5256,7 @@ def main() -> int:
     for t in sorted(_TOUCHED):
         print("  " + t)
     with open(os.path.join(OUT, "_build-figures.json"), "w", encoding="utf-8") as fh:
-        json.dump({"figures": figs,
+        json.dump({"figures": {k: unwrap_exact(v) for k, v in figs.items()},
                    # repo-rooted, so the record identifies files in the repository and carries no
                    # part of whatever machine ran the build
                    "artifacts_read": sorted(os.path.relpath(p, REPO_ROOT) for p in _TOUCHED),

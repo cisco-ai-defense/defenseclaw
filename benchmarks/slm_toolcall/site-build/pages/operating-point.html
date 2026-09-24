@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Operating point &#8212; SLM tool-call security</title>
+<title>At the budget &#8212; SLM tool-call security</title>
 {{STYLE}}
 </head>
 <body>
@@ -11,34 +11,23 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">OPERATING POINT</p>
-<h1>Every arm at one false-positive budget</h1>
+<p class="eyebrow">AT THE BUDGET</p>
+<h1>Every model at block false-positive rate {{fig:cap.exact}}</h1>
 <p class="lede">
-  All {{fig:arms.scored}} arms are re-thresholded to the same block false-positive rate,
-  {{fig:cap.exact}}, which is the incumbent cascade's own operating rate on this corpus. That
-  budget allows {{fig:cap.maxfp}} false blocks out of {{fig:corpus.negatives}} benign cases. The
-  threshold each arm needs to reach it differs by arm; the budget does not.
+  The budget allows {{fig:cap.maxfp}} false blocks in {{fig:corpus.negatives}} benign calls. Each
+  model's threshold is fitted to meet it, so every row below is comparable with every other.
+  At that budget no model catches more than {{fig:cap.f1.tp}} of {{fig:corpus.positives}}
+  destructive calls.
 </p>
 
-<div class="box" id="rule">
-  <h3>The reporting rule</h3>
-  <p>
-    Precision, recall, F1, accuracy and block FPR appear in one table, computed at one shared
-    budget, over the {{fig:corpus.scorable}} scorable cases. No arm appears in that table at a
-    threshold chosen for it alone. Each arm's own argmax is a
-    <a href="#oracle">separate table</a> and is an in-sample upper bound.
-  </p>
-</div>
+{{TOC}}
 
-<h2 id="common">The common operating point</h2>
+<h2 id="common">Counts and rates</h2>
 <p>
-  At this budget the highest F1 among the {{fig:arms.candidates}} candidates is
-  <code>{{fig:cap.f1.arm}}</code>: F1 {{fig:cap.f1}}, recall {{fig:cap.f1.recall}}, precision
-  {{fig:cap.f1.precision}}. That is {{fig:cap.f1.tp}} true blocks of
-  {{fig:corpus.positives}} positives and {{fig:cap.f1.fp}} false blocks of
-  {{fig:corpus.negatives}} benign cases, at threshold {{fig:cap.f1.threshold}}. Each of the
-  {{fig:arms.scored}} rows needed its own threshold to reach the budget, and
-  {{fig:cap.thresholds}} distinct thresholds appear.
+  The best model, <code>{{fig:cap.f1.model}}</code>, blocks {{fig:cap.f1.tp}} destructive calls and
+  {{fig:cap.f1.fp}} benign ones at threshold {{fig:cap.f1.threshold}}: F1 {{fig:cap.f1}}, recall
+  {{fig:cap.f1.recall}}, precision {{fig:cap.f1.precision}}. The two rows at the bottom are what
+  blocking everything and blocking nothing score.
 </p>
 
 {{ui:common_point_table}}
@@ -47,83 +36,83 @@
 
 <div class="box bad">
   <p>
-    The highest recall any arm reaches inside this budget is {{fig:cap.f1.recall}}. The Wilson 95%
-    interval on it runs to {{fig:res.wilson.hi}}. A filter at that recall leaves most destructive
-    calls through, so no arm in this cohort is a guardrail on its own.
+    The highest recall inside the budget is {{fig:cap.f1.recall}}, and the Wilson 95% interval on
+    it runs to {{fig:res.wilson.hi}}. A filter at that recall lets most destructive calls through,
+    so no model here works as a guardrail on its own.
   </p>
 </div>
 
-<h2 id="zerofp">Recall at a zero-false-positive gate</h2>
+<h2 id="curves">Near the budget</h2>
 <p>
-  The stricter gate admits no false block at all. {{fig:zfp.zero}} of the {{fig:zfp.candidates}}
-  candidates retain zero recall under it. {{fig:zfp.nonzero}} retain some, and the highest is
-  <code>{{fig:zfp.best.arm}}</code> at recall {{fig:zfp.best.recall}} over {{fig:zfp.best.tp}}
-  true blocks.
+  The budget sits at {{fig:cap.exact}} on an axis that runs to 1. These ROC panels stop the x axis
+  at {{fig:zoom.fpr}}, {{fig:zoom.multiple}}&#215; the budget. Even there the best recall any
+  candidate reaches is {{fig:zoom.recall.max}}.
+</p>
+
+{{chart:roc_zoom}}
+
+<h2 id="capfpr">Whether the budget holds on new traffic</h2>
+<p>
+  Every model meets the budget on this corpus by construction. The Wilson 95% interval on its
+  false-block rate reaches {{fig:fpr.wilson.max}} at its widest, and for {{fig:fpr.wilson.over}}
+  of the {{fig:models.scored}} models the upper end is above the budget. Meeting it here does not
+  show a model would meet it on another sample of the same size.
+</p>
+
+{{chart:cap_fpr}}
+
+<h2 id="zerofp">With no false blocks allowed</h2>
+<p>
+  {{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates catch nothing when they may block no
+  benign call at all. The best, <code>{{fig:zfp.best.model}}</code>, catches {{fig:zfp.best.tp}}
+  (recall {{fig:zfp.best.recall}}).
 </p>
 
 {{chart:zerofp}}
 
-<h2 id="oracle">Each arm at its own argmax</h2>
-<div class="box warn">
-  <p>
-    <strong>Every figure in this section is an in-sample oracle upper bound.</strong> The
-    threshold is found by sweeping the same rows the score is computed on, so it is the ceiling an
-    arm would reach if its threshold had been fitted with the labels in hand. It is not an
-    operating point and it is not comparable with the common-budget table above, which is why the
-    two are separate tables and never share a column.
-  </p>
-</div>
+<h2 id="sizes">Size against F1</h2>
 <p>
-  The highest is <code>{{fig:oracle.best.arm}}</code> at {{fig:oracle.best.f1}} and the lowest is
-  <code>{{fig:oracle.min.arm}}</code> at {{fig:oracle.min.f1}}. All
-  {{fig:oracle.clear.floor}} arms clear the trivial floor of {{fig:floor.f1}} at their own argmax.
-  The last column repeats each arm's F1 at the shared budget, so the size of the gap between a
-  fitted ceiling and a fixed budget is visible per arm.
+  Counted parameters put {{fig:band.under}} models under 3B, {{fig:band.mid}} from 3B to 6B and
+  {{fig:band.upper}} at 6B and up. Nothing in this cohort lands in the last band; the largest has
+  {{fig:band.max.params.short}} parameters. The best model under 3B,
+  <code>{{fig:band.best.under}}</code>, beats the best from 3B to 6B,
+  <code>{{fig:band.best.mid}}</code>, on F1 at the budget, {{fig:cap.f1}} against
+  {{fig:band.best.mid.f1}}. The leaderboard filters by band.
 </p>
 
-{{ui:oracle_table}}
+{{chart:size_scatter}}
 
-<h2 id="floor">Shipped decisions against the trivial floor</h2>
+<h2 id="sources">Recall by source dataset</h2>
 <p>
-  Blocking every case scores block-only F1 {{fig:floor.f1}} at {{fig:corpus.prevalence}}
-  prevalence. That row sits in the table below, at the bottom, so every F1 in the table is read
-  against it. {{fig:arms.under.floor}} of the {{fig:arms.shipped.cands}} candidates with a shipped
-  decision fall below it and {{fig:arms.zero.f1}} score exactly zero, blocking no positive case.
-</p>
-<p>
-  The untrained <code>control-modernbert-base</code> backbone scores {{fig:cb.shipped}} at its
-  shipped decision and {{fig:cb.oracle}} at its own argmax. {{fig:beat.control.shipped}} of the
-  candidates sit at or below it on shipped F1 and {{fig:beat.control.oracle}} at or below it on
-  argmax F1. The decomposition of that result is on
-  <a href="results.html#control">Results</a>.
+  s2 pools {{fig:src.datasets}} source datasets and {{fig:src.withpos}} of them contribute a
+  positive. <code>{{fig:src.big.short}}</code> holds {{fig:src.big.pos}} of the
+  {{fig:corpus.positives}} positives, {{fig:src.big.share}}, so a recall figure here is mostly a
+  recall figure on that one dataset.
 </p>
 
-{{ui:floor_table}}
+{{chart:srcheat}}
 
-<h2 id="accuracy">Accuracy, and the accuracy of doing nothing</h2>
+<h2 id="accuracy">Accuracy, beside the accuracy of doing nothing</h2>
 <p>
-  Positive prevalence is {{fig:corpus.prevalence}} on s2 and {{fig:s3.prevalence}} on the second
-  corpus, whose positives are {{fig:s3.gradeA.share}} grade A against s2's
-  {{fig:s2.gradeA.share}}. At those prevalences accuracy is set by the benign class. Allowing
-  every case scores {{fig:acc.s2.allow}} on s2 and {{fig:acc.s3.allow}} on the second corpus.
-</p>
-<p>
-  An arm's accuracy at the shared budget exceeds the all-allow figure exactly when it gains more
-  true blocks than it spends on false ones. {{fig:acc.beat}} of the {{fig:arms.scored}} arms do,
-  and the widest margin is {{fig:acc.gain}} cases out of {{fig:corpus.scorable}}. Both baselines
-  sit in the same table as the accuracy figures.
+  At {{fig:corpus.prevalence}} prevalence, allowing every call scores accuracy
+  {{fig:acc.s2.allow}}. A model beats that by exactly the true blocks it gains minus the false
+  blocks it spends. {{fig:acc.beat}} of the {{fig:models.scored}} models come out ahead, by at most
+  {{fig:acc.gain}} cases of {{fig:corpus.scorable}}.
 </p>
 
-{{ui:accuracy_table}}
+{{chart:accuracy_delta}}
 
-<div class="foot">
-  <p>Every cell above is read at build time from
-    <code>cohort-length-controlled-ranking.json</code>, <code>cohort-rank.json</code> and
-    <code>s3-scores-in-scope.json</code>, over
-    <code>cases_sha256 {{fig:corpus.sha}}</code>. Confusion matrices, rates and accuracies are
-    recomputed from the counts beside them and checked against the artifacts before this page is
-    written.</p>
-</div>
+<h2 id="overlap">Combining two models</h2>
+<p>
+  No single model is usable. The remaining question is whether two together would be.
+</p>
+
+{{ui:overlap_finding}}
+
+{{chart:jaccard}}
+
+{{chart:union}}
+
 </div>
 </body>
 </html>

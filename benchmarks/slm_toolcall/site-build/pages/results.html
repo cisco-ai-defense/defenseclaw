@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Results &#8212; SLM tool-call security</title>
+<title>Ranking and diagnostics &#8212; SLM tool-call security</title>
 {{STYLE}}
 </head>
 <body>
@@ -11,383 +11,123 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">RESULTS</p>
-<h1>Scored arms</h1>
+<p class="eyebrow">RANKING AND DIAGNOSTICS</p>
+<h1>How well each model orders cases, and why that is not the answer</h1>
 <p class="lede">
-  {{fig:arms.scored}} arms have a ranking record on s2: {{fig:arms.candidates}} candidates and
-  {{fig:roster.control}} negative controls, {{fig:settle.rows}} rows each with 0 errors. Every arm
-  is ranked on one fixed variable chosen by its class structure, never selected per arm.
+  F1 at the budget, on <a href="index.html#leaderboard-table">the leaderboard</a>, answers the
+  deployment question. This page is diagnostic: AUC with no threshold, what length alone predicts,
+  what an untrained backbone scores, and how far each model's default decision sits from a
+  usable one.
 </p>
 
-<h2 id="deployment">Deployability</h2>
-<p>
-  Every arm's confusion matrix, precision, recall, F1, accuracy and block false-positive rate at
-  the one shared budget of {{fig:cap.value}} are on
-  <a href="operating-point.html#common">Operating point</a>, together with each arm's own argmax
-  as a separate table and the two trivial baselines. The best F1 there is
-  <code>{{fig:cap.f1.arm}}</code> at {{fig:cap.f1}}, on {{fig:cap.f1.tp}} of
-  {{fig:corpus.positives}} positives. <code>{{fig:rank1.arm}}</code>, which leads the ranking
-  below, catches {{fig:cap.deberta.tp}} positive at the same budget.
-</p>
+{{TOC}}
 
-{{chart:deploy}}
-
+<h2 id="auc">AUC, with and without length control</h2>
 <p>
-  {{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates retain zero recall under a
-  zero-false-positive gate. {{fig:zfp.nonzero}} retain some, and the highest is
-  <code>{{fig:zfp.best.arm}}</code> at {{fig:zfp.best.recall}} over {{fig:zfp.best.tp}} true
-  blocks. <a href="operating-point.html#zerofp">That gate in full</a>.
-</p>
-<div class="box bad">
-  <p>
-    No arm in this cohort reaches a recall at a deployable false-positive budget that would make
-    it useful on its own. Zero-FP gates did not transfer across corpora when the System One
-    programme measured them, so neither gate is presented as durable.
-  </p>
-</div>
-
-<h2 id="auc">Threshold-free discrimination</h2>
-<p>
-  AUC depends on no threshold, so it separates an arm's ability to order cases from the calibration
-  of its decision rule. For {{fig:corpus.positives}} positives and {{fig:corpus.negatives}}
-  negatives the Hanley&#8211;McNeil standard error at AUC 0.5 is {{fig:band.se}}, which puts the
-  95% chance band at <strong>[{{fig:band.lo}}, {{fig:band.hi}}]</strong>. {{fig:auc.above}} of the
-  {{fig:arms.scored}} arms sit above that band on raw AUC, {{fig:auc.inside}} inside it and
-  {{fig:auc.below}} below it.
+  AUC is the chance a model scores a random destructive call above a random benign one. For
+  {{fig:corpus.positives}} positives and {{fig:corpus.negatives}} benign cases the
+  Hanley&#8211;McNeil standard error at AUC 0.5 is {{fig:band.se}}, so the 95% chance band is
+  <strong>[{{fig:band.lo}}, {{fig:band.hi}}]</strong>. On raw AUC {{fig:auc.above}} of the
+  {{fig:models.scored}} models sit above that band and {{fig:auc.below}} below it. Every model is
+  scored on one fixed variable chosen by its class structure, and each is a single monotone
+  scalar, so AUC definitions A and B coincide for all of them.
 </p>
 <p>
-  Each row carries its AUC definition. {{fig:auc.coincide}} of the {{fig:arms.scored}} arms are
-  ranked on a variable for which definitions A and B coincide, because the variable is already a
-  single monotone scalar and both definitions reduce to the same maximum over events.
+  Raw AUC overstates what a model knows. Destructive trajectories in this corpus are longer than
+  benign ones, and {{fig:cue.n}} counting variables with no model in them separate the two:
+  {{fig:cue.list}}. Length-controlled AUC removes that: the AUC inside each prompt-length quintile,
+  pooled with each quintile weighted by the positive-benign pairs it holds.
 </p>
 
-{{ui:auc_table}}
+{{chart:cues}}
 
-<h3 id="definitions">Where definitions A and B differ</h3>
-{{ui:definition_table}}
+{{chart:quintiles}}
 
-<h2 id="ranking">The ranking</h2>
+<h2 id="ranking">The AUC ordering</h2>
 <p>
-  The published length-controlled AUC is the <strong>{{fig:est.published}}</strong> figure, named in
-  {{fig:est.source}}. It weights each length bin by the positive-benign comparisons the bin actually
-  holds. Ranks 1 and 2 are <code>{{fig:est.rank1}}</code> and <code>{{fig:est.rank2}}</code>; rank 3
-  is <code>{{fig:est.rank3}}</code>.
+  On length-controlled AUC the top three are <code>{{fig:est.rank1}}</code> at
+  {{fig:rank1.lc}}, <code>{{fig:est.rank2}}</code> at {{fig:rank2.lc}} and
+  <code>{{fig:est.rank3}}</code>. {{fig:beat.control}} of the {{fig:models.candidates}}
+  candidates score above the untrained <code>control-modernbert-base</code>, and
+  {{fig:under.band}} fall below the chance band, which means they are anti-correlated with the
+  label once length is removed. The estimator is the one named in {{fig:est.source}};
+  <a href="methodology.html#length">Method</a> gives the reasons for it.
 </p>
-<div class="box warn">
-  <p>
-    An earlier revision of this Space published the <em>unweighted mean</em> of the per-quintile
-    AUCs and gave rank 3 to <code>{{fig:est.rank3.unw}}</code>. That estimator is retracted. It
-    hands the thinnest quintile, which holds {{fig:est.q0.pos}} of the {{fig:corpus.positives}}
-    positives, {{fig:est.q0.wunw}} of the weight against an evidential share of
-    {{fig:est.q0.share}} &#8212; an over-weighting of {{fig:est.overweight}}&#215;.
-  </p>
-</div>
+
 {{chart:ranking}}
-<p>
-  <code>{{fig:rank1.arm}}</code> leads at {{fig:rank1.lc}} against a raw {{fig:rank1.raw}}. It ran
-  at a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk.
-  <code>{{fig:rank2.arm}}</code> at {{fig:rank2.lc}} ran at cap {{fig:rank2.cap}} with no rows
-  shrunk, so it earned its position seeing the whole prompt while rank 1 did not.
-</p>
-<p>
-  The artifact records <code>rank_1_stable</code> and <code>rank_2_stable</code> as false, so the
-  claim is not that positions 1 and 2 are settled across schemes. Each is contradicted by exactly
-  one of the {{fig:est.schemes}}, and it is the same scheme in both cases:
-  <code>{{fig:est.disagree1}}</code>, whose bins move with each arm's own truncation, which the
-  artifact marks confounded. Position 3 is contradicted by {{fig:est.disagree3}}.
-</p>
-<p>
-  Under the published estimator, {{fig:beat.control}} of the {{fig:arms.candidates}} candidates
-  score above the untrained <code>control-modernbert-base</code> and {{fig:under.band}} fall below
-  the chance band, which puts them anti-correlated with the label.
-</p>
-
-<h3 id="estimators">Why this estimator</h3>
-<p>
-  Three reasons, none of them a count of how many estimators agree. The ranking artifact evaluates
-  {{fig:est.schemes}} schemes and {{fig:est.unwfam}} of them are unweighted means differing only in
-  how the bins are cut, so they share one defect and are not independent witnesses.
-</p>
-<ul>
-  <li><strong>What it estimates.</strong> Pooling is the Mann-Whitney statistic over within-stratum
-      pairs: the raw AUC with the length-confounded pairs deleted and nothing else changed. The
-      unweighted mean estimates a different thing, the same probability averaged with equal weight
-      per length band regardless of how many attacks fall in that band.</li>
-  <li><strong>Weight against evidence.</strong> The thinnest quintile holds {{fig:est.q0.pos}} of
-      {{fig:corpus.positives}} positives, {{fig:est.q0.share}} of the evidence. The unweighted mean
-      gives it {{fig:est.q0.wunw}} of the weight, {{fig:est.overweight}}&#215; its share. Pair
-      weighting gives it {{fig:est.q0.wpool}}.</li>
-  <li><strong>Variance.</strong> Per-bin Hanley&#8211;McNeil at AUC 0.5, a function of bin
-      composition alone, puts the unweighted mean's standard error at {{fig:est.seratio}}&#215; the
-      pooled estimator's, on every candidate arm. The number of arms where it is not worse is
-      {{fig:est.seworse}}.</li>
-</ul>
-<p>
-  Position 3 under the four estimators reported here: <code>{{fig:est.rank3.pooled}}</code>
-  pooled, <code>{{fig:est.rank3.unw}}</code> unweighted over all bins,
-  <code>{{fig:est.rank3.ge10}}</code> unweighted over bins with 10 or more positives, and
-  <code>{{fig:est.rank3.ge25}}</code> over bins with 25 or more. As the thin bins are dropped the
-  unweighted mean walks toward the pooled answer. The artifact's own plurality among the
-  {{fig:est.schemes}} schemes is <code>{{fig:est.rank3.plurality}}</code>, and that plurality is
-  not what decides the position: {{fig:est.unwfam}} of the schemes are unweighted means differing
-  only in binning.
-</p>
-
-{{chart:estimators}}
-
-{{ui:estimator_table}}
-
-<h4>Where the published estimator is fragile</h4>
-{{ui:sparse_bin_note}}
-<h2 id="corpora">The grade composition of the positives</h2>
-<p>
-  A held-out corpus exists, disjoint from s2 with zero case-id overlap, and {{fig:s3.arms}} arms
-  have been scored on it. It is not used here as a generalisation test, and
-  <strong>no transfer figure is published</strong>: its positives are built from almost the opposite
-  grade mix.
-</p>
-
-{{ui:corpus_design_note}}
 
 <p>
-  Grade A is an unambiguous destructive call; grade B is a judgement call. s2's positives are
-  {{fig:s2.gradeA.share}} grade A. The held-out corpus's are {{fig:s3.gradeA.share}}. So a change
-  in an arm's score between the two conflates threshold miscalibration with a changed definition of
-  a positive, and a difference between them cannot be read as generalisation in either direction.
+  The ordering is not stable at the top: the ranking artifact records
+  <code>rank_1_stable</code> = {{fig:rank1.stable}} and <code>rank_2_stable</code> =
+  {{fig:rank2.stable}}, and
+  position 3 changes under {{fig:est.disagree3}} of its {{fig:est.schemes}} schemes. Rank 1 ran at
+  a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk;
+  <code>{{fig:rank2.model}}</code> ran at {{fig:rank2.cap}} tokens with none shrunk.
 </p>
 
-{{chart:grades}}
+<h2 id="defaults">Default decisions and best-F1 thresholds</h2>
 
-<p>
-  Because the held-out corpus is {{fig:s3.gradeA.share}} grade A, position on it is driven by
-  grade-A separation, and the two extremes of that make the point.
-  <code>{{fig:mirror.a.arm}}</code> reaches {{fig:mirror.a.aucA}} on grade A against
-  {{fig:mirror.a.aucB}} on grade B, from s2 rank {{fig:mirror.a.rank}} on a corpus that is
-  {{fig:s2.gradeA.share}} grade A. <code>{{fig:mirror.b.arm}}</code> is the other end at
-  {{fig:mirror.b.aucA}} on grade A against {{fig:mirror.b.aucB}} on grade B, so it is
-  anti-predictive on exactly the class the held-out corpus is made of, from s2 rank
-  {{fig:mirror.b.rank}}.
-</p>
-<div class="box bad">
-  <p>
-    Neither of those is evidence about generalisation. Both are evidence that the two corpora
-    measure different things. This is a corpus-design finding and more data of the same kind does
-    not fix it.
-  </p>
-</div>
-
-<h3 id="s3cue">Length fields on the second corpus</h3>
-<p class="small">
-  Still the corpus whose positives are {{fig:s3.gradeA.share}} grade A against s2's
-  {{fig:s2.gradeA.share}}; this section is about its length fields, and no transfer figure is
-  published from it.
-</p>
-<p>
-  On the held-out corpus the counting variables sit at {{fig:s3.cue.bytes}} and
-  {{fig:s3.cue.events}}, inside and below its chance band of [{{fig:s3.band.lo}},
-  {{fig:s3.band.hi}}]. Both are corpus fields identical across every arm. Raw AUC is therefore the
-  honest primary there, and a length-controlled figure would add estimator noise and nothing else.
-  The length control on this Space applies to s2, where the same kind of variable reaches
-  {{fig:cue.tokens}}.
-</p>
-
-{{chart:s3cue}}
-
-<h3 id="resolution">The resolution of the current corpus</h3>
-<p class="small">
-  This section is about precision of measurement. The grade A share of positives is {{fig:s3.gradeA.share}} on the
-  held-out corpus against {{fig:s2.gradeA.share}} on s2, so none of this licenses a transfer claim.
-</p>
-{{ui:resolution_note}}
-
-<h2 id="control">What an untrained backbone scores</h2>
 {{ui:control_finding}}
-
-{{ui:scored_table}}
-
-<h2 id="metrics">Block false-positive rates</h2>
-<p>
-  Precision, recall, F1, accuracy and block FPR for every arm are on
-  <a href="operating-point.html#common">Operating point</a>: once at the common budget of
-  {{fig:cap.value}}, once at each arm's own argmax as an in-sample upper bound, and once at each
-  arm's shipped decision beside the trivial floor. Every cell there is counted from rows over the
-  {{fig:corpus.scorable}} scorable cases.
-</p>
-
-{{chart:fpr}}
-
-<p>
-  The candidate's block false-positive rate of {{fig:deb.fpr}} means {{fig:deb.fp}} of the
-  {{fig:corpus.negatives}} benign cases are blocked. Both controls sit lower, at {{fig:cb.fpr}}
-  and {{fig:cl.fpr}}, while blocking every case is {{fig:floor.fpr}} by construction.
-</p>
-<h2 id="parity">Scorer equivalence</h2>
-<p>
-  The cohort harness imports the reference driver's own <code>build_state</code> and
-  <code>build_questions</code>, so the prompts it sends are byte-exact and each row's
-  <code>context_sha256</code>, <code>context_bytes</code> and <code>truncated</code> fields are
-  byte-identical to the settled board rows. Before any cohort arm is reported, the pipeline
-  re-derives {{fig:parity.n}} published System One board scorecards from their settled prediction
-  bodies and matches the published figures.
-</p>
-
-{{ui:parity_table}}
-
-<p>
-  The reference arms belong to the System One programme and their scores are published on the
-  <a href="{{fig:other.space}}">System One
-  Space</a>. What the gate establishes for this Space is that the scoring code
-  reproduces known answers before it is trusted on a new arm.
-</p>
-
-<h3 id="arithmetic">The arithmetic</h3>
-<p>
-  The {{fig:arith.importers}} cohort scoring scripts import their arithmetic verbatim from
-  <code>{{fig:arith.path}}</code>, {{fig:arith.bytes}} bytes at sha256
-  <code>{{fig:arith.sha}}</code>. That module is in the repository and git-tracked, and the copy
-  the scoring run imported hashes to the same digest, checked on {{fig:arith.verified}}. The
-  digest is re-hashed at build time. Request construction is pinned the same way, through
-  <code>{{fig:arith.driver}}</code>.
-</p>
 
 <h2 id="gate">The leakage gate</h2>
 <p>
-  Both ModernBERT arms are bare <code>ModernBertForMaskedLM</code> backbones with no trained
-  head, scored by a zero-shot masked-token yes/no readout. The prediction stated before
-  measurement was that both should land at chance. The null band for {{fig:corpus.positives}}
-  positives and {{fig:corpus.negatives}} negatives is [{{fig:band.lo}}, {{fig:band.hi}}].
-</p>
-<p class="small">
-  Two gates are named apart here. The parity gate is inside <code>score_cohort.py</code> and is
-  the <a href="#parity">scorer equivalence</a> above. The leakage gate is this programme's name
-  for the pre-registered prediction about the controls plus the surface-cue diagnostic that tests
-  it; the scoring code carries no gate under that name.
+  Both ModernBERT models are bare <code>ModernBertForMaskedLM</code> backbones with no trained
+  head, read by a zero-shot masked-token yes/no probe. The prediction made before measuring was
+  that both land at chance once prompt length is controlled for. Under the published estimator
+  that prediction {{fig:ctrl.verdict}}.
 </p>
 <div class="tiles">
-  <div class="tile"><div class="v">{{fig:cl.auc}}</div>
-    <div class="l">control-modernbert-large, raw AUC</div>
-    <div class="s">inside the band</div></div>
-  <div class="tile"><div class="v">{{fig:cb.auc}}</div>
-    <div class="l">control-modernbert-base, raw AUC</div>
-    <div class="s">above the band</div></div>
+  <div class="tile"><div class="v">{{fig:cb.controlled}}</div>
+    <div class="l">control-modernbert-base, length-controlled AUC</div>
+    <div class="s">{{fig:cb.controlled.where}} the band; raw {{fig:cb.auc}}, {{fig:cb.raw.where}} it</div></div>
+  <div class="tile"><div class="v">{{fig:cl.controlled}}</div>
+    <div class="l">control-modernbert-large, length-controlled AUC</div>
+    <div class="s">{{fig:cl.controlled.where}} the band; raw {{fig:cl.auc}}, {{fig:cl.raw.where}} it</div></div>
 </div>
-
-<h3>Where the base control's excess comes from</h3>
-<p>The excess is the length cue. Four measurements.</p>
 <ul>
-  <li>It scores below a pure counting variable with no semantic content: {{fig:cb.auc}} against
-      {{fig:cue.tokens}}. Spearman against natural prompt length is {{fig:cb.spearman}}.</li>
-  <li>Inside prompt-length quintiles both controls fall to chance: {{fig:cb.controlled}} and
-      {{fig:cl.controlled}}.</li>
-  <li>The two controls disagree at Pearson r = {{fig:controls.pearson}} and sit on opposite sides
-      of chance. A corpus-level label leak would be visible to both in the same direction.</li>
-  <li>Both readouts are near-degenerate: {{fig:cb.distinct}} and {{fig:cl.distinct}} distinct
-      values across {{fig:corpus.scorable}} cases, each with a median of exactly 0.5.</li>
+  <li>The base control's raw excess is the length cue. It scores below a pure token counter,
+    {{fig:cb.auc}} against {{fig:cue.tokens}}, and tracks prompt length at Spearman
+    {{fig:cb.spearman}}.</li>
+  <li>The two controls agree at Pearson r = {{fig:controls.pearson}}. A label leaking into the
+    prompt would push both the same way.</li>
+  <li>Both readouts are near-degenerate: {{fig:cb.distinct}} and {{fig:cl.distinct}} distinct values
+    across {{fig:corpus.scorable}} cases, each with a median of 0.5.</li>
 </ul>
 
 {{chart:control_dist}}
 
-<div class="box good">
-  <p><strong>Gate: passed.</strong> No surface-cue or label-leakage signal.</p>
+<div class="box warn">
+  <p><strong>Gate: {{fig:ctrl.verdict.short}}.</strong> <code>control-modernbert-large</code>
+    sits below the chance band under length control, so within length strata its readout runs
+    against the label. The artifacts record no mechanism for that, and none is asserted here.
+    Nothing on this Space is ranked against that control.</p>
 </div>
 
-<h2 id="deberta">deberta-v3-prompt-injection-v2</h2>
-<p class="small">
-  <code>protectai/deberta-v3-base-prompt-injection-v2</code> at revision
-  <code>{{fig:deb.revision}}</code>, {{fig:deb.params}} parameters, licence
-  <code>apache-2.0</code>. {{fig:corpus.rows}} rows, 0 errors, prediction sha256
-  <code>{{fig:deb.sha}}</code>.
-</p>
-
-<div class="tiles">
-  <div class="tile"><div class="v">{{fig:deb.auc}}</div>
-    <div class="l">AUC on its single scalar</div>
-    <div class="s">definitions A and B coincide</div></div>
-  <div class="tile"><div class="v">{{fig:deb.controlled}}</div>
-    <div class="l">length-controlled AUC</div>
-    <div class="s">mean within prompt-length quintile</div></div>
-  <div class="tile"><div class="v">{{fig:deb.fpr}}</div>
-    <div class="l">block FPR at argmax</div>
-    <div class="s">{{fig:deb.fp}} false blocks of {{fig:corpus.negatives}}</div></div>
-  <div class="tile"><div class="v">{{fig:deb.oracle}}</div>
-    <div class="l">oracle ceiling, in-sample upper bound</div>
-    <div class="s">threshold {{fig:deb.oracle.threshold}}</div></div>
-</div>
-
-<h3>Calibration</h3>
+<h2 id="calibration">Calibration</h2>
 <p>
-  The arm emits <code>block</code> on {{fig:deb.blockrows}} of {{fig:corpus.rows}} rows and
-  {{fig:deb.blockcases}} of {{fig:corpus.scorable}} cases, {{fig:deb.blockshare}}. At argmax its
-  recall is {{fig:deb.recall}}, its precision {{fig:deb.precision}} and its block FPR
-  {{fig:deb.fpr}}. Its oracle threshold sits at {{fig:deb.oracle.threshold}} over
-  {{fig:deb.distinct}} distinct achievable thresholds. At {{fig:lap.deberta.rpm}} rows/min
-  CPU-only under int8 the next step is threshold calibration on a separate split.
+  Each model's block score is bucketed into {{fig:cal.buckets}} equal-width bins over the
+  {{fig:corpus.scorable}} scorable cases, and each bin's observed positive rate is plotted against
+  its mean predicted probability. {{fig:cal.sparse}} of the filled bins hold fewer than 20 cases, so
+  each point's case count is drawn with it. A model far from the diagonal is miscalibrated at its
+  default decision even if it orders cases well.
 </p>
 
-{{chart:deberta_points}}
+{{chart:reliability}}
 
-<h3 id="window">The 512-token window</h3>
+<h2 id="window">deberta-v3-prompt-injection-v2 and its 512-token window</h2>
 <p>
-  The cap is <code>min(token_budget, max_position_embeddings &#8722; 2)</code>, which is
-  {{fig:trunc.cap}}. {{fig:trunc.rows}} of {{fig:trunc.rowstotal}} rows exceeded it
-  ({{fig:trunc.rowspct}}); within the scored set {{fig:trunc.scoredrows}} of
-  {{fig:trunc.scoredrowstotal}} rows ({{fig:trunc.scoredrowspct}}) and {{fig:trunc.cases}} of
-  {{fig:corpus.scorable}} cases ({{fig:trunc.casespct}}) carry at least one truncated event.
-  {{fig:trunc.allcases}} cases have every event truncated. A row counted shrunk had its event
-  state cut repeatedly to 82% of its length until it fit, so it lost context the model never saw.
-</p>
-<p>
-  Truncation does not track the arm's errors. AUC inside the truncated stratum is
-  {{fig:trunc.auc}} against {{fig:trunc.aucun}} untruncated, and F1 at the oracle threshold is
-  {{fig:trunc.f1}} against {{fig:trunc.f1un}}. Recall and FPR do differ across the strata, and
-  positive prevalence differs {{fig:trunc.prevratio}}&#215; between them. The mechanism is
-  consistent with <code>build_ids</code>: the shrink trims event history while preserving the
-  decision-relevant current tool call.
-</p>
-<p class="small">
-  The per-row <code>truncated</code> boolean is a different thing: a corpus-level request-build
-  flag, identical at {{fig:trunc.flagrows}} rows in all scored arms including the 16k-context
-  controls.
+  The AUC leader is a {{fig:deb.params.short}}-parameter encoder whose window is
+  <code>min(token_budget, max_position_embeddings &#8722; 2)</code> = {{fig:trunc.cap}} tokens.
+  {{fig:trunc.cases}} of {{fig:corpus.scorable}} cases ({{fig:trunc.casespct}}) have at least one
+  truncated event, and {{fig:trunc.allcases}} have every event truncated. Truncation does not track
+  its errors: AUC is {{fig:trunc.auc}} on truncated cases and {{fig:trunc.aucun}} on the rest.
+  At its default decision it blocks {{fig:deb.fp}} of {{fig:corpus.negatives}} benign cases, more
+  than either control ({{fig:deb.fp.cb}} and {{fig:deb.fp.cl}}); at the budget it catches
+  {{fig:cap.deberta.tp}} positive.
 </p>
 
 {{chart:trunc}}
 
-<h3>What it is measured against</h3>
-<p>
-  Against the trivial floor it clears {{fig:floor.f1s}} by {{fig:deb.over.floor}}. Against the
-  cohort it has the highest length-controlled AUC of the {{fig:roster.scored}} scored arms, and
-  the highest block FPR of the three.
-</p>
-<p>
-  Comparison with the System One board's cascade guardrail arms is out of scope for this Space, and
-  so is any transfer claim from the held-out corpus, whose grade A share of positives is
-  {{fig:s3.gradeA.share}} against s2's {{fig:s2.gradeA.share}}.
-  Those arms are measured under a different protocol and are published on the
-  <a href="{{fig:other.space}}">System One
-  Space</a>.
-</p>
-
-<h2 id="twoclass">Two-class arms</h2>
-<p>
-  All {{fig:roster.scored}} scored arms emit one scalar per event. Three consequences are recorded
-  as facts about those arms.
-</p>
-<ul>
-  <li>Definitions A and B coincide, because both reduce to the maximum over events for a single
-      monotone scalar. Their AUC carries no definition label.</li>
-  <li><code>P(block) + P(confirm)</code> and <code>P(block) &#8722; P(confirm)</code> are
-      inapplicable: with no confirm class they do not exist, so neither is computed and neither
-      gets a zero substituted for it. The second is also the variable that inverted below chance out of
-      sample.</li>
-  <li>Any-intervention F1 equals block-only F1 by construction, and is reported as an
-      identity.</li>
-</ul>
-
-<div class="foot">
-  <p>Artifacts: <code>cohort-scores.json</code>, <code>leakage-diagnostic.json</code>,
-    <code>final-comparisons.json</code>, from <code>score_cohort.py</code>,
-    <code>leakage.py</code> and <code>final.py</code>.</p>
-</div>
 </div>
 </body>
 </html>

@@ -39,6 +39,14 @@ Checks, all of which abort with a non-zero exit:
      fill / stroke (and every <text> its own font-size) as a presentation
      attribute with a literal value, and no SVG attribute names a custom
      property. Checked again with the <style> block stripped out.
+ 10. reading precision. Every exact value stored behind a figure must round-trip
+     (repr(float(x)) == x), the visible text must be a rounding of it to within half a unit of
+     its own last displayed place, and nothing a reader sees anywhere on any page may carry more
+     than MAX_SIG significant digits. The last of those is the gate that keeps 1,933 raw float
+     expansions from coming back.
+ 11. the controls' no-script defaults. The precision control must be pre-set to the rounding, the
+     leaderboard must ship its rows and its unfiltered group pre-selected, its row count and its
+     find box must carry real values, and every sortable table must have a tbody.
 """
 from __future__ import annotations
 
@@ -332,6 +340,102 @@ HELDOUT = re.compile(r"held-out|held out|transfer penalt|generalis", re.I)
 HELDOUT_NEAR = ("grade a", "grade-a", "composition", "conflate", "no transfer figure")
 
 
+# ---------------------------------------------------------------- check 10
+# Every figure on a page is published at reading precision, with the artifact's exact decimal in
+# data-x. Two things have to hold for that to be honest rather than a rounding:
+#
+#   * nothing a reader SEES may be a raw binary float expansion. The pages carried 1,933 of them,
+#     which is what made a column of twenty-two F1 values unreadable, and this is the gate that
+#     keeps them from coming back.
+#   * every data-x must round-trip: repr(float(x)) == x, so the exact value is preserved and not
+#     itself a rounding, and the visible text must be that same number to within its own last
+#     displayed digit.
+EX_SPAN = re.compile(r'<span class="ex" data-x="([^"]*)"[^>]*>([^<]*)</span>')
+DECIMAL = re.compile(r"(?<![\w.])([0-9][0-9,]*\.[0-9]+)(?![\w.])")
+# The most significant digits any figure may be shown at. A rate displayed at four decimals
+# spends five ("0.9910"), and a value under a thousandth spends three ("0.000296"), so six is
+# above every display this build produces and far below a raw binary expansion, which spends
+# sixteen or seventeen.
+MAX_SIG = 6
+
+
+def sig_digits(lit: str) -> int:
+    return len(lit.replace(",", "").replace(".", "").lstrip("0"))
+
+
+def audit_precision(name: str, body: str) -> list[str]:
+    out = []
+    for m in EX_SPAN.finditer(body):
+        x, shown = m.group(1), m.group(2).strip()
+        try:
+            xv = float(x)
+        except ValueError:
+            out.append(f"{name}: data-x={x!r} is not a number, so the exact value is lost")
+            continue
+        if repr(xv) != x:
+            out.append(f"{name}: data-x={x!r} is not the shortest round-tripping decimal "
+                       f"({repr(xv)!r}), so the 'exact value' is itself a rounding")
+        if not shown:
+            out.append(f"{name}: a figure renders empty without scripting (data-x={x!r})")
+            continue
+        try:
+            sv = float(shown.replace(",", ""))
+        except ValueError:
+            out.append(f"{name}: the visible form {shown!r} of {x!r} is not a number")
+            continue
+        # the displayed rounding has to be within half a unit of its own last place
+        places = len(shown.partition(".")[2])
+        tol = 0.5 * 10 ** -places if places else 0.5
+        if abs(sv - xv) > tol * 1.000001:
+            out.append(f"{name}: {shown!r} is not a rounding of {x!r} at {places} decimals")
+    # No figure a reader sees may be shown at raw float precision, whether or not it went through
+    # exact(). data-x is an attribute rather than text, so the spans are reduced to what they
+    # render before the scan and the exact decimals behind them are not scanned.
+    text = STYLE_BLOCK.sub("", SCRIPT_BLOCK.sub("", body))
+    text = EX_SPAN.sub(lambda m: " " + m.group(2) + " ", text)
+    for m in DECIMAL.finditer(text):
+        n = sig_digits(m.group(1))
+        if n > MAX_SIG:
+            out.append(f"{name}: {m.group(1)!r} is shown at {n} significant digits, over the "
+                       f"{MAX_SIG} a reader can compare; publish it through exact() so the page "
+                       f"shows the rounding and keeps the exact value in data-x "
+                       f"(...{text[max(0, m.start() - 60):m.end() + 12]!r}...)")
+    return out
+
+
+# ---------------------------------------------------------------- check 11
+# The controls added to this Space are progressive enhancement, and the states below are the ones
+# the HTML has to already be in before any script runs.
+def audit_controls(name: str, body: str) -> list[str]:
+    out = []
+    nojs = SCRIPT_BLOCK.sub("", body)
+    if 'data-prec-btn' not in nojs:
+        out.append(f"{name}: no precision control, so the exact value behind every figure is "
+                   f"reachable only on hover")
+    elif 'data-prec-btn aria-pressed="false"' not in nojs:
+        out.append(f"{name}: the precision control is not pre-set to the reading precision, so "
+                   f"the no-script render is not the rounded one")
+    if 'id="lb"' in nojs:
+        m = re.search(r'<table id="lb"[^>]*>.*?<tbody>(.*?)</tbody>', nojs, re.S)
+        if not m or "<tr" not in m.group(1):
+            out.append(f"{name}: the leaderboard has no static rows, so it is empty without "
+                       f"scripting")
+        if 'data-lb-group="all" aria-pressed="true"' not in nojs:
+            out.append(f"{name}: the leaderboard's unfiltered group is not pre-selected")
+        c = re.search(r'<output id="lb-count"[^>]*>([^<]*)</output>', nojs)
+        if not c or not c.group(1).strip():
+            out.append(f"{name}: the leaderboard's row count is empty without scripting")
+        q = re.search(r'<input[^>]*id="lb-q"[^>]*>', nojs)
+        if q and 'value=""' not in q.group(0):
+            out.append(f"{name}: the leaderboard's find box has no explicit empty value, so its "
+                       f"no-script state is browser-defined")
+    for m in re.finditer(r'<table\b[^>]*data-sortable[^>]*>', nojs):
+        frag = nojs[m.start():m.start() + 4000]
+        if "<tbody" not in frag:
+            out.append(f"{name}: a sortable table has no <tbody>, so it cannot be read unsorted")
+    return out
+
+
 def audit_heldout(name: str, body: str) -> list[str]:
     out = []
     for m in HELDOUT.finditer(body):
@@ -340,6 +444,31 @@ def audit_heldout(name: str, body: str) -> list[str]:
             out.append(f"{name}: {m.group(0)!r} at offset {m.start()} appears with no nearby "
                        f"grade-composition caveat, so it could be read as a generalisation "
                        f"result")
+    return out
+
+
+TABLE = re.compile(r"<table\b.*?</table>", re.S | re.I)
+THEAD = re.compile(r"<thead\b.*?</thead>", re.S | re.I)
+TH = re.compile(r"<th\b", re.I)
+COL_CAP = 8
+
+
+def audit_table_width(name: str, body: str) -> list[str]:
+    """No table may carry more than COL_CAP columns. A 14-column table does not render on a laptop,
+    and the fix is to split it or to compress the four confusion counts into one cell. Enforced
+    over the generated bytes so a new table cannot reintroduce the defect."""
+    out = []
+    for i, m in enumerate(TABLE.finditer(body), 1):
+        head = THEAD.search(m.group(0))
+        if not head:
+            out.append(f"{name}: table {i} has no <thead>, so its column count cannot be checked")
+            continue
+        n = len(TH.findall(head.group(0)))
+        if n > COL_CAP:
+            labels = [re.sub(r"<[^>]+>", "", x).strip()
+                      for x in re.findall(r"<th[^>]*>(.*?)</th>", head.group(0), re.S)]
+            out.append(f"{name}: table {i} has {n} columns, over the {COL_CAP}-column cap: "
+                       f"{labels}")
     return out
 
 
@@ -494,6 +623,57 @@ RETIRED = [
     ("accuracy of 0.95",
      "an accuracy below the all-allow baseline on the second corpus; accuracy appears only "
      "beside that baseline"),
+    # The source count. The corpora pool their sources under `source.dataset`, and that field
+    # carries 10 distinct values on s2, not 13. 13 is the count of PUBLIC source datasets that can
+    # be cited by link in the source lock, which is a different population.
+    ("pools 13 sources",
+     "s2 pools 10 source datasets under `source.dataset`; 13 is a count of citable public sources "
+     "in the lock and is a different population"),
+    ("13 source datasets",
+     "the same overcount; the census is taken over the corpora on disk and reports 10 on s2"),
+    ("across 13 sources", "the same overcount"),
+    # A per-arm peak RSS does not exist in the artifacts.
+    ("peak RSS per arm",
+     "the artifacts carry a measured peak resident set for one arm only; the per-arm memory "
+     "quantity that exists for all 22 is the snapshot size on disk"),
+    ("peak RSS for every arm", "the same claim"),
+    # The union result, stated the wrong way round.
+    ("two arms clear the gate",
+     "the best two-arm union inside the budget reaches recall 0.07798165137614679 and the union of "
+     "all 22 arms reaches 0.2018348623853211 at 10.7x the budget; neither clears a gate"),
+    ("stacking clears", "the same claim"),
+    ("failures are correlated",
+     "overstated: 185 of the 221 defined pairs share no caught positive because each model catches "
+     "so few, although summed over pairs the caught sets share 62 positives against 15.7 expected "
+     "under independent selection"),
+    # Errors the 2026-09-24 review corrected. Each phrase carried a figure or a claim the
+    # artifacts contradict; the build now derives the corrected statement.
+    ("unweighted mean of the five within-quintile",
+     "the published length-controlled AUC is the pair-weighted pooled figure"),
+    ("both controls fall to chance",
+     "under the published estimator control-modernbert-large lands below the chance band"),
+    ("both controls sit at chance",
+     "the same claim; the verdict is read off the published estimator"),
+    ("No surface-cue or label-leakage signal",
+     "the pre-registered control prediction did not hold for control-modernbert-large"),
+    ("close to independent",
+     "the caught sets share 3.95 times the positives independent selection predicts"),
+    ("plus one false blocks",
+     "a pair each at the full budget can spend up to twice the allowance, 26"),
+    ("eight times faster",
+     "the ledger's 3,059 against 1,190 rows/min is about 2.6 times, and the GPU serving note "
+     "is not published here"),
+    ("hungriest",
+     "peak RSS was measured for one model only, so no model can be named the hungriest"),
+    ("Nothing in the cohort reaches 8 GiB",
+     "gemma-3-4b-it's unquantized checkpoint is over 8 GiB"),
+    ("judgement call",
+     "grade B is destructive by the source's own label without a deterministic proof"),
+    ("of the 0 scored",
+     "a count of zero printed where the number of ranked models belonged"),
+    ("All 0 scored", "the same templating defect"),
+    ("moves it down the table",
+     "pair weighting moves the sparse-bin model up the table, not down"),
     # The retired variable, as a ranking.
     ("ranked on P(block)",
      "the ranking variable is named in full with its definition label, and the difference "
@@ -511,6 +691,10 @@ EMBEDS_SEEN: list[tuple[str, int]] = []
 all_ids: dict[str, set[str]] = {}
 all_hrefs: dict[str, list[tuple[str, int]]] = {}
 charts = 0
+EX_SPANS_SEEN = 0
+PREC_PAGES = 0
+LB_PAGES = 0
+SORTABLE_SEEN = 0
 
 for name in pages:
     path = os.path.join(SITE, name)
@@ -533,38 +717,19 @@ for name in pages:
     # The disclosures this Space's pages must carry. A page that lost one of these lost a
     # statement the payload depends on, so it is a build failure.
     REQUIRED = [
+        # ---- index.html: the answer
         ("index.html", "not interchangeable",
          "the two-Space non-interchangeability statement is missing from index"),
         ("index.html", "defenseclaw-system-one",
          "index does not name the other Space it must be distinguished from"),
         ("index.html", "block false-positive rate",
          "index does not state the candidate's false-positive rate"),
-        ("results.html", "estimator",
-         "the results page does not name which length-control estimator it publishes"),
-        ("results.html", "Unweighted mean, all bins",
-         "the four-estimator table is missing from the results page"),
-        ("results.html", "Pair-weighted pooled",
-         "the pair-weighted estimator is missing from the results page"),
-        ("index.html", "retracted",
-         "index does not record that the earlier length-control estimator was retracted"),
-        ("results.html", "Pair-weighted pooled",
-         "the pair-weighted estimator is missing from the results page"),
-        ("results.html", "Mann-Whitney",
-         "the estimand argument for the published estimator is missing"),
-        ("results.html", "over-weighting",
-         "the weight-against-evidence argument is missing"),
-        ("results.html", "Hanley",
-         "the variance argument for the published estimator is missing"),
-        ("results.html", "grade A",
-         "the grade-composition caveat is missing from the results page"),
-        ("results.html", "no transfer figure is published",
-         "the results page does not state that no transfer figure is published"),
-        ("index.html", "grade A",
-         "index does not carry the grade-composition caveat"),
-        ("README.md", "grade A",
-         "the Space card does not carry the grade-composition caveat"),
-        # The per-arm confusion columns moved to the operating-point page, where every arm is
-        # reported at one shared false-positive budget. The requirement follows the content.
+        ("index.html", "The verdict", "index carries no verdict panel"),
+        ("index.html", "No model in this cohort is usable",
+         "index does not state the answer in plain words"),
+        ("index.html", "Assumption", "index carries no assumption table"),
+        ("index.html", "What breaks it", "the assumption table has no falsification column"),
+        # ---- operating-point.html: every model at the budget
         ("operating-point.html", "Block FPR",
          "the operating-point page has no block-FPR column"),
         ("operating-point.html", "Precision",
@@ -573,21 +738,52 @@ for name in pages:
         ("operating-point.html", "Accuracy", "the operating-point page has no accuracy column"),
         ("operating-point.html", "0.00384502",
          "the operating-point page does not state the shared false-positive budget"),
-        ("operating-point.html", "in-sample oracle upper bound",
-         "the oracle label is missing from the operating-point page"),
         ("operating-point.html", "All-allow accuracy",
          "accuracy is printed without the all-allow baseline in the same table"),
         ("operating-point.html", "0.20503174229955326",
-         "the trivial floor is missing from the operating-point page at full precision"),
-        ("operating-point.html", "grade A",
-         "the operating-point page does not carry the grade-composition caveat"),
-        ("sizes.html", "under 3B", "the first size band is missing"),
-        ("sizes.html", "3B to 6B", "the second size band is missing"),
-        ("sizes.html", "6B and up", "the third size band is missing"),
-        ("sizes.html", "Nothing in this cohort lands here",
+         "the block-everything baseline is missing from the operating-point page at full precision"),
+        ("operating-point.html", "tp/fp/fn/tn",
+         "the confusion counts are not in one compact cell, so a table is wider than it needs "
+         "to be"),
+        ("operating-point.html", "Wilson 95%",
+         "the operating-point page reports a proportion with no interval on it"),
+        ("operating-point.html", "chance",
+         "the ROC panels are published without the chance diagonal being named"),
+        ("operating-point.html", "Jaccard",
+         "the failure-overlap analysis is missing from the operating-point page"),
+        ("operating-point.html", "clears no gate",
+         "the operating-point page does not state what the two-model union concludes"),
+        ("operating-point.html", "bootstrap",
+         "the interval on F1 is published without its method named"),
+        ("operating-point.html", "source dataset",
+         "the per-source recall result is missing from the operating-point page"),
+        ("operating-point.html", "under 3B", "the first size band is missing"),
+        ("operating-point.html", "3B to 6B", "the second size band is missing"),
+        ("operating-point.html", "6B and up", "the third size band is missing"),
+        ("operating-point.html", "Nothing in this cohort lands",
          "the empty size band is not printed with its zero count and its one-line statement"),
-        ("sizes.html", "mixture-of-experts",
-         "the mixture-of-experts arm's parameter counts are not distinguished"),
+        ("operating-point.html", "log scale",
+         "the size-against-F1 scatter is missing from the operating-point page"),
+        # ---- results.html: ranking and diagnostics
+        ("results.html", "estimator",
+         "the results page does not name which length-control estimator it publishes"),
+        ("results.html", "chance band",
+         "the results page does not print the chance band beside its AUC table"),
+        ("results.html", "A and B coincide",
+         "the AUC definition label is missing from the results page"),
+        ("results.html", "Hanley",
+         "the chance band is printed without its standard-error method"),
+        ("results.html", "in-sample upper bound",
+         "the oracle label is missing from the results page"),
+        ("results.html", "0.20503174229955326",
+         "the block-everything baseline is missing beside the default-decision F1 column"),
+        ("results.html", "length-controlled",
+         "the length-control rule is missing from the results page"),
+        ("results.html", "Calibration",
+         "the calibration diagram is missing from the results page"),
+        ("results.html", "Gate: ",
+         "the leakage gate is published without a verdict"),
+        # ---- datasets.html: data and models
         ("datasets.html", "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
          "the s2 corpus digest is missing from the datasets page"),
         ("datasets.html", "0ccbc08fb408ffefc89e051c585cfe22433b1ed4c9714f60cc0f7e242969fa03",
@@ -596,36 +792,40 @@ for name in pages:
          "the datasets page does not name the function that assigns every grade"),
         ("datasets.html", "Redistribution",
          "the datasets page carries no redistribution marker"),
+        ("datasets.html", "evaluation-only",
+         "the evaluation-only disposition of the case rows is missing"),
         ("datasets.html", "mcptox",
          "the local-evaluation-only disclosure is missing from the datasets page"),
         ("datasets.html", "grade A",
          "the datasets page does not carry the grade-composition caveat"),
         ("datasets.html", "no transfer figure is published",
          "the datasets page does not state that no transfer figure is published"),
-        ("results.html", "chance band",
-         "the results page does not print the chance band beside its AUC table"),
-        ("results.html", "A and B coincide",
-         "the AUC definition labels are missing from the results page"),
+        ("datasets.html", "source.dataset",
+         "the datasets page does not name the field the source census is taken over"),
+        ("datasets.html", ">Licence</th>", "the licence column is missing from the roster"),
+        ("datasets.html", "apache-2.0", "the roster lost its licence values"),
+        ("datasets.html", "llama3.2", "the roster lost a gating group"),
+        ("datasets.html", "gemma", "the roster lost a gating group"),
+        ("datasets.html", "Falcon LLM", "Falcon3's licence name is missing from the roster"),
+        ("datasets.html", "DebertaV2ForSequenceClassification",
+         "the withdrawn independent-backbone claim's correction is missing from the roster"),
+        ("datasets.html", "llamaguard_default_taxonomy_covers_task: false",
+         "the Llama Guard taxonomy record is missing from the roster"),
+        ("datasets.html", "mixture-of-experts",
+         "the mixture-of-experts model's parameter counts are not distinguished"),
+        ("datasets.html", "VmHWM", "the peak-RSS provenance caveat is missing"),
+        ("datasets.html", "optimistic ceiling", "the foreign-load caveat is missing"),
+        ("datasets.html", "peak-RSS axis cannot be drawn",
+         "the page does not record that per-model peak RSS is absent from the artifacts"),
+        ("datasets.html", "not reproducible from vendored code",
+         "the laptop figures are published without saying they cannot be reproduced"),
+        # ---- methodology.html: method and reproduce
+        ("methodology.html", "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
+         "the corpus digest is missing from methodology"),
         ("methodology.html", "grade-C", "methodology does not explain the grade-C exclusion"),
         ("methodology.html", "complete-line prefix",
          "the settlement digest's scope is not stated"),
-        ("methodology.html", "untorn",
-         "the settlement row requirement is not stated"),
-        ("roster.html", ">Licence</th>", "the licence column is missing from the roster"),
-        ("roster.html", "apache-2.0", "the roster lost its licence values"),
-        ("roster.html", "llama3.2", "the roster lost a gating group"),
-        ("roster.html", "gemma", "the roster lost a gating group"),
-        ("roster.html", "DebertaV2ForSequenceClassification",
-         "the withdrawn independent-backbone claim's correction is missing from the roster"),
-        ("roster.html", "llamaguard_default_taxonomy_covers_task: false",
-         "the Llama Guard taxonomy record is missing from the roster"),
-        ("roster.html", "Falcon LLM", "Falcon3's licence name is missing from the roster"),
-        ("baselines.html", "0.20503174229955326",
-         "the trivial floor is missing from the baselines page at full precision"),
-        ("baselines.html", "length-controlled",
-         "the length-control rule is missing from the baselines page"),
-        ("methodology.html", "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
-         "the corpus digest is missing from methodology"),
+        ("methodology.html", "untorn", "the settlement row requirement is not stated"),
         ("methodology.html", "oracle upper bound",
          "the oracle-ceiling rule is missing from methodology"),
         ("methodology.html", "mcptox",
@@ -634,13 +834,24 @@ for name in pages:
          "the aggregate-only disclosure is missing from methodology"),
         ("methodology.html", "stay private",
          "the private-data-repository statement is missing from methodology"),
-        ("results.html", "in-sample upper bound",
-         "the oracle label is missing from the results page"),
-        ("footprint.html", "VmHWM", "the peak-RSS provenance caveat is missing from footprint"),
-        ("footprint.html", "optimistic ceiling",
-         "the foreign-load caveat is missing from footprint"),
-        ("reproduce.html", "feat/system-one-benchmarks",
+        ("methodology.html", "feat/system-one-benchmarks",
          "the deep links are not pinned to the branch"),
+        ("methodology.html", "retracted",
+         "the changelog does not record that the earlier length-control estimator was retracted"),
+        ("methodology.html", "Unweighted mean, all bins",
+         "the four-estimator table is missing"),
+        ("methodology.html", "Pair-weighted pooled",
+         "the pair-weighted estimator is missing"),
+        ("methodology.html", "Mann-Whitney",
+         "the estimand argument for the published estimator is missing"),
+        ("methodology.html", "over-weighting",
+         "the weight-against-evidence argument is missing"),
+        ("methodology.html", "Hanley",
+         "the variance argument for the published estimator is missing"),
+        ("methodology.html", "area under each drawn curve",
+         "methodology does not state that the drawn ROC reproduces the published AUC"),
+        ("README.md", "grade A",
+         "the Space card does not carry the grade-composition caveat"),
     ]
 
     for page, text, reason in REQUIRED:
@@ -689,9 +900,16 @@ for name in pages:
     PROBLEMS.extend(audit_svg_paint(name, body, "as shipped"))
     PROBLEMS.extend(audit_svg_paint(name, STYLE_BLOCK.sub("", body), "style stripped"))
     PROBLEMS.extend(audit_nojs(name, body))
+    PROBLEMS.extend(audit_precision(name, body))
+    PROBLEMS.extend(audit_controls(name, body))
+    EX_SPANS_SEEN += len(EX_SPAN.findall(body))
+    PREC_PAGES += 1 if "data-prec-btn" in body else 0
+    LB_PAGES += 1 if 'id="lb"' in body else 0
+    SORTABLE_SEEN += len(re.findall(r"<table\b[^>]*data-sortable", body))
     PROBLEMS.extend(audit_flagged_variable(name, body))
     PROBLEMS.extend(audit_scope(name, body))
     PROBLEMS.extend(audit_heldout(name, body))
+    PROBLEMS.extend(audit_table_width(name, body))
     if c.figures != c.figcaptions:
         PROBLEMS.append(f"{name}: {c.figures} chart figures but {c.figcaptions} figcaptions")
     charts += c.figures
@@ -725,6 +943,19 @@ for name in pages:
                 PROBLEMS.append(
                     f"{name}: <rect> right edge "
                     f"{float(xm.group(1)) + float(wm.group(1)):.1f} > viewBox width {vw}")
+        # polylines: every plotted vertex must stay inside the viewBox. The attribute checks
+        # above only see x/y/cx/cy, so a curve drawn from data could leave the canvas unseen.
+        for pl in re.finditer(r'<polyline\b[^>]*\bpoints="([^"]*)"', sv):
+            for pair in pl.group(1).split():
+                try:
+                    px, py = (float(t) for t in pair.split(","))
+                except ValueError:
+                    PROBLEMS.append(f"{name}: <polyline> point {pair!r} is not an x,y pair")
+                    break
+                if px < -2 or px > vw + 2 or py < -2 or py > vh + 2:
+                    PROBLEMS.append(f"{name}: <polyline> point {px},{py} outside viewBox "
+                                    f"0..{vw} by 0..{vh}")
+                    break
         # text runs: estimate the rendered extent and require it to stay on canvas
         for t in re.finditer(r"<text\b([^>]*)>(.*?)</text>", sv, re.S):
             attrs, inner = t.group(1), re.sub(r"<[^>]+>", "", t.group(2))
@@ -794,6 +1025,11 @@ print(f"viewer embeds      : {_em} Hugging Face dataset-viewer iframe(s) on "
       f"{len(_ep)} page(s), each inside a collapsed <details>; 0 other subresources")
 print(f"internal links     : {sum(len(v) for v in all_hrefs.values())}")
 print(f"retired figures    : {len(RETIRED)} checked, 0 present as literal text")
+print(f"table width        : every table at or under {COL_CAP} columns")
+print(f"precision          : {EX_SPANS_SEEN:,} figures at reading precision, each round-tripping "
+      f"to its exact decimal; nothing visible over {MAX_SIG} significant digits")
+print(f"controls           : precision control on {PREC_PAGES} page(s), "
+      f"{SORTABLE_SEEN:,} sortable table(s), leaderboard on {LB_PAGES} page(s)")
 if PROBLEMS:
     print(f"PROBLEMS           : {len(PROBLEMS)}")
     for p in PROBLEMS[:80]:

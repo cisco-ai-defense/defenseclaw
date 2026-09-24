@@ -115,6 +115,15 @@ code{
 }
 hr{border:0;border-top:1px solid var(--border);margin:36px 0}
 .small{font-size:13.5px;color:var(--ink-2)}
+/* the glossary on the method page, and the findings list on the answer page */
+dl.gloss{display:grid;grid-template-columns:minmax(150px,220px) 1fr;gap:6px 18px;margin:12px 0 18px;
+  max-width:90ch}
+dl.gloss dt{font-weight:600}
+dl.gloss dd{margin:0;color:var(--ink-2)}
+@media (max-width:640px){dl.gloss{grid-template-columns:1fr}dl.gloss dd{margin-bottom:6px}}
+ul.findings{list-style:none;padding-left:0}
+ul.findings li{margin:0 0 10px;padding-left:14px;border-left:2px solid var(--border)}
+h1{max-width:34ch}
 .muted{color:var(--muted)}
 
 /* ---------- boxes ---------- */
@@ -147,7 +156,9 @@ hr{border:0;border-top:1px solid var(--border);margin:36px 0}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px 15px}
 .tile .v{font-size:25px;letter-spacing:-.02em;line-height:1.15}
 .tile .l{font-size:12.5px;color:var(--ink-2);margin-top:3px}
-.tile .s{font-size:11px;color:var(--muted);margin-top:5px;word-break:break-all}
+/* `word-break:break-all` was here for the sha in a tile; it also broke "[0.0391, 0.0833]"
+   mid-number and "12 cases" mid-word. `anywhere` breaks only when a line cannot fit. */
+.tile .s{font-size:11px;color:var(--muted);margin-top:5px;overflow-wrap:anywhere}
 
 /* ---------- tables ---------- */
 .tbl-scroll{
@@ -302,6 +313,61 @@ th[data-sort]{cursor:pointer;user-select:none}
 th[data-sort]:hover{color:var(--ink)}
 th[data-sort]:focus-visible{outline:2px solid var(--series-1);outline-offset:-2px}
 th[data-sort]::after{content:" \2195";color:var(--axis)}
+th[data-sort][aria-sort="descending"]{color:var(--ink)}
+th[data-sort][aria-sort="descending"]::after{content:" \2193";color:var(--seq-3)}
+th[data-sort][aria-sort="ascending"]{color:var(--ink)}
+th[data-sort][aria-sort="ascending"]::after{content:" \2191";color:var(--seq-3)}
+
+/* ---------- a figure at reading precision, exact on demand ---------- */
+/* Every value on this Space is published rounded, with the artifact's exact decimal in data-x.
+   The control in the header swaps all of them; the title attribute carries the exact value with
+   no scripting at all, so the underline is an affordance and not a promise the page cannot keep. */
+.ex{
+  font-variant-numeric:tabular-nums;
+  border-bottom:1px dotted var(--axis);cursor:help
+}
+.ex:hover{border-bottom-color:var(--series-1)}
+.seg.prec{
+  margin-left:auto;font-size:12px;padding:3px 10px;letter-spacing:.02em
+}
+/* the nav already pushes .tag right with margin-left:auto; with the button there, the button
+   takes the push and the tag follows it */
+.nav .tag{margin-left:0}
+
+/* ---------- in-page section index ---------- */
+.toc{
+  display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin:22px 0 4px;
+  padding:11px 15px;background:var(--surface);border:1px solid var(--border);border-radius:10px
+}
+.toc-l{
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+  font-weight:620;margin-right:2px
+}
+.toc a{font-size:13.5px;text-decoration:none;color:var(--link)}
+.toc a:hover{text-decoration:underline}
+
+/* ---------- leaderboard ---------- */
+.lbwrap{margin:18px 0 8px}
+.ctl input[type="search"]{
+  font:inherit;font-size:14px;padding:5px 10px;border-radius:8px;min-width:13em;flex:0 1 17em;
+  background:var(--page);color:var(--ink);border:1px solid var(--border)
+}
+.ctl input[type="search"]:focus-visible{outline:2px solid var(--series-1);outline-offset:1px}
+#lb-count{min-width:7.5em;font-size:13.5px;font-weight:600;color:var(--ink-2)}
+table.lb{min-width:760px}
+table.lb td{vertical-align:middle}
+table.lb code{background:none;padding:0;font-size:13px}
+table.lb thead th:first-child{white-space:nowrap}
+table.lb .rmeta{
+  display:block;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;
+  margin-top:1px;white-space:nowrap
+}
+table.lb .pill{margin-left:5px;vertical-align:1px}
+svg.mb{vertical-align:-1px;margin-right:5px}
+@media (max-width:620px){
+  table.lb .rmeta{white-space:normal}
+  svg.mb{display:none}
+}
 
 /* ---------- head-to-head matchup cards ---------- */
 /* leaderboard verdict column: a short phrase, the full scope on hover ---------- */

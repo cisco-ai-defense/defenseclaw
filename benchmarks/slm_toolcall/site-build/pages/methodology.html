@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Methodology &#8212; SLM tool-call security</title>
+<title>Method and reproduce &#8212; SLM tool-call security</title>
 {{STYLE}}
 </head>
 <body>
@@ -11,261 +11,186 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">METHODOLOGY</p>
-<h1>How every number on this Space was produced</h1>
+<p class="eyebrow">METHOD AND REPRODUCE</p>
+<h1>How the numbers were produced, and how to check them</h1>
 <p class="lede">
-  One corpus, one grid cell, one scorer. These rules govern which figures may be quoted and which
-  may be compared.
+  One corpus (s2, grid cell C7/I3/Q2, <code>--instruction-format structured</code>), one scorer,
+  one budget. Links point at branch <code>feat/system-one-benchmarks</code> of
+  <code>cisco-ai-defense/defenseclaw</code>.
 </p>
 
-<h2 id="corpus">Corpus</h2>
-<table>
-  <thead><tr><th>Property</th><th class="n">Value</th></tr></thead>
-  <tbody>
-    <tr><td>Corpus</td><td class="n">s2, the core parity grid</td></tr>
-    <tr><td>Cases</td><td class="n">{{fig:corpus.cases}}</td></tr>
-    <tr><td>Scorable cases</td><td class="n">{{fig:corpus.scorable}}</td></tr>
-    <tr><td>Positives (grade A + grade B)</td>
-        <td class="n">{{fig:corpus.positives}} = {{fig:corpus.gradeA}} + {{fig:corpus.gradeB}}</td></tr>
-    <tr><td>Benign (grade D)</td><td class="n">{{fig:corpus.negatives}}</td></tr>
-    <tr><td>Excluded, grade C, diagnostic only</td><td class="n">{{fig:corpus.gradeC}}</td></tr>
-    <tr><td>Prevalence</td><td class="n">{{fig:corpus.prevalence}}</td></tr>
-    <tr><td>Rows per prediction file</td><td class="n">{{fig:corpus.rows}}</td></tr>
-    <tr><td>Grid cell</td><td class="n">C7 / I3 / Q2,
-        <code>--instruction-format structured</code></td></tr>
-    <tr><td><code>cases_sha256</code></td><td class="n"><code>{{fig:corpus.sha}}</code></td></tr>
-  </tbody>
-</table>
+{{TOC}}
+
+<h2 id="terms">Terms</h2>
+
+{{ui:glossary}}
+
+<h2 id="rules">Reporting rules</h2>
+<ul>
+  <li><strong>One budget.</strong> Precision, recall, F1 and block FPR are reported at block FPR
+    {{fig:cap.exact}}, the existing cascade guardrail's own rate on s2. Each model's threshold is
+    the one with the highest recall that holds it, ties broken toward the tighter threshold.</li>
+  <li><strong>Scorable cases only.</strong> Every F1, AUC, FPR and confusion count is over the
+    {{fig:corpus.scorable}} cases of grade A, B or D. The {{fig:corpus.gradeC}} grade-C cases are
+    kept for diagnostics and counted nowhere.</li>
+  <li><strong>Oracle figures are labelled.</strong> A best F1 found by sweeping thresholds on the
+    rows it is scored on is an oracle upper bound. It is shown only in its own column, never as a
+    result.</li>
+  <li><strong>Accuracy only beside all-allow accuracy</strong> ({{fig:acc.s2.allow}} on s2), because
+    at {{fig:corpus.prevalence}} prevalence the benign class sets it.</li>
+  <li><strong>No table over eight columns</strong>; the four confusion counts share one
+    <code>tp/fp/fn/tn</code> cell.</li>
+  <li><strong>One ranking variable per class structure.</strong> <code>P(block)</code> for
+    three-class models and <code>block.yes</code> for the two-head model; the single positive-class
+    probability for two-class models. <code>P(block) &#8722; P(confirm)</code> is never ranked on:
+    on the System One programme it inverted below chance on a disjoint corpus. For the
+    {{fig:models.twoclass}} two-class models ({{fig:models.twoclass.controls}} of them controls)
+    <code>P(confirm)</code> does not exist, so neither sum nor difference is computed.</li>
+  <li><strong>Neither gate is durable.</strong> When the System One programme moved thresholds to a
+    disjoint corpus, 4 of 24 zero-false-positive gates survived, 3 of them degenerate, and
+    false-positive caps held in 8 of 48.</li>
+</ul>
+
+<h2 id="intervals">Intervals</h2>
 <p>
-  Grade C is excluded from scoring. The grade records an unresolved or partial adjudication, so a
-  scored decision on one of those cases would have no settled truth value to score against. The
-  {{fig:corpus.gradeC}} grade-C cases are kept for diagnostics and are not counted in any
-  numerator or denominator here. Every F1, AUC, FPR and confusion matrix on this Space is over the
-  {{fig:corpus.scorable}} scorable cases.
-</p>
-<p>
-  Positive prevalence of {{fig:corpus.prevalence}} is what sets the trivial floor at
-  {{fig:floor.f1}}, so the floor is a property of this corpus and of no arm. See
-  <a href="baselines.html#floor">Baselines</a>.
-</p>
-<p>
-  Both corpora are documented field by field on <a href="datasets.html#record">Datasets</a>,
-  together with the grade conditions, the function that assigns them, the licence and
-  redistribution markers, and the length fields.
+  Recall and block FPR carry Wilson 95% intervals at z = {{fig:wilson.z}}. F1 carries a percentile
+  bootstrap over cases, {{fig:boot.n}} resamples at seed {{fig:boot.seed}}, with each model's
+  threshold held fixed, so it covers sampling of the corpus but not re-fitting the threshold. The
+  zero-false-positive gate carries the rule-of-three bound 3/{{fig:corpus.negatives}}. The best
+  pair of models is the best of {{fig:over.pairs}} evaluated on the rows it is scored on, so it is
+  an in-sample selection.
 </p>
 
-{{chart:corpus}}
-
-<h2 id="scorer">Scorer equivalence</h2>
+<h2 id="length">Length control, and why this estimator</h2>
 <p>
-  The cohort harness imports the reference driver's own <code>build_state</code> and
-  <code>build_questions</code>, so prompts are byte-exact. Before any cohort arm is reported the
-  pipeline re-derives {{fig:parity.n}} published System One board scorecards from their settled
-  bodies: {{fig:parity.confmatch}} confusion matrices reproduce cell for cell, the largest
-  absolute block-only F1 difference is {{fig:parity.maxdelta}}, and the ranking AUC on the one
-  reference that publishes it reproduces with an absolute difference of {{fig:parity.aucdelta}}.
-  The full table is on <a href="results.html#parity">Results</a>.
-</p>
-<p>
-  Those reference arms are out of scope for this Space and their scores are published on the
-  <a href="{{fig:other.space}}">System One
-  Space</a>. The arithmetic is one vendored module, <code>{{fig:arith.path}}</code> at sha256
-  <code>{{fig:arith.sha}}</code>, imported verbatim by all {{fig:arith.importers}} cohort scoring
-  scripts and re-hashed at build time.
-</p>
-
-<h2 id="oracle">In-sample ceilings</h2>
-<p>
-  A best F1 found by sweeping thresholds on the same rows it is scored on is an
-  oracle upper bound. Every figure of that kind here is labelled, and no arm's oracle ceiling is
-  quoted as a result.
-  No figure here is a transfer result; see the two corpora below.
-</p>
-
-<h2 id="variables">The ranking variables</h2>
-<div class="box bad">
-  <p>
-    <code>P(block) &#8722; P(confirm)</code> is never ranked on. Measured on the System One
-    programme it inverted below chance on a disjoint corpus, and it was the argmax
-    variable for five of eleven re-mineable arms there, so the exclusion is a standing rule and no
-    arm is judged case by case. <code>P(block)</code>, <code>risk</code> and
-    <code>P(block) + P(confirm)</code> all transferred. The figures behind that result belong to
-    the other programme and are published on the
-    <a href="{{fig:other.space}}">System One
-    Space</a>.
-  </p>
-</div>
-<p>
-  <strong>Two AUC definitions exist and are not interchangeable.</strong> Definition A takes the
-  maximum block probability and the maximum confirm probability over a case's events, then
-  subtracts. Definition B takes the maximum over events of the per-event difference. Every AUC on
-  this Space is labelled with its definition, and no figure is compared across definitions. For
-  an arm that emits a single monotone scalar the two coincide, because both reduce to the maximum
-  over events, and that coincidence is recorded on the arm as its definition label. Every arm's
-  AUC with its definition is on <a href="results.html#auc">Results</a>, and the variables where
-  the two definitions give different numbers are shown apart on the same page.
-</p>
-<p>
-  <strong>Two-class arms have genuinely inapplicable variables.</strong> An arm with no confirm
-  class has no <code>P(confirm)</code>, so <code>P(block) + P(confirm)</code> and
-  <code>P(block) &#8722; P(confirm)</code> are not computed and are not zero-filled. Its
-  any-intervention F1 equals its block-only F1 by construction and is reported as an identity.
-</p>
-
-<h2 id="length">Length control</h2>
-<p>
-  Every arm carries a length-controlled AUC beside its raw AUC. The corpus is stratified into five
-  prompt-length quintiles by natural prompt tokens, which is a corpus property identical for every
-  arm, the AUC is computed inside each, and the five are pooled with each bin weighted by the
-  positive-benign comparisons it holds. That is the {{fig:est.published}} estimator, read from
-  {{fig:est.source}}. The unweighted mean of the five is retracted and is still reported beside the
-  published figure so the difference is visible. The quintile boundaries, case counts and positive
-  counts are in the table view of every chart that uses them, and the null band is on
-  <a href="baselines.html#band">Baselines</a>.
-</p>
-<p>
-  Length control applies to s2. On the second corpus the same kind of counting variable sits inside
-  or below its chance band, so raw AUC is the primary there; the figures are on
-  <a href="datasets.html#length">Datasets</a>, whose positives are {{fig:s3.gradeA.share}} grade A
-  against s2's {{fig:s2.gradeA.share}}.
-</p>
-
-<h2 id="reporting">One common operating point</h2>
-<p>
-  Precision, recall, F1, accuracy and block FPR are reported for every arm at one shared block
-  false-positive budget of {{fig:cap.exact}}, which is the incumbent cascade's own operating rate
-  on this corpus. No arm appears in that table at a threshold chosen for it alone. The threshold
-  each arm needs to reach the budget is printed in its own column. The table is on
-  <a href="operating-point.html#common">Operating point</a>.
-</p>
-<p>
-  An arm's own argmax is a separate table on the same page and carries the label
-  <strong>in-sample oracle upper bound</strong> in its own heading. The two never share a column.
-</p>
-<p>
-  Accuracy is printed only with the all-allow baseline in the same table. At
-  {{fig:corpus.prevalence}} prevalence on s2 and {{fig:s3.prevalence}} on the second corpus,
-  accuracy is set by the benign class, and allowing every case scores {{fig:acc.s2.allow}} and
-  {{fig:acc.s3.allow}}.
-</p>
-<p>
-  Arms are grouped by counted parameters into three bands, under 3B, 3B to 6B, and 6B and up, with
-  the rank inside each band taken on F1 at the common budget. Counted parameters come from each
-  arm's own run metadata and are checked against the arm registry at build time. The bands are on
-  <a href="sizes.html">Size bands</a>.
-</p>
-
-<h2 id="deployment">The two deployment gates</h2>
-<p>
-  Both re-threshold every arm, so no figure either produces is an arm's shipped behaviour.
+  The corpus is cut into five quintiles of natural prompt tokens, the same bins for every model.
+  AUC is computed inside each and pooled with each bin weighted by its positive-benign pairs: the
+  <strong>{{fig:est.published}}</strong> estimator, named in {{fig:est.source}}.
 </p>
 <ul>
-  <li><strong>False-positive cap.</strong> The highest recall an arm reaches while its block
-      false-positive rate stays at or below {{fig:cap.value}}, which is the incumbent cascade's own
-      operating rate. Enumerating achievable operating points and taking the highest recall inside
-      the cap, ties broken toward the tightest threshold.</li>
-  <li><strong>Zero-false-positive gate.</strong> The highest threshold at which an arm blocks no
-      benign case at all, and the recall it retains there.</li>
+  <li><strong>What it estimates.</strong> Pooling is the Mann-Whitney statistic over
+    within-quintile pairs: raw AUC with the length-confounded pairs removed.</li>
+  <li><strong>Weight against evidence.</strong> The thinnest quintile holds {{fig:est.q0.pos}} of
+    {{fig:corpus.positives}} positives, {{fig:est.q0.share}} of the evidence. An unweighted mean
+    gives it {{fig:est.q0.wunw}} of the weight, an over-weighting of {{fig:est.overweight}}&#215;;
+    pair weighting gives it {{fig:est.q0.wpool}}.</li>
+  <li><strong>Variance.</strong> Per-bin Hanley&#8211;McNeil at AUC 0.5 puts the unweighted mean's
+    standard error at {{fig:est.seratio}}&#215; the pooled estimator's; it is worse on every
+    candidate ({{fig:est.seworse}} exceptions).</li>
 </ul>
 <p>
-  Neither is presented as durable. When the System One programme measured transfer to a disjoint
-  corpus, 4 of 24 zero-FP gates survived and 3 of those were degenerate, and FPR caps held in 8 of
-  48 transfers.
+  The ranking artifact evaluates {{fig:est.schemes}} schemes, and {{fig:est.unwfam}} of them are
+  unweighted means that differ only in binning, so a tally across them is not evidence. The table
+  gives every model under four of them.
 </p>
 
-<h2 id="heldout">The held-out corpus</h2>
-<p>
-  {{fig:s3.arms}} arms are scored on a corpus disjoint from s2 with zero case-id overlap. Its
-  positives are {{fig:s3.gradeA.share}} grade A against s2's {{fig:s2.gradeA.share}}, so a
-  difference between the two conflates threshold miscalibration with a changed definition of a
-  positive. <strong>No transfer figure is published.</strong> What is published is the composition
-  itself and the per-grade separation it explains, on
-  <a href="results.html#corpora">Results</a>.
-</p>
-<p class="small">
-  Grade A is an unambiguous destructive call and grade B is a judgement call, so the two corpora ask
-  different questions of an arm. This is a corpus-design finding and more data of the same kind does
-  not fix it.
-</p>
+{{ui:estimator_table}}
 
-<h2 id="gates">Gate transfer</h2>
-<p>
-  Measured on the System One programme, 4 of 24 zero-false-positive gate transfers to a disjoint
-  corpus survived and 3 of those were degenerate; 12 of 24 violated the source corpus's Wilson
-  bound; FPR caps held in 8 of 48 transfers. Neither a zero-FP gate nor an FPR cap is presented
-  here as durable. Cross-validation within the source corpus called one gate perfect at 5 of 5
-  folds and the disjoint corpus showed that threshold leaking 66 false positives, so
-  cross-validation does not see corpus shift.
-</p>
+{{ui:sparse_bin_note}}
 
 <h2 id="validity">When a run counts</h2>
 <p>
-  A run is valid only if its metadata says <code>complete: true</code> and the on-disk sha256 of
-  the prediction body equals its recorded <code>prediction_sha256</code>. Runs are not spliced, and
-  a multi-shard merge counts only when every row was produced under identical serving conditions.
-</p>
-<p>
-  The cohort runner <code>harness/score_arm.py</code> writes neither field and never hashes the
-  body. <code>harness/settle.py</code> retrofits both: it requires
-  {{fig:settle.rows}} rows with no torn final line, writes <code>complete: true</code> and the
-  digest, then re-reads the metadata and re-hashes the body and compares, so the pass is measured.
-  It exits non-zero if any settled arm's digest disagrees with its metadata.
-</p>
-<div class="box warn">
-  <p>Two limits remain, and they make this weaker than the reference driver's inline guarantee.</p>
-  <ul>
-    <li>The digest is taken at settlement time over the body's complete-line prefix, so it
-        certifies unchanged-since-settlement and not as-the-runner-emitted-it.</li>
-    <li>Settlement requires {{fig:settle.rows}} untorn rows, so an unsettled metadata file means
-        the run is incomplete, and not merely unchecked.</li>
-  </ul>
-</div>
-<p>
-  Of the {{fig:arms.scored}} ranked arms, {{fig:settle.settled}} carry the settled fields with a
-  digest that matches the bytes on disk, and {{fig:settle.mismatch}} of those disagree.
-  {{fig:settle.unsettled}} carry neither field, and all {{fig:settle.unsettled.rowsok}} of them
-  hold the full {{fig:settle.rows}} rows, so they are complete and unsettled: settlement had not run over them when this metadata was recorded. For those five,
-  completeness rests on the row count plus <code>errors == 0</code>. Every ranked arm covers all
-  {{fig:corpus.scorable}} scorable cases at {{fig:settle.rows}} rows with 0 errors and 0 cases
-  missing.
+  A run counts only if its metadata says <code>complete: true</code> and the on-disk sha256 of its
+  predictions equals the recorded <code>prediction_sha256</code>. The runner
+  <code>harness/score_arm.py</code> writes neither; <code>harness/settle.py</code> adds both after
+  requiring {{fig:settle.rows}} untorn rows, then re-reads and re-hashes to confirm. The digest is
+  taken over the complete-line prefix at that point, so it certifies the body unchanged since
+  then, not as the runner wrote it. {{fig:settle.settled}} of the {{fig:models.scored}} models are
+  complete, hash-verified runs, with {{fig:settle.mismatch}} digest mismatches.
+  {{fig:settle.unsettled.note}}
 </p>
 
-<h2 id="publication">What is published here</h2>
+<h2 id="parity">Scorer equivalence</h2>
+<p>
+  The harness imports the reference driver's <code>build_state</code> and
+  <code>build_questions</code>, so prompts are byte-exact. Before any model here is reported, the
+  pipeline re-derives {{fig:parity.n}} published System One scorecards and must match them. Those
+  reference models are published on the <a href="{{fig:other.space}}">System One Space</a>, not
+  here. All {{fig:arith.importers}} scoring scripts import their arithmetic verbatim from
+  <code>{{fig:arith.path}}</code>, {{fig:arith.bytes}} bytes at sha256
+  <code>{{fig:arith.sha}}</code>.
+</p>
+
+{{ui:parity_table}}
+
+<h2 id="publication">What is published</h2>
 <div class="box">
   <p>
-    <strong>Aggregates only.</strong> No per-case row detail appears on this Space. Every figure
-    is a count, a rate or a distribution statistic over the corpus or a stratum of it. The payload
-    guard indexes every corpus case id on disk and fails the build if one appears in a file.
-  </p>
-  <p>
-    <code>mcptox</code> is local-evaluation-only: aggregate numbers only, never rows. One further
-    source dataset is aggregate-only on the same terms. A census over the <code>source.dataset</code>
-    field of both corpora found 0 rows from either, so neither contributes a case to any figure
-    here. Every source's licence and redistribution marker is recorded in
-    <code>{{fig:lock.path}}</code>, {{fig:lock.entries}} entries at sha256
-    <code>{{fig:lock.sha}}</code>: {{fig:lock.download}} download-only, {{fig:lock.vendored}}
-    vendored, {{fig:lock.aggregate}} aggregate-only, across {{fig:lock.licences}} distinct
-    licences. <a href="datasets.html#licence">Detail</a>.
+    <strong>Aggregates only.</strong> No per-case row detail appears on this Space; every figure is
+    a count, rate or distribution over the corpus or a stratum of it.
+    <code>mcptox</code> is local-evaluation-only and one further source is aggregate-only; a census
+    of the <code>source.dataset</code> field found 0 rows from either in either corpus. Licences
+    and redistribution markers for every source are in <code>{{fig:lock.path}}</code>,
+    {{fig:lock.entries}} entries at sha256 <code>{{fig:lock.sha}}</code>.
   </p>
   <p>
     The four data repositories that hold the corpora and the prediction files stay private. This
     Space is public and carries no corpus rows, no provider rationales, no credentials and no
-    unredacted identifiers.
+    unredacted identifiers. Corpus <code>cases_sha256 {{fig:corpus.sha}}</code>.
   </p>
 </div>
 
 <h2 id="build">Build gates</h2>
-<p>
-  {{fig:gate.asserts}} figures are recomputed from their primitives and checked against their
-  artifacts before any file is written, over {{fig:gate.artifacts}} artifacts and
-  {{fig:gate.charts}} charts. The payload guard is byte-identical to the System One Space's copy.
-  The scripts are listed on <a href="reproduce.html#gates">Reproduce</a>.
-</p>
+<ul>
+  <li><code>site-build/build.py</code> recomputes {{fig:gate.asserts}} figures from their
+    primitives and checks each against its artifact before any page is written, over
+    {{fig:gate.artifacts}} input files and {{fig:gate.charts}} charts. It aborts on any mismatch.</li>
+  <li>Each ROC curve is carried as integer (false blocks, true blocks) pairs,
+    {{fig:curve.points}} points across {{fig:curve.models}} models. The area under each drawn curve
+    must equal the published raw AUC exactly, on all {{fig:curve.aucs}} AUCs, and the budget point
+    must lie on the curve.</li>
+  <li><code>site-build/guard.py</code>, byte-identical to the System One Space's copy, fails on any
+    corpus case id, sensitive-text shingle, CJK codepoint or credential shape, and on any file that
+    is not <code>.html .css .md .json .txt</code> or is over 1 MiB.</li>
+  <li><code>site-build/verify.py</code> checks structure, links, SVG bounds, table width, the
+    reading precision of every figure, the required disclosures and the list of retired
+    figures.</li>
+  <li><code>site-build/publish.py</code> re-runs both, records the repository's visibility, uploads,
+    and aborts if the visibility changed. It never moves a repository between public and
+    private.</li>
+</ul>
 
-<div class="foot">
-  <p>Ledger: <code>benchmarks/EXPERIMENTS.md</code>. Corpus:
-    <code>cases_sha256 {{fig:corpus.sha}}</code>.</p>
-</div>
+<h2 id="reproduce">Scripts</h2>
+<ul>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/EXPERIMENTS.md"><code>benchmarks/EXPERIMENTS.md</code></a>
+    &#8212; the experiment ledger.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_prepare_system_one.py"><code>benchmark_prepare_system_one.py</code></a>,
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_run_system_one.py"><code>benchmark_run_system_one.py</code></a>
+    and
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/scripts/benchmark_score_system_one.py"><code>benchmark_score_system_one.py</code></a>
+    &#8212; corpus assembly, the reference driver and the reference scorer.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/arms.py"><code>harness/arms.py</code></a>
+    and
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/harness/score_arm.py"><code>harness/score_arm.py</code></a>
+    &#8212; the model registry and the runner.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/score_cohort.py"><code>scoring/score_cohort.py</code></a>,
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/leakage.py"><code>leakage.py</code></a>
+    and
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/scoring/final.py"><code>final.py</code></a>
+    &#8212; scorecards behind the parity check, the counting-variable diagnostic, and the
+    baselines and chance band.</li>
+  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/reproduce/07-analysis/rescoring/remine.py"><code>rescoring/remine.py</code></a>
+    and its
+    <a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/system_one/reproduce/07-analysis/rescoring/README.md"><code>README.md</code></a>
+    &#8212; the shared arithmetic and the two AUC definitions.</li>
+</ul>
+
+<h3 id="artifacts">Files this build reads</h3>
+
+{{ui:artifacts_read}}
+
+<h2 id="changelog">Changelog</h2>
+<ul>
+  <li><strong>This revision.</strong> Eleven pages became five. The two controls'
+    length-controlled AUCs, the DeBERTa tile and the length counter had still been printed with
+    the retracted unweighted estimator; they now use the published one, and the leakage-gate
+    verdict was re-read from it. The laptop figures are keyed to model names, and the overlap,
+    grade-B and memory statements were corrected against the artifacts.</li>
+  <li><strong>Earlier.</strong> The unweighted mean of per-quintile AUCs was retracted as the
+    length-control estimator in favour of the {{fig:est.published}} figure. The claim that Prompt
+    Guard 2 supplied an independent encoder backbone was withdrawn.</li>
+</ul>
+
 </div>
 </body>
 </html>

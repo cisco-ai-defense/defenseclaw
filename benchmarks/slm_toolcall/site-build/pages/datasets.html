@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Datasets &#8212; SLM tool-call security</title>
+<title>Data and models &#8212; SLM tool-call security</title>
 {{STYLE}}
 </head>
 <body>
@@ -11,20 +11,18 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">DATASETS</p>
-<h1>The two corpora</h1>
+<p class="eyebrow">DATA AND MODELS</p>
+<h1>The corpus, the labels, the models and what they cost to run</h1>
 <p class="lede">
-  Scoring uses s2: {{fig:corpus.cases}} cases, {{fig:corpus.scorable}} scorable,
-  {{fig:corpus.positives}} positive, {{fig:corpus.negatives}} benign, at
-  <code>cases_sha256 {{fig:corpus.sha}}</code>. A second corpus holds {{fig:s3.cases}} cases,
-  {{fig:s3.positives}} positive, {{fig:s3.negatives}} benign, at
-  <code>cases_sha256 {{fig:heldout.sha}}</code>. They share {{fig:heldout.overlap}} case ids.
-  Their positives are built from almost opposite grade mixes: {{fig:s2.gradeA.share}} grade A on
-  s2 against {{fig:s3.gradeA.share}} on the second, so no transfer figure is published from the
-  pair.
+  Every figure on this Space is computed on corpus s2: {{fig:corpus.cases}} cases,
+  {{fig:corpus.scorable}} scorable, {{fig:corpus.positives}} destructive and
+  {{fig:corpus.negatives}} benign. The case rows are evaluation-only and are not published; only
+  aggregates over them are.
 </p>
 
-<h2 id="record">Field by field</h2>
+{{TOC}}
+
+<h2 id="record">The corpus</h2>
 
 {{ui:corpus_table}}
 
@@ -37,109 +35,137 @@
 {{ui:grade_scheme_table}}
 
 <p>
-  Grade A and grade B are scored as positives. Grade C is excluded: the condition it tests is
-  satisfied by a case whose adjudication is unresolved or partial, so a scored decision on one
-  would have no settled truth value to score against. s2 holds {{fig:corpus.gradeC}} grade-C
-  cases, kept for diagnostics and counted in no numerator or denominator here. The second corpus
-  holds none, and neither corpus holds a grade-E case.
-</p>
-<p>
-  Grade A is an unambiguous destructive call and grade B is a judgement call, so the two grades
-  are different evidentiary standards and the mix of them changes what a positive means.
+  Grades A and B are positives; grade D is benign. The {{fig:corpus.gradeC}} grade-C cases record
+  an unresolved or partial adjudication, so they are excluded from every numerator and
+  denominator.
 </p>
 
-<h2 id="composition">The grade composition of the positives</h2>
+<h2 id="sources">Which source datasets the corpus pools</h2>
+
+{{ui:source_census_table}}
+
+<h2 id="second">The second corpus, and why nothing is compared across the two</h2>
 <p>
-  s2's positives are {{fig:corpus.gradeA}} grade A and {{fig:corpus.gradeB}} grade B, which is
-  {{fig:s2.gradeA.share}} grade A. The second corpus's are {{fig:s3.gradeA}} grade A and
-  {{fig:s3.gradeB}} grade B, which is {{fig:s3.gradeA.share}}. A change in an arm's score between
-  the two conflates threshold miscalibration with a changed definition of a positive.
+  A second corpus of {{fig:s3.cases}} cases, {{fig:s3.positives}} of them positive, shares
+  {{fig:heldout.overlap}} case ids with s2, and {{fig:s3.models}} models were scored on it. Its
+  positives are {{fig:s3.gradeA.share}} grade A against s2's {{fig:s2.gradeA.share}}. A change in a
+  model's score between the two would mix a miscalibrated threshold with a changed definition of
+  a positive, so <strong>no transfer figure is published</strong> in either direction, and no
+  figure elsewhere on this Space uses the second corpus. What is published is the composition and
+  the per-grade separation it explains.
 </p>
-<div class="box bad">
-  <p>
-    <strong>No transfer figure and no generalisation claim is published in either direction.</strong>
-    What is published is the composition itself and the per-grade separation it explains, on
-    <a href="results.html#corpora">Results</a>. This is a corpus-design property and more data of
-    the same kind does not change it.
-  </p>
-</div>
+
+{{chart:grade_slope}}
 
 {{chart:grades}}
 
-<h2 id="length">The length cue on s2</h2>
 <p>
-  Five scalars read off the request, containing no model at all, separate s2's positives from its
-  benign cases: prompt tokens at AUC {{fig:cue.tokens}}, event count at {{fig:cue.events}},
-  <code>context_events</code> at {{fig:cue.ctxevents}} and <code>context_bytes</code> at
-  {{fig:cue.ctxbytes}}. Destructive multi-step trajectories in s2 are longer than benign ones, so
-  every raw AUC on s2 carries a length component and every arm carries a length-controlled figure
-  beside its raw one. The decomposition is on <a href="baselines.html#length">Baselines</a>.
+  The two ends make the point. <code>{{fig:mirror.a.model}}</code> reaches {{fig:mirror.a.aucA}} on
+  grade A and {{fig:mirror.a.aucB}} on grade B; <code>{{fig:mirror.b.model}}</code> reaches
+  {{fig:mirror.b.aucA}} and {{fig:mirror.b.aucB}}. A corpus built mostly of one grade therefore
+  ranks models by how they handle that grade.
 </p>
-<p>
-  On the second corpus the same kind of variable carries nothing: <code>context_bytes</code>
-  reaches {{fig:s3.cue.bytes}}, inside that corpus's chance band of [{{fig:s3.band.lo}},
-  {{fig:s3.band.hi}}], which follows from a Hanley&#8211;McNeil standard error of
-  {{fig:s3.band.se}} at AUC 0.5. <code>context_events</code> reaches {{fig:s3.cue.events}}, below
-  that band.
-  Both fields are corpus properties and are byte-identical across every arm that scored it. The
-  grade A share of its positives is {{fig:s3.gradeA.share}}, so this is a statement about its
-  length fields and not a comparison of the two corpora's difficulty.
-</p>
-
-{{chart:s3cue}}
-
-<h2 id="settlement">The second corpus, as scored</h2>
-<p class="small">
-  Still the corpus whose positives are {{fig:s3.gradeA.share}} grade A against s2's
-  {{fig:s2.gradeA.share}}; this section records which bodies exist and whether they are settled,
-  and no transfer figure is published from them.
-</p>
-<p>
-  {{fig:heldout.arms}} arms have a settled prediction body on it, each of
-  {{fig:heldout.rows}} rows covering all {{fig:s3.cases}} cases with 0 errors and 0 cases
-  missing. Every one carries <code>complete: true</code> and a <code>prediction_sha256</code>
-  matching the bytes on disk.
-</p>
-
-{{ui:heldout_table}}
-
-<h3 id="reconcile">Two artifacts, {{fig:heldout.stage0}} arms against {{fig:heldout.arms}}</h3>
-{{ui:heldout_reconciliation}}
 
 <h2 id="licence">Licence and redistribution</h2>
 
 {{ui:licence_table}}
 
-<div class="box">
-  <p>
-    <strong>Aggregates only.</strong> No per-case row detail appears on this Space. The payload
-    guard indexes every corpus case id on disk and fails the build if one appears in a published
-    file, and it shingles the corpora's intent, tool-call argument and description fields and
-    fails on a match. Both corpora's rows stay in a private data repository.
-  </p>
-</div>
-
-<h2 id="construction">How the second corpus relates to s2</h2>
-<p>
-  The artifacts record three relations between them and no more. They share
-  {{fig:heldout.overlap}} case ids. The second corpus carries {{fig:s3.negatives}} benign cases
-  against s2's {{fig:corpus.negatives}}, and its prevalence is lower by a factor of
-  {{fig:corpus.prev.ratio}}. Its positives are {{fig:s3.gradeA.share}} grade A against s2's
-  {{fig:s2.gradeA.share}}.
-</p>
-<p>
-  The artifacts do not record a mechanism for that inversion in the grade mix, and none is
-  asserted here. What is asserted is the consequence: a score measured on one of these corpora
-  and a score measured on the other are answers to different questions, so the pair supports no
-  transfer figure in either direction.
+<p class="small">
+  The payload guard indexes every corpus case id and shingles the corpora's intent, tool-call
+  argument and description fields, and fails the build if any appears in a published file.
 </p>
 
-<div class="foot">
-  <p>Corpus records from <code>cohort-rank.json</code> and
-    <code>s3-scores-in-scope.json</code>. Grade conditions from
-    <code>{{fig:labels.path}}</code> at sha256 <code>{{fig:labels.sha}}</code>. Source-dataset
-    licences from <code>{{fig:lock.path}}</code> at sha256 <code>{{fig:lock.sha}}</code>.</p>
-</div>
+<h2 id="roster">The {{fig:roster.n}} models</h2>
+<p>
+  {{fig:roster.general}} general decoders, {{fig:roster.safety}} purpose-built safety classifiers,
+  {{fig:roster.encoder}} trained encoder classifiers and {{fig:roster.control}} untrained controls,
+  {{fig:roster.snapshot.gib}} GiB of weights in all. Repository, pinned revision, parameter count,
+  licence, origin and readout come from the harness's model registry.
+</p>
+
+{{ui:roster_table}}
+
+<h3 id="gating">Gated downloads</h3>
+<p>
+  {{fig:roster.gated}} of the {{fig:roster.n}} need a licence-accepted Hugging Face token, across
+  {{fig:roster.groups}} acceptance groups: Gemma, Llama 3.2 and Llama Prompt Guard 2. A 403 means
+  the token is valid and that group is not yet accepted; a 401 means the token itself is not.
+  Community re-uploads of gated weights were not used, because a mirror loses the provenance the
+  licence column records. Anyone repeating the cohort has to accept all three licences. Both Falcon3 models carry the Falcon LLM licence, not Apache-2.0.
+</p>
+
+{{chart:gating}}
+
+<h3 id="backbones">Encoder backbones</h3>
+<p>
+  Both Prompt Guard 2 sizes are <code>{{fig:pg2.arch}}</code>, with a {{fig:pg2.maxpos}}-token
+  window, so all {{fig:roster.encoder}} trained encoders are checkpoints of one DeBERTa-v2 family.
+  The only other encoder backbone is ModernBERT, and both ModernBERT models are controls. Prompt
+  Guard 2's names understate its size: 22M is {{fig:pg2.22}} parameters and 86M is
+  {{fig:pg2.86}}, because the published figures exclude embeddings.
+</p>
+
+<h3 id="taxonomy">Safety-classifier policies</h3>
+
+{{ui:taxonomy_table}}
+
+<p>
+  <code>llama-guard-3-1b</code>'s default {{fig:lg.categories}} categories have none for code
+  execution or system damage, so a single custom category built from the I3 policy was passed
+  through the template's documented categories hook. <code>shieldgemma-2b</code> and
+  <code>shieldstral-1.0-3b</code> take a policy argument and were given the same policy.
+</p>
+
+<h3 id="moe">Mixture of experts</h3>
+
+{{ui:moe_note}}
+
+<h3 id="dropped">Qwen3</h3>
+<p>
+  Qwen3 at 0.6B, 1.7B and 4B was dropped on a non-China provenance constraint, after
+  {{fig:qwen.gib}} GiB of weights had been downloaded and before any GPU time was spent.
+</p>
+
+<h2 id="footprint">Running on a laptop</h2>
+<p>
+  CPU only, 8 pinned threads. Decoders ran as GGUF Q4_K_M under llama.cpp, encoders as dynamic
+  int8 under transformers. {{fig:lap.published}} models have a measured rows/min figure.
+</p>
+
+{{chart:envelope}}
+
+{{chart:throughput}}
+
+<p>
+  The fastest decoder, <code>{{fig:lap.fastest.arm}}</code>, does {{fig:lap.fastest.rpm}} rows/min;
+  the slowest, <code>{{fig:lap.slowest.arm}}</code>, does {{fig:lap.slowest.rpm}}.
+  <code>shieldstral-1.0-3b</code> does {{fig:lap.rpm.shieldstral}} on its text tower alone. The
+  encoder <code>{{fig:lap.deberta.arm}}</code> does {{fig:lap.deberta.rpm}}, about
+  {{fig:lap.encoder.ratio}}&#215; the fastest decoder, but only because its window stops at 512
+  tokens.
+</p>
+
+{{chart:cost}}
+
+<p>
+  The artifacts carry a measured peak resident set for one model only,
+  <code>{{fig:lap.rss.key}}</code>, so a per-model peak-RSS axis cannot be drawn from them.
+  <code>gemma-3-4b-it</code> is the one checkpoint over 8 GiB unquantized
+  ({{fig:gm.gib}} GiB); its vision tower and projector are {{fig:gm.share}} of its parameters and
+  go unused on a text-only task, as do {{fig:sh.share}} of <code>shieldstral-1.0-3b</code>'s.
+</p>
+
+<h3 id="caveats">Caveats on these figures</h3>
+
+{{ui:caveat_list}}
+
+<p>
+  <strong>These figures are archived, not reproducible from vendored code.</strong> The CPU
+  measurements were ad-hoc invocations whose scripts were never saved;
+  <code>harness/build_llamacpp.sh</code> builds the toolchain but nothing runs it, and
+  <code>harness/score_arm.py</code> measures no RSS and no CPU latency.
+</p>
+
 </div>
 </body>
 </html>
