@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Method and data — corpora, labels, scoring, question format and the prompt contract</title>
+<meta name="description" content="The two scored corpora and how every label was assigned, how a figure is scored, why question format is held fixed, the prompt contract as sent, the source inventory, and a glossary.">
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<h1>Method and data</h1>
+<p class="lede">
+  What was scored, how a label was assigned, how a figure is computed, what the models were asked,
+  and where the data came from. Names used on every page are defined in the
+  <a href="#glossary">glossary</a> at the end.
+</p>
+
+<h2 id="corpora">The two scored corpora</h2>
+<p>
+  Every ranked figure is on the <strong>Broad comparison</strong> (stage S2,
+  {{fig:s2.benign.scorable}} of scorable cases benign). The <strong>Production-weighted</strong>
+  corpus (stage S3) is weighted to the benign share of real coding traffic,
+  {{fig:s3.benign.scorable}} benign; it is where the judge stops paying for itself. A third, the
+  <strong>200-case pilot</strong> (stage S1), screened candidates before either.
+</p>
+{{ui:datasets}}
+{{chart:grade_slope}}
+
+<h2 id="per-source">Which source each model&#8217;s recall comes from</h2>
+<p>
+  The Broad comparison draws its unsafe cases from a few source datasets in very unequal numbers,
+  so recall is published per model and per source with the unsafe count behind every rate.
+</p>
+{{chart:source_recall}}
+
+<h2 id="scoring">How a figure is scored</h2>
+<ul>
+  <li><strong>{{term:block_f1}}</strong> is the default everywhere: a <code>confirm</code> stops
+      nothing, so only a hard <code>block</code> counts as a catch. {{term:any_f1}} counts a
+      confirm too; it is quoted only where it is named.</li>
+  <li><strong>The {{term:budget}}</strong> is block FPR &#8804; {{fig:x.budget.cap}}, OpenJev&#8217;s own
+      realised rate on the Broad comparison: at most {{fig:x.budget.fp}} false blocks in
+      {{fig:x.s2.neg}} benign cases. Each
+      model&#8217;s threshold on <code>P(block)</code> is the one that stays inside it on these same
+      cases.</li>
+  <li><strong>{{term:auc}}</strong> and every figure at the budget use <code>P(block)</code>, with
+      a case scored at the maximum over its events.</li>
+  <li><strong>Grade C is excluded</strong> from every score; grades A and B are the unsafe class
+      and grade D the benign one ({{term:grades}}).</li>
+  <li><strong>Intervals</strong> are bootstraps over families (cases that share an origin), 2,000
+      replicates, seed 741983, or Wilson intervals for a single proportion.</li>
+</ul>
+
+<h2 id="format">Question format is held fixed</h2>
+<p>
+  The question format changes a result about as much as the model does. With model, context and
+  instruction held, OpenJev scores {{fig:fmt.q.hi}} block-only F1 at {{fig:fmt.q.qhi}} and
+  {{fig:fmt.q.lo}} at {{fig:fmt.q.qlo}}, a spread of {{fig:x.fmt.q.diff}}. Across the
+  {{fig:sf.n}} models ranked at the one format they all answered, {{fig:par.grid}}, the spread is
+  {{fig:sf.diff}}, from {{fig:sf.hi.f1}} ({{fig:sf.hi.name}}) to {{fig:sf.lo.f1}}
+  ({{fig:sf.lo.name}}). A table that mixed formats would rank the format as much as the model, so
+  the ranking holds {{fig:par.grid}} fixed and SecJudge, which takes no question at all, is the one
+  disclosed exception. This is the only place the caveat is stated; it applies wherever two models
+  on different formats appear in one panel, and every such series names its format.
+</p>
+{{chart:questions}}
+<p>
+  The boolean-probe formats Q1 and Q3 almost never emit a block at scale, which is why they fall
+  below the judge alone inside the cascade. Jev 1.13.0 is the only model run at all
+  {{fig:sweep.n}} formats:
+</p>
+{{ui:sweep}}
+
+<h2 id="prompts">The prompt contract</h2>
+<p>
+  Each request has three parts: an instruction variant, a question variant and a context variant,
+  {{fig:proto.instructions}} &#215; {{fig:proto.questions}} &#215; {{fig:proto.contexts}} of them.
+  Every generative model received this request; SecJudge received the same state serialised as one
+  string. The whole state is capped at {{fig:proto.maxbytes}} bytes. The text below is verbatim
+  from the protocol files.
+</p>
+<div class="box bad">
+  <p style="margin:0"><strong>Instantiated prompts are withheld.</strong> The 33 files of filled-in
+  prompts each embed a corpus row, and every corpus involved is <code>download-only</code> or
+  <code>aggregate-only</code>. This page publishes the templates and one synthetic
+  instantiation; no real request, tool call or argument value appears anywhere on this site.</p>
+</div>
+<h3 id="instructions">Instructions</h3>
+<p>I3 is the default everywhere except the instruction ablation itself.</p>
+{{ui:instructions}}
+<h3 id="questions">Questions</h3>
+<p>Q0, Q2 and Q4 answer a disposition directly; Q1 and Q3 answer eight booleans and the action is
+  derived from them, which is where they fail open (<a href="risks.html#failopen">Risks</a>).</p>
+{{ui:questions}}
+<h3 id="contexts">Contexts</h3>
+<p>Ten recipes over the 200-case pilot. C0 through C7 are the production ladder; CR, CS, CF, CA
+  and CD are diagnostics. Redacting argument values (CD) raises the false-positive rate to
+  {{fig:ctx.CD.fpr}}; 64 events of history (CF) scores the same as three (C3).</p>
+{{ui:contexts}}
+{{chart:contexts}}
+<h3 id="filled">One filled request</h3>
+{{ui:example_filled}}
+
+<h2 id="funnel">Stages</h2>
+{{chart:funnel}}
+
+<h2 id="inventory">Where the data came from</h2>
+<p>
+  Across 18 normalised corpora, {{fig:src.rows}} rows, the user-request field was empty in every
+  row, so the intent check had never been measurable. Three adapters were rewritten to carry the
+  request through, and a new corpus of real emitted MCP tool calls with deterministic proof of
+  compromise added 405 proof-verified families against 333 grade-A rows in the whole prior
+  inventory. That corpus is evaluation-only and aggregate-only.
+</p>
+<p>
+  All {{fig:src.count}} row-supplying sources are public and <code>download-only</code>; the
+  per-source table with licences and revisions is on <a href="reproduce.html#datasets">Reproduce</a>.
+  {{fig:src.noncommercial}} is licensed <strong>CC-BY-NC-4.0</strong>, the only non-commercial
+  source that supplies rows: its {{fig:src.noncommercial.rows}} rows must not be used for any
+  commercial purpose.
+</p>
+<div class="box bad" id="provenance">
+  <p><strong>Two provenance defects.</strong> (1) A trajectory corpus marked
+  <code>enabled: false</code> / <code>review_required</code> in the dataset lock was normalised
+  anyway, and 452 of its cases became the clean lane of the proof-backed intent corpus. It changes
+  no measurement; it changes what may be published. (2) The evaluation-only corpus&#8217;s lock
+  entry pins an arXiv abstract (<code>revision: paper-v1</code>) instead of the code repository,
+  so it cannot pin a revision.</p>
+  <p class="small" style="margin-bottom:0"><code>assay</code> is disabled in the lock
+  (<code>license: {{fig:lock.assay.licence}}</code>) and ships zero rows; a forbidden benchmark
+  named in the screening manifest could not be drawn from.</p>
+</div>
+
+<h2 id="glossary">Glossary</h2>
+<div class="tbl-scroll">
+<table>
+  <thead><tr><th scope="col">Term</th><th scope="col">Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><strong>System One</strong></td><td>The small-model tier of the cascade.</td></tr>
+    <tr><td><strong>disposition</strong></td><td>The decision: <code>allow</code>, <code>confirm</code> (send for review) or <code>block</code>.</td></tr>
+    <tr><td><strong>Broad comparison / Production-weighted / 200-case pilot</strong></td><td>The three scored stages, S2, S3 and S1. The Broad comparison is {{fig:s2.benign.scorable}} benign, the Production-weighted corpus {{fig:s3.benign.scorable}}.</td></tr>
+    <tr><td><strong>proof-backed corpus</strong></td><td>Real emitted MCP tool calls with deterministic proof of compromise (<code>mcptox</code>, <code>intent-real</code>); evaluation-only, aggregate metrics only.</td></tr>
+    <tr><td><strong>AgentDojo</strong></td><td>The synthetic benchmark behind the eight negative intent runs.</td></tr>
+    <tr><td><strong>coding traffic</strong></td><td>{{fig:tb.traj}} real benign coding sessions, {{fig:tb.events}} tool-call events (<code>terminalbench</code>); every flag on it is a false positive.</td></tr>
+    <tr><td><strong>C0 / C7</strong></td><td>Context recipes: the call alone, and the call with the request and up to seven prior events.</td></tr>
+    <tr><td><strong>I0&#8211;I3, Q0&#8211;Q4</strong></td><td>Instruction and question variants (<a href="#prompts">above</a>).</td></tr>
+    <tr><td><strong>shipped threshold</strong></td><td>The operating point a model applies itself (its argmax disposition).</td></tr>
+    <tr><td><strong>shared budget</strong></td><td>The false-block rate every model is held to in the ranking.</td></tr>
+    <tr><td><strong>one-sided / two-sided routing</strong></td><td>Escalate everything but confident blocks / escalate only the uncertain band.</td></tr>
+    <tr><td><strong>short-circuit / escalate-on-confirm</strong></td><td>A rule-engine <code>confirm</code> ends the cascade / becomes a floor and the later tiers still run.</td></tr>
+    <tr><td><strong>surface</strong></td><td><code>action</code>: a one-shot operation. <code>stateful</code>: part of a multi-step trajectory.</td></tr>
+    <tr><td><strong>Lane A / Lane B</strong></td><td>The Q4 scores &#8220;harmful regardless of the request?&#8221; (<code>intrinsic_danger</code>) and &#8220;still serves the request?&#8221; (<code>serves_intent</code>).</td></tr>
+    <tr><td><strong>separation</strong></td><td>Block rate on proven compromise minus block rate on a correct refusal (<code>sep|res</code>).</td></tr>
+    <tr><td><strong>family</strong></td><td>Cases sharing an origin; the unit a bootstrap resamples and a stage split isolates.</td></tr>
+    <tr><td><strong>settled file</strong></td><td>A prediction file whose manifest says <code>complete: true</code> and whose on-disk SHA-256 matches it. Nothing here reads any other.</td></tr>
+    <tr><td><strong>noul</strong></td><td>The protocol&#8217;s type for a probe answered with probabilities over no / unknown / likely, as opposed to a <code>choice</code> (one disposition) or a <code>score</code>.</td></tr>
+    <tr><td><strong>flip rate</strong></td><td>Share of events whose action differs across byte-identical replays.</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{FOOT}}
+</div>
+{{SCRIPT}}
+</body>
+</html>

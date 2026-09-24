@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>What to deploy — cost, quality and the operational trade</title>
-<meta name="description" content="The cost/quality frontier for every measured guard policy, where traffic ends up, the cascade as a flow, dollars per attack stopped, and a calculator that prices your own traffic against the measured settings.">
+<title>Deploy — the recommended stack, its settings and what it costs</title>
+<meta name="description" content="How to run the tool-call guard cascade: routing, threshold, tier order, traffic mix, enforcement granularity, cost, latency and the twelve recommendations.">
 {{STYLE}}
 {{DATA}}
 </head>
@@ -13,172 +13,220 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">evaluation-only</p>
-<h1>What to deploy</h1>
+<h1>Deploy</h1>
 <p class="lede">
-  {{fig:dec.rows.s2}} policy rows were measured on the Broad comparison and
-  {{fig:dec.rows.s3}} on the Production-weighted corpus, over
-  {{fig:dec.models.s2}} small models. This page is the part a reader deciding what to run
-  actually needs: what each one costs, what it catches, what it lets through, and how much of it
-  lands on a person. Every number is read from an artifact at build time.
+  How to run the cascade once the middle tier is chosen: which routing rule, which threshold, in
+  what order, on what traffic, enforced at what granularity, and what it costs. Everything on this
+  page uses OpenJev as the small model unless a panel names another.
 </p>
+<p class="answer"><strong>Recommended:</strong> <code>rules &#8594; OpenJev &#8594; Gemma 4
+  judge</code>, {{term:two_sided}} at 0.30, with {{term:escalate}}: block-only F1
+  {{fig:lb.casc_esc.f1}} at block FPR {{fig:lb.casc_esc.fpr}}, judge called on
+  {{fig:s2.twosided.llm}} of cases. The cascade as it runs today, which short-circuits on an
+  advisory rule <code>confirm</code>, scores {{fig:s2.shortcircuit.f1}}. The routing, threshold, cost and tier-order panels
+  below are measured on that version, because the escalating version was scored only in the
+  policy re-analysis. OpenJev
+  weights are CC BY-NC 4.0: non-commercial, attribution required, contact the authors for
+  commercial use. At production traffic, drop the judge (<a href="#mix">below</a>).</p>
 
-<p class="pick"><strong>The short answer:</strong> for OpenJev (weights CC BY-NC 4.0:
-  non-commercial, attribution required, contact authors for commercial use) on the Broad comparison the
-  cheapest two-sided setting is also its best-scoring one, so there is no trade to make &#8212; take
-  <code>two-sided @0.30</code> at {{fig:dec.spend.s2}} of judge spend per 1,000 cases. That does not
-  hold for every model: the panels below give each one&#8217;s own optimum. At the benign
-  share of real traffic the judge stops paying for itself at all: for OpenJev,
-  <code>rules → small model</code>
-  with nothing behind it scores {{fig:s3.so.f1}} against {{fig:s3.twosided.f1}} for the full
-  cascade, at zero provider spend.</p>
-<div class="box warn">
-  <p style="margin:0"><strong>At production weighting the no-judge policy is measured for
-  {{fig:s3.nojudge.n}} small models, and OpenJev&#8217;s is not the strongest of them.</strong>
-  Block-only F1 at zero judge spend: {{fig:s3.nojudge.table}}. On the cost-against-quality panel
-  below, {{fig:s3.nojudge.best.model}}&#8217;s is the single undominated point on that corpus.
-  Both it and OpenJev ran question format Q2, so that pair carries no question-format confound.
-  The deployment pick does not follow from this panel alone: on real benign coding traffic
-  {{fig:s3.nojudge.best.model}} flags {{fig:tb.q2.jev}} of events against OpenJev&#8217;s
-  {{fig:tb.q2.oj}}, and it has the lowest proof-backed recall of the {{fig:ir.models.n}} models
-  run on the proof-backed corpus
-  ({{fig:recall.jev.C7}} against {{fig:recall.openjev.C7}}). Those are on
-  <a href="finding-safety.html#benign">safety</a> and <a href="finding-intent.html#limits">intent</a>.</p>
+<h2 id="cascade">The cascade</h2>
+<p>
+  Three tiers, cheapest first. The rules settle only {{fig:dec.flow.rules}} of
+  {{fig:dec.flow.total}} cases, the small model settles {{fig:dec.flow.small}}, and
+  {{fig:dec.flow.judge}} reach the judge.
+</p>
+{{chart:architecture}}
+{{chart:cascade_s2}}
+<div class="tiles">
+  <div class="tile"><div class="v">{{fig:s2.detllm.f1}} → {{fig:s2.twosided.f1}}</div>
+    <div class="l">block-only F1, judge alone → cascade</div></div>
+  <div class="tile"><div class="v">{{fig:s2.detllm.fpr}} → {{fig:s2.twosided.fpr}}</div>
+    <div class="l">block false-positive rate</div></div>
+  <div class="tile"><div class="v">{{fig:s2.detllm.review}} → {{fig:s2.twosided.review}}</div>
+    <div class="l">confirm rate (left for review)</div></div>
+  <div class="tile"><div class="v">100% → {{fig:s2.twosided.llm}}</div>
+    <div class="l">cases sent to the judge</div></div>
 </div>
 
-<h2 id="frontier">Cost against quality</h2>
+<h2 id="routing">Routing</h2>
 <p>
-  Every policy as one point: {{fig:dec.points.s2}} on the Broad comparison and
-  {{fig:dec.points.s3}} at Production weighting, from the {{fig:dec.models.s2}} small models with a
-  cascade scorecard on the same deterministic rule tier ({{fig:dec.models.s2.names}}). A point is
-  greyed when some other policy in the same panel is both cheaper and better;
-  {{fig:dec.front.s2}} are undominated on the Broad comparison and {{fig:dec.front.s3}} at
-  Production weighting. The judge price is the one measured LLM
-  spend in the artifacts: {{fig:dec.price.usd}} over {{fig:dec.price.cases}} cases, which is
-  {{fig:dec.price.case}} per case judged, or {{fig:dec.price.call}} per provider call across
-  {{fig:dec.price.calls}} calls.
+  {{term:one_sided}} trusts the small model only on its confident blocks.
+  {{term:two_sided}} also trusts its confident allows, and that is the whole saving.
 </p>
-<p class="small">
-  These are different small models on different question formats, so a gap between two of them
-  carries that confound; the comparison the panels support is policy against policy within one
-  model. Hosted Jev is on both panels from
-  <code>outputs/deterministic-real/realdet-s{2,3}-jev.json</code>, whose rule-tier provenance is
-  recorded &#8212; see <a href="reproduce.html#restated">restated figures</a>.
-</p>
-{{chart:pareto}}
-
-<h2 id="dispositions">Where traffic ends up</h2>
-<p>
-  An F1 hides which mistakes a policy makes. These two charts split every policy's traffic by what
-  the case actually was, so a benign call that got blocked and an unsafe call that got through are
-  each their own segment.
-</p>
-{{chart:disp_s2}}
-{{chart:disp_s3}}
-
-<h2 id="flow">The cascade as a flow</h2>
-<p>
-  All {{fig:dec.flow.total}} scorable cases enter at the left. The deterministic rules terminate
-  {{fig:dec.flow.rules}} of them, the small model settles {{fig:dec.flow.small}}, and
-  {{fig:dec.flow.judge}} reach the judge. Every arrow carries its own measured rate.
-</p>
-{{chart:sankey}}
-
-<h2 id="per-catch">What an attack stopped actually costs</h2>
-<p>
-  Judge spend divided by the number of unsafe cases the policy ended as a hard <code>block</code>.
-  This reorders the policies against F1. Only the policies that call the judge have a value here:
-  each model&#8217;s <code>rules → small model</code> never calls it, so its judge spend is
-  $0.00000 and the ratio is undefined &#8212; {{fig:dec.cpc.s2.free}} of the
-  {{fig:dec.points.s2}} policies on the Broad comparison. Across the remaining
-  {{fig:dec.cpc.s2.n}} priced policies, from {{fig:dec.models.s2}} small models
-  ({{fig:dec.models.s2.names}}), the spread from cheapest to most expensive per attack stopped is
-  {{fig:dec.cpc.s2.ratio}}&#215;, from {{fig:dec.cpc.s2.best}} to {{fig:dec.cpc.s2.worst}}.
-</p>
-{{chart:cost_per_catch}}
-
-<h2 id="trade">Review burden against attacks allowed through</h2>
-<p>
-  The operational trade, plotted as a path so its direction is visible. At the shipped setting
-  OpenJev leaves {{fig:dec.rev.s2}} of cases for review and lets {{fig:dec.leak.s2}} of the
-  corpus's unsafe cases through. Every step towards a cheaper threshold moves both numbers the same
-  way: less work, more leakage.
-</p>
-{{chart:trade}}
-
-<h2 id="calculator">Price it against your own traffic</h2>
-<p>
-  Enter your own volume and benign share. The projection uses the measured rates directly and
-  interpolates only inside the range that was run.
-</p>
-<div class="box warn">
-  <p style="margin-bottom:0"><strong>This interpolates between four measured settings.</strong> The
-  allow threshold was run at 0.05, 0.10, 0.20 and 0.30 and at nothing in between. A value between
-  two of them is a straight line drawn between the two measurements on either side &#8212; it is not
-  a measurement. The benign share is interpolated between the two corpora that were run,
-  {{fig:calc.lo}} and {{fig:calc.hi}} benign, and clamped to that range. The volume you enter is
-  <em>cases</em>, which is the unit every measured rate here is per; the projection never converts
-  from decisions, so no decisions-per-case ratio is applied at any operating point. If you hold a
-  decisions-per-day figure instead, a scorable case averaged {{fig:calc.dpc}} decisions on the
-  Broad comparison and {{fig:calc.dpc3}} at Production weighting, and the two differ by a factor
-  of {{fig:calc.dpcratio}}. Both are per scorable case, which is the basis the rates use; per
-  scenario the Broad figure is {{fig:calc.dpcscen}}, because {{fig:calc.gradec}} grade-C
-  scenarios are not scorable.</p>
-</div>
-{{ui:calculator}}
-<p class="small" id="calc-clamp"></p>
-<p class="small">
-  What this does <em>not</em> model: your own traffic mix, your own tools, retry behaviour, the
-  latency cost of an in-line judge call, or the human cost of a confirm. It prices the judge tier
-  only, at each corpus&#8217;s own token count and the one measured provider rate.
-</p>
-
-<h2 id="caveats">What would change these numbers</h2>
 <div class="tbl-scroll">
 <table>
-  <caption>Each of these is a real limit on how far the frontier above travels.</caption>
-  <thead><tr><th>Assumption</th><th>What it rests on</th><th>What breaks it</th></tr></thead>
+  <caption>Broad comparison, OpenJev, as the cascade runs today. Source:
+    <code>outputs/deterministic-real/realdet-s2-openjev.json</code>.</caption>
+  <thead><tr><th>Routing</th><th class="n">block-only F1</th><th class="n">cases sent to the judge</th><th class="n">confirm rate</th></tr></thead>
   <tbody>
-    <tr>
-      <td>Judge price {{fig:dec.price.case}} per case on the Broad comparison,
-          {{fig:dec.price3.case}} at Production weighting</td>
-      <td>each corpus&#8217;s own judge run, priced at {{fig:dec.price.rate}} per million input
-          tokens. The judge runs the cascades were scored from record token counts but no price;
-          the rate comes from the one Gemma&nbsp;4 run that does. The two corpora differ because
-          the judge prompt is roughly half as long per case at Production weighting.</td>
-      <td>a different context length, a different service tier, or a provider price change. Both
-          self-hosted small models recorded no provider spend at all, so no GPU cost is in any
-          figure here.</td>
-    </tr>
-    <tr>
-      <td>Benign share drives the ranking</td>
-      <td>two corpora, {{fig:calc.lo}} and {{fig:calc.hi}} benign</td>
-      <td>a third mix. Nothing between the two measured benign shares was run.</td>
-    </tr>
-    <tr>
-      <td>A confirm has a cost</td>
-      <td>not measured anywhere on this site</td>
-      <td>nothing here prices a human review. The confirm rate is reported as a volume, and what it
-          costs you is yours to fill in.</td>
-    </tr>
-    <tr>
-      <td>Block-only is the default lens</td>
-      <td>a <code>confirm</code> does not stop a tool call</td>
-      <td>if your confirm path is actually enforced by a reliable second decider, the
-          any-intervention lens becomes the honest one and the ranking changes.</td>
-    </tr>
+    <tr><td>one-sided</td><td class="n">{{fig:thr.005.f1}}</td><td class="n">{{fig:s2.onesided.llm}}</td><td class="n">{{fig:s2.onesided.review}}</td></tr>
+    <tr><td>two-sided @0.30</td><td class="n pos">{{fig:s2.twosided.f1}}</td><td class="n pos">{{fig:s2.twosided.llm}}</td><td class="n pos">{{fig:s2.twosided.review}}</td></tr>
   </tbody>
 </table>
 </div>
 
-<p class="foot">
-  <span class="pill">evaluation-only</span>
-  <span class="pill">never-train</span><br>
-  The 13 source datasets are public and linked on
-  <a href="finding-data.html#normalized">data</a>; the analysis artifacts behind each number are held
-  privately and available on request.
+<h2 id="threshold">The allow threshold</h2>
+<p>
+  Four settings were run: {{fig:thr.list}}. The slider snaps to them; nothing in between was
+  measured. For OpenJev the cheapest setting is also the best: block-only F1 moves
+  {{fig:thr.f1.span}} across the four while the judge-call rate falls {{fig:thr.llm.span}}. That
+  optimum is OpenJev&#8217;s: Jev 1.13.0 peaks at {{fig:s2.jev.best.thr}}
+  ({{fig:s2.jev.best.f1}}) and calls the judge {{fig:s2.jev.llm.ratio}}&#215; as often at 0.30.
+</p>
+{{ui:thr_ctl}}
+{{chart:threshold}}
+<p class="small">
+  Separate thresholds per surface save judge calls and nothing else: on one-shot
+  <code>action</code> calls a threshold of {{fig:surf.esc.action.thr}} cuts judge calls from
+  {{fig:surf.esc.action.gemmaat30}} to {{fig:surf.esc.action.gemma}} of
+  {{fig:surf.esc.action.cases}} cases at unchanged block-only F1 ({{fig:surf.esc.action.f1}});
+  <code>stateful</code> calls are already at their optimum at 0.30.
 </p>
 
+<h2 id="order">Tier order</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>Broad comparison, as the cascade runs today. Source:
+    <code>outputs/s2/policy-reanalysis-realdet.json</code>.</caption>
+  <thead><tr><th>Cascade</th><th class="n">block-only F1</th><th class="n">block FPR</th><th class="n">cases sent to the judge</th></tr></thead>
+  <tbody>
+    <tr><td>rules → OpenJev → judge</td><td class="n pos">{{fig:s2.realdet.f1}}</td><td class="n">{{fig:s2.twosided.fpr}}</td><td class="n">{{fig:s2.twosided.llm}}</td></tr>
+    <tr><td>rules → OpenJev → DiffusionGemma → judge</td><td class="n">{{fig:ord.fwd}}</td><td class="n">0.00651</td><td class="n">{{fig:ord.rate}}</td></tr>
+    <tr><td>rules → DiffusionGemma → OpenJev → judge</td><td class="n neg">{{fig:ord.rev}}</td><td class="n">0.01035</td><td class="n">{{fig:ord.rate}}</td></tr>
+    <tr><td>rules → DiffusionGemma → judge</td><td class="n neg">0.45574</td><td class="n">0.01035</td><td class="n">3.51%</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  The stronger model goes first. A second small model in the right order gives up
+  {{fig:ord.trade}} F1 for a further {{fig:ord.cut}}&#215; cut in judge calls; in the wrong order
+  it costs {{fig:ord.gap}}.
+</p>
+
+<h2 id="mix">Traffic mix: when to drop the judge</h2>
+<p>
+  The Broad comparison is {{fig:s2.benign.scorable}} benign. Real coding traffic is closer to the
+  Production-weighted corpus, {{fig:s3.benign.scorable}} benign. At that mix precision dominates
+  F1, and a judge that escalates uncertain cases adds more false blocks than true ones.
+</p>
+{{chart:cascade_s3}}
+<div class="box bad">
+  <p><strong>Production-weighted, block-only F1:</strong> full cascade {{fig:s3.twosided.f1}},
+  judge alone {{fig:s3.detllm.f1}}, <code>rules → OpenJev</code> with no judge
+  <strong>{{fig:s3.so.f1}}</strong> at block FPR {{fig:s3.so.fpr}}, a {{fig:s3.so.review}}
+  confirm rate and no judge calls.</p>
+  <p class="small" style="margin-bottom:0">With no judge, {{fig:s3.nojudge.n}} small models were
+  measured: {{fig:s3.nojudge.table}}. Jev 1.13.0 scores highest there, but it flags
+  {{fig:tb.q2.jev}} of real benign coding events against OpenJev&#8217;s {{fig:tb.q2.oj}} and
+  blocks {{fig:recall.jev.C7}} of proof-verified compromises against OpenJev&#8217;s
+  {{fig:recall.openjev.C7}}. Dropping the judge also removes the only tier that fails closed
+  (<a href="risks.html#faults">Risks</a>).</p>
+</div>
+
+<h2 id="per-call">Enforce per tool call, not per session</h2>
+{{chart:per_event}}
+<p>
+  Same model, same threshold. Stopping the one flagged call instead of the whole session costs
+  2.7&#215; to 5.1&#215; less benign work across the four measured model-and-corpus pairs: on the
+  Broad comparison, 16 benign tool calls blocked against 13 whole benign sessions killed.
+</p>
+
+<h2 id="cost">Cost against quality</h2>
+<p>
+  The judge is the only metered tier: Gemma 4 on Bedrock costs {{fig:x.price.k}} per 1,000 cases
+  judged on the Broad comparison ({{fig:x.price3.k}} on the Production-weighted corpus, whose
+  prompts are shorter). Both small models ran self-hosted and recorded no provider spend. Each
+  panel below compares policies within one model; the three models ran different question
+  formats, named on each series.
+</p>
+{{chart:pareto}}
+{{chart:sankey}}
+{{chart:trade}}
+
+<h2 id="calculator">Price it against your own traffic</h2>
+<p>
+  The projection prices the judge only, from the measured rates: not your own tools, retries,
+  in-line latency or the human cost of a confirm.
+</p>
+{{ui:calculator}}
+<p class="small" id="calc-clamp"></p>
+
+<h2 id="serving">Serving cost and latency</h2>
+<p>
+  Recorded provider spend over every run on this site is {{fig:spend.api}}: {{fig:spend.jev}} for
+  hosted Jev 1.13.0 ({{fig:spend.jev.paidtok}} input tokens at {{fig:spend.jev.rate}} per
+  million, the one rate every priced manifest records) and {{fig:spend.gemma4}} for the Gemma 4
+  judge, whose large-stage runs logged no cost, so its true Bedrock spend is higher by an unknown
+  amount. The self-hosted models ran on one g6e.12xlarge (published on-demand rate $12.90 per
+  hour); its uptime is not recorded, so no GPU total is stated.
+</p>
+<p>
+  The small model emits one token per call, so serving time is all prefill: there is no decode
+  phase to speed up and input tokens are the whole cost. The latencies below come from a saturated
+  GPU running a batch to completion; the long tail is queueing, and any in-line deployment needs
+  a timeout policy.
+</p>
+{{chart:latency}}
+<div class="tbl-scroll">
+<table>
+  <caption>The judge on the flex service tier: 200 cases, identical prompts. Source:
+    <code>outputs/flex/</code>.</caption>
+  <thead><tr><th>Metric</th><th class="n">default</th><th class="n">flex</th><th class="n">change</th></tr></thead>
+  <tbody>
+    <tr><td>median per-case latency</td><td class="n">844.6 ms</td><td class="n">813.8 ms</td><td class="n">−3.6%</td></tr>
+    <tr><td>p95 per-case latency</td><td class="n">23,502.7 ms</td><td class="n pos">15,908.9 ms</td><td class="n pos">−32.3%</td></tr>
+    <tr><td>worst case</td><td class="n neg">122,211 ms</td><td class="n pos">33,560 ms</td><td class="n pos">−72.5%</td></tr>
+    <tr><td>tokens, errors</td><td class="n">993,812 / 3,038, 0</td><td class="n">993,812 / 3,038, 0</td><td class="n">identical</td></tr>
+    <tr><td>case decisions</td><td class="n" colspan="3">199 of 200 identical</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="small">
+  Prefix caching does not pay for this workload. {{fig:px.under}} of {{fig:px.calls}} measured
+  prompts are shorter than one {{fig:px.block}}-token cache block. Padding prompts to the block
+  boundary cost +86.68% input tokens. A finer cache match unit raised hit rates but slowed the
+  server: on the 120-prompt probe by {{fig:px.serial.slower}} serially and
+  {{fig:px.concurrent.slower}} at four concurrent requests, and on the 200-case benchmark
+  workload by 0.72% of wall clock. Putting the static part of the prompt first costs nothing.
+</p>
+
+<h2 id="recommendations">Recommendations</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>Twelve recommendations. Confidence: high means reproduced and gated; medium means
+    measured once or with a stated confound.</caption>
+  <thead><tr><th>#</th><th>Recommendation</th><th>Evidence</th><th>Confidence</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Enforce per tool call, not per session.</td><td>2.7&#215;&#8211;5.1&#215; less benign work destroyed at identical recall (<a href="#per-call">above</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>2</td><td>Use a single-disposition question (Q2, or Q4) for anything that blocks; never the boolean-probe formats Q1 and Q3.</td><td>Block-only F1 {{fig:q.q2.alone}} against {{fig:q.q1.alone}} and {{fig:q.q3.alone}}; Q1 and Q3 fail open on a malformed answer (<a href="risks.html#failopen">Risks</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>3</td><td>Set the escalation threshold per surface to save judge calls.</td><td>{{fig:surf.esc.action.gemmagain}} points fewer judge calls on one-shot actions at unchanged F1.</td><td><span class="pill">qualified</span></td></tr>
+    <tr><td>4</td><td>Treat a rule-engine <code>confirm</code> as a floor and keep evaluating.</td><td>{{fig:s2.shortcircuit.f1}} → {{fig:s2.escalate.f1}} block-only F1, same false blocks and judge-call rate.</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>5</td><td>At production traffic, run <code>rules → small model</code> with no judge, once recommendation 6 is in place.</td><td>{{fig:s3.twosided.f1}} → {{fig:s3.so.f1}} block-only F1 at zero judge cost (<a href="#mix">above</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>6</td><td>Make the disposition on a small-model failure configurable, defaulting to <code>confirm</code>, with a timeout.</td><td>{{fig:fault.allow.total}} of 28 injected failure classes end with the call allowed (<a href="risks.html#faults">Risks</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>7</td><td>Decide explicitly whether to accept the short-circuit loss of two-sided routing.</td><td>Of the 1,346 cases the judge wanted to escalate and the small model allowed, 32 are graded unsafe (2.38%); two-sided routing discards at most that set (<a href="risks.html#disagreement">Risks</a>).</td><td><span class="pill open">medium</span></td></tr>
+    <tr><td>8</td><td>Author the mined deterministic rules, starting with shell-history tampering.</td><td>96.2% of the small model&#8217;s confident blocks match no rule; that cluster is grade A throughout ({{fig:rule.history.events}} events).</td><td><span class="pill open">medium</span></td></tr>
+    <tr><td>9</td><td>Fix the two provenance defects in the dataset lock.</td><td>One disabled source was normalised into the intent corpus; one entry pins a paper, not a revision (<a href="method.html#provenance">Method</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>10</td><td>Do not use the serves-the-request score (Lane B) as a standalone gate.</td><td>It flags {{fig:tb.laneb.oj}} of benign tool calls and {{fig:tb.laneb.oj.traj}} benign coding sessions (<a href="risks.html#laneb">Risks</a>).</td><td><span class="pill settled">high</span></td></tr>
+    <tr><td>11</td><td>Do not invest in prefix caching or prompt padding.</td><td>+86.68% input tokens for padding; slower serving with a finer match unit (<a href="#serving">above</a>).</td><td><span class="pill">qualified</span></td></tr>
+    <tr><td>12</td><td>Do not reinstate Von 1.0.1.</td><td>Block-only F1 {{fig:von.f1}} against {{fig:von.floor}} for blocking everything on the same pilot, at a {{fig:von.p50.lo}}&#8211;{{fig:von.p50.hi}} median per case on CPU.</td><td><span class="pill settled">high</span></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="limits">What would change these numbers</h2>
+<div class="tbl-scroll">
+<table>
+  <thead><tr><th>Assumption</th><th>What breaks it</th></tr></thead>
+  <tbody>
+    <tr><td>The judge price, {{fig:x.price.k}} per 1,000 cases judged</td><td>A different context length, service tier or provider price.</td></tr>
+    <tr><td>The benign share, between {{fig:calc.lo}} and {{fig:calc.hi}}</td><td>A third mix; nothing between or outside the two was run.</td></tr>
+    <tr><td>A <code>confirm</code> stops nothing</td><td>If your confirm path is enforced by a reliable second decider, {{term:any_f1}} becomes the relevant score and the order of policies changes.</td></tr>
+    <tr><td>Recall on proven compromises</td><td>Even the best model blocks only {{fig:recall.openjev.C7}} of proof-verified compromises (<a href="intent.html#limits">Intent</a>). No setting here makes the guard sufficient on its own.</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{FOOT}}
 </div>
 {{SCRIPT}}
 </body>

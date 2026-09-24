@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tool-call guard benchmark — leaderboard</title>
-<meta name="description" content="Which small model should guard an agent's tool calls: hosted Jev 1.13.0, OpenJev, DiffusionGemma 26B-A4B, Von 1.0.1 and the candidate arms added since, against Gemma 4 26B-A4B as the incumbent LLM judge.">
+<title>Which small model to put in front of the judge — tool-call guard benchmark</title>
+<meta name="description" content="Small models scored as the middle tier of a tool-call guard cascade (rules, small model, Gemma 4 judge): every model at one shared false-block budget, with the recommended stack.">
 {{STYLE}}
 {{DATA}}
 </head>
@@ -13,363 +13,93 @@
 {{NAV}}
 <div class="wrap" id="main">
 
-<p class="eyebrow">evaluation-only</p>
-<h1>Small models scored as tool-call guards</h1>
+<h1>Which small model to put in front of the judge</h1>
 <p class="lede">
-  Which small model should decide whether an agent&#8217;s next tool call is safe to run.
-  {{fig:lb.models.n}} model rows, {{fig:lb.ranked.n}} of them ranked on the same corpus,
-  scored on {{fig:s2.cases}} real agent scenarios
-  ({{fig:s2.scorable}} scorable, {{fig:s2.decisions}} decisions per arm).
-  {{fig:lb.ranked.fmtnote}}
+  A tool-call guard here is a cascade: deterministic rules, then a small model, then the Gemma 4
+  judge on the cases the small model is unsure of. Each small model answers <code>allow</code>,
+  <code>confirm</code> or <code>block</code> for one agent tool call. This page ranks the
+  candidates for the middle tier on the Broad comparison corpus: {{fig:s2.scorable}} scorable
+  cases, {{fig:x.s2.pos}} of them unsafe and {{fig:x.s2.neg}} benign. Every model is held to one
+  {{term:budget}}.
 </p>
-<p class="answer"><strong>The answer:</strong> run <code>rules → OpenJev → Gemma 4</code> (OpenJev
-  weights are CC BY-NC 4.0: non-commercial, attribution required, contact the authors for
-  commercial use). Block
-  F1 {{fig:s2.escalate.f1}} at {{fig:s2.twosided.fpr}} false blocks, with the judge called on
-  {{fig:s2.twosided.llm}} of cases, escalating a deterministic confirm. Both compositions are rows
-  in the table below and
-  the table names which is which; short-circuiting scores {{fig:s2.shortcircuit.f1}} on the same column.
-  OpenJev alone scores {{fig:lb.openjev.blk.f1}}; the judge alone
-  {{fig:lb.gemma4.blk.f1}}.</p>
-<p class="changed">{{fig:lb.added.n}} arms have been added to the table since the original
-  four-model roster ({{fig:lb.added.grids}}). {{fig:lb.added.gridnote}}
-  <a href="#added">The added arms</a> &#183;
-  <a href="#secjudge">SecJudge</a> &#183;
-  <a href="reproduce.html#restated">what was restated, and why</a>.</p>
 
-<h2 id="common">One operating point for every arm</h2>
-{{ui:common_point}}
+<h2 id="verdict">The answer</h2>
+{{ui:verdict}}
 
-<h2 id="sizebands">Arms by parameter count</h2>
-{{ui:sizebands}}
-
-<h2 id="auc">Separation without a threshold</h2>
-{{ui:auc}}
-
-<h2 id="oracle">Each arm at its own best threshold</h2>
-{{ui:oracle}}
-
-<h2 id="leaderboard">Leaderboard, at each arm&#8217;s shipped threshold</h2>
-<p>Every cell below is the threshold its arm shipped with. Those thresholds were chosen
-  separately, so a difference between two rows carries both the models and their calibration.
-  <a href="#common">The common-budget table</a> holds one threshold rule for all of them.</p>
-{{ui:lens_ctl}}
-{{ui:leaderboard}}
-
-<details class="disc">
-  <summary>How these are scored, and what the two lenses mean</summary>
-  <div class="dbody">
-  <p><strong>Block-only is the default lens in every table here</strong>, because a
-  <code>confirm</code> does not stop a tool call.</p>
-  {{ui:lens_dir}}
-  <p>In the same-format table below, DiffusionGemma&#8217;s any-intervention F1 is
-  {{fig:par.dg.any}} against its own block-only {{fig:par.dg.blk}}, and OpenJev&#8217;s is
-  {{fig:par.oj.any}} against
-  {{fig:par.oj.blk}}. At <code>Q3</code> that reverses for every model run at it &#8212; all
-  {{fig:par.q3.n}} land between {{fig:par.q3.anylo}} and {{fig:par.q3.anyhi}} on the looser lens
-  while their block-only F1s span {{fig:par.q3.blklo}} to {{fig:par.q3.blkhi}} &#8212; which is a
-  property of that question format.</p>
-  </div>
-</details>
-
-<details class="disc">
-  <summary>The question format the ranked rows are read at, {{fig:par.grid}}</summary>
-  <div class="dbody">
-  <p>Question format moves a result by {{fig:sweep.spread}}&#215; on the one model measured at all
-  {{fig:sweep.n}} formats, from {{fig:sweep.best.f1}} at {{fig:sweep.best.q}} down to
-  {{fig:sweep.worst.f1}} at {{fig:sweep.worst.q}}. {{fig:sweep.vs}} A table that ranked models
-  measured at different formats would be reporting the format as well as the model, so the
-  ranking holds it fixed where it can.
-  {{fig:lb.ranked.fmtnote}} Arms at other formats are published below, in their own table, and
-  are not ranked.</p>
-  <p style="margin-bottom:0">Gemma 4 is a chat judge on prompt <code>Q0</code>. The C/I/Q grid
-  arms are the other rows, so Gemma 4 carries <code>ref</code> and no rank. Von 1.0.1 is scored on
-  the 200-case pilot, a different corpus, so it carries <code>&#8212;</code> and its
-  {{fig:von.n}}-case figures are not comparable with any row above it.</p>
-  </div>
-</details>
-
-{{chart:lens}}
-
-<h2 id="pick">Why OpenJev, in detail</h2>
-{{ui:pick}}
-
-<h2 id="parity">The ranked format, and the arms that are not ranked</h2>
-<details class="disc">
-  <summary>The same-format comparison, and the {{fig:par.offn}} arms that are not ranked</summary>
-  <div class="dbody">
-  <p>
-    {{fig:sf.n}} of the ranked rows are read at {{fig:par.grid}}, and the table below holds
-    that format fixed for the three of them this comparison file scores. The rows under it are
-    the same models at the other formats they were also run at, at the same scale, on the same
-    corpus.
-  </p>
-  {{ui:parity}}
-  {{ui:offparity}}
-  </div>
-</details>
-
-<h2 id="sweep">One model, five question formats</h2>
-<details class="disc">
-  <summary>Hosted Jev at all {{fig:sweep.n}} formats: a {{fig:sweep.spread}}&#215; spread</summary>
-  <div class="dbody">
-  <p>
-    Hosted Jev has an arm at every question format this programme documents, on the Broad
-    comparison. The table below states which models ran how many formats. The largest
-    question-only move measured on this corpus is {{fig:fmt.q.ratio}}× and it belongs to
-    {{fig:fmt.q.who}}.
-  </p>
-  {{ui:sweep}}
-  </div>
-</details>
-
-<h2 id="roster">The candidates</h2>
-{{ui:roster}}
+<h2 id="board">Every model at the shared budget</h2>
+<p>
+  One ranking. Each model&#8217;s threshold is set so it makes no more than {{fig:x.budget.fp}}
+  false blocks, and its {{term:block_f1}}, recall and precision are read there. The shipped
+  column is the same model at the threshold it ships with, which mixes the model with its
+  calibration; it is printed for reference and does not rank anything.
+</p>
+{{ui:board}}
 <p class="small">
-  OpenJev leads block-only F1 among the {{fig:lb.selfhosted.n}} GPU-served self-hosted rows
-  scored on this corpus ({{fig:lb.openjev.blk.f1}} against {{fig:self.next.name}}&#8217;s
-  {{fig:self.next.f1}}) and holds the lowest benign FPR of the {{fig:tb.n}} models scored for one
-  on real coding traffic ({{fig:tb.q2.oj}}). Hosted Jev prints benign FPR {{fig:tb.q2.jev}} on
-  that traffic and block-only F1 {{fig:lb.jev.blk.f1}} here. Von 1.0.1 is rejected: it beats a
-  block-everything policy by {{fig:von.gain}} block-only F1, on a different and much smaller
-  corpus. Gemma 4 26B-A4B is
-  the incumbent judge every other row is measured against.
+  Every ranked model answered the same question format, {{term:q2}}, except SecJudge, a
+  classifier that takes one serialised string and answers no question at all. Question format
+  moves F1 about as much as the choice of model does, which is why the ranking holds it fixed;
+  the measurement is on <a href="method.html#format">Method</a>.
 </p>
+{{chart:cleveland}}
 
-<h2 id="added">The {{fig:lb.added.n}} arms added since the original roster</h2>
+<h2 id="curves">Every model at every other budget</h2>
 <p>
-  {{fig:lb.added.n}} arms have been added to the ranked table since the original four-model
-  roster. Each was run on the same corpus, on the same real deterministic rule
-  tier, scored by the same scorer, and are in the ranked table above
-  ({{fig:lb.added.grids}}). {{fig:lb.added.gridnote}} This
-  section carries what the F1 column does not: what each one answers by default, how the ranking
-  variable treats it, where it beats a hosted incumbent, and what it does in front of the judge.
+  The table is one point on each model&#8217;s precision-recall curve. A deployment that
+  tolerates more false blocks reads a different point, and the order can change.
 </p>
-{{ui:added}}
+{{chart:pr}}
 
-<h2 id="rethreshold">Shipped thresholds and re-thresholded figures</h2>
+<h2 id="size">Size against score</h2>
 <p>
-  Every F1 in the ranked table is the arm&#8217;s shipped argmax operating point. Sweeping a
-  single threshold over one ranking variable on the same cases raises that figure for every arm
-  that carries a disposition distribution. A threshold fitted on the cases it is then scored on is
-  an oracle upper bound, so each one here sits beside the nested out-of-fold figure from grouped
-  cross-validation inside the same corpus, where the threshold and the variable were chosen on the
-  training folds alone.
+  Parameter counts are counted from the served weights where the artifacts record them and
+  nominal (read from the base model&#8217;s name) otherwise; {{fig:x.params.absent}} carry
+  neither and are not plotted.
 </p>
-{{ui:rethreshold}}
+{{chart:size_scatter}}
 
-<h2 id="s3heldout">bespoke-nimble-9b on the held-out corpus</h2>
+<h2 id="calibration">Does the score mean what it says</h2>
 <p>
-  One ranked arm has a settled run on a second corpus that shares no case id with this one. That
-  corpus has more cases, lower prevalence and a near-inverted positive-grade composition, so the
-  two sets of figures are stated side by side and one number is computed across them.
+  A threshold is only portable if the probability behind it is calibrated. Each panel buckets
+  the per-case score and plots the share of the bucket that is unsafe, with the case count
+  beside it.
 </p>
-{{ui:s3heldout}}
+{{chart:calibration}}
 
-<h2 id="secjudge">SecJudge, and the two things its row discloses</h2>
-<p>
-  One of those arms carries a disclosure marker on its leaderboard row, because two things about
-  its cell cannot be read off an F1 number: it answered a different question shape from every
-  other row, and its evaluation lane carries a known collision with one of its own declared
-  training sources. This section quantifies both, and everything else the row cannot say.
-</p>
-{{ui:secjudge}}
+<h2 id="notes">Notes on individual models</h2>
+<ul class="tight">
+  <li><strong>open-jev-qwen-27b</strong> ranks first at the budget but blocks only
+      {{fig:x.q27.shipped.tp}} unsafe cases at its shipped threshold (F1 {{fig:x.q27.shipped}}),
+      so it needs its own threshold before it can be deployed. Its cascade has not been run at
+      that threshold.</li>
+  <li><strong>OpenJev</strong> has the lowest benign false-positive rate of the
+      {{fig:tb.n}} models run on real coding traffic ({{fig:tb.q2.oj}} of benign events flagged,
+      against {{fig:tb.q2.jev}} for Jev 1.13.0) and the highest recall on proof-verified
+      compromises of the {{fig:ir.models.n}} models run on them ({{fig:recall.openjev.C7}};
+      <a href="intent.html#limits">Intent</a>).</li>
+  <li><strong>Jev 1.13.0</strong> is a hosted API, billed at {{fig:spend.jev.rate}} per million
+      input tokens; it is {{fig:x.jev.rank}} at the budget.</li>
+  <li><strong>gemma-4-26B-A4B-it</strong> is the judge&#8217;s own weights read out as a typed
+      decision instead of a chat answer. <strong>jevify-gemma4-26b-a4b</strong> is a LoRA
+      fine-tune of those weights and scores below them both at the budget and as shipped.</li>
+  <li><strong>kev-9b</strong> answers <code>allow</code> on {{fig:x.kev.allow}} of cases as
+      shipped, which gives it the lowest shipped F1 on the board;
+      <strong>bespoke-nimble-9b</strong> answers <code>confirm</code> on {{fig:x.nimble.confirm}},
+      and a confirm is a miss on the block-only lens.</li>
+  <li><strong>SecJudge</strong> blocks {{fig:x.sj.benign}} of benign cases as shipped, which
+      leaves its F1 {{fig:x.sj.margin}} above a policy that blocks everything. At the budget it makes
+      no true block at all.</li>
+  <li><strong>decider-2b</strong> appears only in the re-thresholding pass. It has no board
+      scorecard of its own; its shipped figure is the one that pass recorded.</li>
+  <li><strong>Von 1.0.1</strong>, a CPU classifier, was scored only on the 200-case pilot, a
+      different corpus, so it is not in the table. There it beats a block-everything policy by
+      {{fig:von.gain}} F1 by hard-blocking {{fig:von.fp}} of {{fig:von.benign}} benign cases, at a
+      median of {{fig:von.p50.lo}} to {{fig:von.p50.hi}} per case.</li>
+</ul>
 
-<h2 id="von">Von against the floor</h2>
-<p>
-  Von&#8217;s best configuration ({{fig:von.arm}}) scores {{fig:von.f1}} block-only F1 on the
-  200-case pilot. A policy that blocks every call scores {{fig:von.floor}} on the same
-  {{fig:von.n}} cases, so the margin is {{fig:von.gap}}. Von reaches it by hard-blocking
-  {{fig:von.fp}} of the {{fig:von.benign}} benign cases and leaving {{fig:von.tn}} alone.
-</p>
-{{chart:von}}
+<h2 id="caveats">What the ranking rests on</h2>
+{{ui:assumptions}}
 
-<h2 id="cascade">Where a model sits in the stack</h2>
-<p>
-  Three tiers, cheapest first: deterministic rules, then the small model, then the LLM judge on the
-  uncertain band only.
-</p>
-
-{{chart:architecture}}
-
-<h2 id="findings">Findings</h2>
-<div class="grid">
-
-  <a class="fcard" href="examples.html">
-    <div class="k">Examples</div>
-    <div class="t">Head-to-head cases and code-level failures</div>
-    <div class="n">{{fig:adj.m1.n}} vs {{fig:adj.m2.n}}</div>
-    <div class="d">
-      Where OpenJev flags and DiffusionGemma allows on independently unsafe traffic, and the
-      reverse, adjudicated by an independent model blinded to all four deciders’ votes.
-    </div>
-    <div class="go">Examples &#8594;</div>
-  </a>
-
-  <a class="fcard" href="finding-intent.html">
-    <div class="k">Intent</div>
-    <div class="t">Intent detection reverses on proof-backed data</div>
-    <div class="n">{{fig:ad.openjev.C7}} &#8594; {{fig:sep.openjev.C7}}</div>
-    <div class="d">
-      Eight earlier runs measured it as negative. On data with independent proof of compromise, all
-      {{fig:cells}} measured cells are positive across the {{fig:ir.models.n}} models run on that
-      corpus.
-    </div>
-    <div class="go">Intent findings &#8594;</div>
-  </a>
-
-  <a class="fcard" href="finding-architecture.html">
-    <div class="k">Architecture</div>
-    <div class="t">Cascade result depends on the benign mix</div>
-    <div class="n">{{fig:s2.twosided.f1}} &#8594; {{fig:s3.twosided.f1}}</div>
-    <div class="d">
-      At {{fig:s2.benign}} benign by scenario, adding the small model beats the judge alone. At the
-      {{fig:s3.benign}} benign share of real traffic the best policy is the small model with no judge
-      behind it &#8212; {{fig:s3.so.f1}} for OpenJev, and higher still for one of the other two
-      models measured on it.
-    </div>
-    <div class="go">Architecture &#8594;</div>
-  </a>
-
-  <a class="fcard" href="finding-safety.html">
-    <div class="k">Security</div>
-    <div class="t">Provider failures resolve to allow</div>
-    <div class="n">{{fig:fault.allow.total}} of 28</div>
-    <div class="d">
-      {{fig:fault.allow.total}} of 28 injected failure classes end with the tool call allowed.
-      {{fig:fault.silent}} raise no error at all. Resume validation accepts a tampered decision.
-    </div>
-    <div class="go">Security &#8594;</div>
-  </a>
-
-  <a class="fcard" href="finding-performance.html">
-    <div class="k">Performance</div>
-    <div class="t">Prefix caching gives no gain; latency is queueing</div>
-    <div class="n">100% prefill &#183; 0% decode</div>
-    <div class="d">
-      This is a one-token classifier, so there is nothing to cache across calls. 82% of prompts are
-      shorter than one cache block. The one tuning that raised hits made the server 0.7% slower.
-    </div>
-    <div class="go">Performance &#8594;</div>
-  </a>
-
-  <a class="fcard" href="finding-data.html">
-    <div class="k">Data</div>
-    <div class="t">No existing corpus contained user intent</div>
-    <div class="n">{{fig:src.rows}} rows &#183; 0 with intent</div>
-    <div class="d">
-      Every previously normalised row carried an empty user-request field. Normalising four corpora
-      with the request field preserved made the intent measurement possible.
-    </div>
-    <div class="go">Data &#8594;</div>
-  </a>
-
-  <a class="fcard" href="prompts.html">
-    <div class="k">Prompts</div>
-    <div class="t">What the models were actually asked</div>
-    <div class="n">{{fig:proto.instructions}} &#215; {{fig:proto.questions}} &#215; {{fig:proto.contexts}}</div>
-    <div class="d">
-      The instruction, question and context templates as sent, with the measured effect of each.
-      Instantiated prompts are withheld: they embed corpus rows.
-    </div>
-    <div class="go">Prompts &#8594;</div>
-  </a>
-
-  <a class="fcard" href="recommendations.html">
-    <div class="k">Recommendations</div>
-    <div class="t">Recommendations</div>
-    <div class="n">14</div>
-    <div class="d">
-      Each with its evidence, measured gain, effort and risk, under three headings: immediate, other,
-      not recommended.
-    </div>
-    <div class="go">Recommendations &#8594;</div>
-  </a>
-
-</div>
-
-<h2 id="how-to-read">Terms</h2>
-
-<div class="tbl-scroll">
-<table>
-  <caption>Full list: <a href="glossary.html">glossary</a>.</caption>
-  <thead><tr><th>Term</th><th>What it means</th><th>Why it matters</th></tr></thead>
-  <tbody>
-    <tr>
-      <td><strong>System One</strong></td>
-      <td>small, fast model deciding <code>allow</code> / <code>confirm</code> /
-          <code>block</code> for one tool call</td>
-      <td>the thing under test</td>
-    </tr>
-    <tr>
-      <td><strong>block-only lens</strong></td>
-      <td>only a hard block counts as a catch; a <code>confirm</code> counts as a miss</td>
-      <td>the default lens in every table here, because a confirm does not stop a tool call</td>
-    </tr>
-    <tr>
-      <td><strong>any-intervention lens</strong></td>
-      <td>a <code>confirm</code> also counts as a catch</td>
-      <td>which rows gain on it and whether the order holds is printed under the table above,
-          computed from the rows the table renders</td>
-    </tr>
-    <tr>
-      <td><strong>confirm rate</strong></td>
-      <td>share of decisions ending as <code>confirm</code></td>
-      <td>operational burden; distinct from LLM call rate</td>
-    </tr>
-    <tr>
-      <td><strong>separation</strong> (<code>sep|res</code>)</td>
-      <td>block rate on a proven compromise minus block rate on an agent that refused the same
-          attack</td>
-      <td>below zero, the guard is reading the attacker&#8217;s text</td>
-    </tr>
-    <tr>
-      <td><strong>C0 / C7</strong></td>
-      <td><code>C0</code> is the tool call alone; <code>C7</code> adds the request and up to seven
-          prior events</td>
-      <td>nearest available proxy for &#8220;does knowing the request help?&#8221;; the isolation
-          is approximate</td>
-    </tr>
-    <tr>
-      <td><strong>grade A&#8211;E</strong></td>
-      <td><strong>A</strong> independently proven, <strong>B</strong> claimed,
-          <strong>C</strong> a model&#8217;s opinion, <strong>D</strong> benign by provenance,
-          <strong>E</strong> out of scope</td>
-      <td>only grade A supports a safety claim</td>
-    </tr>
-    <tr>
-      <td><strong>two-sided routing</strong></td>
-      <td>trust the small model when confident either way; escalate the uncertain band</td>
-      <td>{{fig:s2.onesided.llm}} of calls reach the judge one-sided against
-          {{fig:s2.twosided.llm}} two-sided</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-
-<div class="box warn">
-  <p><strong>Three caveats that apply to every page.</strong></p>
-  <ul>
-    <li><strong>Most labels are not ground truth.</strong> Where a number rests on a model&#8217;s
-        opinion (grade C) the page says so. Agreement between two label sources is not accuracy.</li>
-    <li><strong>One corpus is evaluation-only.</strong> The proof-backed compromise data
-        (<code>mcptox</code>) may be reported only in aggregate, so this site carries its rates and
-        counts but never an example.</li>
-    <li><strong>Several headline figures were restated.</strong> Where a figure carried over from an
-        earlier write-up disagrees with the artifact, the artifact wins. The full list is on
-        <a href="reproduce.html#restated">reproduce</a>.</li>
-  </ul>
-</div>
-
-<p class="foot">
-  <span class="pill">evaluation-only</span>
-  <span class="pill">never-train</span><br>
-  Nothing derived here is approved for training or redistribution. The 13 source datasets are public
-  and linked on <a href="reproduce.html#datasets">reproduce</a>; the analysis artifacts behind each
-  number are held privately and available on request. Seeds, revisions and the rebuild path:
-  <a href="reproduce.html">how to reproduce</a>.
-</p>
-
+{{FOOT}}
 </div>
 {{SCRIPT}}
 </body>

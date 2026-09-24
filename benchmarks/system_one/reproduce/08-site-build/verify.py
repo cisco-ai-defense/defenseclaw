@@ -478,6 +478,81 @@ RETIRED = [
      "restored, and 0.75173 belongs to one ordering"),
 ]
 
+# ---------------------------------------------------------------- reading precision
+# Every figure is published at reading precision, with the artifact's exact decimal in data-x.
+# Two things have to hold for that to be honest rather than a rounding:
+#   * nothing a reader SEES may carry more than MAX_SIG significant digits. The pages carried
+#     hundreds of raw float expansions such as 0.8857741681949175;
+#   * every data-x must round-trip (repr(float(x)) == x), so the exact value is preserved and not
+#     itself a rounding, and the visible text must be that number to within its last digit.
+EX_SPAN = re.compile(r'<span class="ex" data-x="([^"]*)"[^>]*>([^<]*)</span>')
+DECIMAL = re.compile(r"(?<![\w.])([0-9][0-9,]*\.[0-9]+)(?![\w.])")
+MAX_SIG = 6
+
+
+def sig_digits(lit: str) -> int:
+    return len(lit.replace(",", "").replace(".", "").lstrip("0"))
+
+
+def audit_precision(name: str, body: str) -> list[str]:
+    out = []
+    for m in EX_SPAN.finditer(body):
+        x, shown = m.group(1), m.group(2).strip()
+        try:
+            xv = float(x)
+        except ValueError:
+            out.append(f"{name}: data-x={x!r} is not a number, so the exact value is lost")
+            continue
+        if repr(xv) != x:
+            out.append(f"{name}: data-x={x!r} is not the shortest round-tripping decimal "
+                       f"({repr(xv)!r}), so the 'exact value' is itself a rounding")
+        if not shown:
+            out.append(f"{name}: a figure renders empty without scripting (data-x={x!r})")
+            continue
+        try:
+            sv = float(shown.replace(",", ""))
+        except ValueError:
+            out.append(f"{name}: the visible form {shown!r} of {x!r} is not a number")
+            continue
+        places = len(shown.partition(".")[2])
+        tol = 0.5 * 10 ** -places if places else 0.5
+        if abs(sv - xv) > tol * 1.000001:
+            out.append(f"{name}: {shown!r} is not a rounding of {x!r} at {places} decimals")
+    # the text a reader sees: no script, no style, the spans reduced to what they render, and no
+    # markup, so an attribute value is never mistaken for visible text
+    text = STYLE_BLOCK.sub(" ", SCRIPT_BLOCK.sub(" ", body))
+    text = EX_SPAN.sub(lambda m: " " + m.group(2) + " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    for m in DECIMAL.finditer(text):
+        n = sig_digits(m.group(1))
+        if n > MAX_SIG:
+            out.append(f"{name}: {m.group(1)!r} is shown at {n} significant digits, over the "
+                       f"{MAX_SIG} a reader can compare "
+                       f"(...{text[max(0, m.start() - 60):m.end() + 12]!r}...)")
+    # money is shown to the cent from a dollar up
+    for m in re.finditer(r"\$([0-9][0-9,]*)\.([0-9]{3,})(?![0-9])", text):
+        if float(m.group(1).replace(",", "") or 0) >= 1:
+            out.append(f"{name}: ${m.group(1)}.{m.group(2)} is money shown past the cent")
+    return out
+
+
+# The licence disclosures every restructure must keep. OpenJev is recommended on index.html and
+# on decide.html, so its CC BY-NC 4.0 notice is required on both; the ranked table on index.html
+# must carry a License column, the apache-2.0 weights of the Gemma-family rows, and the Bedrock
+# qualifier on the judge row.
+REQUIRED = [
+    ("index.html", "CC BY-NC 4.0", "OpenJev license disclosure missing from index"),
+    ("decide.html", "CC BY-NC 4.0", "OpenJev license disclosure missing from decide"),
+    ("index.html", "<th>License</th>", "License column missing from the ranked table"),
+    ("index.html", "apache-2.0", "apache-2.0 licence missing from the ranked table"),
+    ("index.html", "served via Bedrock (paid service)", "Gemma 4 Bedrock qualifier missing"),
+    ("method.html", "CC-BY-NC-4.0", "non-commercial source disclosure missing from method"),
+    ("reproduce.html", "CC-BY-NC-4.0", "non-commercial source disclosure missing from reproduce"),
+    ("risks.html", "carve-out", "the disagreement-queue carve-out must sit with its table"),
+    ("reproduce.html", "carve-out", "the aggregate-only rule and its carve-out must be stated"),
+    ("method.html", "Instantiated prompts are withheld", "prompt-withholding statement missing"),
+]
+
 pages = sorted(p for p in os.listdir(SITE) if p.endswith(".html"))
 if not pages:
     print(f"no pages found in {SITE}")
@@ -508,16 +583,9 @@ for name in pages:
         if hit:
             PROBLEMS.append(f"{name}: retired figure {lit!r} is present as literal text - {why}")
 
-    # Check for required license disclosures
-    REQUIRED = [
-        ("index.html", "CC BY-NC 4.0", "OpenJev license disclosure missing from index"),
-        ("decide.html", "CC BY-NC 4.0", "OpenJev license disclosure missing from decide"),
-        ("recommendations.html", "CC BY-NC 4.0", "OpenJev license disclosure missing from recommendations"),
-        ("index.html", "<th>License</th>", "License column missing from leaderboard"),
-        ("index.html", "apache-2.0", "DiffusionGemma/Gemma4 license missing from leaderboard"),
-        ("index.html", "served via Bedrock (paid service)", "Gemma 4 Bedrock qualifier missing"),
-    ]
-
+    # Required disclosures, per page. The check is keyed on the file name, so a page that is
+    # deleted or renamed would silently stop being checked; the loop after the page walk fails
+    # the build if any page named here is missing from the payload.
     for page, text, reason in REQUIRED:
         if name == page and text not in body:
             PROBLEMS.append(f"{name}: {reason}")
@@ -561,6 +629,7 @@ for name in pages:
     inline = STYLE_BLOCK.search(body)
     if not inline or "--series-1" not in inline.group(0):
         PROBLEMS.append(f"{name}: the inlined <style> block is missing or does not carry the palette")
+    PROBLEMS.extend(audit_precision(name, body))
     PROBLEMS.extend(audit_svg_paint(name, body, "as shipped"))
     PROBLEMS.extend(audit_svg_paint(name, STYLE_BLOCK.sub("", body), "style stripped"))
     PROBLEMS.extend(audit_nojs(name, body))
@@ -624,6 +693,11 @@ for name in pages:
                 PROBLEMS.append(
                     f"{name}: <text> {inner[:46]!r} spans {left:.0f}..{right:.0f}, "
                     f"outside viewBox 0..{vw:.0f}")
+
+for page in sorted({p for p, _t, _r in REQUIRED}):
+    if page not in pages:
+        PROBLEMS.append(f"{page}: a page REQUIRED carries disclosures for is missing, so its "
+                        f"checks would silently stop running")
 
 for name, hrefs in all_hrefs.items():
     for href, line in hrefs:

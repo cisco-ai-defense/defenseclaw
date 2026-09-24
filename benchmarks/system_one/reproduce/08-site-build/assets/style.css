@@ -127,6 +127,15 @@ hr{border:0;border-top:1px solid var(--border);margin:36px 0}
 .box.good{border-left-color:var(--good)}
 .box > :first-child{margin-top:0}
 .box > :last-child{margin-bottom:0}
+/* the verdict panel: one screen, one row per question */
+.verdict{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--series-1);
+         border-radius:10px;padding:4px 0;margin:18px 0}
+.verdict .vrow{display:grid;gap:10px;grid-template-columns:minmax(150px,210px) 1fr;
+               padding:11px 18px;border-top:1px solid var(--border)}
+.verdict .vrow:first-child{border-top:0}
+.verdict .vk{color:var(--ink-2);font-size:13px;font-weight:640}
+.verdict .vv{font-size:14.5px;line-height:1.5}
+@media (max-width:640px){.verdict .vrow{grid-template-columns:1fr;gap:2px}}
 .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));margin:18px 0}
 .grid-2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));margin:18px 0}
 
@@ -307,6 +316,7 @@ th[data-sort]::after{content:" \2195";color:var(--axis)}
 /* leaderboard verdict column: a short phrase, the full scope on hover ---------- */
 th.vcol,td.vcol{max-width:27ch;min-width:19ch}
 /* chart provenance: the artifact path lives on hover, never under the graph ----- */
+figcaption .src{word-break:break-word}
 figcaption .prov{margin-left:.4em;font-size:12px;color:var(--muted);
   text-decoration-color:var(--muted)}
 figcaption .prov .ttv::before{content:"\2139\00a0"}
@@ -405,3 +415,10 @@ details.disc>div.dbody{padding:2px 14px 12px}
 details.disc>div.dbody>p:first-child{margin-top:10px}
 p.answer{font-size:17px;margin:10px 0 6px}
 p.changed{font-size:13.5px;color:var(--muted);margin:6px 0 16px}
+
+/* ---------- a figure at reading precision, exact on demand ---------- */
+/* Every figure is published rounded, with the artifact's exact decimal in data-x. The control in
+   the nav swaps all of them; the title attribute carries the exact value with no scripting. */
+.ex{font-variant-numeric:tabular-nums;border-bottom:1px dotted var(--axis);cursor:help}
+.ex:hover{border-bottom-color:var(--series-1)}
+.seg.prec{margin-left:auto;font-size:12px;padding:3px 10px;letter-spacing:.02em}

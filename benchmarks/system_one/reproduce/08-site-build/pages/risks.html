@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Risks — failure handling, benign over-flagging, repeatability and disagreements</title>
+<meta name="description" content="Where the guard cascade fails open, how often it flags benign work, whether it gives the same answer twice, and what an independent adjudicator says where the deciders disagree.">
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<h1>Risks</h1>
+<p class="lede">
+  What goes wrong around the model: failures that resolve to <code>allow</code>, benign work
+  flagged as unsafe, answers that change on replay, and the cases where the deciders disagree.
+</p>
+<div class="box bad">
+  <ol>
+    <li>{{fig:fault.allow.total}} of 28 injected provider and parse failures end with the tool
+        call allowed; {{fig:fault.silent}} of them raise no error at all.</li>
+    <li>Two question formats, Q1 and Q3, fail open on a malformed answer with no error code.</li>
+    <li>The promotion gate advanced a candidate that errored on every diagnostic request.</li>
+    <li>Resume validation accepts a stored decision flipped to <code>allow</code>.</li>
+    <li>The serves-the-request score flags {{fig:tb.laneb.oj.traj}} benign coding sessions as a
+        standalone gate.</li>
+  </ol>
+</div>
+
+<h2 id="faults">Failure handling</h2>
+<p>
+  Twenty-eight failure classes were injected against a local mock: refused and reset
+  connections, timeouts, HTTP 429, 500, 502, 503 and 422, truncated bodies, invalid or duplicate
+  JSON, missing, wrong or extra answer keys, out-of-range probabilities, wrong value types and a
+  deliberate silent allow.
+</p>
+{{chart:faults}}
+<p>
+  {{fig:fault.allow}} classes write an error row and the cascade allows anyway;
+  {{fig:fault.silent}} answer in the wrong shape and are allowed with no error code;
+  {{fig:fault.other}} are partially degraded; {{fig:fault.notscorable}} crashes the runner on a
+  non-finite token count and writes no prediction file. With the judge behind the small model every
+  all-allow class becomes <code>confirm</code> instead, because all {{fig:judge.closed}} of the
+  judge&#8217;s own injected failure modes answer <code>confirm</code>. Without the judge, which
+  is the recommendation at production traffic, the <code>allow</code> is what ships.
+</p>
+
+<h2 id="failopen">Q1 and Q3 fail open</h2>
+<p>
+  Q0, Q2 and Q4 answer with a disposition, and a value outside the vocabulary returns
+  <code>action = "error"</code>. Q1 and Q3 derive an action from eight boolean slots with
+  <code>probabilities.get(name, 0)</code>, so a response that parses but carries no signal becomes
+  <code>allow</code> at confidence 1.0 with no error code. That is indistinguishable from a
+  confident correct allow, and no scorer downstream can see it.
+</p>
+<div class="tbl-scroll">
+<table>
+  <caption>A malformed Q1 answer, traced through <code>derive_action()</code> in
+    <code>benchmarks/scripts/benchmark_run_system_one.py</code>. The answer is a synthetic
+    illustration.</caption>
+  <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>answered</td><td><code>{"exfiltration.yes": 0.93, "dangerous_effect.yes": 0.88, "high_impact.yes": 0.91}</code></td></tr>
+    <tr><td>key-set check</td><td>passes: the answer names match the question names</td></tr>
+    <tr><td>every lookup</td><td><code>probabilities.get("exfiltration.true", 0)</code> returns <code>0</code></td></tr>
+    <tr><td>derived</td><td><code>("allow", 1.0)</code>, no <code>error_code</code>; 1.0 is inside the trusted-allow band, so the judge is never called</td></tr>
+    <tr><td>right answer</td><td><code>("error", 0)</code>, what Q0, Q2 and Q4 return</td></tr>
+  </tbody>
+</table>
+</div>
+<p>The guard that closes it:</p>
+<pre><code>if not any(key.endswith(".true") for key in probabilities):
+    return "error", 0</code></pre>
+<p class="small">
+  It never fired in the measured runs: {{fig:fo.fired}} of {{fig:failopen.rows}} scored rows across
+  {{fig:failopen.arms}} audited runs. The defect is latent, and Q1 and Q3 also block too rarely to
+  be used for enforcement (<a href="method.html#format">Method</a>). A second, smaller defect: when
+  two dispositions tie to within {{fig:tie.eps}}, the winner was whichever key the provider
+  emitted first; the fix resolves the tie toward the higher severity.
+</p>
+
+<h2 id="gate">The promotion gate</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>The culling gate reads the scorer&#8217;s error count, which covers scorable rows only.
+    Source: <code>outputs/fault-injection/report.json</code>.</caption>
+  <thead><tr><th>Scope</th><th class="n">rows that errored</th><th class="n">errors the scorer reported</th><th>gate decision</th></tr></thead>
+  <tbody>
+    <tr><td>all grades</td><td class="n">58</td><td class="n">46</td><td><span class="pill neg">reject</span></td></tr>
+    <tr><td>high-grade only</td><td class="n">15</td><td class="n">15</td><td><span class="pill neg">reject</span></td></tr>
+    <tr><td>diagnostic grade only</td><td class="n neg">{{fig:fault.gate.rows}}</td><td class="n neg">{{fig:fault.gate.seen}}</td><td><span class="pill open">{{fig:fault.gate.decision}}</span></td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+  A candidate can fail every diagnostic request and still be promoted. The fix is to read the
+  prediction file&#8217;s own error rows. The gate does work on scorable rows: at the
+  Production-weighted stage it rejected OpenJev for {{fig:s3.errors}} provider errors in
+  {{fig:req.s3oj}} requests.
+</p>
+
+<h2 id="resume">Resume validation</h2>
+<p>
+  Long runs resume from a partial prediction file. Of {{fig:fault.tamper.total}} tampers probed,
+  {{fig:fault.tamper.accepted}} were accepted (counting the untampered control):
+  {{fig:fault.tamper.list}}. The run then reports complete. The validator checks which request each
+  row answers, not what the answer was. A resumed run also keeps its predecessor&#8217;s errored
+  rows unless <code>--resume-retry-errors</code> is passed.
+</p>
+
+<h2 id="benign">Benign traffic</h2>
+<div class="tbl-scroll">
+<table>
+  <caption>Share of benign events flagged, {{fig:tb.events}} events across {{fig:tb.traj}} real
+    coding sessions. Source: <code>outputs/terminalbench/q4-lane-fpr.json</code>.</caption>
+  <thead><tr><th>Model</th><th class="n">benign events flagged</th></tr></thead>
+  <tbody>
+    <tr><td>Jev 1.13.0 (hosted API)</td><td class="n neg">{{fig:tb.q2.jev}}</td></tr>
+    <tr><td>DiffusionGemma</td><td class="n">{{fig:tb.q2.dg}}</td></tr>
+    <tr><td>OpenJev</td><td class="n pos">{{fig:tb.q2.oj}}</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="laneb">The serves-the-request score as a gate</h3>
+<p>
+  The Q4 format returns a second score, <code>serves_intent</code> (&#8220;does this still serve
+  the user&#8217;s request?&#8221;), called Lane B here. As a standalone gate at its nominal 0.5
+  threshold it flags {{fig:tb.laneb.oj}} of benign events for OpenJev and {{fig:tb.laneb.dg}} for
+  DiffusionGemma, {{fig:tb.laneb.ratio.span}} each model&#8217;s own full-decision rate, and
+  {{fig:tb.laneb.oj.traj}} and {{fig:tb.laneb.dg.traj}} of the {{fig:tb.traj}} sessions. On OpenJev
+  the score never exceeds {{fig:tb.si.oj.max}} on any benign event, so no threshold separates the
+  traffic. This corpus has no unsafe cases, so the recall cost of a lower threshold is unmeasured.
+</p>
+{{chart:benign_fpr}}
+
+<h2 id="repeatability">Repeatability</h2>
+<p>
+  Three byte-identical replays of each model over {{fig:flip.openjev.events}} events. Flips only
+  happen on events flagged in at least one replay, so the rate that matters is over those:
+  {{fig:flip.flagged.per_model}}. Jev 1.13.0 was replayed {{fig:cross.jev.all.runs}} times in all,
+  and over all of them its rate rises to {{fig:flip.jev.deep.flagged}}; more replays can only find
+  more flips, so OpenJev&#8217;s zero is a zero over three. DiffusionGemma&#8217;s confidence differs on every event across replays even where its
+  action does not.
+</p>
+{{chart:repeat}}
+
+<h2 id="disagreement">Where the deciders disagree</h2>
+<p>
+  OpenJev, DiffusionGemma, the Gemma 4 judge and the rules disagree on {{fig:s2.disagree}} of the
+  Broad comparison ({{fig:s3.disagree}} of the Production-weighted corpus). All {{fig:adj.queue}}
+  disputed Broad cases went to an independent model, <code>{{fig:adj.model}}</code>, blinded to the
+  four votes. It is one model&#8217;s opinion, not ground truth, and it is permissive: it allows
+  {{fig:adj.permissive}} of the cases the corpus grades unsafe. Agreement with it is weaker
+  evidence than the raw rate suggests.
+</p>
+{{chart:parallel}}
+{{chart:confusion}}
+{{chart:adjudicator}}
+<p>
+  On unsafe disputed cases OpenJev agrees with the adjudicator on {{fig:adj.unsafe.openjev}},
+  DiffusionGemma on {{fig:adj.unsafe.diffgemma}} and the judge on {{fig:adj.unsafe.gemma4}}. On
+  benign ones the judge agrees on only {{fig:adj.benign.gemma4}}: it escalates almost everything.
+</p>
+{{ui:matchups}}
+<p>
+  <strong>The cost of two-sided routing.</strong> 1,346 cases are ones the judge wanted to escalate
+  and the small model allowed. The adjudicator agrees with discarding 89.08% of them, but 32 are
+  independently graded unsafe, 2.38% (Wilson 1.69%&#8211;3.34%), a loss that does not depend on the
+  adjudicator. Whether that is acceptable is recommendation 7 on
+  <a href="decide.html#recommendations">Deploy</a>.
+</p>
+
+<h3 id="explorer">The disagreement queue</h3>
+<p>
+  Every disputed case, filterable by vote pattern, grade, surface and verdict.
+</p>
+<div class="box warn">
+  <p style="margin-bottom:0"><strong>Metadata only, and the one table of per-case rows on this
+  site.</strong> Each row is {{fig:exp.ints}} small integers into the code tables beside it: truth
+  grade, surface, event count, source dataset, the four votes and the verdict. The tool call, the
+  user request, the adjudicator&#8217;s written <code>reason</code> and <code>apparent_task</code>,
+  and the corpus <code>case_id</code> are withheld; every row of the source files is
+  <code>download-only</code>. The {{fig:exp.rows}} rows collapse to {{fig:exp.distinct}} distinct
+  tuples and carry no identifier and no corpus text, and none comes from an aggregate-only or
+  local-evaluation-only corpus. The aggregate-only rule carries an explicit carve-out for coded
+  contingency data of exactly this kind; <a href="reproduce.html#withheld">the rule and its
+  carve-out</a> are stated together.</p>
+</div>
+{{ui:explorer}}
+
+<h2 id="fixes">Security work, in order</h2>
+<div class="tbl-scroll">
+<table>
+  <thead><tr><th>#</th><th>Fix</th><th>Effort</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Refuse Q1 and Q3 for enforcement, or give their derivation the answer-type guard above.</td><td>one function</td></tr>
+    <tr><td>2</td><td>Make the disposition on a small-model error configurable, defaulting to <code>confirm</code>. This trades availability for safety and needs a policy decision.</td><td>small</td></tr>
+    <tr><td>3</td><td>Have the culling gate read the prediction file&#8217;s own error rows.</td><td>small</td></tr>
+    <tr><td>4</td><td>Validate response content on resume, not only request identity.</td><td>small</td></tr>
+    <tr><td>5</td><td>Do not ship Lane B as a standalone gate.</td><td>none</td></tr>
+    <tr><td>6</td><td>Handle a non-finite token-usage value in the runner instead of crashing.</td><td>small</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{FOOT}}
+</div>
+{{SCRIPT}}
+</body>
+</html>

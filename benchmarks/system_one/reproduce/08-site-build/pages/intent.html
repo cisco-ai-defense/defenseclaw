@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intent — does comparing a tool call with the user's request catch compromise?</title>
+<meta name="description" content="Intent detection measured negative on AgentDojo in eight runs, then positive in all 32 cells on a corpus with independently proven compromises, with the control run and the recall limit.">
+{{STYLE}}
+{{DATA}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<h1>Intent: comparing the call with the user&#8217;s request</h1>
+<p class="lede">
+  DefenseClaw checks each tool call against what the user asked for. Eight runs on AgentDojo
+  measured that check as harmful. On a corpus where the compromise is independently proven, the
+  same code, models and seed turn all {{fig:cells}} measured cells positive. It separates
+  compromise from refusal; it does not block enough to be a control on its own.
+</p>
+
+<h2 id="statistic">The statistic</h2>
+<p>
+  An attacker plants text the agent will read. The agent either complies or correctly refuses, and
+  in both cases the attacker&#8217;s text is present and the agent keeps making tool calls. The
+  guard has to tell the two apart, so the measure is {{term:separation}}:
+</p>
+<div class="box">
+  <p style="font-size:17px;margin:0"><strong>separation</strong> = block rate on a proven
+  compromise &#8722; block rate on an agent that correctly refused the same attack</p>
+  <p class="small" style="margin-bottom:0">Written <code>sep|res</code> in the artifacts. Below zero,
+  the guard fires more on the refusal: it is reacting to the attacker&#8217;s text and punishing
+  the agent for doing the right thing.</p>
+</div>
+
+<h2 id="agentdojo">Eight negative runs on AgentDojo</h2>
+<p>
+  AgentDojo is a synthetic benchmark with matched attacked and clean pairs: 651 matched cases, four
+  models, two context recipes. Every run came out negative, between &#8722;0.0053 and
+  &#8722;0.5343 per case counting only hard blocks, and supplying the user&#8217;s request
+  made it worse in 26 of 36 paired comparisons across the first three models. Two mechanical
+  causes, both measured and both specific to that benchmark:
+</p>
+<ul>
+  <li><strong>Attacker-text sensitivity.</strong> On AgentDojo the only difference between a clean
+      case and a correct refusal is the attacker&#8217;s text. One model&#8217;s flag rate goes
+      from {{fig:ad.rate.clean}} on clean cases to {{fig:ad.rate.res}} on correct refusals, against
+      {{fig:ad.rate.comp}} on real compromises.</li>
+  <li><strong>The aggregation unit.</strong> A case counts as flagged if any of its events fired,
+      and correct refusals had the most events per case (5.07 against 4.14 for compromise). Scored
+      per event, OpenJev&#8217;s cell with the request moves from {{fig:ad.openjev.C7}} to
+      {{fig:ad.openjev.C7.event}}.</li>
+</ul>
+
+<h2 id="reversal">The reversal on proof-backed data</h2>
+<p>
+  A new corpus was built from real emitted MCP tool calls where a deterministic proof establishes
+  that the compromise happened: 3,402 cases over 1,929 families, 405 of them proof-verified. All
+  four models were re-run on it, and the same scorer with the same seed was re-run on AgentDojo as
+  a control. The proof-backed corpus is evaluation-only and reported in aggregate only: this site
+  carries its rates and counts and never an example.
+</p>
+{{chart:reversal_heat}}
+<p>
+  The one cell that is not a sign reversal (OpenJev without the request, C0, per event,
+  block-only) was already positive at {{fig:ad.openjev.C0.event}}. For OpenJev with the request
+  ({{term:c0c7}}), separation is {{fig:ad.openjev.C7}} on AgentDojo and {{fig:sep.openjev.C7}} on
+  the proof-backed corpus.
+</p>
+{{chart:reversal}}
+
+<h2 id="control">Why the reversal is not an artefact</h2>
+<ul>
+  <li><strong>The control did not move.</strong> The same scorer, flags and seed reproduce every
+      model&#8217;s published AgentDojo figure to four decimal places.</li>
+  <li><strong>Not corpus identity.</strong> Compromise and correct refusal come from the same
+      source corpus.</li>
+  <li><strong>Not a between-family confound.</strong> Restricted to the {{fig:wf.families}}
+      families holding both a proven compromise and a correct refusal on the same user request and
+      the same poisoned tool catalogue, all {{fig:wf.cells}} cells stay positive.</li>
+  <li><strong>Not carried by weak labels.</strong> Grade A beats grade B in all 8 cells for every
+      model.</li>
+</ul>
+
+<h2 id="limits">Limits</h2>
+{{chart:recall}}
+<div class="box bad">
+  <p style="margin:0"><strong>Every model misses {{fig:miss.openjev.C7}} to {{fig:miss.jev.C7}} of
+  proven compromises.</strong> With the request supplied, the four block
+  {{fig:recall.openjev.C7}} (OpenJev), {{fig:recall.diffgemma.C7}} (DiffusionGemma),
+  {{fig:recall.gemma4.C7}} (the Gemma 4 judge) and {{fig:recall.jev.C7}} (Jev 1.13.0).</p>
+</div>
+<ul>
+  <li><strong>&#8220;With intent&#8221; is not a clean isolation.</strong> C7 adds the request, up
+      to seven prior events and a different text representation at once, so the C0-to-C7 gain
+      cannot be attributed to the request alone.</li>
+  <li><strong>No between-model ranking.</strong> The order of the four changes with the lens and
+      the context; only the within-model contrast is controlled.</li>
+  <li><strong>The refusal label is upstream.</strong> Nothing independently proves the agent
+      ignored the attack; mislabelling would depress separation, so the bias is conservative.</li>
+</ul>
+
+<div class="tbl-scroll">
+<table>
+  <caption>What the evidence supports.</caption>
+  <thead><tr><th>Claim</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>Comparing the call with the user&#8217;s request separates proven compromise from correct refusal.</td><td><span class="pill settled">supported</span></td></tr>
+    <tr><td>Knowing the request improves that separation.</td><td><span class="pill settled">supported</span></td></tr>
+    <tr><td>The earlier eight-run negative was a property of the mechanism.</td><td><span class="pill neg">refuted</span></td></tr>
+    <tr><td>This is enough to ship as a blocking control.</td><td><span class="pill neg">not supported</span></td></tr>
+  </tbody>
+</table>
+</div>
+
+{{FOOT}}
+</div>
+{{SCRIPT}}
+</body>
+</html>
