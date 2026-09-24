@@ -2,12 +2,12 @@
   "archived_at_utc": "2026-09-24T02:56:46.650266+00:00",
   "source_host": "defenseclaw-dev (CPU dev host)",
   "note": "Uploaded from the dev host using that host's own HF token, resolved in place. The studio token was never read, printed, copied or moved.",
-  "code_commit": "6548bd4ce8bd6772b2b3caac186082c9ce74d319",
+  "code_commit": "9411b1f32cda70ec06371de0587b02efff65d923",
   "datasets": {
     "Vineethsain/defenseclaw-slm-toolcall-v1": {
       "action": "created (new)",
       "private": true,
-      "sha": "07e7c1e73154b19cd4ce70f45f9e340ab52d34fc",
+      "sha": "f742d4cef3a59cc6b061ce09c344ddc9e460fc33",
       "files_in_repo": 14,
       "files_uploaded": 10,
       "bytes_uploaded": 73656813
@@ -356,5 +356,25 @@
     },
     "total_bytes": 238254346720,
     "total_human": "~238 GB (~222 GiB) measured, which is considerably more than the ~97 GiB estimated in the brief"
-  }
+  },
+  "corrections_after_initial_upload": [
+    {
+      "what": "Vendored 6 further laptopguard scripts (settle.py, dispatch_all.sh, dispatch2.sh, dispatch_card2.sh, vacate_and_dispatch.sh, and refreshed run_lane_card.sh).",
+      "why": "A backgrounded studio search was still buffering when first read; its empty output was wrongly recorded as a confirmed negative. These files were written during the sweep (02:48-03:20 UTC), after the first enumeration."
+    },
+    {
+      "what": "Corrected the integrity claim in the harness README, the slm_toolcall README and the uploaded slm-toolcall-v1 card.",
+      "why": "settle.py retrofits `complete` and `prediction_sha256` onto cohort metas and re-verifies them, so the earlier statement that the integrity check 'cannot be performed at all' for cohort arms was wrong about the pipeline, though correct about score_arm.py itself.",
+      "residual_limits": [
+        "digest taken at settlement time over the complete-line prefix, so it certifies unchanged-since-settlement rather than as-emitted",
+        "settlement requires 30310 untorn rows, so an unsettled meta means incomplete rather than unchecked"
+      ]
+    },
+    {
+      "what": "Corrected the CPU-measurement evidence wording.",
+      "why": "The search did return laptopguard/build_llamacpp.sh and sysone/kev-src/kev/train.py; neither measures RSS or CPU latency, so the conclusion stands but the stated evidence was inaccurate."
+    }
+  ],
+  "cohort_arms_archived_are_unsettled": true,
+  "note_on_cohort_verification": "The three cohort bodies archived here were staged before settle.py existed, so their metas carry no complete/prediction_sha256 and are recorded UNVERIFIABLE. Re-archive after settle.py runs to obtain the settled metas."
 }
