@@ -2489,6 +2489,22 @@ func validateEnterpriseHookManagedRuntime() error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
+	if err := repairEnterpriseHookManagedRuntimePlatform(
+		cfg.DataDir,
+		os.Getenv(managed.WindowsServiceAccountEnv),
+	); err != nil {
+		// Preserve the ordinary trust verdict when repair cannot run. This keeps
+		// the diagnostic actionable and, importantly, never turns a failed
+		// repair into a successful validation.
+		if validationErr := managed.ValidateTrustedServiceRuntimeDir(
+			cfg.DataDir,
+			"hook guardian state data_dir",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); validationErr != nil {
+			return validationErr
+		}
+		return fmt.Errorf("enterprise hooks: managed runtime ACL repair failed: %w", err)
+	}
 	if err := managed.ValidateTrustedServiceRuntimeDir(
 		cfg.DataDir,
 		"hook guardian state data_dir",

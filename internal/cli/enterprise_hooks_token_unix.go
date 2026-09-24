@@ -15,6 +15,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func repairEnterpriseHookManagedRuntimePlatform(string, string) error { return nil }
+
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
 	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
 		return err
