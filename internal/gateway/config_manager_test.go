@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -443,6 +445,45 @@ func TestApplyConfigReloadHotRejectsRestartRequiredChange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "data_dir") {
 		t.Fatalf("error = %v, want data_dir", err)
+	}
+}
+
+func TestApplyConfigReloadReplacesPrivateUpstreamAllowlist(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "")
+	oldCfg := config.DefaultConfig()
+	oldCfg.Guardrail.AllowPrivateUpstreams = []string{"10.50.2.100"}
+	netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(oldCfg.Guardrail.AllowPrivateUpstreams))
+	t.Cleanup(func() { netguard.SetAllowedPrivateIPs(nil) })
+
+	newCfg := *oldCfg
+	newCfg.Guardrail.AllowPrivateUpstreams = []string{"10.50.2.101"}
+	sidecar := &Sidecar{cfg: oldCfg}
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	if netguard.IsAllowedPrivateIP(net.ParseIP("10.50.2.100")) {
+		t.Fatal("removed private upstream remains allowlisted after reload")
+	}
+	if !netguard.IsAllowedPrivateIP(net.ParseIP("10.50.2.101")) {
+		t.Fatal("new private upstream was not allowlisted after reload")
+	}
+}
+
+func TestApplyConfigReloadClearsPrivateUpstreamAllowlist(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "")
+	oldCfg := config.DefaultConfig()
+	oldCfg.Guardrail.AllowPrivateUpstreams = []string{"10.50.2.100"}
+	netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(oldCfg.Guardrail.AllowPrivateUpstreams))
+	t.Cleanup(func() { netguard.SetAllowedPrivateIPs(nil) })
+
+	newCfg := *oldCfg
+	newCfg.Guardrail.AllowPrivateUpstreams = nil
+	sidecar := &Sidecar{cfg: oldCfg}
+	if err := sidecar.applyConfigReload(context.Background(), oldCfg, &newCfg, diffConfigs(oldCfg, &newCfg)); err != nil {
+		t.Fatalf("applyConfigReload: %v", err)
+	}
+	if netguard.IsAllowedPrivateIP(net.ParseIP("10.50.2.100")) {
+		t.Fatal("last private upstream remains allowlisted after reload")
 	}
 }
 

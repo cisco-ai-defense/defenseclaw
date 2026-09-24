@@ -39,6 +39,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_llm_api_key,
     _check_openhands_hooks,
+    _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
     _probe_splunk_hec,
@@ -53,6 +54,46 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
 )
+
+
+class DoctorSecurityOverrideTests(unittest.TestCase):
+    def test_private_upstream_config_entries_are_visible(self):
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(
+                allow_private_upstreams=["10.50.2.100", "172.16.0.5"]
+            )
+        )
+        result = _DoctorResult()
+
+        with patch.dict(os.environ, {}, clear=True):
+            _check_security_overrides(cfg, result)
+
+        self.assertEqual(result.warned, 1)
+        check = result.checks[0]
+        self.assertEqual(check["label"], "Private upstream allowlist")
+        self.assertIn("10.50.2.100", check["detail"])
+        self.assertIn("172.16.0.5", check["detail"])
+        self.assertIn("config.yaml", check["detail"])
+
+    def test_private_upstream_env_and_config_entries_are_merged(self):
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100"])
+        )
+        result = _DoctorResult()
+
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100,192.168.1.20"},
+            clear=True,
+        ):
+            _check_security_overrides(cfg, result)
+
+        self.assertEqual(result.warned, 1)
+        detail = result.checks[0]["detail"]
+        self.assertEqual(detail.count("10.50.2.100"), 1)
+        self.assertIn("192.168.1.20", detail)
+        self.assertIn("config.yaml", detail)
+        self.assertIn("environment", detail)
 
 
 class DoctorMultiConnectorInventoryTests(unittest.TestCase):

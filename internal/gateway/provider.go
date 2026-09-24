@@ -6,35 +6,42 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
 // representation throughout the proxy. Content can be a plain string or an
 // array of content blocks ([{"type":"text","text":"..."}]).
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    string          `json:"-"`
-	RawContent json.RawMessage `json:"content,omitempty"`
-	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role         string          `json:"role"`
+	Content      string          `json:"-"`
+	RawContent   json.RawMessage `json:"content,omitempty"`
+	ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	type plain struct {
-		Role       string          `json:"role"`
-		Content    json.RawMessage `json:"content,omitempty"`
-		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID string          `json:"tool_call_id,omitempty"`
-		Name       string          `json:"name,omitempty"`
+		Role         string          `json:"role"`
+		Content      json.RawMessage `json:"content,omitempty"`
+		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID   string          `json:"tool_call_id,omitempty"`
+		Name         string          `json:"name,omitempty"`
+		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 	}
 	var p plain
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -45,6 +52,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.ToolCalls = p.ToolCalls
 	m.ToolCallID = p.ToolCallID
 	m.Name = p.Name
+	m.ExtraContent = p.ExtraContent
 
 	if len(p.Content) == 0 {
 		return nil
@@ -86,17 +94,19 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Role       string          `json:"role,omitempty"`
-		Content    json.RawMessage `json:"content,omitempty"`
-		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID string          `json:"tool_call_id,omitempty"`
-		Name       string          `json:"name,omitempty"`
+		Role         string          `json:"role,omitempty"`
+		Content      json.RawMessage `json:"content,omitempty"`
+		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID   string          `json:"tool_call_id,omitempty"`
+		Name         string          `json:"name,omitempty"`
+		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 	}
 	a := alias{
-		Role:       m.Role,
-		ToolCalls:  m.ToolCalls,
-		ToolCallID: m.ToolCallID,
-		Name:       m.Name,
+		Role:         m.Role,
+		ToolCalls:    m.ToolCalls,
+		ToolCallID:   m.ToolCallID,
+		Name:         m.Name,
+		ExtraContent: m.ExtraContent,
 	}
 	if m.RawContent != nil {
 		a.Content = m.RawContent
@@ -112,21 +122,23 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // Everything else is pass-through. RawBody carries the original JSON so
 // the OpenAI provider can forward unknown fields verbatim.
 type ChatRequest struct {
-	Model        string          `json:"model"`
-	Messages     []ChatMessage   `json:"messages"`
-	MaxTokens    *int            `json:"max_tokens,omitempty"`
-	Temperature  *float64        `json:"temperature,omitempty"`
-	TopP         *float64        `json:"top_p,omitempty"`
-	Stream       bool            `json:"stream,omitempty"`
-	Stop         json.RawMessage `json:"stop,omitempty"`
-	Tools        json.RawMessage `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
-	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
-	ExtraParams  map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
-	RawBody      json.RawMessage `json:"-"`
-	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
-	TargetPath   string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
-	TargetAPIKey string          `json:"-"` // from Authorization header, forwarded to upstream
+	Model            string          `json:"model"`
+	Messages         []ChatMessage   `json:"messages"`
+	MaxTokens        *int            `json:"max_tokens,omitempty"`
+	Temperature      *float64        `json:"temperature,omitempty"`
+	TopP             *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
+	Stop             json.RawMessage `json:"stop,omitempty"`
+	Tools            json.RawMessage `json:"tools,omitempty"`
+	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
+	Fallbacks        []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams      map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
+	RawBody          json.RawMessage `json:"-"`
+	TargetURL        string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
+	TargetPath       string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
+	TargetAPIKey     string          `json:"-"` // from Authorization header, forwarded to upstream
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
@@ -511,6 +523,85 @@ var providerHTTPClient = &http.Client{
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	},
+	CheckRedirect: netguard.BlockRedirects,
+}
+
+// privateUpstreamPeerObserver records the concrete remote peer selected by
+// net/http. Auditing DNS preflight results is insufficient because a later
+// resolution, redirect, or connection reuse can select a different address.
+type privateUpstreamPeerObserver struct {
+	mu      sync.Mutex
+	allowed map[string]struct{}
+}
+
+func observePrivateUpstreamPeers(req *http.Request) (*http.Request, *privateUpstreamPeerObserver) {
+	observer := &privateUpstreamPeerObserver{allowed: make(map[string]struct{})}
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil {
+				observer.recordRemoteAddr(info.Conn.RemoteAddr())
+			}
+		},
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace)), observer
+}
+
+func (o *privateUpstreamPeerObserver) recordRemoteAddr(addr net.Addr) {
+	if o == nil || addr == nil {
+		return
+	}
+	var ip net.IP
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		ip = tcpAddr.IP
+	} else if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+		ip = net.ParseIP(stripIPv6Zone(host))
+	}
+	// The allowlist can also be supplied by an environment variable, which
+	// does not pass config validation. Re-apply the non-exemptible deny here
+	// so loopback/link-local/metadata can never be mislabeled as approved.
+	if ip == nil || netguard.IsHardDeniedIP(ip) || !netguard.IsAllowedPrivateIP(ip) {
+		return
+	}
+	o.mu.Lock()
+	o.allowed[ip.String()] = struct{}{}
+	o.mu.Unlock()
+}
+
+func (o *privateUpstreamPeerObserver) allowedPrivatePeers() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	peers := make([]string, 0, len(o.allowed))
+	for peer := range o.allowed {
+		peers = append(peers, peer)
+	}
+	o.mu.Unlock()
+	sort.Strings(peers)
+	return peers
+}
+
+// doProviderRequest executes a provider request and emits one audit event for
+// each allowlisted private address actually used by net/http. GotConn runs for
+// both fresh and pooled connections, so the event describes the dial path that
+// carried traffic rather than an earlier DNS guess.
+func doProviderRequest(req *http.Request) (*http.Response, error) {
+	observedReq, observer := observePrivateUpstreamPeers(req)
+	resp, err := providerHTTPClient.Do(observedReq)
+	for _, peer := range observer.allowedPrivatePeers() {
+		emitEgress(req.Context(), gatewaylog.EgressPayload{
+			TargetHost:   req.URL.Hostname(),
+			ResolvedIP:   peer,
+			TargetPath:   req.URL.Path,
+			LooksLikeLLM: true,
+			Branch:       "private-upstream",
+			Decision:     "allow",
+			Reason:       "private-ip-allowed",
+			Source:       "go",
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] ALLOWED upstream connection: host=%s peer=%s (operator allowlist)\n", req.URL.Hostname(), peer)
+	}
+	return resp, err
 }
 
 // ResolveAPIKey reads the API key from the named environment variable,
@@ -545,22 +636,21 @@ func isUnsafeIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.IsLoopback() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() ||
-		ip.IsUnspecified() ||
-		ip.IsPrivate() ||
-		ip.IsInterfaceLocalMulticast() {
+	// These classes, including the IPv6 cloud metadata endpoint, are
+	// never allowed regardless of the operator allowlist.
+	if netguard.IsHardDeniedIP(ip) {
+		return true
+	}
+	// Operator allowlist: specific private IPs that are explicitly trusted.
+	if netguard.IsAllowedPrivateIP(ip) {
+		return false
+	}
+	if ip.IsPrivate() {
 		return true
 	}
 	// CGNAT: 100.64.0.0/10
 	if v4 := ip.To4(); v4 != nil {
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return true
-		}
-		// AWS / link-local metadata: 169.254.169.254 + 169.254.170.2 (ECS)
-		if v4[0] == 169 && v4[1] == 254 {
 			return true
 		}
 	}

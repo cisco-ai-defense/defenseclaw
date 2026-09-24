@@ -96,6 +96,12 @@ func cgnatAllowed() bool {
 
 var parsedExtraReserved []*net.IPNet
 
+var cloudMetadataIPs = []net.IP{
+	net.ParseIP("169.254.169.254"), // EC2/Azure/GCP instance metadata
+	net.ParseIP("169.254.170.2"),   // ECS task metadata
+	net.ParseIP("fd00:ec2::254"),   // EC2 instance metadata over IPv6
+}
+
 func init() {
 	for _, cidr := range extraReservedCIDRs {
 		_, n, err := net.ParseCIDR(cidr)
@@ -116,10 +122,16 @@ func IsPrivateOrReserved(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() {
+	// Hardcoded deny: loopback, link-local, multicast, unspecified, and
+	// cloud metadata are NEVER exempted by the allowlist.
+	if IsHardDeniedIP(ip) {
 		return true
 	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+	// Operator allowlist: specific private IPs that are explicitly trusted.
+	if IsAllowedPrivateIP(ip) {
+		return false
+	}
+	if ip.IsPrivate() {
 		return true
 	}
 	for _, n := range parsedExtraReserved {
@@ -128,6 +140,43 @@ func IsPrivateOrReserved(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// IsCloudMetadataIP reports whether ip is a known cloud instance/task
+// metadata endpoint. These exact addresses are never allowlist-exemptible.
+func IsCloudMetadataIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	for _, metadataIP := range cloudMetadataIPs {
+		if ip.Equal(metadataIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsHardDeniedIP reports whether ip belongs to an address class that must
+// never be exempted by the operator private-upstream allowlist. IPv4-mapped
+// IPv6 addresses are normalized first so mapped loopback and link-local
+// addresses cannot bypass the IPv4 checks.
+func IsHardDeniedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() ||
+		ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		IsCloudMetadataIP(ip)
 }
 
 // RejectInlineCredentials returns ErrInlineCredentials when u
