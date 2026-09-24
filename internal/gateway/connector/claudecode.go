@@ -363,8 +363,12 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
 	}
 
+	llmMode := LLMTrafficModeForConnector(c.Name())
+	if opts.HybridProxyMode {
+		llmMode = LLMTrafficModeHybrid
+	}
 	return ConnectorCapabilities{
-		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
+		LLMTrafficMode: llmMode,
 		ACP:            ACPAgentCapabilityForConnector(c.Name()),
 		Hooks:          c.HookCapabilities(opts),
 		MCP: SurfaceCapability{
@@ -1428,6 +1432,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 // operator's pristine values for any keys we overwrite. Keep this
 // list in sync with the CLAUDE_CODE_* / OTEL_* vars Claude reads.
 var claudeCodeOtelEnvKeys = []string{
+	"ANTHROPIC_BASE_URL",
 	"CLAUDE_CODE_ENABLE_TELEMETRY",
 	"DEFENSECLAW_FAIL_MODE",
 	"OTEL_METRICS_EXPORTER",
@@ -1481,6 +1486,9 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	env, err := spec.EnvBlock()
 	if err != nil {
 		return map[string]string{}
+	}
+	if opts.HybridProxyMode && opts.ProxyAddr != "" {
+		env["ANTHROPIC_BASE_URL"] = "http://" + opts.ProxyAddr + "/c/claudecode"
 	}
 	return env
 }

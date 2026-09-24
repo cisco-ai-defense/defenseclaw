@@ -346,6 +346,41 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeCodeOtelEnv_HybridProxyMode(t *testing.T) {
+	t.Parallel()
+	opts := fixedSetupOpts(t)
+	opts.ProxyAddr = "127.0.0.1:4000"
+
+	t.Run("without_hybrid_no_anthropic_base_url", func(t *testing.T) {
+		o := opts
+		o.HybridProxyMode = false
+		env := buildClaudeCodeOtelEnv(o)
+		if _, present := env["ANTHROPIC_BASE_URL"]; present {
+			t.Errorf("ANTHROPIC_BASE_URL should not be set without hybrid mode, got %q", env["ANTHROPIC_BASE_URL"])
+		}
+	})
+
+	t.Run("with_hybrid_sets_anthropic_base_url", func(t *testing.T) {
+		o := opts
+		o.HybridProxyMode = true
+		env := buildClaudeCodeOtelEnv(o)
+		want := "http://127.0.0.1:4000/c/claudecode"
+		if got := env["ANTHROPIC_BASE_URL"]; got != want {
+			t.Errorf("ANTHROPIC_BASE_URL = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("with_hybrid_no_proxy_addr_no_anthropic_base_url", func(t *testing.T) {
+		o := opts
+		o.HybridProxyMode = true
+		o.ProxyAddr = ""
+		env := buildClaudeCodeOtelEnv(o)
+		if _, present := env["ANTHROPIC_BASE_URL"]; present {
+			t.Errorf("ANTHROPIC_BASE_URL should not be set when ProxyAddr is empty, got %q", env["ANTHROPIC_BASE_URL"])
+		}
+	})
+}
+
 func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(t *testing.T) {
 	const apiAddr = "127.0.0.1:18970"
 	dataDir := filepath.Join("fixture", "defenseclaw")
