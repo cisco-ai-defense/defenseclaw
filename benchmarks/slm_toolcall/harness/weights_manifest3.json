@@ -1,0 +1,56 @@
+[
+  {
+    "repo": "meta-llama/Llama-Guard-3-1B",
+    "revision": "acf7aafa60f0410f8f42b1fa35e077d705892029",
+    "licence": "llama3.2",
+    "params": 1498482688,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/meta-llama__Llama-Guard-3-1B",
+    "bytes": 3006170568,
+    "status": "ok"
+  },
+  {
+    "repo": "google/shieldgemma-2b",
+    "revision": "d1dffc9c8c9237a90aab09c61383791e718ef9e8",
+    "licence": "gemma",
+    "params": 2614341888,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/google__shieldgemma-2b",
+    "bytes": 5250578613,
+    "status": "ok"
+  },
+  {
+    "repo": "google/gemma-3-4b-it",
+    "revision": "093f9f388b31de276ce2de164bdc2081324b9767",
+    "licence": "gemma",
+    "params": 4300079472,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/google__gemma-3-4b-it",
+    "bytes": 8639634218,
+    "status": "ok"
+  },
+  {
+    "repo": "meta-llama/Llama-3.2-3B-Instruct",
+    "revision": "0cb88a4f764b7a12671c53f0838cd831a0843b95",
+    "licence": "llama3.2",
+    "params": 3212749824,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/meta-llama__Llama-3.2-3B-Instruct",
+    "bytes": 6434752520,
+    "status": "ok"
+  },
+  {
+    "repo": "google/gemma-3-1b-it",
+    "revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
+    "licence": "gemma",
+    "params": 999885952,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/google__gemma-3-1b-it",
+    "bytes": 2039072537,
+    "status": "ok"
+  },
+  {
+    "repo": "meta-llama/Llama-3.2-1B-Instruct",
+    "revision": "9213176726f574b556790deb65791e0c5aa438b6",
+    "licence": "llama3.2",
+    "params": 1235814400,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/meta-llama__Llama-3.2-1B-Instruct",
+    "bytes": 2480847368,
+    "status": "ok"
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "repo": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/Qwen__Qwen3-0.6B",
+    "bytes": 1519211939,
+    "status": "ok"
+  },
+  {
+    "repo": "Qwen/Qwen3-1.7B",
+    "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/Qwen__Qwen3-1.7B",
+    "bytes": 4079453482,
+    "status": "ok"
+  },
+  {
+    "repo": "Qwen/Qwen3-4B",
+    "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/Qwen__Qwen3-4B",
+    "bytes": 8060930437,
+    "status": "ok"
+  },
+  {
+    "repo": "ibm-granite/granite-guardian-3.1-2b",
+    "revision": "81145486e85c6c82c01e759c0356d9d6da4d21a5",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/ibm-granite__granite-guardian-3.1-2b",
+    "bytes": 5071957207,
+    "status": "ok"
+  },
+  {
+    "repo": "ibm-granite/granite-guardian-3.2-3b-a800m",
+    "revision": "3de033d89b499a18d9a573b5192bf3b967ef48c5",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/ibm-granite__granite-guardian-3.2-3b-a800m",
+    "bytes": 6602467360,
+    "status": "ok"
+  },
+  {
+    "repo": "microsoft/Phi-4-mini-instruct",
+    "revision": "cfbefacb99257ffa30c83adab238a50856ac3083",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/microsoft__Phi-4-mini-instruct",
+    "bytes": 7694059344,
+    "status": "ok"
+  },
+  {
+    "repo": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+    "revision": "31b70e2e869a7173562077fd711b654946d38674",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/HuggingFaceTB__SmolLM2-1.7B-Instruct",
+    "bytes": 3426390374,
+    "status": "ok"
+  },
+  {
+    "repo": "protectai/deberta-v3-base-prompt-injection-v2",
+    "revision": "90c9989b1a342275dd0d1a95aad283c04e075671",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/protectai__deberta-v3-base-prompt-injection-v2",
+    "bytes": 748866413,
+    "status": "ok"
+  }
+]

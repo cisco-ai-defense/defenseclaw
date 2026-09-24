@@ -1,0 +1,360 @@
+{
+  "archived_at_utc": "2026-09-24T02:56:46.650266+00:00",
+  "source_host": "defenseclaw-dev (CPU dev host)",
+  "note": "Uploaded from the dev host using that host's own HF token, resolved in place. The studio token was never read, printed, copied or moved.",
+  "code_commit": "6548bd4ce8bd6772b2b3caac186082c9ce74d319",
+  "datasets": {
+    "Vineethsain/defenseclaw-slm-toolcall-v1": {
+      "action": "created (new)",
+      "private": true,
+      "sha": "07e7c1e73154b19cd4ce70f45f9e340ab52d34fc",
+      "files_in_repo": 14,
+      "files_uploaded": 10,
+      "bytes_uploaded": 73656813
+    },
+    "Vineethsain/defenseclaw-system-one-evaluations-v1": {
+      "action": "extended with rescoring-remine/ tranche",
+      "private": true,
+      "sha_before": "3968997cdabc3539c6810156053963c472c61a3c",
+      "sha": "553896191c4b995473fd414dfd73556b2dec1597",
+      "files_in_repo_before": 1170,
+      "files_in_repo": 1191,
+      "files_uploaded": 18,
+      "bytes_uploaded": 41745401
+    }
+  },
+  "untouched_datasets": {
+    "Vineethsain/defenseclaw-system-one-predictions-v1": {
+      "private": true,
+      "sha": "d4ade41ef9e3be16b4ecf16148edf942be05347d",
+      "files": 882
+    },
+    "Vineethsain/defenseclaw-system-one-corpora-v1": {
+      "private": true,
+      "sha": "b46628023bb03399f60908017b573e480605dbf0",
+      "files": 92
+    },
+    "Vineethsain/defenseclaw-system-one-contamination-v1": {
+      "private": true,
+      "sha": "343fb13c9970c6047d3336953320fb377fb811e8",
+      "files": 181
+    }
+  },
+  "licence_gate": {
+    "method": "census on source.dataset over s2/cases.jsonl (4277) and s3/cases.jsonl (24476)",
+    "mcptox_rows": 0,
+    "augur_unsafe_tool_input_eval_rows": 0,
+    "payload_field_present_in_any_uploaded_file": false,
+    "conclusion": "No filtering was required for this tranche because neither restricted source appears in s2 or s3. mcptox remains LOCAL-EVALUATION-ONLY and augur remains aggregate-only."
+  },
+  "credential_scan": {
+    "scanner": "benchmarks/archive/scan_credentials.py",
+    "files_scanned": 35,
+    "findings": 0,
+    "positive_control": "PASS - all 11 seeded credential classes fired",
+    "negative_control": "PASS - 0 false positives on sha256 digests, revisions, case ids and redacted/templated secret-shaped strings"
+  },
+  "post_upload_verification": {
+    "refetched_samples": 6,
+    "digest_matches": 6,
+    "all_five_repos_private_after_push": true
+  },
+  "exclusions": {
+    "model_weights": "~97 GiB of checkpoints/GGUFs never archived; re-downloadable from pinned repo+revision.",
+    "open-jev-qwen-2b-merged.jsonl": "33,760,188 bytes not duplicated - already verified in predictions-v1; equivalence proven (0 scoring-relevant row differences, only run_id differs)."
+  },
+  "staging_records": [
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/control-modernbert-base.jsonl",
+      "source": "/home/ubuntu/cohort-scoring/preds/control-modernbert-base.jsonl",
+      "bytes": 24205385,
+      "sha256": "9d62074edd4ca545839b6f4246e4e7638804b3dc1c96cd2d940c8f1eae74a984",
+      "verification": "UNVERIFIABLE: meta has no prediction_sha256",
+      "meta_complete": null,
+      "meta_rows": 30310,
+      "meta_errors": 0
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/control-modernbert-large.jsonl",
+      "source": "/home/ubuntu/cohort-scoring/preds/control-modernbert-large.jsonl",
+      "bytes": 24330010,
+      "sha256": "46cbba9bab176aa69afcdd383025999ae112b20e201ea13d126b672ee282f33e",
+      "verification": "UNVERIFIABLE: meta has no prediction_sha256",
+      "meta_complete": null,
+      "meta_rows": 30310,
+      "meta_errors": 0
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/deberta-v3-prompt-injection-v2.jsonl",
+      "source": "/home/ubuntu/cohort-scoring/preds/deberta-v3-prompt-injection-v2.jsonl",
+      "bytes": 25070987,
+      "sha256": "927baa5ccc8bbf9b7885381ed50781264f848ab1c666e053166f9aab1721eeb4",
+      "verification": "UNVERIFIABLE: meta has no prediction_sha256",
+      "meta_complete": null,
+      "meta_rows": 30310,
+      "meta_errors": 0
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/control-modernbert-base.jsonl.meta.json",
+      "source": "/home/ubuntu/cohort-scoring/preds/control-modernbert-base.jsonl.meta.json",
+      "bytes": 994,
+      "sha256": "3b157c53bed227ae33b90e46068c25468ccbc4d2cb789c00aca34524540ee5a8",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/control-modernbert-large.jsonl.meta.json",
+      "source": "/home/ubuntu/cohort-scoring/preds/control-modernbert-large.jsonl.meta.json",
+      "bytes": 996,
+      "sha256": "d39b1270c46412d2735405038eac71592b1e05b01add214ee7fd514d0e1897be",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "predictions/deberta-v3-prompt-injection-v2.jsonl.meta.json",
+      "source": "/home/ubuntu/cohort-scoring/preds/deberta-v3-prompt-injection-v2.jsonl.meta.json",
+      "bytes": 859,
+      "sha256": "885da58751b7d76774b178e452ba03d3a3fa9ca2e1f4afeae6902a58eeb6ecab",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "scoring/cohort-scores.json",
+      "source": "/home/ubuntu/cohort-scoring/cohort-scores.json",
+      "bytes": 26396,
+      "sha256": "27f4291214dbdff97a2374deb45b9cd26af6a99d3aaa1d0955e85b6ac15b850f",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "scoring/leakage-diagnostic.json",
+      "source": "/home/ubuntu/cohort-scoring/leakage-diagnostic.json",
+      "bytes": 5841,
+      "sha256": "5f1fbe70117d1a0b6e9d3e47aaa68453ab4eb3a9af59cce02a2a6127d20a8d2d",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "scoring/final-comparisons.json",
+      "source": "/home/ubuntu/cohort-scoring/final-comparisons.json",
+      "bytes": 6012,
+      "sha256": "7d29a782d7aa9d1e81bb478e9cc57e06d11b9196eea38c5dcbfbc29b40b7ad2e",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "slm-toolcall-v1",
+      "path_in_repo": "registry/arms_registry.json",
+      "source": "/tmp/arms_registry.json",
+      "bytes": 9333,
+      "sha256": "606adcde97c59db61b76ba79d0baa18f8a67ecf76a9358de83a142933baeba19",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/heldout-s2-to-s3.json",
+      "source": "/home/ubuntu/rescoring-remine/heldout-s2-to-s3.json",
+      "bytes": 157623,
+      "sha256": "00ac2dc36302b48c9aa11e3ff9c97f93af6bbc271dda2774da582d579d534337",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/heldout-s2-cv.json",
+      "source": "/home/ubuntu/rescoring-remine/heldout-s2-cv.json",
+      "bytes": 7267849,
+      "sha256": "d67b231a6c1351c936845b49e8ae3e8f034a3d9a9af1831ab9bc672a3e7cfe5a",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/heldout-summary.tsv",
+      "source": "/home/ubuntu/rescoring-remine/heldout-summary.tsv",
+      "bytes": 36533,
+      "sha256": "1c924147a99bd403c7818b45c53fb736086ef7c41c9f241d32f818296aaa92cc",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/remine-combined.json",
+      "source": "/home/ubuntu/rescoring-remine/remine-combined.json",
+      "bytes": 514807,
+      "sha256": "6df53a21717ad4e29569667e39fdc94d85a25444031f130481a8898d8432dcc4",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/remine-all-arms-by-variable.tsv",
+      "source": "/home/ubuntu/rescoring-remine/remine-all-arms-by-variable.tsv",
+      "bytes": 85095,
+      "sha256": "c12babb368850e64b1746d1af052af2f7f1403dbd44a8603fe98dd0feacf0b95",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/inventory.json",
+      "source": "/home/ubuntu/rescoring-remine/inventory.json",
+      "bytes": 25584,
+      "sha256": "bab21f857a970c5449d3d85afce6c5935986dc0ed96783d41ed81d8d78b186bf",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out/corpus.json",
+      "source": "/home/ubuntu/rescoring-remine/out/corpus.json",
+      "bytes": 443,
+      "sha256": "56bcfc2cab1704e223dcb221d8edad5756057a30ee8889735591a1b75f9c01bd",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out/remine-by-variable.tsv",
+      "source": "/home/ubuntu/rescoring-remine/out/remine-by-variable.tsv",
+      "bytes": 41102,
+      "sha256": "d065f69f49e597235e94661eadf7aefbc40473ee2699ae8de3848dc55cc82ce3",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out/remine-full.json",
+      "source": "/home/ubuntu/rescoring-remine/out/remine-full.json",
+      "bytes": 270868,
+      "sha256": "ab2390490ded3ed7e8826f73aafdd223f8aeb0c227a1a0d82601b704a83d959b",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out/remine-ranked.json",
+      "source": "/home/ubuntu/rescoring-remine/out/remine-ranked.json",
+      "bytes": 12263,
+      "sha256": "8ab9bb62f2ed9950dfed22a0f5ae2c808c8621d6bf0054a29c300eb9a4b5635f",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out-extra/corpus.json",
+      "source": "/home/ubuntu/rescoring-remine/out-extra/corpus.json",
+      "bytes": 443,
+      "sha256": "56bcfc2cab1704e223dcb221d8edad5756057a30ee8889735591a1b75f9c01bd",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out-extra/remine-full.json",
+      "source": "/home/ubuntu/rescoring-remine/out-extra/remine-full.json",
+      "bytes": 241891,
+      "sha256": "6b85de9c450d9f3e9d7310931818a805bad20cd254e4d2e8541ff8a067cf60dc",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out-kev/corpus.json",
+      "source": "/home/ubuntu/rescoring-remine/out-kev/corpus.json",
+      "bytes": 443,
+      "sha256": "56bcfc2cab1704e223dcb221d8edad5756057a30ee8889735591a1b75f9c01bd",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/out-kev/remine-full.json",
+      "source": "/home/ubuntu/rescoring-remine/out-kev/remine-full.json",
+      "bytes": 23758,
+      "sha256": "3169151c64b09e82a86f043eb6a7aa2d946772cb5ba6247efe9ced27eabaa8b4",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/kev-s2/auc-variants-kev-9b-shard0.json",
+      "source": "/home/ubuntu/rescoring-remine/kev-s2/auc-variants-kev-9b-shard0.json",
+      "bytes": 1692,
+      "sha256": "83fc3b1bb1eecca284f2f665a99a45ccda5afb4ab0ebfc102fee49f88be787d9",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/kev-s2/comparison-s2.json",
+      "source": "/home/ubuntu/rescoring-remine/kev-s2/comparison-s2.json",
+      "bytes": 7033,
+      "sha256": "ded4fb2c5f9275e6512ca3d9d4f7ba90dc81b6122f60562e191541226afceec4",
+      "verification": "digest-recorded"
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/kev-s2/kev-9b-shard0.jsonl",
+      "source": "/home/ubuntu/rescoring-remine/kev-s2/kev-9b-shard0.jsonl",
+      "bytes": 33057217,
+      "sha256": "c3f8a277bdbd3865eaa4a44f8d8667af1b8b7b9b85642669f32ab9e08a392ff5",
+      "verification": "VERIFIED",
+      "meta_complete": true,
+      "meta_prediction_sha256": "c3f8a277bdbd3865eaa4a44f8d8667af1b8b7b9b85642669f32ab9e08a392ff5",
+      "digest_matches_meta": true
+    },
+    {
+      "dataset": "evaluations-rescoring",
+      "path_in_repo": "rescoring-remine/kev-s2/kev-9b-shard0.jsonl.meta.json",
+      "source": "/home/ubuntu/rescoring-remine/kev-s2/kev-9b-shard0.jsonl.meta.json",
+      "bytes": 757,
+      "sha256": "48d888831d980d224a1638358186fabc7c24610af7d65aa5b7dc18c4333718ff",
+      "verification": "digest-recorded"
+    }
+  ],
+  "code_paths": {
+    "cohort_harness_and_scoring": "benchmarks/slm_toolcall/",
+    "reshard_tooling": "benchmarks/system_one/reproduce/09-reshard/",
+    "rescoring_analysis": "benchmarks/system_one/reproduce/07-analysis/rescoring/",
+    "scanner": "benchmarks/archive/scan_credentials.py"
+  },
+  "deferred_from_studio": {
+    "reason": "A 22-arm GPU sweep and the 4-replica nimble reshard were both still running. Deferral is required for correctness, not only for I/O: at check time laptopguard/preds held 22 prediction bodies but only 6 metas, with 16 .lock files present, so 16 bodies were mid-flight and would have archived incomplete.",
+    "studio_io_pressure_at_check": "some avg60=29.82 (down from 81.99 at task start); load average 540",
+    "tranches": [
+      {
+        "what": "cohort prediction rows + per-arm metas",
+        "path": "laptopguard/preds",
+        "bytes": 381431389,
+        "files": 44,
+        "blocker": "16 arms still in flight (lock files present, metas not yet written)"
+      },
+      {
+        "what": "anchor shard bodies",
+        "path": "laptopguard/anchors",
+        "bytes": 67520376,
+        "note": "check for overlap with predictions-v1 before uploading; the merged anchor is already archived there"
+      },
+      {
+        "what": "CPU/laptop measurement logs + inventories",
+        "path": "laptopguard/cpu/*.json, *.log, cpu/logs/",
+        "bytes": 1378690,
+        "note": "excludes cpu/gguf and cpu/scratch, which are quantised model weights"
+      },
+      {
+        "what": "cohort run logs",
+        "path": "laptopguard/logs",
+        "bytes": 93605
+      },
+      {
+        "what": "nimble reshard banked chunk bodies + metas",
+        "path": "sysone/runs/nimble-s3",
+        "bytes": 40988833,
+        "blocker": "arm has not settled: 5 of 67 chunks banked, 5-10 claimed, shard0 static at 23096 rows; no settled/ directory yet. Archive after merge.py --write succeeds."
+      }
+    ],
+    "total_bytes_now": 491412893,
+    "total_bytes_human": "~491 MB (~469 MiB) - sub-GB, so below the multi-GB threshold that needs scheduling approval, but gated on the runs finishing"
+  },
+  "excluded_model_weights": {
+    "note": "Never archived. Re-downloadable from the pinned repo+revision in the arm registry and weights manifests.",
+    "measured_bytes": {
+      "laptopguard/weights": 105446979648,
+      "sysone/hf": 98805946299,
+      "laptopguard/cpu/gguf": 32117690368,
+      "laptopguard/cpu/scratch": 1388733057,
+      "sysone/checkpoints": 494997348
+    },
+    "total_bytes": 238254346720,
+    "total_human": "~238 GB (~222 GiB) measured, which is considerably more than the ~97 GiB estimated in the brief"
+  }
+}

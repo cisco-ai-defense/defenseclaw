@@ -81,7 +81,17 @@ def main():
     sys.path.insert(0, args.kev_src)
     n_cards = torch.cuda.device_count()
     if n_cards < 2:
-        raise SystemExit(f"ABORT: need 2 visible cards to shard 9.7B, see {n_cards}")
+        # The 2-card floor is an L40S constraint, not a model one: 14.78 GiB of bf16
+        # backbone plus eager attention's fp32 [B,heads,T,T] transient did not fit under
+        # one 44 GiB card. A single H200 is 140 GiB, so one card is ample. This is a
+        # placement change only -- infer_auto_device_map/dispatch_model below are already
+        # generic over n_cards, and the zero-offload, bf16-dtype and live-attn assertions
+        # after dispatch are unchanged, so the readout is bit-identical.
+        total_gib = torch.cuda.get_device_properties(0).total_memory / (1 << 30)
+        if n_cards != 1 or args.weights_budget_gib >= total_gib:
+            raise SystemExit(f"ABORT: need 2 visible cards to shard 9.7B, see {n_cards}")
+        print(f"single-card placement: card 0 has {total_gib:.1f} GiB, weights budget "
+              f"{args.weights_budget_gib} GiB", flush=True)
     cap = int(args.max_memory_gib * (1 << 30))
     for i in range(n_cards):
         total = torch.cuda.get_device_properties(i).total_memory

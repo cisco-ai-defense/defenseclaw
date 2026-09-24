@@ -1,0 +1,65 @@
+[
+  {
+    "repo": "mistralai/Shieldstral-1.0-3B",
+    "revision": "003ec7e2b0bab5f0e6307edbaf186fa5822b76f5",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/mistralai__Shieldstral-1.0-3B",
+    "bytes": 7731632731,
+    "status": "ok"
+  },
+  {
+    "repo": "allenai/OLMo-2-0425-1B-Instruct",
+    "revision": "48d788eca847d4d7548f375ad03d3c9312f6139e",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/allenai__OLMo-2-0425-1B-Instruct",
+    "bytes": 2979535483,
+    "status": "ok"
+  },
+  {
+    "repo": "tiiuae/Falcon3-1B-Instruct",
+    "revision": "28ba2251970a01dd1edc7ba7dad2eb71216ccfdf",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/tiiuae__Falcon3-1B-Instruct",
+    "bytes": 3348994667,
+    "status": "ok"
+  },
+  {
+    "repo": "tiiuae/Falcon3-3B-Instruct",
+    "revision": "411bb94318f94f7a5735b77109f456b1e74b42a1",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/tiiuae__Falcon3-3B-Instruct",
+    "bytes": 6465509473,
+    "status": "ok"
+  },
+  {
+    "repo": "HuggingFaceTB/SmolLM3-3B",
+    "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/HuggingFaceTB__SmolLM3-3B",
+    "bytes": 6167868975,
+    "status": "ok"
+  },
+  {
+    "repo": "ibm-granite/granite-4.0-1b",
+    "revision": "6a7381ba1f54d684ff508d991aeb7dc580157103",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/ibm-granite__granite-4.0-1b",
+    "bytes": 3273295937,
+    "status": "ok"
+  },
+  {
+    "repo": "ibm-granite/granite-4.0-micro",
+    "revision": "56111ae135df9c53a78c99028e7bc24035a9e979",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/ibm-granite__granite-4.0-micro",
+    "bytes": 6815498811,
+    "status": "ok"
+  },
+  {
+    "repo": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/answerdotai__ModernBERT-base",
+    "bytes": 600805271,
+    "status": "ok"
+  },
+  {
+    "repo": "answerdotai/ModernBERT-large",
+    "revision": "45bb4654a4d5aaff24dd11d4781fa46d39bf8c13",
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/answerdotai__ModernBERT-large",
+    "bytes": 1585715090,
+    "status": "ok"
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "repo": "meta-llama/Llama-Prompt-Guard-2-86M",
+    "revision": "a8ded8e697ce7c355e395a0df51f94adb4a2fd27",
+    "licence": "other",
+    "params": 278810882,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/meta-llama__Llama-Prompt-Guard-2-86M",
+    "bytes": 1131677308,
+    "architectures": [
+      "DebertaV2ForSequenceClassification"
+    ],
+    "id2label": null,
+    "max_pos": 512,
+    "status": "ok"
+  },
+  {
+    "repo": "meta-llama/Llama-Prompt-Guard-2-22M",
+    "revision": "11614a155199674a0a95e6602d6ab0417b790ed0",
+    "licence": "other",
+    "params": 70830722,
+    "path": "/teamspace/studios/this_studio/laptopguard/weights/meta-llama__Llama-Prompt-Guard-2-22M",
+    "bytes": 292053522,
+    "architectures": [
+      "DebertaV2ForSequenceClassification"
+    ],
+    "id2label": null,
+    "max_pos": 512,
+    "status": "ok"
+  }
+]
