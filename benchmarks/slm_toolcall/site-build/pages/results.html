@@ -21,29 +21,22 @@
 
 <h2 id="deployment">Deployability</h2>
 <p>
-  Two gates, both with every arm re-thresholded. The first caps the block false-positive rate at
-  {{fig:cap.value}}, the incumbent cascade's own operating rate. The second admits no false
-  positive at all.
+  Every arm's confusion matrix, precision, recall, F1, accuracy and block false-positive rate at
+  the one shared budget of {{fig:cap.value}} are on
+  <a href="operating-point.html#common">Operating point</a>, together with each arm's own argmax
+  as a separate table and the two trivial baselines. The best F1 there is
+  <code>{{fig:cap.f1.arm}}</code> at {{fig:cap.f1}}, on {{fig:cap.f1.tp}} of
+  {{fig:corpus.positives}} positives. <code>{{fig:rank1.arm}}</code>, which leads the ranking
+  below, catches {{fig:cap.deberta.tp}} positive at the same budget.
 </p>
-
-{{ui:deploy_table}}
 
 {{chart:deploy}}
 
 <p>
-  The best arm at the false-positive cap is <code>{{fig:cap.best.arm}}</code> at recall
-  {{fig:cap.best.recall}}, {{fig:cap.best.tp}} of {{fig:corpus.positives}} positives, F1
-  {{fig:cap.best.f1}}. <code>{{fig:rank1.arm}}</code>, which leads the ranking, catches
-  {{fig:cap.deberta.tp}} positive at the same budget.
-</p>
-
-{{chart:zerofp}}
-
-<p>
-  {{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates retain zero recall under the
-  zero-false-positive gate. {{fig:zfp.nonzero}} retain any, and the best is
+  {{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates retain zero recall under a
+  zero-false-positive gate. {{fig:zfp.nonzero}} retain some, and the highest is
   <code>{{fig:zfp.best.arm}}</code> at {{fig:zfp.best.recall}} over {{fig:zfp.best.tp}} true
-  blocks.
+  blocks. <a href="operating-point.html#zerofp">That gate in full</a>.
 </p>
 <div class="box bad">
   <p>
@@ -52,6 +45,26 @@
     programme measured them, so neither gate is presented as durable.
   </p>
 </div>
+
+<h2 id="auc">Threshold-free discrimination</h2>
+<p>
+  AUC depends on no threshold, so it separates an arm's ability to order cases from the calibration
+  of its decision rule. For {{fig:corpus.positives}} positives and {{fig:corpus.negatives}}
+  negatives the Hanley&#8211;McNeil standard error at AUC 0.5 is {{fig:band.se}}, which puts the
+  95% chance band at <strong>[{{fig:band.lo}}, {{fig:band.hi}}]</strong>. {{fig:auc.above}} of the
+  {{fig:arms.scored}} arms sit above that band on raw AUC, {{fig:auc.inside}} inside it and
+  {{fig:auc.below}} below it.
+</p>
+<p>
+  Each row carries its AUC definition. {{fig:auc.coincide}} of the {{fig:arms.scored}} arms are
+  ranked on a variable for which definitions A and B coincide, because the variable is already a
+  single monotone scalar and both definitions reduce to the same maximum over events.
+</p>
+
+{{ui:auc_table}}
+
+<h3 id="definitions">Where definitions A and B differ</h3>
+{{ui:definition_table}}
 
 <h2 id="ranking">The ranking</h2>
 <p>
@@ -74,12 +87,18 @@
   <code>{{fig:rank1.arm}}</code> leads at {{fig:rank1.lc}} against a raw {{fig:rank1.raw}}. It ran
   at a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk.
   <code>{{fig:rank2.arm}}</code> at {{fig:rank2.lc}} ran at cap {{fig:rank2.cap}} with no rows
-  shrunk, so it earned its position seeing the whole prompt while rank 1 did not. Both hold their
-  places under every estimator.
+  shrunk, so it earned its position seeing the whole prompt while rank 1 did not.
 </p>
 <p>
-  {{fig:beat.control}} of the {{fig:arms.candidates}} candidates score above the untrained
-  <code>control-modernbert-base</code> under the published estimator. {{fig:under.band}} fall below
+  The artifact records <code>rank_1_stable</code> and <code>rank_2_stable</code> as false, so the
+  claim is not that positions 1 and 2 are settled across schemes. Each is contradicted by exactly
+  one of the {{fig:est.schemes}}, and it is the same scheme in both cases:
+  <code>{{fig:est.disagree1}}</code>, whose bins move with each arm's own truncation, which the
+  artifact marks confounded. Position 3 is contradicted by {{fig:est.disagree3}}.
+</p>
+<p>
+  Under the published estimator, {{fig:beat.control}} of the {{fig:arms.candidates}} candidates
+  score above the untrained <code>control-modernbert-base</code> and {{fig:under.band}} fall below
   the chance band, which puts them anti-correlated with the label.
 </p>
 
@@ -108,9 +127,10 @@
   pooled, <code>{{fig:est.rank3.unw}}</code> unweighted over all bins,
   <code>{{fig:est.rank3.ge10}}</code> unweighted over bins with 10 or more positives, and
   <code>{{fig:est.rank3.ge25}}</code> over bins with 25 or more. As the thin bins are dropped the
-  unweighted mean walks toward the pooled answer. Ranks 1 and 2 are contradicted by one scheme of
-  the {{fig:est.schemes}}, <code>{{fig:est.disagree1}}</code>, whose bins move with each arm's own
-  truncation; rank 3 by {{fig:est.disagree3}}.
+  unweighted mean walks toward the pooled answer. The artifact's own plurality among the
+  {{fig:est.schemes}} schemes is <code>{{fig:est.rank3.plurality}}</code>, and that plurality is
+  not what decides the position: {{fig:est.unwfam}} of the schemes are unweighted means differing
+  only in binning.
 </p>
 
 {{chart:estimators}}
@@ -119,7 +139,7 @@
 
 <h4>Where the published estimator is fragile</h4>
 {{ui:sparse_bin_note}}
-<h2 id="corpora">The two corpora do not measure the same thing</h2>
+<h2 id="corpora">The grade composition of the positives</h2>
 <p>
   A held-out corpus exists, disjoint from s2 with zero case-id overlap, and {{fig:s3.arms}} arms
   have been scored on it. It is not used here as a generalisation test, and
@@ -156,7 +176,7 @@
   </p>
 </div>
 
-<h3 id="s3cue">The held-out corpus carries no length cue</h3>
+<h3 id="s3cue">Length fields on the second corpus</h3>
 <p class="small">
   Still the corpus whose positives are {{fig:s3.gradeA.share}} grade A against s2's
   {{fig:s2.gradeA.share}}; this section is about its length fields, and no transfer figure is
@@ -173,9 +193,9 @@
 
 {{chart:s3cue}}
 
-<h3 id="resolution">More data does not change the answer</h3>
+<h3 id="resolution">The resolution of the current corpus</h3>
 <p class="small">
-  Precision, not generalisation: the grade A share of positives is {{fig:s3.gradeA.share}} on the
+  This section is about precision of measurement. The grade A share of positives is {{fig:s3.gradeA.share}} on the
   held-out corpus against {{fig:s2.gradeA.share}} on s2, so none of this licenses a transfer claim.
 </p>
 {{ui:resolution_note}}
@@ -185,13 +205,14 @@
 
 {{ui:scored_table}}
 
-<h2 id="metrics">Precision, recall, F1 and block FPR</h2>
+<h2 id="metrics">Block false-positive rates</h2>
 <p>
-  Every cell below is counted from rows over the {{fig:corpus.scorable}} scorable cases. Each arm
-  appears at its shipped argmax decision and at its in-sample oracle threshold.
+  Precision, recall, F1, accuracy and block FPR for every arm are on
+  <a href="operating-point.html#common">Operating point</a>: once at the common budget of
+  {{fig:cap.value}}, once at each arm's own argmax as an in-sample upper bound, and once at each
+  arm's shipped decision beside the trivial floor. Every cell there is counted from rows over the
+  {{fig:corpus.scorable}} scorable cases.
 </p>
-
-{{ui:metrics_table}}
 
 {{chart:fpr}}
 
@@ -215,7 +236,7 @@
 <p>
   The reference arms belong to the System One programme and their scores are published on the
   <a href="{{fig:other.space}}">System One
-  Space</a>, not restated here. What the gate establishes for this Space is that the scoring code
+  Space</a>. What the gate establishes for this Space is that the scoring code
   reproduces known answers before it is trusted on a new arm.
 </p>
 

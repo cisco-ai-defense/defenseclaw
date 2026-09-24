@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Size bands &#8212; SLM tool-call security</title>
+{{STYLE}}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{{NAV}}
+<div class="wrap" id="main">
+
+<p class="eyebrow">SIZE BANDS</p>
+<h1>The cohort split by counted parameters</h1>
+<p class="lede">
+  Three bands: under 3B, 3B to 6B, and 6B and up. The cohort holds {{fig:band.under}} arms in the
+  first, {{fig:band.mid}} in the second and {{fig:band.upper}} in the third. The smallest arm is
+  <code>{{fig:band.min.arm}}</code> at {{fig:band.min.params}} parameters and the largest is
+  <code>{{fig:band.max.arm}}</code> at {{fig:band.max.params}}, a spread of
+  {{fig:band.spread}}&#215;.
+</p>
+
+<div class="box" id="how">
+  <h3>How the bands are drawn</h3>
+  <p>
+    The cut points are 3&#215;10<sup>9</sup> and 6&#215;10<sup>9</sup> counted parameters. Each
+    arm's count comes from its own run metadata and is checked against the arm registry at build
+    time; the build fails if the two disagree. Every arm inside a band is reported at the one
+    common false-positive budget of {{fig:cap.exact}}, so the columns compare across bands as well
+    as within them.
+  </p>
+</div>
+
+{{chart:bands}}
+
+<h2 id="bands">Within each band</h2>
+<p>
+  Rank inside a band is F1 at the common budget. The band leaders are
+  <code>{{fig:band.best.under}}</code> under 3B and <code>{{fig:band.best.mid}}</code> in the 3B
+  to 6B band.
+</p>
+
+{{ui:size_band_tables}}
+
+<h2 id="moe">Mixture of experts</h2>
+{{ui:moe_note}}
+
+<h2 id="reading">Size and the operating point</h2>
+<p>
+  The best F1 at the common budget is {{fig:cap.f1}}, held by <code>{{fig:cap.f1.arm}}</code> at
+  {{fig:cap.f1.params}} counted parameters, which places it in the under-3B band. Of the
+  {{fig:arms.candidates}} candidates, {{fig:zfp.zero}} retain zero recall at a
+  zero-false-positive gate, and that set spans both populated bands.
+</p>
+<p>
+  The binding constraint measured on this cohort is the grade composition of the positives, which
+  is a property of the corpora and is set out on <a href="datasets.html#grades">Datasets</a>. The
+  grade A share of positives is {{fig:s2.gradeA.share}} on s2 against {{fig:s3.gradeA.share}} on
+  the second corpus.
+</p>
+
+<div class="foot">
+  <p>Parameter counts are read from each arm's run metadata inside
+    <code>cohort-length-controlled-ranking.json</code> and cross-checked against
+    <code>harness/arms.py</code>. Operating-point figures are at block FPR &#8804;
+    {{fig:cap.exact}} over <code>cases_sha256 {{fig:corpus.sha}}</code>.</p>
+</div>
+</div>
+</body>
+</html>

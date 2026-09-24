@@ -45,8 +45,13 @@
 </p>
 <p>
   Positive prevalence of {{fig:corpus.prevalence}} is what sets the trivial floor at
-  {{fig:floor.f1}}, so the floor is a property of this corpus rather than of any arm. See
+  {{fig:floor.f1}}, so the floor is a property of this corpus and of no arm. See
   <a href="baselines.html#floor">Baselines</a>.
+</p>
+<p>
+  Both corpora are documented field by field on <a href="datasets.html#record">Datasets</a>,
+  together with the grade conditions, the function that assigns them, the licence and
+  redistribution markers, and the length fields.
 </p>
 
 {{chart:corpus}}
@@ -82,8 +87,8 @@
   <p>
     <code>P(block) &#8722; P(confirm)</code> is never ranked on. Measured on the System One
     programme it inverted below chance on a disjoint corpus, and it was the argmax
-    variable for five of eleven re-mineable arms there, so the exclusion is a rule rather than a
-    case-by-case judgement. <code>P(block)</code>, <code>risk</code> and
+    variable for five of eleven re-mineable arms there, so the exclusion is a standing rule and no
+    arm is judged case by case. <code>P(block)</code>, <code>risk</code> and
     <code>P(block) + P(confirm)</code> all transferred. The figures behind that result belong to
     the other programme and are published on the
     <a href="{{fig:other.space}}">System One
@@ -96,7 +101,9 @@
   subtracts. Definition B takes the maximum over events of the per-event difference. Every AUC on
   this Space is labelled with its definition, and no figure is compared across definitions. For
   an arm that emits a single monotone scalar the two coincide, because both reduce to the maximum
-  over events; those AUCs carry no definition label and the coincidence is recorded on the arm.
+  over events, and that coincidence is recorded on the arm as its definition label. Every arm's
+  AUC with its definition is on <a href="results.html#auc">Results</a>, and the variables where
+  the two definitions give different numbers are shown apart on the same page.
 </p>
 <p>
   <strong>Two-class arms have genuinely inapplicable variables.</strong> An arm with no confirm
@@ -107,11 +114,45 @@
 
 <h2 id="length">Length control</h2>
 <p>
-  Every arm carries a length-controlled AUC beside its raw AUC. The corpus is stratified into
-  five prompt-length quintiles by natural prompt tokens, the AUC is computed inside each, and the
-  five are averaged unweighted. The quintile boundaries, case counts and positive counts are in
-  the table view of every chart that uses them, and the null band is on
+  Every arm carries a length-controlled AUC beside its raw AUC. The corpus is stratified into five
+  prompt-length quintiles by natural prompt tokens, which is a corpus property identical for every
+  arm, the AUC is computed inside each, and the five are pooled with each bin weighted by the
+  positive-benign comparisons it holds. That is the {{fig:est.published}} estimator, read from
+  {{fig:est.source}}. The unweighted mean of the five is retracted and is still reported beside the
+  published figure so the difference is visible. The quintile boundaries, case counts and positive
+  counts are in the table view of every chart that uses them, and the null band is on
   <a href="baselines.html#band">Baselines</a>.
+</p>
+<p>
+  Length control applies to s2. On the second corpus the same kind of counting variable sits inside
+  or below its chance band, so raw AUC is the primary there; the figures are on
+  <a href="datasets.html#length">Datasets</a>, whose positives are {{fig:s3.gradeA.share}} grade A
+  against s2's {{fig:s2.gradeA.share}}.
+</p>
+
+<h2 id="reporting">One common operating point</h2>
+<p>
+  Precision, recall, F1, accuracy and block FPR are reported for every arm at one shared block
+  false-positive budget of {{fig:cap.exact}}, which is the incumbent cascade's own operating rate
+  on this corpus. No arm appears in that table at a threshold chosen for it alone. The threshold
+  each arm needs to reach the budget is printed in its own column. The table is on
+  <a href="operating-point.html#common">Operating point</a>.
+</p>
+<p>
+  An arm's own argmax is a separate table on the same page and carries the label
+  <strong>in-sample oracle upper bound</strong> in its own heading. The two never share a column.
+</p>
+<p>
+  Accuracy is printed only with the all-allow baseline in the same table. At
+  {{fig:corpus.prevalence}} prevalence on s2 and {{fig:s3.prevalence}} on the second corpus,
+  accuracy is set by the benign class, and allowing every case scores {{fig:acc.s2.allow}} and
+  {{fig:acc.s3.allow}}.
+</p>
+<p>
+  Arms are grouped by counted parameters into three bands, under 3B, 3B to 6B, and 6B and up, with
+  the rank inside each band taken on F1 at the common budget. Counted parameters come from each
+  arm's own run metadata and are checked against the arm registry at build time. The bands are on
+  <a href="sizes.html">Size bands</a>.
 </p>
 
 <h2 id="deployment">The two deployment gates</h2>
@@ -176,15 +217,14 @@
     <li>The digest is taken at settlement time over the body's complete-line prefix, so it
         certifies unchanged-since-settlement and not as-the-runner-emitted-it.</li>
     <li>Settlement requires {{fig:settle.rows}} untorn rows, so an unsettled metadata file means
-        the run is incomplete rather than merely unchecked.</li>
+        the run is incomplete, and not merely unchecked.</li>
   </ul>
 </div>
 <p>
   Of the {{fig:arms.scored}} ranked arms, {{fig:settle.settled}} carry the settled fields with a
   digest that matches the bytes on disk, and {{fig:settle.mismatch}} of those disagree.
   {{fig:settle.unsettled}} carry neither field, and all {{fig:settle.unsettled.rowsok}} of them
-  hold the full {{fig:settle.rows}} rows, so they are complete and unsettled rather than
-  incomplete: settlement had not run over them when this metadata was recorded. For those five,
+  hold the full {{fig:settle.rows}} rows, so they are complete and unsettled: settlement had not run over them when this metadata was recorded. For those five,
   completeness rests on the row count plus <code>errors == 0</code>. Every ranked arm covers all
   {{fig:corpus.scorable}} scorable cases at {{fig:settle.rows}} rows with 0 errors and 0 cases
   missing.
@@ -198,9 +238,14 @@
     guard indexes every corpus case id on disk and fails the build if one appears in a file.
   </p>
   <p>
-    <code>mcptox</code> is local-evaluation-only: aggregate numbers only, never rows. The
-    <code>augur_unsafe_tool_input_eval</code> source is aggregate-only on the same terms. Neither
-    contributes a row to this Space.
+    <code>mcptox</code> is local-evaluation-only: aggregate numbers only, never rows. One further
+    source dataset is aggregate-only on the same terms. A census over the <code>source.dataset</code>
+    field of both corpora found 0 rows from either, so neither contributes a case to any figure
+    here. Every source's licence and redistribution marker is recorded in
+    <code>{{fig:lock.path}}</code>, {{fig:lock.entries}} entries at sha256
+    <code>{{fig:lock.sha}}</code>: {{fig:lock.download}} download-only, {{fig:lock.vendored}}
+    vendored, {{fig:lock.aggregate}} aggregate-only, across {{fig:lock.licences}} distinct
+    licences. <a href="datasets.html#licence">Detail</a>.
   </p>
   <p>
     The four data repositories that hold the corpora and the prediction files stay private. This

@@ -34,10 +34,23 @@
   can discriminate.
 </p>
 <p>
-  {{fig:arms.under.floor}} of the {{fig:arms.candidates}} candidates score below the floor at
-  their shipped operating point, and {{fig:arms.zero.f1}} score exactly zero there, blocking no
-  positive case at all. <code>{{fig:top.f1.arm}}</code> has the highest shipped F1 at
-  {{fig:top.f1}}.
+  {{fig:arms.under.floor}} of the {{fig:arms.shipped.cands}} candidates with a shipped decision
+  score below the floor at that decision, and {{fig:arms.zero.f1}} score exactly zero there,
+  blocking no positive case at all. <code>{{fig:top.f1.arm}}</code> has the highest shipped F1 at
+  {{fig:top.f1}}. The floor sits in the same table as every shipped block-only F1, on
+  <a href="operating-point.html#floor">Operating point</a>.
+</p>
+<p>
+  At each arm's own argmax the picture changes: all {{fig:oracle.clear.floor}} arms clear the
+  floor, the lowest being <code>{{fig:oracle.min.arm}}</code> at {{fig:oracle.min.f1}}. Those
+  figures are in-sample upper bounds and are kept in a
+  <a href="operating-point.html#oracle">separate table</a>.
+</p>
+<p>
+  The second corpus has its own floor. Blocking every case there scores
+  {{fig:heldout.floor.f1}} at prevalence {{fig:s3.prevalence}}; its positives are
+  {{fig:s3.gradeA.share}} grade A against s2's {{fig:s2.gradeA.share}}, so the two floors are
+  properties of two different corpora and are not compared.
 </p>
 
 {{chart:floor}}
@@ -64,7 +77,11 @@
 <p>
   Every arm's headline AUC therefore contains a length component. Each arm carries a
   length-controlled AUC beside its raw AUC: the corpus is stratified into five prompt-length
-  quintiles, the AUC is computed inside each, and the five are averaged unweighted.
+  quintiles on natural prompt tokens, a corpus property identical for every arm, and the
+  within-quintile AUCs are pooled with each bin weighted by the positive-benign comparisons it
+  holds. That is the {{fig:est.published}} estimator, named in {{fig:est.source}}. An earlier
+  revision averaged the five quintiles unweighted and that estimator is retracted;
+  <a href="results.html#estimators">why</a>.
 </p>
 <p>
   The pure length counter falls from {{fig:cue.tokens}} to {{fig:cue.tokens.controlled}} under

@@ -25,22 +25,56 @@ and appear nowhere here.
 A model can be measured under both protocols. **The numbers across the two Spaces are
 not interchangeable.** The corpora differ and the label sets differ.
 
-## The deployment result
+## One common operating point
 
-Re-thresholded so every arm blocks benign cases at the same rate as the incumbent cascade — a
-block false-positive rate of {{fig:cap.value}} — the best arm in the cohort is
-**`{{fig:cap.best.arm}}`** at recall **{{fig:cap.best.recall}}**: {{fig:cap.best.tp}} of
-{{fig:corpus.positives}} positives, F1 {{fig:cap.best.f1}}. `{{fig:rank1.arm}}`, which leads on
-discrimination, catches {{fig:cap.deberta.tp}} positive at the same budget.
+{{fig:cap.exact}} is the incumbent cascade's block false-positive rate on this corpus. Every arm
+is re-thresholded to it, which allows {{fig:cap.maxfp}} false blocks out of
+{{fig:corpus.negatives}} benign cases. No arm is reported at a threshold chosen for it alone.
+
+| At block FPR ≤ {{fig:cap.exact}} | Value |
+| --- | --- |
+| Highest F1 among the {{fig:arms.candidates}} candidates | **`{{fig:cap.f1.arm}}`**, F1 **{{fig:cap.f1}}** |
+| Its recall | {{fig:cap.f1.recall}} ({{fig:cap.f1.tp}} of {{fig:corpus.positives}} positives) |
+| Its precision | {{fig:cap.f1.precision}} |
+| Its accuracy | {{fig:cap.f1.accuracy}}, against an all-allow baseline of {{fig:acc.s2.allow}} |
+| Its false blocks | {{fig:cap.f1.fp}} of {{fig:corpus.negatives}} |
+| Its threshold | {{fig:cap.f1.threshold}} |
+| Wilson 95% interval on that recall | [{{fig:res.wilson.lo}}, {{fig:res.wilson.hi}}] |
+| The ranking leader at the same budget | `{{fig:rank1.arm}}`, {{fig:cap.deberta.tp}} positive caught |
 
 Under a zero-false-positive gate, **{{fig:zfp.zero}} of the {{fig:zfp.candidates}} candidates
-retain zero recall** — they catch nothing without blocking something benign. The best is
+retain zero recall** — they catch nothing without blocking something benign. The highest is
 `{{fig:zfp.best.arm}}` at recall {{fig:zfp.best.recall}} over {{fig:zfp.best.tp}} true blocks.
 
 No arm in this cohort reaches a recall at a deployable false-positive budget that would make it
 useful on its own. Every threshold in those two gates is re-fitted, so none of those figures is
 any arm's shipped behaviour, and neither gate is durable: when the System One programme measured
 transfer to a disjoint corpus, 4 of 24 zero-FP gates survived and FPR caps held in 8 of 48.
+
+`operating-point.html` carries tp, fp, fn, tn, precision, recall, F1, accuracy and block FPR for
+every arm at that one budget, with the threshold each arm needed printed beside them.
+
+## Each arm's own argmax
+
+A best F1 found by sweeping thresholds on the same rows it is scored on is an **in-sample oracle
+upper bound**. Those figures are in a separate table and never share a column with the
+common-budget figures. The highest is `{{fig:oracle.best.arm}}` at {{fig:oracle.best.f1}} and the
+lowest is `{{fig:oracle.min.arm}}` at {{fig:oracle.min.f1}}. All {{fig:oracle.clear.floor}} arms
+clear the trivial floor at their own argmax.
+
+## By size
+
+Counted parameters split the cohort into three bands.
+
+| Band | Arms | Leader at the common budget |
+| --- | --- | --- |
+| Under 3B | {{fig:band.under}} | `{{fig:band.best.under}}` |
+| 3B to 6B | {{fig:band.mid}} | `{{fig:band.best.mid}}` |
+| 6B and up | {{fig:band.upper}} | nothing in the cohort lands here |
+
+The smallest arm is `{{fig:band.min.arm}}` at {{fig:band.min.params}} counted parameters and the
+largest is `{{fig:band.max.arm}}` at {{fig:band.max.params}}, a spread of {{fig:band.spread}}×.
+The arm with the highest F1 at the common budget carries {{fig:cap.f1.params}} parameters.
 
 ## The ranking, on length-controlled AUC
 
@@ -53,47 +87,62 @@ and never on the excluded difference variable.
 | 2 | `{{fig:rank2.arm}}` | {{fig:rank2.lc}} | — | — | — |
 | 3 | `{{fig:rank3.arm}}` | {{fig:rank3.lc}} | — | — | — |
 
-`results.html` carries all {{fig:arms.scored}} rows with tp/fp/fn/tn, precision, recall, F1 and
-block FPR at both operating points.
+The published estimator is the {{fig:est.published}} figure, read from {{fig:est.source}}. The
+artifact records `rank_1_stable` as {{fig:rank1.stable}} and `rank_2_stable` as
+{{fig:rank2.stable}}, so neither position is claimed as settled across schemes. Position 3 is
+contested across estimators and the artifact says so.
 
-Rank 1 ran at a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk. Ranks 2 and 3
-ran at cap {{fig:rank2.cap}} with no rows shrunk, so they earned their positions seeing the whole
-prompt while rank 1 did not.
+Rank 1 ran at a {{fig:rank1.cap}}-token cap with {{fig:rank1.shrunk}} rows shrunk. Rank 2 ran at
+cap {{fig:rank2.cap}} with no rows shrunk, so it earned its position seeing the whole prompt while
+rank 1 did not.
 
-{{fig:beat.control}} of the {{fig:arms.candidates}} candidates score above the untrained
-`control-modernbert-base`. {{fig:under.band}} fall below the chance band, which puts them
-anti-correlated with the label.
+On length-controlled AUC, {{fig:beat.control}} of the {{fig:arms.candidates}} candidates score
+above the untrained `control-modernbert-base`, and {{fig:under.band}} fall below the chance band,
+which puts them anti-correlated with the label. On raw AUC, {{fig:auc.above}} of the
+{{fig:arms.scored}} arms sit above the band, {{fig:auc.inside}} inside it and {{fig:auc.below}}
+below it.
 
 ## What an untrained backbone scores
 
 `control-modernbert-base` has no trained head and no safety training. Its best F1 on its own
 scalar is {{fig:ctrl.oracle}} and its shipped F1 is {{fig:cb.f1}}, and it blocks {{fig:cb.fp}}
-benign cases against {{fig:deb.fp}} for the highest-ranked candidate.
+benign cases against {{fig:deb.fp}} for the highest-ranked candidate. It scores at or above
+{{fig:beat.control.oracle}} of the candidates on argmax F1 and {{fig:beat.control.shipped}} on
+shipped F1.
 
 This is not leakage: the leakage gate put both controls at chance once prompt length is controlled
 for, and this one lands at {{fig:cb.controlled}} inside the band [{{fig:band.lo}},
 {{fig:band.hi}}]. It is the threshold sweep. An unconstrained best-F1 search on a corpus carrying
 a length cue worth AUC {{fig:cue.tokens}} flatters anything correlated with length, and this
-readout correlates with length at Spearman {{fig:cb.spearman}}. Several arms in this cohort cannot
-be separated from an untrained backbone by F1.
+readout correlates with length at Spearman {{fig:cb.spearman}}.
 
-## The corpus
+## The corpora
 
-| Property | Value |
-| --- | --- |
-| Corpus | s2, the core parity grid |
-| Cases | {{fig:corpus.cases}} |
-| Scorable | {{fig:corpus.scorable}} |
-| Positives | {{fig:corpus.positives}} (grade A {{fig:corpus.gradeA}} + grade B {{fig:corpus.gradeB}}) |
-| Benign | {{fig:corpus.negatives}} (grade D) |
-| Excluded | {{fig:corpus.gradeC}} (grade C, diagnostic only) |
-| Prevalence | {{fig:corpus.prevalence}} |
-| Grid cell | C7 / I3 / Q2, `--instruction-format structured` |
-| `cases_sha256` | `{{fig:corpus.sha}}` |
+| Property | s2 | Second corpus |
+| --- | --- | --- |
+| Cases | {{fig:corpus.cases}} | {{fig:s3.cases}} |
+| Scorable | {{fig:corpus.scorable}} | {{fig:s3.cases}} |
+| Positives | {{fig:corpus.positives}} | {{fig:s3.positives}} |
+| Grade A / grade B positives | {{fig:corpus.gradeA}} / {{fig:corpus.gradeB}} | {{fig:s3.gradeA}} / {{fig:s3.gradeB}} |
+| Grade A share of positives | {{fig:s2.gradeA.share}} | {{fig:s3.gradeA.share}} |
+| Benign, grade D | {{fig:corpus.negatives}} | {{fig:s3.negatives}} |
+| Excluded, grade C | {{fig:corpus.gradeC}} | 0 |
+| Prevalence | {{fig:corpus.prevalence}} | {{fig:s3.prevalence}} |
+| All-allow accuracy | {{fig:acc.s2.allow}} | {{fig:acc.s3.allow}} |
+| Block-everything F1 | {{fig:floor.f1}} | {{fig:heldout.floor.f1}} |
+| `cases_sha256` | `{{fig:corpus.sha}}` | `{{fig:heldout.sha}}` |
+| Case-id overlap between them | {{fig:heldout.overlap}} | {{fig:heldout.overlap}} |
 
-Grade C is excluded because the grade records an unresolved or partial adjudication, so a scored
-decision on one of those cases would have no settled truth value. Every F1, AUC, FPR and confusion
-matrix here is over the {{fig:corpus.scorable}} scorable cases.
+s2 is the scoring corpus: cell C7 / I3 / Q2, `--instruction-format structured`.
+
+Every grade is assigned by one deterministic function, `{{fig:labels.fn}}()` in
+`{{fig:labels.path}}` ({{fig:labels.bytes}} bytes, sha256 `{{fig:labels.sha}}`), evaluated from
+fields already present on each case row. No model and no human reviewer is consulted, so no
+inter-rater agreement figure exists for these grades, and source-label error is a limitation.
+Grade C is excluded because the condition it tests is satisfied by a case whose adjudication is
+unresolved or partial, so a scored decision on it would have no settled truth value. Every F1,
+AUC, FPR, accuracy and confusion matrix here is over the {{fig:corpus.scorable}} scorable cases
+of s2.
 
 ## The two baselines
 
@@ -101,22 +150,34 @@ matrix here is over the {{fig:corpus.scorable}} scorable cases.
   {{fig:corpus.prevalence}} prevalence (tp {{fig:floor.tp}} / fp {{fig:floor.fp}} / fn
   {{fig:floor.fn}} / tn {{fig:floor.tn}}), at block FPR {{fig:floor.fpr}}. An F1 at or below the
   floor says the operating point is broken. **{{fig:arms.under.floor}} of the
-  {{fig:arms.candidates}} candidates score below it, and {{fig:arms.zero.f1}} score exactly zero
-  at their own argmax.**
-- **The length cue.** Counting variables containing no model reach AUC {{fig:cue.tokens}}. Every
-  arm carries a length-controlled AUC beside its raw AUC over five prompt-length quintiles. The
-  pure length counter falls to {{fig:cue.tokens.controlled}} under that control.
+  {{fig:arms.shipped.cands}} candidates with a shipped decision score below it, and
+  {{fig:arms.zero.f1}} score exactly zero there.** The floor row sits in the same table as every
+  shipped block-only F1.
+- **The length cue.** Counting variables containing no model reach AUC {{fig:cue.tokens}} on s2.
+  Every arm carries a length-controlled AUC beside its raw AUC over five prompt-length quintiles.
+  The pure length counter falls to {{fig:cue.tokens.controlled}} under that control. On the second
+  corpus the same kind of variable reaches {{fig:s3.cue.bytes}} and {{fig:s3.cue.events}}, inside
+  and below its own chance band, so raw AUC is the primary there.
 
 The 95% chance interval for {{fig:corpus.positives}} positives and {{fig:corpus.negatives}}
 negatives is [{{fig:band.lo}}, {{fig:band.hi}}] under Hanley and McNeil.
 
+## Accuracy
+
+At {{fig:corpus.prevalence}} prevalence, accuracy is set by the benign class. Allowing every case
+scores {{fig:acc.s2.allow}} on s2 and {{fig:acc.s3.allow}} on the second corpus. Accuracy appears
+on this Space only with that baseline in the same table. {{fig:acc.beat}} of the
+{{fig:arms.scored}} arms exceed the all-allow figure at the common budget, by at most
+{{fig:acc.gain}} cases out of {{fig:corpus.scorable}}.
+
 ## Not in this revision
 
-**No transfer figure.** {{fig:s3.arms}} arms are scored on a held-out corpus whose positives are
-{{fig:s3.gradeA.share}} grade A against s2's {{fig:s2.gradeA.share}}. A difference between the two
-conflates threshold miscalibration with a changed definition of a positive, so it is not a
-generalisation test and no transfer penalty is published. The composition and the per-grade
-separation are published instead.
+**No transfer figure and no generalisation claim in either direction.** {{fig:heldout.arms}} arms
+are scored on a second corpus whose positives are {{fig:s3.gradeA.share}} grade A against s2's
+{{fig:s2.gradeA.share}}. A difference between the two conflates threshold miscalibration with a
+changed definition of a positive, so no transfer penalty is published. The composition and the
+per-grade separation are published instead. All {{fig:heldout.arms}} bodies hold
+{{fig:heldout.rows}} rows with 0 errors, `complete: true` and a digest matching the bytes on disk.
 
 `{{fig:arms.noshipped}}` is ranked and has both deployment gates but no shipped-argmax row, because
 its prediction body landed after the run that recorded those.
@@ -145,21 +206,29 @@ its prediction body landed after the run that recorded those.
   body's complete-line prefix, so it certifies unchanged-since-settlement; and settlement requires
   {{fig:settle.rows}} untorn rows, so an unsettled metadata file means incomplete.
   {{fig:settle.settled}} of {{fig:arms.scored}} ranked arms are settled with a matching digest.
-- The CPU throughput and memory figures are archived rather than reproducible: the measurement
+- The CPU throughput and memory figures are archived and are not reproducible: the measurement
   scripts were never saved and only their logs survive.
-- Aggregates only. No per-case row detail is published. `mcptox` and
-  `augur_unsafe_tool_input_eval` contribute aggregate numbers only.
+- Aggregates only. No per-case row detail is published. `mcptox` is local-evaluation-only:
+  aggregate numbers only, never rows. One further source dataset is aggregate-only on the same
+  terms. A census over the `source.dataset` field of both corpora found 0 rows from either.
+  Source-dataset licences and redistribution markers are recorded per source in
+  `{{fig:lock.path}}`, {{fig:lock.entries}} entries at sha256 `{{fig:lock.sha}}`:
+  {{fig:lock.download}} download-only, {{fig:lock.vendored}} vendored, {{fig:lock.aggregate}}
+  aggregate-only, across {{fig:lock.licences}} distinct licences.
 
 ## Pages
 
 | Page | What it covers |
 | --- | --- |
-| `index.html` | Scope, the deployment result, the ranking, and what is measured. |
+| `index.html` | Scope, the common operating point, the size bands, the ranking, and what is measured. |
+| `operating-point.html` | Every arm at block FPR ≤ {{fig:cap.exact}} with tp/fp/fn/tn, precision, recall, F1, accuracy and block FPR; each arm's own argmax as a separate in-sample upper bound; the zero-false-positive gate; the trivial floor; accuracy with the all-allow baseline. |
+| `sizes.html` | The three size bands by counted parameters, the rank inside each, and the mixture-of-experts arm's counts. |
+| `datasets.html` | Both corpora field by field, the grade conditions and the function that assigns them, the grade composition of the positives, the length fields, the settled bodies, licence and redistribution. |
 | `baselines.html` | The trivial floor, the length cue, the quintile stratification, the chance band. |
-| `results.html` | Deployability at both gates, the full ranking, the untrained-backbone comparison, per-arm confusion metrics, the leakage gate, scorer equivalence, and rank 1's 512-token window. |
+| `results.html` | Threshold-free AUC with definition labels, the full ranking and its estimator, the untrained-backbone comparison, the leakage gate, scorer equivalence, and rank 1's 512-token window. |
 | `roster.html` | All {{fig:roster.n}} arms with licence, origin and gating group; encoder backbone families; taxonomy coverage; the Qwen3 drop. |
 | `footprint.html` | CPU memory and throughput, the caveats, the two multimodal parameter splits. |
-| `methodology.html` | Corpus and grade split, the two deployment gates, the held-out hold-out, scorer equivalence, oracle labelling, ranking-variable rules, run validity, publication scope. |
+| `methodology.html` | Corpus and grade split, the reporting rules, the two deployment gates, scorer equivalence, oracle labelling, ranking-variable rules, run validity, publication scope. |
 | `reproduce.html` | Every script and artifact, deep-linked to branch `feat/system-one-benchmarks`. |
 
 The four data repositories holding the corpora and the prediction files are private. This Space

@@ -108,7 +108,7 @@
 <p class="small">
   The three scripts carry the dev host's absolute paths as they ran. Their arithmetic is imported
   verbatim from the board's re-mining module, which is what makes cohort numbers and board
-  numbers comparable; that module is reached through a path on the dev host rather than through
+  numbers comparable; that module is reached through a path on the dev host and not through
   this directory. They are published in the form that produced the artifacts.
 </p>
 
@@ -124,19 +124,14 @@
 </ul>
 
 <h2 id="artifacts">Artifacts this Space reads</h2>
-<ul>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/cohort-scores.json"><code>benchmarks/slm_toolcall/artifacts/cohort-scores.json</code></a></li>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/leakage-diagnostic.json"><code>benchmarks/slm_toolcall/artifacts/leakage-diagnostic.json</code></a></li>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/artifacts/final-comparisons.json"><code>benchmarks/slm_toolcall/artifacts/final-comparisons.json</code></a></li>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/roster.json"><code>site-build/pinned/roster.json</code></a>
-      &#8212; the roster, transcribed from the ledger and cross-checked against each scored arm's
-      run metadata.</li>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/laptop-feasibility.json"><code>site-build/pinned/laptop-feasibility.json</code></a>
-      &#8212; the CPU throughput and memory primitives, with their provenance block.</li>
-  <li><a href="https://github.com/cisco-ai-defense/defenseclaw/blob/feat/system-one-benchmarks/benchmarks/slm_toolcall/site-build/pinned/scorer-provenance.json"><code>site-build/pinned/scorer-provenance.json</code></a>
-      &#8212; the pinned digest of the shared arithmetic and of the reference driver's role in
-      request construction.</li>
-</ul>
+{{ui:artifacts_read}}
+<p class="small">
+  The three <code>site-build/pinned/</code> files carry what no scoring artifact holds: the roster
+  overlay cross-checked against each scored arm's run metadata, the CPU throughput and memory
+  primitives with their provenance block, and the pinned digest of the shared arithmetic. The
+  overlay also names the module that assigns every truth grade and the source lock that carries
+  each source dataset's licence, and the build hashes both.
+</p>
 
 <h2 id="site">Building this Space</h2>
 <ul>

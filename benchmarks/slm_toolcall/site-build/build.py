@@ -311,6 +311,9 @@ def build_cohort() -> dict:
                 "pair_weighted_pooled"],
             "oracle_f1": a["oracle_best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT"],
             "cap_tokens": m["cap_tokens"],
+            "params": m["params_counted"],
+            "repo": m["repo"],
+            "revision": m["revision"],
             "shrunk": m["shrunk"],
             "frac_shrunk": m["shrunk"] / a["prediction_rows"],
             "rows": a["prediction_rows"],
@@ -359,6 +362,163 @@ STABILITY = rank_stability()
 
 ROWS = build_roster()
 
+# --------------------------------------------------------------------- size bands
+# Counted parameters, from each arm's own run metadata. The cuts are 3e9 and 6e9 exactly, so an
+# arm at 2,614,341,888 is in the first band and one at 3,075,098,624 is in the second. The third
+# band is declared even though the cohort puts nothing in it: a band that is simply absent from
+# the page reads as an omission rather than as a measured zero.
+SIZE_BANDS = (("under 3B", 0, 3_000_000_000),
+              ("3B to 6B", 3_000_000_000, 6_000_000_000),
+              ("6B and up", 6_000_000_000, None))
+
+
+def band_of(params: int) -> str:
+    for label, lo, hi in SIZE_BANDS:
+        if params >= lo and (hi is None or params < hi):
+            return label
+    raise AssertionError(params)
+
+
+def in_band(label: str) -> list[dict]:
+    """The arms in one band, ordered by F1 at the common operating point, then by parameters."""
+    return sorted((a for a in COH.values() if band_of(a["params"]) == label),
+                  key=lambda a: (-a["cap_row"]["f1"], a["params"]))
+
+
+def accuracy(m: dict, scorable: int) -> float:
+    return (m["tp"] + m["tn"]) / scorable
+
+
+# --------------------------------------------------- the held-out corpus, as scored
+# The settled held-out artifact covers six arms. The stage-0 ranking artifact carries a partial
+# `arms_s3` block covering three. Only the NAMES of that block are read here, for the
+# reconciliation; every held-out number on the page comes from the settled artifact, and a gate
+# in main() scans the built figures for any score-shaped value under the stage-0 block.
+S3_STAGE0_NAMES = sorted(RANK.get("arms_s3", {}))
+S3ARMS = S3C["task1_cohort_s3"]
+S3CORP = S3C["corpora"]["s3"]
+S2CORP = S3C["corpora"]["s2"]
+S3FLOOR = S3C["corpora"]["s3_trivial_floor_block_everything"]
+S3BANDC = S3C["corpora"]["s3_chance_band_hanley_mcneil"]
+GRADE = S3["grade_composition_confound"]
+S3DESIGN = S3["design"]
+S3RES = S3["resolution_of_the_current_corpus"]
+S3BIND = S3["binding_constraint"]
+
+
+def wilson(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    p = k / n
+    z2 = z * z
+    c = (p + z2 / (2 * n)) / (1 + z2 / n)
+    h = (z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / (1 + z2 / n)
+    return c - h, c + h
+
+
+
+def tightest_pair() -> dict:
+    """The narrowest of the 15 pairwise comparisons, and the positive count that would have
+    settled it. Both growth models are reported, because they disagree by one positive."""
+    nar = S3RES["narrowest_minimum_detectable_difference"]
+    rec = S3["pairwise_delong_all_pairs"][nar["pair"]]["sample_size_to_significance"]
+    return {"pair": nar["pair"], "mdd": nar["value"],
+            "proportional": rec["proportional_growth"]["positives_needed_ceiling"],
+            "positives_only": rec["positives_only_growth"]["positives_needed_ceiling"]}
+
+
+
+
+def s3_primary(key: str) -> dict:
+    """One held-out arm's record on its primary block variable."""
+    a = S3ARMS[key]
+    return a["by_variable"][a["primary_block_variable"]]
+
+
+# The second corpus is never named in a table without the grade-composition figure that keeps it
+# from being read as a generalisation result. The label carries the figure so it travels with
+# every row it appears in.
+S3LABEL = (f'held out, {S3CORP["grade_counts_all"]["A"] * 100 / S3CORP["positives_A_B"]:.2f}% '
+           f'grade A positives')
+
+
+# ------------------------------------------------- where the labels and the licences come from
+# The overlay names two first-party files: the module that assigns every truth grade, and the
+# source lock that carries each source dataset's licence and redistribution marker. Both are read
+# and hashed here, so the datasets page cites files that exist at a digest this build checked.
+CORPORA = ROSTER["corpora"]
+
+
+def label_provenance() -> dict:
+    rel = CORPORA["label_scheme"]["source"]
+    path = os.path.join(REPO_ROOT, rel)
+    if not os.path.exists(path):
+        BAD.append(f"the module that assigns every truth grade is not at {rel}, so the label "
+                   f"scheme on the datasets page cites nothing in this repository")
+        return {"path": rel, "sha256": None, "bytes": 0, "defines": False}
+    _TOUCHED.add(path)
+    with open(path, "r", encoding="utf-8") as fh:
+        src = fh.read()
+    fn = CORPORA["label_scheme"]["function"]
+    if f"def {fn}(" not in src:
+        BAD.append(f"{rel} does not define {fn}(), so the label scheme cites the wrong function")
+    for grade in ("A", "B", "C", "D", "E"):
+        if f'return "{grade}"' not in src:
+            BAD.append(f"{rel} never returns grade {grade}, so the grade table names a grade the "
+                       f"function cannot assign")
+    return {"path": rel, "sha256": sha256_file(path), "bytes": os.path.getsize(path),
+            "defines": True}
+
+
+def restricted_source_census() -> dict:
+    """The archive record's census of the two restricted sources over both corpora.
+
+    The record's keys name one of those sources, and that name is being removed from the corpora
+    entirely, so only the counts are read out of it. Both are expected to be 0, which is what lets
+    this Space publish a figure over either corpus at all.
+    """
+    rel = CORPORA["redistribution"]["census_record"]
+    path = os.path.join(REPO_ROOT, rel)
+    if not os.path.exists(path):
+        BAD.append(f"the restricted-source census is not at {rel}, so the statement that neither "
+                   f"contributes a row rests on nothing in this repository")
+        return {"path": rel, "sha256": None, "rows": None, "sources": 0, "method": None}
+    _TOUCHED.add(path)
+    with open(path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)
+    gate = rec.get("licence_gate") or {}
+    counts = {k: v for k, v in gate.items() if k.endswith("_rows") and isinstance(v, int)}
+    if not counts:
+        BAD.append(f"{rel} carries no per-source row counts, so the census has no numbers in it")
+    return {"path": rel, "sha256": sha256_file(path), "bytes": os.path.getsize(path),
+            "rows": sum(counts.values()), "sources": len(counts),
+            "method": gate.get("method", ""),
+            "payload_field_absent": gate.get("payload_field_present_in_any_uploaded_file")}
+
+
+def source_lock() -> dict:
+    rel = CORPORA["redistribution"]["source_lock"]
+    path = os.path.join(REPO_ROOT, rel)
+    if not os.path.exists(path):
+        BAD.append(f"the source lock is not at {rel}, so the redistribution markers on the "
+                   f"datasets page rest on nothing in this repository")
+        return {"path": rel, "sha256": None, "entries": 0, "redistribution": {},
+                "licence_status": {}, "enabled": 0, "licences": {}}
+    _TOUCHED.add(path)
+    with open(path, "r", encoding="utf-8") as fh:
+        lock = json.load(fh)
+    rows = lock["datasets"]
+    def tally(field):
+        out: dict[str, int] = {}
+        for e in rows:
+            out[str(e.get(field))] = out.get(str(e.get(field)), 0) + 1
+        return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+    return {"path": rel, "sha256": sha256_file(path), "bytes": os.path.getsize(path),
+            "frozen_at": lock.get("frozen_at"), "schema": lock.get("schema_version"),
+            "entries": len(rows), "redistribution": tally("redistribution"),
+            "licence_status": tally("license_status"), "licences": tally("license"),
+            "enabled": sum(1 for e in rows if e.get("enabled"))}
+
+
+
 
 
 
@@ -368,8 +528,19 @@ ROWS = build_roster()
 
 ASSERTS: list[tuple[str, float, float]] = []
 BAD: list[str] = []
-# keys read out of the ranking artifact, so the s3 hold-out can be checked rather than trusted
-_READ_KEYS: set[str] = {"arms_s2", "corpus_s2", "length_cue_no_model_s2", "provenance"}
+# the two first-party files the overlay names, read and hashed now that BAD exists to record a
+# missing one
+LABELS = label_provenance()
+LOCK = source_lock()
+CENSUS = restricted_source_census()
+# Keys read out of the stage-0 ranking artifact. `arms_s3` is read for one purpose: the two
+# held-out artifacts cover different arm counts, 3 against 6, and the page has to say which one
+# governs. The check below requires the two to agree on every arm they share, so the answer rests
+# on a comparison rather than on a preference. `corpus_s3` and `length_cue_no_model_s3` are still
+# not read: the settled pair carries both and is the only source for a held-out number.
+_READ_KEYS: set[str] = {"arms_s2", "corpus_s2", "length_cue_no_model_s2", "provenance",
+                        "arms_s3"}
+_S3_KEYS_STILL_CLOSED = ("corpus_s3", "length_cue_no_model_s3", "corpus_overlap")
 
 
 def expect(label: str, computed: float, recorded: float, tol: float = 5e-12) -> float:
@@ -648,10 +819,11 @@ def check_figures() -> None:
         BAD.append("the ranking artifact does not record the cohort scope rule")
     if rp["gpu_used"] is not False:
         BAD.append("the ranking artifact records GPU use, which the scoring path should not need")
-    # the held-out half is present in the artifact and must not be read into this build
-    for k in S3_KEYS:
+    # the stage-0 artifact's remaining held-out keys stay closed; the settled pair carries them
+    for k in _S3_KEYS_STILL_CLOSED:
         if k in RANK and k in _READ_KEYS:
-            BAD.append(f"an s3 key ({k}) was read; the held-out results are out of this revision")
+            BAD.append(f"an s3 key ({k}) was read out of the stage-0 artifact; the settled pair "
+                       f"is the only source for a held-out number")
 
     # --- the shared scoring arithmetic. This is the load-bearing claim for comparability
     # between a cohort number and a board number, so the module's identity is checked here
@@ -718,6 +890,277 @@ def check_figures() -> None:
                        f'{r["revision"]!r}')
         expect(f"{arm_key} rows", m["rows"], ARMS[arm_key]["prediction_rows"], 0)
         expect(f"{arm_key} errors", m["errors"], 0, 0)
+    # --- the common operating point. Every arm is reported at one shared false-positive budget,
+    # so each row's confusion matrix is recomputed from its own counts and checked against the
+    # rates the artifact records, and the budget itself is checked to hold on every row.
+    scorable = CORPUS["scorable_cases_A_B_D"]
+    pos, neg = CORPUS["positives_A_B"], CORPUS["negatives_D"]
+    max_fp = int(FPR_CAP * neg)
+    for key, a in COH.items():
+        x = a["cap_row"]
+        expect(f"{key} at the cap, positives", x["tp"] + x["fn"], pos, 0)
+        expect(f"{key} at the cap, negatives", x["fp"] + x["tn"], neg, 0)
+        expect(f"{key} at the cap, F1", f1_of(x["tp"], x["fp"], x["fn"]), x["f1"], 5e-15)
+        expect(f"{key} at the cap, recall", x["tp"] / pos, x["recall"], 5e-15)
+        expect(f"{key} at the cap, FPR", x["fp"] / neg, x["fpr"], 5e-15)
+        expect(f"{key} at the cap, false-positive allowance",
+               x["max_false_positives_allowed"], max_fp, 0)
+        if x["tp"] + x["fp"]:
+            expect(f"{key} at the cap, precision",
+                   x["tp"] / (x["tp"] + x["fp"]), x["precision"], 5e-15)
+        if x["fpr"] > FPR_CAP:
+            BAD.append(f"{key}: FPR {x['fpr']} at the cap row exceeds the cap {FPR_CAP}, so the "
+                       f"row is not at the common operating point")
+        if x["fp"] > max_fp:
+            BAD.append(f"{key}: {x['fp']} false positives against an allowance of {max_fp}")
+        z = a["zero_fp"]
+        expect(f"{key} at a zero-FP gate, false positives", z["fp"], 0, 0)
+        expect(f"{key} at a zero-FP gate, negatives", z["fp"] + z["tn"], neg, 0)
+        expect(f"{key} at a zero-FP gate, positives", z["tp"] + z["fn"], pos, 0)
+        expect(f"{key} at a zero-FP gate, F1", f1_of(z["tp"], z["fp"], z["fn"]), z["f1"], 5e-15)
+        expect(f"{key} at a zero-FP gate, recall", z["tp"] / pos, z["recall"], 5e-15)
+        expect(f"{key} at a zero-FP gate, rule-of-three bound", 3 / neg,
+               z["rule_of_three_upper_bound"], 5e-15)
+    expect("the cap is the incumbent block false-positive rate", FPR_CAP,
+           float(next(k.rsplit("_", 1)[1]
+                      for k in AUTH if k.startswith("deployability_at_fpr_cap_"))), 0)
+    expect("candidates retaining zero recall at a zero-FP gate",
+           sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] == 0), 13, 0)
+    expect("candidates with any recall at a zero-FP gate",
+           sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] > 0), 7, 0)
+    best_cap = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    expect("the best F1 at the common operating point", best_cap["cap_row"]["f1"],
+           0.10548523206751055, 5e-17)
+    expect("its true blocks", best_cap["cap_row"]["tp"], 25, 0)
+
+    # --- accuracy is only meaningful against the all-allow baseline at these prevalences
+    allow = TRIVIAL["allow_every_case"]
+    expect("all-allow accuracy on s2", accuracy(allow, scorable), neg / scorable, 5e-16)
+    expect("all-allow accuracy on s2 equals 1 minus prevalence",
+           1 - CORPUS["prevalence"], neg / scorable, 5e-15)
+    # an arm's accuracy exceeds the all-allow baseline exactly when it gains more true blocks
+    # than it spends on false ones, so the two counts are the same count
+    expect("arms whose accuracy at the cap beats the all-allow baseline",
+           sum(1 for a in COH.values()
+               if accuracy(a["cap_row"], scorable) > neg / scorable),
+           sum(1 for a in COH.values()
+               if a["cap_row"]["tp"] > a["cap_row"]["fp"]), 0)
+    expect("the widest accuracy gain over the all-allow baseline, in cases",
+           max(a["cap_row"]["tp"] - a["cap_row"]["fp"] for a in COH.values()), 12, 0)
+    expect("all-allow accuracy on the held-out corpus",
+           S3CORP["negatives_D"] / S3CORP["cases"], 1 - S3CORP["prevalence"], 5e-15)
+
+    # --- each arm's own argmax, which is an in-sample oracle upper bound and never a result
+    for key, a in COH.items():
+        if a["oracle"] is None:
+            continue
+        o = a["oracle"]
+        expect(f"{key} oracle positives", o["tp"] + o["fn"], pos, 0)
+        expect(f"{key} oracle negatives", o["fp"] + o["tn"], neg, 0)
+        expect(f"{key} oracle F1", f1_of(o["tp"], o["fp"], o["fn"]), o["f1"], 5e-15)
+        expect(f"{key} oracle recall", o["tp"] / pos, o["recall"], 5e-15)
+        expect(f"{key} oracle precision", o["tp"] / (o["tp"] + o["fp"]), o["precision"], 5e-15)
+        expect(f"{key} oracle block FPR", o["fp"] / neg, o["block_fpr"], 5e-15)
+        expect(f"{key} oracle F1 matches the ranking artifact", o["f1"], a["oracle_f1"], 0)
+        if o["f1"] < a["cap_row"]["f1"]:
+            BAD.append(f"{key}: its own argmax scores below the common operating point, which "
+                       f"an unconstrained in-sample sweep cannot do")
+    expect("arms whose own argmax clears the trivial floor",
+           sum(1 for a in COH.values() if a["oracle_f1"] > FLOOR["f1"]), 22, 0)
+    expect("candidates below the floor at their shipped decision",
+           sum(1 for a in CANDS.values()
+               if a["shipped"] and a["shipped"]["f1"] < FLOOR["f1"]), 9, 0)
+    expect("candidates scoring exactly zero at their shipped decision",
+           sum(1 for a in CANDS.values()
+               if a["shipped"] and a["shipped"]["f1"] == 0.0), 5, 0)
+
+    # --- size bands, from counted parameters in each arm's own run metadata
+    for a in COH.values():
+        r = by_key[a["key"]]
+        expect(f"{a['key']} counted parameters agree with the registry", a["params"],
+               r["params"], 0)
+        if a["repo"] != r["repo"]:
+            BAD.append(f'{a["key"]}: ranking meta repo {a["repo"]!r} against registry '
+                       f'{r["repo"]!r}')
+        if a["revision"] != r["revision"]:
+            BAD.append(f'{a["key"]}: ranking meta revision {a["revision"]!r} against registry '
+                       f'{r["revision"]!r}')
+    expect("arms in the under-3B band", len(in_band("under 3B")), 14, 0)
+    expect("arms in the 3B-to-6B band", len(in_band("3B to 6B")), 8, 0)
+    expect("arms in the 6B-and-up band", len(in_band("6B and up")), 0, 0)
+    expect("every arm lands in exactly one band",
+           sum(len(in_band(b)) for b, _lo, _hi in SIZE_BANDS), len(COH), 0)
+
+    # --- the two corpora, and the grade composition that keeps a transfer claim off this Space
+    expect("s2 scorable agrees across artifacts", S2CORP["scorable_cases_A_B_D"], scorable, 0)
+    expect("s2 digest agrees across artifacts",
+           1 if S2CORP["cases_sha256"] == CORPUS["cases_sha256"] else 0, 1, 0)
+    expect("held-out scorable", S3CORP["positives_A_B"] + S3CORP["negatives_D"],
+           S3CORP["scorable_cases_A_B_D"], 0)
+    expect("held-out cases", S3CORP["scorable_cases_A_B_D"] + S3CORP["grade_C_excluded"],
+           S3CORP["cases"], 0)
+    expect("held-out prevalence", S3CORP["positives_A_B"] / S3CORP["cases"],
+           S3CORP["prevalence"], 5e-16)
+    expect("held-out positives by grade",
+           S3CORP["grade_counts_all"]["A"] + S3CORP["grade_counts_all"]["B"],
+           S3CORP["positives_A_B"], 0)
+    expect("held-out trivial floor",
+           f1_of(S3FLOOR["tp"], S3FLOOR["fp"], S3FLOOR["fn"]), S3FLOOR["f1"], 5e-16)
+    expect("held-out chance band is verified in the artifact",
+           1 if S3BANDC["verified"] else 0, 1, 0)
+    _z = 1.959963984540054
+    expect("held-out chance band lower", 0.5 - _z * S3BANDC["se_at_auc_0.5"],
+           S3BANDC["band_95pct"][0], 5e-15)
+    expect("held-out chance band upper", 0.5 + _z * S3BANDC["se_at_auc_0.5"],
+           S3BANDC["band_95pct"][1], 5e-15)
+    expect("case-id overlap between the two corpora", S3C["corpora"]["case_id_overlap_s2_s3"],
+           0, 0)
+    _gc = S3["grade_composition_confound"]
+    expect("s2 grade A share of positives", CORPUS["grade_counts_all"]["A"] / pos,
+           _gc["s2_positive_composition"]["grade_A_share_of_positives"], 5e-16)
+    expect("held-out grade A share of positives",
+           S3CORP["grade_counts_all"]["A"] / S3CORP["positives_A_B"],
+           _gc["s3_positive_composition"]["grade_A_share_of_positives"], 5e-16)
+    expect("s2 positives by grade agree across artifacts",
+           _gc["s2_positive_composition"]["A"] + _gc["s2_positive_composition"]["B"], pos, 0)
+
+    # --- the label scheme and the source lock, both first-party files in this repository
+    expect("the grade function is defined where the overlay says",
+           1 if LABELS["defines"] else 0, 1, 0)
+    expect("grades the function can assign", len(CORPORA["label_scheme"]["conditions"]), 5, 0)
+    for g in ("A", "B", "C", "D"):
+        if g not in CORPUS["grade_counts_all"]:
+            BAD.append(f"s2 carries no grade {g} count, so the grade table would print a blank")
+    expect("grades absent from the held-out corpus",
+           len({"C", "E"} & set(S3CORP["grade_counts_all"])), 0, 0)
+    expect("source-lock entries",
+           sum(LOCK["redistribution"].values()), LOCK["entries"], 0)
+    expect("source-lock entries by licence status",
+           sum(LOCK["licence_status"].values()), LOCK["entries"], 0)
+    if "aggregate-only" not in LOCK["redistribution"]:
+        BAD.append("the source lock records no aggregate-only entry, so the restricted-source "
+                   "disclosure has nothing behind it")
+    expect("rows either restricted source contributes to these corpora", CENSUS["rows"], 0, 0)
+    expect("restricted sources the census covers", CENSUS["sources"], 2, 0)
+    for _n in (str(CORPUS["cases"]), str(S3CORP["cases"])):
+        if _n not in (CENSUS["method"] or ""):
+            BAD.append(f"the restricted-source census does not record a case count of {_n}, so it "
+                       f"may not have been taken over the corpora this Space reports")
+    if CENSUS["payload_field_absent"] is not False:
+        BAD.append("the census record does not assert that no uploaded file carries the payload "
+                   "field")
+
+    # --- the held-out bodies, settled
+    expect("arms scored on the held-out corpus", len(S3ARMS), 6, 0)
+    expect("arms in the stage-0 artifact's partial held-out block", len(S3_STAGE0_NAMES), 3, 0)
+    if not set(S3_STAGE0_NAMES) <= set(S3ARMS):
+        BAD.append(f"the stage-0 held-out block names arms the settled artifact does not cover: "
+                   f"{sorted(set(S3_STAGE0_NAMES) - set(S3ARMS))}")
+    # The two artifacts have to agree on every arm they share, or the page cannot say which one
+    # governs on the strength of coverage alone.
+    for key in S3_STAGE0_NAMES:
+        old, new = RANK["arms_s3"][key], S3ARMS[key]
+        if old["primary_block_variable"] != new["primary_block_variable"]:
+            BAD.append(f"{key}: the two held-out artifacts rank it on different variables")
+            continue
+        ov = old["by_variable"][old["primary_block_variable"]]
+        nv = new["by_variable"][new["primary_block_variable"]]
+        expect(f"{key} held-out raw AUC agrees across both artifacts",
+               ov["auc_raw_mann_whitney_tie_corrected"],
+               nv["s3_auc_raw_mann_whitney_tie_corrected"], 0)
+        expect(f"{key} held-out rows agree across both artifacts", old["prediction_rows"],
+               new["s3_prediction_rows"], 0)
+        if old["prediction_sha256_disk"] != new["s3_prediction_sha256_disk"]:
+            BAD.append(f"{key}: the two held-out artifacts scored different bytes")
+        if (old["shipped_argmax_from_rows"]["block_only"]
+                != new["s3_shipped_argmax_from_rows"]["block_only"]):
+            BAD.append(f"{key}: the two held-out artifacts disagree on its shipped confusion "
+                       f"matrix, so neither can be preferred on coverage alone")
+    for key, a in S3ARMS.items():
+        m = a["s3_meta"]
+        expect(f"{key} held-out rows", m["rows"], a["s3_prediction_rows"], 0)
+        expect(f"{key} held-out errors", m["errors"], 0, 0)
+        expect(f"{key} held-out cases covered", a["s3_cases_in_prediction"], S3CORP["cases"], 0)
+        expect(f"{key} held-out cases missing", a["s3_scorable_missing"], 0, 0)
+        expect(f"{key} held-out params agree with the registry", m["params_counted"],
+               by_key[key]["params"], 0)
+        if m["prediction_sha256_meta"] != a["s3_prediction_sha256_disk"]:
+            BAD.append(f"{key}: the held-out metadata digest differs from the body on disk")
+        if not (m["complete_value"] and m["settled"] and m["sha256_meta_matches_disk"]):
+            BAD.append(f"{key}: the held-out body is not settled complete with a matching digest")
+        v = s3_primary(key)
+        x = v["s3_at_fpr_cap"][f"{FPR_CAP}"]
+        expect(f"{key} held-out positives at the cap", x["tp"] + x["fn"],
+               S3CORP["positives_A_B"], 0)
+        expect(f"{key} held-out negatives at the cap", x["fp"] + x["tn"],
+               S3CORP["negatives_D"], 0)
+        expect(f"{key} held-out F1 at the cap", f1_of(x["tp"], x["fp"], x["fn"]), x["f1"], 5e-15)
+        expect(f"{key} held-out FPR at the cap", x["fp"] / S3CORP["negatives_D"],
+               x["fpr"], 5e-15)
+        if x["fpr"] > FPR_CAP:
+            BAD.append(f"{key}: held-out FPR {x['fpr']} exceeds the cap")
+    expect("held-out row counts that are all equal",
+           len({a["s3_prediction_rows"] for a in S3ARMS.values()}), 1, 0)
+    expect("held-out prediction rows per arm",
+           next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})), 100001, 0)
+    for pos_i in (1, 2, 3):
+        nm = AUTH["AUTHORITATIVE_RANKING"][f"rank_{pos_i}"]
+        if nm not in S3ARMS:
+            BAD.append(f"rank {pos_i} under the authoritative estimator, {nm}, has no settled "
+                       f"held-out body, so the settlement claim does not cover it")
+    # --- the ranking is never read off the retracted difference variable
+    expect("rank 1 is not stable across every scheme",
+           0 if AUTH["rank_stability"]["rank_1_stable"] else 1, 1, 0)
+    expect("rank 2 is not stable across every scheme",
+           0 if AUTH["rank_stability"]["rank_2_stable"] else 1, 1, 0)
+    expect("rank 3 is contested across schemes",
+           1 if AUTH["rank_stability"]["rank_3_is_contested_across_estimators"] else 0, 1, 0)
+
+    # --- what more corpus would buy, on the held-out corpus's own arithmetic
+    expect("pairwise comparisons tested", S3RES["pairs_tested"], 15, 0)
+    expect("pairwise comparisons that separate", S3RES["pairs_significant_at_0.05"],
+           S3RES["pairs_tested"], 0)
+    expect("positives the held-out corpus holds", S3RES["positives"],
+           S3CORP["positives_A_B"], 0)
+    expect("benign cases the held-out corpus holds", S3RES["benign"],
+           S3CORP["negatives_D"], 0)
+    _t = tightest_pair()
+    expect("positives that would have settled the narrowest pair", _t["proportional"], 32, 0)
+    expect("the same under positive-only growth", _t["positives_only"], 31, 0)
+    if _t["proportional"] >= S3RES["positives"]:
+        BAD.append("the narrowest pair now needs at least as many positives as the corpus holds, "
+                   "so the statement that more positives are unnecessary needs rewriting")
+    _ceils = [v["sample_size_to_significance"]["proportional_growth"]["positives_needed_ceiling"]
+              for v in S3["pairwise_delong_all_pairs"].values()]
+    expect("pairs with a sample-size ceiling", len(_ceils), S3RES["pairs_tested"], 0)
+    if max(_ceils) > S3RES["positives"]:
+        BAD.append("some pair needs more positives than the corpus holds, which contradicts all "
+                   "15 comparisons separating")
+    _best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    expect("Wilson upper bound on the best recall at the common budget",
+           wilson(_best["cap_row"]["tp"], pos)[1], 0.08327404239553826, 5e-16)
+    expect("Wilson lower bound on the same recall",
+           wilson(_best["cap_row"]["tp"], pos)[0], 0.039137016728024596, 5e-16)
+
+    # --- the held-out corpus carries no length cue, so raw AUC is its honest primary
+    _lo3, _hi3 = S3BANDC["band_95pct"]
+    for name, rec in S3C["s3_length_cue_no_model"].items():
+        if not isinstance(rec, dict) or "auc_raw" not in rec:
+            continue
+        if rec["auc_raw"] > _hi3:
+            BAD.append(f"the held-out corpus's {name} now reaches AUC {rec['auc_raw']}, above its "
+                       f"chance band, so the no-length-cue statement needs rewriting")
+    expect("held-out length proxies measured", sum(
+        1 for rec in S3C["s3_length_cue_no_model"].values()
+        if isinstance(rec, dict) and "auc_raw" in rec), 2, 0)
+    expect("the held-out length fields are identical across every arm", sum(
+        1 for v in S3C["s3_length_cue_no_model"]["corpus_field_identity_across_all_six_arms"]
+        .values() if v["context_bytes_identical_to_reference"]
+        and v["context_events_identical_to_reference"]), 6, 0)
+    expect("s2's own length cue is larger than either held-out proxy",
+           1 if LEAK["structural_cue_auc"]["natural_prompt_tokens (max over events)"]["auc"]
+           > _hi3 else 0, 1, 0)
+
     # every ranked arm is a registry arm, and every registry arm is ranked or deployment-only
     reg_keys = {a["key"] for a in ROWS}
     for k in COH:
@@ -794,6 +1237,18 @@ def pct(v, nd=2) -> str:
 
 def num(v) -> str:
     return f"{v:,}"
+
+
+def exact(v) -> str:
+    """The shortest decimal string that round-trips to the same float, so a table cell carries
+    the artifact's value and not a rounding of it."""
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, int) or float(v) == int(v):
+        return f"{int(v):,}"
+    return repr(float(v))
 
 
 MINUS = "&#8722;"
@@ -1300,8 +1755,10 @@ def chart_floor() -> str:
         "Block-only F1 at each arm's shipped operating point",
         f'Blocking every case scores {fmt(FLOOR["f1"], 17)} at '
         f'{pct(CORPUS["prevalence"])} prevalence, at a block false-positive rate of '
-        f'{fmt(FLOOR["block_fpr"], 1)}. {len(below)} of the {len(CANDS)} ranked candidates score '
-        f'below that line, and {len(zeros)} score exactly zero at their own argmax.',
+        f'{fmt(FLOOR["block_fpr"], 1)}. {len(below)} of the '
+        f'{sum(1 for a in CANDS.values() if a["shipped"])} candidates with a shipped decision '
+        f'score below that line, and {len(zeros)} score exactly zero at it. Each arm\'s own '
+        f'argmax is a separate figure and is an in-sample upper bound.',
         svg, "cohort-rank.json",
         legend=[("Candidate", "seq3"), ("MLM negative control", "s5"),
                 ("Trivial baseline, no model", "axis")],
@@ -1698,7 +2155,10 @@ def chart_corpus() -> str:
                 ("Grade C, excluded", "axis")],
         table=table_html(["Grade", "Cases", "Role in scoring", "What the grade records"], trows,
                          numeric_from=1),
-        note=f'Grade C is excluded because {ROSTER["corpus_grades"]["C"].split("because ", 1)[1]}')
+        note=f'Grade C is excluded because '
+             f'{ROSTER["corpus_grades"]["C"].split("because ", 1)[1].rstrip(".")}. The condition '
+             f'the grade function tests for it is '
+             f'{CORPORA["label_scheme"]["conditions"]["C"]}.')
 
 
 def chart_fpr() -> str:
@@ -1883,20 +2343,8 @@ def sparse_bin_note() -> str:
 # threshold miscalibration with a changed definition of a positive. What is published is the
 # composition itself, the per-grade separation it explains, and the two results that follow.
 
-GRADE = S3["grade_composition_confound"]
-S3DESIGN = S3["design"]
-S3RES = S3["resolution_of_the_current_corpus"]
-S3BIND = S3["binding_constraint"]
 S3CUE = {k: v for k, v in S3C["s3_length_cue_no_model"].items()
          if isinstance(v, dict) and "auc_raw" in v}
-
-
-def wilson(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
-    p = k / n
-    z2 = z * z
-    c = (p + z2 / (2 * n)) / (1 + z2 / n)
-    h = (z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / (1 + z2 / n)
-    return c - h, c + h
 
 
 def grade_rows():
@@ -1998,62 +2446,37 @@ def corpus_design_note() -> str:
 
 
 def resolution_note() -> str:
-    best = sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
     lo, hi = wilson(best["cap_row"]["tp"], CORPUS["positives_A_B"])
+    t = tightest_pair()
+    ceilings = [v["sample_size_to_significance"]["proportional_growth"]["positives_needed_ceiling"]
+                for v in S3["pairwise_delong_all_pairs"].values()]
     return (
         f'<p>\n  More data does not change the s2 answer. All '
-        f'{len(S3["pairwise_delong_all_pairs"])} pairwise comparisons on the held-out corpus are '
-        f'already separable, the median detectable AUC difference is '
-        f'{fmt(S3RES["median_minimum_detectable_auc_difference"], 12)}, and a false-positive cap is '
-        f'a rate, so a larger benign pool grows the budget in step with itself. On s2 the best arm '
-        f'at the cap catches {best["cap_row"]["tp"]} of {num(CORPUS["positives_A_B"])} positives, '
-        f'and the Wilson 95% interval on that recall is [{fmt(lo, 12)}, {fmt(hi, 12)}]. More '
-        f'traces buy a tighter interval around the same unusable number.\n</p>\n'
+        f'{S3RES["pairs_significant_at_0.05"]} of the {S3RES["pairs_tested"]} pairwise comparisons '
+        f'on the held-out corpus already separate at p &lt; 0.05, and the median detectable AUC '
+        f'difference is {exact(S3RES["median_minimum_detectable_auc_difference"])}. The narrowest '
+        f'pair is '
+        f'{" against ".join(f"<code>{esc(x)}</code>" for x in t["pair"].split("  vs  "))} at '
+        f'{exact(t["mdd"])} AUC, and it would have been significant on '
+        f'{num(t["proportional"])} positives under proportional growth or '
+        f'{num(t["positives_only"])} under positive-only growth, against the '
+        f'{num(S3RES["positives"])} the corpus holds. The widest needs '
+        f'{num(max(ceilings))}, which the corpus also holds.\n</p>\n'
+        f'<p>\n  A false-positive cap is a rate, so a larger benign pool grows the allowance in '
+        f'step with itself and the operating point stays at the same place on an arm\'s ROC curve. '
+        f'On s2 the best arm at the cap catches {best["cap_row"]["tp"]} of '
+        f'{num(CORPUS["positives_A_B"])} positives, and the Wilson 95% interval on that recall is '
+        f'[{exact(lo)}, {exact(hi)}]. More traces buy a tighter interval around the same '
+        f'number.\n</p>\n'
         f'<p class="small">\n  That is a statement about ranking precision. '
         f'{pct(S3BIND["mean_share_of_variance_from_the_221_positives"])} of the AUC variance on '
         f'the held-out corpus comes from its {num(S3DESIGN["positives_A_B"])} positives, so the '
         f'positive count remains the binding constraint on every per-positive quantity, and grade '
-        f'B has only {num(GRADE["s3_positive_composition"]["B"])} of them there.\n</p>')
+        f'B has only {num(GRADE["s3_positive_composition"]["B"])} of them there. The binding '
+        f'constraint this cohort measures is the grade composition of the positives, and it is a '
+        f'property of the corpora.\n</p>')
 
-
-
-def metrics_table() -> str:
-    head = ["Arm", "Role", "Operating point", "tp", "fp", "fn", "tn", "Precision", "Recall",
-            "F1", "Block FPR"]
-    rows = []
-    for a in by_lc():
-        if a["shipped"] is None:
-            continue
-        role = "negative control" if a["is_control"] else "candidate"
-        for label, m, fpr_key in (("shipped argmax", a["shipped"], "block_fpr"),
-                                  (f'oracle threshold {fmt(a["oracle"]["threshold"], 12)}',
-                                   a["oracle"], "block_fpr")):
-            rows.append([f'<code>{esc(a["key"])}</code>', role, esc(label),
-                         num(m["tp"]), num(m["fp"]), num(m["fn"]), num(m["tn"]),
-                         fmt(m["precision"], 10) if m["tp"] + m["fp"] else "n/a",
-                         fmt(m["recall"], 10), fmt(m["f1"], 12), fmt(m[fpr_key], 10)])
-    for label, t in (("block every case", FLOOR),
-                     ("allow every case", TRIVIAL["allow_every_case"])):
-        tp, fp, fn, tn = t["tp"], t["fp"], t["fn"], t["tn"]
-        rows.append([f"<code>{label}</code>", "trivial baseline", "by construction",
-                     num(tp), num(fp), num(fn), num(tn),
-                     fmt(tp / (tp + fp), 10) if tp + fp else "n/a",
-                     fmt(tp / (tp + fn), 1), fmt(f1_of(tp, fp, fn), 12),
-                     fmt(fp / (fp + tn), 1)])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
-
-
-def deploy_table() -> str:
-    head = ["Arm", "Role", "Recall at the FPR cap", "tp", "fp", "F1 at the cap",
-            "Recall at a zero-FP gate", "tp at that gate"]
-    rows = []
-    for a in sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"]):
-        x, z = a["cap_row"], a["zero_fp"]
-        rows.append([f'<code>{esc(a["key"])}</code>',
-                     "negative control" if a["is_control"] else "candidate",
-                     fmt(x["recall"], 12), num(x["tp"]), num(x["fp"]), fmt(x["f1"], 12),
-                     fmt(z["recall"], 12), num(z["tp"])])
-    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
 
 
 def control_finding() -> str:
@@ -2076,6 +2499,10 @@ def control_finding() -> str:
                      fmt(a["shipped"]["f1"], 12), fmt(a["oracle"]["f1"], 12),
                      fmt(a["auc_lc"], 12), fmt(a["shipped"]["block_fpr"], 10),
                      num(a["shipped"]["fp"])])
+    # the trivial floor belongs beside every block-only F1 column on this Space
+    rows.append(["<code>block every case</code>", "trivial floor",
+                 fmt(FLOOR["f1"], 12), MDASH, MDASH, fmt(FLOOR["block_fpr"], 1),
+                 num(FLOOR["fp"])])
     return (
         f'<p>\n  <code>control-modernbert-base</code> is an untrained '
         f'<code>ModernBertForMaskedLM</code> backbone with no trained head and no safety '
@@ -2099,10 +2526,413 @@ def control_finding() -> str:
         f'length-controlled AUC, and best F1 is a diagnostic.\n</p>\n'
         f'<p>\n  The control also blocks fewer benign cases than the highest-ranked candidate: '
         f'{num(fp_ctrl)} against {num(fp_deb)}, which is {pct(fewer, 1)} fewer.\n</p>\n'
-        f'<div class="tbl-scroll">{table_html(["Arm", "Role", "Shipped F1", "Best F1 (oracle)", "Length-controlled AUC", "Block FPR", "False blocks"], rows, numeric_from=2)}</div>')
+        f'<div class="tbl-scroll">{table_html(["Arm", "Role", "Shipped block-only F1", "Its own argmax F1 (in-sample upper bound)", "Length-controlled AUC", "Block FPR", "False blocks"], rows, numeric_from=2)}</div>')
+
+
+# ================================================ one common operating point, and the bands
+# Every arm below is reported at the same block false-positive budget. No arm appears at a
+# threshold chosen for it alone, so the columns are comparable down the table. Each arm's own
+# argmax is a separate table, labelled an in-sample oracle upper bound.
+
+ROLE = {True: "negative control", False: "candidate"}
+
+
+def _band_slot(label: str) -> str:
+    return {"under 3B": "seq2", "3B to 6B": "s4", "6B and up": "axis"}[label]
+
+
+def by_cap():
+    """Every arm, best F1 at the common operating point first."""
+    return sorted(COH.values(), key=lambda a: (-a["cap_row"]["f1"], a["params"]))
+
+
+def _confusion_cells(m: dict, scorable: int, neg: int, fpr_key: str = "fpr") -> list[str]:
+    return [num(m["tp"]), num(m["fp"]), num(m["fn"]), num(m["tn"]),
+            exact(m["precision"]) if m["tp"] + m["fp"] else "n/a",
+            exact(m["recall"]), exact(m["f1"]),
+            exact(accuracy(m, scorable)), exact(m[fpr_key])]
+
+
+CONF_HEAD = ["tp", "fp", "fn", "tn", "Precision", "Recall", "F1", "Accuracy", "Block FPR"]
+
+
+def common_point_table() -> str:
+    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    head = (["Arm", "Role", "Size band", "Counted parameters", "Threshold"] + CONF_HEAD)
+    rows = []
+    for a in by_cap():
+        x = a["cap_row"]
+        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
+                     band_of(a["params"]), num(a["params"]), exact(x["threshold"])]
+                    + _confusion_cells(x, scorable, neg))
+    allow = TRIVIAL["allow_every_case"]
+    for label, t, fk in (("block every case", dict(FLOOR, fpr=FLOOR["block_fpr"]), "fpr"),
+                         ("allow every case",
+                          dict(allow, precision=0.0, recall=0.0, f1=allow["f1"], fpr=0.0), "fpr")):
+        rows.append([f"<code>{label}</code>", "trivial baseline", MDASH, MDASH,
+                     "by construction"]
+                    + [num(t["tp"]), num(t["fp"]), num(t["fn"]), num(t["tn"]),
+                       exact(t["precision"]) if t["tp"] + t["fp"] else "n/a",
+                       exact(t["recall"]), exact(t["f1"]),
+                       exact(accuracy(t, scorable)), exact(t[fk])])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
+
+
+def chart_prf() -> str:
+    """Precision, recall and F1 for every arm at the one shared false-positive budget."""
+    rows, trows = [], []
+    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    for a in by_cap():
+        x = a["cap_row"]
+        rows.append((alabel(a["key"]), [(x["precision"], "s1"), (x["recall"], "s2"),
+                                        (x["f1"], "s3")]))
+        trows.append([alabel(a["key"]), ROLE[a["is_control"]], band_of(a["params"]),
+                      exact(x["threshold"])] + _confusion_cells(x, scorable, neg))
+    svg = hbars(rows, 1.0, gutter=252, rowh=13, pad_right=80,
+                vticks=[0, 0.2, 0.4, 0.6, 0.8, 1.0], where="prf")
+    best = max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])
+    return figure(
+        "prf",
+        f'Precision, recall and F1 at block FPR &#8804; {exact(FPR_CAP)}',
+        f'One budget for every arm, so the three columns are read down the table as well as '
+        f'across it. The threshold each arm needs to reach that budget differs; the budget does '
+        f'not. The highest F1 among the {len(CANDS)} candidates is '
+        f'<code>{esc(best["key"])}</code> at {exact(best["cap_row"]["f1"])}, on '
+        f'{num(best["cap_row"]["tp"])} of {num(CORPUS["positives_A_B"])} positives.',
+        svg, "cohort-length-controlled-ranking.json",
+        legend=[("Precision", "s1"), ("Recall", "s2"), ("F1", "s3")],
+        table=table_html(["Arm", "Role", "Size band", "Threshold"] + CONF_HEAD, trows,
+                         numeric_from=3),
+        note=f'The false-positive allowance at this budget is '
+             f'{num(int(FPR_CAP * CORPUS["negatives_D"]))} of the '
+             f'{num(CORPUS["negatives_D"])} benign cases.')
+
+
+def chart_bands() -> str:
+    """F1 at the common operating point, with each arm's bar coloured by its size band."""
+    rows, trows = [], []
+    for a in by_cap():
+        b = band_of(a["params"])
+        rows.append((f'{alabel(a["key"])} ({a["params"] / 1e9:.2f}B)', a["cap_row"]["f1"],
+                     _band_slot(b)))
+        trows.append([alabel(a["key"]), b, num(a["params"]), ROLE[a["is_control"]],
+                      exact(a["cap_row"]["f1"]), exact(a["cap_row"]["recall"]),
+                      num(a["cap_row"]["tp"])])
+    svg = hbars(rows, 0.12, gutter=300, rowh=19, pad_right=92,
+                vticks=[0, 0.03, 0.06, 0.09, 0.12], where="bands")
+    counts = ", ".join(f'{b} {len(in_band(b))}' for b, _lo, _hi in SIZE_BANDS)
+    return figure(
+        "bands",
+        "F1 at the common operating point, by size band",
+        f'Counted parameters set the band: {counts}. Within a band the order is F1 at the '
+        f'shared budget.',
+        svg, "cohort-length-controlled-ranking.json",
+        legend=[(b, _band_slot(b)) for b, _lo, _hi in SIZE_BANDS],
+        table=table_html(["Arm", "Size band", "Counted parameters", "Role", "F1", "Recall",
+                          "True blocks"], trows, numeric_from=2),
+        note="Parameter counts come from each arm's own run metadata and are checked against the "
+             "arm registry at build time.")
+
+
+def oracle_table() -> str:
+    """Each arm at its own argmax. This is an in-sample upper bound, never an operating point."""
+    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    head = ["Arm", "Role", "Its own threshold"] + CONF_HEAD + ["F1 at the common budget"]
+    rows = []
+    for a in sorted(COH.values(), key=lambda a: -a["oracle_f1"]):
+        if a["oracle"] is None:
+            rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]], "n/a"]
+                        + ["n/a"] * 6 + [exact(a["oracle_f1"])] + ["n/a", "n/a"]
+                        + [exact(a["cap_row"]["f1"])])
+            continue
+        o = a["oracle"]
+        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
+                     exact(o["threshold"])]
+                    + _confusion_cells(o, scorable, neg, "block_fpr")
+                    + [exact(a["cap_row"]["f1"])])
+    rows.append([f"<code>block every case</code>", "trivial baseline", "by construction",
+                 num(FLOOR["tp"]), num(FLOOR["fp"]), num(FLOOR["fn"]), num(FLOOR["tn"]),
+                 exact(FLOOR["precision"]), exact(FLOOR["recall"]), exact(FLOOR["f1"]),
+                 exact(accuracy(FLOOR, scorable)), exact(FLOOR["block_fpr"]), MDASH])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>'
+
+
+def accuracy_table() -> str:
+    """Accuracy beside the accuracy of doing nothing, on both corpora."""
+    s2s, s2n = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    s3s, s3n = S3CORP["scorable_cases_A_B_D"], S3CORP["negatives_D"]
+    head = ["Corpus", "Arm", "Accuracy at the common budget", "All-allow accuracy",
+            "Difference, in cases", "Prevalence"]
+    rows = []
+    for a in by_cap():
+        x = a["cap_row"]
+        rows.append(["s2", f'<code>{esc(a["key"])}</code>', exact(accuracy(x, s2s)),
+                     exact(s2n / s2s), num(x["tp"] - x["fp"]), exact(CORPUS["prevalence"])])
+    for key in sorted(S3ARMS):
+        x = s3_primary(key)["s3_at_fpr_cap"][f"{FPR_CAP}"]
+        rows.append([S3LABEL, f"<code>{esc(key)}</code>", exact(accuracy(x, s3s)),
+                     exact(s3n / s3s), num(x["tp"] - x["fp"]), exact(S3CORP["prevalence"])])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
+
+
+def size_band_tables() -> str:
+    """One table per band, plus the band the cohort leaves empty."""
+    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    out = []
+    for label, lo, hi in SIZE_BANDS:
+        arms = in_band(label)
+        rng = (f"{lo / 1e9:g}B or more" if hi is None
+               else (f"under {hi / 1e9:g}B" if lo == 0
+                     else f"{lo / 1e9:g}B to under {hi / 1e9:g}B"))
+        out.append(f'<h3 id="band-{label.replace(" ", "-").lower()}">{esc(label)} '
+                   f'&#8212; {len(arms)} arms</h3>')
+        out.append(f'<p class="small">Counted parameters {esc(rng)}.</p>')
+        if not arms:
+            out.append('<p>Nothing in this cohort lands here. The largest arm carries '
+                       f'{num(max(a["params"] for a in COH.values()))} counted parameters.</p>')
+            continue
+        head = (["Rank in band", "Arm", "Role", "Counted parameters", "Threshold"] + CONF_HEAD)
+        rows = []
+        for i, a in enumerate(arms, 1):
+            x = a["cap_row"]
+            rows.append([num(i), f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
+                         num(a["params"]), exact(x["threshold"])]
+                        + _confusion_cells(x, scorable, neg))
+        out.append(f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=3)}</div>')
+    return "\n".join(out)
+
+
+def moe_note() -> str:
+    key = "granite-guardian-3.2-3b-a800m"
+    a, r = COH[key], next(x for x in ROWS if x["key"] == key)
+    return (f'<p>\n  <code>{esc(key)}</code> is a mixture-of-experts arm, so its counted total '
+            f'and the parameters active on a forward pass are different numbers. The counted '
+            f'total is {num(a["params"])}, recorded in its run metadata and matched against the '
+            f'arm registry. The artifacts carry no counted active-parameter figure for it; the '
+            f'registry note records {esc(r["note"])}, and the band above places it on the '
+            f'counted total. Every other arm in the cohort is dense, so for them the counted '
+            f'total and the active count coincide.\n</p>')
+
+
+def auc_table() -> str:
+    """Threshold-free discrimination, one row per arm, each AUC labelled with its definition."""
+    lo, hi = BAND["chance_95pct_interval"]
+    head = ["Arm", "Role", "Class structure", "Ranking variable", "AUC definition", "Raw AUC",
+            "Length-controlled AUC", "Against the chance band"]
+    rows = []
+    for a in by_lc():
+        var, _, dfn = a["primary_var"].partition("||")
+        where = ("below" if a["auc_raw"] < lo else
+                 "inside" if a["auc_raw"] <= hi else "above")
+        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]],
+                     esc(a["class_structure"]), f'<code>{esc(var.strip())}</code>',
+                     esc(dfn.strip().replace("defA==defB", "A and B coincide")),
+                     exact(a["auc_raw"]), exact(a["auc_lc"]), where])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=5)}</div>'
+
+
+def definition_table() -> str:
+    """Where definitions A and B differ, they are reported apart and never compared."""
+    key = "falcon3-1b-instruct"
+    src = RANK["arms_s2"][key]
+    head = ["Variable", "Definition A", "Definition B", "Ranked on"]
+    seen: dict[str, dict[str, float]] = {}
+    for vk, vv in src["by_variable"].items():
+        var, _, dfn = vk.partition("||")
+        seen.setdefault(var.strip(), {})[dfn.strip()] = (
+            vv["auc_raw_mann_whitney_tie_corrected"])
+    rows = []
+    for var, by_def in sorted(seen.items()):
+        both = by_def.get("defA==defB")
+        flagged = "P(block) - P(confirm)" in var
+        var_html = esc(var).replace(" - ", f" {MINUS} ")
+        if both is not None:
+            rows.append([f"<code>{var_html}</code>", exact(both), exact(both),
+                         "yes, when the class structure selects it"])
+        else:
+            rows.append([f"<code>{var_html}</code>", exact(by_def.get("defA")),
+                         exact(by_def.get("defB")),
+                         "no; it inverted below chance on the disjoint corpus and is excluded "
+                         "by rule" if flagged
+                         else "no; the two definitions give different orderings and the "
+                              "programme ranks on one fixed variable"])
+    return (f'<p class="small">\n  One arm, <code>{esc(key)}</code>, shown because it emits all '
+            f'three classes and therefore carries every variable. Definition A takes the maximum '
+            f'block probability and the maximum confirm probability over a case\'s events and '
+            f'then subtracts. Definition B takes the maximum over events of the per-event '
+            f'difference. For a variable that is already a single monotone scalar the two reduce '
+            f'to the same maximum, which is what <code>A and B coincide</code> records. '
+            f'<code>P(block) {MINUS} P(confirm)</code> is the variable that inverted below '
+            f'chance on a disjoint corpus, and it is never ranked on.\n</p>\n'
+            f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>')
+
+
+def floor_table() -> str:
+    """Shipped block-only F1 for every arm, with the trivial floor in the same table."""
+    scorable, neg = CORPUS["scorable_cases_A_B_D"], CORPUS["negatives_D"]
+    head = ["Arm", "Role"] + CONF_HEAD + ["Against the floor"]
+    rows = []
+    for a in by_shipped():
+        s = a["shipped"]
+        rows.append([f'<code>{esc(a["key"])}</code>', ROLE[a["is_control"]]]
+                    + _confusion_cells(s, scorable, neg, "block_fpr")
+                    + ["above" if s["f1"] > FLOOR["f1"] else "below"])
+    rows.append(["<code>block every case</code>", "trivial floor",
+                 num(FLOOR["tp"]), num(FLOOR["fp"]), num(FLOOR["fn"]), num(FLOOR["tn"]),
+                 exact(FLOOR["precision"]), exact(FLOOR["recall"]), exact(FLOOR["f1"]),
+                 exact(accuracy(FLOOR, scorable)), exact(FLOOR["block_fpr"]), MDASH])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=2)}</div>'
+
+
+def corpus_table() -> str:
+    """Both corpora, documented field by field."""
+    head = ["Property", "s2", S3LABEL[0].upper() + S3LABEL[1:]]
+    g2, g3 = CORPUS["grade_counts_all"], S3CORP["grade_counts_all"]
+    rows = [
+        ["Cases", num(CORPUS["cases"]), num(S3CORP["cases"])],
+        ["Scorable cases", num(CORPUS["scorable_cases_A_B_D"]),
+         num(S3CORP["scorable_cases_A_B_D"])],
+        ["Positives, grade A and grade B", num(CORPUS["positives_A_B"]),
+         num(S3CORP["positives_A_B"])],
+        ["Grade A positives", num(g2["A"]), num(g3["A"])],
+        ["Grade B positives", num(g2["B"]), num(g3["B"])],
+        ["Grade A share of positives",
+         exact(CORPUS["grade_counts_all"]["A"] / CORPUS["positives_A_B"]),
+         exact(g3["A"] / S3CORP["positives_A_B"])],
+        ["Benign, grade D", num(CORPUS["negatives_D"]), num(S3CORP["negatives_D"])],
+        ["Grade C, excluded from scoring", num(CORPUS["grade_C_excluded"]),
+         num(S3CORP["grade_C_excluded"])],
+        ["Prevalence of positives over scorable cases", exact(CORPUS["prevalence"]),
+         exact(S3CORP["prevalence"])],
+        ["All-allow accuracy",
+         exact(CORPUS["negatives_D"] / CORPUS["scorable_cases_A_B_D"]),
+         exact(S3CORP["negatives_D"] / S3CORP["scorable_cases_A_B_D"])],
+        ["Block-everything F1", exact(FLOOR["f1"]), exact(S3FLOOR["f1"])],
+        ["Chance band at AUC 0.5, 95%",
+         f'[{exact(BAND["chance_95pct_interval"][0])}, '
+         f'{exact(BAND["chance_95pct_interval"][1])}]',
+         f'[{exact(S3BANDC["band_95pct"][0])}, {exact(S3BANDC["band_95pct"][1])}]'],
+        ["Hanley&#8211;McNeil standard error at AUC 0.5",
+         exact(BAND["hanley_mcneil_se_at_auc_0.5"]), exact(S3BANDC["se_at_auc_0.5"])],
+        ["Prediction rows per arm", num(DEB["prediction_rows"]),
+         num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})))],
+        ["Arms scored on it", num(len(COH)), num(len(S3ARMS))],
+        ["<code>cases_sha256</code>", f'<code>{esc(CORPUS["cases_sha256"])}</code>',
+         f'<code>{esc(S3CORP["cases_sha256"])}</code>'],
+        ["Case-id overlap with the other corpus",
+         num(S3C["corpora"]["case_id_overlap_s2_s3"]),
+         num(S3C["corpora"]["case_id_overlap_s2_s3"])],
+        ["Redistribution", "evaluation-only; rows stay in a private data repository",
+         "evaluation-only; rows stay in a private data repository"],
+        ["Published here", "aggregates over the corpus or a stratum of it",
+         "aggregates over the corpus or a stratum of it"],
+    ]
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
+
+
+def grade_scheme_table() -> str:
+    g = ROSTER["corpus_grades"]
+    cond = CORPORA["label_scheme"]["conditions"]
+    head = ["Grade", "Condition the function tests", "What it records", "Scored as",
+            "Cases in s2", "Cases in the second corpus"]
+    g2, g3 = CORPUS["grade_counts_all"], S3CORP["grade_counts_all"]
+    scored = {"A": "positive", "B": "positive", "C": "excluded", "D": "negative",
+              "E": "not present in either corpus"}
+    rows = [[f"<code>{k}</code>", esc(cond[k]),
+             esc(g[k]) if k in g else "no case of this grade is in either corpus", scored[k],
+             num(g2.get(k, 0)), num(g3.get(k, 0))]
+            for k in ("A", "B", "C", "D", "E")]
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=4)}</div>'
+
+
+def label_provenance_block() -> str:
+    ls = CORPORA["label_scheme"]
+    imp = "".join(f'<li><code>{esc(p)}</code></li>' for p in ls["importers"])
+    return (f'<p>\n  {esc(ls["how"])}\n</p>\n'
+            f'<p>\n  The function is <code>{esc(ls["function"])}()</code> in '
+            f'<a href="{GH}/{esc(ls["source"])}"><code>{esc(ls["source"])}</code></a>, '
+            f'{num(LABELS["bytes"])} bytes at sha256 <code>{esc(LABELS["sha256"])}</code>, '
+            f're-hashed at build time. The scoring paths import it:\n</p>\n<ul>{imp}</ul>\n'
+            f'<p>\n  {esc(ls["limits"])}\n</p>')
+
+
+def licence_table() -> str:
+    r = CORPORA["redistribution"]
+    head = ["Property", "Value"]
+    rows = [
+        ["Disposition of the case rows", esc(r["corpora"])],
+        ["What leaves the host", esc(r["published_here"])],
+        ["Source-dataset licences", f'recorded per source in '
+                                   f'<a href="{GH}/{esc(r["source_lock"])}">'
+                                   f'<code>{esc(r["source_lock"])}</code></a>, schema version '
+                                   f'{esc(LOCK["schema"])}, frozen '
+                                   f'{esc(LOCK["frozen_at"])}, at sha256 '
+                                   f'<code>{esc(LOCK["sha256"])}</code>'],
+        ["Entries in that lock", num(LOCK["entries"])],
+        ["Redistribution markers across them",
+         ", ".join(f"{esc(k)} {num(v)}" for k, v in LOCK["redistribution"].items())],
+        ["Licence-review status across them",
+         ", ".join(f"{esc(k)} {num(v)}" for k, v in LOCK["licence_status"].items())],
+        ["Distinct licences named", num(len(LOCK["licences"]))],
+        ["Most common licence",
+         f'{esc(next(iter(LOCK["licences"])))} on '
+         f'{num(next(iter(LOCK["licences"].values())))} entries'],
+        ["Restricted sources", esc(r["restricted_sources"])],
+        ["The local-evaluation-only source",
+         f'<code>{esc(r["local_evaluation_only_source"])}</code>'],
+        ["Rows either restricted source contributes to these corpora",
+         f'{num(CENSUS["rows"])}, counted over {num(CENSUS["sources"])} sources by a census '
+         f'recorded in <a href="{GH}/{esc(CENSUS["path"])}">'
+         f'<code>{esc(CENSUS["path"])}</code></a> at sha256 '
+         f'<code>{esc(CENSUS["sha256"])}</code>'],
+        ["Why the lock is cited by digest", esc(r["source_lock_caveat"])],
+    ]
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
+
+
+def heldout_table() -> str:
+    """The six settled held-out bodies, with the digest each metadata records."""
+    head = ["Arm", "Counted parameters", "Rows", "Cases covered", "Cases missing", "Errors",
+            "complete", "Digest matches the body on disk", "Prediction sha256"]
+    rows = []
+    for key in sorted(S3ARMS):
+        a = S3ARMS[key]
+        m = a["s3_meta"]
+        rows.append([f"<code>{esc(key)}</code>", num(m["params_counted"]),
+                     num(a["s3_prediction_rows"]), num(a["s3_cases_in_prediction"]),
+                     num(a["s3_scorable_missing"]), num(m["errors"]),
+                     exact(m["complete_value"]), exact(m["sha256_meta_matches_disk"]),
+                     f'<code>{esc(a["s3_prediction_sha256_disk"])}</code>'])
+    return f'<div class="tbl-scroll">{table_html(head, rows, numeric_from=1)}</div>'
+
+
+def heldout_reconciliation() -> str:
+    """Two artifacts cover different arm counts on the held-out corpus. Which one governs."""
+    stage0 = ", ".join(f"<code>{esc(k)}</code>" for k in S3_STAGE0_NAMES)
+    return (
+        f'<p>\n  Two artifacts carry held-out records and they cover different arms. '
+        f'<code>cohort-rank.json</code> holds {len(S3_STAGE0_NAMES)}: {stage0}. '
+        f'<code>s3-stats.json</code> and <code>s3-scores-in-scope.json</code> hold '
+        f'{len(S3ARMS)}, and the {len(S3_STAGE0_NAMES)} are a subset of the {len(S3ARMS)}.\n</p>\n'
+        f'<p class="small">\n  This section is about which bodies exist and which artifact '
+        f'governs. The corpus they cover has positives that are '
+        f'{pct(S3CORP["grade_counts_all"]["A"] / S3CORP["positives_A_B"])} grade A against s2\'s '
+        f'{pct(CORPUS["grade_counts_all"]["A"] / CORPUS["positives_A_B"])}, so no figure here or '
+        f'anywhere on this Space compares a score across the two.\n</p>\n'
+        f'<p>\n  The two agree on every arm they share: the same ranking variable, the same raw '
+        f'AUC to the last digit, the same {num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()})))} '
+        f'rows, the same prediction digest and the same argmax confusion matrix. The build '
+        f'asserts each of those, so the coverage difference is the only difference.\n</p>\n'
+        f'<p>\n  The {len(S3ARMS)}-arm pair governs. <code>cohort-rank.json</code> was written '
+        f'when {len(S3_STAGE0_NAMES)} held-out bodies had landed and its block was never '
+        f'extended; the later pair was written over the settled archive, where all '
+        f'{len(S3ARMS)} bodies carry <code>complete: true</code> and a digest matching the bytes '
+        f'on disk. Every held-out number on this Space is read from the later pair.\n</p>')
 
 
 CHARTS = {
+    "prf": chart_prf,
+    "bands": chart_bands,
     "corpus": chart_corpus,
     "deploy": chart_deploy,
     "zerofp": chart_zerofp,
@@ -2170,8 +3000,8 @@ def build_figs() -> dict[str, str]:
             fmt(LCA["pure length counter (natural prompt tokens)"]
                 ["mean_within_length_quintile_auc"], 16),
         # the null band
-        "band.lo": fmt(lo, 15), "band.hi": fmt(hi, 15),
-        "band.se": fmt(BAND["hanley_mcneil_se_at_auc_0.5"], 18),
+        "band.lo": exact(lo), "band.hi": exact(hi),
+        "band.se": exact(BAND["hanley_mcneil_se_at_auc_0.5"]),
         # controls
         "cb.auc": fmt(CB["headline"]["auc_of_best_variable"], 16),
         "cl.auc": fmt(CL["headline"]["auc_of_best_variable"], 17),
@@ -2249,8 +3079,9 @@ def build_figs() -> dict[str, str]:
         "s3.arms": num(len(GRADE["per_arm"])),
         "s3.cue.bytes": fmt(S3CUE["context_bytes (max over events)"]["auc_raw"], 15),
         "s3.cue.events": fmt(S3CUE["context_events (max over events)"]["auc_raw"], 17),
-        "s3.band.lo": fmt(S3DESIGN["chance_band_95pct"][0], 14),
-        "s3.band.hi": fmt(S3DESIGN["chance_band_95pct"][1], 13),
+        "s3.band.lo": exact(S3DESIGN["chance_band_95pct"][0]),
+        "s3.band.hi": exact(S3DESIGN["chance_band_95pct"][1]),
+        "s3.band.se": exact(S3DESIGN["chance_se_at_auc_0.5"]),
         "s3.varshare": pct(S3BIND["mean_share_of_variance_from_the_221_positives"]),
         "s3.mdauc": fmt(S3RES["median_minimum_detectable_auc_difference"], 14),
         "s3.pairs": num(len(S3["pairwise_delong_all_pairs"])),
@@ -2412,18 +3243,107 @@ def build_figs() -> dict[str, str]:
                               if a["auc_lc"] < BAND["chance_95pct_interval"][0])),
         # deployment
         "cap.value": f"{FPR_CAP}",
-        "cap.best.arm": sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]["key"],
-        "cap.best.recall": fmt(sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]["cap_row"]["recall"], 14),
-        "cap.best.f1": fmt(sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]["cap_row"]["f1"], 14),
-        "cap.best.tp": num(sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]["cap_row"]["tp"]),
-        "cap.best.fp": num(sorted(COH.values(), key=lambda a: -a["cap_row"]["recall"])[0]["cap_row"]["fp"]),
         "cap.deberta.tp": num(COH["deberta-v3-prompt-injection-v2"]["cap_row"]["tp"]),
+        # --- the common operating point, reported the same way for every arm
+        "cap.exact": exact(FPR_CAP),
+        "cap.maxfp": num(int(FPR_CAP * CORPUS["negatives_D"])),
+        "cap.f1.arm": max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["key"],
+        "cap.f1": exact(max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["cap_row"]["f1"]),
+        "cap.f1.tp": num(max(CANDS.values(),
+                             key=lambda a: a["cap_row"]["f1"])["cap_row"]["tp"]),
+        "cap.f1.fp": num(max(CANDS.values(),
+                             key=lambda a: a["cap_row"]["f1"])["cap_row"]["fp"]),
+        "cap.f1.recall": exact(max(CANDS.values(),
+                                   key=lambda a: a["cap_row"]["f1"])["cap_row"]["recall"]),
+        "cap.f1.precision": exact(max(CANDS.values(),
+                                      key=lambda a: a["cap_row"]["f1"])["cap_row"]["precision"]),
+        "cap.f1.threshold": exact(max(CANDS.values(),
+                                      key=lambda a: a["cap_row"]["f1"])["cap_row"]["threshold"]),
+        "cap.f1.accuracy": exact(accuracy(max(CANDS.values(),
+                                              key=lambda a: a["cap_row"]["f1"])["cap_row"],
+                                          CORPUS["scorable_cases_A_B_D"])),
+        "cap.thresholds": num(len({a["cap_row"]["threshold"] for a in COH.values()})),
+        "cap.f1.params": num(max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["params"]),
+        "cap.f1.band": band_of(max(CANDS.values(), key=lambda a: a["cap_row"]["f1"])["params"]),
+        # --- size bands
+        "band.under": num(len(in_band("under 3B"))),
+        "band.mid": num(len(in_band("3B to 6B"))),
+        "band.upper": num(len(in_band("6B and up"))),
+        "band.max.params": num(max(a["params"] for a in COH.values())),
+        "band.max.arm": max(COH.values(), key=lambda a: a["params"])["key"],
+        "band.min.params": num(min(a["params"] for a in COH.values())),
+        "band.min.arm": min(COH.values(), key=lambda a: a["params"])["key"],
+        "band.spread": f'{max(a["params"] for a in COH.values()) / min(a["params"] for a in COH.values()):.0f}',
+        "band.best.under": in_band("under 3B")[0]["key"],
+        "band.best.mid": in_band("3B to 6B")[0]["key"],
+        # --- accuracy against the accuracy of doing nothing
+        "acc.s2.allow": exact(CORPUS["negatives_D"] / CORPUS["scorable_cases_A_B_D"]),
+        "acc.s3.allow": exact(S3CORP["negatives_D"] / S3CORP["scorable_cases_A_B_D"]),
+        "acc.beat": num(sum(1 for a in COH.values()
+                            if a["cap_row"]["tp"] > a["cap_row"]["fp"])),
+        "acc.gain": num(max(a["cap_row"]["tp"] - a["cap_row"]["fp"] for a in COH.values())),
+        # --- each arm's own argmax, an in-sample upper bound
+        "oracle.best.arm": max(COH.values(), key=lambda a: a["oracle_f1"])["key"],
+        "oracle.best.f1": exact(max(a["oracle_f1"] for a in COH.values())),
+        "oracle.min.arm": min(COH.values(), key=lambda a: a["oracle_f1"])["key"],
+        "oracle.min.f1": exact(min(a["oracle_f1"] for a in COH.values())),
+        "oracle.clear.floor": num(sum(1 for a in COH.values()
+                                      if a["oracle_f1"] > FLOOR["f1"])),
+        # --- threshold-free
+        "auc.above": num(sum(1 for a in COH.values()
+                             if a["auc_raw"] > BAND["chance_95pct_interval"][1])),
+        "auc.inside": num(sum(1 for a in COH.values()
+                              if BAND["chance_95pct_interval"][0] <= a["auc_raw"]
+                              <= BAND["chance_95pct_interval"][1])),
+        "auc.below": num(sum(1 for a in COH.values()
+                             if a["auc_raw"] < BAND["chance_95pct_interval"][0])),
+        "auc.coincide": num(sum(1 for a in COH.values()
+                                if "defA==defB" in a["primary_var"])),
+        # --- the held-out corpus, as settled
+        "heldout.arms": num(len(S3ARMS)),
+        "heldout.rows": num(next(iter({a["s3_prediction_rows"] for a in S3ARMS.values()}))),
+        "heldout.stage0": num(len(S3_STAGE0_NAMES)),
+        "heldout.floor.f1": exact(S3FLOOR["f1"]),
+        "heldout.sha": S3CORP["cases_sha256"],
+        "heldout.overlap": num(S3C["corpora"]["case_id_overlap_s2_s3"]),
+        "corpus.prev.ratio": f'{CORPUS["prevalence"] / S3CORP["prevalence"]:.2f}&#215;',
+        "rank1.stable": "no" if not AUTH["rank_stability"]["rank_1_stable"] else "yes",
+        "rank2.stable": "no" if not AUTH["rank_stability"]["rank_2_stable"] else "yes",
+        # --- the Wilson interval on the best recall at the common budget
+        "res.wilson.lo": exact(wilson(max(CANDS.values(),
+                                          key=lambda a: a["cap_row"]["f1"])["cap_row"]["tp"],
+                                      CORPUS["positives_A_B"])[0]),
+        "res.wilson.hi": exact(wilson(max(CANDS.values(),
+                                          key=lambda a: a["cap_row"]["f1"])["cap_row"]["tp"],
+                                      CORPUS["positives_A_B"])[1]),
+        # --- the untrained backbone, at both operating points
+        "cb.shipped": exact(BASE["shipped"]["f1"]),
+        "cb.oracle": exact(BASE["oracle"]["f1"]),
+        "beat.control.shipped": num(sum(1 for a in CANDS.values()
+                                        if a["shipped"]
+                                        and a["shipped"]["f1"] <= BASE["shipped"]["f1"])),
+        "beat.control.oracle": num(sum(1 for a in CANDS.values()
+                                       if a["oracle"]
+                                       and a["oracle"]["f1"] <= BASE["oracle"]["f1"])),
+        # --- where the grades and the licences come from
+        "labels.path": LABELS["path"],
+        "labels.fn": CORPORA["label_scheme"]["function"],
+        "labels.sha": LABELS["sha256"],
+        "labels.bytes": num(LABELS["bytes"]),
+        "lock.path": LOCK["path"],
+        "lock.sha": LOCK["sha256"],
+        "lock.entries": num(LOCK["entries"]),
+        "lock.frozen": LOCK["frozen_at"],
+        "lock.aggregate": num(LOCK["redistribution"].get("aggregate-only", 0)),
+        "lock.download": num(LOCK["redistribution"].get("download-only", 0)),
+        "lock.vendored": num(LOCK["redistribution"].get("vendored", 0)),
+        "lock.licences": num(len(LOCK["licences"])),
         "zfp.zero": num(sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] == 0)),
         "zfp.nonzero": num(sum(1 for a in CANDS.values() if a["zero_fp"]["recall"] > 0)),
         "zfp.candidates": num(len(CANDS)),
         "zfp.best.arm": max(CANDS.values(), key=lambda a: a["zero_fp"]["recall"])["key"],
-        "zfp.best.recall": fmt(max(CANDS.values(),
-                                   key=lambda a: a["zero_fp"]["recall"])["zero_fp"]["recall"], 12),
+        "zfp.best.recall": exact(max(CANDS.values(),
+                                     key=lambda a: a["zero_fp"]["recall"])["zero_fp"]["recall"]),
         "zfp.best.tp": num(max(CANDS.values(),
                                key=lambda a: a["zero_fp"]["recall"])["zero_fp"]["tp"]),
         # settlement
@@ -2539,6 +3459,21 @@ def lg_categories() -> str:
             f"{esc(t['readout'])}.</p>")
 
 
+def artifacts_read() -> str:
+    """Every file this build read, deep-linked, with its digest. Derived from the read log, so a
+    new input cannot be published without appearing here."""
+    rows = []
+    for path in sorted(_TOUCHED):
+        rel = os.path.relpath(path, REPO_ROOT)
+        rows.append([f'<a href="{GH}/{esc(rel)}"><code>{esc(rel)}</code></a>',
+                     num(os.path.getsize(path)),
+                     f'<code>{esc(sha256_file(path)[:16])}</code>'])
+    return (f'<p>\n  {len(rows)} files, listed from the build\'s own read log. A file the build '
+            f'opens and this table omits is impossible: the table is generated from that log.\n'
+            f'</p>\n<div class="tbl-scroll">'
+            f'{table_html(["File", "Bytes", "sha256, first 16"], rows, numeric_from=1)}</div>')
+
+
 def caveat_list() -> str:
     items = "".join(f'<li>{esc(c["text"])}</li>'
                     for c in LAPTOP["provenance"]["caveats"])
@@ -2546,9 +3481,21 @@ def caveat_list() -> str:
 
 
 UIS = {
+    "common_point_table": common_point_table,
+    "oracle_table": oracle_table,
+    "accuracy_table": accuracy_table,
+    "size_band_tables": size_band_tables,
+    "moe_note": moe_note,
+    "auc_table": auc_table,
+    "definition_table": definition_table,
+    "floor_table": floor_table,
+    "corpus_table": corpus_table,
+    "grade_scheme_table": grade_scheme_table,
+    "label_provenance": label_provenance_block,
+    "licence_table": licence_table,
+    "heldout_table": heldout_table,
+    "heldout_reconciliation": heldout_reconciliation,
     "control_finding": control_finding,
-    "metrics_table": metrics_table,
-    "deploy_table": deploy_table,
     "estimator_table": estimator_table,
     "sparse_bin_note": sparse_bin_note,
     "corpus_design_note": corpus_design_note,
@@ -2558,6 +3505,7 @@ UIS = {
     "scored_table": scored_table,
     "taxonomy_table": taxonomy_table,
     "lg_categories": lg_categories,
+    "artifacts_read": artifacts_read,
     "caveat_list": caveat_list,
 }
 
@@ -2596,6 +3544,9 @@ def check_card(body: str) -> list[str]:
 
 NAV_ITEMS = [
     ("index.html", "Overview"),
+    ("operating-point.html", "Operating point"),
+    ("sizes.html", "Size bands"),
+    ("datasets.html", "Datasets"),
     ("baselines.html", "Baselines"),
     ("results.html", "Results"),
     ("roster.html", "Roster"),
@@ -2617,6 +3568,8 @@ def nav(current: str) -> str:
 
 
 TOKEN = re.compile(r"\{\{(chart|fig|ui):([A-Za-z0-9_.]+)\}\}")
+
+
 
 
 def main() -> int:
@@ -2751,7 +3704,11 @@ def main() -> int:
         print("  " + t)
     with open(os.path.join(OUT, "_build-figures.json"), "w", encoding="utf-8") as fh:
         json.dump({"figures": figs,
-                   "artifacts_read": sorted(_TOUCHED),
+                   # repo-rooted, so the record identifies files in the repository and carries no
+                   # part of whatever machine ran the build
+                   "artifacts_read": sorted(os.path.relpath(p, REPO_ROOT) for p in _TOUCHED),
+                   "artifacts_read_sha256": {
+                       os.path.relpath(p, REPO_ROOT): sha256_file(p) for p in sorted(_TOUCHED)},
                    "assertions_checked": len(ASSERTS),
                    "charts": sorted(charts),
                    "cases_sha256": CORPUS["cases_sha256"]}, fh, indent=1, sort_keys=True)

@@ -470,6 +470,34 @@ RETIRED = [
      "the estimator is named by its label and its source, not described loosely in prose"),
     ("is zero-filled",
      "nothing here is zero-filled; an inapplicable variable is recorded as inapplicable"),
+    # The second restricted source is being removed from the corpora entirely. It contributed 0
+    # rows to either corpus, so naming it here would publish a dependency this Space does not
+    # have. The aggregate-only disclosure stays; the name does not.
+    ("augur",
+     "the second restricted source contributed 0 rows to either corpus and is being removed from "
+     "them; the aggregate-only disclosure is published without naming it"),
+    # Claims about the ranking that the artifact's own stability record contradicts.
+    ("Both hold their places under every estimator",
+     "withdrawn: the artifact records rank_1_stable and rank_2_stable as false, and one scheme "
+     "contradicts each"),
+    ("hold their places under every estimator", "the same withdrawn claim in its short form"),
+    ("stable across every estimator", "the same claim again"),
+    # Accuracy without its baseline, and an oracle figure presented as an operating point.
+    ("score exactly zero at their own argmax",
+     "withdrawn: every arm clears the trivial floor at its own argmax; the 5 arms that score "
+     "exactly zero do so at their shipped decision"),
+    ("Ranks 2 and 3 ran at cap",
+     "the joint claim about positions 2 and 3, withdrawn because position 3 is contested"),
+    ("best accuracy",
+     "accuracy is dominated by the benign class at these prevalences and is never reported "
+     "without the all-allow baseline in the same table"),
+    ("accuracy of 0.95",
+     "an accuracy below the all-allow baseline on the second corpus; accuracy appears only "
+     "beside that baseline"),
+    # The retired variable, as a ranking.
+    ("ranked on P(block)",
+     "the ranking variable is named in full with its definition label, and the difference "
+     "variable is excluded by rule"),
 ]
 
 pages = sorted(p for p in os.listdir(SITE) if p.endswith(".html"))
@@ -535,10 +563,49 @@ for name in pages:
          "index does not carry the grade-composition caveat"),
         ("README.md", "grade A",
          "the Space card does not carry the grade-composition caveat"),
-        ("results.html", "Block FPR",
-         "the results page has no block-FPR column"),
-        ("results.html", "Precision", "the results page has no precision column"),
-        ("results.html", "Recall", "the results page has no recall column"),
+        # The per-arm confusion columns moved to the operating-point page, where every arm is
+        # reported at one shared false-positive budget. The requirement follows the content.
+        ("operating-point.html", "Block FPR",
+         "the operating-point page has no block-FPR column"),
+        ("operating-point.html", "Precision",
+         "the operating-point page has no precision column"),
+        ("operating-point.html", "Recall", "the operating-point page has no recall column"),
+        ("operating-point.html", "Accuracy", "the operating-point page has no accuracy column"),
+        ("operating-point.html", "0.00384502",
+         "the operating-point page does not state the shared false-positive budget"),
+        ("operating-point.html", "in-sample oracle upper bound",
+         "the oracle label is missing from the operating-point page"),
+        ("operating-point.html", "All-allow accuracy",
+         "accuracy is printed without the all-allow baseline in the same table"),
+        ("operating-point.html", "0.20503174229955326",
+         "the trivial floor is missing from the operating-point page at full precision"),
+        ("operating-point.html", "grade A",
+         "the operating-point page does not carry the grade-composition caveat"),
+        ("sizes.html", "under 3B", "the first size band is missing"),
+        ("sizes.html", "3B to 6B", "the second size band is missing"),
+        ("sizes.html", "6B and up", "the third size band is missing"),
+        ("sizes.html", "Nothing in this cohort lands here",
+         "the empty size band is not printed with its zero count and its one-line statement"),
+        ("sizes.html", "mixture-of-experts",
+         "the mixture-of-experts arm's parameter counts are not distinguished"),
+        ("datasets.html", "39f2c1df2369952a0525cc4c5575f4bdb590fb3ca8c1bc6805cf4f376c1adbf7",
+         "the s2 corpus digest is missing from the datasets page"),
+        ("datasets.html", "0ccbc08fb408ffefc89e051c585cfe22433b1ed4c9714f60cc0f7e242969fa03",
+         "the second corpus's digest is missing from the datasets page"),
+        ("datasets.html", "truth_grade",
+         "the datasets page does not name the function that assigns every grade"),
+        ("datasets.html", "Redistribution",
+         "the datasets page carries no redistribution marker"),
+        ("datasets.html", "mcptox",
+         "the local-evaluation-only disclosure is missing from the datasets page"),
+        ("datasets.html", "grade A",
+         "the datasets page does not carry the grade-composition caveat"),
+        ("datasets.html", "no transfer figure is published",
+         "the datasets page does not state that no transfer figure is published"),
+        ("results.html", "chance band",
+         "the results page does not print the chance band beside its AUC table"),
+        ("results.html", "A and B coincide",
+         "the AUC definition labels are missing from the results page"),
         ("methodology.html", "grade-C", "methodology does not explain the grade-C exclusion"),
         ("methodology.html", "complete-line prefix",
          "the settlement digest's scope is not stated"),
@@ -563,7 +630,7 @@ for name in pages:
          "the oracle-ceiling rule is missing from methodology"),
         ("methodology.html", "mcptox",
          "the local-evaluation-only disclosure is missing from methodology"),
-        ("methodology.html", "augur_unsafe_tool_input_eval",
+        ("methodology.html", "aggregate-only",
          "the aggregate-only disclosure is missing from methodology"),
         ("methodology.html", "stay private",
          "the private-data-repository statement is missing from methodology"),
