@@ -1,5 +1,10 @@
 # DefenseClaw System One Benchmark Handoff
 
+> **Superseded as a status record.** The plan and protocol below still hold. The "Active runs",
+> "Immediate next steps", GPU-worker and cost sections describe 2026-09-21 and are out of date. For
+> what ran, what is published, where the data is and what is still open, see
+> [`../HANDOFF-2026-09-24.md`](../HANDOFF-2026-09-24.md).
+
 Status captured: 2026-09-21. This document is the operational handoff for continuing the Jev/OpenJev/Von guardrail benchmark in Claude Code.
 
 ## Objective

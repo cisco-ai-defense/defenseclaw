@@ -1,4 +1,27 @@
-# DefenseClaw deterministic benchmarks
+# DefenseClaw benchmarks
+
+Three separate evaluation programmes live here. They share the dataset lock, the grade
+function and most of the scoring arithmetic, and they answer different questions — so a number
+from one is **not** comparable with a number from another.
+
+| programme | question | entry point | published |
+|---|---|---|---|
+| **Deterministic guardrails** (this file, below) | Do the shipped deterministic rules detect what they claim, and how noisy are they on benign trajectories? | this README | [`DETERMINISTIC-DETECTION-BENCHMARKS.md`](DETERMINISTIC-DETECTION-BENCHMARKS.md), [`results/public-scorecard-v1.json`](results/public-scorecard-v1.json) |
+| **System One** cascade | What is the best production architecture for `deterministic → System One → Gemma`, on a governed 1,000 → 10,000 → 100,000 funnel? | [`system_one/HANDOFF.md`](system_one/HANDOFF.md), [`system_one/reproduce/`](system_one/reproduce/) | Space [`Vineethsain/defenseclaw-system-one`](https://huggingface.co/spaces/Vineethsain/defenseclaw-system-one) |
+| **SLM tool-call cohort** | Can a laptop-class local model decide that a tool call must be blocked, at a false-positive budget a deployment would accept? | [`slm_toolcall/README.md`](slm_toolcall/README.md) | Space [`Vineethsain/defenseclaw-slm-toolcall`](https://huggingface.co/spaces/Vineethsain/defenseclaw-slm-toolcall) |
+
+Cross-programme context, the corpora as built, the two baselines every number is read against,
+and the findings that were withdrawn: [`EXPERIMENTS.md`](EXPERIMENTS.md).
+Current status, what is published versus withheld, where the data lives and what is still open:
+[`HANDOFF-2026-09-24.md`](HANDOFF-2026-09-24.md).
+
+**Row-level data is never committed.** Every corpus row, prediction body and run meta lives in
+private HuggingFace datasets; this repository holds code, aggregate artifacts and documentation
+only. The restore map is in the handoff.
+
+---
+
+## Deterministic guardrails
 
 This directory contains the public benchmark harness, schemas, dataset lock,
 normalizers, authored conformance fixtures, and published scorecard for
@@ -188,3 +211,17 @@ durations, token counts, and hashes only. They omit state, prompts, provider
 responses, rationales, credentials, and evidence values. Restricted source
 payloads remain referenced by immutable revision and digest instead of being
 copied into the experiment archive.
+
+The runs that were actually executed, stage by stage, are vendored under
+[`system_one/reproduce/`](system_one/reproduce/): corpus and serving setup, the analysis and
+re-mining lane (`07-analysis/`), the Space generator (`08-site-build/`), the chunked reshard that
+recovered the `bespoke-nimble-9b` held-out cell (`09-reshard/`), and the staging, payload guard and
+upload tooling that moved the evidence into the private datasets (`10-archive/`).
+
+## SLM tool-call cohort
+
+22 small locally-runnable models — 20 candidates and 2 negative controls — scored on the same
+`C7` / `I3` / `Q2` cell, reported at one shared block false-positive rate so the columns are
+comparable down the table. See [`slm_toolcall/README.md`](slm_toolcall/README.md) for the corpora,
+the harness, the run coverage (including which arms have the held-out 100,001-row bodies), and the
+end-to-end commands.
