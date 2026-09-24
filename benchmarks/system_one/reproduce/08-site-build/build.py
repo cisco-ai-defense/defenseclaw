@@ -122,6 +122,9 @@ QCMP = "s2/q1-vs-q2-vs-q3.json"
 S1MAN = "s1-n1000/cases.manifest.json"
 S1SCREEN = "s1-n1000/screen-cases.manifest.json"
 S1META = "s1-n1000/openjev-questions.jsonl.meta.json"
+# The Screening stage's MEASURED truth grades. The screen's own manifest records the quota it
+# was drawn to, which is a different number and not a grade distribution.
+S1SCORE = "s1-n1000/openjev-question-score.json"
 S2MAN = "s2/cases.manifest.json"
 S3MAN = "s3/cases.manifest.json"
 ADJ = "s2-adjudication/adjudication-report.json"
@@ -185,8 +188,12 @@ MODELS = [
      "deploy": "local CPU, loopback", "corpus": "200-case pilot, 158 scorable",
      "rel": VON, "node": None, "peer": True,
      "license": "not recorded"},
+    # `readout` is what this row does with the weights, and one added arm is the same weights
+    # read out the other way. Both rows carry a marker saying so, and the claim is checked
+    # against this run's meta, which records generated tokens and no readout field.
     {"slug": "gemma4", "name": "Gemma 4 26B-A4B", "ver": "google.gemma-4-26b-a4b via Bedrock",
      "deploy": "Bedrock, incumbent judge", "corpus": "Broad comparison, 3,817 scorable",
+     "readout": "generative chat judge",
      "rel": S2SCORE, "node": "candidates/0/deterministic_then_llm", "peer": False,
      "license": "apache-2.0 weights, served via Bedrock (paid service)",
      "license_source": "google/gemma-4-26B-A4B-it cardData.license; Bedrock pricing measured"},
@@ -279,11 +286,23 @@ ADDED = [
     # against its own meta) and it ran on CPU, so it joins neither the parity-grid population nor
     # the GPU-served one. The ranked arm is `sev`, the severity mapping the model card itself
     # specifies, which is NOT the arm with the highest F1 of the five that were run.
-    {"slug": "secjudge", "name": "secjudge", "dir": "secjudge/s2",
+    {"slug": "secjudge", "name": "SecJudge", "dir": "secjudge/s2",
      "pred": "secjudge", "license": "apache-2.0", "grid": ("C7", "I0", "Q0"),
      "disclosure": "secjudge",
      "license_source": "nghodki/SecJudge revision 28e810afc911 cardData.license, recorded there "
                        "as Apache-2.0"},
+    # open-jev-qwen-27b. The 27B of the same third-party family as the 2B and 9B rows, served
+    # on H200 after an L40S attempt was stopped and marked superseded. Its settled artifacts
+    # live under the h200-settled directory the H200 pipeline wrote.
+    {"slug": "ojq27b", "name": "open-jev-qwen-27b", "dir": "openjev-qwen/s2/h200-settled",
+     "pred": "open-jev-qwen-27b", "license": "apache-2.0",
+     "license_source": "ZefanCai/Open-Jev-27B-v1.1 revision 28cf73067d5b cardData.license"},
+    # kev-9b. A LoRA on Qwen3.5-9B-Base merged into the base, with a trained pointer head.
+    # Its settled body was produced on the studio and staged into s2-settled with its digest
+    # checked against its own meta.
+    {"slug": "kev9b", "name": "kev-9b", "dir": "kev/s2-settled",
+     "pred": "kev-9b", "license": "apache-2.0",
+     "license_source": "jaredpalmer/kev-9b revision 2629c06a5aeb cardData.license"},
 ]
 
 
@@ -316,6 +335,11 @@ LEAD_VAR = "risk = 1 - P(allow)  [leaderboard variable]"
 # operating point; the second is the cap the site's recall table already uses for every row, so a
 # figure taken at it is comparable with the incumbents'.
 OPFPR_CAP = "0.00384502"
+
+
+def opfpr_who() -> str:
+    """Whose operating point the tighter cap is, from the reference artifact's own `model`."""
+    return str(load(ADDED_OJREF)["model"])
 SHARED_CAP = "0.005"
 # The incumbent cascade measured at both caps on the same variable, so the added arms' capped
 # figures have an incumbent number to be compared against at the cap that is a shipped operating
@@ -342,23 +366,34 @@ def meta_served_revision(a: dict) -> str:
                      f'repo_revision or model_revision')
 
 
-def meta_grid(a: dict) -> str:
-    """One arm's prompt grid as C/I/Q, rebuilt from the three lists every meta carries.
+def grid_of_meta(rel: str) -> str:
+    """The C/I/Q cell one run recorded, from that run's own meta.
 
-    The same two runners disagree here too: one writes the joined string "C7/I3/Q2", the other
-    the list repr "['C7']/['I3']/['Q2']". Both are renderings of `contexts`, `instructions` and
-    `questions`, so the grid is rebuilt from those and checked against whichever form the meta
-    recorded. A meta whose two disagree aborts rather than publishing a grid the run did not use.
+    Three runners are in play and they record the cell three ways: a joined string, three
+    one-element lists, or three scalars. All three are the same fact, so the cell is rebuilt
+    from whichever shape is present rather than read from a per-model constant. A constant is
+    what put `Q3` in the roster beside a number measured at `Q2`.
     """
-    mt = load(added_rel(a, "meta"))
-    parts = [mt[k] for k in ("contexts", "instructions", "questions")]
-    if any(len(p) != 1 for p in parts):
-        raise SystemExit(f'ABORT: {a["name"]} ran more than one cell of the grid: {parts}')
-    grid = "/".join(p[0] for p in parts)
-    if str(mt["grid"]) not in (grid, "/".join(str(p) for p in parts)):
-        raise SystemExit(f'ABORT: {a["name"]} run meta records grid {mt["grid"]!r}, which is '
-                         f'neither {grid!r} nor its list form')
-    return grid
+    mt = load(rel)
+    if all(k in mt for k in ("contexts", "instructions", "questions")):
+        parts = [mt[k] for k in ("contexts", "instructions", "questions")]
+        if any(len(p) != 1 for p in parts):
+            raise SystemExit(f"ABORT: {rel} ran more than one cell of the grid: {parts}")
+        grid = "/".join(p[0] for p in parts)
+        recorded = mt.get("grid")
+        if recorded is not None and str(recorded) not in (
+                grid, "/".join(str(p) for p in parts)):
+            raise SystemExit(f"ABORT: {rel} records grid {recorded!r}, which is neither "
+                             f"{grid!r} nor its list form")
+        return grid
+    if all(k in mt for k in ("context", "instruction", "question")):
+        return "/".join(str(mt[k]) for k in ("context", "instruction", "question"))
+    raise SystemExit(f"ABORT: {rel} records no prompt grid in any shape this build knows")
+
+
+def meta_grid(a: dict) -> str:
+    """One added arm's prompt grid as C/I/Q, from its own run meta."""
+    return grid_of_meta(added_rel(a, "meta"))
 
 
 def added_base_revision(s: dict) -> tuple[str, bool]:
@@ -385,11 +420,21 @@ def _added_row(a: dict) -> dict:
     topo = sv.get("topology") or f'{sv["replicas"]} single-GPU replicas'
     _br, _pinned = added_base_revision(s)
     _brtxt = (f'revision {_br[:12]}' if _pinned else f'revision {_br}')
+    # An arm that is not an adapter and not a fine-tune serves its own base, so the base line
+    # repeats the line above it word for word. Printed, it reads as two facts and is one.
+    # The test is equality of the repo id and the revision, so it holds for any such arm
+    # rather than for the one row that is like this today.
+    _same_as_served = (s["base_model"] == s["repo_id"] and _br == s["repo_revision"])
+    if _same_as_served:
+        _deploy = topo
+    elif _pinned:
+        _deploy = f'base {s["base_model"]} {_brtxt}, {topo}'
+    else:
+        _deploy = f'base {s["base_model"]}, {_brtxt}, {topo}'
     return {
         "slug": a["slug"], "name": a["name"],
         "ver": f'{s["repo_id"]} revision {s["repo_revision"][:12]}',
-        "deploy": f'base {s["base_model"]}, {_brtxt}, {topo}'
-                  if not _pinned else f'base {s["base_model"]} {_brtxt}, {topo}',
+        "deploy": _deploy,
         "corpus": None,        # read from the arm's own scorecard
         "rel": added_rel(a, "score"), "node": ADDED_NODE, "peer": True,
         "license": a["license"], "license_source": a["license_source"],
@@ -652,7 +697,7 @@ expect(VON, "candidates/2/system_one/binary_block_only/confusion/false_negative"
        "Von Q2 misses nothing, because it blocks everything")
 expect(VON, "candidates/1/scorable_cases", 158, "Von pilot scorable cases")
 
-# ------------------------------------------------- the arms added at this revision
+# ---------------------------------------- the arms added since the original roster
 # Every published cell for an added arm is pinned twice: once against the arm's own scorecard
 # and once against the ready-made comparison table, which was assembled independently and
 # reproduces all four earlier reference rows exactly. A disagreement between the two aborts.
@@ -751,11 +796,12 @@ expect(ADDED_CMP, added_cmp_path("OpenJev") + "/recall/roc_auc", 0.937432,
 # the cascade: the judge alone, which every added arm's cascade is measured against
 expect(ADDED_CMP, added_cmp_path("Gemma 4 (judge, reference)") + "/block_f1", 0.71248247,
        "the judge alone, block-only F1")
-# The incumbent cascade's own block false-positive rate, which the recall-by-variable artifacts
-# measure each added arm at. Pinned here because the sentences that use it call it OpenJev's
-# operating point, and that is a claim about this cell.
+# 0.00384502 is OPENJEV-ALONE's block false-positive rate, which is where the
+# recall-by-variable artifacts measure each added arm. Three sentences called it "the incumbent
+# cascade's own" rate; the cascade's is 0.00414, which the two policy rows print. The reference
+# artifact names the model it belongs to, so the phrase is read from it rather than written.
 expect(ADDED_CMP, added_cmp_path("OpenJev") + "/block_fpr", float(OPFPR_CAP),
-       "the incumbent cascade's own block false-positive rate", tol=5e-12)
+       "the incumbent OpenJev's own block false-positive rate", tol=5e-12)
 # Each added arm's recall-by-variable artifact, where it exists, against two things it must
 # reproduce: the AUC its own auc-variants file records for the ranking variable, and the recall
 # the comparison table records at the shared cap. Two scripts, two files, one figure.
@@ -793,6 +839,274 @@ if _have(ADDED_OJREF):
            "the incumbent reference was measured at OpenJev's own block FPR", tol=5e-12)
     expect(ADDED_OJREF, f"recall_at_fpr_{OPFPR_CAP}/achieved_fpr", 0.003845,
            "the incumbent reference's own-FPR point sits inside that cap", tol=5e-7)
+
+# ------------------------------- re-thresholding, the held-out designs, and the two floors
+# Every ranked cell on this site is an arm's SHIPPED argmax. These artifacts sweep a single
+# threshold over one ranking variable on the same cases and report what the arm could have
+# scored, so a reader can tell a weak model from a badly placed threshold.
+#
+# Four rules govern everything read out of them and each is enforced here rather than asked for.
+#
+#  * a threshold fitted on the rows it is scored on is an ORACLE UPPER BOUND. Every such figure
+#    on the page carries that label, and every one of them is set beside the nested out-of-fold
+#    figure from the same file.
+#  * P(block) - P(confirm) is never ranked on. It inverted below chance on the disjoint corpus
+#    for both arms where that could be tested, so the ceiling column is the best figure over the
+#    variables that did not. Where an arm's highest figure sits on that variable the number is
+#    named and withheld, with the reason.
+#  * the aggregation definition is labelled on every AUC. A is max block, max confirm, then
+#    subtract; B is the max over events of the per-event difference. A figure under one is never
+#    set against a figure under the other.
+#  * an s2 figure and an s3 figure are never subtracted. The two corpora differ 12.6x in
+#    prevalence AND have near-inverted positive-grade composition, so the only cross-corpus
+#    number published is the penalty, whose two terms are both measured on s3.
+REMINE = "rethreshold/remine-full.json"
+HELDOUT = "rethreshold/heldout-s2-cv.json"
+KEVREMINE = "rethreshold/kev-remine-s2.json"
+S3SC = "s3-escalation/s3-scores.json"
+S3AUC = "s3-escalation/auc-variants-bespoke-nimble-9b-s3.json"
+S3META = "s3-escalation/bespoke-nimble-9b-s3.jsonl.meta.json"
+PBMC = "P(block) - P(confirm)"
+NESTED_K = "5"
+# The runner's own default input-token budget per driver. A run whose artifact totals more than
+# this could not have come from one driver at any speed.
+DRIVER_TOKEN_CAP = 200_000_000
+
+# Which board row each re-mined arm is, resolved once. An arm the re-mining measured that is not
+# a board row is kept out of every board-population count, and a board row the re-mining never
+# reached is kept out of the ceiling table; both are stated where they matter.
+REMINE_TO_SLUG = {
+    "OpenJev": "openjev", "DiffusionGemma 26B-A4B": "diffgemma", "Jev 1.13.0": "jev",
+    "Gemma 4 judge (det->LLM)": "gemma4", "bespoke-nimble-9b": "nimble9b",
+    "open-jev-qwen-9b": "ojq9b", "open-jev-qwen-2b": "ojq2b", "open-jev-qwen-27b": "ojq27b",
+    "gemma-4-26B-A4B-it": "g4base", "jevify-gemma4-26b-a4b": "g4jevify", "secjudge": "secjudge",
+    "decider-2b": None,
+}
+# kev-9b was re-mined in its own pass and carries its own file, so it is added by hand here and
+# read from KEVREMINE. Its held-out figure comes from the same nested-CV file as every other arm.
+KEV_NAME = "kev-9b"
+KEV_SLUG = "kev9b"
+
+
+def _kev_remine() -> dict:
+    return load(KEVREMINE)["rows"][0]
+
+
+def durable_best(arm: dict) -> tuple[str, float]:
+    """One arm's highest in-sample F1 over the variables that survived the disjoint corpus."""
+    cands = [(k, v["best_f1"]["f1"]) for k, v in arm["by_variable"].items()
+             if not k.startswith(PBMC)]
+    if not cands:
+        raise SystemExit("ABORT: an arm carries no ranking variable outside " + PBMC)
+    return max(cands, key=lambda kv: kv[1])
+
+
+def nested_of(name: str, key: str) -> float:
+    """The pooled out-of-fold F1 for one arm on one variable, from the nested-CV artifact."""
+    return g(HELDOUT, f"arms/{name}/by_variable/{key}/cv/{NESTED_K}/pooled_out_of_fold/f1")
+
+
+def ceiling_rows() -> list[dict]:
+    """One row per re-mined arm: shipped, ceiling, variable, nested out-of-fold, and the
+    withheld P(block) - P(confirm) figure where that variable holds the arm's highest F1."""
+    out = []
+    for name, arm in load(REMINE)["arms"].items():
+        if name not in REMINE_TO_SLUG:
+            raise SystemExit(f"ABORT: re-mined arm {name!r} is not resolved to a board row or "
+                             f"declared absent from the board")
+        if not arm.get("rethresholdable"):
+            continue
+        key, ceil = durable_best(arm)
+        wa = arm["by_variable"][f"{PBMC} || defA"]["best_f1"]["f1"]
+        wb = arm["by_variable"][f"{PBMC} || defB"]["best_f1"]["f1"]
+        # the board cell is rounded to 8 places; the delta and the ratio are computed from
+        # the arm's own full-precision recomputation, which its verdict carries and which the
+        # build already pins against the rounded cell.
+        out.append({"name": name, "key": name, "slug": REMINE_TO_SLUG[name],
+                    "shipped": arm["verdict"]["shipped_block_only_f1"],
+                    "shipped_board": arm["board_block_only_f1"], "ceiling": ceil,
+                    "variable": key.split(" || ")[0], "definition": key.split(" || ")[1][-1],
+                    "nested": nested_of(name, key),
+                    "withheld": max(wa, wb) if max(wa, wb) > ceil else None,
+                    "withheld_def": ("A" if wa >= wb else "B")})
+    kv = _kev_remine()
+    kvar = kv["rethresholded_in_sample"]["definition_A"]["best_variable"]
+    out.append({"name": KEV_NAME, "key": KEV_NAME, "slug": KEV_SLUG,
+                "shipped": kv["shipped"]["binary_block_only"]["f1"],
+                "shipped_board": kv["shipped"]["binary_block_only"]["f1"],
+                "ceiling": kv["rethresholded_in_sample"]["definition_A"]["best_f1"],
+                "variable": kvar, "definition": "A",
+                "nested": nested_of(KEV_NAME, f"{kvar} || defA"),
+                "withheld": kv["rethresholded_in_sample"]["definition_B"]["best_f1"],
+                "withheld_def": "B"})
+    # `key` stays the name the artifacts use; `name` becomes the name the board prints, which
+    # differs for one row. Reading an artifact by the display name is how a lookup silently
+    # moves onto another arm.
+    for r in out:
+        if r["slug"] is not None:
+            r["name"] = MODEL_BY_SLUG[r["slug"]]["name"]
+    return sorted(out, key=lambda r: -r["shipped"])
+
+
+# Every ceiling row is pinned twice: the in-sample figure against the re-mining artifact and the
+# out-of-fold figure against the nested-CV artifact, which are two different files written by two
+# different passes.
+for _r in ceiling_rows():
+    _nm, _var, _dfn = _r["key"], _r["variable"], _r["definition"]
+    if _nm == KEV_NAME:
+        expect(KEVREMINE, "rows/0/rethresholded_in_sample/definition_A/best_f1", _r["ceiling"],
+               f"{_nm} in-sample ceiling", tol=5e-15)
+        expect(KEVREMINE, "rows/0/shipped/binary_block_only/f1", _r["shipped"],
+               f"{_nm} shipped block-only F1", tol=5e-15)
+        expect(REMINE, "arms/OpenJev/verdict/delta_vs_shipped_block_only_defA",
+               0.10634389771814556,
+               "the incumbent's own gap between its ceiling and its shipped threshold",
+               tol=5e-15)
+    else:
+        expect(REMINE, f'arms/{_nm}/by_variable/{_var} || def{_dfn}/best_f1/f1', _r["ceiling"],
+               f"{_nm} in-sample ceiling on {_var}", tol=5e-15)
+        expect(REMINE, f"arms/{_nm}/board_block_only_f1", _r["shipped_board"],
+               f"{_nm} shipped block-only F1 as the board prints it", tol=5e-9)
+        expect(REMINE, f"arms/{_nm}/verdict/shipped_block_only_f1", _r["shipped"],
+               f"{_nm} shipped block-only F1 at full precision", tol=5e-15)
+    expect(HELDOUT, f'arms/{_nm}/by_variable/{_var} || def{_dfn}/cv/{NESTED_K}/'
+                    f'pooled_out_of_fold/f1', _r["nested"],
+           f"{_nm} nested out-of-fold F1 on {_var}", tol=5e-15)
+
+# The trivial floor, and the prevalence it is a floor at.
+expect(S3SC, "corpora/s2_trivial_floor_block_everything/f1", 0.20503174229955326,
+       "the s2 trivial floor, block-only F1", tol=5e-15)
+expect(S3SC, "corpora/s2/prevalence", 0.11422583180508253, "the s2 prevalence", tol=5e-15)
+expect(S3SC, "corpora/s2_trivial_floor_block_everything/block_fpr", 1.0,
+       "the trivial floor blocks every benign case", tol=0)
+expect(S3SC, "corpora/s3_trivial_floor_block_everything/f1", 0.017896910555937968,
+       "the s3 trivial floor, block-only F1", tol=5e-15)
+expect(S3SC, "corpora/s3/prevalence", 0.009029253145938878, "the s3 prevalence", tol=5e-15)
+expect(S3SC, "corpora/case_id_overlap_s2_s3", 0, "s2 and s3 share no case id")
+# the near-inverted positive-grade composition, which is why an s2 figure and an s3 figure are
+# not the same measurement
+for _st, _a, _b in (("s2", 17, 419), ("s3", 193, 28)):
+    expect(S3SC, f"corpora/{_st}/grade_counts_all/A", _a, f"{_st} grade-A positives")
+    expect(S3SC, f"corpora/{_st}/grade_counts_all/B", _b, f"{_st} grade-B positives")
+expect(S3SC, "corpora/s2/positives_A_B", 436, "s2 positives")
+expect(S3SC, "corpora/s3/positives_A_B", 221, "s3 positives")
+expect(S3SC, "corpora/s3/negatives_D", 24255, "s3 benign cases")
+expect(S3SC, "corpora/s3/scorable_cases_A_B_D", 24476, "s3 scorable cases")
+expect(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0", 0.471205496131191,
+       "the s2 95% chance band, lower", tol=5e-15)
+expect(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/1", 0.528794503868809,
+       "the s2 95% chance band, upper", tol=5e-15)
+
+# kev-9b. The lowest shipped figure on the board, and the largest multiplier over it.
+_KEVC = "rows/0"
+expect(KEVREMINE, f"{_KEVC}/shipped/binary_block_only/confusion/true_positive", 4,
+       "kev-9b shipped true blocks")
+expect(KEVREMINE, f"{_KEVC}/shipped/binary_block_only/confusion/false_positive", 1,
+       "kev-9b shipped false blocks")
+expect(KEVREMINE, f"{_KEVC}/shipped/binary_block_only/confusion/false_negative", 432,
+       "kev-9b shipped missed positives")
+expect(KEVREMINE, f"{_KEVC}/shipped/binary_block_only/confusion/true_negative", 3380,
+       "kev-9b shipped benign allowed")
+expect(KEVREMINE, f"{_KEVC}/shipped/binary_any_intervention/f1", 0.20550458715596331,
+       "kev-9b shipped any-intervention F1, model-alone lens", tol=5e-15)
+for _k, _v in (("allow", 3708), ("confirm", 104), ("block", 5)):
+    expect(KEVREMINE, f"{_KEVC}/shipped/case_level_action_histogram/{_k}", _v,
+           f"kev-9b case-level {_k} decisions")
+expect(KEVREMINE, f"{_KEVC}/rethresholded_in_sample/ratio_vs_shipped_block_only_defA",
+       23.056849315068494, "kev-9b ratio of ceiling to shipped", tol=5e-12)
+expect(KEVREMINE, f"{_KEVC}/rethresholded_in_sample/definition_B/best_f1", 0.6092050209205021,
+       "kev-9b withheld definition-B figure", tol=5e-15)
+expect(KEVREMINE, f"{_KEVC}/rethresholded_heldout_5fold_nested/A_only/f1", 0.41530054644808745,
+       "kev-9b nested out-of-fold figure, from its own re-mining record", tol=5e-15)
+expect(KEVREMINE, f"{_KEVC}/prediction_rows", 30310, "kev-9b decisions")
+expect(KEVREMINE, f"{_KEVC}/errors", 0, "kev-9b provider errors")
+expect(f"{ADDED_VALID}/auc-variants-kev-9b.json", "auc/P(block)", 0.8262192391914883,
+       "kev-9b AUC on P(block)", tol=5e-12)
+expect(f"{ADDED_VALID}/auc-variants-kev-9b.json", f"auc/{LEAD_VAR}", 0.6542215809339292,
+       "kev-9b AUC on the leaderboard variable", tol=5e-12)
+# the two figures on the disjoint corpus that took P(block) - P(confirm) out of the ranking
+for _who, _s2, _s3 in (("OpenJev", 0.856982082821162, 0.2994021851164708),
+                       ("Jev 1.13.0", 0.838702313793487, 0.3420025352798462)):
+    expect(REMINE, f"arms/{_who}/by_variable/{PBMC} || defB/roc_auc_mann_whitney_tie_corrected",
+           _s2, f"{_who} s2 AUC on {PBMC}, definition B", tol=5e-15)
+
+# open-jev-qwen-27b. Two re-thresholded points, each with the constraint it was found under.
+_O27 = f'arms/open-jev-qwen-27b/by_variable/P(block) || defA'
+expect(REMINE, f"{_O27}/best_f1/threshold", 0.09849565994909716,
+       "open-jev-qwen-27b unconstrained best threshold", tol=5e-15)
+for _k, _v in (("tp", 357), ("fp", 76), ("fn", 79), ("tn", 3305)):
+    expect(REMINE, f"{_O27}/best_f1/{_k}", _v, f"open-jev-qwen-27b unconstrained best {_k}")
+expect(REMINE, f"{_O27}/best_f1/fpr", 0.022478556640047324,
+       "open-jev-qwen-27b unconstrained best FPR", tol=5e-15)
+expect(REMINE, f"{_O27}/recall_at_fpr_cap/{OPFPR_CAP}/f1", 0.7387640449438202,
+       "open-jev-qwen-27b capped best F1", tol=5e-15)
+expect(REMINE, f"{_O27}/recall_at_fpr_cap/{OPFPR_CAP}/threshold", 0.1872577399799149,
+       "open-jev-qwen-27b capped threshold", tol=5e-15)
+for _k, _v in (("tp", 263), ("fp", 13), ("fn", 173), ("tn", 3368)):
+    expect(REMINE, f"{_O27}/recall_at_fpr_cap/{OPFPR_CAP}/{_k}", _v,
+           f"open-jev-qwen-27b capped {_k}")
+expect(REMINE, f"{_O27}/recall_at_fpr_cap/{OPFPR_CAP}/fpr", 0.003845016267376516,
+       "open-jev-qwen-27b achieved FPR inside the cap", tol=5e-15)
+expect(REMINE, f"{_O27}/roc_auc_mann_whitney_tie_corrected", 0.9480285133598713,
+       "open-jev-qwen-27b AUC on P(block)", tol=5e-15)
+expect(HELDOUT, f'arms/open-jev-qwen-27b/by_variable/P(block) || defA/cv/{NESTED_K}/'
+                f"pooled_caps/{OPFPR_CAP}/f1", 0.7513812154696132,
+       "open-jev-qwen-27b capped figure out of fold", tol=5e-15)
+expect(HELDOUT, f'arms/open-jev-qwen-27b/by_variable/P(block) || defA/cv/{NESTED_K}/'
+                f"pooled_caps/{OPFPR_CAP}/fpr", 0.004732327713694173,
+       "open-jev-qwen-27b achieved FPR out of fold", tol=5e-15)
+expect(HELDOUT, f'arms/open-jev-qwen-27b/by_variable/P(block) || defA/cv/{NESTED_K}/'
+                f"pooled_caps/{OPFPR_CAP}/cap_respected_pooled", False,
+       "open-jev-qwen-27b does not hold its fitted cap out of fold")
+
+# The judge row cannot be re-mined at all, and the artifact says why.
+expect(REMINE, "arms/Gemma 4 judge (det->LLM)/rethresholdable", False,
+       "the judge row is not re-thresholdable")
+expect(REMINE, "arms/Gemma 4 judge (det->LLM)/rows_without_full_disposition_distribution", 4277,
+       "judge rows carrying no disposition distribution")
+expect(REMINE, "arms/Gemma 4 judge (det->LLM)/prediction_rows", 4277, "judge prediction rows")
+
+# Two arms are below chance on the variable the board ranks by.
+expect(f"{ADDED_VALID}/auc-variants-open-jev-qwen-2b.json", f"auc/{LEAD_VAR}",
+       0.37630349307652855, "open-jev-qwen-2b AUC on the leaderboard variable", tol=5e-12)
+
+# bespoke-nimble-9b on the held-out corpus.
+_NS3 = "comparison/bespoke-nimble-9b"
+expect(S3SC, f"{_NS3}/s3_shipped_block_only_f1", 0.00881057268722467,
+       "bespoke-nimble-9b s3 shipped block-only F1", tol=5e-15)
+for _k, _v in (("tp", 2), ("fp", 231), ("fn", 219), ("tn", 24024)):
+    expect(S3SC, f"{_NS3}/s3_shipped_block_only_confusion/{_k}", _v,
+           f"bespoke-nimble-9b s3 shipped {_k}")
+expect(S3SC, f"{_NS3}/s3_shipped_block_only_block_fpr", 0.009523809523809525,
+       "bespoke-nimble-9b s3 shipped block FPR", tol=5e-15)
+expect(S3SC, f"{_NS3}/s3_auc_raw_on_P_block_defA_equals_defB", 0.961057896352014,
+       "bespoke-nimble-9b s3 AUC on P(block)", tol=5e-15)
+expect(S3SC, f"{_NS3}/s3_oracle_best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT",
+       0.3624733475479744, "bespoke-nimble-9b s3 oracle best F1", tol=5e-15)
+expect(S3SC, f"{_NS3}/s3_f1_at_s2_fitted_threshold", 0.21855435401252135,
+       "bespoke-nimble-9b s3 F1 at the s2-fitted threshold", tol=5e-15)
+expect(S3SC, f"{_NS3}/s2_fitted_threshold_on_P_block", 0.2881231844806654,
+       "bespoke-nimble-9b s2-fitted threshold", tol=5e-15)
+expect(S3SC, f"{_NS3}/s2_to_s3_transfer_penalty", 0.14391899353545304,
+       "bespoke-nimble-9b s2 to s3 transfer penalty", tol=5e-15)
+expect(S3SC, f"{_NS3}/settled_s3_digest",
+       "b34651649b668c069dc02253c0e79682305ab57c4277d233fb189a6ad57a3842",
+       "bespoke-nimble-9b s3 prediction digest")
+expect(S3AUC, "auc_definition_A/P(block)", 0.961057896352014,
+       "the s3 AUC file agrees with the s3 score file on P(block)", tol=5e-15)
+expect(S3AUC, "chance_band_95pct/0", 0.46176687597792665, "the s3 95% chance band, lower",
+       tol=5e-15)
+expect(S3AUC, "chance_band_95pct/1", 0.5382331240220734, "the s3 95% chance band, upper",
+       tol=5e-15)
+expect(S3AUC, "scored_cases", 24476, "the s3 AUC file scored every s3 case")
+expect(S3META, "complete", True, "the s3 run is settled")
+expect(S3META, "requests", 100001, "s3 decisions")
+expect(S3META, "cases", 24476, "s3 cases")
+expect(S3META, "actual_input_tokens", 270881394, "s3 input tokens the artifact totals")
+expect(S3META, "merge/shards", 53, "s3 shards merged")
+expect(S3META, "prediction_sha256",
+       "b34651649b668c069dc02253c0e79682305ab57c4277d233fb189a6ad57a3842",
+       "the s3 meta and the s3 score file agree on the digest")
 
 # ------------------------------------------- the SecJudge row's disclosure and its section
 # Every figure the marker on that row and its section quote, pinned to the artifact it is read
@@ -1749,6 +2063,17 @@ def sa(slot: str, w: str = "1.5") -> str:
     return f'class="k-{slot}" fill="none" stroke="{SERIES[slot]}" stroke-width="{w}"'
 
 
+def fsa(fill_slot: str, stroke_slot: str, w: str = "1.5") -> str:
+    """Fill and stroke attributes for one element, with both dark-mode hooks.
+
+    `fa(x) sa(y)` side by side emits `class` and `fill` twice. A parser keeps the first of
+    each, so the stroke slot's class was silently discarded on every box drawn that way and
+    dark mode kept the hard-coded light stroke. One `class`, one `fill`, one `stroke`.
+    """
+    return (f'class="f-{fill_slot} k-{stroke_slot}" fill="{SERIES[fill_slot]}" '
+            f'stroke="{SERIES[stroke_slot]}" stroke-width="{w}"')
+
+
 def hexof(slot: str) -> str:
     return SERIES[slot]
 
@@ -1800,6 +2125,17 @@ def check_css(css: str) -> list[str]:
     for cls in list(TEXT_ROLE) + list(LINE_ROLE) + ["ref"] + [f"f-{s}" for s in SERIES]:
         if f".{cls}{{" not in css:
             bad.append(f"stylesheet has no .{cls} rule, so dark mode would not swap it")
+    # A var() naming a property that does not exist is invalid at computed-value time, which
+    # drops the WHOLE declaration it sits in - every layer of a shorthand, not just the one
+    # that named it. Two such typos shipped: `--bg` for `--page` killed the right-edge fade
+    # that was the only cue a table column was cut off, and `--surface2` for `--surface-2`
+    # left the disclosure blocks transparent. Both are invisible to a palette check that reads
+    # only the definitions, so the uses are read here too.
+    declared = set(re.findall(r"--([A-Za-z0-9_-]+)\s*:", css))
+    for name in sorted(set(re.findall(r"var\(\s*--([A-Za-z0-9_-]+)", css))):
+        if name not in declared:
+            bad.append(f"var(--{name}) names a custom property the stylesheet never defines, "
+                       f"so every declaration using it is dropped")
     return bad
 
 
@@ -1822,6 +2158,10 @@ _BAD_LT = re.compile(r"<(?!/?[A-Za-z][A-Za-z0-9]*[\s/>]|!--|!\[|!DOCTYPE|\?)", r
 _ESCAPED_TAG = re.compile(
     r"&lt;/?(code|em|strong|a|span|br|p|li|ul|ol|sup|sub|abbr|table|thead|tbody|tr|td|th|div|"
     r"h[1-6]|figure|figcaption|details|summary|svg|text|g|rect|path)\b", re.I)
+# a `{name}` or `{name.attr}` left behind by a .format() that was never called
+_FORMAT_TOKEN = re.compile(r"\{[A-Za-z_][A-Za-z0-9_.]*\}")
+# one tag and its double-quoted attributes, for the repeated-attribute check
+_TAG_WITH_ATTRS = re.compile(r"<([A-Za-z][\w-]*)((?:\s+[-:\w]+\s*=\s*\"[^\"]*\")*)\s*/?>")
 
 
 def check_markup(name: str, body: str) -> list[str]:
@@ -1863,6 +2203,26 @@ def check_markup(name: str, body: str) -> list[str]:
         bad.append(f"{name}: escaped markup {m.group(0)!r} renders to the reader as literal "
                    f"text, so a generated string carrying markup went through esc(), "
                    f"{where(m.start())}")
+    # A tag carrying one attribute twice is well-formed enough for a parser and for the
+    # verifier: the parser keeps the FIRST and discards the rest in silence. Two attribute
+    # builders concatenated side by side emitted `class` and `fill` twice on six chart boxes,
+    # and the dark-mode class that arrived second was the one thrown away.
+    # An unresolved `.format()` token. The build already aborts on an unresolved
+    # `{{chart:...}}` template token and never looked for this one, so `{casc_sc_short}` reached
+    # a table cell the moment that verdict stopped being a literal. Attribute values are
+    # excluded: a CSS `calc()` and a JSON blob legitimately carry braces, and both live in the
+    # regions this function already skips.
+    for m in _FORMAT_TOKEN.finditer(text):
+        bad.append(f"{name}: {m.group(0)!r} is an unresolved format token, so a generated "
+                   f"string reached the page with a placeholder in it, {where(m.start())}")
+    for m in _TAG_WITH_ATTRS.finditer(text):
+        seen: dict[str, int] = {}
+        for attr in re.findall(r"\s([-:\w]+)\s*=", m.group(2)):
+            seen[attr] = seen.get(attr, 0) + 1
+        rep = sorted(a for a, n in seen.items() if n > 1)
+        if rep:
+            bad.append(f"{name}: <{m.group(1)}> carries {', '.join(rep)} more than once; a "
+                       f"parser keeps the first and drops the rest, {where(m.start())}")
     return bad
 
 
@@ -2065,10 +2425,12 @@ def figure(fid, title, sub, svg, source, legend=None, table=None, note=None,
     # 1.0 is a property of the composition rather than a field in the scorecard (the field is
     # null). `derived` lets a figure say which values those are instead of being covered by a
     # blanket claim.
+    # `derived` carries markup, the same as `note` and `title`: it names the composition it
+    # is about in a <code> span. esc() here rendered those tags to the reader as literal text.
     prov = tip_text("Provenance",
                     f"Every value plotted here is read at build time from "
                     f"<code>{esc(source)}</code>"
-                    + (f", except: {esc(derived)}" if derived else "")
+                    + (f", except: {derived}" if derived else "")
                     + ". The table view above lists them all.",
                     cls="prov")
     cap = f"{note} {prov}" if note else prov
@@ -2387,6 +2749,13 @@ def chart_cascade(stage_key, title, sub, score_rel, standin_rel) -> str:
     standin = g(standin_rel,
                 "candidates/0/deterministic_then_system_one_then_llm_two_sided_0.30/"
                 "binary_block_only/f1")
+    # These three rates are THIS stage's. They were written as literals taken from the Broad
+    # stage and the same note is rendered for both stages, so the Production-weighted figure
+    # printed the Broad numbers one line above a table holding its own.
+    _nj_rev = g(score_rel, "candidates/0/deterministic_then_system_one/review_rate")
+    _os_llm = g(score_rel,
+                "candidates/0/deterministic_then_system_one_then_llm/llm_invocation_rate")
+    _os_rev = g(score_rel, "candidates/0/deterministic_then_system_one_then_llm/review_rate")
     trows.append([f"<em>same two-sided cascade, but scored against the all-allow "
                   f"<strong>stand-in</strong> rule tier</em>", f"<em>{fmt(standin)}</em>",
                   "&#8212;", "&#8212;", "&#8212;"])
@@ -2407,8 +2776,9 @@ def chart_cascade(stage_key, title, sub, score_rel, standin_rel) -> str:
         table=table_html(["Composition", "block F1", "block FPR", "confirm rate", "LLM call rate"],
                          trows),
         note="Confirm rate and LLM call rate are different measurements. <code>rules → OpenJev</code> "
-             "ends 8.49% of decisions as <code>confirm</code> with no LLM tier to call; one-sided "
-             "routing sends 90.31% of cases to the judge and still ends 43.02% as "
+             f"ends {_nj_rev:.2%} of decisions as <code>confirm</code> with no LLM tier to call; "
+             f"one-sided routing sends {_os_llm:.2%} of cases to the judge and still ends "
+             f"{_os_rev:.2%} as "
              "<code>confirm</code>. Two axes are separate. The rule tier - all-allow stand-in "
              f"against the real rules - moves the block lens by {_CF['COMP_TIERGAP']} in all "
              f"{_CF['COMP_CELLS']} measured cells when the cascade escalates a deterministic "
@@ -2733,8 +3103,8 @@ def chart_architecture() -> str:
     xs = [16 + i * (bw + gap) for i in range(4)]
 
     def box(x, ttl, sub1, sub2, accent):
-        return (f'<rect x="{x:.1f}" y="{y}" width="{bw}" height="{bh}" rx="10" {fa("surface2")} '
-                f'{sa(accent)}/>'
+        return (f'<rect x="{x:.1f}" y="{y}" width="{bw}" height="{bh}" rx="10" '
+                f'{fsa("surface2", accent)}/>'
                 f'<text x="{x + 11:.1f}" y="{y + 22}" {HD}>'
                 f'{fit(ttl, bw - 20, 11.5, "arch box title")}</text>'
                 f'<text {AX} x="{x + 11:.1f}" y="{y + 41}">'
@@ -2779,7 +3149,7 @@ def chart_architecture() -> str:
     # short-circuit bypass arc from System One straight to outcome
     arc_low = y + bh + 62
     s.append(f'<path d="M {xs[1] + bw / 2:.1f} {y + bh} C {xs[1] + bw / 2:.1f} {arc_low:.1f}, '
-             f'{xs[3] + bw / 2:.1f} {arc_low:.1f}, {xs[3] + bw / 2:.1f} {y + bh + 4}" fill="none" '
+             f'{xs[3] + bw / 2:.1f} {arc_low:.1f}, {xs[3] + bw / 2:.1f} {y + bh + 4}" '
              f'{sa("s1")}/>'
              f'<path d="M {xs[3] + bw / 2 - 4.5:.1f} {y + bh + 13} L {xs[3] + bw / 2:.1f} '
              f'{y + bh + 4} L {xs[3] + bw / 2 + 4.5:.1f} {y + bh + 13} Z" {fa("s1")}/>'
@@ -2806,7 +3176,7 @@ def chart_architecture() -> str:
     ]):
         x0 = 16 + i * (lane_w + 18)
         s.append(f'<rect x="{x0:.1f}" y="{ly + 12}" width="{lane_w:.1f}" height="74" rx="10" '
-                 f'{fa("surface2")} {sa(accent)}/>')
+                 f'{fsa("surface2", accent)}/>')
         s.append(f'<text x="{x0 + 12:.1f}" y="{ly + 34}" {HD}>'
                  f'{esc(fit(ttl, lane_w - 22, 11.5, "arch lane title"))}</text>')
         s.append(f'<text {AX} x="{x0 + 12:.1f}" y="{ly + 54}">'
@@ -2845,7 +3215,12 @@ def chart_funnel() -> str:
     scr = load(S1SCREEN)
     s2 = load(S2MAN)
     s3 = load(S3MAN)
-    s1g = {k.replace("grade:", ""): v for k, v in scr["selected_counts"].items()}
+    # `selected_counts` is the SAMPLING QUOTA the screen was drawn to, not what the drawn
+    # cases turned out to be graded. Printed in a column headed "truth grades" beside two rows
+    # that do hold measured grades, it overstated grade A by 2.5x (20 against 8) and hid 12
+    # grade-E cases, which is how the fake total still summed to 200. Grade A is the only lane
+    # this site says supports a safety claim.
+    s1g = load(S1SCORE)["truth_grades"]
     stages = [
         ("Screening", "S1", scr["row_count"], g(S1META, "requests"),
          s1g["D"] / scr["row_count"], s1g,
@@ -2907,8 +3282,8 @@ def chart_funnel() -> str:
         "Stage sizes and benign share",
         "Only the 200-scenario screen and the two large stages were scored.",
         "\n".join(s),
-        f"outputs/{S1SCREEN}, outputs/{S1MAN}, outputs/{S2MAN}, outputs/{S3MAN} :: "
-        f"row_count / cases / decisions / grades",
+        f"outputs/{S1SCREEN} :: row_count, outputs/{S1SCORE} :: truth_grades, "
+        f"outputs/{S1MAN}, outputs/{S2MAN}, outputs/{S3MAN} :: cases / decisions / grades",
         legend=[("unsafe + partially-unsafe scenarios", "seq2"),
                 ("benign (grade D) scenarios", "seq4")],
         table=table_html(["Stage", "internal name", "scenarios",
@@ -4084,6 +4459,9 @@ GRID: dict[str, str] = {
     "openjev_arm": "OpenJev, self-hosted FP8, revision 5ec9e5fd, {ARM}.",
     "diffgemma_arm": "DiffusionGemma 26B-A4B-it-FP8-dynamic, self-hosted FP8, {ARM}.",
     "jev_arm": "Jev 1.13.0, hosted API, {ARM}.",
+    "gemma4_arm": "google.gemma-4-26b-a4b via Bedrock, {ARM}. Two Gemma 4 runs exist on the "
+                  "Broad corpus and are not interchangeable; this figure is the one at that "
+                  "cell.",
     "von": "von-sdk 1.0.1, a local ModernBERT classifier, C0/I3/Q1.",
     # one arm-aware entry per added arm, built from that arm's own serving record
     **{f'{a["slug"]}_arm':
@@ -4141,7 +4519,7 @@ CAVEAT: dict[str, str] = {
     "addednode": "This cell comes from the rules-then-model node of the arm's own scorecard. "
                  "On the block-only lens that node and the model-alone node hold identical "
                  "values for every row in this table. On the any-intervention lens they differ "
-                 "for the arms added at this revision, because the deterministic tier "
+                 "for the arms added since the original roster, because the deterministic tier "
                  "contributes advisory confirms; the added-arm block on the leaderboard prints "
                  "both values.",
     # the ranking variable the AUC and recall-at-FPR figures are taken over
@@ -4184,6 +4562,7 @@ TIP_NOT_A_NUMBER = {
     "flip.flagged.per_model", "judge.control", "q.cascade.formats", "fault.total.note",
     "dec.models.s2.names", "dec.models.s3.names", "ctx.settled",
     "s3.nojudge.best.model", "s3.nojudge.table", "flip.runs.note",
+    "s3.nojudge.leadnote", "s3.nojudge.fprlow.model",
     "par.grid", "sweep.best.q", "sweep.worst.q", "sweep.pub.q", "jev.casc.q0q4",
     "spend.errors.total", "s3.nojudge.verdict", "inv.stage", "von.floor.arm",
     "lock.frozen", "lock.assay.licence", "lock.assay.status", "lock.assay.redist",
@@ -4196,6 +4575,8 @@ TIP_NOT_A_NUMBER = {
     # formats. Each is prose computed from the arms' own metas, not a measurement, so a "what
     # this number is" tooltip would have nothing to add.
     "lb.added.grids", "lb.added.gridnote", "lb.ranked.fmtnote",
+    "sf.hi.name", "sf.lo.name", "sf.hi.any.name", "sf.lo.any.name", "sf.dg.blk.pos",
+    "sf.dg.any.pos", "self.next.name", "sweep.vs",
 }
 _TIP_N = [0]
 
@@ -4214,6 +4595,40 @@ def _judge_src(stage: str) -> str:
             f"judge run the cascade was scored from, which records no price) at the rate in "
             f"outputs/{JUDGE_PRICED} :: estimated_usd / prompt_tokens (the Q2 judge run, the "
             f"only one priced)")
+
+
+# The cell each secondary corpus was run at, read from the record that names it rather than
+# from a per-model constant. A per-model constant said `Q3` for DiffusionGemma while these
+# artifacts are all `Q2`, so eight figure families carried both a wrong cell AND a warning that
+# they were "not comparable with OpenJev's Q2 figures" when they are exactly that.
+def tb_arm(model_key: str) -> str:
+    """The grid cell the coding-traffic artifact records for one model, from its own key."""
+    who = {"openjev": "openjev", "diffgemma": "diffusiongemma", "jev": "jev-hosted"}[model_key]
+    cells = sorted({k.split("/", 1)[1] for k in g(TB, "published_references")
+                    if k.split("/", 1)[0] == who})
+    if len(cells) != 1:
+        raise SystemExit(f"ABORT: {TB} records {len(cells)} grid cells for {who} ({cells}), so "
+                         f"one label cannot stand for its figures")
+    return cells[0]
+
+
+def ir_arm(slug: str, ctx: str) -> str:
+    """The grid cell one model's proof-backed-corpus run was made at, from its own meta."""
+    return grid_of_meta(f"intent-real/{slug}-{ctx}.jsonl.meta.json")
+
+
+def repeat_arm(slug: str) -> str:
+    """The grid cell one model's replay set was made at, from the first replay's own meta."""
+    return grid_of_meta(f"repeat/{slug}-r1.jsonl.meta.json")
+
+
+def q4abl_arm() -> str:
+    """The single grid cell the Q4 ablation artifact holds, from its own key."""
+    cells = sorted({k.split(" ", 1)[1] for k in g(Q4ABL, "entanglement_check") if " " in k})
+    if len(cells) != 1:
+        raise SystemExit(f"ABORT: {Q4ABL} entanglement_check holds {cells}, so one label "
+                         f"cannot stand for its figures")
+    return cells[0]
 
 
 def _spec(metric, scope, grid, source, caveat=(), arm=None):
@@ -4302,34 +4717,43 @@ def _tip_rules():
                          + ".cascade_tiers.two_tier_openjev_then_gemma",
                          ("composition",)))
     rule(r"lb\.(openjev|diffgemma|jev)\.tbfpr",
-         lambda m: _spec("event_fpr", "tb", m[1],
+         lambda m: _spec("event_fpr", "tb", f"{m[1]}_arm",
                          f"outputs/{TB} :: published_references."
                          + {"openjev": "openjev", "diffgemma": "diffusiongemma",
                             "jev": "jev-hosted"}[m[1]]
-                         + ".C7.I3.Q2.per_event_fpr", ()))
+                         + "." + tb_arm(m[1]).replace("/", ".") + ".per_event_fpr", (),
+                         arm=tb_arm(m[1])))
     # benign FPR on coding traffic
     rule(r"tb\.q2\.(oj|dg|jev)",
          lambda m: _spec("event_fpr", "tb",
-                         {"oj": "openjev", "dg": "diffgemma", "jev": "jev"}[m[1]],
-                         f"outputs/{TB} :: published_references.*.C7.I3.Q2.per_event_fpr", ()))
+                         {"oj": "openjev_arm", "dg": "diffgemma_arm",
+                          "jev": "jev_arm"}[m[1]],
+                         f"outputs/{TB} :: published_references.*."
+                         + tb_arm({"oj": "openjev", "dg": "diffgemma",
+                                   "jev": "jev"}[m[1]]).replace("/", ".")
+                         + ".per_event_fpr", (),
+                         arm=tb_arm({"oj": "openjev", "dg": "diffgemma",
+                                     "jev": "jev"}[m[1]])))
     # separation, per backend and context
     rule(r"sep\.(openjev|diffgemma|gemma4|jev)\.(C0|C7)",
-         lambda m: _spec("sep", "intent", m[1],
+         lambda m: _spec("sep", "intent", f"{m[1]}_arm",
                          f"outputs/{IR_JEV} :: four_backend_table.{m[1]}.{m[2]}.case.block."
-                         f"intent_real.sep_vs_resisted", ("grade_a",)))
+                         f"intent_real.sep_vs_resisted", ("grade_a",),
+                         arm=ir_arm(m[1], m[2])))
     rule(r"ad\.(openjev|diffgemma|gemma4|jev)\.(C0|C7)\.event",
-         lambda m: _spec("sep", "intent", m[1],
+         lambda m: _spec("sep", "intent", f"{m[1]}_arm",
                          f"outputs/{IR_JEV} :: four_backend_table.{m[1]}.{m[2]}.event.block."
-                         f"agentdojo_prior.sep_vs_resisted", ("grade_a",)))
+                         f"agentdojo_prior.sep_vs_resisted", ("grade_a",),
+                         arm=ir_arm(m[1], m[2])))
     rule(r"ad\.(openjev|diffgemma|gemma4|jev)\.(C0|C7)",
-         lambda m: _spec("sep", "intent", m[1],
+         lambda m: _spec("sep", "intent", f"{m[1]}_arm",
                          f"outputs/{IR_JEV} :: four_backend_table.{m[1]}.{m[2]}.case.block."
                          f"agentdojo_prior.sep_vs_resisted",
-                         ("grade_a",)))
+                         ("grade_a",), arm=ir_arm(m[1], m[2])))
     rule(r"(recall|miss)\.(openjev|diffgemma|gemma4|jev)\.C7",
-         lambda m: _spec("grade_a_recall", "intent", m[2],
+         lambda m: _spec("grade_a_recall", "intent", f"{m[2]}_arm",
                          f"outputs/{IR_JEV} :: grade_a_block_only_recall.{m[2]}.C7.case",
-                         ("grade_a",)))
+                         ("grade_a",), arm=ir_arm(m[2], "C7")))
     # adjudication
     rule(r"adj\.(unsafe|benign)\.(openjev|diffgemma|gemma4|deterministic)",
          lambda m: _spec("agreement", "queue", m[2],
@@ -4352,26 +4776,29 @@ def _tip_rules():
     # S41: one event moves the flagged-only rate 26x more than the corpus-wide one, and the
     # flagged-only figures are the ones the site says to quote. The caveat was on the other lens.
     rule(r"flip\.(openjev|diffgemma|jev)\.(wide|flagged)",
-         lambda m: _spec("flip", "repeat", m[1],
+         lambda m: _spec("flip", "repeat", f"{m[1]}_arm",
                          f"outputs/repeat/{m[1]}-r{{1,2,3}}.jsonl :: case_id / event_index / "
                          f"action, recounted at build time",
-                         ("smalln",) if m[2] == "flagged" else ()))
+                         ("smalln",) if m[2] == "flagged" else (),
+                         arm=repeat_arm(m[1])))
     rule(r"flip\.(openjev|diffgemma|jev)\.deep\.(flagged|wide)",
-         lambda m: _spec("flip", "repeat", m[1],
+         lambda m: _spec("flip", "repeat", f"{m[1]}_arm",
                          f"outputs/repeat/{m[1]}-r*.jsonl :: every replay on disk, which is a "
-                         f"wider set than the three-replay cross-model basis", ()))
+                         f"wider set than the three-replay cross-model basis", (),
+                         arm=repeat_arm(m[1])))
     rule(r"flip\.(openjev|diffgemma|jev)\.conf",
-         lambda m: _spec("count", "repeat", m[1],
+         lambda m: _spec("count", "repeat", f"{m[1]}_arm",
                          f"outputs/repeat/{m[1]}-r{{1,2,3}}.jsonl :: events whose confidence "
                          f"field is not identical in all three replays, recounted at build time. "
-                         f"This is not an action flip."))
+                         f"This is not an action flip.", (), arm=repeat_arm(m[1])))
     rule(r"flip\.(openjev|diffgemma|jev)\.events|flip\.runs",
          lambda m: _spec("count", "repeat", "none",
                          "outputs/repeat/<model>-r{1,2,3}.jsonl :: the events present in all "
                          "three replays, and the number of replays the comparison is held at"))
     rule(r"flip\.(openjev|diffgemma|jev)\.(n|fn)",
-         lambda m: _spec("count", "repeat", m[1],
-                         f"outputs/repeat/{m[1]}-r{{1,2,3}}.jsonl", ()))
+         lambda m: _spec("count", "repeat", f"{m[1]}_arm",
+                         f"outputs/repeat/{m[1]}-r{{1,2,3}}.jsonl", (),
+                         arm=repeat_arm(m[1])))
     # the decision layer
     rule(r"dec\.price\.(case|call|usd|cases|calls)",
          lambda m: _spec("usd_judge" if m[1] in ("case", "call", "usd") else "count",
@@ -4506,6 +4933,11 @@ def _tip_rules():
     rule(r"jev\.tier\.sha",
          lambda m: _spec("count", "none", "jev",
                          f"outputs/{JEV_PROV} :: stages.s2.deterministic_tier_sha256", ()))
+    rule(r"s3\.nojudge\.fprlow",
+         lambda m: _spec("fpr", "s3", "cascade",
+                         "candidates[0].deterministic_then_system_one.binary_block_only, the "
+                         "lowest block false-positive rate over every same-tier arm at this "
+                         "stage", ("composition",)))
     rule(r"s3\.nojudge\.(best\.f1|best\.fpr|n)",
          lambda m: _spec("block_f1" if m[1] == "best.f1"
                          else "fpr" if m[1] == "best.fpr" else "count", "s3", "cascade",
@@ -4513,9 +4945,33 @@ def _tip_rules():
                          "every small model with a same-tier scorecard at this stage", ()))
     rule(r"par\.(oj|dg|jev)\.(blk|any)",
          lambda m: _spec("block_f1" if m[2] == "blk" else "any_f1", "s2",
-                         {"oj": "openjev", "dg": "diffgemma", "jev": "jev"}[m[1]],
-                         f"outputs/{S2CMP} :: arms[grid=parity].per_case.model_only, all models "
-                         f"at one question format on the real deterministic tier", ()))
+                         {"oj": "openjev_arm", "dg": "diffgemma_arm",
+                          "jev": "jev_arm"}[m[1]],
+                         f"outputs/{S2CMP} :: arms[grid=parity].per_case.model_only, the models "
+                         f"this file scores at one question format on the real deterministic "
+                         f"tier", (), arm=PARITY_GRID))
+    # the same-format population taken over the rows on the board rather than over the
+    # arms one comparison file happens to hold
+    rule(r"sf\.(n)",
+         lambda m: _spec("count", "s2", "none",
+                         "the ranked leaderboard rows whose cell was read at the parity grid, "
+                         "counted at build time from each row's own record", ()))
+    rule(r"sf\.(hi|lo)\.f1",
+         lambda m: _spec("block_f1", "s2", "none",
+                         "the highest and lowest block-only F1 over every ranked row at the "
+                         "parity grid, from each row's own scorecard", ()))
+    rule(r"sf\.(hi|lo)\.any",
+         lambda m: _spec("any_f1", "s2", "none",
+                         "the highest and lowest any-intervention F1 over every ranked row at "
+                         "the parity grid, from each row's own scorecard", ()))
+    rule(r"sf\.(diff|ratio)",
+         lambda m: _spec("block_f1" if m[1] == "diff" else "rate", "s2", "none",
+                         "the spread of block-only F1 over every ranked row at the parity grid, "
+                         "as a difference and as a ratio", ()))
+    rule(r"self\.next\.f1",
+         lambda m: _spec("block_f1", "s2", "none",
+                         "the second-highest block-only F1 of the GPU-served self-hosted rows "
+                         "scored on this corpus, read off the column", ()))
     rule(r"par\.(n|offn|q3\.n)",
          lambda m: _spec("count", "s2", "none",
                          f"outputs/{S2CMP} :: grid_parity", ()))
@@ -4742,14 +5198,10 @@ def _tip_rules():
                          f"outputs/{QCMP} :: comparison, one key per question format run in the "
                          f"cascade", ()))
     rule(r"tie\.(n|rows|rate)",
-         lambda m: _spec("count" if m[1] != "rate" else "rate", "none", "openjev",
+         lambda m: _spec("count" if m[1] != "rate" else "rate", "none", "openjev_arm",
                          f"outputs/{Q4ABL} :: entanglement_check['openjev C1/I3/Q4']."
                          f"{{intrinsic_danger_exact_ties, intrinsic_danger_exact_tie_rate}} over "
-                         f"flag_rate_matched.n", ("gradec",)))
-    rule(r"ad\.openjev\.C0\.event",
-         lambda m: _spec("sep", "intent", "openjev",
-                         f"outputs/{IR_JEV} :: four_backend_table.openjev.C0.event.block."
-                         f"agentdojo_prior.sep_vs_resisted", ("grade_a",)))
+                         f"flag_rate_matched.n", ("gradec",), arm=q4abl_arm()))
     rule(r"adj\.m[1-4]\.blockconfirm",
          lambda m: _spec("count", "queue", "none",
                          f"outputs/{ADJQ} joined to outputs/{ADJL}, adjudicated block + confirm "
@@ -4816,6 +5268,11 @@ def _tip_rules():
                          ("standin_is",)))
     # E07: escalate is read from the policy reanalysis, not from the scorecard, so it needs its
     # own source string. Its four siblings from the same artifact node already had one.
+    rule(r"s2\.shortcircuit\.f1",
+         lambda m: _spec("block_f1", "s2", "cascade",
+                         f"outputs/{S2POL} :: compositions.realdet_short_circuit."
+                         f"cascade_tiers.two_tier_openjev_then_gemma.block_f1",
+                         ("composition",)))
     rule(r"s2\.escalate\.f1",
          lambda m: _spec("block_f1", "s2", "cascade",
                          f"outputs/{S2POL} :: compositions.realdet_escalate_on_confirm."
@@ -4978,6 +5435,10 @@ def _tip_rules():
                          f"outputs/{QCMP} :: verdict."
                          f"block_only_f1_deterministic_then_llm_no_system_one",
                          ("question",)))
+    rule(r"tb\.n",
+         lambda m: _spec("count", "tb", "none",
+                         "the leaderboard rows scored for a benign per-event false-positive "
+                         "rate on coding traffic, counted at build time", ()))
     rule(r"tb\.(events|traj)",
          lambda m: _spec("count", "tb", "none", f"outputs/{TB} :: corpus", ()))
     rule(r"tb\.laneb\.(oj|dg)(\.traj)?",
@@ -5038,8 +5499,9 @@ def _tip_rules():
                          "summed over every outputs/**/*.meta.json that records an "
                          "estimated_usd key", ()))
     rule(r"tie\.eps",
-         lambda m: _spec("rate", "s2", "openjev",
-                         "the tie-band width used by the deterministic tie-break", ()))
+         lambda m: _spec("rate", "s2", "openjev_arm",
+                         "the tie-band width used by the deterministic tie-break", (),
+                         arm=q4abl_arm()))
     return R
 
 
@@ -5193,6 +5655,42 @@ def describe(key: str, spec: dict) -> str:
     return " ".join(out)
 
 
+# A grid label names a C/I/Q cell. Where the source string names one too, the two must be the
+# same cell, or the tooltip is describing a different run from the one it cites. Eight figure
+# families shipped with a per-model constant naming `Q3` over a `Q2` artifact, each carrying a
+# "not comparable with OpenJev's Q2 figures" warning about figures that were measured at the
+# same cell as OpenJev's. Both halves are already in the record, so they are compared here.
+GRID_LABEL_BAD: list[str] = []
+_SRC_CELL = re.compile(r"\bC(\d)[/.]I(\d)[/.]Q(\d)\b")
+_SRC_FILE_Q = re.compile(r"-q(\d)(?=[./]|$)")
+_GRID_CELL = re.compile(r"\bC(\d)\s*[/.]\s*I(\d)\s*[/.]\s*Q(\d)\b")
+_GRID_Q = re.compile(r"\bquestion (Q\d)\b")
+
+
+def check_grid_label(key: str, spec: dict) -> None:
+    """Record any figure whose grid label names a different question from its source."""
+    grid = GRID.get(spec["grid"], "")
+    if not grid:
+        return
+    if "{ARM}" in grid:
+        if not spec["arm"]:
+            GRID_LABEL_BAD.append(f"{key}: grid {spec['grid']!r} needs an arm and the rule "
+                                  f"supplied none")
+            return
+        grid = grid.replace("{ARM}", spec["arm"])
+    m = _GRID_CELL.search(grid) or _GRID_Q.search(grid)
+    if not m:
+        return
+    declared = f"Q{m.group(3)}" if m.re is _GRID_CELL else m.group(1)
+    src_ = spec["source"] or ""
+    found = {f"Q{mm.group(3)}" for mm in _SRC_CELL.finditer(src_)}
+    found |= {f"Q{q}" for q in _SRC_FILE_Q.findall(src_)}
+    if found and declared not in found:
+        GRID_LABEL_BAD.append(
+            f"{key}: labelled {declared} under grid {spec['grid']!r} while its source names "
+            f"{sorted(found)} - {src_[:120]}")
+
+
 def tipped(key: str, text: str, inner: str | None = None) -> str:
     """A number plus its generated description, reachable by hover, focus and tap.
 
@@ -5203,6 +5701,7 @@ def tipped(key: str, text: str, inner: str | None = None) -> str:
     if spec is None:
         TIP_MISSING.append(key)
         return inner if inner is not None else text
+    check_grid_label(key, spec)
     _TIP_N[0] += 1
     tid = f"tt{_TIP_N[0]}"
     body = inner if inner is not None else f'<span class="ttv">{text}</span>'
@@ -5276,17 +5775,22 @@ for _a in ADDED:
 
 # Which question format each model's large-stage arm is on. Named once so a table that mixes
 # formats has to say which row is which (A16, S24).
-GRID_Q = {"openjev": "Q2", "diffgemma": "Q3", "gemma4": "Q0", "jev": "Q2", "von": "Q1"}
+# The DEFAULT large-stage arm of each model, which is not the arm every row's cell is read
+# from: DiffusionGemma's ranked and parity cells were migrated to its Q2 arm and its default
+# large-stage arm is still Q3. Use lb_row_arm() for anything that labels a row; this is only
+# for the families that genuinely read STAGE_REL, the default arm.
+DEFAULT_ARM_Q = {"openjev": "Q2", "diffgemma": "Q3", "gemma4": "Q0", "jev": "Q2", "von": "Q1"}
 # read from each added arm's own run meta, so a future arm at another format labels itself
-GRID_Q.update({a["slug"]: g(added_rel(a, "meta"), "questions/0") for a in ADDED})
+DEFAULT_ARM_Q.update({a["slug"]: g(added_rel(a, "meta"), "questions/0")
+                      for a in ADDED})
 
 LB_VERDICT_SHORT = {
-    "openjev": "Lowest benign FPR of the models scored for one on coding traffic",
+    "openjev": "{oj_short}",
     "diffgemma": "{dg_short}",
-    "jev": "Highest benign FPR of the models scored for one on coding traffic",
-    "von": "Barely beats block-everything on a 158-case pilot",
+    "jev": "{jev_short}",
+    "von": "{von_short}",
     "gemma4": "Incumbent judge, shown as a reference",
-    "casc_sc": "Shipped policy: beats the judge alone",
+    "casc_sc": "{casc_sc_short}",
     "casc_esc": "Same cascade, rule confirms escalated",
 }
 LB_VERDICT = {
@@ -5298,21 +5802,25 @@ LB_VERDICT = {
                "The judge edges it on standalone block F1 ({f1_g4} against {f1_oj}) and on "
                "recall. Put it <em>in front of</em> the judge and the cascade rows below beat "
                "the judge alone by {casc_gain}.",
-    "diffgemma": "At the shared question format {par_grid} it is last of the "
-                 "{par_n} models in the same-format table on both lenses: block-only F1 "
-                 "{f1_dg} against OpenJev's {f1_oj}, and any-intervention F1 {any_dg} against "
-                 "OpenJev's {any_oj}. Its any-intervention F1 is <em>below</em> its own "
-                 "block-only F1 here, so on this format it does not gain from counting a "
-                 "confirm as a catch. {dg_rank_note} {dg_offparity}",
+    # Every comparative in this verdict is computed over the rows that are at the question
+    # format, not over the three rows the comparison artifact happens to score. The two
+    # populations were the same when this row was written and are not any more.
+    "diffgemma": "At {par_grid}, the question format {sf_n} of the {ranked_n} ranked rows "
+                 "share, it is {sf_pos_blk} on block-only F1 ({f1_dg} against "
+                 "{sf_top_blk_name}&#8217;s {sf_top_blk}) and {sf_pos_any} on "
+                 "any-intervention ({any_dg} against {sf_top_any_name}&#8217;s "
+                 "{sf_top_any}). {dg_lensgap_note} {dg_rank_note} {dg_offparity}",
     "jev": "Benign FPR on real coding traffic {tb_jev}, the highest of the {tb_n} models "
            "scored for one and {tb_ratio}&#215; OpenJev&#8217;s. On the Broad comparison its "
            "block FPR is {fpr_jev_rank} of the {allrows_n} rows scored on that corpus "
-           "({fpr_jev}){fpr_jev_below}, and it gets there by blocking least &#8212; block-only recall "
-           "{rec_jev} against OpenJev&#8217;s {rec_oj}. Low FPR earned by not blocking is not a "
-           "safety property.",
-    "von": "Beats a block-everything policy by only 0.05241 on its 158-case pilot, and reaches "
-           "even that by hard-blocking 50 of 70 benign cases. A different and much smaller "
-           "corpus, so this F1 is not comparable with the rows above it. Rejected.",
+           "({fpr_jev}){fpr_jev_below}. {jev_recall_note} A low false-positive rate that is "
+           "bought by blocking less is not a safety property on its own.",
+    # Every figure here was a literal in a cell whose siblings are all tokens, and the two
+    # adverbs did the arguing the numbers can do on their own.
+    "von": "Beats a block-everything policy by {von_gain} block-only F1 on its {von_n}-case "
+           "pilot, hard-blocking {von_fp} of {von_neg} benign cases to get there. A different "
+           "and much smaller corpus, so this F1 is not comparable with the rows above it. "
+           "Rejected.",
     "gemma4": "The incumbent, shown as a reference rather than ranked. {g4_f1_claim} "
               "{g4_fpr_claim} Under the any-intervention lens its FPR is {any_fpr_g4}. It is "
               "also the only judge tier on this page with a measured provider bill, at "
@@ -5326,6 +5834,26 @@ LB_VERDICT = {
 for _a in ADDED:
     LB_VERDICT_SHORT[_a["slug"]] = "{s_" + _a["slug"] + "}"
     LB_VERDICT[_a["slug"]] = "{v_" + _a["slug"] + "}"
+
+# How each composition is named to a reader, keyed on the composition node the row reads. Both
+# rows are the same three tiers in the same order and differ only in what the cascade does with a
+# deterministic verdict, so the tier chain alone cannot name them apart - and it was the whole
+# bold name. The qualifier comes from the node so a row cannot be labelled as a composition it
+# does not read.
+COMPOSITION_LABEL = {
+    "realdet_short_circuit": "short-circuit on a deterministic block",
+    "realdet_escalate_on_confirm": "escalate a deterministic confirm",
+}
+
+
+def composition_of(node: str) -> str:
+    """Which composition a policy row reads, from its own node path."""
+    hits = [k for k in COMPOSITION_LABEL if k in node]
+    if len(hits) != 1:
+        raise SystemExit(f"ABORT: {node!r} names {len(hits)} known compositions, so the row "
+                         f"cannot be labelled with the one it reads")
+    return hits[0]
+
 
 # The cascade, as its own rows.  Without these the page cannot support its own recommendation:
 # every model row is a STANDALONE blocker, and the pick is justified by the composition.
@@ -5433,6 +5961,37 @@ LB_RANKMARK = {1: "ref", 2: "&#8212;", 3: "policy"}
 LB_CORPUS_N = 3817          # the Broad comparison's scorable count; group 0 requires it
 
 
+def lb_row_arm(m: dict) -> str:
+    """The C/I/Q cell THIS row's leaderboard cell was read from.
+
+    Not one constant across the table. The ranked incumbents read the arm the comparison file
+    calls the parity grid; the judge row reads its own chat-judge run, which is not a grid arm
+    at all; Von reads its pilot arm; and each added arm reads the cell its own run meta
+    records. A per-model constant was wrong for one of them, and the roster printed that
+    constant next to a figure measured somewhere else.
+    """
+    a = m.get("added")
+    if a:
+        return meta_grid(a)
+    if m["slug"] == "von":
+        return "/".join(VON_ARM.split("/")[-3:])
+    if not m["peer"]:
+        return grid_of_meta(JUDGE_SCORED["s2"])
+    return PARITY_GRID
+
+
+# The three incumbent rows whose cell is claimed to be at the parity grid, and the scorecard
+# that names the arm each one was read from. Checked rather than asserted in prose, because
+# `lb_row_arm` returns PARITY_GRID for them by default and a silently-migrated cell would make
+# that default a claim instead of a reading.
+PARITY_CLAIMED = {"openjev": (S2SCORE, "candidates/0/candidate"),
+                  "diffgemma": (S2SCORE_DG_Q2, "candidates/0/candidate")}
+# The comparison artifacts name models with their own spellings. Every place that has to line an
+# artifact row up with a leaderboard row goes through this map rather than comparing strings.
+CMP_SLUG = {"openjev": "openjev", "diffusiongemma": "diffgemma", "diffgemma": "diffgemma",
+            "jev": "jev", "jev-hosted": "jev", "gemma4": "gemma4", "von": "von"}
+
+
 def lb_group(slug: str) -> int:
     if slug in LB_FIXED_GROUP:
         return LB_FIXED_GROUP[slug]
@@ -5527,6 +6086,43 @@ def lb_facts() -> dict:
     # the two cascade policy rows, derived from the same set the table draws.
     _allmin = _e["all_min_fpr"]
     f["allrows_n"] = str(len(_e["all_broad"]))
+    # "it gets there by blocking least" was false: seven of the twelve rows on this corpus have a
+    # lower block recall than Jev. The position is computed and printed instead of the claim.
+    _recrows = sorted((r for r in _e["all_broad"] if r.get("recall") is not None),
+                      key=lambda r: r["recall"])
+    _jr = next((i + 1 for i, r in enumerate(_recrows) if r["slug"] == "jev"), None)
+    _jevrec = next((r["recall"] for r in _recrows if r["slug"] == "jev"), None)
+    if _jr and _jevrec is not None:
+        _below = _jr - 1
+        f["jev_recall_note"] = (
+            f'Its block-only recall of {_jevrec:.5f} is the {ordinal(_jr, len(_recrows))} lowest '
+            f'of the {len(_recrows)} rows scored on that corpus, with {_below} row'
+            + ("" if _below == 1 else "s") + ' blocking less.')
+    else:
+        f["jev_recall_note"] = ""
+    # The three short verdicts that carried a bare superlative. Each is the same comparison the
+    # long form already makes, taken over the same population, so the word follows the column.
+    # The coding-traffic population is the rows that were scored for a benign per-event rate,
+    # which is LB_BENIGN and nothing else. Built here so the word follows the column.
+    _lohi = sorted(({"slug": _s, "name": MODEL_BY_SLUG[_s]["name"], "v": g(_rel, _path)}
+                    for _s, (_path, _rel) in LB_BENIGN.items()), key=lambda r: r["v"])
+    for _slug, _key, _end in (("openjev", "oj_short", 0), ("jev", "jev_short", -1)):
+        _me = next((r for r in _lohi if r["slug"] == _slug), None)
+        if _me is None:
+            f[_key] = "not scored on coding traffic"
+        elif _lohi[_end]["slug"] == _slug:
+            f[_key] = (("Lowest" if _end == 0 else "Highest")
+                       + f" benign FPR of the {len(_lohi)} models scored for one on coding "
+                         f"traffic, at {_lohi[_end]['v']:.5f}")
+        else:
+            f[_key] = (f'Benign FPR on coding traffic {_me["v"]:.5f}; the '
+                       + ("lowest" if _end == 0 else "highest")
+                       + f' of the {len(_lohi)} scored for one is '
+                         f'{esc(_lohi[_end]["name"])}&#8217;s {_lohi[_end]["v"]:.5f}')
+    _scf1 = sc["block_f1"]
+    f["casc_sc_short"] = (
+        f'Shipped policy: {"beats" if _scf1 > g4["f1"] else "does not beat"} the judge alone '
+        f'({_scf1:.5f} against {g4["f1"]:.5f})')
     f["allrows_fpr_holder"] = esc(_allmin["name"])
     # Its rank in the column, then the row that is below it, in that order: the earlier phrasing
     # put the exception before the population and read as though the population qualified it.
@@ -5588,6 +6184,15 @@ def lb_facts() -> dict:
                "par_q3_anylo", "par_q3_anyhi", "par_q3_blklo", "par_q3_blkhi"):
         f.setdefault(_k, "not measured")
     f["prec_g4"] = f'{g4["precision"]:.5f}'
+    # The Von verdict's own figures, from its own scorecard and its own floor arm.
+    _vr = von_arm(VON_ARM)["system_one"]["binary_block_only"]
+    _vf = von_arm(VON_FLOOR_ARM)["system_one"]["binary_block_only"]
+    _vn = von_arm(VON_ARM)
+    f["von_gain"] = f'{_vr["f1"] - _vf["f1"]:+.5f}'
+    f["von_n"] = f'{_vn.get("scorable_cases", 0):,}'
+    f["von_fp"] = str(_vr["confusion"]["false_positive"])
+    f["von_neg"] = str(_vr["confusion"]["false_positive"] + _vr["confusion"]["true_negative"])
+    f["von_short"] = (f'Beats block-everything by {f["von_gain"]} on a {f["von_n"]}-case pilot')
     f.update(g4_claims())
     # Jev's standalone cells are absent until its large-stage scorecard lands
     jv = lt["block"].get("jev") or {}
@@ -5602,18 +6207,46 @@ def lb_facts() -> dict:
     _ord = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
             7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth"}
     f["ranked_n"] = str(len(_ranked))
+    # the same-format population, and DiffusionGemma's place in it on each lens separately.
+    # One lens does not stand in for the other: the lowest any-intervention row at this format
+    # is a different model from the lowest block-only one.
+    _sf = same_format_rows()
+    f["sf_n"] = str(len(_sf))
+    for _lens, _tag in (("blk", "blk"), ("any", "any")):
+        _i, _n = place(_sf, "diffgemma", _lens)
+        f[f"sf_pos_{_tag}"] = ordinal(_i, _n) if _i else "not scored"
+        _top = max((r for r in _sf if r[_lens] is not None), key=lambda r: r[_lens], default=None)
+        _low = min((r for r in _sf if r[_lens] is not None), key=lambda r: r[_lens], default=None)
+        f[f"sf_top_{_tag}_name"] = esc(_top["name"]) if _top else "not scored"
+        f[f"sf_top_{_tag}"] = f'{_top[_lens]:.5f}' if _top else "not scored"
+        f[f"sf_low_{_tag}_name"] = esc(_low["name"]) if _low else "not scored"
+        f[f"sf_low_{_tag}"] = f'{_low[_lens]:.5f}' if _low else "not scored"
+    # whether the looser lens helps this row, decided by the comparison rather than asserted
+    _dgb, _dga = lt["block"]["diffgemma"]["f1"], lt["any"]["diffgemma"]["f1"]
+    if _dgb is not None and _dga is not None:
+        f["dg_lensgap_note"] = (
+            f'Its any-intervention F1 is <em>below</em> its own block-only F1 here '
+            f'({_dga:.5f} against {_dgb:.5f}), so on this format it does not gain from '
+            f'counting a confirm as a catch.' if _dga < _dgb else
+            f'Counting a confirm as a catch raises it from {_dgb:.5f} to {_dga:.5f} here.')
+    else:
+        f["dg_lensgap_note"] = ""
     if _dgpos == len(_ranked):
         f["dg_rank_note"] = (f'Over the whole ranked table it is also last of the '
                              f'{len(_ranked)} rows on block-only F1.')
-        f["dg_short"] = (f"Last of the {len(_ranked)} ranked rows and of the {f['par_n']} "
-                         f"same-format rows on block-only F1")
     else:
         f["dg_rank_note"] = (f'Over the whole ranked table it is {_ord.get(_dgpos, _dgpos)} of '
                              f'the {len(_ranked)} rows on block-only F1, above '
                              f'{len(_ranked) - _dgpos} row'
                              + ("s" if len(_ranked) - _dgpos != 1 else "") + '.')
-        f["dg_short"] = (f"{(_ord.get(_dgpos, str(_dgpos)) or '').capitalize()} of the "
-                         f"{len(_ranked)} ranked rows; last of the {f['par_n']} same-format rows")
+    # Both halves of the short verdict are positions, computed over their own population.
+    # The word "last" used to be literal here and in the long verdict, over a population that
+    # had grown from 3 to 8 without it: a fourth-of-eight row read as a last-of-three row.
+    _sfi, _sfn = place(_sf, "diffgemma", "blk")
+    f["dg_short"] = (
+        f"{(_ord.get(_dgpos, str(_dgpos)) or '').capitalize()} of the {len(_ranked)} ranked "
+        f"rows; " + (f"{ordinal(_sfi, _sfn)} of the {_sfn} at {f['par_grid']}"
+                     if _sfi else f"not scored at {f['par_grid']}"))
     f.update(added_facts())
     return f
 
@@ -5623,20 +6256,99 @@ def lb_facts() -> dict:
 # own artifacts. Nothing about an added arm is written as prose, so a further arm gets the same
 # sentences over its own numbers and none of them can state a comparative the column refutes.
 
+def same_format_rows() -> list[dict]:
+    """The ranked rows whose cell was read at the parity grid, best block-only F1 first.
+
+    The comparison artifact declares its own parity set and that list holds the three models
+    that file scores. Five further ranked rows are at the same cell and are scored in their own
+    files, so a position taken over that file's rows is a position in a table, not a position
+    at the question format. This population is every ranked row at the cell, so a sentence
+    about the format cannot quietly mean the table.
+    """
+    lt = lens_table()
+    rows = []
+    for m in MODELS:
+        if lb_group(m["slug"]) != 0 or lb_row_arm(m) != PARITY_GRID:
+            continue
+        rows.append({"slug": m["slug"], "name": m["name"],
+                     "blk": lt["block"][m["slug"]]["f1"],
+                     "any": lt["any"][m["slug"]]["f1"]})
+    rows.sort(key=lambda r: -(r["blk"] if r["blk"] is not None else -1))
+    return rows
+
+
+_ORDINAL = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
+            7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh",
+            12: "twelfth"}
+
+
+def ordinal(i: int, n: int) -> str:
+    """`i` of `n` in words, and `last` where that is what `i` is."""
+    if i == n:
+        return "last"
+    return _ORDINAL.get(i, f"{i}th")
+
+
+def place(rows: list[dict], slug: str, key: str) -> tuple[int, int]:
+    """One row's 1-based position on `key`, and the size of the population."""
+    ordered = sorted((r for r in rows if r[key] is not None), key=lambda r: -r[key])
+    for i, r in enumerate(ordered, 1):
+        if r["slug"] == slug:
+            return i, len(ordered)
+    return 0, len(ordered)
+
+
 def added_dispositions(a: dict) -> dict:
-    """What the arm answered, over the scorable grades, from its own three-way confusion."""
+    """What the arm answered, over the scorable grades, from its own three-way confusion.
+
+    The total is taken over every action column the confusion records, not over the three the
+    sentence names. The confusion carries a fourth, `error`, which is 0 on every arm today;
+    summing only three would have quietly shrunk the denominator under a sentence that still
+    said "of scorable cases", so the total is pinned against the scorecard's own
+    `scorable_cases` instead of trusted.
+
+    A tie for the most common answer would make "its default answer" a choice this function
+    made rather than a fact about the arm, so a tie aborts rather than resolving to whichever
+    key `max` happens to see first.
+    """
     cf = g(added_rel(a, "score"), f"{ADDED_NODE}/three_way/confusion")
-    out = {"allow": 0, "confirm": 0, "block": 0}
+    named = ("allow", "confirm", "block")
+    out = {k: 0 for k in named}
+    total = 0
+    other: dict[str, int] = {}
     for truth in ("allow", "block", "confirm"):
-        for action in out:
-            out[action] += cf[truth][action]
-    total = sum(out.values())
+        for action, n in cf[truth].items():
+            total += n
+            if action in out:
+                out[action] += n
+            else:
+                other[action] = other.get(action, 0) + n
+    scorable = g(added_rel(a, "score"), "candidates/0/scorable_cases")
+    if total != scorable:
+        raise SystemExit(f'ABORT: {a["name"]} three-way confusion totals {total:,} over '
+                         f'{ADDED_NODE}, and its scorecard records {scorable:,} scorable '
+                         f'cases, so a share of it cannot be called a share of scorable cases')
+    top = max(out.values())
+    tied = sorted(k for k in named if out[k] == top)
+    if len(tied) > 1:
+        raise SystemExit(f'ABORT: {a["name"]} answers {" and ".join(tied)} equally often '
+                         f'({top:,} each), so it has no single most common answer and the '
+                         f'sentence that names one would be this build\'s choice')
     out["total"] = total
-    out["default"] = max(("allow", "confirm", "block"), key=lambda k: out[k])
+    out["other"] = other
+    out["default"] = tied[0]
     return out
 
 
 ADDED_SHIPPED_POLICY = "deterministic_then_system_one_then_llm_two_sided_0.30"
+# An added row's cells and its disposition share are both read from ADDED_NODE, which is the
+# rules-then-model composition. The share is therefore the row's final disposition and not the
+# model's own answer: the deterministic tier contributes advisory confirms before the model is
+# asked, and on four of the six arms the model alone answers its default on a different share
+# (99.6% against 99.3% on the widest). The phrase is keyed to the node rather than written
+# beside it, so pointing ADDED_NODE somewhere else either moves the phrase or aborts the build.
+ADDED_NODE_PHRASE = {"candidates/0/deterministic_then_system_one": "with the rule tier in front",
+                     "candidates/0/system_one": "on its own"}[ADDED_NODE]
 
 
 def added_cascade(a: dict) -> dict:
@@ -5712,11 +6424,15 @@ def added_facts() -> dict:
                 + ("does" if ar > lr else "does not")
                 + f' carry into the low-false-positive region; both are re-thresholded figures '
                   f'and neither is this row&#8217;s shipped behaviour. ')
+        # The short verdict is escaped where it is placed, so nothing composed into it may
+        # carry a pre-escaped entity: `&#8217;` here reached a published revision as
+        # `&amp;#8217;` and the reader saw the entity. A literal character survives both paths.
         f[f"s_{slug}"] = (
-            ("The incumbent judge&#8217;s own weights, read out as a typed decision; "
+            (f"The incumbent judge\u2019s own weights, read out as a typed decision; "
              if same_w else "")
             + f"answers {disp['default']} on "
-              f"{disp[disp['default']] / disp['total'] * 100:.1f}% of scorable cases; "
+              f"{disp[disp['default']] / disp['total'] * 100:.1f}% of scorable cases "
+              f"{ADDED_NODE_PHRASE}; "
             + (f"{ord_.get(pos, str(pos))} of the {len(ranked)} ranked rows"
                if pos else "unranked") + " on block-only F1")
         if not same_w:
@@ -5727,7 +6443,8 @@ def added_facts() -> dict:
             f'{esc(row["candidate"].split("/", 1)[1])}, '
             + (f'{ord_.get(pos, str(pos))} of the {len(ranked)} ranked rows on block-only F1. '
                if pos else 'unranked. ')
-            + f'Its default answer is <code>{disp["default"]}</code>, on '
+            + f'{ADDED_NODE_PHRASE.capitalize()}, its most common answer is '
+              f'<code>{disp["default"]}</code>, on '
               f'{disp[disp["default"]]:,} of {disp["total"]:,} scorable cases, which puts its '
               f'confirm rate at {row["review_rate"]:.5f} and its three-way accuracy at '
               f'{row["three_way"]:.4f}. '
@@ -6071,6 +6788,8 @@ def leaderboard_html() -> str:
             f'<span class="pill">policy</span></td>'
             f'<td><strong>{esc(spec["name"])}</strong> '
             f'<span class="pill">composition</span><br>'
+            f'<span class="sub"><span class="pill">'
+            f'{esc(COMPOSITION_LABEL[composition_of(spec["node"])])}</span></span><br>'
             f'<span class="sub">{esc(spec["ver"])}</span><br>'
             f'<span class="sub">{esc(spec["deploy"])}</span></td>'
             f'<td>{esc(spec["corpus"])}</td>'
@@ -6078,7 +6797,7 @@ def leaderboard_html() -> str:
             + "".join(cells)
             + f'<td class="n">&#8212;</td>'
             f'<td class="vcol">'
-            f'{tip_text(esc(LB_VERDICT_SHORT[spec["slug"]]), spec["verdict"].format(**facts))}'
+            f'{tip_text(esc(LB_VERDICT_SHORT[spec["slug"]].format(**facts)), spec["verdict"].format(**facts))}'
             f'</td></tr>')
 
     return (f'<p class="small tbl-note"><strong>What Rank means here:</strong> position among '
@@ -6128,7 +6847,7 @@ def roster_html() -> str:
             f'<tr><td><strong>{esc(m["name"])}</strong>'
             + ("" if m["peer"] else ' <span class="pill">incumbent</span>')
             + f'</td><td>{esc(m["ver"])}<br><span class="sub">{esc(m["deploy"])}</span></td>'
-              f'<td><code>{esc(GRID_Q.get(slug, "not recorded"))}</code></td>'
+              f'<td><code>{esc(lb_row_arm(m).rsplit("/", 1)[-1])}</code></td>'
               f'<td>{esc(m.get("license", "not recorded"))}</td>'
               f'<td>{standing}</td></tr>')
     return (f'<div class="tbl-scroll"><table data-sortable>'
@@ -6159,15 +6878,27 @@ def lens_dir_sentence() -> str:
         rows.append((m["name"], b, a))
     up = [r for r in rows if r[2] > r[1]]
     down = [r for r in rows if r[2] < r[1]]
+    # A row identical on both lenses is in neither group. One is, and it was dropped: the counts
+    # summed to one less than the population and the reader was left with a row unaccounted for.
+    same = [r for r in rows if r[2] == r[1]]
+
+    def _same_clause():
+        if not same:
+            return ""
+        return (" " + ("One row is" if len(same) == 1 else f"{len(same)} rows are")
+                + " identical on both: "
+                + "; ".join(f'{esc(r[0])} {r[1]:.5f}' for r in same) + ".")
+
     if not up:
-        return (f'All {len(rows)} ranked rows score lower on the any-intervention lens than on '
-                f'block-only.')
+        return (f'{len(down)} of the {len(rows)} ranked rows score lower on the '
+                f'any-intervention lens than on block-only.' + _same_clause())
     ups = sorted(up, key=lambda r: -(r[2] - r[1]))
     return (f'{len(down)} of the {len(rows)} ranked rows score lower on the any-intervention '
             f'lens than on block-only. '
             + ("One row scores" if len(ups) == 1 else f"{len(ups)} rows score")
             + " higher: "
-            + "; ".join(f'{esc(r[0])} {r[2]:.5f} against {r[1]:.5f}' for r in ups) + ".")
+            + "; ".join(f'{esc(r[0])} {r[2]:.5f} against {r[1]:.5f}' for r in ups) + "."
+            + _same_clause())
 
 
 def lens_order_sentence() -> str:
@@ -6217,7 +6948,7 @@ def roster_md() -> str:
             + plain(lens_dir_sentence()) + " " + plain(lens_order_sentence()))
 
 
-# -------------------------------------------------- the arms added at this revision
+# ----------------------------------------- the arms added since the original roster
 def added_html() -> str:
     """Provenance, operating behaviour, ranking variable and cascade for every added arm.
 
@@ -6378,10 +7109,10 @@ def added_html() -> str:
         capvar_tbl = (
             f'<div class="tbl-scroll tbl-wide"><table data-sortable>'
             f'<caption>The same four variables, ordered by AUC and then measured at two caps on '
-            f'the block false-positive rate. The first cap is the incumbent cascade&#8217;s own '
-            f'block false-positive rate, {float(OPFPR_CAP):.8f}, which is the only one of them '
-            f'that is a shipped operating point; the second is the cap every row in the recall '
-            f'table below is measured at. '
+            f'the block false-positive rate. The first cap is the incumbent '
+            f'{esc(opfpr_who())}&#8217;s own block false-positive rate as a standalone blocker, '
+            f'{float(OPFPR_CAP):.8f}, which is the only one of them that is a shipped operating '
+            f'point; the second is the cap every row in the recall table below is measured at. '
             + (f'OpenJev on the same variable is the last row: it catches {oj_op:.6f} at its own '
                f'false-positive rate and {oj_cap:.6f} at the looser 0.5% cap, so the two columns '
                f'have different reference values and a figure taken at one of them cannot be '
@@ -6548,24 +7279,65 @@ def added_findings_html() -> str:
     # family's cause to rows that do not have it. Whether grade-B risk sits below the benign
     # grade-D mean is read per arm from that arm's own per-grade check, and the two groups are
     # named separately with the means that put them there.
-    inverted, ordered = [], []
+    # "mean risk rises with severity" is a claim about all three grades, so it is tested on all
+    # three. The earlier branch compared grade B against grade D only and put everything else in
+    # the group the sentence calls rising, which would have published "rises with severity" over
+    # an arm whose grade-A mean sits BELOW its grade-B mean. Three outcomes, three clauses, each
+    # written only when its own group is non-empty, so no clause can render with an empty list.
+    inverted, rising, neither = [], [], []
     for a in withmap:
         bg = load(added_rel(a, "mapping"))["by_grade"]
-        (inverted if bg["B"]["risk"]["mean"] < bg["D"]["risk"]["mean"] else ordered).append((a, bg))
+        _d, _b, _a = (bg[k]["risk"]["mean"] for k in ("D", "B", "A"))
+        if _b < _d:
+            inverted.append((a, bg))
+        elif _d < _b < _a:
+            rising.append((a, bg))
+        else:
+            neither.append((a, bg))
+
+    def _means(pair):
+        a_, bg = pair
+        return (f'{esc(a_["name"])} benign grade-D {bg["D"]["risk"]["mean"]:.6f}, grade-B '
+                f'{bg["B"]["risk"]["mean"]:.6f}, grade-A {bg["A"]["risk"]["mean"]:.6f}')
+
     cause = ""
-    if ordered:
-        cause = (
-            f' That inversion is not shared. Of the {len(withmap)} arms with a per-grade check on '
-            f'disk, {len(inverted)} show{"s" if len(inverted) == 1 else ""} it and '
-            f'{len(ordered)} do{"es" if len(ordered) == 1 else ""} not: on '
-            + ", ".join(
-                f'{esc(a["name"])} mean risk rises with severity, benign grade-D '
-                f'{bg["D"]["risk"]["mean"]:.6f} to grade-B {bg["B"]["risk"]["mean"]:.6f} to '
-                f'grade-A {bg["A"]["risk"]["mean"]:.6f}' for a, bg in ordered)
-            + f'. On those rows the ranking variable orders the corpus in the right direction and '
-              f'is only coarser than <code>P(block)</code>, not inverted, so the grade-B cause '
-              f'belongs to '
-            + ", ".join(esc(a["name"]) for a, _ in inverted) + ' alone.')
+    if rising or neither:
+        _tally = []
+        if inverted:
+            _tally.append(f'{len(inverted)} show{"s" if len(inverted) == 1 else ""} it')
+        if rising:
+            _tally.append(f'{len(rising)} {"has" if len(rising) == 1 else "have"} mean risk '
+                          f'rising across all three grades')
+        if neither:
+            _tally.append(f'{len(neither)} {"is" if len(neither) == 1 else "are"} neither')
+        cause = (f' That inversion is not shared. Of the {len(withmap)} of {len(ADDED)} arms with '
+                 f'a per-grade check on disk, ' + ", ".join(_tally) + '.')
+        if rising:
+            cause += (' Mean risk rises with severity on '
+                      + "; ".join(_means(p) for p in rising)
+                      + '. On those rows the ranking variable orders the corpus in the right '
+                        'direction and is coarser than <code>P(block)</code> rather than '
+                        'inverted.')
+        if neither:
+            cause += (' Neither ordering holds on ' + "; ".join(_means(p) for p in neither)
+                      + ': grade B sits above benign grade D and grade A below grade B, so the '
+                        'variable is not monotone in severity there either.')
+        if inverted:
+            cause += (' The grade-B cause belongs to '
+                      + ", ".join(esc(a_["name"]) for a_, _ in inverted)
+                      + f' of the {len(withmap)} arms checked.')
+    # The population is the arms with a check on disk, which is not every arm. Which arms are
+    # outside it was inferable only by counting the named ones against the roster.
+    _nomap = [a for a in ADDED if not have(added_rel(a, "mapping"))]
+    if _nomap:
+        cause += (f' {len(_nomap)} arm'
+                  + ("" if len(_nomap) == 1 else "s")
+                  + ' on the board '
+                  + ("has" if len(_nomap) == 1 else "have")
+                  + ' no per-grade check on disk and '
+                  + ("is" if len(_nomap) == 1 else "are")
+                  + ' outside this comparison: '
+                  + ", ".join(esc(a["name"]) for a in _nomap) + '.')
     alts = ", ".join(
         f'{esc(a["name"])} {load(added_rel(a, "auc"))["auc"]["P(block) - P(confirm)"]:.4f}'
         for a in ADDED)
@@ -6600,7 +7372,9 @@ def added_findings_html() -> str:
         # row in the recall table is measured at; the operating cap's is OpenJev measured at the
         # same cap, which is a tighter threshold and a lower recall. Quoting the 0.5% figure as the
         # incumbent's recall at its own operating point would flatter the incumbent by the gap.
-        CAPREF = [(OPFPR_CAP, "the incumbent cascade&#8217;s own block false-positive rate",
+        CAPREF = [(OPFPR_CAP,
+                   f"the incumbent {esc(opfpr_who())}&#8217;s own block false-positive rate as "
+                   f"a standalone blocker",
                    (ojref[f"recall_at_fpr_{OPFPR_CAP}"]["recall"] if ojref else None)),
                   (SHARED_CAP, "the cap every row in the recall table below is measured at",
                    added_cmp_row("OpenJev")["recall"][SHARED_CAP])]
@@ -6998,8 +7772,8 @@ def sj_disclosure() -> tuple[str, str]:
     f = sj_facts()
     c = f["contam"]
     par = PARITY_GRID
-    short = (f'Discloses a different question shape &#8212; {esc(f["grid"])}, a single serialised '
-             f'string, not the ranked {par} question grid &#8212; and {c["s2_cases"]} of '
+    short = (f'Discloses a different question shape: {esc(f["grid"])}, one serialised string, '
+             f'where the ranked rows answer the {par} question grid. Also {c["s2_cases"]} of '
              f'{f["n"]:,} s2 cases that collide exactly with one of its own declared training '
              f'sources.')
     full = (
@@ -7027,17 +7801,96 @@ for _a in ADDED:
                          f'which no builder is registered')
 
 
+# ------------------------------------------ rows that are one set of weights served two ways
+# Two rows can be the same safetensors read out two different ways, and the Model column does
+# not say so: the incumbent judge row and the typed-decision row over those same weights differ
+# by a suffix and a space, which is not something a reader scanning a column can see. The
+# pairing is detected from the serving records rather than listed here, and both halves are
+# marked, because a marker on one row leaves the other looking like a different model.
+#
+# `serving.same_base_weights_as_incumbent_judge` on an added arm means "these are the incumbent
+# judge row's weights". Which row that is comes from MODELS, where exactly one row is not a
+# peer, so a further arm that declares the flag pairs with whatever the incumbent is then.
+def same_weight_rows() -> dict[str, dict[str, str]]:
+    """{slug: {"short": ..., "full": ...}} for every row in a same-weights pair."""
+    out: dict[str, dict[str, str]] = {}
+    for a in ADDED:
+        sv = g(added_rel(a, "serving"), "serving")
+        if not sv.get("same_base_weights_as_incumbent_judge"):
+            continue
+        s = g(added_rel(a, "serving"), "served")
+        incs = [m for m in MODELS if not m["peer"]]
+        if len(incs) != 1:
+            raise SystemExit(f'ABORT: {a["name"]} declares the incumbent judge\'s own weights, '
+                             f'and MODELS holds {len(incs)} rows that are not peers, so which '
+                             f'row it is paired with cannot be read off the table')
+        inc = incs[0]
+        # the two rows must at least name the same repo, or the claim has drifted off its row
+        if s["repo_id"] not in inc.get("license_source", ""):
+            raise SystemExit(f'ABORT: {a["name"]} serves {s["repo_id"]} and claims the weights '
+                             f'of {inc["name"]}, whose licence source does not name that repo')
+        # each side's readout, so the marker says what actually differs rather than only that
+        # something does. The arm's comes from its own record; the incumbent's is declared on
+        # its MODELS row, beside the deployment and version strings that row already carries,
+        # and is checked below against its run meta rather than trusted.
+        arm_readout = str(s["readout"]).split(":", 1)[0].strip()
+        inc_readout = inc.get("readout")
+        if not inc_readout:
+            raise SystemExit(f'ABORT: {inc["name"]} is paired with {a["name"]} on one set of '
+                             f'weights and its MODELS row declares no readout, so the marker '
+                             f'cannot say what differs between them')
+        # the arm's meta records a readout and no generated tokens; the judge's meta records
+        # generated tokens and no readout. That is the difference the marker states, so it is
+        # read from both metas instead of being taken on trust.
+        am = load(added_rel(a, "meta"))
+        jm = load(JUDGE_SCORED["s2"])
+        if not am.get("readout") or am.get("completion_tokens"):
+            raise SystemExit(f'ABORT: {a["name"]} run meta does not record a readout without '
+                             f'generated tokens, so calling its row a typed readout of the '
+                             f'judge\'s weights is not supported by it')
+        if not jm.get("completion_tokens") or jm.get("readout"):
+            raise SystemExit(f'ABORT: {inc["name"]} run meta does not record generated tokens '
+                             f'without a readout, so calling its row a generative judge is not '
+                             f'supported by it')
+        rev = str(s["repo_revision"])[:12]
+        full = (f'{esc(sv["relationship_to_incumbent"])} Both rows are served from '
+                f'<code>{esc(s["repo_id"])}</code> at revision <code>{esc(rev)}</code>. '
+                f'<strong>{esc(a["name"])}</strong> reads the decision out with a '
+                f'{esc(arm_readout)} readout and <strong>{esc(inc["name"])}</strong> with a '
+                f'{esc(inc_readout)} readout. The gap between the two rows is a '
+                f'serving-architecture comparison over one set of weights.')
+        out[a["slug"]] = {
+            "short": (f'as {esc(inc["name"])}, revision {esc(rev)}; '
+                      f'{esc(arm_readout)} readout'),
+            "full": full}
+        out[inc["slug"]] = {
+            "short": (f'as {esc(a["name"])}, revision {esc(rev)}; '
+                      f'{esc(inc_readout)} readout'),
+            "full": full}
+    return out
+
+
+def same_weight_marker(m: dict) -> str:
+    """The small marker a row carries when another row on the board is the same weights."""
+    d = same_weight_rows().get(m["slug"])
+    if not d:
+        return ""
+    return (f'<span class="sub"><span class="pill">same weights</span> '
+            f'{tip_text(d["short"], d["full"])}</span><br>')
+
+
 def added_row_disclosure(m: dict) -> str:
     """The small marker a leaderboard row carries where its cell needs a disclosure.
 
     Kept off the metric cells and on the model cell, so it qualifies the row rather than any one
     number, and registered per arm so leaderboard_html() knows about no particular model.
     """
+    out = same_weight_marker(m)
     a = m.get("added")
     if not a or not a.get("disclosure"):
-        return ""
+        return out
     short, full = ADDED_DISCLOSURE[a["disclosure"]]()
-    return (f'<span class="sub">{tip_text(short, full)} '
+    return (out + f'<span class="sub">{tip_text(short, full)} '
             f'<a href="#{esc(SJ_SLUG)}">Why neither is decisive</a></span><br>')
 
 
@@ -7205,6 +8058,81 @@ def secjudge_html() -> str:
         f'the publisher&#8217;s approval.</p>')
 
 
+# ------------------------------------------------------------ the code paths, as links
+# One base and two refs. Every link on the Code paths table is composed from these, so a path and
+# the URL beside it cannot disagree, and the pinned ref is stated once rather than per row.
+REPO_URL = "https://github.com/cisco-ai-defense/defenseclaw"
+REPO_BRANCH = "feat/system-one-benchmarks"
+# The commit this revision's figures were produced from. A branch moves; a reader a year from now
+# needs the tree, so both forms are published and this one is the reproducible one.
+REPO_PIN = "d2ae73f32736db0aa9fd8e78d5656355c1a41012"
+# The dataset lock resolves on `main` as well, and the two refs hold DIFFERENT files: the copy
+# this build reads is the one on `main`. Linking the branch copy beside a count taken from the
+# `main` copy would point a reader at a file that disagrees with the number next to it.
+REPO_LOCK_REF = "main"
+
+# (path, ref, what it does). `ref` is the branch unless the file differs between refs and this
+# build reads the other one.
+CODE_PATHS = [
+    ("benchmarks/system_one/contexts-v1.json", None,
+     "10 context recipes (C0&#8230;CD) and production byte bounds."),
+    ("benchmarks/system_one/questions-v1.json", None,
+     "The first question set, kept for the pilot arms that were run against it."),
+    ("benchmarks/system_one/questions-v2.json", None,
+     "5 question formats (Q0&#8230;Q4), 4 instruction variants (I0&#8230;I3), verbatim prompt "
+     "text."),
+    ("benchmarks/schema/system-one-prediction-v1.schema.json", None,
+     "Prediction row schema with the enum of valid context variants."),
+    ("benchmarks/scripts/benchmark_run_system_one.py", None,
+     'Runner. <code>derive_action()</code> holds the '
+     '<a href="finding-safety.html#failopen">Q1/Q3 answer-type guard</a>; '
+     '<code>validate_resume_prefix()</code> the resume validator behind the '
+     '<a href="finding-safety.html#resume">tamper experiment</a>.'),
+    ("benchmarks/scripts/benchmark_score_system_one.py", None,
+     "Cascade scorer. Produces the <code>binary</code> / <code>binary_block_only</code> / "
+     "<code>three_way</code> blocks and all policy lenses."),
+    ("benchmarks/scripts/score_intent_separation.py", None,
+     "Separation scorer. Unmodified across every intent analysis, including the AgentDojo "
+     "control."),
+    ("benchmarks/scripts/benchmark_inventory_system_one_sources.py", None,
+     "Truth-grade assignment (<code>truth_grade()</code>) and family-identity resolution "
+     "(<code>family_authority()</code>)."),
+    ("benchmarks/scripts/benchmark_normalize_agenttrace.py", None,
+     "One of the per-corpus adapters; three were rewritten to carry the user&#8217;s request "
+     "through normalisation."),
+    ("benchmarks/datasets.lock.json", REPO_LOCK_REF,
+     "91 pinned sources with licence status and redistribution terms; 14 "
+     "<code>enabled: false</code>. Linked at <code>main</code>, which is the copy this build "
+     "reads: the branch copy is a different file with 11 disabled."),
+    ("benchmarks/coverage-report.mapping.json", None,
+     "Per-source intended use and stated limitations."),
+]
+
+
+def code_paths_html() -> str:
+    """The Code paths table, every row linked at both the branch and the pinned commit."""
+    rows = []
+    for path, ref, what in CODE_PATHS:
+        r = ref or REPO_BRANCH
+        rows.append(
+            f'<tr><td><a href="{REPO_URL}/blob/{r}/{path}"><code>{esc(path)}</code></a><br>'
+            f'<span class="sub"><a href="{REPO_URL}/blob/{REPO_PIN}/{path}">at '
+            f'<code>{REPO_PIN[:12]}</code></a></span></td>'
+            f'<td>{what}</td></tr>')
+    return (
+        f'<p class="small">Everything below is in <a href="{REPO_URL}/tree/{REPO_BRANCH}/'
+        f'benchmarks"><code>{REPO_BRANCH}</code></a>, and pinned at '
+        f'<a href="{REPO_URL}/tree/{REPO_PIN}/benchmarks"><code>{REPO_PIN[:12]}</code></a>, which '
+        f'is the tree these figures were produced from. <strong>The default branch does not '
+        f'carry this work</strong>: of the {len(CODE_PATHS)} paths below, only '
+        f'<code>benchmarks/datasets.lock.json</code> resolves on <code>main</code>, and there it '
+        f'is a different file. Each row links the branch copy and the pinned copy; a branch '
+        f'moves.</p>'
+        f'<div class="tbl-scroll"><table>'
+        f'<thead><tr><th>Path</th><th>What it does</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+
 def parity_html() -> str:
     """The same-format comparison, and every off-parity arm beside it.
 
@@ -7238,23 +8166,61 @@ def parity_html() -> str:
     worst_any = min(p["at_parity"], key=lambda r: r["any"] if r["any"] is not None else 9)
     return (
         f'<div class="tbl-scroll"><table data-sortable>'
-        f'<caption><strong>The same-format comparison.</strong> All '
-        f'{len(p["at_parity"])} models at <code>{esc(p["grid"])}</code> on the '
+        f'<caption><strong>The same-format comparison.</strong> The '
+        f'{len(p["at_parity"])} models this comparison file scores at '
+        f'<code>{esc(p["grid"])}</code>, on the '
         f'{p["scorable"]:,} scorable cases of the Broad comparison, model-alone lens, on the '
         f'real deterministic rule tier'
         + (f' (tier digest <code>{esc(p["tier_sha"][:12])}&#8230;</code>)'
            if p["real_tier"] else "")
         + f'. The bold rows hold the question format fixed, so the difference between them is '
           f'the model. The rows below them are the same models at other question formats, which '
-          f'is where the large-stage leaderboard reads some of its cells from. Source: '
+          f'is where the large-stage leaderboard reads some of its cells from. '
+        + _sf_scope_note(p)
+        + f' Source: '
           f'<code>outputs/{S2CMP} :: grid_parity, arms[].per_case.model_only</code>.</caption>'
         f'<thead>{head}</thead><tbody>{at}'
         f'<tr><td colspan="7" class="sub">other question formats, same corpus and models</td></tr>'
         f'{off}</tbody></table></div>'
-        f'<p class="small">At the parity grid {esc(best_any["label"])} has the highest '
-        f'any-intervention F1 at {best_any["any"]:.5f} and {esc(worst_any["label"])} the lowest '
-        f'at {worst_any["any"]:.5f}. '
+        f'<p class="small">Of the {len(p["at_parity"])} arms in this file '
+        f'{esc(best_any["label"])} has the highest any-intervention F1 at '
+        f'{best_any["any"]:.5f} and {esc(worst_any["label"])} the lowest at '
+        f'{worst_any["any"]:.5f}. ' + _sf_lens_note() + ' '
         + _parity_note(p) + '</p>')
+
+
+def _sf_scope_note(p) -> str:
+    """How many ranked rows are at this format, against how many this file scores.
+
+    The file declares its own parity set and it was written when those were the same rows. They
+    are not now: five further ranked rows are at the same cell and are scored in their own
+    files, so a reader told "the models at this format" would be told about three of eight.
+    """
+    sf = same_format_rows()
+    # The comparison file spells DiffusionGemma `diffusiongemma` and the leaderboard spells it
+    # `diffgemma`. Matching the two by string equality counted that model as absent from the
+    # file it is in, so the sentence's halves did not sum to its own population. CMP_SLUG is the
+    # one place the two spellings are reconciled.
+    in_file = {CMP_SLUG.get(a["model"], a["model"]) for a in p["at_parity"]}
+    extra = [r for r in sf if r["slug"] not in in_file]
+    if not extra:
+        return ""
+    return (f'This file scores {len(p["at_parity"])} of the {len(sf)} ranked rows that are at '
+            f'<code>{esc(p["grid"])}</code>; the other {len(extra)} are scored in their own '
+            f'files and appear in the added-arm table: '
+            + ", ".join(esc(r["name"]) for r in extra) + '.')
+
+
+def _sf_lens_note() -> str:
+    """The same two extremes over every ranked row at the format, not only this file's rows."""
+    sf = same_format_rows()
+    hi = max((r for r in sf if r["any"] is not None), key=lambda r: r["any"], default=None)
+    lo = min((r for r in sf if r["any"] is not None), key=lambda r: r["any"], default=None)
+    if hi is None or lo is None or hi["slug"] == lo["slug"]:
+        return ""
+    return (f'Over all {len(sf)} ranked rows at that format the highest any-intervention F1 is '
+            f'{esc(hi["name"])}&#8217;s {hi["any"]:.5f} and the lowest '
+            f'{esc(lo["name"])}&#8217;s {lo["any"]:.5f}.')
 
 
 def _parity_note(p) -> str:
@@ -7621,18 +8587,42 @@ def matchups_html() -> str:
 # there is not shingle-scanned; a blob in <body> would be.  Every value comes from
 # the same g() reads the assertions cover.
 
-def build_data() -> str:
-    d = {
+# Which control consumes each key, and the markup that proves the control is on the page.
+# The script reads every key from behind the matching guard, so a page that renders none of
+# these reads none of the blob. It was emitted whole on every page carrying {{DATA}}, which
+# put `exp` - one row per case of the 2,133-case disagreement queue, with the upstream dataset
+# named per row - on five pages that never render the explorer. Every cell is an integer index
+# and the payload guard passes it, but a per-case table of a download-only corpus is not
+# something to redistribute as a side effect of a template token.
+BLOB_CONSUMERS = {
+    "lens": "data-lens-btn",     # the lens control re-reads every [data-lens-key] cell
+    "thr": 'id="thr-range"',     # the threshold slider
+    "calc": 'id="calc-dec"',     # the cost calculator
+    "exp": 'id="exp-body"',      # the case explorer
+}
+
+
+def build_data() -> dict:
+    """Every key the blob can carry. main() ships each page only what that page renders."""
+    return {
         "lens": lens_table(),
         "thr": {"points": THR_POINTS, "s2": thr_series(S2SCORE), "s3": thr_series(S3SCORE)},
-        "order": [m["slug"] for m in MODELS],
         "calc": calc_blob(),
         "exp": explore_data(),
     }
-    blob = json.dumps(d, separators=(",", ":"), sort_keys=True)
+
+
+def data_block(d: dict, body: str) -> tuple[str, list[str]]:
+    """The blob one page needs, and the keys it got.
+
+    The element is emitted even when no key is needed, because the script reads it before it
+    reaches the tooltip behaviour every page uses.
+    """
+    keys = sorted(k for k, marker in BLOB_CONSUMERS.items() if marker in body)
+    blob = json.dumps({k: d[k] for k in keys}, separators=(",", ":"), sort_keys=True)
     if "<" in blob or "&" in blob:
         raise SystemExit("ABORT: the data blob contains markup characters")
-    return f'<script type="application/json" id="bench-data">{blob}</script>'
+    return (f'<script type="application/json" id="bench-data">{blob}</script>', keys)
 
 
 SCRIPT = """
@@ -8040,6 +9030,33 @@ def proto(rel: str):
 
 Q_V2 = "v2/questions-v2.json"
 C_V1 = "v1/contexts-v1.json"
+# Where these files live in the repository. The build reads them from a local staging tree whose
+# layout is `protocol/v{1,2}/`, and that staging path was published as though it were a
+# repository path: there is no `protocol/` directory on any ref. The reader gets the repository
+# path, composed from this one constant plus the file's own basename, and the bytes behind it are
+# pinned below so the path names a specific file rather than a plausible one.
+PROTO_REPO = "benchmarks/system_one"
+
+
+def proto_cite(rel: str) -> str:
+    """The repository path of a protocol file, for a caption a reader may follow."""
+    return f"{PROTO_REPO}/{os.path.basename(rel)}"
+
+
+def proto_sha(rel: str) -> str:
+    """The sha256 of the protocol file this build actually read."""
+    import hashlib
+    with open(os.path.join(PROTO, rel), "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+# The two protocol files, pinned by content. A caption that names a repository path is only worth
+# reading if the bytes behind it are the bytes the figures came from.
+for _prel, _psha in ((Q_V2, "faaa14d4d2fd019821a33d91eb946d76784658a36d84d76b421c5e5e23f9b80b"),
+                     (C_V1, "6db1adb7cfcee82ec73c4d3c1dc4ecb43d77b326ea30b243aa403176c6591842")):
+    if proto_sha(_prel) != _psha:
+        raise SystemExit(f"ABORT: {proto_cite(_prel)} is not the file this build was pinned to: "
+                         f"staged copy sha256 {proto_sha(_prel)}, expected {_psha}")
 
 INSTRUCTION_NOTE = {
     "I0": "Jev-native wording. No policy block.",
@@ -8093,7 +9110,8 @@ def instructions_html() -> str:
             f'<td class="n">{m["C0"]:.5f}</td><td class="n">{m["C7"]:.5f}</td></tr>')
     return (f'<div class="tbl-scroll"><table>'
             f'<caption>Instruction variants. Policy text verbatim from '
-            f'<code>protocol/{esc(Q_V2)}</code>. F1 columns are the any-intervention lens on the '
+            f'<code>{esc(proto_cite(Q_V2))}</code>. F1 columns are the any-intervention lens on '
+            f'the '
             f'200-case pilot, hosted Jev 1.13.0, question Q0.</caption>'
             f'<thead><tr><th>Variant</th><th>Policy text as sent</th><th>What it adds</th>'
             f'<th class="n">F1 at C0</th><th class="n">F1 at C7</th></tr></thead>'
@@ -8123,7 +9141,7 @@ def questions_html() -> str:
             f'<td><ul class="slots">{"".join(parts)}</ul></td></tr>')
     return (f'<div class="tbl-scroll"><table>'
             f'<caption>Question variants and their answer schemas, verbatim from '
-            f'<code>protocol/{esc(Q_V2)}</code>.</caption>'
+            f'<code>{esc(proto_cite(Q_V2))}</code>.</caption>'
             f'<thead><tr><th>Variant</th><th>Shape</th><th>Slots as sent</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
 
@@ -8150,7 +9168,8 @@ def contexts_html() -> str:
             f'<td class="n">{f1:.5f}</td><td class="n">{rec:.5f}</td>'
             f'<td class="n">{fpr:.5f}</td></tr>')
     return (f'<div class="tbl-scroll"><table>'
-            f'<caption>Context variants, verbatim from <code>protocol/{esc(C_V1)}</code>. '
+            f'<caption>Context variants, verbatim from '
+            f'<code>{esc(proto_cite(C_V1))}</code>. '
             f'Production bounds: {bounds["intent_bytes"]:,} bytes of request, '
             f'{bounds["prior_event_bytes"]:,} per prior event, '
             f'{bounds["current_event_bytes"]:,} for the current event, '
@@ -8476,7 +9495,10 @@ SPEND_ROSTER_PREFIX = {"jev-": "jev"}
 # Every arm added to the leaderboard is reported here, so its manifests join the reported side
 # of the reconciliation rather than the set-aside side. Without this an added arm's manifests
 # would be counted as belonging to an evaluation this site does not report, which it does.
-SPEND_ROSTER.update({a["name"]: a["slug"] for a in ADDED})
+# Keyed on BOTH the display name and the artifact stem, because a manifest records the stem in
+# its `model` field while every lookup elsewhere on the site uses the display name. An arm whose
+# two differ - two of them do - was landing on the set-aside side of the reconciliation.
+SPEND_ROSTER.update({k: a["slug"] for a in ADDED for k in (a["name"], a["pred"])})
 SPEND: dict = {}
 
 
@@ -8698,6 +9720,59 @@ def resolve_spend() -> dict:
             parts.update(d.get("shard_run_ids")
                          or (d.get("merge") or {}).get("shard_run_ids") or [])
     part_n = part_req = 0
+    # The same run's manifest exists at more than one path in the outputs tree: a staged copy
+    # beside a guard payload, a pre-settlement copy beside the settled one, a resume ledger
+    # beside the run it resumed. Each pair describes ONE set of decisions, and counting both
+    # inflated the request total. A manifest is counted once per (run_id, prediction_sha256):
+    # the same run at the same body digest is the same measurement whatever path it sits at.
+    # Files are walked in sorted order, so which copy is kept is deterministic.
+    # Which copy is kept matters: the two copies of one run can record the `model` field two
+    # ways, the repo id at one path and the artifact stem at the other, and only one of the two
+    # is on the roster. Keeping the first path in sorted order dropped SecJudge out of the
+    # reported families altogether. The representative is therefore chosen per identity: a copy
+    # whose `model` resolves to a reported family wins, and sorted order breaks the remaining
+    # ties, so the choice is deterministic and cannot silently reclassify a run.
+    by_ident: dict = {}
+    for f in files:
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if not isinstance(d, dict) or d.get("estimated_usd") is None:
+            continue
+        if d.get("run_id") in parts:
+            continue
+        ident = (d.get("run_id"), d.get("prediction_sha256"))
+        if not all(ident):
+            continue
+        by_ident.setdefault(ident, []).append(f)
+    keep: set = set()
+    dup_n = dup_req = 0
+    for ident, paths in by_ident.items():
+        chosen = None
+        for f in sorted(paths):
+            with open(f, "r", encoding="utf-8") as fh:
+                m = str(json.load(fh).get("model", "unknown"))
+            if m != MOCK_MODEL and spend_class(m) is not None:
+                chosen = f
+                break
+        keep.add(chosen or sorted(paths)[0])
+    for f in files:
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if not isinstance(d, dict) or d.get("estimated_usd") is None:
+            continue
+        if d.get("run_id") in parts:
+            continue
+        ident = (d.get("run_id"), d.get("prediction_sha256"))
+        if all(ident) and f not in keep:
+            dup_n += 1
+            dup_req += (d.get("requests") or d.get("provider_calls")
+                        or d.get("attempted_provider_calls") or 0)
     for f in files:
         try:
             with open(f, "r", encoding="utf-8") as fh:
@@ -8711,6 +9786,9 @@ def resolve_spend() -> dict:
             part_req += (d.get("requests") or d.get("provider_calls")
                          or d.get("attempted_provider_calls") or 0)
             continue
+        ident = (d.get("run_id"), d.get("prediction_sha256"))
+        if all(ident) and f not in keep:
+            continue                     # a second copy of a run already counted
         n += 1
         r = (d.get("requests") or d.get("provider_calls")
              or d.get("attempted_provider_calls") or 0)
@@ -8736,7 +9814,12 @@ def resolve_spend() -> dict:
     # The set legitimately GROWS while runs land, so the counts are not frozen. What is
     # checked is that the classification is exhaustive and reconciles, and that the set has
     # not silently shrunk below what has already been published.
-    floor = {"found": 164, "with_key": 162, "mock_metas": 35, "mock_req": 2030,
+    # The mock floor was 35 manifests and 2,030 requests. One of those 35 was a second copy of
+    # `fi-intermittent_20pct_http503` at the same body digest, sitting beside the run it resumed,
+    # so the published pair counted 58 requests twice. The floor moves to the deduplicated pair
+    # with that reason recorded: the floor exists to catch a manifest set that shrank by
+    # accident, and a correction that names the duplicate it removed is not that.
+    floor = {"found": 164, "with_key": 162, "mock_metas": 34, "mock_req": 1972,
              "real_metas": 127, "real_req": 1052612, "usd": 5.679945,
              "jev_usd": 4.903156, "gemma4_usd": 0.776789}
     got = {"found": len(files), "with_key": n, "mock_metas": mock_n, "mock_req": mock_req,
@@ -8756,7 +9839,8 @@ def resolve_spend() -> dict:
     if bad:
         raise SystemExit("ABORT: the provider-spend rollup is inconsistent or has lost "
                          "manifests that were already published:\n  " + "\n  ".join(bad))
-    SPEND.update({"total": tot, "requests": req, "errors": errs, "per": per,
+    SPEND.update({"dup_metas": dup_n, "dup_requests": dup_req,
+                  "total": tot, "requests": req, "errors": errs, "per": per,
                   "found": len(files), "with_key": n, "mock_metas": mock_n,
                   "mock_requests": mock_req, "real_metas": n - mock_n - off_n,
                   "off_metas": off_n, "off_requests": off_req, "off_usd": off_usd,
@@ -8771,7 +9855,9 @@ def resolve_spend() -> dict:
                              f"{len(per)} reported model families. A further {part_n} manifests "
                              f"are the shards of a sharded run ({part_req:,} requests) and are "
                              f"covered by that run's merged manifest, so they are counted once "
-                             f"rather than twice")})
+                             f"rather than twice, and {dup_n} are a second copy of a manifest "
+                             f"already counted, at the same <code>run_id</code> and the same "
+                             f"body digest ({dup_req:,} requests), counted once")})
     return SPEND
 
 
@@ -10854,20 +11940,45 @@ DEC_ORDER = ["allow", "confirm", "block"]
 def conf_panels() -> list[dict]:
     """The 3x3 truth-by-decision matrix per model, all on one fixed policy."""
     out = []
+    # DiffusionGemma's panel read its Q3 arm while its F1, precision, recall, FPR and confirm
+    # rate on the same page are all read from its Q2 arm. The panel is presented beside the
+    # others as one fixed policy, so a reader checking the confirm column against the printed
+    # confirm rate found 6.73% against 0.08174. It now reads the same arm as every other cell
+    # for this model, and each panel carries the arm it was read from.
     spec = [("openjev", "OpenJev", S2SCORE, f"candidates/0/{CONF_POLICY}"),
-            ("diffgemma", "DiffusionGemma 26B-A4B", S2SCORE_DG, f"candidates/0/{CONF_POLICY}"),
+            ("diffgemma", "DiffusionGemma 26B-A4B", S2SCORE_DG_Q2, f"candidates/0/{CONF_POLICY}"),
             ("gemma4", "Gemma 4 26B-A4B (judge)", S2SCORE, "candidates/0/deterministic_then_llm")]
     for slug, name, rel, path in spec:
         cm = g(rel, path + "/three_way/confusion")
         out.append({"slug": slug, "name": name, "cm": cm, "src": f"outputs/{rel} :: {path}",
+                    "arm": "/".join(str(g(rel, "candidates/0/candidate")).split("/")[-3:])
+                           if slug != "gemma4" else grid_of_meta(JUDGE_SCORED["s2"]),
                     "n": sum(sum(r.values()) for r in cm.values())})
     big = jev_stage("s2")
     if big and big.get(CONF_POLICY, {}).get("three_way"):
         out.append({"slug": "jev", "name": "Jev 1.13.0", "src": _JEV_FOUND["s2"],
                     "cm": big[CONF_POLICY]["three_way"]["confusion"],
+                    "arm": "/".join(JEV_CANON_ARM.split("/")[-3:]),
                     "n": sum(sum(r.values())
                              for r in big[CONF_POLICY]["three_way"]["confusion"].values())})
     return out
+
+
+def _conf_arm_note() -> str:
+    """Which prompt grid each panel is read at, and whether they are one cell.
+
+    A claim that the panels are directly comparable is a claim about their arms, so it is made
+    from the arms rather than beside them.
+    """
+    panels = conf_panels()
+    cells = {p["arm"] for p in panels}
+    if len(cells) == 1:
+        return (f'Every panel is read at <code>{esc(next(iter(cells)))}</code>, so the '
+                f'difference between them is the model.')
+    return ("The panels are not all at one prompt grid, so a difference between them carries "
+            "the grid as well as the model: "
+            + "; ".join(f'{esc(p["name"])} at <code>{esc(p["arm"])}</code>' for p in panels)
+            + ".")
 
 
 def chart_confusion() -> str:
@@ -10960,7 +12071,7 @@ def chart_confusion() -> str:
                          trows, numeric_from=3),
         note="Grade C is excluded from scoring, so there is no third unsafe row. The grade-A row "
              "holds 17 cases on this corpus: a single case moves it by 5.88 points, which is why "
-             "the counts are printed.",
+             "the counts are printed. " + _conf_arm_note(),
     )
 
 
@@ -11700,6 +12811,342 @@ def _build_charts() -> dict[str, str]:
     }
 
 
+def full(x) -> str:
+    """The shortest decimal string that round-trips to this float.
+
+    A fixed number of places either truncates a figure quoted in full elsewhere or pads it with
+    digits the float does not hold. `repr` of a float is the shortest string that reads back as
+    the same double, so the printed digits are exactly the ones the artifact carries.
+    """
+    return repr(float(x))
+
+
+def _floor_facts() -> dict:
+    """The trivial floor, and which ranked rows sit under it at their shipped operating point."""
+    floor = g(S3SC, "corpora/s2_trivial_floor_block_everything/f1")
+    prev = g(S3SC, "corpora/s2/prevalence")
+    ranked = sorted((r for r in lb_extremes()["models"] if lb_group(r["slug"]) == 0),
+                    key=lambda r: -r["f1"])
+    under = [r for r in ranked if r["f1"] < floor]
+    near = [r for r in ranked if floor <= r["f1"] < floor + 0.012]
+    return {"floor": floor, "prev": prev, "ranked": ranked, "under": under, "near": near}
+
+
+def _name_list(rows, fmt="{:.8f}") -> str:
+    """"a 0.1, b 0.2 and c 0.3" over a list of leaderboard rows."""
+    parts = [f'<strong>{esc(r["name"])}</strong> ' + fmt.format(r["f1"]) for r in rows]
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def rethreshold_html() -> str:
+    """Shipped argmax against the re-thresholded ceiling, with the held-out figure beside it."""
+    rows = ceiling_rows()
+    onboard = [r for r in rows if r["slug"] is not None]
+    offboard = [r for r in rows if r["slug"] is None]
+    deltas = [(r["ceiling"] - r["shipped"], r) for r in onboard]
+    lo, hi = min(deltas, key=lambda d: d[0]), max(deltas, key=lambda d: d[0])
+    ff = _floor_facts()
+    oj = next(r for r in rows if r["slug"] == "openjev")
+    kev = next(r for r in rows if r["slug"] == KEV_SLUG)
+    o27 = next(r for r in rows if r["slug"] == "ojq27b")
+    withheld = [r for r in onboard if r["withheld"] is not None]
+
+    trs = []
+    for r in rows:
+        mark = "" if r["slug"] else (
+            ' <span class="pill">not a board row</span>')
+        wh = ("&#8212;" if r["withheld"] is None else
+              f'{r["withheld"]:.8f} <span class="sub">def {r["withheld_def"]}</span>')
+        trs.append(
+            f'<tr><td><strong>{esc(r["name"])}</strong>{mark}</td>'
+            f'<td class="n">{full(r["shipped"])}</td>'
+            f'<td class="n">{full(r["ceiling"])}</td>'
+            f'<td><code>{esc(r["variable"])}</code> '
+            f'<span class="sub">def {esc(r["definition"])}</span></td>'
+            f'<td class="n">{full(r["nested"])}</td>'
+            f'<td class="n">{r["ceiling"] - r["shipped"]:+.4f}</td>'
+            f'<td class="n">{r["ceiling"] / r["shipped"]:.2f}&#215;</td>'
+            f'<td class="n">{wh}</td></tr>')
+    tbl = (
+        f'<div class="tbl-scroll tbl-wide"><table data-sortable>'
+        f'<caption>Block-only F1 on the {g(S3SC, "corpora/s2/scorable_cases_A_B_D"):,} scorable '
+        f'cases of the Broad comparison. <em>Shipped</em> is the argmax operating point the '
+        f'ranked table prints. <em>Ceiling</em> is the highest F1 over a full single-threshold '
+        f'sweep, fitted on the same cases it is scored on, so it is an oracle upper bound. '
+        f'<em>Nested out of fold</em> is the pooled figure from '
+        f'grouped {NESTED_K}-fold cross-validation inside the same corpus, with the threshold '
+        f'and the variable chosen on the training folds only. The last column is the arm&#8217;s '
+        f'highest figure on <code>P(block) &#8722; P(confirm)</code> where that exceeds the '
+        f'ceiling; it is withheld from the ranking. One row is an arm the re-mining measured '
+        f'that is not on the board; it is marked, and it is excluded from every count taken '
+        f'over the board. Sources: '
+        f'<code>outputs/{esc(REMINE)}</code>, <code>outputs/{esc(KEVREMINE)}</code> and '
+        f'<code>outputs/{esc(HELDOUT)}</code>.</caption>'
+        f'<thead><tr><th>Arm</th><th class="n" data-sort="num">shipped</th>'
+        f'<th class="n">ceiling <span class="sub">oracle, in-sample</span></th>'
+        f'<th>variable</th><th class="n">nested out of fold</th>'
+        f'<th class="n">&#916;</th><th class="n">ratio</th>'
+        f'<th class="n">withheld on P(b) &#8722; P(c)</th></tr></thead>'
+        f'<tbody>{"".join(trs)}</tbody></table></div>')
+
+    items = []
+    items.append(
+        f'<h3>The trivial floor, and the incumbent&#8217;s own ceiling</h3>'
+        f'<p>Blocking every case scores block-only F1 '
+        f'<strong>{full(ff["floor"])}</strong> at this corpus&#8217;s {ff["prev"] * 100:.2f}% '
+        f'prevalence, with '
+        f'{g(S3SC, "corpora/s2_trivial_floor_block_everything/tp")} true blocks, '
+        f'{g(S3SC, "corpora/s2_trivial_floor_block_everything/fp"):,} false blocks and a block '
+        f'false-positive rate of '
+        f'{g(S3SC, "corpora/s2_trivial_floor_block_everything/block_fpr"):.1f}. '
+        f'{len(ff["under"])} of the {len(ff["ranked"])} ranked rows score below it at their '
+        f'shipped operating point: {_name_list(ff["under"])}. '
+        f'{len(ff["near"])} more clear it by under 0.012: {_name_list(ff["near"])}.</p>'
+        f'<p>{esc(oj["name"])}&#8217;s own ceiling is '
+        f'<strong>{full(oj["ceiling"])}</strong> on <code>{esc(oj["variable"])}</code>, against '
+        f'the {oj["shipped"]:.8f} it ships at. A challenger measured against the shipped figure '
+        f'is measured against a threshold, so that comparison carries '
+        f'{full(g(REMINE, "arms/OpenJev/verdict/delta_vs_shipped_block_only_defA"))} that '
+        f'belongs to the incumbent&#8217;s calibration. Across the {len(onboard)} ranked rows the sweep lifts the shipped figure '
+        f'by {lo[0]:+.4f} ({esc(lo[1]["name"])}) to {hi[0]:+.4f} '
+        f'({esc(hi[1]["name"])}).</p>')
+
+    items.append(
+        f'<h3>kev-9b</h3>'
+        f'<p>Its shipped figure is {full(kev["shipped"])}, the lowest of the '
+        f'{len(ff["ranked"])} ranked rows. Case-level dispositions are '
+        f'{g(KEVREMINE, "rows/0/shipped/case_level_action_histogram/allow"):,} allow, '
+        f'{g(KEVREMINE, "rows/0/shipped/case_level_action_histogram/confirm")} confirm and '
+        f'{g(KEVREMINE, "rows/0/shipped/case_level_action_histogram/block")} block, so block '
+        f'recall was bounded at '
+        f'{g(KEVREMINE, "rows/0/shipped/case_level_action_histogram/block")}/'
+        f'{g(S3SC, "corpora/s2/positives_A_B")} before correctness entered. Of those '
+        f'{g(KEVREMINE, "rows/0/shipped/case_level_action_histogram/block")} blocks, '
+        f'{g(KEVREMINE, "rows/0/shipped/binary_block_only/confusion/true_positive")} land on an '
+        f'unsafe case and '
+        f'{g(KEVREMINE, "rows/0/shipped/binary_block_only/confusion/false_positive")} on a '
+        f'benign one. On the model-alone lens its any-intervention figure is '
+        f'{full(g(KEVREMINE, "rows/0/shipped/binary_any_intervention/f1"))}.</p>'
+        f'<p>Re-thresholded on <code>{esc(kev["variable"])}</code> under definition A it reaches '
+        f'<strong>{full(kev["ceiling"])}</strong> in sample and '
+        f'<strong>{full(kev["nested"])}</strong> nested out of fold, a ratio of '
+        f'{full(g(KEVREMINE, "rows/0/rethresholded_in_sample/ratio_vs_shipped_block_only_defA"))} '
+        f'over the shipped figure. Its AUC on <code>P(block)</code> is '
+        f'{full(g(f"{ADDED_VALID}/auc-variants-kev-9b.json", "auc/P(block)"))} and on the '
+        f'leaderboard variable {full(g(f"{ADDED_VALID}/auc-variants-kev-9b.json", f"auc/{LEAD_VAR}"))}, '
+        f'both above the corpus chance band of '
+        f'[{full(g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0"))}, '
+        f'{full(g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/1"))}].</p>'
+        f'<p>Its highest figure is '
+        f'{full(g(KEVREMINE, "rows/0/rethresholded_in_sample/definition_B/best_f1"))}, on '
+        f'<code>P(block) &#8722; P(confirm)</code> under definition B, and it is withheld. That '
+        f'variable inverted below chance on the disjoint corpus for both arms where the transfer '
+        f'could be measured: OpenJev '
+        f'{full(g(REMINE, f"arms/OpenJev/by_variable/{PBMC} || defB/roc_auc_mann_whitney_tie_corrected"))} '
+        f'to 0.2994021851164708, and Jev 1.13.0 '
+        f'{full(g(REMINE, f"arms/Jev 1.13.0/by_variable/{PBMC} || defB/roc_auc_mann_whitney_tie_corrected"))} '
+        f'to 0.3420025352798462. kev-9b has no settled run on that corpus, so the same test '
+        f'cannot be run on it.</p>')
+
+    cap = float(OPFPR_CAP)
+    bp = f'arms/open-jev-qwen-27b/by_variable/P(block) || defA'
+    hp = f'arms/open-jev-qwen-27b/by_variable/P(block) || defA/cv/{NESTED_K}'
+    items.append(
+        f'<h3>open-jev-qwen-27b</h3>'
+        f'<p>Shipped, it blocks '
+        f'{added_dispositions(ADDED_BY_SLUG["ojq27b"])["block"]} times in '
+        f'{added_dispositions(ADDED_BY_SLUG["ojq27b"])["total"]:,} cases: '
+        f'{g(added_rel(ADDED_BY_SLUG["ojq27b"], "score"), ADDED_NODE + "/binary_block_only/confusion/true_positive")} '
+        f'true blocks, '
+        f'{g(added_rel(ADDED_BY_SLUG["ojq27b"], "score"), ADDED_NODE + "/binary_block_only/confusion/false_positive")} '
+        f'false block, '
+        f'{g(added_rel(ADDED_BY_SLUG["ojq27b"], "score"), ADDED_NODE + "/binary_block_only/confusion/false_negative")} '
+        f'unsafe cases allowed or confirmed and '
+        f'{g(added_rel(ADDED_BY_SLUG["ojq27b"], "score"), ADDED_NODE + "/binary_block_only/confusion/true_negative"):,} '
+        f'benign cases left alone. Its AUC on <code>P(block)</code> is '
+        f'{full(g(REMINE, bp + "/roc_auc_mann_whitney_tie_corrected"))}.</p>'
+        f'<p>Two re-thresholded points, each under the constraint it was found beneath. '
+        f'Unconstrained, the sweep reaches <strong>{full(o27["ceiling"])}</strong> at threshold '
+        f'{full(g(REMINE, bp + "/best_f1/threshold"))}, with '
+        f'{g(REMINE, bp + "/best_f1/tp")} true blocks, {g(REMINE, bp + "/best_f1/fp")} false '
+        f'blocks and a block false-positive rate of '
+        f'{full(g(REMINE, bp + "/best_f1/fpr"))}. Capped at the incumbent '
+        f'{esc(opfpr_who())}&#8217;s own block false-positive rate of {cap:.8f}, the best point '
+        f'is <strong>{full(g(REMINE, bp + f"/recall_at_fpr_cap/{OPFPR_CAP}/f1"))}</strong> at '
+        f'threshold {full(g(REMINE, bp + f"/recall_at_fpr_cap/{OPFPR_CAP}/threshold"))}, with '
+        f'{g(REMINE, bp + f"/recall_at_fpr_cap/{OPFPR_CAP}/tp")} true blocks, '
+        f'{g(REMINE, bp + f"/recall_at_fpr_cap/{OPFPR_CAP}/fp")} false blocks and an achieved '
+        f'rate of {full(g(REMINE, bp + f"/recall_at_fpr_cap/{OPFPR_CAP}/fpr"))}. The two figures '
+        f'answer two questions and neither is the ranked cell, which stays at '
+        f'{o27["shipped"]:.8f}.</p>'
+        f'<p>Both are fitted on the cases they are scored on. Out of fold the unconstrained '
+        f'point holds {full(o27["nested"])}. The capped point reaches '
+        f'{full(g(HELDOUT, hp + f"/pooled_caps/{OPFPR_CAP}/f1"))} out of fold at an achieved '
+        f'false-positive rate of {full(g(HELDOUT, hp + f"/pooled_caps/{OPFPR_CAP}/fpr"))}, '
+        f'outside the cap the threshold was fitted to.</p>')
+
+    wl = ", ".join(f'<strong>{esc(r["name"])}</strong> {r["withheld"]:.8f} '
+                   f'(def {r["withheld_def"]}, against a ceiling of {r["ceiling"]:.8f})'
+                   for r in withheld)
+    items.append(
+        f'<h3>The withheld variable, and the two aggregation definitions</h3>'
+        f'<p><code>P(block) &#8722; P(confirm)</code> holds the highest in-sample figure for '
+        f'{len(withheld)} of the {len(onboard)} ranked rows: {wl}. It is withheld from all of '
+        f'them. Both arms that could be tested on the disjoint corpus inverted below chance on '
+        f'it, and the ceiling column is the best figure over the remaining variables.</p>'
+        f'<p>Every AUC on this page carries its aggregation definition. Definition A takes the '
+        f'maximum block probability and the maximum confirm probability over a case&#8217;s '
+        f'events and then subtracts; definition B takes the maximum over events of the per-event '
+        f'difference. On <code>P(block)</code> and on the leaderboard variable the two coincide '
+        f'by construction. On the two combined variables they do not, and a figure under one '
+        f'definition is never set against a figure under the other.</p>')
+
+    jr = "arms/Gemma 4 judge (det->LLM)"
+    ff2 = load(f"{ADDED_VALID}/auc-variants-open-jev-qwen-9b.json")["auc"][LEAD_VAR]
+    f2b = load(f"{ADDED_VALID}/auc-variants-open-jev-qwen-2b.json")["auc"][LEAD_VAR]
+    items.append(
+        f'<h3>The judge row, the leaderboard variable, and SecJudge&#8217;s readouts</h3>'
+        f'<p>The Gemma 4 judge row carries no threshold sweep. Every one of its '
+        f'{g(REMINE, jr + "/prediction_rows"):,} prediction rows holds an empty '
+        f'<code>probabilities</code> object under <code>route: "llm"</code>, so no disposition '
+        f'distribution exists to sweep and its shipped figure is the only figure it has.</p>'
+        f'<p>Two rows are below chance on the variable the board ranks by. '
+        f'<code>{esc(LEAD_VAR)}</code> scores {full(ff2)} for '
+        f'<strong>open-jev-qwen-9b</strong> and {full(f2b)} for '
+        f'<strong>open-jev-qwen-2b</strong>, both under the lower edge of the corpus chance band '
+        f'at {full(g(S3SC, "corpora/s2_chance_band_hanley_mcneil/band_95pct/0"))}. Their block '
+        f'channels are informative; the variable that ranks them absorbs their confirm mass.</p>'
+        f'<p>SecJudge&#8217;s five readouts are threshold-equivalent. They give byte-identical '
+        f'AUCs at full precision and the same best F1, '
+        f'{full(next(r for r in rows if r["slug"] == "secjudge")["ceiling"])}, for every arm at '
+        f'this context. Only the shipped action mapping separates them, so re-thresholding '
+        f'cannot choose between them.</p>')
+
+    return tbl + "\n" + "\n".join(items)
+
+
+def s3heldout_html() -> str:
+    """bespoke-nimble-9b on the disjoint corpus, with the composition caveat beside the penalty."""
+    n = "comparison/bespoke-nimble-9b"
+    rows = ceiling_rows()
+    s2 = next(r for r in rows if r["slug"] == "nimble9b")
+    tok = g(S3META, "actual_input_tokens")
+    over = tok - DRIVER_TOKEN_CAP
+    s2a, s2b = g(S3SC, "corpora/s2/grade_counts_all/A"), g(S3SC, "corpora/s2/grade_counts_all/B")
+    s3a, s3b = g(S3SC, "corpora/s3/grade_counts_all/A"), g(S3SC, "corpora/s3/grade_counts_all/B")
+    s2pos, s3pos = g(S3SC, "corpora/s2/positives_A_B"), g(S3SC, "corpora/s3/positives_A_B")
+
+    prov = (
+        f'<p>The artifact is merged from {g(S3META, "merge/shards")} shards into '
+        f'{g(S3META, "requests"):,} rows over {g(S3META, "cases"):,} cases, with 0 error rows, '
+        f'<code>complete: true</code>, and an on-disk sha256 of '
+        f'<code>{esc(g(S3META, "prediction_sha256"))}</code> that the scoring record repeats. '
+        f'It totals {tok:,} input tokens. The runner&#8217;s default budget is '
+        f'{DRIVER_TOKEN_CAP:,} input tokens per driver, which the artifact exceeds by '
+        f'{over:,}. A single driver would have been stopped by that budget before it '
+        f'finished. The {g(S3META, "merge/shards")} shards are what put a complete artifact on '
+        f'disk.</p>'
+        f'<p>The two corpora share no case id, checked at '
+        f'{g(S3SC, "corpora/case_id_overlap_s2_s3")} overlapping ids across '
+        f'{g(S3SC, "corpora/s2/scorable_cases_A_B_D"):,} and '
+        f'{g(S3SC, "corpora/s3/scorable_cases_A_B_D"):,} scorable cases. A census of both '
+        f'corpora finds 0 rows drawn from the local-evaluation-only source and 0 from the '
+        f'aggregate-only source, so no figure on this page rests on either.</p>')
+
+    caveat = (
+        f'<h3>Prevalence and positive-grade composition on the two corpora</h3>'
+        f'<p>Prevalence differs by a factor of '
+        f'{g(S3SC, "corpora/s2/prevalence") / g(S3SC, "corpora/s3/prevalence"):.2f}: '
+        f'{g(S3SC, "corpora/s2/prevalence") * 100:.3f}% against '
+        f'{g(S3SC, "corpora/s3/prevalence") * 100:.4f}%. F1 moves with prevalence, so the '
+        f'trivial floor moves with it too, from {full(g(S3SC, "corpora/s2_trivial_floor_block_everything/f1"))} '
+        f'to {full(g(S3SC, "corpora/s3_trivial_floor_block_everything/f1"))}.</p>'
+        f'<p>The positive-grade composition is close to inverted. The Broad comparison&#8217;s '
+        f'{s2pos} positives are {s2a} grade A and {s2b} grade B, {s2a / s2pos * 100:.2f}% grade '
+        f'A. The held-out corpus&#8217;s {s3pos} positives are {s3a} grade A and {s3b} grade B, '
+        f'{s3a / s3pos * 100:.2f}% grade A. A difference between one arm&#8217;s figure on the '
+        f'two corpora therefore carries a threshold effect and a changed definition of a '
+        f'positive at the same time, and the two cannot be separated from the figures alone.</p>')
+
+    tbl = (
+        f'<div class="tbl-scroll"><table>'
+        f'<caption>bespoke-nimble-9b on both corpora, block-only F1 throughout. Each corpus '
+        f'carries its own trivial floor, because the floor is a function of prevalence. The two '
+        f'oracle figures are fitted on the cases they are scored on. Sources: '
+        f'<code>outputs/{esc(S3SC)}</code>, <code>outputs/{esc(S3AUC)}</code> and '
+        f'<code>outputs/{esc(S3META)}</code>.</caption>'
+        f'<thead><tr><th>Figure</th>'
+        f'<th class="n">Broad comparison</th><th class="n">held-out corpus</th></tr></thead>'
+        f'<tbody>'
+        f'<tr><td>scorable cases</td>'
+        f'<td class="n">{g(S3SC, "corpora/s2/scorable_cases_A_B_D"):,}</td>'
+        f'<td class="n">{g(S3SC, "corpora/s3/scorable_cases_A_B_D"):,}</td></tr>'
+        f'<tr><td>positives</td><td class="n">{s2pos}</td><td class="n">{s3pos}</td></tr>'
+        f'<tr><td>grade A share of positives</td>'
+        f'<td class="n">{s2a / s2pos * 100:.2f}%</td>'
+        f'<td class="n">{s3a / s3pos * 100:.2f}%</td></tr>'
+        f'<tr><td>trivial floor, block everything</td>'
+        f'<td class="n">{full(g(S3SC, "corpora/s2_trivial_floor_block_everything/f1"))}</td>'
+        f'<td class="n">{full(g(S3SC, "corpora/s3_trivial_floor_block_everything/f1"))}</td></tr>'
+        f'<tr><td>shipped block-only F1</td>'
+        f'<td class="n">{full(g(S3SC, n + "/s2_shipped_block_only_f1_recomputed"))}</td>'
+        f'<td class="n">{full(g(S3SC, n + "/s3_shipped_block_only_f1"))}</td></tr>'
+        f'<tr><td>shipped block false-positive rate</td>'
+        f'<td class="n">{g(added_rel(ADDED_BY_SLUG["nimble9b"], "score"), ADDED_NODE + "/binary_block_only/false_positive_rate"):.8f}</td>'
+        f'<td class="n">{full(g(S3SC, n + "/s3_shipped_block_only_block_fpr"))}</td></tr>'
+        f'<tr><td>AUC on <code>P(block)</code>, definition A</td>'
+        f'<td class="n">{full(load(added_rel(ADDED_BY_SLUG["nimble9b"], "auc"))["auc"]["P(block)"])}</td>'
+        f'<td class="n">{full(g(S3SC, n + "/s3_auc_raw_on_P_block_defA_equals_defB"))}</td></tr>'
+        f'<tr><td>best F1 over a full sweep '
+        f'<span class="sub">oracle, in-sample</span></td>'
+        f'<td class="n">{full(s2["ceiling"])}</td>'
+        f'<td class="n">{full(g(S3SC, n + "/s3_oracle_best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT"))}</td></tr>'
+        f'<tr><td>nested out of fold, inside the Broad comparison</td>'
+        f'<td class="n">{full(s2["nested"])}</td><td class="n">&#8212;</td></tr>'
+        f'</tbody></table></div>')
+
+    body = (
+        f'<p>Shipped on the held-out corpus it scores '
+        f'{full(g(S3SC, n + "/s3_shipped_block_only_f1"))} block-only F1, with '
+        f'{g(S3SC, n + "/s3_shipped_block_only_confusion/tp")} true blocks, '
+        f'{g(S3SC, n + "/s3_shipped_block_only_confusion/fp")} false blocks, '
+        f'{g(S3SC, n + "/s3_shipped_block_only_confusion/fn")} unsafe cases not blocked and '
+        f'{g(S3SC, n + "/s3_shipped_block_only_confusion/tn"):,} benign cases left alone. Its '
+        f'block false-positive rate there is '
+        f'{full(g(S3SC, n + "/s3_shipped_block_only_block_fpr"))}. That figure sits below the '
+        f'corpus&#8217;s own trivial floor of '
+        f'{full(g(S3SC, "corpora/s3_trivial_floor_block_everything/f1"))}.</p>'
+        f'<p>On the same corpus its AUC on '
+        f'<code>P(block)</code> is '
+        f'{full(g(S3SC, n + "/s3_auc_raw_on_P_block_defA_equals_defB"))}, against a 95% chance '
+        f'band of [{full(g(S3AUC, "chance_band_95pct/0"))}, '
+        f'{full(g(S3AUC, "chance_band_95pct/1"))}]. Definition A and definition B coincide on '
+        f'that variable by construction, so it carries one AUC. Sweeping a single threshold on '
+        f'it reaches {full(g(S3SC, n + "/s3_oracle_best_f1_ORACLE_IN_SAMPLE_UPPER_BOUND_NOT_A_RESULT"))}, '
+        f'fitted on the cases it is scored on.</p>'
+        f'<p>The threshold fitted on the Broad comparison, '
+        f'{full(g(S3SC, n + "/s2_fitted_threshold_on_P_block"))}, reaches '
+        f'{full(g(S3SC, n + "/s3_f1_at_s2_fitted_threshold"))} on the held-out corpus. The '
+        f'transfer penalty is {full(g(S3SC, n + "/s2_to_s3_transfer_penalty"))}, the held-out '
+        f'oracle minus that figure. Both terms are measured on the held-out corpus, so the '
+        f'prevalence gap cancels out of the subtraction. The grade composition does not cancel: '
+        f'the threshold was fitted against positives that are '
+        f'{s2a / s2pos * 100:.2f}% grade A and applied to positives that are '
+        f'{s3a / s3pos * 100:.2f}% grade A. The penalty is a threshold-transfer loss measured '
+        f'across a change of corpus definition, and it is published only beside that '
+        f'statement.</p>'
+        f'<p>On the held-out corpus the two length proxies carry no signal. '
+        f'<code>context_bytes</code> scores '
+        f'{full(g(S3SC, "s3_length_cue_no_model/context_bytes (max over events)/auc_raw"))}, '
+        f'inside the chance band, and <code>context_events</code> scores '
+        f'{full(g(S3SC, "s3_length_cue_no_model/context_events (max over events)/auc_raw"))}, '
+        f'below it. Raw AUC is the primary figure there.</p>')
+
+    return prov + caveat + tbl + body
+
+
 TOKEN = re.compile(r"\{\{(chart|fig|ui):([a-zA-Z0-9_.]+)\}\}")
 
 
@@ -11710,12 +13157,15 @@ def build_ui() -> dict[str, str]:
         "roster": roster_html(),
         "roster_md": roster_md(),
         "added": added_html(),
+        "rethreshold": rethreshold_html(),
+        "s3heldout": s3heldout_html(),
         "secjudge": secjudge_html(),
         "lens_dir": lens_dir_html(),
         "pick": pick_html(),
         "lens_ctl": lens_control_html(),
         "thr_ctl": threshold_control_html(),
         "matchups": matchups_html(),
+        "codepaths": code_paths_html(),
         "parity": parity_html(),
         "offparity": offparity_html(),
         "sweep": sweep_html(),
@@ -11773,9 +13223,9 @@ def build_figs() -> dict[str, str]:
     # Whether every ranked row answers a question grid at all. The lede used to assert that they
     # were all at one question format, in prose. One ranked row is not a generative judge and was
     # never handed a question, so the sentence is computed from the arms' own metas. It states
-    # only that, and does not enumerate the other rows' formats: GRID_Q is a per-model constant
-    # that records the arm each model was first run at, not the arm its ranked cell was read
-    # from, and quoting it here would relabel a ranked cell.
+    # only that, and does not enumerate the other rows' formats. Use lb_row_arm() for a
+    # per-row cell; DEFAULT_ARM_Q records the arm each model was first run at, not the arm
+    # its ranked cell was read from, and quoting it here would relabel a ranked cell.
     _rqn = sum(1 for _m in MODELS if lb_group(_m["slug"]) == 0)
     f["lb.ranked.fmtnote"] = (
         f'All {_rqn} ranked rows answer the {PARITY_GRID} question grid.' if not _offn else
@@ -11787,11 +13237,47 @@ def build_figs() -> dict[str, str]:
           'clean model ranking; the same-format table below holds the format fixed.')
     # models with a measured p50 anywhere on this site, counted from the same records the
     # latency figures are read from
+    # The same-format population, for the prose that compares a question-format move against a
+    # model-against-model gap. `format_facts()` takes its within-format spread over the arms the
+    # comparison FILE holds, which is three of the eight ranked rows at that cell, so a sentence
+    # about "any two models at a fixed format" needs the board's population, not the file's.
+    _sf = same_format_rows()
+    _sfb = [r for r in _sf if r["blk"] is not None]
+    f["sf.n"] = str(len(_sf))
+    if len(_sfb) > 1:
+        _hi = max(_sfb, key=lambda r: r["blk"])
+        _lo = min(_sfb, key=lambda r: r["blk"])
+        f["sf.hi.name"] = esc(_hi["name"])
+        f["sf.hi.f1"] = f'{_hi["blk"]:.5f}'
+        f["sf.lo.name"] = esc(_lo["name"])
+        f["sf.lo.f1"] = f'{_lo["blk"]:.5f}'
+        f["sf.diff"] = f'{_hi["blk"] - _lo["blk"]:.5f}'
+        f["sf.ratio"] = f'{_hi["blk"] / _lo["blk"]:.2f}' if _lo["blk"] else "not measured"
+        # DiffusionGemma's place at the format, on each lens, for the pages that state it
+        for _lens, _tag in (("blk", "blk"), ("any", "any")):
+            _i, _n = place(_sf, "diffgemma", _lens)
+            f[f"sf.dg.{_tag}.pos"] = ordinal(_i, _n) if _i else "not scored"
+        _ah = max((r for r in _sf if r["any"] is not None), key=lambda r: r["any"], default=None)
+        _al = min((r for r in _sf if r["any"] is not None), key=lambda r: r["any"], default=None)
+        if _ah and _al:
+            f["sf.hi.any.name"], f["sf.hi.any"] = esc(_ah["name"]), f'{_ah["any"]:.5f}'
+            f["sf.lo.any.name"], f["sf.lo.any"] = esc(_al["name"]), f'{_al["any"]:.5f}'
+    # The self-hosted GPU runner-up, so the roster paragraph stops naming a row that is no
+    # longer second. The leaderboard verdict on the same page already names this one.
+    _sh = sorted((r for r in lb_extremes()["models"]
+                  if r["slug"] in SELF_HOSTED_GPU and r["f1"] is not None),
+                 key=lambda r: -r["f1"])
+    if len(_sh) > 1:
+        f["self.next.name"] = esc(_sh[1]["name"])
+        f["self.next.f1"] = f'{_sh[1]["f1"]:.5f}'
     f["lat.p50.n"] = str(sum(1 for r in cmp_rows("block") if r["v"]["p50"] is not None)
                          + sum(1 for a in ADDED
                                if g(added_rel(a, "score"),
                                     "candidates/0/system_one/latency_ms/p50") is not None))
-    f["ir.models.n"] = str(len(g(IR_JEV, "four_backend_table")))
+    # four_backend_table is keyed <backend>/<context>/<unit>/<lens>, so its length is 32 cells
+    # over 4 backends. The sentences that read this call it a count of models, which made every
+    # one of them wrong by a factor of 8. The artifact states the roster size itself.
+    f["ir.models.n"] = str(g(IR_JEV, "four_backend_summary/backends_total"))
     f["cmp.models.n"] = str(len(CMP_MODELS))
     fbs = g(IR_JEV, "four_backend_summary")
     f["cells"] = str(fbs["cells"])
@@ -11827,6 +13313,9 @@ def build_figs() -> dict[str, str]:
     f["s2.realdet.f1"] = f["s2.twosided.f1"]
     f["s2.standin.f1"] = f'{g(S2STANDIN, "candidates/0/deterministic_then_system_one_then_llm_two_sided_0.30/binary_block_only/f1"):.5f}'
     f["s2.escalate.f1"] = f'{g(S2POL, "compositions/realdet_escalate_on_confirm/cascade_tiers/two_tier_openjev_then_gemma/block_f1"):.5f}'
+    # the other composition of the same three tiers, so the lede can name which one
+    # its figure is and a reader can tell the two identically-named rows apart
+    f["s2.shortcircuit.f1"] = f'{g(S2POL, "compositions/realdet_short_circuit/cascade_tiers/two_tier_openjev_then_gemma/block_f1"):.5f}'
     f["s2.disagree"] = f'{g(S2POL, "disagreement/disagreement_rate")*100:.2f}%'
     c3 = g(S3SCORE, "candidates/0")
     f["s3.detllm.f1"] = f'{c3["deterministic_then_llm"]["binary_block_only"]["f1"]:.5f}'
@@ -11882,6 +13371,9 @@ def build_figs() -> dict[str, str]:
         f'{g(IR_JEV, "four_backend_table/openjev/C0/event/block/agentdojo_prior/sep_vs_resisted"):+.6f}')
     f["tb.q2.dg"] = f'{g(TB, "published_references/diffusiongemma/C7/I3/Q2/per_event_fpr"):.5f}'
     f["tb.q2.jev"] = f'{g(TB, "published_references/jev-hosted/C7/I3/Q2/per_event_fpr"):.5f}'
+    # How many rows were scored for a benign per-event rate on coding traffic. LB_BENIGN is the
+    # population, so the count follows it instead of being written as a word in prose.
+    f["tb.n"] = str(len(LB_BENIGN))
     f["tb.events"] = f'{g(TB, "corpus/events"):,}'
     f["tb.traj"] = f'{g(TB, "corpus/trajectories"):,}'
     cats = _fault_tally()
@@ -11963,6 +13455,9 @@ def build_figs() -> dict[str, str]:
     # block-everything floor, which by definition blocks all of them.
     f["von.floor.fp"] = str(vf["binary_block_only"]["confusion"]["false_positive"])
     f["von.floor.arm"] = VON_FLOOR_ARM.split("/", 1)[1]
+    # Von is above the block-everything floor, not at it. One page said "rejected at the
+    # block-everything floor" while the section below it printed the gap.
+    f["von.gain"] = f'{von_arm(VON_ARM)["system_one"]["binary_block_only"]["f1"] - vf["binary_block_only"]["f1"]:+.5f}'  # noqa: E501
     f["von.p50.lo"] = f'{min(c["system_one"]["latency_ms"]["p50"] for c in load(VON)["candidates"]) / 1000:.1f}s'
     f["von.p50.hi"] = f'{max(c["system_one"]["latency_ms"]["p50"] for c in load(VON)["candidates"]) / 1000:.1f}s'
     f["von.arms"] = str(len(load(VON)["candidates"]))
@@ -12450,21 +13945,63 @@ def build_figs() -> dict[str, str]:
             THR_POINTS,
             key=lambda p: g(_orel, f"candidates/0/deterministic_then_system_one_then_llm_"
                                    f"two_sided_{p}/binary_block_only/f1"))
-    # At production weighting the no-judge policy is measured for three small models. The site's
-    # recommendation rests on that policy, so all three are published and the best one is named,
-    # rather than only the one the recommendation happens to use.
+    # At production weighting the no-judge policy is measured for every arm that has a scorecard
+    # on the same deterministic tier. The site's recommendation rests on that policy, so all of
+    # them are published and the best one is named by measurement rather than by choice.
+    #
+    # The population used to be one arm per model from dec_models() plus the shared-format
+    # DiffusionGemma arm appended by hand. That missed any further arm of a model already in the
+    # list: Jev's Q3 arm has the same node on the same tier, holds the lowest block
+    # false-positive rate of the set, and appeared in none of the counts. The arms are read off
+    # disk and de-duplicated by the candidate id each scorecard states for itself.
     _nj = []
+    _seen: set[str] = set()
+
+    def _nj_add(_nm, _rel, _node, _slug):
+        _cand = str(g(_rel, "candidates/0/candidate"))
+        if _cand in _seen:
+            return
+        _b = g(_rel, f"candidates/0/{_node}/binary_block_only")
+        if _b.get("f1") is None:
+            return
+        _seen.add(_cand)
+        _nj.append((_nm, _b["f1"], _b["false_positive_rate"],
+                    _cand.rsplit("/", 1)[-1], _slug))
+
+    # dec_models() is the tier gate: a model reaches it only with a scorecard on the same real
+    # deterministic tier. The disk sweep below adds FURTHER ARMS OF THOSE MODELS and nothing
+    # else, so a model on a different tier still cannot enter the population by having a file.
+    _allowed = {_s for _s, _ in dec_models("s3")}
     for _slug, _nm in dec_models("s3"):
         _r = next((r for r in (policy_rows("s3", _slug) or [])
                    if r["key"] == "deterministic_then_system_one"), None)
-        if _r:
-            _nj.append((_nm, _r["f1"], _r["fpr"], GRID_Q.get(_slug, "?"), _slug))
+        _rel = STAGE_REL.get(("s3", _slug))
+        if _r is None or _rel is None:
+            continue          # Jev has no STAGE_REL entry; the sweep below resolves its arms
+        _nj_add(_nm, _rel, "deterministic_then_system_one", _slug)
     # A16: the shared-format DiffusionGemma arm, which the mixed table hid
     if have(S3SCORE_DG_Q2):
-        _dq2 = g(S3SCORE_DG_Q2, "candidates/0/deterministic_then_system_one/binary_block_only")
-        _dgname = next((n for n, _v, _p, _q, s in _nj if s == "diffgemma"),
-                       "DiffusionGemma 26B-A4B")
-        _nj.append((_dgname, _dq2["f1"], _dq2["false_positive_rate"], "Q2", "diffgemma"))
+        _nj_add(next((n for n, _v, _p, _q, s in _nj if s == "diffgemma"),
+                     "DiffusionGemma 26B-A4B"),
+                S3SCORE_DG_Q2, "deterministic_then_system_one", "diffgemma")
+    # and every other same-tier arm on disk, whatever model it belongs to
+    import glob as _njg
+    for _p in sorted(_njg.glob(os.path.join(DATA, "deterministic-real", "realdet-s3-*.json"))):
+        _rel = os.path.join("deterministic-real", os.path.basename(_p))
+        try:
+            _c0 = g(_rel, "candidates/0")
+        except Exception:                                   # noqa: BLE001
+            continue
+        if "deterministic_then_system_one" not in _c0:
+            continue
+        _cand = str(_c0["candidate"])
+        if _cand in _seen:
+            continue
+        _who = _cand.split("/")[0]
+        _slug = next((s for s in DEC_MODEL_NAMES if s in _who or _who.startswith(s)), None)
+        if _slug not in _allowed:
+            continue
+        _nj_add(DEC_MODEL_NAMES[_slug], _rel, "deterministic_then_system_one", _slug)
     if _nj:
         _top = max(_nj, key=lambda x: x[1])
         f["s3.nojudge.best.model"] = _top[0]  # noqa: E501 - named by measurement, not by choice
@@ -12475,6 +14012,22 @@ def build_figs() -> dict[str, str]:
             sorted(_nj, key=lambda x: -x[1]))
         f["s3.nojudge.n"] = str(len({s for _n, _v, _p, _q, s in _nj}))
         f["s3.nojudge.arms"] = str(len(_nj))
+        # Whether the best-F1 arm also holds the lowest block false-positive rate of the set.
+        # It did while the population was four arms and does not at five, so the claim is
+        # decided here instead of written into the page.
+        _fprlow = min(_nj, key=lambda x: x[2])
+        f["s3.nojudge.fprlow.model"] = f'{_fprlow[0]} ({_fprlow[3]})'
+        f["s3.nojudge.fprlow"] = f'{_fprlow[2]:.5f}'
+        if _fprlow[:3] == _top[:3]:
+            f["s3.nojudge.leadnote"] = (
+                f'{esc(_top[0])} leads on both block F1 and block false-positive rate over '
+                f'those {len(_nj)} arms')
+        else:
+            f["s3.nojudge.leadnote"] = (
+                f'{esc(_top[0])} leads on block F1 at {_top[1]:.5f}; the lowest block '
+                f'false-positive rate of the {len(_nj)} arms is {esc(_fprlow[0])} '
+                f'({_fprlow[3]}) at {_fprlow[2]:.5f}, against {_top[2]:.5f} for the '
+                f'block-F1 leader')
         # A01: "holds for every model measured" was asserted, not computed, and is false for one
         # arm. Dropping the judge means beating the judge-alone policy, which is byte-identical in
         # every scorecard on this corpus. Derived so the sentence cannot outrun the artifacts.
@@ -12614,6 +14167,19 @@ def build_figs() -> dict[str, str]:
         f["sweep.worst.q"] = _sw[-1]["q"]
         f["sweep.worst.f1"] = f'{_sw[-1]["blk"]:.5f}'
         f["sweep.spread"] = f'{_best["blk"] / _sw[-1]["blk"]:.2f}'
+        # How the question sweep compares with a model change at one fixed format, decided by
+        # the comparison rather than asserted. As a ratio the sweep is NOT the larger of the two
+        # over the rows now on the board, and the prose said it was.
+        _sr = _best["blk"] / _sw[-1]["blk"] if _sw[-1]["blk"] else None
+        _mr = float(f["sf.ratio"]) if f.get("sf.ratio", "").replace(".", "").isdigit() else None
+        if _sr and _mr:
+            f["sweep.vs"] = (
+                f'As a ratio that is {"larger" if _sr > _mr else "smaller"} than the widest '
+                f'model-against-model gap at the ranked format, where the {f["sf.n"]} rows span '
+                f'{f["sf.ratio"]}&#215; from {f["sf.hi.name"]}&#8217;s {f["sf.hi.f1"]} to '
+                f'{f["sf.lo.name"]}&#8217;s {f["sf.lo.f1"]}.')
+        else:
+            f["sweep.vs"] = ""
         if _canon:
             f["sweep.pub.q"] = _canon["q"]
             f["sweep.pub.f1"] = f'{_canon["blk"]:.5f}'
@@ -12732,7 +14298,8 @@ def main() -> int:
     charts = build_charts()
     figs = build_figs()
     uis = build_ui()
-    data_block = build_data()
+    blob_all = build_data()
+    blob_shipped: dict[str, list[str]] = {}
     print(f"charts generated: {len(charts)}")
     print(f"ui blocks generated: {len(uis)}")
     names = sorted(k for k in figs if k in TIP_NOT_A_NUMBER)
@@ -12756,13 +14323,24 @@ def main() -> int:
             print(f"    {k}")
     else:
         print("  0 measured figure keys are left unexplained")
-    print(f"data blob: {len(data_block):,} bytes")
+    if set(blob_all) != set(BLOB_CONSUMERS):
+        print(f"ABORT: the data blob carries {sorted(set(blob_all) - set(BLOB_CONSUMERS))} that "
+              f"no control consumes, and BLOB_CONSUMERS names "
+              f"{sorted(set(BLOB_CONSUMERS) - set(blob_all))} that the blob does not carry. A "
+              f"key with no reader is payload nobody sees.")
+        return 8
     if _FIT_WARNINGS:
         print("ABORT: label(s) would overflow their gutter:")
         for w in _FIT_WARNINGS:
             print("  " + w)
         return 4
     print("label-fit check: all axis labels fit their gutters")
+    if GRID_LABEL_BAD:
+        print("ABORT: a figure's grid label disagrees with the artifact it cites:")
+        for line in sorted(set(GRID_LABEL_BAD)):
+            print("  " + line)
+        return 9
+    print(f"grid-label check: every figure whose source names a C/I/Q cell carries that cell")
 
     os.makedirs(os.path.join(OUT, "assets"), exist_ok=True)
     with open(os.path.join(ASSETS, "style.css"), "r", encoding="utf-8") as fh:
@@ -12821,7 +14399,10 @@ def main() -> int:
                 if headend < 0 or body.find("{{DATA}}") > headend:
                     missing.append(f"{name}: {{{{DATA}}}} is outside <head>, so the payload "
                                    f"guard would shingle-scan it")
-            body = body.replace("{{DATA}}", data_block)
+            if "{{DATA}}" in body:
+                _blob, _keys = data_block(blob_all, body)
+                blob_shipped[name] = _keys
+                body = body.replace("{{DATA}}", _blob)
             body = body.replace("{{SCRIPT}}", SCRIPT.strip())
         with open(os.path.join(OUT, name), "w", encoding="utf-8") as fh:
             fh.write(body)
@@ -12840,7 +14421,8 @@ def main() -> int:
             print("  " + line)
         return 7
     print(f"markup check: {len(written)} pages, 0 double-escaped entities, 0 raw '&' or '<', "
-          f"0 escaped tags rendering as text")
+          f"0 escaped tags rendering as text, 0 repeated attributes, "
+          f"0 unresolved format tokens")
 
     allsrc = "".join(open(os.path.join(PAGES, n), encoding="utf-8").read() for n in written)
     unused = sorted(c for c in charts if f"chart:{c}" not in allsrc)
@@ -12856,6 +14438,14 @@ def main() -> int:
         print(f"  {n:28s} {os.path.getsize(os.path.join(OUT, n)):>8,} bytes")
     print(f"  {'assets/style.css':28s} "
           f"{os.path.getsize(os.path.join(OUT, 'assets', 'style.css')):>8,} bytes")
+    unread = sorted(set(BLOB_CONSUMERS) - {k for ks in blob_shipped.values() for k in ks})
+    if unread:
+        print(f"ABORT: no page renders the control for data-blob key(s) {unread}, so the key "
+              f"would ship to readers who cannot see it")
+        return 8
+    print("data blob, per page:")
+    for n in sorted(blob_shipped):
+        print(f"  {n:28s} {', '.join(blob_shipped[n]) or 'no key: the tooltip script only'}")
     print(f"artifacts read: {len(_TOUCHED)}")
     for t in sorted(_TOUCHED):
         print("  " + t)

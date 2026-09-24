@@ -48,10 +48,10 @@
     }
   ],
   "totals": {
-    "files": 166,
-    "bytes": 1583333,
-    "payload_safe_files": 165,
-    "payload_safe_bytes": 1570912
+    "files": 169,
+    "bytes": 1702314,
+    "payload_safe_files": 168,
+    "payload_safe_bytes": 1689893
   },
   "files": [
     {
@@ -991,6 +991,24 @@
       "payload_safe": true
     },
     {
+      "path": "05-settlement/stage_kev_9b.py",
+      "stage": "Settlement",
+      "sha256": "db263db92c93e03c73fa60d0310f691b23c8662505086ed2df0d0a7e0865d06f",
+      "bytes": 9627,
+      "origin": "$WORK/stage_kev_9b.py",
+      "purpose": "Stage the settled kev-9b s2 body into the outputs tree after ten settledness checks, and compose the serving contract and the augmented meta the Space build reads from the provenance already on disk.",
+      "payload_safe": true
+    },
+    {
+      "path": "05-settlement/stage_ojq27b.py",
+      "stage": "Settlement",
+      "sha256": "75346a07553b24dfc4dafa6b02ede92dadf70604a2c7d754c157fedb6f5c5c83",
+      "bytes": 8787,
+      "origin": "$WORK/stage_ojq27b.py",
+      "purpose": "Give the settled open-jev-qwen-27b s2 arm the nested served / serving blocks and the six meta provenance keys the Space build reads, composed from its four replica startup records after checking they agree field by field.",
+      "payload_safe": true
+    },
+    {
       "path": "05-settlement/stop_27b.sh",
       "stage": "Settlement",
       "sha256": "ec5701585134d6b989250ac509ea0950a17505480fc8886d69b985a94db99983",
@@ -1105,6 +1123,15 @@
       "bytes": 5452,
       "origin": "$WORK/j27/append_row_27b.py",
       "purpose": "Append the open-jev-qwen-27b row to comparison-s2.json preserving every existing row, importing row construction from compare_s2.py so the row is 1:1 with the published ones.",
+      "payload_safe": true
+    },
+    {
+      "path": "07-analysis/append_row_arm.py",
+      "stage": "Analysis",
+      "sha256": "f85479d14eb3534a586189d2ec51e378ed60675c02a6ef2ab10e7075304e7b57",
+      "bytes": 5388,
+      "origin": "$WORK/append_row_arm.py",
+      "purpose": "Append one settled arm's row to comparison-s2.json, tolerating both shapes of the recall-by-variable file, and assert that every pre-existing row is byte-identical afterwards.",
       "payload_safe": true
     },
     {
@@ -1488,8 +1515,8 @@
     {
       "path": "08-site-build/build.py",
       "stage": "Site build and payload verification",
-      "sha256": "cbcc5841d0529b35f3c890bd81ab00bbde6eddbf5e9e1b5621e1b82c03b9ea96",
-      "bytes": 723730,
+      "sha256": "549c7c9cb88e084e99f3347bd4961412dd609b78234024b3dddc020d617168dd",
+      "bytes": 820177,
       "origin": "$WORK/.system-one-space-build/src/build.py",
       "purpose": "Site builder: reads the analysis JSONs, verifies every headline figure against its artifact, renders the pages.",
       "payload_safe": true
@@ -1515,8 +1542,8 @@
     {
       "path": "08-site-build/publish.py",
       "stage": "Site build and payload verification",
-      "sha256": "2e189f58a46d559a9f8b0caec2fe3c10c94aa5abbfb3f1271e8db2dd63cccc63",
-      "bytes": 17337,
+      "sha256": "657ec15c7478f2ddce690a8f97c69fd1ef113c87039e03aa8555d2ef1d736bc6",
+      "bytes": 16069,
       "origin": "$WORK/.system-one-space-build/src/publish.py",
       "purpose": "Create the private static Space and upload the verified payload.",
       "payload_safe": true

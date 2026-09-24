@@ -8,8 +8,8 @@ Two programmes, two HuggingFace Spaces:
 
 | programme | Space | scope |
 |---|---|---|
-| **System One** | existing, public, rev `ec65348100cd` | cascade guardrail models on the DefenseClaw parity grid |
-| **SLM tool-call security** | to be created | small/local models for destructive tool-call classification |
+| **System One** | existing, public, rev `c11a65bcc85c` | cascade guardrail models on the DefenseClaw parity grid |
+| **SLM tool-call security** | existing, public, final at `55490b2f855a` | small/local models for destructive tool-call classification |
 
 System One arms go in the System One Space. Cohort arms go in the new one. A model may
 appear in both if it is measured under both protocols, but the numbers are not
@@ -75,11 +75,18 @@ Production grid cell: **C7 / I3 / Q2**, `--instruction-format structured`.
 
 **The trivial floor.** Blocking every case scores block-only F1 **0.20503174229955326** at this
 11.42% prevalence (tp 436 / fp 3,381 / fn 0 / tn 0; precision 0.11423, recall 1.0). Against
-that floor, **five board arms score BELOW trivial at their shipped operating point** —
+that floor, **five re-mined arms score BELOW trivial at their shipped operating point** —
 `open-jev-qwen-9b` 0.17551020, `open-jev-qwen-2b` 0.17194570, `decider-2b` 0.10843373,
 `jevify` 0.04921700, `kev-9b` 0.018140589569160998 — and two more clear it by under 0.012
 (`SecJudge` 0.20724154, `bespoke-nimble-9b` 0.21568627). Argmax F1 in this lens is barely a
 discrimination measure. Quote the floor alongside any shipped F1.
+
+**Correction, 2026-09-24.** Four of those five, not five, are *board* arms. `decider-2b` has a
+settled scorecard and a comparison row but no leaderboard row: it never reached the `ADDED`
+registry, so the site has never carried it. The published page therefore states **4 of the 11
+ranked rows** below the floor and 2 more clearing it by under 0.012, with both lists computed
+over the ranked population at build time. Say "re-mined arms" for the list of five and "board
+rows" only for the four.
 
 (Blocking everything has FPR 1.0 and fails any deployment gate, so this is not an argument
 that trivial blocking is competitive. It is an argument that shipped F1 below ~0.205 tells you
@@ -118,6 +125,29 @@ published. "Ceiling" is the in-sample best over a full threshold sweep, definiti
 
 ⚠ = ceiling rests on `P(block) − P(confirm)`, which inverted below chance held-out. Not
 publishable as a ranking.
+
+**Correction, 2026-09-24 — the Δ range depends on which ceiling column you read.** The range
+"+0.1063 (OpenJev) to +0.5540 (jevify)" is taken over the table above, whose ceiling column
+includes the five ⚠ rows. Drop `P(block) − P(confirm)` as the column requires, and the ceiling
+for those five falls to their best *durable* variable, which moves the minimum:
+
+| arm | ceiling on the best durable variable | variable | Δ vs shipped | withheld P(b)−P(c) figure |
+|---|---|---|---|---|
+| gemma-4-26B-A4B-it | 0.6292629262926293 | P(block) | +0.1543 | 0.71759259 (def B) |
+| DiffusionGemma 26B-A4B | 0.5048309178743962 | P(block) | +0.2369 | 0.62777778 (def B) |
+| open-jev-qwen-9b | 0.4640198511166253 | P(block) | +0.2885 | 0.57300710 (def A) |
+| open-jev-qwen-2b | 0.23096841015018124 | P(block) | **+0.0590** | 0.58262875 (def B) |
+| decider-2b | 0.38693877551020406 | P(block) | +0.2785 | 0.44723247 (def A) |
+| kev-9b | 0.4182648401826484 | P(block) | +0.4001 | 0.60920502 (def B) |
+
+Over durable variables the Δ range is **+0.0590 (`open-jev-qwen-2b`) to +0.5540 (`jevify`)**, and
+OpenJev is no longer the floor of it. The published page uses the durable column and names each
+withheld figure beside the ceiling it exceeds. Every arm's best durable variable is `P(block)`
+except `secjudge`, whose best is `P(block) + P(confirm)` at 0.3967280163599182.
+
+Nested out-of-fold figures on the durable column, for the arms whose ceiling moved:
+gemma-4-26B-A4B-it 0.6262403528114664, DiffusionGemma 0.47831474597273854, open-jev-qwen-9b
+0.45828144458281445, open-jev-qwen-2b 0.22054794520547946, decider-2b 0.37251655629139074.
 
 ### Held-out numbers (the quotable ones)
 
@@ -165,6 +195,8 @@ free** — the s2→s3 result says otherwise.
 | arm | run_id | prediction_sha256 | rows / cases |
 |---|---|---|---|
 | kev-9b (s2) | `s2-kev-9b-h200` | `c3f8a277bdbd3865eaa4a44f8d8667af1b8b7b9b85642669f32ab9e08a392ff5` | 30,310 / 4,277 |
+| open-jev-qwen-27b (s2) | `s2-open-jev-qwen-27b-h200` | `0b672a6485567acff32940a507297ea7c5b59b73ada7a91887c2bd869f58766d` | 30,310 / 4,277 |
+| bespoke-nimble-9b (s3) | `s3-bespoke-nimble-9b-h200`, 53 shards | `b34651649b668c069dc02253c0e79682305ab57c4277d233fb189a6ad57a3842` | 100,001 / 24,476 |
 | open-jev-qwen-2b (s2) | 4 shards `s2-open-jev-qwen-2b-shard{0..3}` | per-shard, all verified | 7,808+7,370+7,597+7,535 = 30,310 / 4,277 |
 | OpenJev (s3) | `s3-openjev-merged` | `cbe2db0fd78ae35e8c9fd7f0b14bdfa5248553bd2ea5702ad3c763e004dd40cd` | 100,001 / 24,476 |
 | Jev (s3) | `s3-jev-C7` | verified | 100,001 |
@@ -202,6 +234,12 @@ Re-mining outputs under `/home/ubuntu/rescoring-remine/`.
   the 27B's 2,671 and DiffusionGemma's 3,813. Hypothesis that coarse grids overfit less is
   **unsupported**: Pearson r = 0.34240056308522954, Spearman ρ = −0.09340659340659342,
   disagreeing in sign, effect inside fold noise.
+- **kev-9b's any-intervention figure depends on the scorecard node.** 0.20550458715596331 on
+  `candidates[0].system_one` (model-alone, tp 56 / fp 53 / fn 380 / tn 3328) and
+  0.24100719 on `candidates[0].deterministic_then_system_one`, which is the node the
+  leaderboard's any-intervention column reads. The deterministic tier contributes 11 advisory
+  confirms that the model alone does not make. Both appear on the page, in the two columns the
+  behaviour table already carries. The block-only lens is identical on both nodes.
 - **Composition axis:** `realdet_escalate_on_confirm` 0.751734 against
   `realdet_short_circuit` 0.73772791. The latter is a three-component cascade with a paid
   judge on 16% of cases (tp 263 / fp 14 / fn 173 / tn 3367; decided_by deterministic 13,
@@ -484,10 +522,81 @@ than treating the utilisation number as free.
 
 ---
 
+## Publication record — System One Space
+
+**2026-09-24 09:41Z, rev `c11a65bcc85ca7548e4d418249af2eb9c554bc87`** (parent
+`ec65348100cdf321ef8759912e985c0bcaac9088`). Public before and after, visibility read at gate 3
+and gate 5 and unchanged. 19 files, 2,223,068 payload bytes, 102 SVG elements.
+
+Added: `open-jev-qwen-27b` (rank 4 of 11) and `kev-9b` (rank 11 of 11) as ranked rows, plus a
+re-thresholding section and a held-out-corpus section for `bespoke-nimble-9b`. Gates: 971 figure
+assertions / 0 mismatches; verifier 14 pages / 0 problems / 810 internal links / 93 retired
+figures absent; payload guard PASS, and also PASS with the first-party protocol exemption off for
+every page except `prompts.html`.
+
+Artifact work this required, none of it a re-run:
+
+- `open-jev-qwen-27b`'s H200 scorecard carried only `candidates[0].system_one`. The leaderboard
+  column reads `deterministic_then_system_one`, so it was re-scored by `benchmark_score_system_one.py`
+  against `deterministic-real/s2-run/predictions.jsonl` and `s2/gemma4-c7.jsonl`. Every rebuilt
+  cell matches the independently assembled comparison row.
+- `kev-9b`'s settled body lived only under `rescoring-remine/kev-s2/`. Staged to
+  `outputs/kev/s2-settled/` by `05-settlement/stage_kev_9b.py` after ten checks, then scored,
+  and its AUC file regenerated by `sysone-auc_variants.py`. **That script reproduces the
+  independent re-mining pass exactly**: 0.8262192391914883 / 0.6554552016259236 /
+  0.590903293906314 / 0.6542215809339292, identical at full precision from two code paths.
+- Neither run meta carried `display_name`, `repo_id`, `repo_revision`, `base_model`,
+  `base_revision`, `license` or `errors_by_code`, and `27b`'s serving record had no nested
+  `served` / `serving` blocks. All composed additively from provenance already on disk, each key
+  logged with its source under `meta_augmented`; `prediction_sha256` still covers each body.
+  `27b`'s four replica startup records were checked to agree field by field first.
+
+**Correction found while doing it — the provider-spend rollup double-counted six runs.** Six runs
+have their manifest at two paths at the same `run_id` and body digest (a staged copy beside a
+guard payload, a pre-settlement copy beside the settled one, a resume ledger beside the run it
+resumed), so 151,608 requests were counted twice. Now deduped by `(run_id, prediction_sha256)`.
+Which copy is kept has to be *chosen*: the SecJudge pair records `model` as `nghodki/SecJudge` at
+one path and `secjudge` at the other, and only the stem is on the roster, so path order dropped
+SecJudge out of the reported families. One of the 35 `fault-inject-mock` manifests was also a
+duplicate pair, so the rollup's shrink guard fired and its floor moved to 34 / 1,972 with the
+duplicate named in code. **No dollar total moved.** Requests 1,739,149 → 1,808,873, reported
+manifests 171 → 168, error rate 0.00190% → 0.00182% on an unchanged 33 errors.
+
+Other derived counts moved because six run manifests have landed under `outputs/` since the
+previous upload, four of them from other work: manifests found 319 → 325, reported families 9 →
+11, shard manifests set aside 24 → 29, added arms 6 → 8, ranked rows 8 → 11, assertions 787 →
+971, artifacts read 193 → 211. `_wordcount.json` was stale — it omitted two pages and predated
+three uploads — and was regenerated over all 14 pages (147,167 words).
+
+**Licence discrepancy, unresolved.** The Programme 2 cohort table below records
+`open-jev-qwen-2b` and `open-jev-qwen-27b` as **CC BY-NC 4.0**. `cardData.license` on
+`ZefanCai/Open-Jev-2B` and `ZefanCai/Open-Jev-27B-v1.1` reads **apache-2.0**, and the Space
+publishes the cardData value with the repo and revision it was read from, which is what the 2B
+row already did before this change. One of the two records is wrong and the Space is currently
+consistent with the cardData one. Resolve before any redistribution decision rests on it.
+
+**Not published.** `kev-9b`'s 0.6092050209205021 and the four other `P(block) − P(confirm)`
+ceilings, each named on the page beside the durable ceiling it exceeds. `decider-2b` remains off
+the board: it has a settled scorecard and a comparison row but no registry entry, and adding it
+was outside the scope of this change.
+
+Per-case detail on the payload: `compare.html` carries a pre-existing coded matrix under
+`id="bench-data"` — one row per case of `[grade, surface, n_events, dataset, openjev, diffgemma,
+gemma4, deterministic, adjudicator]`, all integer indices, no case id and no corpus text. It was
+already public at `ec65348100cd` and this change does not touch it. Flagging it because the
+aggregate-only rule is stated in absolute terms and this is the closest thing on the payload to
+row detail.
+
+---
+
 ## Open items
 
-- Build the SLM tool-call security Space (see `SPACE-SLM-PLAN.md` when written).
-- Publish batched System One rows: `kev-9b`, plus s3 arms as they settle.
+- Publish further System One s3 rows as they settle. Only `bespoke-nimble-9b` has a settled s3
+  counterpart on the board so far; the s3 section is built to take more.
+- Resolve the `open-jev-qwen-*` licence discrepancy above: cohort table CC BY-NC 4.0 against
+  `cardData.license` apache-2.0.
+- Decide whether `decider-2b` becomes a board row. Its artifacts are complete except for a
+  scorecard with the deterministic node, which is one re-score away.
 - `Llama-Prompt-Guard-2-22M/86M` need a third gating group accepted (403, not 401).
 - Card affinity for `qadd`.
 - Four archive licence/secret-hygiene decisions (see task #54).
