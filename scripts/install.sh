@@ -46,6 +46,13 @@ readonly PREVIOUS="${DEFENSECLAW_HOME}/previous"
 readonly STAGING="${DEFENSECLAW_HOME}/.staging"
 readonly INSTALLER_DIR="${DEFENSECLAW_HOME}/installer"
 readonly LOCK_DIR="${DEFENSECLAW_HOME}/.install.lock"
+# A copy that the upgrade command or another installer downloaded into a
+# temporary directory removes that directory when it finishes.
+SELF_TMP="$(dirname "${BASH_SOURCE[0]:-.}")"
+case "$(basename "${SELF_TMP}")" in
+    defenseclaw-upgrade-*|defenseclaw-rollback-*) trap 'rm -rf "${SELF_TMP}"' EXIT ;;
+    *) SELF_TMP="" ;;
+esac
 readonly OPENCLAW_VERSION="2026.3.24"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
@@ -245,7 +252,8 @@ latest_release() {
 # and run it. Used for --version and for an unstamped (source) copy.
 run_release_installer() {
     local version="$1"; shift
-    local tmp; tmp="$(mktemp -d)"
+    local tmp base="${TMPDIR:-/tmp}"
+    tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
         "https://github.com/${REPO}/releases/download/${version}/install.sh" \
@@ -255,6 +263,7 @@ run_release_installer() {
         || die "Release ${version} has no checksums.txt"
     [[ "$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")" == "$(sha256_of "${tmp}/install.sh")" ]] \
         || die "install.sh for ${version} does not match its checksums.txt"
+    [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
 }
 
@@ -297,7 +306,7 @@ fi
 echo $$ > "${LOCK_DIR}/pid"
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 exec > >(tee -a "${LOG}") 2>&1
-trap 'rm -rf "${LOCK_DIR}"' EXIT
+trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 # ── Existing install ─────────────────────────────────────────────────────────

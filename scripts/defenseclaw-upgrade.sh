@@ -45,6 +45,8 @@ dc_handoff() {
     unset DEFENSECLAW_UPGRADE_FRESH_PROCESS 2>/dev/null || true
 
     tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064 # tmp is local; expand it now.
+    trap "rm -rf '${tmp}'" EXIT
     if [ -n "${DEFENSECLAW_UPGRADE_LOCAL_DIR:-}" ]; then
         # Tests only: run the installer from a local release directory.
         cp "${DEFENSECLAW_UPGRADE_LOCAL_DIR}/install.sh" "${DEFENSECLAW_UPGRADE_LOCAL_DIR}/checksums.txt" "${tmp}/"

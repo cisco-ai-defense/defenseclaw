@@ -108,7 +108,7 @@ install_legacy() {
         "https://github.com/cisco-ai-defense/defenseclaw/releases/download/${LEGACY_VERSION}/install.sh" \
         || curl -fsSL -o "${installer}" \
         "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${LEGACY_VERSION}/scripts/install.sh"
-    # 0.8.4 through 0.8.7 refuse to install without cosign.
+    # The 0.8.4 installer refuses to run without cosign on PATH.
     VERSION="${LEGACY_VERSION}" with_cosign bash "${installer}" --yes --no-openclaw
 }
 
@@ -179,6 +179,12 @@ os.replace(path + ".new", path)
 PY
 }
 
+# installer_copies: temporary installer copies that upgrade and rollback left in TMPDIR.
+installer_copies() {
+    find "${TMPDIR:-/tmp}/" -maxdepth 1 \( -name 'defenseclaw-upgrade-*' -o -name 'defenseclaw-rollback-*' \) 2>/dev/null \
+        | wc -l | tr -d ' '
+}
+
 assert_versions() {
     local want="$1" cli gateway
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
@@ -243,7 +249,10 @@ upgrade_lane() {
     assert_data_kept
     [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "previous/VERSION is not ${from}"
     log "${name}: defenseclaw rollback"
+    local copies
+    copies="$(installer_copies)"
     must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
+    [[ "$(installer_copies)" == "${copies}" ]] || fail "defenseclaw rollback left its installer copy in ${TMPDIR:-/tmp}"
     assert_versions "${from}"
     assert_healthy
     assert_data_kept
@@ -372,7 +381,10 @@ lane_drills() {
     if "${HOME}/.local/bin/defenseclaw" status >/dev/null 2>&1; then
         fail "the drill did not break the CLI"
     fi
+    local copies
+    copies="$(installer_copies)"
     must env DEFENSECLAW_UPGRADE_LOCAL_DIR="${ASSETS}" "${HOME}/.local/bin/defenseclaw" upgrade --version "${TARGET}" --yes || return 1
+    [[ "$(installer_copies)" == "${copies}" ]] || fail "defenseclaw upgrade left its installer copy in ${TMPDIR:-/tmp}"
     assert_versions "${TARGET}"
     assert_healthy
     "${HOME}/.local/bin/defenseclaw" status >/dev/null 2>&1 || fail "the upgrade did not repair the broken CLI"
