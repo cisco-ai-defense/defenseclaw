@@ -2848,11 +2848,22 @@ def migrate(
     steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
     names = [name for name, _step in steps]
     if check:
-        if version < _FIRST_V8_CONFIG_VERSION and gateway_binary:
-            with tempfile.TemporaryDirectory(prefix=".migrate-check-", dir=data_dir) as scratch:
-                _preflight_observability_v8(ctx, scratch, gateway_binary=gateway_binary)
+        # The v8 conversion reads the config as it is now, so the preflight is
+        # only meaningful when no earlier 0.x step would change it first; the
+        # real migration still validates and the installer rolls back on failure.
+        v8_first = bool(names) and names[0].startswith(f"0.x import {_V8_IMPORT_VERSION}:")
+        if version < _FIRST_V8_CONFIG_VERSION and gateway_binary and v8_first:
+            try:
+                with tempfile.TemporaryDirectory(prefix=".migrate-check-", dir=data_dir) as scratch:
+                    _preflight_observability_v8(ctx, scratch, gateway_binary=gateway_binary)
+            except MigrationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reported like a failed step
+                raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
         return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
+    if steps:
+        _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
     for name, step in steps:
         click.echo(f"  {ux.dim('→')} {name}")
         try:
@@ -2871,6 +2882,30 @@ def migrate(
         )
     _refresh_local_observability_bundle(data_dir, __version__)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:
+    """Make config files that group or others can write private (0600).
+
+    0.x releases wrote them with the process umask, so on distributions whose
+    default umask is 002 they are group-writable, which the v8 activation
+    refuses. Only files this user owns are changed.
+    """
+
+    if os.name != "posix":
+        return
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or not info.st_mode & 0o022:
+            continue
+        try:
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            raise MigrationError(f"could not make {path} private: {exc}") from exc
+        ctx.changes.append(f"made {os.path.basename(path)} private ({oct(stat.S_IMODE(info.st_mode))} → 0o600)")
 
 
 def _pending_migration_steps(

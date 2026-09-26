@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import re
 from pathlib import Path
 
@@ -286,3 +288,26 @@ def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded:
     migrate(str(data_dir))
 
     assert recorded == ["0.8.5"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+def test_a_group_writable_0x_config_is_made_private_before_importing(data_dir: Path, recorded: list[str]) -> None:
+    config = _write_config(data_dir, "config_version: 7\n")
+    config.chmod(0o664)
+
+    migrate(str(data_dir), from_version="0.8.4")
+
+    assert recorded == ["0.8.5"]
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+
+def test_check_skips_the_v8_preflight_when_earlier_0x_steps_come_first(
+    data_dir: Path, recorded: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The conversion reads the config as it is; steps before it would change it.
+    _write_config(data_dir, "config_version: 6\n")
+    monkeypatch.setattr(migrations, "_preflight_observability_v8", lambda *_a, **_k: pytest.fail("preflight ran"))
+
+    result = migrate(str(data_dir), from_version="0.7.2", check=True, gateway_binary="/staged/defenseclaw-gateway")
+
+    assert result.applied[0].startswith("0.x import 0.8.0:")
