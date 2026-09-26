@@ -14,11 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deterministic identity for the separately shipped OpenClaw extension.
+"""Deterministic identity for the OpenClaw extension.
 
-The Python wheel and plugin archive are separate release artifacts.  This
+The Python wheel and the OpenClaw extension are built separately.  This
 module gives both builds one small, deterministic contract: a SHA-256 digest
-over the exact files selected by ``make dist-plugin``.  Scanner exemptions can
+over the extension's runtime files (``package.json``, ``openclaw.plugin.json``,
+``dist/`` and the bundled ``node_modules`` packages).  Scanner exemptions can
 then compare a deployed tree with repository-owned bytes during development or
 with the reference embedded in an installed wheel.  A deployed tree is never
 allowed to act as its own reference.
@@ -149,7 +150,7 @@ def _walk_selected_directory(root: Path, relative_root: str) -> list[tuple[str, 
 
 
 def _repository_runtime_rows(root: Path) -> list[tuple[str, Path, int]]:
-    """Select only files that the ``dist-plugin`` tar recipe publishes."""
+    """Select only the extension's runtime files."""
 
     rows: list[tuple[str, Path, int]] = []
     for name in sorted(_TOP_LEVEL_FILES):
@@ -165,7 +166,7 @@ def _repository_runtime_rows(root: Path) -> list[tuple[str, Path, int]]:
 
 
 def _deployed_runtime_rows(root: Path) -> list[tuple[str, Path, int]]:
-    """Inventory an extracted plugin archive, rejecting every extra entry."""
+    """Inventory a deployed plugin tree, rejecting every extra entry."""
 
     rows: list[tuple[str, Path, int]] = []
     normalized_paths: set[str] = set()
