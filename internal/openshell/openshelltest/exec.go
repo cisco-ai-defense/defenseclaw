@@ -22,16 +22,26 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // ExecCall is one command the fake was asked to run.
 type ExecCall struct {
-	Workspace    string
-	Sandbox      string
-	Command      []string
+	Workspace string
+	Sandbox   string
+	// Command is the caller's argv. openshell.Client.Exec wraps it in
+	// timeout(1); the fake strips that wrapper and reports its limit in
+	// Timeout.
+	Command []string
+	// Timeout is the in-sandbox limit of the command (0: unwrapped).
+	Timeout time.Duration
+	// Argv is the argv as sent, wrapper included.
+	Argv         []string
 	Env          map[string]string
 	WorkDir      string
 	NoLoginShell bool
@@ -44,9 +54,15 @@ type ExecResponse struct {
 	ExitCode int
 	// Err fails the stream after any output.
 	Err error
-	// Hang blocks the stream, without output, until its context ends:
-	// the OpenShell 0.1.1 first-exec hang.
+	// Hang blocks the stream, without output, until its context ends: a
+	// gateway that never reports the command.
 	Hang bool
+	// Duration is how long the command runs before it exits. Like the real
+	// gateway, the fake does not stop a command whose client went away.
+	// When Duration exceeds the call's Timeout, the in-sandbox timeout
+	// stops it instead: the stream reports exit status 124 after Timeout,
+	// without the scripted output.
+	Duration time.Duration
 }
 
 // ExecHandler decides the response to a call. It runs when the caller
@@ -83,7 +99,9 @@ func (e *execClient) Stream(ctx context.Context, workspace, sandboxName string, 
 	if _, err := e.f.sdk.Sandboxes().Get(ctx, workspace, sandboxName); err != nil {
 		return nil, err
 	}
-	call := ExecCall{Workspace: workspace, Sandbox: sandboxName, Command: slices.Clone(command)}
+	call := ExecCall{Workspace: workspace, Sandbox: sandboxName, Argv: slices.Clone(command)}
+	cmd, timeout, _ := openshell.ParseSandboxTimeoutArgv(command)
+	call.Command, call.Timeout = slices.Clone(cmd), timeout
 	if len(opts) > 0 {
 		call.Env = maps.Clone(opts[0].Env)
 		call.WorkDir = opts[0].WorkDir
@@ -150,6 +168,24 @@ func (s *execStream) start() {
 		<-s.ctx.Done()
 		s.err = contextStatus(s.ctx.Err())
 		return
+	}
+	if s.resp.Duration > 0 {
+		run, stopped := s.resp.Duration, false
+		if s.call.Timeout > 0 && run > s.call.Timeout {
+			run, stopped = s.call.Timeout, true
+		}
+		t := time.NewTimer(run)
+		defer t.Stop()
+		select {
+		case <-s.ctx.Done():
+			s.err = contextStatus(s.ctx.Err())
+			return
+		case <-t.C:
+		}
+		if stopped {
+			s.resp = ExecResponse{ExitCode: 124}
+			return
+		}
 	}
 	if len(s.resp.Stdout) > 0 {
 		s.pending = append(s.pending, &types.ExecChunk{Stream: types.StreamStdout, Data: s.resp.Stdout})

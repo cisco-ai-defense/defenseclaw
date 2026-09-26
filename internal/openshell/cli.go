@@ -71,7 +71,9 @@ type CLIExecOptions struct {
 	TTY     bool
 	WorkDir string
 	// Timeout is passed as --timeout (whole seconds, rounded up) and
-	// bounds the local process a little longer.
+	// bounds the local process a little longer. OpenShell 0.1.1 then
+	// reports exit status 124 but leaves the command running; Client.Exec
+	// stops it.
 	Timeout time.Duration
 	// Env sets non-secret variables (--env K=V).
 	Env map[string]string

@@ -178,10 +178,14 @@ func New(opts ...Option) *Fake {
 	return f
 }
 
-// Client wraps the fake in the production openshell.Client.
+// Client wraps the fake in the production openshell.Client. Unset poll
+// and exec grace intervals default to test-friendly values.
 func (f *Fake) Client(opts openshell.ClientOptions) openshell.Client {
 	if opts.PollInterval == 0 {
 		opts.PollInterval = time.Millisecond
+	}
+	if opts.ExecGrace == 0 {
+		opts.ExecGrace = 250 * time.Millisecond
 	}
 	return openshell.NewClient(f, opts)
 }

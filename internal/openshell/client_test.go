@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -265,23 +266,122 @@ func TestExec(t *testing.T) {
 	}
 }
 
-func TestExecRetriesSilentHangs(t *testing.T) {
+func TestSandboxTimeoutArgv(t *testing.T) {
+	cases := []struct {
+		timeout time.Duration
+		secs    string
+		back    time.Duration
+	}{
+		{time.Minute, "60", time.Minute},
+		{1500 * time.Millisecond, "1.5", 1500 * time.Millisecond},
+		{20 * time.Millisecond, "0.02", 20 * time.Millisecond},
+		{time.Nanosecond, "0.001", time.Millisecond},
+	}
+	for _, tc := range cases {
+		argv := openshell.SandboxTimeoutArgv([]string{"git", "status"}, tc.timeout)
+		if got := strings.Join(argv, " "); got != "timeout -k 5 "+tc.secs+" git status" {
+			t.Fatalf("SandboxTimeoutArgv(%s) = %q", tc.timeout, got)
+		}
+		cmd, d, ok := openshell.ParseSandboxTimeoutArgv(argv)
+		if !ok || d != tc.back || strings.Join(cmd, " ") != "git status" {
+			t.Fatalf("ParseSandboxTimeoutArgv(%q) = %q, %s, %v", argv, cmd, d, ok)
+		}
+	}
+	for _, argv := range [][]string{{"git", "status"}, {"timeout", "-k", "5", "10"}, {"timeout", "-k", "9", "10", "true"}, {"timeout", "-k", "5", "x", "true"}} {
+		if cmd, _, ok := openshell.ParseSandboxTimeoutArgv(argv); ok || strings.Join(cmd, " ") != strings.Join(argv, " ") {
+			t.Fatalf("ParseSandboxTimeoutArgv(%q) accepted", argv)
+		}
+	}
+}
+
+// TestExecStopsCommandsInsteadOfOverlapping is the quiet long-running
+// command: an attempt that times out is stopped in the sandbox and never
+// retried, so no two runs of the command overlap, even when the caller
+// runs it again.
+func TestExecStopsCommandsInsteadOfOverlapping(t *testing.T) {
 	f, c := newClient(t)
 	createReady(t, c, "box", nil)
-	attempts := 0
-	f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
-		attempts++
-		if attempts < 3 {
-			return openshelltest.ExecResponse{Hang: true}
+	const timeout = 100 * time.Millisecond
+	type run struct{ start, end time.Time }
+	var (
+		mu   sync.Mutex
+		runs []run
+	)
+	f.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		// The command runs three timeouts long unless the sandbox stops
+		// it; the fake keeps it running after its client gives up.
+		const duration = 3 * timeout
+		end := duration
+		if call.Timeout > 0 && call.Timeout < end {
+			end = call.Timeout
 		}
-		return openshelltest.ExecResponse{Stdout: []byte("ok")}
+		now := time.Now()
+		mu.Lock()
+		runs = append(runs, run{now, now.Add(end)})
+		mu.Unlock()
+		return openshelltest.ExecResponse{Duration: duration}
 	})
-	res, err := c.Exec(context.Background(), "box", []string{"true"}, openshell.ExecOptions{Timeout: 20 * time.Millisecond, RetryDelay: time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
+	opts := openshell.ExecOptions{Timeout: timeout, Attempts: 3, RetryDelay: time.Millisecond}
+	start := time.Now()
+	_, err := c.Exec(context.Background(), "box", []string{"git", "clone", "-q", "https://example.com/r.git"}, opts)
+	if !errors.Is(err, openshell.ErrExecTimeout) || !strings.Contains(err.Error(), "the sandbox stopped the command (exit status 124)") {
+		t.Fatalf("Exec = %v", err)
 	}
-	if res.Attempts != 3 || string(res.Stdout) != "ok" {
-		t.Fatalf("result = %+v", res)
+	if elapsed := time.Since(start); elapsed >= 3*timeout {
+		t.Fatalf("Exec returned after %s, when the command would have finished", elapsed)
+	}
+	call := f.ExecCalls()[0]
+	if call.Timeout != timeout || call.Argv[0] != "timeout" || strings.Join(call.Command, " ") != "git clone -q https://example.com/r.git" {
+		t.Fatalf("call = %+v", call)
+	}
+	// The caller's own retry starts only after the first run was stopped.
+	if _, err := c.Exec(context.Background(), "box", []string{"git", "clone", "-q", "https://example.com/r.git"}, opts); !errors.Is(err, openshell.ErrExecTimeout) {
+		t.Fatalf("second Exec = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(runs) != 2 {
+		t.Fatalf("the command ran %d times, want once per Exec call", len(runs))
+	}
+	if runs[1].start.Before(runs[0].end) {
+		t.Fatalf("runs overlap: %v", runs)
+	}
+}
+
+func TestExecExitStatuses(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	cases := []struct {
+		name     string
+		resp     openshelltest.ExecResponse
+		wantCode int
+		wantErr  error
+	}{
+		{name: "fast 124 is the command's own status", resp: openshelltest.ExecResponse{ExitCode: 124}, wantCode: 124},
+		{name: "killed after ignoring SIGTERM", resp: openshelltest.ExecResponse{Duration: timeout, ExitCode: 137}, wantErr: openshell.ErrExecTimeout},
+		{name: "stopped at the timeout", resp: openshelltest.ExecResponse{Duration: 2 * timeout}, wantErr: openshell.ErrExecTimeout},
+		{name: "missing user command", resp: openshelltest.ExecResponse{ExitCode: 127,
+			Stderr: []byte("timeout: failed to run command 'nope': No such file or directory\n")}, wantCode: 127},
+		{name: "image without timeout", resp: openshelltest.ExecResponse{ExitCode: 127,
+			Stderr: []byte("/bin/bash: line 1: timeout: command not found\n")}, wantErr: openshell.ErrNoSandboxTimeout},
+		{name: "busybox image without timeout", resp: openshelltest.ExecResponse{ExitCode: 127,
+			Stderr: []byte("sh: timeout: not found\n")}, wantErr: openshell.ErrNoSandboxTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, c := newClient(t)
+			createReady(t, c, "box", nil)
+			f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse { return tc.resp })
+			res, err := c.Exec(context.Background(), "box", []string{"nope"}, openshell.ExecOptions{Timeout: timeout})
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Exec = %+v, %v; want %v", res, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || res.ExitCode != tc.wantCode {
+				t.Fatalf("Exec = %+v, %v", res, err)
+			}
+		})
 	}
 }
 
@@ -293,56 +393,61 @@ func TestExecRetryPolicy(t *testing.T) {
 		respond  func(attempt int) openshelltest.ExecResponse
 		failNext error
 		wantRuns int
+		wantOpen int
 		wantErr  func(error) bool
 	}{
 		{
-			name:     "hang exhausts attempts",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Attempts: 2, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Hang: true} },
-			wantRuns: 2,
-			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
-		},
-		{
-			name:     "single attempt never retries",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Attempts: 1},
+			name:     "gateway hang is not retried",
+			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Attempts: 3, RetryDelay: time.Millisecond},
 			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Hang: true} },
 			wantRuns: 1,
-			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
+			wantOpen: 1,
+			wantErr: func(err error) bool {
+				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "no exit status from the gateway")
+			},
 		},
 		{
 			name: "failure after output is not retried",
-			opts: openshell.ExecOptions{RetryDelay: time.Millisecond},
+			opts: openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
 			respond: func(int) openshelltest.ExecResponse {
 				return openshelltest.ExecResponse{Stdout: []byte("partial"), Err: unavailable}
 			},
 			wantRuns: 1,
+			wantOpen: 1,
 			wantErr:  openshell.IsUnavailable,
 		},
 		{
-			name: "unavailable before output is retried",
-			opts: openshell.ExecOptions{RetryDelay: time.Millisecond},
-			respond: func(attempt int) openshelltest.ExecResponse {
-				if attempt == 1 {
-					return openshelltest.ExecResponse{Err: unavailable}
-				}
-				return openshelltest.ExecResponse{Stdout: []byte("ok")}
-			},
-			wantRuns: 2,
+			name:     "stream lost before output is not retried",
+			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Err: unavailable} },
+			wantRuns: 1,
+			wantOpen: 1,
+			wantErr:  openshell.IsUnavailable,
 		},
 		{
-			name:     "stream open failure is retried",
+			name:     "stream that never opened is retried when asked",
+			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Stdout: []byte("ok")} },
+			failNext: unavailable,
+			wantRuns: 1, // the failed open never reaches the handler
+			wantOpen: 2,
+		},
+		{
+			name:     "one attempt by default",
 			opts:     openshell.ExecOptions{RetryDelay: time.Millisecond},
 			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
 			failNext: unavailable,
-			wantRuns: 1, // the failed open never reaches the handler
+			wantRuns: 0,
+			wantOpen: 1,
+			wantErr:  openshell.IsUnavailable,
 		},
 		{
-			name: "non-retryable error stops",
-			opts: openshell.ExecOptions{RetryDelay: time.Millisecond},
-			respond: func(int) openshelltest.ExecResponse {
-				return openshelltest.ExecResponse{Err: &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"}}
-			},
-			wantRuns: 1,
+			name:     "open refusal is not retried",
+			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
+			failNext: &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"},
+			wantRuns: 0,
+			wantOpen: 1,
 			wantErr:  openshell.IsPermissionDenied,
 		},
 	}
@@ -358,15 +463,15 @@ func TestExecRetryPolicy(t *testing.T) {
 			if tc.failNext != nil {
 				f.FailNext(openshelltest.MethodExec, tc.failNext)
 			}
-			_, err := c.Exec(context.Background(), "box", []string{"true"}, tc.opts)
-			if tc.wantErr == nil && err != nil {
-				t.Fatalf("Exec: %v", err)
+			res, err := c.Exec(context.Background(), "box", []string{"true"}, tc.opts)
+			if tc.wantErr == nil && (err != nil || res.Attempts != tc.wantOpen) {
+				t.Fatalf("Exec = %+v, %v", res, err)
 			}
 			if tc.wantErr != nil && !tc.wantErr(err) {
 				t.Fatalf("Exec error = %v", err)
 			}
-			if runs != tc.wantRuns {
-				t.Fatalf("handler ran %d times, want %d", runs, tc.wantRuns)
+			if runs != tc.wantRuns || f.Calls(openshelltest.MethodExec) != tc.wantOpen {
+				t.Fatalf("handler ran %d times over %d opens, want %d over %d", runs, f.Calls(openshelltest.MethodExec), tc.wantRuns, tc.wantOpen)
 			}
 		})
 	}

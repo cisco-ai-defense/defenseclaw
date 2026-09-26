@@ -64,8 +64,8 @@ type Client interface {
 	// WaitDeleted waits until the sandbox no longer exists.
 	WaitDeleted(ctx context.Context, name string) error
 
-	// Exec runs argv in a sandbox with a per-attempt timeout, retrying
-	// attempts that hang before producing any output.
+	// Exec runs argv in a sandbox. The sandbox stops the command at its
+	// timeout; see ExecOptions for what is and is not retried.
 	Exec(ctx context.Context, sandbox string, argv []string, opts ExecOptions) (*ExecResult, error)
 
 	ListProfiles(ctx context.Context) ([]*ProviderProfile, error)
@@ -140,6 +140,9 @@ type ClientOptions struct {
 	PollInterval time.Duration
 	// ReadyTimeout bounds waits whose context has no deadline.
 	ReadyTimeout time.Duration
+	// ExecGrace is how long Exec waits past a command's timeout for the
+	// sandbox to report its end (default DefaultExecGrace).
+	ExecGrace time.Duration
 }
 
 func (o ClientOptions) withDefaults() ClientOptions {
@@ -154,6 +157,9 @@ func (o ClientOptions) withDefaults() ClientOptions {
 	}
 	if o.ReadyTimeout <= 0 {
 		o.ReadyTimeout = DefaultReadyTimeout
+	}
+	if o.ExecGrace <= 0 {
+		o.ExecGrace = DefaultExecGrace
 	}
 	return o
 }

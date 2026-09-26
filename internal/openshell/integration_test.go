@@ -156,6 +156,20 @@ func TestLiveGateway(t *testing.T) {
 	}
 	t.Logf("SDK exec: attempts %d, uid %s", res.Attempts, strings.TrimSpace(strings.TrimPrefix(string(res.Stdout), "sdk-ok\n")))
 
+	// A quiet command that outlives its timeout is stopped in the sandbox
+	// and not retried, so nothing finishes it later.
+	started := time.Now()
+	_, err = client.Exec(ctx, name, []string{"sh", "-c", "sleep 3; echo run >> /tmp/d-smoke-count"}, openshell.ExecOptions{Timeout: time.Second, Attempts: 3})
+	if !errors.Is(err, openshell.ErrExecTimeout) {
+		t.Fatalf("quiet exec past its timeout = %v", err)
+	}
+	t.Logf("timed-out exec returned after %s: %v", time.Since(started).Round(time.Millisecond), err)
+	time.Sleep(4 * time.Second)
+	count, err := client.Exec(ctx, name, []string{"sh", "-c", "cat /tmp/d-smoke-count 2>/dev/null | wc -l"}, openshell.ExecOptions{Timeout: 30 * time.Second})
+	if err != nil || strings.TrimSpace(string(count.Stdout)) != "0" {
+		t.Fatalf("the timed-out command still ran: %+v, %v", count, err)
+	}
+
 	cli := openshell.CLI{Gateway: reg.Name}
 	inv, err := cli.Exec(name, []string{"sh", "-c", "echo cli-ok"}, openshell.CLIExecOptions{Timeout: 30 * time.Second, WorkDir: "/tmp"})
 	if err != nil {
