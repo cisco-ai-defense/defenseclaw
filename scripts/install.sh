@@ -453,6 +453,8 @@ if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; t
     else
         warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
     fi
+elif [[ -z "${LOCAL_DIR}" ]]; then
+    info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
 fi
 for asset in "${ARCHIVE}" "${WHEEL}" "${REQUIREMENTS}"; do
     fetch "${asset}" "${STAGING}/${asset}" || die "Could not get ${asset} for ${VERSION}"

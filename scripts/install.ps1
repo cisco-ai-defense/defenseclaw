@@ -1145,6 +1145,8 @@ function Invoke-Install {
         } else {
             Write-Warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
         }
+    } elseif (-not $Local) {
+        Write-Info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
     }
     foreach ($asset in @($Archive, $Wheel, $Requirements)) {
         if (-not (Get-Asset $asset (Join-Path $Staging $asset))) { Die "Could not get $asset for $Ver" }
