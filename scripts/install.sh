@@ -536,6 +536,9 @@ ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
+        warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
+    fi
 fi
 if [[ -n "${APP_RELAUNCH:-}" ]]; then
     open "${APP_PATH}" >/dev/null 2>&1 || true
