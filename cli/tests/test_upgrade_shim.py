@@ -27,7 +27,6 @@ import urllib.error
 from pathlib import Path
 
 import pytest
-
 from defenseclaw import entry, update_notice, upgrade_shim
 
 
@@ -272,7 +271,7 @@ def test_notice_skips_quiet_invocations(argv: list[str]) -> None:
 def test_notice_uses_the_daily_cache(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
     (home / ".update-check.json").write_text(json.dumps({"checked_at": time.time(), "latest": "1.1.0"}))
-    monkeypatch.setattr(upgrade_shim, "latest_version", lambda **_kwargs: pytest.fail("network used"))
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", lambda *_args: pytest.fail("network used"))
 
     assert update_notice.available_message() == (
         "DefenseClaw 1.1.0 is available (you have 1.0.0) — run 'defenseclaw upgrade'"
@@ -282,7 +281,7 @@ def test_notice_uses_the_daily_cache(home: Path, monkeypatch: pytest.MonkeyPatch
 def test_notice_refreshes_a_stale_cache(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.__version__", "1.1.0")
     (home / ".update-check.json").write_text(json.dumps({"checked_at": 0, "latest": "1.2.0"}))
-    monkeypatch.setattr(upgrade_shim, "latest_version", lambda **_kwargs: "1.1.0")
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", lambda repo, method, timeout: "1.1.0")
 
     assert update_notice.available_message() is None
     assert json.loads((home / ".update-check.json").read_text())["latest"] == "1.1.0"
@@ -300,3 +299,37 @@ def test_notice_can_be_disabled(home: Path, monkeypatch: pytest.MonkeyPatch, set
         (home / "config.yaml").write_text("config_version: 8\nupdate_check: false\n")
 
     assert update_notice.available_message() is None
+
+
+def test_notice_gives_up_on_a_slow_network(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setattr(update_notice, "_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", lambda *_args: time.sleep(5) or "9.9.9")
+
+    started = time.monotonic()
+    assert update_notice.available_message() is None
+    assert time.monotonic() - started < 2
+
+
+def test_notice_swallows_ctrl_c(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(update_notice, "_interactive", lambda argv: True)
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(update_notice, "available_message", interrupted)
+
+    update_notice.maybe_print(["status"])
+
+
+def test_shim_output_survives_a_console_that_cannot_encode_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr("defenseclaw.__version__", "1.2.0")
+    monkeypatch.setattr(upgrade_shim, "_latest_version", lambda repo: "1.2.0")
+
+    assert upgrade_shim.run(["upgrade"]) == 0

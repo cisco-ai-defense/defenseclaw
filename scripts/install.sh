@@ -267,7 +267,7 @@ VERSION="${DC_VERSION}"
 # with the placeholder, which stamping would also rewrite.
 if ! is_version "${VERSION}"; then
     if [[ -n "${LOCAL_DIR}" ]]; then
-        wheel="$(cd "${LOCAL_DIR}" && ls defenseclaw-*-py3-none-any.whl 2>/dev/null | head -1)"
+        wheel="$(cd "${LOCAL_DIR}" && ls defenseclaw-*-py3-none-any.whl 2>/dev/null | head -1 || true)"
         VERSION="${wheel#defenseclaw-}"; VERSION="${VERSION%-py3-none-any.whl}"
         is_version "${VERSION}" || die "No defenseclaw-X.Y.Z-py3-none-any.whl in ${LOCAL_DIR}"
     elif [[ "${ROLLBACK}" != true ]]; then
@@ -302,13 +302,18 @@ trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 # ── Existing install ─────────────────────────────────────────────────────────
 
+is_gateway_process() {
+    # After a crash the PID in gateway.pid can belong to an unrelated process.
+    ps -p "$1" -o comm= 2>/dev/null | grep -q defenseclaw
+}
+
 gateway_pid() {
     # gateway.pid is JSON ({"pid": N, ...}); accept a bare number too.
     local file="${DEFENSECLAW_HOME}/gateway.pid" pid
     [[ -f "${file}" ]] || return 1
     pid="$(grep -Eo '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "${file}" 2>/dev/null | grep -Eo '[0-9]+$' || true)"
     [[ -n "${pid}" ]] || pid="$(grep -Eo '^[[:space:]]*[0-9]+[[:space:]]*$' "${file}" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null && printf '%s' "${pid}"
+    [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null && is_gateway_process "${pid}" && printf '%s' "${pid}"
 }
 
 installed_version() {
@@ -350,6 +355,8 @@ if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
     done
 fi
 
+recover_interrupted_run
+
 # ── Rollback-only mode ───────────────────────────────────────────────────────
 
 if [[ "${ROLLBACK}" == true ]]; then
@@ -366,7 +373,12 @@ if [[ "${ROLLBACK}" == true ]]; then
     if [[ "${was_running}" == true ]] || [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]]; then
         start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi
-    ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+    if version_lt "${back_to}" 1.0.0; then
+        ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+    else
+        ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+    fi
+    info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
     exit 0
 fi
 
@@ -498,6 +510,7 @@ else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
 fi
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
+trap '' HUP PIPE
 snapshot || { undo_snapshot; restart_old; die "Could not save the current install; nothing was changed"; }
 
 if ! swap_in; then
@@ -519,6 +532,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     fi
 fi
 finish_swap
+trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 if [[ ${START_RC} -eq 3 ]]; then
@@ -598,8 +612,60 @@ snapshot() {
     if [[ -n "${APP_PATH}" ]]; then
         ditto "${APP_PATH}" "${SNAP}/DefenseClawMac.app" || return 1
     fi
+    save_external_config "${SNAP}" || return 1
     printf '%s\n' "${PREV_VERSION:-}" > "${SNAP}/VERSION"
     printf '%s\n' "${WAS_RUNNING}" > "${SNAP}/GATEWAY_WAS_RUNNING"
+    : > "${SNAP}/COMPLETE"
+}
+
+# A config.yaml outside the data dir (DEFENSECLAW_CONFIG) is part of the snapshot too.
+save_external_config() {
+    local config="${DEFENSECLAW_CONFIG:-}"
+    [[ -n "${config}" && -f "${config}" ]] || return 0
+    case "${config}" in "${DEFENSECLAW_HOME}"/*) return 0 ;; esac
+    cp -p "${config}" "$1/external-config.yaml" && printf '%s\n' "${config}" > "$1/EXTERNAL_CONFIG"
+}
+
+restore_external_config() {
+    [[ -f "$1/EXTERNAL_CONFIG" && -f "$1/external-config.yaml" ]] || return 0
+    cp -p "$1/external-config.yaml" "$(cat "$1/EXTERNAL_CONFIG")"
+}
+
+# recover_interrupted_run: a run killed mid-swap (closed laptop, power loss)
+# leaves its snapshot behind. Put the install it saved back before doing
+# anything else, so re-running the installer is always the recovery.
+recover_interrupted_run() {
+    local slot name
+    for slot in "${DEFENSECLAW_HOME}/previous.new" "${DEFENSECLAW_HOME}/.repair"; do
+        [[ -d "${slot}" ]] || continue
+        SNAP="${slot}"
+        if [[ -f "${slot}/COMPLETE" ]]; then
+            warn "An earlier install was interrupted; restoring the install it replaced"
+            stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
+            WAS_RUNNING="$(cat "${slot}/GATEWAY_WAS_RUNNING" 2>/dev/null || echo false)"
+            VERSION_BEFORE="${VERSION}"; VERSION="(interrupted)"
+            restore_snapshot
+            VERSION="${VERSION_BEFORE}"
+        else
+            # The snapshot never finished, so live data was only copied, not changed.
+            undo_snapshot
+        fi
+    done
+    slot="${DEFENSECLAW_HOME}/.rollback-hold"
+    if [[ -d "${slot}" ]]; then
+        warn "An earlier rollback was interrupted; restoring the install it started from"
+        stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
+        if [[ -f "${slot}/STASHED" ]]; then
+            # The live install was fully set aside, so anything live now came from previous/.
+            mkdir -p "${PREVIOUS}/data"
+            while IFS= read -r name; do
+                mv "${DEFENSECLAW_HOME}/${name}" "${PREVIOUS}/data/"
+            done < <(data_entries)
+            if [[ -d "${VENV}" ]]; then mv "${VENV}" "${PREVIOUS}/venv"; fi
+            if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${PREVIOUS}/installer"; fi
+        fi
+        unstash "${slot}" && rm -rf "${slot}"
+    fi
 }
 
 # undo_snapshot: put back what snapshot() moved before it failed.
@@ -682,6 +748,7 @@ restore_snapshot() {
     if [[ -n "${APP_PATH}" && -d "${SNAP}/DefenseClawMac.app" ]]; then
         rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"
     fi
+    restore_external_config "${SNAP}"
     rm -rf "${SNAP}"
     restart_old
     warn "The failed ${VERSION} install was kept in ${failed} for troubleshooting"
@@ -701,6 +768,7 @@ start_gateway() {
 finish_swap() {
     local tmp
     if [[ "${SNAP}" == "${DEFENSECLAW_HOME}/previous.new" && -n "${PREV_VERSION}" ]]; then
+        keep_rolled_back_data
         rm -rf "${PREVIOUS}" && mv "${SNAP}" "${PREVIOUS}"
     else
         rm -rf "${SNAP}"
@@ -720,6 +788,16 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
+# A rollback parks the data written since the upgrade in previous/. Keep it
+# when a later upgrade reuses the slot: it can hold audit history.
+keep_rolled_back_data() {
+    [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
+    local kept
+    kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
+    mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" \
+        && info "Kept the data from before the last rollback in ${kept}"
+}
+
 # stash_live SLOT: move the live install (binaries copied, everything else
 # renamed) into SLOT/{bin,data,venv,installer}.
 stash_live() {
@@ -736,6 +814,7 @@ stash_live() {
     done < <(data_entries)
     if [[ -d "${VENV}" ]]; then mv "${VENV}" "${slot}/venv" || return 1; fi
     if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
+    save_external_config "${slot}"
 }
 
 # unstash SLOT: make SLOT the live install again (the inverse of stash_live).
@@ -758,6 +837,7 @@ unstash() {
     done
     if [[ -d "${slot}/venv" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
     if [[ -d "${slot}/installer" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
+    restore_external_config "${slot}"
 }
 
 swap_with_previous() {
@@ -770,6 +850,7 @@ swap_with_previous() {
         err "Could not set the current install aside; nothing was changed"
         return 1
     fi
+    : > "${hold}/STASHED"
     printf '%s\n' "${current}" > "${hold}/VERSION"
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! unstash "${PREVIOUS}"; then
@@ -781,6 +862,7 @@ swap_with_previous() {
         mv "${APP_PATH}" "${hold}/DefenseClawMac.app" && mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
             || warn "Could not swap the macOS app back; it stays at the newer version"
     fi
+    date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"
 }

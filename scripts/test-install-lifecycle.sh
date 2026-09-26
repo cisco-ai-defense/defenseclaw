@@ -182,6 +182,12 @@ upgrade_lane() {
     must bash "${forward}" --rollback --yes || return 1
     assert_versions "${TARGET}"
     assert_healthy
+    if [[ "${name}" == upgrade-previous ]]; then
+        log "${name}: moving to another version keeps the data a rollback parked"
+        must install_candidate "${PREVIOUS_ASSETS}" || return 1
+        assert_versions "${from}"
+        ls -d "${DC_HOME}"/backups/rolled-back-* >/dev/null 2>&1 || fail "rolled-back data was not kept in backups/"
+    fi
     stop_lane
 }
 
@@ -283,6 +289,33 @@ lane_drills() {
     assert_versions "${TARGET}"
     assert_healthy
     "${HOME}/.local/bin/defenseclaw" status >/dev/null 2>&1 || fail "the upgrade did not repair the broken CLI"
+
+    log "drills: an install killed mid-swap (power loss) is recovered by the next run"
+    local out="${ROOT}/killed-install.log" installer tries=0
+    bash "${ASSETS}/install.sh" --local "${ASSETS}" --yes > "${out}" 2>&1 &
+    installer=$!
+    until grep -q "Installing DefenseClaw" "${out}" 2>/dev/null || [[ ${tries} -ge 900 ]]; do
+        sleep 0.2; tries=$((tries + 1))
+    done
+    pkill -9 -P "${installer}" 2>/dev/null || true
+    kill -9 "${installer}" 2>/dev/null || true
+    wait "${installer}" 2>/dev/null || true
+    [[ -f "${DC_HOME}/.repair/COMPLETE" ]] || fail "the killed install left no complete snapshot"
+    rm -rf "${DC_HOME}/.install.lock"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    assert_healthy
+    assert_data_kept
+    [[ ! -e "${DC_HOME}/.repair" ]] || fail "the recovered snapshot was left behind"
+
+    log "drills: a stale gateway.pid naming another process is left alone"
+    "${HOME}/.local/bin/defenseclaw-gateway" stop >/dev/null 2>&1 || true
+    sleep 300 &
+    local bystander=$!
+    printf '{"pid":%s}\n' "${bystander}" > "${DC_HOME}/gateway.pid"
+    must install_candidate "${ASSETS}" || return 1
+    kill -0 "${bystander}" 2>/dev/null || fail "the installer killed an unrelated process"
+    kill "${bystander}" 2>/dev/null || true
     stop_lane
 }
 

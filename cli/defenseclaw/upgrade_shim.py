@@ -65,6 +65,7 @@ def run(argv: list[str]) -> int:
     """Run ``upgrade`` or ``rollback`` with the arguments after the command."""
 
     command, args = argv[0], argv[1:]
+    _tolerant_output()
     try:
         options = _parse(command, args)
         if options is None:
@@ -79,6 +80,16 @@ def run(argv: list[str]) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+
+
+def _tolerant_output() -> None:
+    """Never fail on a character the console cannot encode (Windows cp1252)."""
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:

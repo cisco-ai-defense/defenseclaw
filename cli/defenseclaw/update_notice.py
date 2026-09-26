@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 NO_CHECK_ENV = "DEFENSECLAW_NO_UPDATE_CHECK"
@@ -44,7 +45,7 @@ def maybe_print(argv: list[str]) -> None:
         message = available_message()
         if message:
             print(f"\n  {message}", file=sys.stderr)
-    except Exception:  # noqa: BLE001 - a notice must never break the command
+    except (Exception, KeyboardInterrupt):  # noqa: BLE001 - a notice must never break the command
         return
 
 
@@ -93,12 +94,7 @@ def _latest_cached() -> str | None:
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
-    from defenseclaw.upgrade_shim import ShimError, latest_version
-
-    try:
-        latest = latest_version(timeout=_TIMEOUT_SECONDS)
-    except ShimError:
-        latest = ""
+    latest = _lookup_latest()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as stream:
@@ -106,6 +102,29 @@ def _latest_cached() -> str | None:
     except OSError:
         pass
     return latest or None
+
+
+def _lookup_latest() -> str:
+    """One redirect lookup, abandoned after _TIMEOUT_SECONDS in total.
+
+    Runs in a daemon thread because DNS resolution is not bounded by the
+    socket timeout; a slow network must not hold the terminal.
+    """
+
+    from defenseclaw.upgrade_shim import DEFAULT_REPO, REPO_ENV, _latest_from_redirect
+
+    found: list[str] = []
+    repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
+
+    def lookup() -> None:
+        tag = _latest_from_redirect(repo, "HEAD", _TIMEOUT_SECONDS)
+        if tag:
+            found.append(tag)
+
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(_TIMEOUT_SECONDS)
+    return found[0] if found else ""
 
 
 def _data_dir() -> str:
