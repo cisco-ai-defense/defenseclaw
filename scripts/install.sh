@@ -380,7 +380,8 @@ if [[ "${ROLLBACK}" == true ]]; then
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     swap_with_previous || die "Rollback failed part-way; see ${LOG}"
     if [[ "${was_running}" == true ]] || [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]]; then
-        start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
+        start_gateway && restart_openclaw \
+            || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi
     if version_lt "${back_to}" 1.0.0; then
         ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
@@ -552,9 +553,8 @@ trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 if [[ ${START_RC} -eq 3 ]]; then
     warn "A connector needs attention before it is guarded again (see the gateway output above)"
 fi
-if [[ "${WAS_RUNNING}" == true ]] && openclaw_connector_active && has openclaw; then
-    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
-        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+if [[ "${WAS_RUNNING}" == true ]]; then
+    restart_openclaw
 fi
 
 if [[ -z "${PREV_VERSION}" ]]; then
@@ -879,6 +879,14 @@ swap_with_previous() {
     date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"
+}
+
+# The gateway writes the OpenClaw plugin when it starts; OpenClaw loads it only
+# when its own gateway restarts.
+restart_openclaw() {
+    openclaw_connector_active && has openclaw || return 0
+    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
+        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
 }
 
 openclaw_connector_active() {
