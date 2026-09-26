@@ -240,12 +240,28 @@ func pinnedChanges(rec *SnapshotRecord) []string {
 	var out []string
 	for rel, before := range rec.Git.Pinned {
 		now, err := captureState(filepath.Join(rec.Project, filepath.FromSlash(rel)), 0)
-		if err != nil || !before.equal(now) {
+		unchanged := err == nil && (before.equal(now) || (emptyPin(before) && emptyPin(now)))
+		if !unchanged {
 			out = append(out, rel)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// emptyPin reports whether a state is absent, an empty file or an empty
+// directory: the shapes PlanMount creates and ReleaseMount removes, which
+// must not read as operator changes.
+func emptyPin(s FileState) bool {
+	switch {
+	case !s.Exists:
+		return true
+	case s.Dir:
+		return s.Empty
+	case s.Symlink == "":
+		return s.Size == 0
+	}
+	return false
 }
 
 // newNestedRepos lists git repositories that appeared inside the folder

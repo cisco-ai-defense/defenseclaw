@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -244,9 +245,11 @@ var (
 
 var gitVersionRE = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
 
-func hostGitVersion(ctx context.Context, dir string) (gitVersion, error) {
+// hostGitVersion reports the host git version. It runs outside any
+// repository; dir is accepted for call-site symmetry only.
+func hostGitVersion(ctx context.Context, _ string) (gitVersion, error) {
 	gitVersionOnce.Do(func() {
-		out, err := gitCmd{dir: dir}.strict(ctx, "version")
+		out, err := gitCmd{dir: os.TempDir()}.strict(ctx, "version")
 		if err != nil {
 			gitVersionErr = fmt.Errorf("workspace: git is required on this machine: %w", err)
 			return

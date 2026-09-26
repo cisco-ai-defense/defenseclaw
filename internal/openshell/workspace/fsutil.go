@@ -40,8 +40,10 @@ type FileID struct {
 
 // FileState is a compact description of one path at a point in time.
 type FileState struct {
-	Exists  bool   `json:"exists"`
-	Dir     bool   `json:"dir,omitempty"`
+	Exists bool `json:"exists"`
+	Dir    bool `json:"dir,omitempty"`
+	// Empty marks a directory with no entries.
+	Empty   bool   `json:"empty,omitempty"`
 	Symlink string `json:"symlink,omitempty"`
 	Mode    uint32 `json:"mode,omitempty"`
 	Size    int64  `json:"size,omitempty"`
@@ -83,6 +85,9 @@ func captureState(p string, keepBytes int64) (FileState, error) {
 			return FileState{}, err
 		}
 		st.SHA256 = sum
+		if entries, err := os.ReadDir(p); err == nil && len(entries) == 0 {
+			st.Empty = true
+		}
 	case info.Mode().IsRegular():
 		st.Size = info.Size()
 		data, sum, err := hashFile(p, keepBytes)

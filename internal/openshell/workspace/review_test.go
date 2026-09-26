@@ -249,3 +249,34 @@ func TestClassifyChangesUnits(t *testing.T) {
 		t.Fatalf("parseGitmodules = %v", urls)
 	}
 }
+
+func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	if err := os.RemoveAll(filepath.Join(e.project, ".git", "hooks")); err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot first, then the plan creates .git/hooks and the commondir pin.
+	mustSnapshot(t, e, "s1")
+	if _, err := PlanMount(bg, e.mountOpts("s1")); err != nil {
+		t.Fatal(err)
+	}
+	// Plan first for a second session: pins exist at snapshot time and are
+	// released before review.
+	mustSnapshot(t, e, "s2")
+	if err := ReleaseMount(e.data, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"s1", "s2"} {
+		rep := review(t, e, name, []ContentScanner{})
+		if len(rep.Flags) != 0 {
+			t.Fatalf("%s: mount pins reported as changes: %+v", name, rep.Flags)
+		}
+	}
+	// A real host-side hook is still reported.
+	writeFileMode(t, e.project, ".git/hooks/pre-commit", "#!/bin/sh\n", 0o755)
+	rep := review(t, e, "s2", []ContentScanner{})
+	if f, ok := flagByLabel(rep, ".git/hooks"); !ok || f.Kind != RiskGitControl {
+		t.Fatalf("hook change not reported: %+v", rep.Flags)
+	}
+}

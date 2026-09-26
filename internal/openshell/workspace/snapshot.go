@@ -355,11 +355,12 @@ func captureControl(gitDir string) (map[string]FileState, error) {
 }
 
 func capturePinned(src *Source) (map[string]FileState, error) {
+	// The commondir pin is DefenseClaw's own and comes and goes with the
+	// mount, so it is not tracked here.
 	g := src.Git
 	paths := []string{
 		filepath.Join(g.GitDir, "config"),
 		filepath.Join(g.GitDir, "hooks"),
-		filepath.Join(g.GitDir, "commondir"),
 	}
 	if g.HooksPath != "" {
 		paths = append(paths, g.HooksPath)
