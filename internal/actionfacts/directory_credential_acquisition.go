@@ -43,6 +43,40 @@ func ExactDirectoryCredentialAcquisition(facts Facts) bool {
 	return true
 }
 
+// ExactDirectoryCredentialCompromise reports whether the action proves at least
+// one operation that IS the credential compromise: a directory secrets dump or an
+// offline Kerberos hash crack. Those have no recoverable benign form and no useful
+// result to observe, so they are the enforceable half of the vocabulary.
+//
+// A mixed action -- for example an AS-REP request whose output is piped to hashcat
+// -- satisfies this predicate, because the crack is present.
+func ExactDirectoryCredentialCompromise(facts Facts) bool {
+	if !ExactDirectoryCredentialAcquisition(facts) {
+		return false
+	}
+	for _, fact := range facts.DirectoryCredentialAcquisitions {
+		if fact.Operation == DirectoryCredentialSecretsDump ||
+			fact.Operation == DirectoryCredentialHashCrack {
+			return true
+		}
+	}
+	return false
+}
+
+// ExactDirectoryCredentialTicketRequest reports whether the action proves only
+// Kerberos service-ticket or AS-REP requests and no dump or crack.
+//
+// This half stays non-enforcing deliberately. A ticket request is the step whose
+// RESULT the credential.returned_kerberos_tgs lifecycle rule exists to observe:
+// blocking the request would prevent the returned TGS from ever being seen, which
+// removes a shipped result-backed detection rather than adding one. The two
+// predicates are total and mutually exclusive over
+// ExactDirectoryCredentialAcquisition, so no proven acquisition loses coverage.
+func ExactDirectoryCredentialTicketRequest(facts Facts) bool {
+	return ExactDirectoryCredentialAcquisition(facts) &&
+		!ExactDirectoryCredentialCompromise(facts)
+}
+
 // DirectoryCredentialAcquisitionSafeNegative proves that a complete static
 // invocation used a reviewed program name but did not use an acquisition
 // grammar. It exists solely to suppress broad regex candidates such as help,

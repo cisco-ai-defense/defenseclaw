@@ -32,7 +32,7 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 				"file_path": "/etc/pam.d/sshd",
 				"content":   "auth sufficient pam_permit.so\n",
 			}),
-			actions: map[string]string{"default": "alert", "permissive": "alert", "strict": "block"},
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
 			name:   "Docker insecure HTTP registry",
@@ -41,7 +41,7 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 				"file_path": "/etc/docker/daemon.json",
 				"content":   `{"insecure-registries":["http://mirror.local"]}`,
 			}),
-			actions: map[string]string{"default": "alert", "permissive": "alert", "strict": "block"},
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
 			name:   "named Kubernetes Secret content read",

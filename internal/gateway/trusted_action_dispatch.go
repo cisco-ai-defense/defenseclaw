@@ -520,7 +520,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"credential.directory_credential_acquisition": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactDirectoryCredentialAcquisition(facts)
+			return actionfacts.ExactDirectoryCredentialCompromise(facts)
+		},
+	},
+	"credential.directory_ticket_request": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactDirectoryCredentialTicketRequest(facts)
 		},
 	},
 	"credential.pkcs12_private_key_extract": {
