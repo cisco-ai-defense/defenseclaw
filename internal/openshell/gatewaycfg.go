@@ -291,20 +291,20 @@ func (p *GatewayPlan) String() string {
 	var b strings.Builder
 	b.WriteString("OpenShell gateway configuration changes\n")
 	for _, f := range p.Files {
-		verb := "edit"
 		if f.Before == nil {
-			verb = "create"
+			fmt.Fprintf(&b, "  create %s\n", f.Path)
+		} else {
+			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
-		fmt.Fprintf(&b, "  %s %s (a timestamped backup is kept)\n", verb, f.Path)
 		for _, s := range f.Summary {
-			fmt.Fprintf(&b, "    - %s\n", s)
+			fmt.Fprintf(&b, "    set %s\n", s)
 		}
 		if !f.TOML {
 			// gateway.env may hold credentials: show only the summary.
 			continue
 		}
 		for _, l := range lineDiff(string(f.Before), string(f.After)) {
-			fmt.Fprintf(&b, "      %s\n", l)
+			fmt.Fprintf(&b, "      %s\n", strings.TrimRight(l, " "))
 		}
 	}
 	fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
@@ -780,8 +780,8 @@ func editEnvFile(src []byte, set map[string]string, unset []string) ([]byte, []s
 	return []byte(strings.Join(out, "\n") + "\n"), summary, nil
 }
 
-// lineDiff is a minimal LCS line diff ("+ added", "- removed"), with
-// unchanged lines omitted.
+// lineDiff is a minimal LCS line diff ("- removed" before "+ added"),
+// with unchanged lines omitted.
 func lineDiff(a, b string) []string {
 	x, y := splitLines(a), splitLines(b)
 	n, m := len(x), len(y)
@@ -805,12 +805,12 @@ func lineDiff(a, b string) []string {
 		case i < n && j < m && x[i] == y[j]:
 			i++
 			j++
-		case j < m && (i == n || lcs[i][j+1] >= lcs[i+1][j]):
-			out = append(out, "+ "+y[j])
-			j++
-		default:
+		case i < n && (j == m || lcs[i+1][j] >= lcs[i][j+1]):
 			out = append(out, "- "+x[i])
 			i++
+		default:
+			out = append(out, "+ "+y[j])
+			j++
 		}
 	}
 	return out

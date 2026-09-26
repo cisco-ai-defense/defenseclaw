@@ -222,7 +222,7 @@ func TestEditTOMLRefusesUnsafeShapes(t *testing.T) {
 
 func TestLineDiff(t *testing.T) {
 	got := strings.Join(lineDiff("a\nb\nc\n", "a\nB\nc\nd\n"), "|")
-	if got != "+ B|- b|+ d" && got != "- b|+ B|+ d" {
+	if got != "- b|+ B|+ d" {
 		t.Fatalf("lineDiff = %q", got)
 	}
 	if d := lineDiff("", "x\n"); len(d) != 1 || d[0] != "+ x" {

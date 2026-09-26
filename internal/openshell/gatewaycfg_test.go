@@ -117,7 +117,10 @@ func TestGatewayConfigCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := plan.String()
-	for _, want := range []string{"create " + filepath.Join(f.dir, "gateway.toml"), "+ enable_bind_mounts = true", "[openshell.drivers.docker.resource_admission] enabled = false",
+	if strings.Contains(text, "backup") {
+		t.Errorf("a plan that only creates files promises a backup:\n%s", text)
+	}
+	for _, want := range []string{"create " + filepath.Join(f.dir, "gateway.toml"), "+ enable_bind_mounts = true", "set [openshell.drivers.docker.resource_admission] enabled = false",
 		"create " + filepath.Join(f.dir, "gateway.env"), "OPENSHELL_TELEMETRY_ENABLED=false", "systemctl --user restart openshell-gateway"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("plan lacks %q:\n%s", want, text)
@@ -169,7 +172,8 @@ func TestGatewayConfigEditKeepsCommentsAndBacksUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := plan.String(); strings.Contains(text, "hunter2") || !strings.Contains(text, "- enable_bind_mounts = false") {
+	if text := plan.String(); strings.Contains(text, "hunter2") || !strings.Contains(text, "- enable_bind_mounts = false\n      + enable_bind_mounts = true") ||
+		!strings.Contains(text, "edit "+filepath.Join(f.dir, "gateway.env")+" (a timestamped backup is kept)") {
 		t.Fatalf("plan:\n%s", text)
 	}
 	if _, err := f.cfg.Apply(context.Background(), plan); err != nil {
