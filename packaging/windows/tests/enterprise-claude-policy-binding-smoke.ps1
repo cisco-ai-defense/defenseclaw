@@ -269,6 +269,69 @@ try {
         }
         Assert-TestFresh 'legacy schema-2 unverified evidence'
 
+        # Review of #895: Repair -AttestClaudeEffectivePolicy that first
+        # recovers a pending transaction. Restore-DefenseClawTransaction puts
+        # the interrupted transaction's recorded claim and the restored
+        # evidence's stale reason back into the layout, which made the
+        # explicit re-attest throw. Re-applying the requested attestations
+        # after recovery rebinds the evidence to the current identity.
+        Set-TestAttestation @{
+            schema_version = 2
+            claude_effective_policy_verified = $true
+            claude_effective_policy_managed_policy_sha256 = $null
+            claude_effective_policy_hook_sha256 = $null
+            claude_effective_policy_manifest_sha256 = ('0' * 64)
+        }
+        $restored = Get-DefenseClawAgentApplicationControlAttestation -Layout $layout
+        $layout.AgentApplicationControlAttested = [bool]$restored.agent_application_control_enforced
+        $layout.ClaudeEffectivePolicyVerified = [bool]$restored.claude_effective_policy_verified
+        $layout.ClaudeEffectivePolicyStaleReason = [string]$restored.claude_effective_policy_stale_reason
+        Assert-TestThrows 'recovered stale evidence without the requested attestation' {
+            Write-DefenseClawAgentApplicationControlAttestation -Layout $layout
+        } 'refusing to re-publish stale Claude effective-policy evidence'
+        Set-DefenseClawRequestedAttestations -Layout $layout -AttestClaudeEffectivePolicy
+        try {
+            Write-DefenseClawAgentApplicationControlAttestation -Layout $layout
+            $rebound = [IO.File]::ReadAllText($layout.AgentApplicationControlAttestationPath) |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ([int]$rebound.schema_version -ne 3 -or
+                -not [bool]$rebound.claude_effective_policy_verified -or
+                [string]$rebound.claude_effective_policy_managed_policy_sha256 -cne
+                    (Get-TestSha256 $layout.ClaudeManagedPolicyPath)) {
+                $failures.Add('re-attest after recovery: evidence was not rebound to the current Claude policy')
+            }
+            Assert-TestFresh 're-attest after recovery'
+        }
+        catch {
+            $failures.Add("re-attest after recovery: unexpected throw: $($_.Exception.Message)")
+        }
+        # A snapshot that recorded no application control must not swallow
+        # this transaction's -AttestAgentApplicationControl either.
+        $layout.AgentApplicationControlAttested = $false
+        Set-DefenseClawRequestedAttestations -Layout $layout -AttestAgentApplicationControl
+        if (-not [bool]$layout.AgentApplicationControlAttested) {
+            $failures.Add('requested application-control attestation was not re-applied')
+        }
+        $layout.CoreHardeningCertification = $true
+        Assert-TestThrows 'requested attestation in core-hardening mode' {
+            Set-DefenseClawRequestedAttestations -Layout $layout -AttestClaudeEffectivePolicy
+        } 'forbidden in core-hardening certification mode'
+        $layout.CoreHardeningCertification = $false
+        $layout.AgentApplicationControlAttested = $false
+        $layout.ClaudeEffectivePolicyVerified = $false
+        $layout.ClaudeEffectivePolicyStaleReason = ''
+
+        # A fresh Install has no DefenseClaw Claude policy for a live proof to
+        # have exercised, so the flag is refused before any lifecycle work
+        # (it used to fail late and roll the Install back).
+        foreach ($lifecycleAction in @('Install', 'Verify')) {
+            Assert-TestThrows "-AttestClaudeEffectivePolicy with $lifecycleAction" {
+                Invoke-DefenseClawEnterpriseLifecycle `
+                    -Action $lifecycleAction `
+                    -AttestClaudeEffectivePolicy
+            } '-AttestClaudeEffectivePolicy is valid only with Upgrade or Repair'
+        }
+
         # Malformed evidence still fails closed.
         Set-TestAttestation @{
             claude_effective_policy_verified = $true

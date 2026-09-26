@@ -110,10 +110,49 @@ def test_lifecycle_retires_stale_evidence_and_never_rebinds_it() -> None:
 
     entry = _slice(module, "function Invoke-DefenseClawEnterpriseLifecycle", "Export-ModuleMember")
     assert "$layout.ClaudeEffectivePolicyStaleReason = [string](" in entry
-    attest = entry[entry.index("if ($AttestClaudeEffectivePolicy) {") :]
-    attest = attest[: attest.index("if ($Action -eq 'Status') {")]
-    assert "$layout.ClaudeEffectivePolicyVerified = $true" in attest
-    assert "$layout.ClaudeEffectivePolicyStaleReason = ''" in attest
+    requested = _slice(
+        module,
+        "function Set-DefenseClawRequestedAttestations",
+        "function Get-DefenseClawAgentApplicationControlAttestation",
+    )
+    attest = requested[requested.index("if ($AttestClaudeEffectivePolicy) {") :]
+    assert "$Layout.ClaudeEffectivePolicyVerified = $true" in attest
+    assert "$Layout.ClaudeEffectivePolicyStaleReason = ''" in attest
+    assert "-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode" in attest
+    assert "$Layout.AgentApplicationControlAttested = $true" in requested
+    call = "Set-DefenseClawRequestedAttestations `"
+    assert entry.count(call) == 2
+    assert entry.index(call) < entry.index("if ($Action -eq 'Status') {")
+
+
+def test_explicit_attestations_survive_pending_recovery() -> None:
+    # Review of #895: Restore-DefenseClawTransaction resets the layout to the
+    # interrupted transaction's claim and the restored evidence's stale
+    # reason, which made Repair -AttestClaudeEffectivePolicy throw
+    # "refusing to re-publish stale Claude effective-policy evidence".
+    module = MODULE.read_text(encoding="utf-8")
+    entry = _slice(module, "function Invoke-DefenseClawEnterpriseLifecycle", "Export-ModuleMember")
+    last_recovery = entry.rindex("Recover-DefenseClawPendingTransaction `")
+    reapply = entry.rindex("Set-DefenseClawRequestedAttestations `")
+    install_like = entry.index("return Invoke-DefenseClawInstallLikeLifecycle `")
+    assert last_recovery < reapply < install_like
+    # The pre-layout recovery also runs before the install-like lifecycle.
+    assert entry.index("Invoke-DefenseClawPreLayoutRecovery `") < reapply
+    restore = _slice(module, "function Restore-DefenseClawTransaction {", "function Assert-DefenseClawRestoredTransaction")
+    assert "$Layout.ClaudeEffectivePolicyVerified = [bool](" in restore
+
+
+def test_install_refuses_claude_effective_policy_attestation_up_front() -> None:
+    module = MODULE.read_text(encoding="utf-8")
+    entry = _slice(module, "function Invoke-DefenseClawEnterpriseLifecycle", "Export-ModuleMember")
+    check = entry[entry.index("if ($AttestClaudeEffectivePolicy -and") :]
+    check = check[: check.index("if ($CoreHardeningCertification -and")]
+    assert "$Action -notin @('Upgrade', 'Repair')" in check
+    assert "'-AttestClaudeEffectivePolicy is valid only with Upgrade or ' +" in check
+    assert "-AttestClaudeEffectivePolicy is valid only with Install, Upgrade, or Repair" not in module
+    # Refused before layout resolution, elevation and the lifecycle lock.
+    assert entry.index("if ($AttestClaudeEffectivePolicy -and") < entry.index("Assert-DefenseClawAdministrator")
+    assert entry.index("if ($AttestClaudeEffectivePolicy -and") < entry.index("$layout = Get-DefenseClawLayout `")
 
     deployment = _slice(
         module, "function Assert-DefenseClawEnterpriseDeployment", "function Get-DefenseClawLifecycleStatus"

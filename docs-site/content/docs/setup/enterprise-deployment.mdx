@@ -678,9 +678,16 @@ The equivalent post-proof CLI transaction is:
 ```
 
 That Repair revalidates the structural attestations, then
-binds the live Claude proof to the protected manifest hash. A manifest change
-invalidates it. Application-control evidence, a healthy Program Files policy,
-or a prior run against another manifest is never substituted for this gate.
+binds the live Claude proof to the Claude policy identity it exercised: the
+DefenseClaw `90-defenseclaw.json` machine policy and the installed
+`defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
+it current. A different policy or hook binary reports it unverified until the
+proof and this Repair are repeated. The Repair still rebinds it when it first
+recovers an interrupted transaction. Install refuses
+`-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
+exists yet for a live proof to have exercised. Application-control evidence, a
+healthy Program Files policy, or a prior run against another policy is never
+substituted for this gate.
 
 `-NoStart` stages and verifies the transaction with all managed services disabled and
 stopped. Use it when endpoint management has a separate activation phase, then

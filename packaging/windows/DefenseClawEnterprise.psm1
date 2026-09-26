@@ -8770,6 +8770,37 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
+function Set-DefenseClawRequestedAttestations {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$AttestAgentApplicationControl,
+        [switch]$AttestClaudeEffectivePolicy
+    )
+    # Explicit attestations describe the transaction being started. The
+    # lifecycle applies them after reading existing evidence and again after
+    # pending-transaction recovery, which restores the interrupted
+    # transaction's evidence state (and any stale reason) into the layout.
+    if ($AttestAgentApplicationControl) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
+        }
+        $Layout.AgentApplicationControlAttested = $true
+    }
+    if ($AttestClaudeEffectivePolicy) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
+        }
+        # A fresh live proof rebinds the evidence to the current Claude
+        # policy identity, whatever the recorded evidence said.
+        $Layout.ClaudeEffectivePolicyVerified = $true
+        if (Test-DefenseClawStandaloneProfile) {
+            $Layout['ClaudeEffectivePolicyStaleReason'] = ''
+        }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = ''
+        }
+    }
+}
 function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -24138,8 +24169,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         throw '-AttestAgentApplicationControl is valid only with Install, Upgrade, or Repair'
     }
     if ($AttestClaudeEffectivePolicy -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-AttestClaudeEffectivePolicy is valid only with Install, Upgrade, or Repair'
+        $Action -notin @('Upgrade', 'Repair')) {
+        # A fresh Install has no DefenseClaw Claude policy yet, so no live
+        # Claude proof can have exercised it (threat model W-34).
+        throw (
+            '-AttestClaudeEffectivePolicy is valid only with Upgrade or ' +
+            'Repair: install first, run the live Claude proof against the ' +
+            'installed policy, then run Repair -AttestClaudeEffectivePolicy'
+        )
     }
     if ($CoreHardeningCertification -and
         ($AttestAgentApplicationControl -or
@@ -24259,26 +24296,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             )
         }
     }
-    if ($AttestAgentApplicationControl) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
-        }
-        $layout.AgentApplicationControlAttested = $true
-    }
-    if ($AttestClaudeEffectivePolicy) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
-        }
-        $layout.ClaudeEffectivePolicyVerified = $true
-        # A fresh live proof supersedes recorded evidence for another
-        # Claude policy identity.
-        if (Test-DefenseClawStandaloneProfile) {
-            $layout['ClaudeEffectivePolicyStaleReason'] = ''
-        }
-        else {
-            $layout.ClaudeEffectivePolicyStaleReason = ''
-        }
-    }
+    Set-DefenseClawRequestedAttestations `
+        -Layout $layout `
+        -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+        -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
     if ($Action -eq 'Status') {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
@@ -24568,6 +24589,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Purge:$Purge `
                 -SelfUninstallCallerPID $SelfUninstallCallerPID
         }
+        # Recovery above restored the interrupted transaction's evidence
+        # state; this transaction's explicit attestations still apply.
+        Set-DefenseClawRequestedAttestations `
+            -Layout $layout `
+            -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+            -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
         return Invoke-DefenseClawInstallLikeLifecycle `
             -Action $Action `
             -Layout $layout `
