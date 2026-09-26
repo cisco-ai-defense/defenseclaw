@@ -40,10 +40,9 @@ dc_handoff() {
         esac
         shift
     done
-    # Markers from the 0.8.x upgrade controller must not reach 1.x processes.
-    unset DEFENSECLAW_UPGRADE_FRESH_PROCESS DEFENSECLAW_STAGED_UPGRADE DEFENSECLAW_STAGED_BRIDGE_VERSION \
-        DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION \
-        DEFENSECLAW_UPGRADE_MUTATION_TOKEN 2>/dev/null || true
+    # A 0.8.x gateway that the installer restores on failure would skip its
+    # readiness wait with this marker from the 0.8.x controller.
+    unset DEFENSECLAW_UPGRADE_FRESH_PROCESS 2>/dev/null || true
 
     tmp="$(mktemp -d)"
     if [ -n "${DEFENSECLAW_UPGRADE_LOCAL_DIR:-}" ]; then

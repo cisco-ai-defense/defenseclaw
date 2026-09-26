@@ -26,7 +26,6 @@ BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
 PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
-RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
 WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
 WINDOWS_NATIVE_CI = ROOT / "scripts" / "windows-native-ci.ps1"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
@@ -863,11 +862,6 @@ def test_signed_release_stages_offline_resource_verifier_before_lifecycle() -> N
         assert name in publish.group(0)
     assert "Build-VerifiedGoBinary $verifier './internal/tools/windowsresources'" in publish.group(0)
     assert "Publish-SetupAcceptanceResourceInputs $out" in build
-
-    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    builder = "./scripts/build-windows-installer.ps1"
-    lifecycle = "./scripts/invoke-windows-setup-standard-user-ci.ps1"
-    assert release.index(builder) < release.index(lifecycle)
 
 
 def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:

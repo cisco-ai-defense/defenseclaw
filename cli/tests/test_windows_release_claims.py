@@ -262,59 +262,45 @@ def test_claude_windows_docs_use_official_config_override() -> None:
         assert "$CLAUDE_HOME" not in text, path
 
 
-def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64() -> None:
+def test_release_builds_only_the_four_supported_targets_with_flat_names() -> None:
     release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     builds = {build["id"]: build for build in release["builds"]}
 
     assert set(builds) == {
         "defenseclaw",
         "defenseclaw-windows-amd64",
-        "defenseclaw-windows-arm64",
         "defenseclaw-hook",
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
-        "defenseclaw-acp-windows-arm64",
     }
-    assert builds["defenseclaw"]["goos"] == ["linux", "darwin"]
-    assert builds["defenseclaw"]["goarch"] == ["amd64", "arm64"]
-    assert builds["defenseclaw-windows-amd64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-windows-amd64"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-windows-arm64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-windows-arm64"]["goarch"] == ["arm64"]
-    assert builds["defenseclaw-hook"]["goos"] == ["windows"]
-    assert builds["defenseclaw-hook"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-acp-posix"]["goos"] == ["linux", "darwin"]
-    assert builds["defenseclaw-acp-posix"]["goarch"] == ["amd64", "arm64"]
-    assert builds["defenseclaw-acp-windows-amd64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-acp-windows-amd64"]["goarch"] == ["amd64"]
-    assert builds["defenseclaw-acp-windows-arm64"]["goos"] == ["windows"]
-    assert builds["defenseclaw-acp-windows-arm64"]["goarch"] == ["arm64"]
+    assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
+    assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
+    for posix in ("defenseclaw", "defenseclaw-acp-posix"):
+        assert builds[posix]["goos"] == ["linux", "darwin"]
+        assert builds[posix]["goarch"] == ["amd64", "arm64"]
+        assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
+    for windows in ("defenseclaw-windows-amd64", "defenseclaw-hook", "defenseclaw-acp-windows-amd64"):
+        assert builds[windows]["goos"] == ["windows"]
+        assert builds[windows]["goarch"] == ["amd64"]
 
     archives = {archive["id"]: archive for archive in release["archives"]}
-    canonical_name = "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    assert set(archives) == {"default", "windows-amd64", "windows-arm64"}
+    flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    assert set(archives) == {"default", "windows-amd64"}
     assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix"]
     assert archives["default"]["formats"] == ["tar.gz"]
-    assert archives["default"]["name_template"] == canonical_name
     assert archives["windows-amd64"]["ids"] == [
         "defenseclaw-windows-amd64",
         "defenseclaw-hook",
         "defenseclaw-acp-windows-amd64",
     ]
     assert archives["windows-amd64"]["formats"] == ["zip"]
-    assert archives["windows-amd64"]["name_template"] == canonical_name
-    assert archives["windows-arm64"]["ids"] == [
-        "defenseclaw-windows-arm64",
-        "defenseclaw-acp-windows-arm64",
-    ]
-    assert archives["windows-arm64"]["formats"] == ["zip"]
-    assert archives["windows-arm64"]["name_template"] == canonical_name
-    assert all(
-        "defenseclaw-hook" not in archive["ids"]
-        for archive_id, archive in archives.items()
-        if archive_id != "windows-amd64"
-    )
+    assert all(archive["name_template"] == flat_name for archive in archives.values())
+    # The Release workflow writes and signs the one checksums.txt users verify.
+    assert release["checksum"] == {"disable": True}
+    assert "signs" not in release
 
+
+def test_windows_installer_tracks_supported_connectors() -> None:
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
     choices_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", installer, re.DOTALL)

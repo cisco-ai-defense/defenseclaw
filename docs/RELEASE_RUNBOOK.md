@@ -21,6 +21,9 @@ between versions.
    install, upgrade from the previous 1.x release and from 0.8.10, rollback,
    and the 0.8.x handoff), and publishes the release as **latest**.
 
+Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
+Intel Macs are unsupported), and Windows (`amd64`).
+
 To try a release on real machines before users see it, run the workflow with
 `draft: true`, download the draft's assets (`gh release download X.Y.Z`),
 install them with `install.sh --local DIR` or `install.ps1 -Local DIR`, then

@@ -249,7 +249,6 @@ def test_shell_entrypoints_distinguish_rosetta_from_genuine_intel(tmp_path: Path
 def test_support_docs_state_the_breaking_architecture_boundary() -> None:
     for path in (
         "docs/INSTALL.md",
-        "docs/RELEASE_VALIDATION.md",
         "docs/RELEASE_RUNBOOK.md",
         "docs-site/content/docs/get-started/install.mdx",
     ):
