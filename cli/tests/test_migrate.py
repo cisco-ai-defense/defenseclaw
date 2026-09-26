@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,10 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     def step(version: str):
         def run(ctx: migrations.MigrationContext) -> None:
             calls.append(version)
+            if version == "0.8.5":
+                # Stands in for the real v8 conversion.
+                path = Path(ctx.active_config_path())
+                path.write_text(re.sub(r"(?m)^config_version: \d+", "config_version: 8", path.read_text()))
 
         return run
 
@@ -207,8 +212,11 @@ def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest
     )
     monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
 
-    migrate(str(data_dir), from_version="0.8.4")
+    migrate(str(data_dir), from_version="0.8.4", check=True)
 
+    assert homes == []
+    with pytest.raises(MigrationError, match="config_version 7 after migrating"):
+        migrate(str(data_dir), from_version="0.8.4")
     assert homes == ["/srv/openclaw"]
 
 
@@ -262,7 +270,19 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
     done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--yes", "--json"])
     assert done.exit_code == 0, done.output
-    payload = json.loads(done.output.strip().splitlines()[-1])
+    payload = json.loads(done.stdout)
+    assert "0.x import 0.8.5" in done.stderr
     assert payload["from_config_version"] == 7
     assert payload["changed"] is True
+    assert recorded == ["0.8.5"]
+
+
+def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded: list[str]) -> None:
+    # A cursor that claims 0.8.5 ran, beside a v7 config, must not skip the conversion.
+    _write_config(data_dir, "config_version: 7\n")
+    applied = [version for version, _desc, _fn in migrations.MIGRATIONS]
+    (data_dir / ".migration_state.json").write_text(json.dumps({"applied": applied}))
+
+    migrate(str(data_dir))
+
     assert recorded == ["0.8.5"]

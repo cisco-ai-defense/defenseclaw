@@ -25,8 +25,10 @@ was written by a newer DefenseClaw than this one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import sys
 
 import click
 
@@ -53,14 +55,17 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     del yes
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
 
+    # With --json, stdout carries only the JSON document; step progress goes to stderr.
+    progress = contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext()
     try:
-        result = migrate(
-            data_dir or _default_data_dir(),
-            openclaw_home=openclaw_home,
-            from_version=from_version,
-            check=check,
-            gateway_binary=gateway_binary,
-        )
+        with progress:
+            result = migrate(
+                data_dir or _default_data_dir(),
+                openclaw_home=openclaw_home,
+                from_version=from_version,
+                check=check,
+                gateway_binary=gateway_binary,
+            )
     except ConfigTooNewError as exc:
         ux.err(str(exc))
         raise SystemExit(EXIT_CONFIG_TOO_NEW) from None

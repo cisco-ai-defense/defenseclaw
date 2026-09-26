@@ -2775,6 +2775,8 @@ CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {}
 # The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
 # that the frozen ``MIGRATIONS`` chain imports.
 _FIRST_V8_CONFIG_VERSION = 8
+# The 0.x chain step that converts a config to v8.
+_V8_IMPORT_VERSION = "0.8.5"
 _LEGACY_STATE_FILE = ".migration_state.json"
 _CONFIG_VERSION_LINE = re.compile(r"^config_version[ \t]*:[^\r\n]*", re.MULTILINE)
 
@@ -2859,6 +2861,14 @@ def migrate(
             raise MigrationError(f"{name} failed: {exc}") from exc
     for change in ctx.changes:
         ux.ok(change, indent="    ")
+    try:
+        reached = source_config_version(path=config_path)
+    except ConfigVersionError as exc:
+        raise MigrationError(str(exc)) from exc
+    if reached != CURRENT_CONFIG_VERSION:
+        raise MigrationError(
+            f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
+        )
     _refresh_local_observability_bundle(data_dir, __version__)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
 
@@ -2879,11 +2889,14 @@ def _pending_migration_steps(
                 "re-run with --from-version X.Y.Z"
             )
         for ver, desc, fn in MIGRATIONS:
-            if applied is not None:
-                if ver in applied:
+            # The v8 conversion is what makes the config v8, so a pre-v8 config
+            # always needs it, whatever the cursor or --from-version claims.
+            if ver != _V8_IMPORT_VERSION:
+                if applied is not None:
+                    if ver in applied:
+                        continue
+                elif _ver_tuple(ver) <= _ver_tuple(from_version or "0"):
                     continue
-            elif _ver_tuple(ver) <= _ver_tuple(from_version or "0"):
-                continue
             steps.append((f"0.x import {ver}: {desc}", fn))
         version = _FIRST_V8_CONFIG_VERSION
     for number in range(version, current):
@@ -2904,7 +2917,8 @@ def _config_version_step(
         text = _read_config_text(config_path)
         if text is None or _CONFIG_VERSION_LINE.search(text) is None:
             raise MigrationError(f"{config_path} has no top-level config_version")
-        _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1))
+        if not _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)):
+            raise MigrationError(f"could not write config_version {target} to {config_path}")
 
     return run
 
