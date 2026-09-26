@@ -302,7 +302,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
 
 def test_windows_installer_tracks_supported_connectors() -> None:
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
-    assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
+    assert '"ARM64" { Die "Windows ARM64 is not certified, including x64 emulation' in installer
     choices_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", installer, re.DOTALL)
     assert choices_match is not None
     choices = tuple(re.findall(r'"([^"]+)"', choices_match.group(1)))
