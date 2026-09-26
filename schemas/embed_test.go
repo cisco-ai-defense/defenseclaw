@@ -774,6 +774,7 @@ cisco_ai_defense:
   timeout_ms: 3000
   enabled_rules: [prompt-injection]
   scan_hook_surface: true
+  unavailable_action: block
 scanners:
   skill_scanner:
     binary: skill-scanner
@@ -1134,6 +1135,23 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 				t.Fatalf("valid openshell section rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestDefenseClawConfigV8CiscoAIDefenseUnavailableActionIsClosed(t *testing.T) {
+	t.Parallel()
+	schema := compileConfigV8Schema(t)
+	for _, value := range []string{"allow", "block"} {
+		doc := map[string]any{"config_version": 8, "cisco_ai_defense": map[string]any{"unavailable_action": value}}
+		if err := schema.Validate(doc); err != nil {
+			t.Fatalf("unavailable_action=%q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []any{"", "deny", "Block", "fail-closed", true} {
+		doc := map[string]any{"config_version": 8, "cisco_ai_defense": map[string]any{"unavailable_action": value}}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatalf("unavailable_action=%#v unexpectedly accepted", value)
+		}
 	}
 }
 

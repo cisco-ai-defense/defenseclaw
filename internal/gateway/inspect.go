@@ -232,6 +232,12 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
+		// cisco_ai_defense.unavailable_action=block: the administrator
+		// chose enforcement over availability for requests AI Defense
+		// should have inspected but could not.
+		if blocked := a.managedAIDUnavailableHookVerdict(failOpenReason); blocked != nil {
+			return blocked
+		}
 		// Fail-open surface: managed_enterprise's local detectors are
 		// demoted, so a nil AID verdict means this inspection ends
 		// with no enforceable decision. Every occurrence must be

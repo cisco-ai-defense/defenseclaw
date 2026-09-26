@@ -218,6 +218,12 @@ type GuardrailInspector struct {
 	strategyToolCall  string
 	judgeSweep        bool
 
+	// managedUnavailableBlock mirrors cisco_ai_defense.unavailable_action
+	// for the managed proxy lane: when set, a request AI Defense could not
+	// inspect is blocked instead of allowed. See
+	// SetManagedUnavailableAction.
+	managedUnavailableBlock atomic.Bool
+
 	// hiltMu guards hilt — set by SetHILTConfig() at proxy boot and on
 	// every guardrail-config reload, read by finalize() under load. The
 	// guarded value is a small struct, so a sync.RWMutex would actually
@@ -682,8 +688,10 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // inspector is unwired (ciscoClient == nil), or AID returns no verdict
 // (transport error, timeout, token failure), the request is ALLOWED rather
 // than blocked. Operators still see the failure via EmitCiscoError on the
-// client side, but traffic is never held hostage to AID availability in
-// managed mode.
+// client side. An administrator who prefers enforcement over availability
+// sets cisco_ai_defense.unavailable_action=block, which turns the unwired
+// and no-verdict branches into a block verdict; the no-content branch stays
+// an allow.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
 	if !managedAIDMessagesHaveInspectableContent(messages) {
 		// Nothing AID can inspect (for example, Inspect rewrites every empty
@@ -699,6 +707,9 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		// Fail open, but surface it loudly so operators can alert on a
 		// misconfigured managed install rather than silently running with
 		// no enforcement.
+		if blocked := g.managedAIDUnavailableVerdict(aidFailOpenUnwired, direction); blocked != nil {
+			return blocked
+		}
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
 		return allowVerdict("ai-defense")
 	}
@@ -713,6 +724,9 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		// already emitted EmitCiscoError for the underlying transport
 		// failure; this records the decision-level fail-open so operators
 		// can alert on sustained AID unavailability driving allow decisions.
+		if blocked := g.managedAIDUnavailableVerdict(aidFailOpenUnavailable, direction); blocked != nil {
+			return blocked
+		}
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnavailable, direction)
 		return allowVerdict("ai-defense")
 	}
