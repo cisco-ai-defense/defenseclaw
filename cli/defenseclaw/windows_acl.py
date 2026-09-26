@@ -413,6 +413,18 @@ def _staged_security_for_observed_dacl(
     return requested
 
 
+def _sacl_protection(control: int, mandatory_label: bytes | None) -> bool:
+    """Report SACL protection only where it guards a mandatory label.
+
+    Without a label the bit only stops a file inheriting audit entries, and a
+    new file cannot take it on without SeSecurityPrivilege. PowerShell's
+    Set-Acl sets it, so 0.8.x Windows config files often carry it; counting
+    it would make them impossible to replace.
+    """
+
+    return bool(control & _SE_SACL_PROTECTED) and mandatory_label is not None
+
+
 def _explicit_dacl_copy(dacl: bytes) -> bytes:
     """Return only explicit ACEs for an unprotected ``SetSecurityInfo`` call.
 
@@ -816,7 +828,7 @@ class _CtypesWindowsApi:
                 dacl=ctypes.string_at(dacl, acl_size),
                 dacl_protected=bool(control.value & _SE_DACL_PROTECTED),
                 mandatory_label=mandatory_label_bytes,
-                sacl_protected=bool(control.value & _SE_SACL_PROTECTED),
+                sacl_protected=_sacl_protection(control.value, mandatory_label_bytes),
             )
         finally:
             if descriptor.value:

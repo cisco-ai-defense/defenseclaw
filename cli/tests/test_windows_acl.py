@@ -574,6 +574,14 @@ def test_write_new_file_preserves_mandatory_label_before_payload(
     assert api.security[api.paths["labeled.tmp"]] == staged
 
 
+def test_sacl_protection_counts_only_with_a_mandatory_label() -> None:
+    protected = windows_acl._SE_SACL_PROTECTED
+    assert windows_acl._sacl_protection(protected, HIGH_MANDATORY_LABEL) is True
+    assert windows_acl._sacl_protection(0, HIGH_MANDATORY_LABEL) is False
+    # Set-Acl leaves the bit on 0.8.x config files that have no label.
+    assert windows_acl._sacl_protection(protected, None) is False
+
+
 def test_mandatory_label_normalization_rejects_unrepresentable_sacl_data() -> None:
     assert windows_acl._normalize_mandatory_label_acl(HIGH_MANDATORY_LABEL) == HIGH_MANDATORY_LABEL
     assert windows_acl._normalize_mandatory_label_acl(struct.pack("<BBHHH", 2, 0, 8, 0, 0)) is None

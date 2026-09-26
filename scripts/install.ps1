@@ -412,15 +412,26 @@ function Get-GatewayProcess {
 }
 
 function Stop-Gateway {
-    # Stop the running gateway with its own (the old) binary; kill it as a last resort.
+    # Stop the running gateway with its own (the old) binary; kill it as a last
+    # resort. Wait for the process itself, not its pid file: a gateway removes
+    # the file before it exits, and while it runs Windows will not let the
+    # migration replace the config it holds open.
     $process = Get-GatewayProcess
     if (-not $process) { return $true }
-    Invoke-Native $process.Path @("stop") -Quiet | Out-Null
-    for ($waited = 0; (Get-GatewayProcess) -and $waited -lt 30; $waited++) {
-        Start-Sleep -Seconds 1
-        if ($waited -eq 15) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+    $image = $process.Path
+    Invoke-Native $image @("stop") -Quiet | Out-Null
+    if (-not $process.WaitForExit(15000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        [void]$process.WaitForExit(15000)
     }
-    return -not (Get-GatewayProcess)
+    # Its watchdog runs the same binary; nothing of this install may keep running.
+    for ($waited = 0; $waited -lt 10; $waited++) {
+        $left = @(Get-ProcessesUnder @($image) | Where-Object { $_.ExecutablePath -eq $image })
+        if (-not $left.Count) { break }
+        if ($waited -eq 5) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+        Start-Sleep -Seconds 1
+    }
+    return $process.HasExited -and -not (Get-GatewayProcess)
 }
 
 function Start-Gateway {

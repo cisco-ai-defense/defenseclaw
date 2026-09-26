@@ -56,6 +56,8 @@ $Root = (Get-Item -LiteralPath $Root).FullName
 # Windows PowerShell 5.1 runs the installer, as for users and `defenseclaw
 # upgrade`, even when this test runs in PowerShell 7.
 $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+# PowerShell 7, if installed, resolved before the lanes narrow PATH.
+$Pwsh = [string](Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
 $Tools = Join-Path $Root "tools"
 New-Item -ItemType Directory -Path $Tools -Force | Out-Null
 $uv = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -87,6 +89,15 @@ function Get-ExeOutput([string]$File, [string[]]$Arguments = @()) {
     return ((& $File @Arguments 2>&1) | ForEach-Object { "$_" }) -join "`n"
 }
 
+# A venv's bundled data goes deeper than MAX_PATH under a lane root, which
+# Windows PowerShell's Remove-Item cannot delete; retry through the \\?\ path.
+function Remove-TreeLong([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
+        [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true)
+    }
+}
+
 function Write-Log([string]$Message) { Write-Host ""; Write-Host "[lifecycle] $Message" -ForegroundColor White }
 function Fail([string]$Message) { Write-Host "[lifecycle] FAIL: $Message" -ForegroundColor Red; $script:Failures++ }
 function Check([bool]$Condition, [string]$Message) { if (-not $Condition) { Fail $Message } }
@@ -100,7 +111,7 @@ function Enter-Lane([string]$Name) {
         $env:USERPROFILE = $LaneHome
         $gateway = Join-Path $LaneHome ".local\bin\defenseclaw-gateway.exe"
         if (Test-Path -LiteralPath $gateway) { [void](Invoke-Exe $gateway @("stop") -Quiet) }
-        Remove-Item -LiteralPath $Lane -Recurse -Force
+        Remove-TreeLong $Lane
     }
     # Laid out like a real profile: .NET resolves the known folders from
     # USERPROFILE and answers "" when they are missing, which sends caches
@@ -402,9 +413,14 @@ function Test-UpgradeLegacy([string]$From) {
         Write-Log "install $From with its own install.ps1"
         # Under Windows PowerShell 5.1 the 0.x installers stop on the progress
         # uv now writes to stderr, so they run under PowerShell 7 when present.
-        $shell = [string](Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
-        if (-not $shell) { $shell = $PowerShell }
-        $code = Invoke-Exe $shell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $legacy, "-Version", $From, "-Yes", "-NoOpenclaw")
+        $shell = if ($Pwsh) { $Pwsh } else { $PowerShell }
+        # 0.x resolved its dependencies live; resolve as of the release date, as
+        # its users did (today's newest packages may no longer build on Windows).
+        $published = (Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/tags/$From").published_at
+        $env:UV_EXCLUDE_NEWER = ([datetime]$published).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        try {
+            $code = Invoke-Exe $shell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $legacy, "-Version", $From, "-Yes", "-NoOpenclaw")
+        } finally { Remove-Item Env:UV_EXCLUDE_NEWER -ErrorAction SilentlyContinue }
         Check ($code -eq 0) "install of $From failed ($code)"
         if ($code -ne 0) { return }
         if (-not (Initialize-Gateway)) { return }
@@ -622,7 +638,8 @@ function Test-SetupImport {
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-gateway.exe") -Destination (Join-Path $setupRoot "bin\defenseclaw-startup.exe")
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-hook.exe") -Destination (Join-Path $hookRuntime "defenseclaw-hook.exe")
         Get-ChildItem -LiteralPath $Bin -Force | Remove-Item -Force
-        Remove-Item -LiteralPath (Join-Path $DcHome ".venv"), (Join-Path $DcHome "installer") -Recurse -Force
+        Remove-TreeLong (Join-Path $DcHome ".venv")
+        Remove-TreeLong (Join-Path $DcHome "installer")
         Set-Content -LiteralPath (Join-Path $cache "DefenseClawSetup-x64.exe") -Value "setup" -Encoding Ascii
         Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Value '{"schema_version":2,"status":"active"}' -Encoding Ascii
         [ordered]@{
@@ -709,7 +726,7 @@ try {
         $gateway = Join-Path $laneHome ".local\bin\defenseclaw-gateway.exe"
         if (Test-Path -LiteralPath $gateway) { $env:USERPROFILE = $laneHome; [void](Invoke-Exe $gateway @("stop") -Quiet) }
     }
-    if ($Keep) { Write-Host "kept $Root" } else { Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($Keep) { Write-Host "kept $Root" } else { try { Remove-TreeLong $Root } catch { Write-Host "could not remove ${Root}: $($_.Exception.Message)" } }
 }
 if ($script:Failures) {
     Write-Host "[lifecycle] $($script:Failures) check(s) failed" -ForegroundColor Red
