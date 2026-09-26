@@ -251,6 +251,13 @@ function Get-LatestRelease {
     return $tag
 }
 
+function ConvertTo-ProcessArgument([string]$Value) {
+    # Quote for CommandLineToArgvW: backslashes before a quote, and trailing
+    # ones before the closing quote, are doubled.
+    if ($Value -and $Value -notmatch '[\s"]') { return $Value }
+    return '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
 function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
@@ -268,8 +275,15 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             Die "install.ps1 for $ReleaseVersion does not match its checksums.txt"
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
-        & (Join-Path $PSHOME $shell) -NoProfile -ExecutionPolicy Bypass -File "$tmp\install.ps1" @Forward
-        return $LASTEXITCODE
+        # Start the child on this console rather than through the pipeline, so its
+        # output and prompts reach the user and only its exit code is returned.
+        # WaitForExit, not -Wait: -Wait would also wait for the gateway it starts.
+        $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$tmp\install.ps1") + @($Forward)
+        $child = Start-Process -FilePath (Join-Path $PSHOME $shell) -NoNewWindow -PassThru `
+            -ArgumentList @($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
+        $null = $child.Handle
+        $child.WaitForExit()
+        return $child.ExitCode
     } finally {
         Invoke-Quietly { Remove-Tree $tmp }
     }
@@ -1117,6 +1131,10 @@ function Invoke-Install {
                 "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", (Join-Path $Staging "checksums.txt")) -Quiet
             if ($verified -ne 0) { Die "The release signature on checksums.txt did not verify; nothing was changed" }
             Write-Ok "Release signature verified"
+        } elseif (-not $Local) {
+            # Every published release carries the bundle; a missing one is not a
+            # release this workflow produced.
+            Die "This release has no checksums.txt.bundle to verify with cosign; nothing was changed"
         } else {
             Write-Warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
         }

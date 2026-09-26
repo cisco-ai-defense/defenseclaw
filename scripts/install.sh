@@ -446,6 +446,10 @@ if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; t
             "${STAGING}/checksums.txt" >/dev/null 2>&1 \
             || die "The release signature on checksums.txt did not verify; nothing was changed"
         ok "Release signature verified"
+    elif [[ -z "${LOCAL_DIR}" ]]; then
+        # Every published release carries the bundle; a missing one is not a
+        # release this workflow produced.
+        die "This release has no checksums.txt.bundle to verify with cosign; nothing was changed"
     else
         warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
     fi
@@ -566,6 +570,8 @@ fi
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
 fi
+# Kept until now: the sandbox extra is checked against the staged checksums.txt.
+rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
@@ -801,7 +807,7 @@ finish_swap() {
         cp "${BASH_SOURCE[0]}" "${INSTALLER_DIR}/install.sh"
     fi
     rm -f "${tmp}"
-    rm -rf "${STAGING}" "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
+    rm -rf "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     find "${TMPDIR:-/tmp}" -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true

@@ -73,7 +73,12 @@ jobs:
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::Run the Release workflow from main"; exit 1; }
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
             || { echo "::error::version must be X.Y.Z, got '$VERSION'"; exit 1; }
-          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)"
+          # Only "no release yet" means there is no latest; any other failure stops the run.
+          if ! latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>latest.err)"; then
+            grep -qi 'release not found' latest.err \
+              || { cat latest.err >&2; echo "::error::Could not read the latest release"; exit 1; }
+            latest=""
+          fi
           if [[ "$OPERATION" == legacy-channel ]]; then
             [[ "$latest" == "$VERSION" ]] || { echo "::error::$VERSION must be the published latest release (latest is $latest)"; exit 1; }
           else
