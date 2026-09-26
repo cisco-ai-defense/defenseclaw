@@ -12,10 +12,9 @@
 # whose contents match the handoff doc byte-for-byte. See
 # docs/specs/002-windows-avc-packaging/design.md for the full flow.
 #
-# Backward-compat: also emits the legacy goreleaser-shaped
-# defenseclaw_${VERSION}_windows_amd64.zip + gateway-source-commit.txt.
-# The zip is vestigial once no consumer remains and can be dropped in a
-# follow-up.
+# Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip +
+# gateway-source-commit.txt that scripts/build-windows-installer.ps1
+# consumes.
 #
 # What the script does:
 #   1. Clone github.com/cisco-aispg/ai-common at ${REF} (SSH first, HTTPS
@@ -24,7 +23,7 @@
 #   3. Snapshot internal/managed/cloudreg/provider_cisco.go + go.mod + go.sum,
 #      apply the private overlay over the OSS stub, run `go get` to pin the
 #      cmid pseudo-version.
-#   4. Cross-build defenseclaw.exe, defenseclaw-acp.exe, defenseclaw-hook.exe, and the isolated
+#   4. Cross-build defenseclaw-gateway.exe, defenseclaw-acp.exe, defenseclaw-hook.exe, and the isolated
 #      defenseclaw-cmid-broker.exe with
 #      GOOS=windows GOARCH=amd64 -tags cmid.
 #   5. Stamp VERSIONINFO / icon on all three PE binaries via
@@ -35,7 +34,7 @@
 #      (`go mod vendor`), packaging/scripts/lib/ (assemble + trust
 #      helpers), shipped assemble.{sh|ps1} at the kit root, and a
 #      payload-metadata.json + README-AVC.md.
-#   7. Also assemble the legacy goreleaser zip (backward-compat).
+#   7. Also assemble the release-shaped gateway zip.
 #   8. Restore the snapshot in an EXIT trap whether the build succeeded or
 #      failed, so the OSS working tree stays untouched.
 #
@@ -258,7 +257,7 @@ echo "==> pinning managed cloud auth module @${CMID_VERSION}"
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-managed-windows-stage.XXXXXX")"
 trap 'restore_overlay; rm -rf "${STAGE_DIR}"' EXIT
 
-GATEWAY_EXE="${STAGE_DIR}/defenseclaw.exe"
+GATEWAY_EXE="${STAGE_DIR}/defenseclaw-gateway.exe"
 HOOK_EXE="${STAGE_DIR}/defenseclaw-hook.exe"
 BROKER_EXE="${STAGE_DIR}/defenseclaw-cmid-broker.exe"
 SENSOR_HELPER_EXE="${STAGE_DIR}/defenseclaw-sensor-helper.exe"
@@ -275,12 +274,12 @@ LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windo
 LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
-echo "==> building defenseclaw.exe (windows/amd64 tags=cmid)"
+echo "==> building defenseclaw-gateway.exe (windows/amd64 tags=cmid)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
     go build -trimpath -buildvcs=false -tags cmid \
     -ldflags "${LDFLAGS_GATEWAY}" -o "${GATEWAY_EXE}" ./cmd/defenseclaw )
 
-echo "==> stamping defenseclaw.exe VERSIONINFO / icon"
+echo "==> stamping defenseclaw-gateway.exe VERSIONINFO / icon"
 ( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
     -target windows_amd64 -executable "${GATEWAY_EXE}" \
     -component gateway -version "${VERSION}" -icon "${ICON_PATH}" )
@@ -648,7 +647,7 @@ fi
 
 rm -rf "${EMITTER_TMP}"
 
-# ---- assemble the goreleaser-shaped archive ---------------------------
+# ---- assemble the release-shaped gateway archive ----------------------
 
 echo "==> assembling gateway archive contents"
 for shipped in LICENSE README.md CHANGELOG.md; do
@@ -660,7 +659,7 @@ cp -R "${REPO_ROOT}/packaging" "${STAGE_DIR}/packaging"
 
 mkdir -p "${DIST_DIR}"
 DIST_ABS="$(cd "${DIST_DIR}" && pwd)"
-GATEWAY_ZIP="${DIST_ABS}/defenseclaw_${VERSION}_windows_amd64.zip"
+GATEWAY_ZIP="${DIST_ABS}/defenseclaw-${VERSION}-windows-amd64.zip"
 rm -f "${GATEWAY_ZIP}"
 
 echo "==> writing ${GATEWAY_ZIP}"

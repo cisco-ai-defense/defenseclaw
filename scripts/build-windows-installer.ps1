@@ -917,7 +917,7 @@ if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
     throw "Invalid version for installer payload: $Version"
 }
-$gatewayZip = Join-Path $dist "defenseclaw_${Version}_windows_amd64.zip"
+$gatewayZip = Join-Path $dist "defenseclaw-$Version-windows-amd64.zip"
 $wheel = Join-Path $dist "defenseclaw-$Version-py3-none-any.whl"
 $upgradeManifest = Join-Path $dist 'upgrade-manifest.json'
 Copy-RequiredFile $gatewayZip $gatewayZip
@@ -941,7 +941,7 @@ try {
 $gatewayArchive = [IO.Compression.ZipFile]::OpenRead($gatewayZip)
 try {
     $entryNames = @($gatewayArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('defenseclaw.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
+    foreach ($required in @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')) {
         if ($required -notin $entryNames) { throw "Gateway archive is missing $required." }
     }
 } finally { $gatewayArchive.Dispose() }
@@ -1198,6 +1198,10 @@ $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
 [IO.Directory]::CreateDirectory($gatewayPayloadDir) | Out-Null
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir -Force
+# Setup's embedded payload keeps its historical gateway member name; Setup
+# installs it as bin\defenseclaw-gateway.exe.
+Move-Item -LiteralPath (Join-Path $gatewayPayloadDir 'defenseclaw-gateway.exe') `
+    -Destination (Join-Path $gatewayPayloadDir 'defenseclaw.exe')
 $gatewayBinary = Join-Path $gatewayPayloadDir 'defenseclaw.exe'
 $hookBinary = Join-Path $gatewayPayloadDir 'defenseclaw-hook.exe'
 $acpBinary = Join-Path $gatewayPayloadDir 'defenseclaw-acp.exe'

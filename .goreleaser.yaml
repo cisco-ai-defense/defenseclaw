@@ -5,7 +5,7 @@ project_name: defenseclaw
 builds:
   - id: defenseclaw
     main: ./cmd/defenseclaw
-    binary: defenseclaw
+    binary: defenseclaw-gateway
     env:
       - CGO_ENABLED=0
     goos:
@@ -14,11 +14,10 @@ builds:
     goarch:
       - amd64
       - arm64
-    # Protocol-2 policy predates the Apple-Silicon-only support boundary and
-    # still authenticates a Darwin/amd64 compatibility slot. Keep producing
-    # that sealed input until the manifest schema changes, but do not add it to
-    # installer, package, validation, or certification matrices: every current
-    # user entry point rejects Intel macOS before artifact selection.
+    # macOS releases support Apple Silicon only.
+    ignore:
+      - goos: darwin
+        goarch: amd64
     flags:
       - -trimpath
       - -buildvcs=false
@@ -31,32 +30,13 @@ builds:
 
   - id: defenseclaw-windows-amd64
     main: ./cmd/defenseclaw
-    binary: defenseclaw
+    binary: defenseclaw-gateway
     env:
       - CGO_ENABLED=0
     goos:
       - windows
     goarch:
       - amd64
-    flags:
-      - -trimpath
-      - -buildvcs=false
-    ldflags:
-      - -s -w -buildid=defenseclaw-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
-    hooks:
-      post:
-        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component gateway -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
-          output: true
-
-  - id: defenseclaw-windows-arm64
-    main: ./cmd/defenseclaw
-    binary: defenseclaw
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - windows
-    goarch:
-      - arm64
     flags:
       - -trimpath
       - -buildvcs=false
@@ -97,6 +77,9 @@ builds:
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
     flags:
       - -trimpath
       - -buildvcs=false
@@ -126,25 +109,8 @@ builds:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component acp-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
-  - id: defenseclaw-acp-windows-arm64
-    main: ./cmd/defenseclaw-acp
-    binary: defenseclaw-acp
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - windows
-    goarch:
-      - arm64
-    flags:
-      - -trimpath
-      - -buildvcs=false
-    ldflags:
-      - -s -w -buildid=defenseclaw-acp-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
-    hooks:
-      post:
-        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component acp-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
-          output: true
-
+# Release asset names are flat and permanent: installers fetch
+# defenseclaw-<version>-<os>-<arch>.{tar.gz,zip} by name.
 archives:
   - id: default
     ids:
@@ -152,7 +118,7 @@ archives:
       - defenseclaw-acp-posix
     formats:
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - LICENSE*
       - NOTICE
@@ -162,15 +128,15 @@ archives:
       - packaging/**/*
 
   - id: windows-amd64
-    # Keep the internal GUI-subsystem hook beside the x64 gateway so the
-    # native installer can stage both binaries from one canonical archive.
+    # The GUI-subsystem hook ships beside the x64 gateway so installers stage
+    # every Windows binary from one archive.
     ids:
       - defenseclaw-windows-amd64
       - defenseclaw-hook
       - defenseclaw-acp-windows-amd64
     formats:
       - zip
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     files:
       - LICENSE*
       - NOTICE
@@ -179,41 +145,14 @@ archives:
       - CHANGELOG.md
       - packaging/**/*
 
-  - id: windows-arm64
-    # Existing clients require the ARM64 gateway entry in the internal release
-    # manifest, but ARM64 is not part of the certified native installer.
-    ids:
-      - defenseclaw-windows-arm64
-      - defenseclaw-acp-windows-arm64
-    formats:
-      - zip
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files:
-      - LICENSE*
-      - NOTICE
-      - THIRD_PARTY_LICENSES.txt
-      - README*
-      - CHANGELOG.md
-      - packaging/**/*
-
+# The release workflow computes and signs checksums.txt over every published
+# asset, so GoReleaser neither checksums nor signs.
 checksum:
-  name_template: "checksums.txt"
+  disable: true
 
 sboms:
   - artifacts: archive
     cmd: syft
-
-signs:
-  - cmd: cosign
-    certificate: "${artifact}.pem"
-    args:
-      - sign-blob
-      - "--yes"
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
-      - "${artifact}"
-    artifacts: checksum
-    output: true
 
 changelog:
   sort: asc

@@ -1703,7 +1703,7 @@ function Invoke-BuildArtifacts {
     try {
         $env:CGO_ENABLED = '0'
         foreach ($binary in @(
-            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
+            @('defenseclaw-gateway.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
             @('defenseclaw-acp.exe', './cmd/defenseclaw-acp', "-s -w -buildid=defenseclaw-acp-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'acp-guard'),
             @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
         )) {
@@ -1743,7 +1743,7 @@ function Invoke-BuildArtifacts {
             Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) -Destination $targetRoot -Force
         }
     }
-    $gatewayArchive = Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip"
+    $gatewayArchive = Join-Path $dist "defenseclaw-$packageVersion-windows-amd64.zip"
     $gatewayArchiveVerification = Join-Path $root 'gateway-archive-verification.zip'
     Invoke-WindowsNativeProcess $uv @(
         'run', '--frozen', 'python', $artifactHelper, 'zip',
@@ -3520,11 +3520,11 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     }
     Copy-Tree -Source $Artifacts -Destination $fixtureRoot
     $zip = @(Get-ChildItem -LiteralPath $fixtureRoot `
-        -File -Filter 'defenseclaw_*_windows_amd64.zip')
+        -File -Filter 'defenseclaw-*-windows-amd64.zip')
     if ($zip.Count -ne 1) { throw "expected one Windows artifact zip; found $($zip.Count)" }
     $expanded = Join-Path $fixtureRoot 'expanded'
     Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $expanded
-    $gateway = Join-Path $expanded 'defenseclaw.exe'
+    $gateway = Join-Path $expanded 'defenseclaw-gateway.exe'
     $acp = Join-Path $expanded 'defenseclaw-acp.exe'
     $hook = Join-Path $expanded 'defenseclaw-hook.exe'
     $stream = [IO.File]::Open(
