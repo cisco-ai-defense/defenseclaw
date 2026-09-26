@@ -339,6 +339,17 @@ stop_gateway() {
     [[ -z "$(gateway_pid || true)" ]]
 }
 
+APP_PATH=""
+# DEFENSECLAW_APP_PATH=none skips the macOS app (tests, CLI-only machines).
+if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
+    for candidate in "${DEFENSECLAW_APP_PATH:-}" /Applications/DefenseClawMac.app "${HOME}/Applications/DefenseClawMac.app"; do
+        [[ -n "${candidate}" && -d "${candidate}" ]] || continue
+        if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
+            APP_PATH="${candidate}"; break
+        fi
+    done
+fi
+
 # ── Rollback-only mode ───────────────────────────────────────────────────────
 
 if [[ "${ROLLBACK}" == true ]]; then
@@ -386,17 +397,6 @@ ARCHIVE="defenseclaw-${VERSION}-${OS}-${ARCH}.tar.gz"
 WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
 APP_ZIP="DefenseClawMac-${VERSION}-macos-arm64.zip"
-
-APP_PATH=""
-# DEFENSECLAW_APP_PATH=none skips the macOS app (tests, CLI-only machines).
-if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
-    for candidate in "${DEFENSECLAW_APP_PATH:-}" /Applications/DefenseClawMac.app "${HOME}/Applications/DefenseClawMac.app"; do
-        [[ -n "${candidate}" && -d "${candidate}" ]] || continue
-        if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
-            APP_PATH="${candidate}"; break
-        fi
-    done
-fi
 
 info "Downloading and verifying release assets"
 fetch checksums.txt "${STAGING}/checksums.txt" || die "Could not get checksums.txt for ${VERSION}"
@@ -773,6 +773,10 @@ swap_with_previous() {
         stash_live "${PREVIOUS}"; unstash "${hold}"; rm -rf "${hold}"
         err "Could not restore the previous install; the current one is back in place"
         return 1
+    fi
+    if [[ -n "${APP_PATH}" && -d "${PREVIOUS}/DefenseClawMac.app" ]]; then
+        mv "${APP_PATH}" "${hold}/DefenseClawMac.app" && mv "${PREVIOUS}/DefenseClawMac.app" "${APP_PATH}" \
+            || warn "Could not swap the macOS app back; it stays at the newer version"
     fi
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"

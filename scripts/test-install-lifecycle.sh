@@ -18,7 +18,7 @@
 # End-to-end install/upgrade/rollback test for scripts/install.sh.
 #
 #   scripts/test-install-lifecycle.sh --assets DIR [--previous-assets DIR]
-#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills"] [--keep]
+#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills macos-app"] [--keep]
 #
 # Every lane runs in its own throwaway HOME with the gateway on a free port,
 # so it never touches the real install. DIR holds release-shaped assets
@@ -200,6 +200,41 @@ lane_handoff() {
     stop_lane
 }
 
+app_version() {
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
+}
+
+# macOS: install.sh updates the app bundle with the runtime, and rollback
+# swaps it back. Needs DefenseClawMac-<v>-macos-arm64.zip in both asset dirs.
+lane_macos_app() {
+    enter_lane macos-app
+    local prev app
+    prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
+    app="${HOME}/Applications/DefenseClawMac.app"
+    mkdir -p "${HOME}/Applications"
+    must ditto -xk "${PREVIOUS_ASSETS}/DefenseClawMac-${prev}-macos-arm64.zip" "${HOME}/Applications" || return 1
+    export DEFENSECLAW_APP_PATH="${app}" DEFENSECLAW_INSTALL_CALLER=app
+    log "macos-app: install ${prev} with the app at ${app}"
+    must install_candidate "${PREVIOUS_ASSETS}" || return 1
+    must init_and_start || return 1
+    [[ "$(app_version "${app}")" == "${prev}" ]] || fail "app is not ${prev} after install"
+    log "macos-app: upgrade runtime and app to ${TARGET}"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    [[ "$(app_version "${app}")" == "${TARGET}" ]] || fail "app was not upgraded to ${TARGET}"
+    [[ "$(app_version "${DC_HOME}/previous/DefenseClawMac.app")" == "${prev}" ]] || fail "previous/ lacks the ${prev} app"
+    codesign --verify --deep --strict "${app}" 2>/dev/null || fail "upgraded app does not verify"
+    log "macos-app: rollback restores the ${prev} app"
+    must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
+    assert_versions "${prev}"
+    [[ "$(app_version "${app}")" == "${prev}" ]] || fail "rollback did not restore the ${prev} app"
+    must bash "${DC_HOME}/installer/install.sh" --rollback --yes || return 1
+    [[ "$(app_version "${app}")" == "${TARGET}" ]] || fail "roll forward did not restore the ${TARGET} app"
+    stop_lane
+    export DEFENSECLAW_APP_PATH=none
+    unset DEFENSECLAW_INSTALL_CALLER
+}
+
 # Failure drills: each must leave a working install behind.
 lane_drills() {
     enter_lane drills
@@ -274,6 +309,9 @@ for lane in ${LANES}; do
         upgrade-0.8.10) upgrade_lane upgrade-legacy "${LEGACY_VERSION}" install_legacy || true ;;
         handoff) lane_handoff || true ;;
         drills) lane_drills || true ;;
+        macos-app)
+            [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "macos-app needs --previous-assets" >&2; exit 2; }
+            lane_macos_app || true ;;
         *) echo "unknown lane: ${lane}" >&2; exit 2 ;;
     esac
 done

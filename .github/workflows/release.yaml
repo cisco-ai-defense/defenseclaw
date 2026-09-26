@@ -255,7 +255,11 @@ jobs:
           set -euo pipefail
           lanes="fresh upgrade-0.8.10 handoff"
           args=()
-          if [[ -n "$PREVIOUS" ]]; then lanes="$lanes upgrade-previous"; args+=(--previous-assets previous); fi
+          if [[ -n "$PREVIOUS" ]]; then
+            lanes="$lanes upgrade-previous"; args+=(--previous-assets previous)
+            [[ "$RUNNER_OS" == macOS ]] && lanes="$lanes macos-app"
+          fi
+          lanes="$lanes drills"
           scripts/test-install-lifecycle.sh --assets release --lanes "$lanes" "${args[@]}"
       - name: Lifecycle (Windows)
         if: runner.os == 'Windows'
