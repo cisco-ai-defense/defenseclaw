@@ -8,6 +8,62 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [1.0.0] — Release-owned upgrades
+
+1.0 replaces the 0.x upgrade system. `defenseclaw upgrade` now downloads the
+latest release's installer, checks it against that release's `checksums.txt`,
+and runs it, so the upgrade logic always ships with the version being
+installed and a broken upgrade is fixed by the next release. See
+[Upgrade DefenseClaw](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
+
+### Upgrading from 0.x
+
+Configuration and data are kept on every path.
+
+| Installed | Run |
+| --- | --- |
+| 0.8.8–0.8.10 on macOS or Linux | `defenseclaw upgrade --yes` |
+| 0.8.7 or older on macOS or Linux | `curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh \| bash` |
+| Any 0.x on Windows | `irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 \| iex` |
+| The 0.8.x macOS app | Download the 1.0 DMG once |
+
+`defenseclaw upgrade` on 0.8.7 and older, and on Windows, stops with messages
+such as `missing release-provenance.json; refusing before services are
+stopped`. Nothing is changed; use the install command above.
+
+### Breaking changes
+
+- `install.sh` and `install.ps1` install, upgrade, repair and roll back the
+  same way on every platform. Each run keeps the replaced install in
+  `~/.defenseclaw/previous` and restores it automatically if the upgrade, the
+  migration or the gateway's health check fails. `defenseclaw rollback` swaps
+  back on demand.
+- Windows installs directly with `install.ps1` into `%USERPROFILE%\.local\bin`
+  and `%USERPROFILE%\.defenseclaw`; `DefenseClawSetup-x64.exe` is no longer
+  published. The installer removes a 0.8.x native Setup installation and keeps
+  its files in `previous\legacy-setup`. The enterprise Setup is unchanged.
+- The macOS app no longer embeds a runtime. Install and Update run the release
+  `install.sh`, which also replaces the app bundle.
+- `defenseclaw migrate` replaces `defenseclaw migrations`. Config changes are
+  ordered steps keyed on `config_version`; the 0.x migrations remain as a
+  one-time import.
+- Release assets use flat names (`defenseclaw-<v>-<os>-<arch>.tar.gz|zip`,
+  `defenseclaw-<v>-py3-none-any.whl`, `defenseclaw-<v>-requirements.txt`).
+  The plugin tarball, `upgrade-manifest.json`, release provenance, rescue
+  scripts, wrapped artifacts, and the Intel macOS and Windows arm64 builds are
+  gone.
+- Python dependencies install from the hash-pinned requirements asset;
+  upgrades never resolve live from PyPI.
+- Signature checking: every asset is checked against `checksums.txt`, and the
+  Sigstore signature on `checksums.txt` is verified when `cosign` 2.x is
+  installed. Releases no longer download a pinned cosign.
+- The OpenClaw gateway is restarted only when the OpenClaw connector is active.
+
+### Added
+
+- A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
+  Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+
 ## [Unreleased] — Hook collector unification
 
 This rollup unifies the agent hook collector across all 8 hook-first

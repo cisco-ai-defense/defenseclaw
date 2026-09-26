@@ -33,7 +33,7 @@ native agent at a WSL installation, or mix native and WSL connector homes.
 
 | Status | Meaning in this guide |
 | --- | --- |
-| **Supported** | Implemented and available through ordinary native Windows x64 Setup. This availability label does not populate validation metadata or claim authentic client evidence. |
+| **Supported** | Implemented and available through the ordinary native Windows x64 install. This availability label does not populate validation metadata or claim authentic client evidence. |
 | **Limited** | Supported only on the stated surface, with optional configuration, an extra dependency, or a narrower guarantee. |
 | **Unsupported** | Rejected, unavailable, or outside the native Windows product contract. |
 | **Not applicable** | A platform-specific concept is intentionally absent from the Windows design. |
@@ -51,7 +51,7 @@ can protect and observe only events the installed agent emits through a
 documented hook, awaited policy, or native telemetry surface.
 
 <Cards>
-  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, authenticated release Setup, repair, upgrade qualification, recovery, and uninstall." />
+  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, install, upgrade, rollback, repair, and uninstall." />
   <Card title="Choose a connector" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows support, then open one connector's setup and quirks." />
   <Card title="Managed enterprise" href="/docs/setup/enterprise-deployment#windows-system-service-layout" description="Gateway, credential broker, hook guardian, profile enumerator, non-admin guarantees, and the enterprise CLI lifecycle." />
   <Card title="Capabilities" href="/docs/capability-matrix" description="Connector enforcement, native ask, fail-closed, and subprocess capabilities." />
@@ -64,8 +64,8 @@ documented hook, awaited policy, or native telemetry surface.
 
 The normal installation is one current-user application:
 
-1. `DefenseClawSetup-x64.exe` installs product-owned files and an embedded
-   runtime below the current user's Programs directory.
+1. `install.ps1` installs the gateway, hook runner, and CLI for the current
+   user in `%USERPROFILE%\.local\bin` and `%USERPROFILE%\.defenseclaw`.
 2. Connector setup installs the exact native hook, adapter, or in-process
    policy bridge documented on that connector's Windows tab. Use the
    [connector platform table](/docs/connectors#platform-support) as the
@@ -86,23 +86,22 @@ the authentication, redaction, and local-storage boundaries.
 | Item | Status | Boundary |
 | --- | --- | --- |
 | WSL installation or a mixed native/WSL connector | **Unsupported** | Native and WSL executables, profiles, and hook paths are different trust domains. |
-| Windows x86 | **Unsupported** | Setup requires an `amd64` process and payload. |
-| Windows ARM64, including x64 emulation | **Not certified** | Setup rejects it rather than relying on emulation. |
-| Machine-wide Setup or MSI | **Unsupported** | The public package accepts `INSTALLSCOPE=user` only. |
-| Elevated, service, session-zero, or background Setup | **Unsupported** | State-changing Setup actions require the signed-in, non-elevated interactive user. |
+| Windows x86 | **Unsupported** | Release binaries are `amd64` only. |
+| Windows ARM64, including x64 emulation | **Not certified** | Releases publish no ARM64 build. |
+| Machine-wide install or MSI | **Unsupported** | `install.ps1` installs for the current user only. |
 | Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
 | OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
 | `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
-| Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
+| Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
 
 No roadmap is implied by these classifications.
 
 ## If you are migrating
 
-For a normal-mode migration from macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
-HKCU `PATH` and Run registration instead of a service manager, native process
+For a normal-mode migration from macOS or Linux, expect `install.ps1` instead of the shell installer,
+an HKCU `PATH` entry, native process
 identity instead of PID-only signaling, and the selected connector's native
 hook, adapter, plugin, or awaited-policy lane instead of a DefenseClaw POSIX
 hook script. Sandbox and proxy connector features do not move with you.

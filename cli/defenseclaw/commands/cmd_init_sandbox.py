@@ -175,7 +175,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
     cfg = app.cfg or load()
     if getattr(cfg, "_source_config_version", None) != 8:
         raise click.ClickException(
-            "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            "Configuration schema v8 is required — run 'defenseclaw migrate' first."
         )
     app.cfg = cfg
 

@@ -23,6 +23,7 @@ import Charts
 struct OverviewView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openSettings) private var openSettings
+    @AppStorage("gatewayAdministratorMode") private var gatewayAdministratorMode = false
     @State private var summary: (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) = (0, 0, 0, 0, 0, 0)
     @State private var hourly: [HourlyPoint] = []
     @State private var doctorRunning = false
@@ -199,19 +200,12 @@ struct OverviewView: View {
                         Label("Open Inventory", systemImage: "shippingbox")
                     }
                     Button {
-                        let action = appState.gatewayReachable ? "restart" : "start"
-                        runOverviewCommand(
-                            title: "\(action.capitalized) gateway",
-                            binary: "defenseclaw-gateway",
-                            arguments: [action],
-                            category: "daemon",
-                            effects: [appState.gatewayReachable ? "Gateway restarted" : "Gateway started"]
-                        )
+                        runGatewayLifecycle(appState.gatewayReachable ? "restart" : "start")
                     } label: {
-                        Label(appState.gatewayReachable ? "Restart Gateway" : "Start Gateway",
+                        Label(gatewayActionTitle(appState.gatewayReachable ? "Restart" : "Start"),
                               systemImage: appState.gatewayReachable ? "arrow.clockwise.circle" : "play.circle")
                     }
-                    .disabled(!appState.installationMutationsAllowed)
+                    .disabled(!appState.installationMutationsAllowed || appState.gatewayStartupInProgress)
                     Button {
                         runDoctor()
                     } label: {
@@ -231,6 +225,14 @@ struct OverviewView: View {
                         Button("Show Provenance") {
                             runOverviewCommand(title: "Show gateway provenance", binary: "defenseclaw-gateway", arguments: ["provenance", "show"], category: "info")
                         }
+                        Button(gatewayActionTitle("Restart")) {
+                            runGatewayLifecycle("restart")
+                        }
+                        .disabled(!appState.installationMutationsAllowed || appState.gatewayStartupInProgress)
+                        Button(gatewayActionTitle("Stop")) {
+                            runGatewayLifecycle("stop")
+                        }
+                        .disabled(!appState.installationMutationsAllowed || appState.gatewayStartupInProgress)
                         Divider()
                         Button("Open Command Palette") { appState.commandPalettePresented = true }
                     } label: {
@@ -239,6 +241,28 @@ struct OverviewView: View {
                     Spacer()
                 }
                 .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Toggle("Run gateway as administrator", isOn: $gatewayAdministratorMode)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .fixedSize()
+                            .disabled(!appState.installationMutationsAllowed)
+                        Spacer()
+                        Button("Gateway Permissions…") {
+                            appState.selectedSettingsTab = .connection
+                            openSettings()
+                        }
+                        .controlSize(.small)
+                    }
+                    Text(gatewayAdministratorMode
+                         ? "Uses your installed gateway with macOS authorization. Runtime agent actions also require Full Disk Access."
+                         : "Enable administrator mode for Runtime monitoring across the machine, then start or restart the gateway.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if let reason = appState.installationReadOnlyReason {
                     Divider()
@@ -296,18 +320,14 @@ struct OverviewView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Gateway unreachable on port \(appState.config.gatewayPort)", systemImage: "bolt.slash")
                         .foregroundStyle(Cisco.red)
-                    Text("File-based panels (Audit, Logs, Activity, alert history) keep working. Start the gateway with:")
+                    Text("Audit, Logs, Activity, and alert history remain available. Start the gateway to restore live monitoring.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Text("defenseclaw-gateway start")
-                            .font(.system(.caption, design: .monospaced))
-                        Button {
-                            copyToPasteboard("defenseclaw-gateway start")
-                        } label: { Image(systemName: "doc.on.doc") }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("Copy gateway start command")
+                    Button(gatewayActionTitle("Start")) {
+                        runGatewayLifecycle("start")
                     }
+                    .controlSize(.small)
+                    .disabled(!appState.installationMutationsAllowed)
                 }
             }
         }
@@ -1081,6 +1101,26 @@ struct OverviewView: View {
             ) ?? appState.doctorCache
             doctorRunning = false
         }
+    }
+
+    private func gatewayActionTitle(_ action: String) -> String {
+        gatewayAdministratorMode ? "\(action) Gateway as Administrator" : "\(action) Gateway"
+    }
+
+    private func runGatewayLifecycle(_ action: String) {
+        let effect: String
+        switch action {
+        case "start": effect = "Gateway started"
+        case "stop": effect = "Gateway stopped"
+        default: effect = "Gateway restarted"
+        }
+        runOverviewCommand(
+            title: gatewayActionTitle(action.capitalized),
+            binary: "defenseclaw-gateway",
+            arguments: [action],
+            category: "daemon",
+            effects: [effect]
+        )
     }
 
     private func runOverviewCommand(

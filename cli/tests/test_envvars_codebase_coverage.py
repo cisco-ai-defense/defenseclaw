@@ -100,12 +100,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "scripts/gen_envvars_docs.py",
     "docs/ENV-VARS.md",
     "docs-site/content/docs/reference/env-vars.mdx",
-    # Historical-upgrade harness fixture names model environment entries that
-    # the later v8 migration will generate. They are test data, not bridge
-    # runtime inputs, so the v7 bridge registry must not advertise them.
-    "scripts/test-upgrade-release.sh",
-    "scripts/test-developer-target-activation.sh",
-    "cli/tests/test_upgrade_release_smoke_contract.py",
     # Configuration docs that explicitly mention env vars users SOMETIMES
     # try to set (DEFENSECLAW_DATA_DIR, DEFENSECLAW_LOG_LEVEL, ...) but
     # which DefenseClaw does NOT honor. These pages tell users to use
@@ -144,8 +138,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "cli/tests/test_cmd_setup_trusted_paths.py",
     "cli/tests/test_observability_v8_activation.py",
     "cli/tests/test_render_telemetry_go.py",
-    "cli/tests/test_upgrade_release_smoke_contract.py",
-    "scripts/test-upgrade-release.sh",
     # Test-only parent/child subprocess sentinels used by Go helper
     # processes; they are not operator configuration and must not be
     # published as such.
@@ -226,9 +218,6 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
             "docs-site/content/docs/observability/index.mdx",
             "internal/config/config.go",
             "internal/config/config_test.go",
-            "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-            "cli/tests/test_upgrade_staged_resolver.py",
-            "scripts/upgrade.sh",
         }
     ),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),

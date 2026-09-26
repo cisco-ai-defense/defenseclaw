@@ -153,44 +153,29 @@ ownership requirements this guide does not certify.
 
 ## Release and installer trust
 
-The current `0.8.10` Windows release trust chain is:
+`install.ps1` checks every file it downloads against the release's
+`checksums.txt`. That catches a corrupted or mismatched download, but on its
+own it does not prove who published the release. The Release workflow signs
+`checksums.txt` with Sigstore; when `cosign` 2.0 or later is installed, the
+installer and `defenseclaw upgrade` verify that signature against the release
+workflow's identity before trusting any file, and stop if it fails. Install
+cosign first if you want that publisher check.
 
-1. verify the release's checksum set against its Sigstore certificate and
-   release-workflow identity;
-2. require the Setup SHA-256 named by that authenticated checksum set;
-3. require the authenticated provenance to describe the same artifact and
-   signing state; and
-4. verify that Windows observes the matching Authenticode state; and
-5. exercise that exact release Setup artifact through the deterministic native
-   Windows x64 matrix. Connector availability and authentic-client evidence
-   remain separate claims.
+Windows release executables are not Authenticode-signed, so Windows reports
+them as `NotSigned`. Their integrity comes from the checksum set, not from a
+`Cisco Systems, Inc.` Digital Signatures entry.
 
-The deterministic native gate is the certification basis. A separately
-configured real-agent run can add upstream smoke evidence, but it is not a
-substitute for that gate. In particular, an authenticated Amp turn requires
-`AMP_API_KEY`; the absence or presence of that optional secret does not change
-the packaged native Windows support classification.
+The release gate installs, upgrades, and rolls back the exact release files on
+a Windows x64 runner before publishing. That trust chain does not fabricate
+connector evidence: supported availability for Codex, Cursor, Devin, Hermes,
+OpenCode, OmniGent, Copilot, and Antigravity does not populate validation
+fields or change `live=false`. An authenticated Amp turn requires
+`AMP_API_KEY`; its absence does not change the native Windows support
+classification.
 
-That artifact trust chain does not fabricate connector evidence. Supported
-availability for Codex, Cursor, Devin, Hermes, OpenCode, OmniGent,
-Copilot, and Antigravity does not populate validation fields or change
-`live=false`; authentic official-client evidence remains independently gated.
-
-For `0.8.10`, the authenticated provenance says `unsigned: true` and
-`product_executables_authenticode_signed: false`; Windows observes the outer
-Setup as `NotSigned`. The release bytes are therefore authenticated by the
-Sigstore-signed checksum set, **not** by an Authenticode publisher. Do not
-expect or claim a `Cisco Systems, Inc.` Digital Signatures entry.
-
-Local and pull-request artifacts do not carry authenticated production release
-provenance. Passing their deterministic suites proves code and lifecycle
-behavior, not that they are a published release artifact.
-
-The native upgrader refuses a missing or invalid authenticated checksum set,
-digest, provenance, a mismatch between recorded and observed Authenticode
-state, or an unauthorized Windows source baseline. Its verification bypass is
-not supported for native Windows. See
-[Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade-and-release-eligibility).
+Local and pull-request artifacts are not published releases. Passing their
+tests proves code and lifecycle behavior, not release provenance. See
+[Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade).
 
 ## Ownership and filesystem boundary
 

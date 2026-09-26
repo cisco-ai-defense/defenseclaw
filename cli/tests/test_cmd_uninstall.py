@@ -221,6 +221,8 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "skill-scanner.cmd",
+                "mcp-scanner.cmd",
             ),
         )
         self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))

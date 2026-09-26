@@ -57,9 +57,6 @@ const (
 	rotationCleanupFlag              = "rotation-cleanup"
 	rotationConnectorStateFlag       = "rotation-connector-state"
 	rotationConnectorStateMaxLen     = 16 << 10
-	upgradeFreshProcessEnv           = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
-	upgradeWaitReadyTimeoutFlag      = "timeout"
-	upgradeWaitReadyVersionFlag      = "expected-version"
 	telemetrySnapshotUnavailable     = gateway.ObservabilityV8HealthSnapshotUnavailable
 	telemetryReadinessDetailMaxBytes = 1024
 	telemetryReadinessFailureRowsMax = 4
@@ -101,14 +98,6 @@ Equivalent to 'stop' followed by 'start'.`,
 	PersistentPreRunE: nil,
 }
 
-var upgradeWaitReadyCmd = &cobra.Command{
-	Use:               "upgrade-wait-ready",
-	Hidden:            true,
-	Args:              cobra.NoArgs,
-	RunE:              runUpgradeWaitReady,
-	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
-}
-
 var (
 	startupListenerOwner            = daemon.ListenerOwnerPID
 	requireStartupListenerOwnership = runtime.GOOS == "windows"
@@ -126,17 +115,10 @@ type authenticatedMigrationProcessIdentity interface {
 	HasAuthenticatedMigrationProcessIdentity(int) bool
 }
 
-type managedProcessGeneration interface {
-	ManagedProcessStartedAt(int) (time.Time, bool)
-}
-
 type gatewayStatusEnvelope struct {
 	Health         gateway.HealthSnapshot         `json:"health"`
 	ConnectorModes []gatewayConnectorModeSnapshot `json:"connector_modes"`
-	Provenance     struct {
-		BinaryVersion string `json:"binary_version"`
-	} `json:"provenance"`
-	Runtime struct {
+	Runtime        struct {
 		PID     int    `json:"pid"`
 		DataDir string `json:"data_dir"`
 	} `json:"runtime"`
@@ -222,8 +204,6 @@ func init() {
 	startCmd.Flags().String(rotationConnectorStateFlag, "", "require an exact configured connector posture")
 	stopCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade shutdown verification")
 	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
-	upgradeWaitReadyCmd.Flags().Duration(upgradeWaitReadyTimeoutFlag, defaultStartReadinessTimeout, "strict readiness deadline")
-	upgradeWaitReadyCmd.Flags().String(upgradeWaitReadyVersionFlag, "", "exact candidate gateway version")
 	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
@@ -232,7 +212,6 @@ func init() {
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
-	rootCmd.AddCommand(upgradeWaitReadyCmd)
 }
 
 func rotationTransactionRequested(cmd *cobra.Command) bool {
@@ -253,7 +232,6 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	rotationTransaction := rotationTransactionRequested(cmd)
-	controllerOwnsReadiness := upgradeControllerOwnsGatewayStartReadiness(rotationTransaction)
 	var expectedConnectorState rotationConnectorState
 	if rotationTransaction {
 		rawState, flagErr := cmd.Flags().GetString(rotationConnectorStateFlag)
@@ -302,12 +280,6 @@ func runStart(cmd *cobra.Command, _ []string) error {
 
 	// Pass through relevant flags to the daemon process
 	args := collectDaemonArgs(cmd)
-	restoreFreshProcessMarker, err := isolateUpgradeFreshProcessMarkerFromChildren()
-	if err != nil {
-		return fmt.Errorf("isolate delegated gateway readiness: %w", err)
-	}
-	defer restoreFreshProcessMarker()
-
 	startAttemptedAt := time.Now()
 	pid, err = d.Start(args)
 	if err != nil {
@@ -324,19 +296,6 @@ func runStart(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rotation start reloaded configuration does not match gateway A: %w", err)
 		}
 	}
-	if controllerOwnsReadiness {
-		if err := verifyDelegatedGatewayStart(d, pid); err != nil {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
-			return fmt.Errorf("delegated gateway start: %w", err)
-		}
-		fmt.Printf("%s (PID %d; readiness delegated to upgrade controller)\n", Style("LAUNCHED", "fg=green", "bold"), pid)
-		fmt.Println()
-		fmt.Printf("  Log file: %s\n", d.LogFile())
-		fmt.Printf("  PID file: %s\n", d.PIDFile())
-		fmt.Println()
-		printSplunkLocalHint()
-		return startConfiguredWatchdog(cfg, cfgErr, false)
-	}
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
@@ -351,6 +310,10 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
 			expectedConnectorState.OrphanHookTokenFingerprints != nil
 		requirements.verifyConnectorOTLP = true
+	} else {
+		// Upstream agent drift refused at admission is not a start failure the
+		// previous release would avoid: leave the gateway running and report it.
+		requirements.allowHookContractAdmissionRefusal = true
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -366,7 +329,13 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap)
+	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	if admissionRefused {
+		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
+		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+	} else {
+		printDaemonStartResult(pid, snap)
+	}
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -375,117 +344,32 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
 	printSplunkLocalHint()
 
-	return startConfiguredWatchdog(cfg, cfgErr, rotationTransaction)
-}
-
-func upgradeControllerOwnsGatewayStartReadiness(rotationTransaction bool) bool {
-	return !rotationTransaction && os.Getenv(upgradeFreshProcessEnv) == "1"
-}
-
-func isolateUpgradeFreshProcessMarkerFromChildren() (func(), error) {
-	value, present := os.LookupEnv(upgradeFreshProcessEnv)
-	if !present {
-		return func() {}, nil
+	if err := startConfiguredWatchdog(cfg, cfgErr, rotationTransaction); err != nil {
+		return err
 	}
-	if err := os.Unsetenv(upgradeFreshProcessEnv); err != nil {
-		return nil, err
-	}
-	return func() { _ = os.Setenv(upgradeFreshProcessEnv, value) }, nil
-}
-
-func runUpgradeWaitReady(cmd *cobra.Command, _ []string) error {
-	if os.Getenv(upgradeFreshProcessEnv) != "1" {
-		return errors.New("upgrade readiness handoff requires the fresh-process controller marker")
-	}
-	timeout, err := cmd.Flags().GetDuration(upgradeWaitReadyTimeoutFlag)
-	if err != nil || timeout <= 0 {
-		return errors.New("upgrade readiness timeout must be greater than zero")
-	}
-	deadline := time.Now().Add(timeout)
-	expectedVersion, err := cmd.Flags().GetString(upgradeWaitReadyVersionFlag)
-	if err != nil || strings.TrimSpace(expectedVersion) == "" || strings.TrimSpace(expectedVersion) != expectedVersion {
-		return errors.New("upgrade readiness requires an exact candidate version")
-	}
-	if appVersion != expectedVersion {
-		return fmt.Errorf("upgrade readiness control binary version %q does not match candidate %q", appVersion, expectedVersion)
-	}
-
-	d := daemon.New(config.DefaultDataPath())
-	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return fmt.Errorf("upgrade readiness process identity: %w", err)
-	}
-	cfg, err := loadDaemonConfig(cmd)
-	if err != nil {
-		return fmt.Errorf("upgrade readiness configuration: %w", err)
-	}
-	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return errors.New("upgrade readiness deadline expired before gateway verification")
-	}
-	if err := waitForUpgradeGatewayReadiness(
-		d,
-		cfg,
-		client,
-		expectedVersion,
-		remaining,
-		defaultReadinessPollInterval,
-	); err != nil {
-		return fmt.Errorf("upgrade gateway readiness: %w", err)
+	if admissionRefused {
+		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
 	return nil
 }
 
-func waitForUpgradeGatewayReadiness(
-	d daemonState,
-	cfg *config.Config,
-	client *http.Client,
-	expectedVersion string,
-	timeout time.Duration,
-	pollInterval time.Duration,
-) error {
-	started := time.Now()
-	running, pid := d.IsRunning()
-	if !running || pid <= 0 {
-		return errors.New("managed gateway is not running")
-	}
-	identity, identityOK := d.(managedProcessIdentity)
-	if !identityOK || !identity.HasManagedProcessIdentity(pid) {
-		return fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", pid)
-	}
-	generation, generationOK := d.(managedProcessGeneration)
-	if !generationOK {
-		return fmt.Errorf("managed gateway PID %d lacks a verified launch generation", pid)
-	}
-	startedAt, startedAtOK := generation.ManagedProcessStartedAt(pid)
-	if !startedAtOK || startedAt.IsZero() {
-		return fmt.Errorf("managed gateway PID %d lacks a verified launch generation", pid)
-	}
-	remaining := timeout - time.Since(started)
-	if remaining <= 0 {
-		return errors.New("upgrade readiness deadline expired before gateway verification")
-	}
-	if err := waitForRunningDaemonReadinessWithVersion(
-		d,
-		pid,
-		client,
-		cfg,
-		remaining,
-		pollInterval,
-		expectedVersion,
-		startedAt,
-	); err != nil {
-		return err
-	}
+// gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
+// refused one or more connectors at the hook-contract admission gate because
+// their agent changed underneath the recorded contract. The previous release
+// would refuse them the same way, so an installer keeps this version and
+// relays the fix instead of rolling back.
+const gatewayStartAdmissionRefusedExitCode = 3
 
-	running, currentPID, err := inspectConfiguredListener(d, cfg, client)
-	if err != nil {
-		return err
+func hookContractAdmissionStartError(connectors []string, detail string) error {
+	commands := make([]string, 0, len(connectors))
+	for _, name := range connectors {
+		commands = append(commands, "defenseclaw setup guardrail --connector "+name)
 	}
-	if !running || currentPID != pid {
-		return fmt.Errorf("configured gateway listener no longer belongs to managed PID %d", pid)
-	}
-	return nil
+	return withExitCode(fmt.Errorf(
+		"gateway is running, but hook-contract admission refused %s: %s; "+
+			"verify the updated agent, then re-run `%s` to refresh the hook contract",
+		strings.Join(connectors, ", "), strings.TrimSpace(detail), strings.Join(commands, "` and `"),
+	), gatewayStartAdmissionRefusedExitCode)
 }
 
 func startConfiguredWatchdog(cfg *config.Config, cfgErr error, rotationTransaction bool) error {
@@ -655,31 +539,8 @@ func waitForRunningDaemonReadiness(
 	timeout time.Duration,
 	pollInterval time.Duration,
 ) error {
-	return waitForRunningDaemonReadinessWithVersion(
-		d,
-		pid,
-		client,
-		cfg,
-		timeout,
-		pollInterval,
-		"",
-		time.Time{},
-	)
-}
-
-func waitForRunningDaemonReadinessWithVersion(
-	d daemonState,
-	pid int,
-	client *http.Client,
-	cfg *config.Config,
-	timeout time.Duration,
-	pollInterval time.Duration,
-	expectedVersion string,
-	startedNotBefore time.Time,
-) error {
-	requirements := daemonReadinessRequirementsFromConfig(cfg, startedNotBefore)
+	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
 	requirements.expectedPID = pid
-	requirements.expectedBinaryVersion = expectedVersion
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
 	_, ready, err := waitForGatewayReadiness(
 		client,
@@ -904,12 +765,16 @@ type daemonReadinessRequirements struct {
 	startedNotBefore            time.Time
 	expectedPID                 int
 	expectedDataDir             string
-	expectedBinaryVersion       string
 	token                       func() string
 	listenerHost                string
 	listenerPort                int
 	listenerOwner               func(string, int) (int, error)
 	requireOwnership            bool
+
+	// allowHookContractAdmissionRefusal lets an ordinary start accept a
+	// guardrail that stopped only because the hook-contract admission gate
+	// refused upstream agent drift. Every other subsystem must still be ready.
+	allowHookContractAdmissionRefusal bool
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -1168,20 +1033,6 @@ func stopAttemptedGatewayStart(d daemonReadinessProcess, pid int) error {
 	return d.Stop(defaultStopTimeout)
 }
 
-func verifyDelegatedGatewayStart(d daemonReadinessProcess, pid int) error {
-	running, currentPID := d.IsRunning()
-	identity, hasIdentity := d.(managedProcessIdentity)
-	if running && currentPID == pid && hasIdentity && identity.HasManagedProcessIdentity(pid) {
-		return nil
-	}
-
-	err := fmt.Errorf("launched gateway PID %d lacks a live matching executable and process start identity", pid)
-	if stopErr := stopAttemptedGatewayStart(d, pid); stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
-		return fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
-	}
-	return err
-}
-
 func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client, statusURL string, timeout, pollInterval time.Duration, requirements daemonReadinessRequirements) (gateway.HealthSnapshot, bool, error) {
 	snap, ready, err := waitForGatewayReadiness(client, statusURL, timeout, pollInterval, requirements, func() bool {
 		running, currentPID := d.IsRunning()
@@ -1249,7 +1100,7 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		// The canonical schema-v8 observability runtime always binds the
 		// sidecar telemetry health source.
 		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion,
+		telemetryEnabled: cfg.ConfigVersion >= config.ObservabilityV8ConfigVersion,
 		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,
@@ -1836,13 +1687,6 @@ func waitForGatewayReadiness(
 				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
 				snap = status.Health
 			}
-			if err == nil && requirements.expectedBinaryVersion != "" && status.Provenance.BinaryVersion != requirements.expectedBinaryVersion {
-				return snap, false, fmt.Errorf(
-					"authenticated gateway version %q does not match candidate %q",
-					status.Provenance.BinaryVersion,
-					requirements.expectedBinaryVersion,
-				)
-			}
 			if err == nil && requirements.verifyConnectorState {
 				if stateErr := verifyRotationRuntimeState(status.ConnectorModes, requirements.expectedConnectorState); stateErr != nil {
 					return snap, false, fmt.Errorf("rotation connector state mismatch: %w", stateErr)
@@ -1940,6 +1784,11 @@ func gatewaySnapshotReady(
 			)
 		}
 	}
+	// A guardrail refused at the hook-contract admission gate is a terminal
+	// state that only the operator can repair. When the caller accepts it, the
+	// start still waits for every other subsystem.
+	_, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	admissionRefused = admissionRefused && requirements.allowHookContractAdmissionRefusal
 	// The external fleet uplink retries after StateError. It is deliberately
 	// excluded from this fatal-error list; local runtime health must not depend
 	// on whether OpenClaw happens to be reachable during a start or upgrade.
@@ -1954,7 +1803,7 @@ func gatewaySnapshotReady(
 		{name: "guardrail", health: snap.Guardrail},
 		{name: "telemetry", health: snap.Telemetry},
 	} {
-		if subsystem.health.State != gateway.StateError {
+		if subsystem.health.State != gateway.StateError || (subsystem.name == "guardrail" && admissionRefused) {
 			continue
 		}
 		// The health endpoint bounds each observability snapshot read. A single
@@ -2012,11 +1861,14 @@ func gatewaySnapshotReady(
 	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
 		return false, nil
 	}
-	if requirements.guardrailEnabled {
+	switch {
+	case admissionRefused:
+		// Accepted above; runStart reports it with its own exit code.
+	case requirements.guardrailEnabled:
 		if snap.Guardrail.State != gateway.StateRunning {
 			return false, nil
 		}
-	} else {
+	default:
 		// Connector-native hooks can remain active while the local proxy is
 		// disabled. Both running hooks and a finalized disabled state are ready;
 		// the initial disabled placeholder is not.
@@ -2229,6 +2081,32 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		return ""
 	}
 	return detail
+}
+
+// guardrailHookContractAdmissionRefusal returns the connectors named by the
+// gateway's structured admission-refusal detail on a failed guardrail.
+func guardrailHookContractAdmissionRefusal(guardrail gateway.SubsystemHealth) ([]string, bool) {
+	if guardrail.State != gateway.StateError {
+		return nil, false
+	}
+	var raw []interface{}
+	switch value := guardrail.Details[gateway.GuardrailHookContractAdmissionRefused].(type) {
+	case []interface{}:
+		raw = value
+	case []string:
+		for _, name := range value {
+			raw = append(raw, name)
+		}
+	}
+	connectors := make([]string, 0, len(raw))
+	for _, value := range raw {
+		name, ok := value.(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, false
+		}
+		connectors = append(connectors, strings.TrimSpace(name))
+	}
+	return connectors, len(connectors) > 0
 }
 
 func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {

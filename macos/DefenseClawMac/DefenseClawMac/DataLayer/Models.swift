@@ -510,6 +510,54 @@ struct ActivityMutation: Identifiable, Sendable, Hashable {
 
 // MARK: - Logs
 
+/// Defense in depth for displayable runtime projections, not a substitute for
+/// producer-side redaction. Mask credentials before truncation so a quoted
+/// value crossing the display limit cannot become a partially visible secret.
+enum DisplayRedaction {
+    static func text(_ value: String, limit: Int = 4096) -> String {
+        let headers = value.replacingOccurrences(
+            of: #"(?i)(\bauthorization\s*[=:]\s*)[^\r\n]+"#,
+            with: "$1[redacted]", options: .regularExpression
+        )
+        let assignments = headers.replacingOccurrences(
+            of: #"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)(?:\s*[=:]\s*|\s+)|\bbearer\s+)("[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s,;]+)"#,
+            with: "$1[redacted]", options: .regularExpression
+        )
+        return String(assignments.prefix(max(0, limit)))
+    }
+
+    static func isSensitiveKey(_ key: String) -> Bool {
+        let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
+        return normalized.hasSuffix("token") || [
+            "password", "secret", "authorization", "apikey", "accesstoken", "refreshtoken",
+            "prompt", "requestbody", "responsebody", "content",
+        ].contains { normalized.contains($0) }
+    }
+}
+
+/// Immutable, bounded local v8 projections. Never reads raw evidence tables.
+enum CanonicalEventHistory: Sendable {
+    case unsupported
+    case unavailable
+    case available([CanonicalEvent])
+}
+
+struct CanonicalEvent: Sendable {
+    var id: String
+    var timestamp: Date?
+    var bucket: String
+    var eventName: String
+    var source: String
+    var severity: Severity
+    var action: String
+    var actor: String
+    var details: String
+    var connector: String
+    var payloadJSON: String
+    var projectionJSON: String
+    var payloadOmitted: Bool
+}
+
 enum LogStream: String, CaseIterable, Identifiable {
     case gateway, verdicts, otel, watchdog
     var id: String { rawValue }

@@ -38,7 +38,7 @@ struct AppSettingsView: View {
                 .tabItem { Label("Notifications", systemImage: "bell.badge") }
                 .tag(AppSettingsTab.notifications)
             ConnectionSettings()
-                .frame(width: 560, height: 540)
+                .frame(width: 560, height: 620)
                 .tabItem { Label("Connection", systemImage: "network") }
                 .tag(AppSettingsTab.connection)
         }
@@ -83,78 +83,36 @@ private struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Updates — Mac app (this application)") {
-                LabeledContent("Installed", value: UpdateChecker.currentVersion)
-                if let update = appState.availableUpdate {
-                    LabeledContent("Available", value: update.tag)
-                    macAppStatus
-                } else {
-                    LabeledContent("Status",
-                                   value: appState.appUpdateCheckFailed
-                                       ? "Could not check (offline or GitHub rate-limited)"
-                                       : "Up to date")
+            Section("Updates") {
+                LabeledContent("Mac app", value: UpdateChecker.currentVersion)
+                LabeledContent("Runtime (CLI + gateway)", value: runtimeInstalledValue)
+                if appState.installedRuntimeVersion == nil, let error = appState.runtimeVersionError {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
                 }
-            }
-
-            Section("Updates — DefenseClaw runtime (CLI + gateway)") {
-                LabeledContent("Installed", value: runtimeInstalledValue)
-                if let update = appState.availableRuntimeUpdate {
-                    LabeledContent("Available", value: update.tag)
-                    runtimeStatus
-                    if let command = runtimeUpgradeCommand {
-                        Button("Copy Upgrade Command") {
-                            copyToPasteboard(command)
-                        }
-                        .controlSize(.small)
-                        Text(command)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-                            .accessibilityLabel("Authenticated runtime upgrade command")
-                    }
-                    if shouldShowRuntimeUpgradeLog {
-                        Button("Copy Full Upgrade Log") {
-                            copyToPasteboard(appState.runtimeUpgradeLog)
-                        }
-                        .controlSize(.small)
-                    }
-                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.")
+                LabeledContent("Latest release", value: latestReleaseValue)
+                if let notice = appState.sourceRuntimeNotice {
+                    Text(notice)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    LabeledContent("Status", value: runtimeStatusSummary)
+                        .textSelection(.enabled)
                 }
-                if let payload = RuntimePayload.bundled {
-                    LabeledContent("Bundled payload", value: "v\(payload.version)")
-                    installStateRow
-                    Button("Install Runtime v\(payload.version) (fresh install only)") {
-                        Task { await appState.installBundledRuntime() }
-                    }
-                    .disabled(appState.runtimeInstallState.isRunning || runtimeActionDisabled)
-                    Text("Fresh installs only. If an existing or partial runtime is detected, this action makes no changes and directs you to the release-owned latest-mode upgrade resolver. A true fresh install lays the bundled runtime into \(appState.installationContext.homeRoot.path) and ~/.local/bin. Configuration, tokens, and the audit database are never touched. Dependency download from PyPI requires network.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Update Actions") {
+                installerStatusRow
                 HStack(spacing: 8) {
-                    Button(macAppButtonTitle) {
-                        appState.performMacAppUpgradeCheck()
+                    installerButton
+                    Button(appState.updateCheckInProgress ? "Checking…" : "Check for Updates") {
+                        Task { await appState.checkForUpdates(force: true) }
                     }
-                    .disabled(macAppActionDisabled)
-
-                    Button(runtimeButtonTitle) {
-                        appState.performRuntimeUpgradeCheck()
+                    .disabled(appState.updateOperationInProgress)
+                    if appState.installerState != .idle {
+                        Button("Open Activity") {
+                            appState.selectedPanel = .activity
+                            AppDelegate.openMainWindow()
+                        }
                     }
-                    .disabled(runtimeActionDisabled)
-
-                    Button(bothButtonTitle) {
-                        appState.performBothUpgrades()
-                    }
-                    .disabled(macAppActionDisabled || runtimeActionDisabled)
                 }
+                Text("Install and update run the release's install.sh, which brings the runtime and this app to the same version and rolls back automatically if a step fails.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Text("The menu bar shield is always available while DefenseClaw is running.")
                 .font(.caption)
@@ -166,117 +124,79 @@ private struct GeneralSettings: View {
         }
     }
 
+    /// The one Install / Update action: update when a newer release exists,
+    /// otherwise install this app's own version when no runtime is detected.
     @ViewBuilder
-    private var installStateRow: some View {
-        switch appState.runtimeInstallState {
+    private var installerButton: some View {
+        if appState.relaunchPending {
+            Button("Restart DefenseClaw") { appState.relaunch() }
+                .buttonStyle(.borderedProminent)
+        } else if let version = installerVersion {
+            Button(installerButtonTitle(version)) {
+                Task { await appState.runReleaseInstaller(version: version) }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(appState.updateOperationInProgress || !appState.installationMutationsAllowed
+                      || appState.sourceRuntimeMarker != nil)
+        }
+    }
+
+    private var installerVersion: String? {
+        if let update = appState.availableUpdate { return update.version }
+        guard appState.installedRuntimeVersion == nil, !appState.runtimeVersionCheckInProgress else { return nil }
+        return UpdateChecker.currentVersion
+    }
+
+    private func installerButtonTitle(_ version: String) -> String {
+        if case .failed(let failed, _) = appState.installerState, failed == version { return "Try Again" }
+        guard appState.availableUpdate != nil else { return "Install Runtime v\(version)" }
+        return appState.updateRestartsApp ? "Update to \(version) & Restart" : "Update Runtime to \(version)"
+    }
+
+    @ViewBuilder
+    private var installerStatusRow: some View {
+        switch appState.installerState {
         case .idle:
             EmptyView()
-        case .running(let step):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(step).font(.caption).foregroundStyle(.secondary)
-            }
-        case .failed(let why):
-            Label(why, systemImage: "xmark.circle.fill")
+        case .downloading(let version):
+            progressRow("Downloading and verifying the \(version) installer…")
+        case .running(let version):
+            progressRow("Installing \(version); progress is in Activity…")
+        case .installed(let version):
+            Label(
+                appState.relaunchPending ? "Installed \(version). Restart DefenseClaw to finish." : "Installed \(version).",
+                systemImage: "checkmark.circle.fill"
+            )
+            .font(.caption).foregroundStyle(Cisco.green)
+        case .needsAttention(let version, let detail):
+            Label("Installed \(version), but a connector needs attention:\n\(detail)", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(Cisco.orange)
+                .textSelection(.enabled)
+        case .failed(let version, let detail):
+            Label("Installing \(version) failed:\n\(detail)", systemImage: "xmark.circle.fill")
                 .font(.caption).foregroundStyle(Cisco.red)
                 .textSelection(.enabled)
-        case .succeeded:
-            Label("Runtime installed.", systemImage: "checkmark.circle.fill")
-                .font(.caption).foregroundStyle(Cisco.green)
         }
     }
 
-    @ViewBuilder
-    private var macAppStatus: some View {
-        switch appState.upgradeState {
-        case .checking:
-            Text("Checking…").font(.caption).foregroundStyle(.secondary)
-        case .downloading:
-            Text("Downloading…").font(.caption).foregroundStyle(.secondary)
-        case .installing:
-            Text("Installing…").font(.caption).foregroundStyle(.secondary)
-        case .failed(let why):
-            Text(why).font(.caption).foregroundStyle(Cisco.red).lineLimit(2)
-        default:
-            EmptyView()
+    private func progressRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    @ViewBuilder
-    private var runtimeStatus: some View {
-        switch appState.runtimeUpgradeState {
-        case .checking:
-            Text("Checking…").font(.caption).foregroundStyle(.secondary)
-        case .installing, .downloading:
-            Text(appState.runtimeUpgradeLogTail.isEmpty ? "Preparing release-owned resolver guidance…" : appState.runtimeUpgradeLogTail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        case .actionRequired(let guidance, _):
-            Text(guidance).font(.caption).foregroundStyle(Cisco.blue).lineLimit(3)
-        case .failed(let why):
-            Text(why).font(.caption).foregroundStyle(Cisco.red).lineLimit(2)
-        default:
-            EmptyView()
+    private var latestReleaseValue: String {
+        if appState.updateCheckInProgress { return "Checking…" }
+        if let update = appState.availableUpdate { return "\(update.version) available" }
+        if let latest = appState.latestRelease {
+            if let installed = appState.installedRuntimeVersion,
+               UpdateChecker.releaseNumber(installed, exceeds: latest.version) {
+                return "\(latest.version); the installed runtime is newer and is left unchanged"
+            }
+            return "Up to date"
         }
-    }
-
-    private var shouldShowRuntimeUpgradeLog: Bool {
-        guard !appState.runtimeUpgradeLog.isEmpty else { return false }
-        return switch appState.runtimeUpgradeState {
-        case .failed: true
-        default: false
-        }
-    }
-
-    private var runtimeUpgradeCommand: String? {
-        if case .actionRequired(_, let command) = appState.runtimeUpgradeState {
-            return command
-        }
-        return nil
-    }
-
-    private var macAppButtonTitle: String {
-        switch appState.upgradeState {
-        case .checking: "Checking App…"
-        case .downloading: "Downloading App…"
-        case .installing: "Installing App…"
-        default: appState.availableUpdate == nil ? "Check Mac App" : "Install & Restart"
-        }
-    }
-
-    private var runtimeButtonTitle: String {
-        switch appState.runtimeUpgradeState {
-        case .checking: "Checking Runtime…"
-        case .downloading, .installing: "Preparing Upgrade Command…"
-        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Show Upgrade Command"
-        }
-    }
-
-    private var bothButtonTitle: String {
-        if appState.availableUpdate != nil || appState.availableRuntimeUpdate != nil {
-            return "Install Available Updates"
-        }
-        return "Check Both"
-    }
-
-    private var runtimeStatusSummary: String {
-        if appState.runtimeVersionCheckInProgress {
-            return "Detecting installed runtime…"
-        }
-        if let error = appState.runtimeVersionError {
-            return error
-        }
-        guard appState.installedRuntimeVersion != nil else {
-            return "Runtime CLI not detected"
-        }
-        if appState.runtimeUpdateCheckFailed {
-            return "Installed; update check unavailable"
-        }
-        if !appState.runtimeReleaseChecked {
-            return "Installed"
-        }
-        return "Up to date"
+        return appState.lastCheckFailed ? "Could not check (offline or GitHub rate-limited)" : "Not checked yet"
     }
 
     private var runtimeInstalledValue: String {
@@ -284,24 +204,6 @@ private struct GeneralSettings: View {
             return version
         }
         return appState.runtimeVersionCheckInProgress ? "Detecting…" : "Not detected"
-    }
-
-    private var macAppActionDisabled: Bool {
-        switch appState.upgradeState {
-        case .checking, .downloading, .installing: true
-        default: false
-        }
-    }
-
-    private var runtimeActionDisabled: Bool {
-        if !appState.installationMutationsAllowed { return true }
-        if appState.runtimeVersionCheckInProgress { return true }
-        // Do not overlap bundled-payload installation with upgrade guidance.
-        if appState.runtimeInstallState.isRunning { return true }
-        return switch appState.runtimeUpgradeState {
-        case .checking, .downloading, .installing: true
-        default: false
-        }
     }
 }
 
@@ -383,6 +285,9 @@ private struct NotificationSettings: View {
 
 private struct ConnectionSettings: View {
     @Environment(AppState.self) private var appState
+    @AppStorage(GatewayAutoStartPreference.key) private var autoStartGateway = true
+    @AppStorage("gatewayAdministratorMode") private var gatewayAdministratorMode = false
+    @State private var administratorServiceStatus = GatewayAdministratorClient.serviceStatusDescription
     @AppStorage(CLIRunner.pathOverrideKey) private var binaryPath = ""
     @State private var configPathOverride = UserDefaults.standard.string(
         forKey: InstallationContext.configPathOverrideKey
@@ -393,6 +298,36 @@ private struct ConnectionSettings: View {
             Section("Gateway") {
                 LabeledContent("Endpoint", value: "http://\(appState.config.gatewayHost):\(appState.config.gatewayPort)")
                 LabeledContent("Token", value: appState.config.gatewayToken == nil ? "not set" : "configured (hidden)")
+                Toggle("Start gateway automatically", isOn: $autoStartGateway)
+                    .disabled(!appState.installationMutationsAllowed)
+                Text("Starts the gateway after setup and whenever DefenseClawMac opens, including after an app update. A running gateway is left in place.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Run gateway as administrator", isOn: $gatewayAdministratorMode)
+                    .disabled(!appState.installationMutationsAllowed)
+                Text("Starts your installed gateway with macOS administrator authorization. Your runtime installation is preserved; background-service approval may also be required.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if gatewayAdministratorMode {
+                    LabeledContent("Gateway executable", value: "~/.local/bin/defenseclaw-gateway")
+                    LabeledContent("Background service", value: administratorServiceStatus)
+                    Text("If approval is needed, allow DefenseClaw in Background Service Settings, then try Start or Restart again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Background Service Settings…") {
+                            GatewayAdministratorClient.openServiceSettings()
+                        }
+                        Button("Full Disk Access…") {
+                            GatewayAdministratorClient.openFullDiskAccessSettings()
+                        }
+                    }
+                    .controlSize(.small)
+                    Text("For Runtime agent actions, add /usr/bin/eslogger to Full Disk Access. iTerm's permission does not transfer to the background gateway.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
             Section("Installation") {
                 LabeledContent("Selected by", value: appState.installationContext.source.label)
@@ -447,6 +382,12 @@ private struct ConnectionSettings: View {
             }
         }
         .formStyle(.grouped)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            administratorServiceStatus = GatewayAdministratorClient.serviceStatusDescription
+        }
+        .onChange(of: gatewayAdministratorMode) { _, _ in
+            administratorServiceStatus = GatewayAdministratorClient.serviceStatusDescription
+        }
     }
 
     private func pathRow(_ label: String, _ path: String) -> some View {

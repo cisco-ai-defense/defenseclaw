@@ -41,7 +41,7 @@ private struct CatalogRows {
 }
 
 enum CatalogCLI {
-    static let auditHistoryUnavailableMessage = "Audit history is unavailable. Showing a read-only host catalog; repair the DefenseClaw audit store before running catalog actions."
+    static let auditHistoryUnavailableMessage = "Audit history is unavailable. Showing a read-only host catalog; run `defenseclaw doctor --fix` to repair the audit store, then refresh before running catalog actions."
 
     static func skills(using cli: CLIRunner) async throws -> CatalogListing<SkillItem> {
         let groups = try await rows(resource: "skill", collection: "skills", using: cli)
@@ -171,7 +171,12 @@ enum CatalogCLI {
             )
         let result = command.result
         guard result.succeeded else {
-            throw CatalogCLIError.commandFailed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw CatalogCLIError.commandFailed(
+                detail.isEmpty
+                    ? "DefenseClaw \(resource) list failed (exit \(result.exitCode))."
+                    : detail
+            )
         }
         let data = try jsonData(from: result.output)
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {

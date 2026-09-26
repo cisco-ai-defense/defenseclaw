@@ -55,7 +55,6 @@ struct FirstRunView: View {
     @State private var checked = false
     @State private var connector = "codex"
     @State private var detectedConnectors: [String] = []
-    @State private var detectedProxyConnectors: [String] = []
     @State private var registeredConnectors: Set<String> = []
     @State private var actionConnectors: Set<String> = []
     @State private var discoveryRequested = false
@@ -67,39 +66,24 @@ struct FirstRunView: View {
     @State private var failMode = "open"
     @State private var humanApproval = false
     @State private var hiltSeverity = "HIGH"
-    @State private var startGateway = false
+    @AppStorage(GatewayAutoStartPreference.key) private var startGateway = true
     @State private var verify = true
     @State private var runID: UUID?
     @State private var exitCode: Int32?
-    @State private var installerRelease: RuntimeInstallerInfo?
-    @State private var installerMetadataLoading = false
-    @State private var installerMetadataError: String?
+    @State private var setupInProgress = false
+    @State private var setupTask: Task<Void, Never>?
+    @State private var setupCancellationRequested = false
+    @State private var setupError: String?
 
     private static let connectors = ConnectorDiscoverySelection.onboardingConnectors
-    private static let installerURL = URL(
-        string: "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh"
-    )!
-    private static let downloadCommand = "curl -fL --proto '=https' --tlsv1.2 --output ~/Downloads/defenseclaw-install.sh \(installerURL.absoluteString)"
-    private static let runCommand = "bash ~/Downloads/defenseclaw-install.sh"
-
     private var runningEntry: CommandActivityEntry? {
         guard let runID else { return nil }
         return appState.activity.entries.first { $0.id == runID }
     }
 
-    private var isRunning: Bool { runningEntry?.status.isActive == true }
-    private var isCancelling: Bool { runningEntry?.status == .cancelling }
+    private var isRunning: Bool { setupInProgress || runningEntry?.status.isActive == true }
+    private var isCancelling: Bool { setupCancellationRequested || runningEntry?.status == .cancelling }
     private var isFinishing: Bool { runningEntry?.status == .finishing }
-
-    private var runtimeInstallIsCancelling: Bool {
-        guard let id = appState.runtimeInstallRunID else { return false }
-        return appState.activity.entries.first(where: { $0.id == id })?.status == .cancelling
-    }
-
-    private var runtimeInstallIsFinishing: Bool {
-        guard let id = appState.runtimeInstallRunID else { return false }
-        return appState.activity.entries.first(where: { $0.id == id })?.status == .finishing
-    }
 
     private var registeredSelection: [String] {
         detectedConnectors.filter { registeredConnectors.contains($0) }
@@ -138,35 +122,38 @@ struct FirstRunView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if cliFound { setupForm } else { installer }
+            if cliFound {
+                setupForm
+                    .disabled(setupInProgress)
+            } else {
+                installer
+            }
 
             if let entry = runningEntry {
                 execution(entry)
             }
+            if let setupError {
+                Label(setupError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Cisco.orange)
+            }
 
             HStack {
                 Button("Check Again") { checkInstallation() }
+                    .disabled(setupInProgress)
                 Button("Continue Without Setup") {
                     // Plain dismissal — installDetected stays honest (it
                     // means "config.yaml exists" and feeds Overview notices).
                     dismiss()
                 }
                 Spacer()
-                if appState.runtimeInstallState.isRunning {
+                if isRunning {
                     Button(role: .destructive) {
-                        if let id = appState.runtimeInstallRunID { appState.activity.cancel(id) }
-                    } label: {
-                        Label(
-                            runtimeInstallIsCancelling
-                                ? "Cancelling..."
-                                : (runtimeInstallIsFinishing ? "Finishing..." : "Cancel Install"),
-                            systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
-                        )
-                    }
-                    .disabled(runtimeInstallIsCancelling || runtimeInstallIsFinishing)
-                } else if isRunning {
-                    Button(role: .destructive) {
-                        if let runID { appState.activity.cancel(runID) }
+                        setupCancellationRequested = true
+                        setupTask?.cancel()
+                        if let runID, runningEntry?.status.isActive == true {
+                            appState.activity.cancel(runID)
+                        }
                     } label: {
                         Label(
                             isCancelling ? "Cancelling..." : (isFinishing ? "Finishing..." : "Cancel"),
@@ -175,25 +162,14 @@ struct FirstRunView: View {
                     }
                     .disabled(isCancelling || isFinishing)
                 } else if cliFound {
-                    if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
-                        Button {
-                            appState.selectedPanel = .setup
-                            dismiss()
-                        } label: {
-                            Label("Open Proxy Connector Setup", systemImage: "cable.connector")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                    } else {
-                        Button {
-                            initialize()
-                        } label: {
-                            Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(setupInvalid || !appState.installationMutationsAllowed)
+                    Button {
+                        initialize()
+                    } label: {
+                        Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
                     }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(setupInvalid || !appState.installationMutationsAllowed)
                 }
             }
         }
@@ -206,10 +182,8 @@ struct FirstRunView: View {
             // CLIs' --version, and the runtime's trusted-path gate is off
             // until a config exists — never exec other binaries without an
             // explicit user action.
+            appState.refreshSourceRuntimeMarker()
             cliFound = await appState.cli.locateBinary() != nil
-            if !cliFound {
-                await loadInstallerRelease()
-            }
         }
     }
 
@@ -262,20 +236,10 @@ struct FirstRunView: View {
                         }
                     }
                 } else {
-                    if detectedProxyConnectors.isEmpty {
-                        Picker("Fallback hook connector", selection: $connector) {
-                            ForEach(TUIWizards.hookConnectors, id: \.self) {
-                                Text(friendlyConnectorName($0)).tag($0)
-                            }
+                    Picker("Fallback hook connector", selection: $connector) {
+                        ForEach(Self.connectors, id: \.self) {
+                            Text(friendlyConnectorName($0)).tag($0)
                         }
-                    } else {
-                        LabeledContent("Detected proxy connectors") {
-                            Text(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", "))
-                                .multilineTextAlignment(.trailing)
-                        }
-                        Text("Proxy connectors require their dedicated Setup flow. Continue with Open Proxy Connector Setup below.")
-                            .font(.caption)
-                            .foregroundStyle(Cisco.orange)
                     }
                     HStack(spacing: 8) {
                         Button {
@@ -290,13 +254,11 @@ struct FirstRunView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    if detectedProxyConnectors.isEmpty {
-                        Text(discoveryRequested
-                             ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
-                             : "Choose a hook connector directly, or detect the agents installed on this Mac.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(discoveryRequested
+                         ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
+                         : "Choose a hook connector directly, or detect the agents installed on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     if let connectorDiscoveryError {
                         Label(connectorDiscoveryError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -325,129 +287,81 @@ struct FirstRunView: View {
                 }
             }
             Section("Finish") {
-                Toggle("Start gateway after setup", isOn: $startGateway)
+                Toggle("Start gateway automatically", isOn: $startGateway)
+                    .disabled(!appState.installationMutationsAllowed || setupInProgress)
+                Text("Starts the gateway after setup and whenever DefenseClawMac opens, including after an app update. You can change this in Settings → Connection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Verify readiness", isOn: $verify)
             }
         }
         .formStyle(.grouped)
     }
 
-    @ViewBuilder
+    /// First run installs the release matching this app, so app and runtime
+    /// agree; the release's install.sh does the work.
     private var installer: some View {
-        if let payload = RuntimePayload.bundled {
+        GroupBox("Install the DefenseClaw Runtime") {
             VStack(alignment: .leading, spacing: 10) {
-                GroupBox("Install the Bundled DefenseClaw Runtime") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into \(appState.installationContext.homeRoot.path) and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        installStateRow
-                        HStack {
-                            Button {
-                                Task {
-                                    await appState.installBundledRuntime()
-                                    checkInstallation()
-                                }
-                            } label: {
-                                Label("Install DefenseClaw Runtime v\(payload.version)", systemImage: "arrow.down.circle.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(
-                                appState.runtimeInstallState.isRunning
-                                    || !appState.installationMutationsAllowed
-                            )
-                            Button("Open Activity") {
-                                appState.selectedPanel = .activity
-                                dismiss()
-                            }
-                            .disabled(appState.runtimeInstallState == .idle)
+                Text("Downloads the DefenseClaw \(UpdateChecker.currentVersion) install.sh from its GitHub release, verifies it against the release's checksums.txt, and runs it to install the CLI and gateway into \(appState.installationContext.homeRoot.path) and ~/.local/bin. Progress streams to Activity; the installer rolls back if a step fails.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if let notice = appState.sourceRuntimeNotice {
+                    Label(notice, systemImage: "hammer.circle")
+                        .font(.caption).foregroundStyle(Cisco.orange)
+                        .textSelection(.enabled)
+                }
+                installStateRow
+                HStack {
+                    Button {
+                        Task {
+                            await appState.runReleaseInstaller(version: UpdateChecker.currentVersion)
+                            checkInstallation()
                         }
+                    } label: {
+                        Label("Install DefenseClaw Runtime v\(UpdateChecker.currentVersion)", systemImage: "arrow.down.circle.fill")
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(appState.installerState.isBusy || !appState.installationMutationsAllowed
+                              || appState.sourceRuntimeMarker != nil)
+                    Button("Open Activity") {
+                        appState.selectedPanel = .activity
+                        dismiss()
+                    }
+                    .disabled(appState.installerState == .idle)
                 }
-                DisclosureGroup("Install with the shell script instead") {
-                    scriptInstaller.padding(.top, 6)
-                }
-                .font(.callout)
             }
-        } else {
-            GroupBox("Install the DefenseClaw Runtime") {
-                scriptInstaller
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
     private var installStateRow: some View {
-        switch appState.runtimeInstallState {
+        switch appState.installerState {
         case .idle:
             EmptyView()
-        case .running(let step):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(step).font(.caption).foregroundStyle(.secondary)
-            }
-        case .failed(let why):
-            Label(why, systemImage: "xmark.circle.fill")
-                .font(.caption).foregroundStyle(Cisco.red)
-                .textSelection(.enabled)
-        case .succeeded:
+        case .downloading:
+            progressRow("Downloading and verifying the installer")
+        case .running:
+            progressRow("Installing (progress is in Activity)")
+        case .installed:
             Label("Runtime installed. Configure it below.", systemImage: "checkmark.circle.fill")
                 .font(.caption).foregroundStyle(Cisco.green)
+        case .needsAttention(_, let detail):
+            Label("Runtime installed, but a connector needs attention:\n\(detail)", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(Cisco.orange)
+                .textSelection(.enabled)
+        case .failed(_, let detail):
+            Label(detail, systemImage: "xmark.circle.fill")
+                .font(.caption).foregroundStyle(Cisco.red)
+                .textSelection(.enabled)
         }
     }
 
-    private var scriptInstaller: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Download the release installer, verify its published SHA-256 digest, review the verified local file, then run it from Terminal. The Mac app does not execute a remote script automatically.")
-                .font(.callout).foregroundStyle(.secondary)
-            if installerMetadataLoading {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading authenticated release metadata...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else if let installerRelease {
-                Link(destination: installerRelease.releaseURL) {
-                    Label("Open DefenseClaw \(installerRelease.tag) Release", systemImage: "safari")
-                }
-                installCommandRow("1. Download and Verify", command: installerRelease.downloadCommand)
-                installCommandRow("2. Review Verified Local File", command: installerRelease.reviewCommand)
-                installCommandRow("3. Verify Again and Run", command: installerRelease.runCommand)
-                Text("Expected SHA-256: \(installerRelease.assetSHA256)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            } else {
-                Label(
-                    installerMetadataError
-                        ?? "Authenticated installer metadata is unavailable. No shell command was generated.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(Cisco.orange)
-                Link(
-                    "Open Official DefenseClaw Releases",
-                    destination: URL(
-                        string: "https://github.com/cisco-ai-defense/defenseclaw/releases"
-                    )!
-                )
-            }
+    private func progressRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @MainActor
-    private func loadInstallerRelease() async {
-        guard !installerMetadataLoading else { return }
-        installerMetadataLoading = true
-        installerMetadataError = nil
-        defer { installerMetadataLoading = false }
-        guard let release = await appState.updater.latestRuntimeInstaller() else {
-            installerMetadataError = "The latest release has no digest-bound install.sh asset. Use the official release page and verify its published checksum manually."
-            return
-        }
-        installerRelease = release
     }
 
     private func execution(_ entry: CommandActivityEntry) -> some View {
@@ -477,8 +391,21 @@ struct FirstRunView: View {
     }
 
     private func initialize() {
+        guard !setupInProgress else { return }
+        setupInProgress = true
+        appState.firstRunSetupNeedsCompletion = true
+        appState.firstRunSetupInProgress = true
         exitCode = nil
-        Task {
+        setupError = nil
+        setupCancellationRequested = false
+        setupTask = Task {
+            defer {
+                setupTask = nil
+                setupInProgress = false
+                setupCancellationRequested = false
+                appState.firstRunSetupInProgress = false
+            }
+            guard !stopIfSetupCancelled() else { return }
             let plan = ConnectorOnboarding.initializationPlan(
                 detectedConnectors: detectedConnectors,
                 registeredConnectors: registeredConnectors,
@@ -490,11 +417,14 @@ struct FirstRunView: View {
                 failMode: failMode,
                 humanApproval: humanApproval,
                 hiltSeverity: hiltSeverity,
-                startGateway: startGateway,
+                // Gateway lifecycle is dispatched separately so administrator
+                // mode and Activity recording apply to the final start.
+                startGateway: false,
                 verify: verify
             )
 
             for (index, arguments) in plan.enumerated() {
+                guard !stopIfSetupCancelled() else { return }
                 let id = UUID()
                 runID = id // the execution box and Cancel track the current step
                 let isLast = index == plan.count - 1
@@ -508,30 +438,105 @@ struct FirstRunView: View {
                     category: "setup",
                     origin: "First Run",
                     successEffects: arguments.first == "init"
-                        ? ["Configuration initialized"] + (startGateway ? ["Gateway started"] : [])
+                        ? ["Configuration initialized"]
                         : [],
                     suggestedNextAction: isLast ? "Review system health on Overview." : "",
-                    refreshOnSuccess: isLast
+                    // Reload once, below, before the final startup check. An
+                    // unawaited reload here can race that check's context bind.
+                    refreshOnSuccess: false
                 )
+                guard !stopIfSetupCancelled() else { return }
                 exitCode = result.exitCode
                 guard result.succeeded else { return }
+                if arguments.first == "init",
+                   let failure = ConnectorOnboarding.initializationFailure(from: result.output) {
+                    exitCode = 1
+                    setupError = failure
+                    return
+                }
             }
 
+            guard !stopIfSetupCancelled() else { return }
             let config = await appState.configStore.reload()
+            guard !stopIfSetupCancelled() else { return }
+            let installPresent = await appState.configStore.installPresent
+            guard !stopIfSetupCancelled() else { return }
             appState.config = config
-            appState.installDetected = await appState.configStore.installPresent
+            appState.installDetected = installPresent
             await appState.gateway.update(config: config)
+            guard !stopIfSetupCancelled() else { return }
+            guard appState.installDetected, config.loadError.isEmpty else {
+                exitCode = 1
+                setupError = "Setup finished, but its configuration could not be loaded. Review Setup Output before trying again. The gateway was not started."
+                return
+            }
+            appState.firstRunSetupInProgress = false
+            if startGateway {
+                let id = UUID()
+                runID = id
+                let outcome = await appState.ensureGatewayStarted(origin: "First Run", runID: id, afterSetup: true)
+                guard !stopIfSetupCancelled() else { return }
+                switch outcome {
+                case .failed:
+                    exitCode = 1
+                    setupError = "Setup completed, but the gateway could not start. Review the output in Activity, then try Start Gateway from Overview."
+                    return
+                case .cancelled:
+                    exitCode = 130
+                    setupError = "Setup completed. Gateway startup was cancelled; use Start Gateway from Overview when ready."
+                    return
+                case .skipped:
+                    if startGateway {
+                        exitCode = 1
+                        setupError = "Setup completed, but automatic gateway startup was deferred. Review Activity and the selected installation, then use Start Gateway from Overview."
+                        return
+                    }
+                case .alreadyRunning:
+                    // A gateway that was already running still has the
+                    // configuration from before setup; restart it to load it.
+                    let restart = await appState.runCommand(
+                        runID: id,
+                        title: "Restart gateway",
+                        binary: "defenseclaw-gateway",
+                        arguments: ["restart"],
+                        category: "daemon",
+                        origin: "First Run",
+                        successEffects: ["Gateway restarted"],
+                        suggestedNextAction: "Review gateway health on Overview."
+                    )
+                    guard !stopIfSetupCancelled() else { return }
+                    guard restart.succeeded else {
+                        exitCode = restart.cancelled ? 130 : 1
+                        setupError = "Setup completed, but the running gateway could not be restarted to load it. Use Restart Gateway from Overview."
+                        return
+                    }
+                case .started:
+                    break
+                }
+            }
             await appState.pulse()
+            guard !stopIfSetupCancelled() else { return }
+            appState.firstRunSetupNeedsCompletion = false
             if appState.installDetected { dismiss() }
         }
+    }
+
+    /// A setup run can be between recorded commands or awaiting the gateway
+    /// probe when Cancel is pressed. Task cancellation covers those gaps;
+    /// Activity cancellation still stops a command that has already launched.
+    private func stopIfSetupCancelled() -> Bool {
+        guard Task.isCancelled else { return false }
+        exitCode = 130
+        setupError = "Setup was cancelled. Review Activity for completed steps and Overview for gateway status before continuing."
+        return true
     }
 
     private func checkInstallation() {
         appState.reloadConfig()
         Task {
+            appState.refreshSourceRuntimeMarker()
             cliFound = await appState.cli.locateBinary() != nil
             appState.installDetected = await appState.configStore.installPresent
-            if !cliFound { await loadInstallerRelease() }
             // Re-discover only after the user opted into discovery — Check
             // Again must not become a back door into exec'ing agent CLIs.
             if cliFound, discoveryRequested { await discoverConnectors() }
@@ -553,23 +558,21 @@ struct FirstRunView: View {
             arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"],
             mutation: true
         )
-        let allDetected = result.succeeded
+        let detected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
-        let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
         let selection = ConnectorDiscoverySelection.reconciling(
             previouslyDetected: detectedConnectors,
             detected: detected,
             registered: registeredConnectors,
             action: actionConnectors
         )
-        detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
         detectedConnectors = detected
         // Pre-check the first discovery and later additions, while preserving
         // explicit choices for connectors that remain installed.
         registeredConnectors = selection.registered
         actionConnectors = selection.action
-        if allDetected.isEmpty {
+        if detected.isEmpty {
             connectorDiscoveryError = result.succeeded
                 ? "Agent discovery completed but did not identify a supported connector."
                 : "Agent discovery failed (exit \(result.exitCode)); choose a fallback connector."
@@ -605,18 +608,6 @@ struct FirstRunView: View {
         Label(label, systemImage: ok ? "checkmark.circle.fill" : "xmark.circle")
             .font(.caption)
             .foregroundStyle(ok ? Cisco.green : .secondary)
-    }
-
-    private func installCommandRow(_ label: String, command: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            HStack {
-                Text(command).font(.caption.monospaced()).lineLimit(2).textSelection(.enabled)
-                Spacer(minLength: 8)
-                Button { copyToPasteboard(command) } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.borderless).help("Copy Command")
-            }
-        }
     }
 
     private func statusIcon(_ status: CommandActivityStatus) -> String {

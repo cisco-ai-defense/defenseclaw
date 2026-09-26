@@ -1825,7 +1825,21 @@ class DefenseClawTUI(App[None]):
         )
         if self.first_run_model.active:
             self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
+        self.run_worker(self._check_for_update(), exclusive=False, thread=False)
         self._render_chrome()
+
+    async def _check_for_update(self) -> None:
+        """Tell the operator once per session when a newer release exists."""
+
+        from defenseclaw.update_notice import available_message
+
+        try:
+            message = await asyncio.to_thread(available_message)
+        except Exception:  # noqa: BLE001 - the notice is best effort
+            return
+        if message:
+            self.notify_toast("info", message)
+            self._write_activity(f"[#FBBF24]Update[/] {message}")
 
     def _schedule_slow_refresh(self) -> None:
         """Reload catalogs and inventory that the operator has opened.

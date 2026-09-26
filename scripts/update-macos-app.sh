@@ -97,8 +97,10 @@ copy_path() {
 maintained_paths=(
     DefenseClawMac.xcodeproj
     DefenseClawMac
+    GatewayAdminHelper
     Tests
     script/build_and_run.sh
+    script/build_gateway_admin_helper.sh
     script/test_connector_onboarding.sh
     tools
     images

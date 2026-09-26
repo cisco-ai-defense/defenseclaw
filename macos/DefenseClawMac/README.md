@@ -18,35 +18,24 @@ SPDX-License-Identifier: Apache-2.0
 
 # DefenseClaw for macOS
 
-Native SwiftUI companion app for [Cisco DefenseClaw](https://github.com/cisco-ai-defense/defenseclaw). The app provides a menu-bar status view, native dashboards and setup flows, and a unified runtime installer.
+Native SwiftUI companion app for [Cisco DefenseClaw](https://github.com/cisco-ai-defense/defenseclaw). The app provides a menu-bar status view, native dashboards and setup flows, and one-click install and update through the release's `install.sh`.
 
 ![Overview dashboard](images/overview.png)
 
 ## Release package
 
-The DefenseClaw release workflow can produce two Apple Silicon artifacts:
+The DefenseClaw release workflow publishes two Apple Silicon artifacts containing the same app:
 
-- `DefenseClawMac-<version>-macos-arm64[-unverified].dmg` — the recommended unified installer. Mount it, drag `DefenseClawMac.app` to `/Applications`, launch it, then select **Install DefenseClaw Runtime** on first run.
-- `DefenseClawMac-<version>-macos-arm64[-unverified].zip` — the smaller app-only artifact. Only the verified form without `-unverified` is eligible for in-app self-update; it does not replace or reinstall the independently updating runtime.
+- `DefenseClawMac-<version>-macos-arm64.dmg` — the drag-to-Applications installer. Mount it, drag `DefenseClawMac.app` to `/Applications`, launch it, then select **Install DefenseClaw Runtime** on first run.
+- `DefenseClawMac-<version>-macos-arm64.zip` — the app with `DefenseClawMac.app` at the archive root. The release's `install.sh` unpacks it with `ditto -xk` when it updates the app.
 
-The app inside the DMG contains an embedded `Contents/Resources/RuntimePayload` with the matching release's:
-
-- `defenseclaw-gateway` macOS arm64 binary;
-- Python CLI wheel;
-- dependency overrides; and
-- SHA-256 payload manifest.
-
-On first run, the app installs that payload into the user's normal DefenseClaw locations. It can download Python dependencies from PyPI and install `uv` or Python if they are missing, so the installer is unified but not fully offline. Configuration, tokens, and the audit database are preserved during install or repair.
+The app does not embed the runtime. **Install DefenseClaw Runtime** (first run) installs the release matching the app's version, and **Update** installs the latest release. Both download that release's `install.sh` and `checksums.txt`, verify the script's SHA-256, and run `install.sh --yes` with `DEFENSECLAW_APP_PATH` set to the running app. The installer installs or upgrades the CLI and gateway, replaces the app bundle, and rolls back automatically if a step fails; output streams to the Activity panel, and the app restarts into the new bundle when it changed. Configuration, tokens, and the audit database are preserved.
 
 The production GitHub release workflow Developer ID signs and notarizes the app
 when all Apple credentials are available. If all five are absent, it publishes
-clearly labeled, ad-hoc-signed `-unverified` artifacts for manual download and
-installation. A partial credential group, or any invalid configured credential,
-stops the release instead of silently falling back. The in-app self-updater
-never offers `-unverified` assets and always requires code-signature and
-Gatekeeper validation.
-
-Before extracting an accepted update ZIP, the app verifies its GitHub-provided SHA-256 digest and inspects the archive manifest. It rejects empty archives, absolute or traversal paths, link entries, multiple app bundles, and content outside one top-level `.app`. After extraction it validates the bundle identity, version, runtime boundary, code signature, and Gatekeeper assessment before replacing the running app.
+ad-hoc-signed artifacts under the same names and reports them as unverified. A
+partial credential group, or any invalid configured credential, stops the
+release instead of silently falling back.
 
 ### Optional production Apple verification
 
@@ -59,18 +48,17 @@ Add these secrets to the GitHub `release` environment:
 - `MACOS_NOTARY_KEY_ID`: App Store Connect API key ID.
 - `MACOS_NOTARY_ISSUER_ID`: App Store Connect issuer ID.
 
-All five signing/notary values produce verified release assets. Production,
+All five signing/notary values produce notarized release assets. Production,
 local, and pull-request builds may omit all five to produce ad-hoc-signed,
-explicitly unverified manual-download assets; partial credentials fail in every
-mode. Certificates are imported into a temporary keychain, sensitive temporary
-files are removed on exit, and the original user keychain search list is
-restored.
+unverified assets; partial credentials fail in every mode. Certificates are
+imported into a temporary keychain, sensitive temporary files are removed on
+exit, and the original user keychain search list is restored.
 
 ## Requirements
 
 - Apple Silicon Mac (`arm64`)
 - macOS 14 or newer
-- Network access to GitHub and, during runtime installation, PyPI/uv/Python distribution endpoints
+- Network access to GitHub and, while `install.sh` runs, PyPI/uv/Python distribution endpoints
 - Xcode 16 or newer to build from source
 
 ## Build and test
@@ -82,19 +70,16 @@ make macos-app-test
 make macos-app-build
 ```
 
-To reproduce the full release package locally:
+To reproduce the release package locally:
 
 ```bash
-make extensions
-make dist-cli
 make macos-app-release
 ```
 
-The last target writes the unified DMG and app-only update zip to `dist/`.
-Local invocations without Apple credentials produce ad-hoc artifacts carrying
-the `-unverified` suffix. The production workflow signs and notarizes when the
-complete credential set is available; with no credentials it publishes only
-the clearly named manual-download artifacts, never an in-app update.
+The target writes the DMG and zip to `dist/`. Local invocations without Apple
+credentials produce ad-hoc, unverified artifacts under the release names. The
+production workflow signs and notarizes when the complete credential set is
+available.
 
 ## Runtime connections
 

@@ -24,6 +24,10 @@ struct AIRuntimeView: View {
     @State private var scanning = false
     @State private var error: String?
     @State private var loaded = false
+    @State private var unsupported = false
+    @State private var activeLoadID: UUID?
+
+    private var loading: Bool { activeLoadID != nil }
 
     private var filtered: [AIRuntimeFinding] {
         guard !search.isEmpty else { return snapshot.findings }
@@ -44,11 +48,11 @@ struct AIRuntimeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            // Rendered before the findings, unconditionally. A detector
+            // Render coverage before findings once a valid snapshot exists. A detector
             // reporting clean because it was never able to look is
             // indistinguishable, on a dashboard, from a host that is genuinely
             // clean, so coverage is not something the operator has to go find.
-            planeStrip
+            if loaded && !unsupported { planeStrip }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.callout)
@@ -57,8 +61,24 @@ struct AIRuntimeView: View {
             content
         }
         .padding(16)
-        .task {
-            if !loaded { await load() }
+        .task(id: appState.installationGeneration) {
+            snapshot = AIRuntimeSnapshot()
+            selection = nil
+            loaded = false
+            unsupported = false
+            activeLoadID = nil
+            error = nil
+            await load()
+        }
+        .onChange(of: appState.gatewayReachable) { _, reachable in
+            if reachable {
+                Task { await load() }
+            } else {
+                error = "Gateway offline; any displayed coverage is stale."
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
+            Task { await load() }
         }
     }
 
@@ -86,13 +106,18 @@ struct AIRuntimeView: View {
             } label: {
                 Label("Poll now", systemImage: "bolt")
             }
-            .disabled(scanning || !appState.gatewayReachable || !appState.installationMutationsAllowed)
+            .disabled(scanning || appState.scanInFlight || loading || !loaded || unsupported || error != nil
+                      || !snapshot.enabled || !appState.gatewayReachable || !appState.installationMutationsAllowed)
+            .disabled(appState.runtimeDiscoveryCommands?.contains("scan") != true)
         }
     }
 
     /// Coverage sits beside the finding count on purpose: a reader who sees
     /// only the count cannot tell a quiet host from a blind sensor.
     private var subtitle: String {
+        if unsupported { return "Unavailable in the selected runtime — update to a build with Runtime support." }
+        if !loaded { return loading ? "Loading runtime coverage…" : "Runtime coverage has not been read." }
+        if error != nil { return "STALE — the last successful coverage snapshot is shown." }
         guard snapshot.enabled else {
             return "Disabled — enable with: defenseclaw agent discovery runtime enable"
         }
@@ -151,7 +176,18 @@ struct AIRuntimeView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !snapshot.enabled {
+        if unsupported {
+            ContentUnavailableView(
+                "Runtime is not supported by this gateway", systemImage: "arrow.up.circle",
+                description: Text("The selected gateway does not provide the Runtime API. A matching version label alone is insufficient; install a compatible runtime build.")
+            )
+        } else if !loaded {
+            ContentUnavailableView(
+                loading ? "Loading runtime coverage" : "Runtime coverage unavailable",
+                systemImage: "waveform.path.ecg",
+                description: Text("No successful snapshot has been received. This is not a clean-host result.")
+            )
+        } else if !snapshot.enabled {
             ContentUnavailableView(
                 "Runtime planes are disabled",
                 systemImage: "waveform.path.ecg",
@@ -163,6 +199,8 @@ struct AIRuntimeView: View {
                 systemImage: "clock",
                 description: Text("The runtime planes have not completed a poll.")
             )
+        } else if filtered.isEmpty && !snapshot.findings.isEmpty {
+            ContentUnavailableView.search(text: search)
         } else if filtered.isEmpty {
             ContentUnavailableView(
                 "No findings",
@@ -274,13 +312,30 @@ struct AIRuntimeView: View {
     }
 
     private func load() async {
-        guard appState.gatewayReachable else { return }
+        guard !loading else { return }
+        guard appState.gatewayReachable else {
+            error = "Gateway offline; runtime coverage is unavailable."
+            return
+        }
+        let loadID = UUID()
+        activeLoadID = loadID
+        defer {
+            // An old installation's request can finish after its replacement
+            // starts. It must not clear the new request's loading state.
+            if activeLoadID == loadID { activeLoadID = nil }
+        }
         let installationGeneration = appState.installationGeneration
         do {
             let fresh = try await appState.gateway.aiRuntime()
-            guard installationGeneration == appState.installationGeneration else { return }
+            guard installationGeneration == appState.installationGeneration,
+                  activeLoadID == loadID, !Task.isCancelled else { return }
+            guard appState.gatewayReachable else {
+                error = "Gateway offline; any displayed coverage is stale."
+                return
+            }
             snapshot = fresh
             loaded = true
+            unsupported = false
             // A selection whose finding is gone must clear, or the detail pane
             // keeps showing a process that has exited.
             if let selection, !snapshot.findings.contains(where: { $0.id == selection }) {
@@ -291,25 +346,49 @@ struct AIRuntimeView: View {
             // Keep the previous snapshot on a transient failure: replacing a
             // stale-but-true coverage report with an empty one would read as a
             // clean host rather than as a lost connection.
-            guard installationGeneration == appState.installationGeneration else { return }
-            self.error = error.localizedDescription
+            guard installationGeneration == appState.installationGeneration,
+                  activeLoadID == loadID, !Task.isCancelled else { return }
+            if case GatewayError.degraded(let status, _) = error, status == 404 || status == 405 {
+                unsupported = true
+                loaded = false
+                snapshot = AIRuntimeSnapshot()
+                selection = nil
+                self.error = nil
+            } else {
+                self.error = "Runtime coverage could not be read. Check gateway health and credentials, then Refresh."
+            }
         }
     }
 
     private func scan() {
+        guard !scanning, !loading, !appState.scanInFlight else { return }
         guard appState.installationMutationsAllowed else {
             error = appState.installationReadOnlyReason ?? "This installation is read only."
             return
         }
+        guard loaded, !unsupported, error == nil, snapshot.enabled, appState.gatewayReachable,
+              appState.runtimeDiscoveryCommands?.contains("scan") == true else { return }
         scanning = true
+        // Pin the selected installation before scheduling the command, not
+        // only once its Activity row appears.
+        appState.scanInFlight = true
+        let generation = appState.installationGeneration
         Task {
-            defer { scanning = false }
-            do {
-                try await appState.gateway.scanAIRuntime()
-                await load()
-            } catch {
-                self.error = "Poll failed: \(error.localizedDescription)"
+            defer {
+                scanning = false
+                appState.scanInFlight = false
             }
+            guard generation == appState.installationGeneration else { return }
+            let result = await appState.activity.run(
+                title: "Poll AI Runtime", arguments: ["agent", "discovery", "runtime", "scan"],
+                mutation: true, category: "scan", origin: "AI Runtime"
+            )
+            guard generation == appState.installationGeneration else { return }
+            guard result.succeeded else {
+                error = "Runtime poll failed. See Activity for the command result."
+                return
+            }
+            await load()
         }
     }
 }

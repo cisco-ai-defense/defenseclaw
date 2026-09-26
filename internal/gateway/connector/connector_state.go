@@ -1464,6 +1464,37 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	return false
 }
 
+// HookContractChangedByDefenseClawRelease reports whether the only
+// compatibility drift is a ContractID that a different DefenseClaw release
+// resolved for the same agent version. A lock with no writer version predates
+// DefenseClawVersion and counts as a different release. Admission refreshes
+// such a lock instead of refusing it; any agent version change still drifts.
+func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
+		current.ContractID == "" || previous.ContractID == current.ContractID {
+		return false
+	}
+	if previous.DefenseClawVersion != "" && previous.DefenseClawVersion == current.DefenseClawVersion {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
+}
+
+// AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
+// recorded when a DefenseClaw release last admitted the connector. A refusal
+// for an unchanged agent comes from the running release's own contract table,
+// not from the agent.
+func AgentUnchangedSinceLock(previous HookContractLockEntry, rawAgentVersion string) bool {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	current := HookContractLockEntry{Connector: previous.Connector, RawAgentVersion: rawAgentVersion}
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current)
+}
+
 // stableRawAgentVersionForContract removes only upstream presentation text
 // known to change without a binary change. Amp appends a relative release-age
 // annotation to `amp --version` (for example, "..., 2h ago"), so persisting the

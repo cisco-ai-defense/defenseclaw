@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import shutil
@@ -43,7 +42,6 @@ from defenseclaw.migrations import (
     _parse_dotenv,
     _read_active_connector_from_yaml,
     _yaml_scalar,
-    run_migrations,
 )
 
 from tests.permissions import assert_owner_only_file, grant_everyone
@@ -313,224 +311,6 @@ class TestMigrate030Dispatch(unittest.TestCase):
         mock_surgical.assert_called_once_with(self.oc_json)
 
 
-class TestRunMigrations(unittest.TestCase):
-    """Tests for the run_migrations orchestrator."""
-
-    def test_applies_migrations_in_range(self):
-        # 0.2.0 → 0.3.0 picks up the 0.3.0 migration only.
-        with tempfile.TemporaryDirectory() as data_dir:
-            count = run_migrations("0.2.0", "0.3.0", tempfile.mkdtemp(), data_dir)
-        self.assertEqual(count, 1)
-
-    def test_applies_same_version_migrations(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            count = run_migrations("0.3.0", "0.3.0", tempfile.mkdtemp(), data_dir)
-        self.assertEqual(count, 1)
-
-    def test_same_version_runs_only_exact_migration(self):
-        calls: list[str] = []
-
-        def record(version: str):
-            def _inner(_ctx: MigrationContext) -> None:
-                calls.append(version)
-
-            return _inner
-
-        migrations = [
-            ("0.3.0", "old restore migration", record("0.3.0")),
-            ("0.4.0", "same-version repair migration", record("0.4.0")),
-        ]
-        with patch("defenseclaw.migrations.MIGRATIONS", migrations):
-            with tempfile.TemporaryDirectory() as data_dir:
-                count = run_migrations("0.4.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-
-        self.assertEqual(count, 1)
-        self.assertEqual(calls, ["0.4.0"])
-
-    def test_applies_connector_v3_migration_in_range(self):
-        # 0.3.x → 0.4.0 picks up the connector-v3 migration only.
-        with tempfile.TemporaryDirectory() as data_dir:
-            count = run_migrations("0.3.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-        # Only _migrate_0_4_0 is in (0.3.0, 0.4.0]; _migrate_0_3_0 is
-        # NOT re-run (already applied at the prior version).
-        self.assertEqual(count, 1)
-
-    def test_applies_both_migrations_when_jumping(self):
-        # 0.2.0 → 0.4.0 picks up both 0.3.0 and 0.4.0.
-        with tempfile.TemporaryDirectory() as data_dir:
-            count = run_migrations("0.2.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-        self.assertEqual(count, 2)
-
-    def test_skips_future_migrations(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            count = run_migrations("0.1.0", "0.2.0", tempfile.mkdtemp(), data_dir)
-        self.assertEqual(count, 0)
-
-    def test_migration_failure_does_not_abort_run(self):
-        """A raised exception in one migration must not skip the next.
-
-        Cursor-model semantics: ``count`` reports SUCCEEDED migrations
-        (the number reported in ``cmd_upgrade``'s "Applied N
-        migration(s)" line). A failed migration does NOT increment
-        the counter and is NOT marked applied in the cursor — so the
-        next upgrade replays only the one that failed, while the
-        siblings stay marked.
-        """
-        calls: list[str] = []
-
-        def fail(_ctx: MigrationContext) -> None:
-            calls.append("0.3.0")
-            raise RuntimeError("boom")
-
-        def succeed(_ctx: MigrationContext) -> None:
-            calls.append("0.4.0")
-
-        migrations = [
-            ("0.3.0", "failing migration", fail),
-            ("0.4.0", "next migration", succeed),
-        ]
-        with patch("defenseclaw.migrations.MIGRATIONS", migrations):
-            with tempfile.TemporaryDirectory() as data_dir:
-                count = run_migrations("0.2.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-                # Cursor records 0.4.0 as applied (succeeded) but not
-                # 0.3.0 (failed); a re-run will retry 0.3.0 only.
-                cursor = _read_json(os.path.join(data_dir, ".migration_state.json"))
-                self.assertEqual(cursor["applied"], ["0.4.0"])
-        self.assertEqual(count, 1)
-        self.assertEqual(calls, ["0.3.0", "0.4.0"])
-
-    def test_partial_failure_only_replays_failed_migration_on_rerun(self):
-        """End-to-end proof of the cursor's main job.
-
-        Run 1: A fails, B succeeds. Cursor records only B.
-        Run 2: cursor present; B is skipped, A retried (this time
-               succeeds). Cursor records both.
-        """
-        attempts: dict[str, int] = {"0.3.0": 0, "0.4.0": 0}
-
-        def flaky(_ctx: MigrationContext) -> None:
-            attempts["0.3.0"] += 1
-            if attempts["0.3.0"] == 1:
-                raise RuntimeError("transient")
-
-        def stable(_ctx: MigrationContext) -> None:
-            attempts["0.4.0"] += 1
-
-        migrations = [
-            ("0.3.0", "flaky", flaky),
-            ("0.4.0", "stable", stable),
-        ]
-        with patch("defenseclaw.migrations.MIGRATIONS", migrations):
-            with tempfile.TemporaryDirectory() as data_dir:
-                run_migrations("0.2.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-                run_migrations("0.4.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-        # 0.3.0 retried; 0.4.0 ran exactly once (cursor protected it).
-        # Same-version reapply on the second run targets only ver==to
-        # which is 0.4.0 — but the cursor already says applied AND
-        # same-version-reapply bypasses for ver==to, so 0.4.0 runs a
-        # second time. That's the documented escape-hatch behavior;
-        # the assertion below pins it.
-        self.assertEqual(attempts["0.3.0"], 2)  # failed, then succeeded
-        self.assertEqual(attempts["0.4.0"], 2)  # ran in run1; same-version reapply re-fired in run2
-
-    def test_corrupt_cursor_treated_as_missing(self):
-        """A garbage cursor file must not crash the upgrade flow."""
-        with tempfile.TemporaryDirectory() as data_dir:
-            cursor_path = os.path.join(data_dir, ".migration_state.json")
-            with open(cursor_path, "w") as f:
-                f.write("{not valid json")
-            count = run_migrations("0.2.0", "0.3.0", tempfile.mkdtemp(), data_dir)
-            # Bootstrapped from from_version=0.2.0 → no pre-marks → 0.3.0 ran.
-            self.assertEqual(count, 1)
-            # A fresh, well-formed cursor exists post-run.
-            cursor = _read_json(cursor_path)
-            self.assertIn("0.3.0", cursor["applied"])
-
-    def test_data_dir_defaults_to_env_then_home(self):
-        """When data_dir is not passed, env override is honored.
-
-        Uses a real temp dir for the env override (the legacy test
-        relied on ``/nonexistent/dclaw`` short-circuiting; with the
-        cursor model the loader needs a writable dir to persist
-        state).
-        """
-        with tempfile.TemporaryDirectory() as env_dir, patch.dict(os.environ, {"DEFENSECLAW_HOME": env_dir}):
-            count = run_migrations("0.3.0", "0.4.0", tempfile.mkdtemp())
-            self.assertTrue(
-                os.path.exists(os.path.join(env_dir, ".migration_state.json")),
-                "run_migrations should persist the cursor under $DEFENSECLAW_HOME",
-            )
-        self.assertEqual(count, 1)
-
-    def test_run_migrations_reloads_stale_migration_state_module(self):
-        """0.7.x upgraders cache migration_state before installing 0.8.0.
-
-        The newly imported migrations module must refresh that stale module
-        before it reaches APIs introduced after 0.7.x.
-        """
-        import defenseclaw
-        import defenseclaw.commands.cmd_version as cmd_version
-        from defenseclaw import migration_state
-
-        installed_version = defenseclaw.__version__
-        defenseclaw.__version__ = "0.7.0"
-        cmd_version.__version__ = "0.7.0"
-        for attr in (
-            "detect_schema",
-            "is_future_schema",
-            "FutureSchemaError",
-            "upgrade_mutation_temp_suffix",
-        ):
-            delattr(migration_state, attr)
-
-        calls: list[str] = []
-
-        def record(_ctx: MigrationContext) -> None:
-            calls.append("0.8.0")
-
-        try:
-            with patch("defenseclaw.migrations.MIGRATIONS", [("0.8.0", "compat", record)]):
-                with tempfile.TemporaryDirectory() as data_dir:
-                    count = run_migrations("0.7.0", "0.8.0", tempfile.mkdtemp(), data_dir)
-                    refreshed_version = defenseclaw.__version__
-                    refreshed_cmd_version = cmd_version.__version__
-        finally:
-            importlib.reload(defenseclaw)
-            importlib.reload(cmd_version)
-            importlib.reload(migration_state)
-
-        self.assertEqual(count, 1)
-        self.assertEqual(calls, ["0.8.0"])
-        self.assertEqual(refreshed_version, installed_version)
-        self.assertEqual(refreshed_cmd_version, installed_version)
-
-    @unittest.skipIf(os.name == "nt", "legacy restart shim is POSIX-only")
-    def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
-        with (
-            tempfile.TemporaryDirectory() as data_dir,
-            patch("defenseclaw.migrations.MIGRATIONS", []),
-            patch("defenseclaw.migrations.shutil.which", return_value=None),
-            patch.dict(os.environ, {"PATH": "/usr/bin"}),
-        ):
-            run_migrations("0.6.0", "0.8.0", tempfile.mkdtemp(), data_dir)
-
-            shim_dir = os.path.join(data_dir, ".upgrade-shims")
-            shim_path = os.path.join(shim_dir, "openclaw")
-            self.assertTrue(os.path.isfile(shim_path))
-            self.assertTrue(os.access(shim_path, os.X_OK))
-            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], shim_dir)
-
-    def test_legacy_openclaw_restart_shim_skips_fixed_upgraders(self):
-        with (
-            tempfile.TemporaryDirectory() as data_dir,
-            patch("defenseclaw.migrations.MIGRATIONS", []),
-            patch("defenseclaw.migrations.shutil.which", return_value=None),
-            patch.dict(os.environ, {"PATH": "/usr/bin"}),
-        ):
-            run_migrations("0.6.1", "0.8.0", tempfile.mkdtemp(), data_dir)
-
-            self.assertFalse(os.path.exists(os.path.join(data_dir, ".upgrade-shims")))
-            self.assertEqual(os.environ["PATH"], "/usr/bin")
 
 
 # ---------------------------------------------------------------------------
@@ -1463,41 +1243,6 @@ class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
             shutil.rmtree(bare)
 
 
-class TestRunMigrations050(unittest.TestCase):
-    """End-to-end coverage of run_migrations for the 0.5.0 entry."""
-
-    def test_050_runs_when_target_includes_it(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            policies = os.path.join(data_dir, "policies")
-            nested = os.path.join(policies, "rego")
-            os.makedirs(nested, exist_ok=True)
-            with open(os.path.join(nested, "guardrail.rego"), "w") as f:
-                f.write("package defenseclaw.placeholder\n")
-            stale = os.path.join(policies, "guardrail.rego")
-            with open(stale, "w") as f:
-                f.write("package defenseclaw.legacy\n")
-
-            count = run_migrations("0.4.0", "0.5.0", tempfile.mkdtemp(), data_dir)
-
-            self.assertEqual(count, 1)
-            self.assertFalse(os.path.isfile(stale))
-
-    def test_050_skipped_when_target_below(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            policies = os.path.join(data_dir, "policies")
-            nested = os.path.join(policies, "rego")
-            os.makedirs(nested, exist_ok=True)
-            with open(os.path.join(nested, "guardrail.rego"), "w") as f:
-                f.write("package defenseclaw.placeholder\n")
-            stale = os.path.join(policies, "guardrail.rego")
-            with open(stale, "w") as f:
-                f.write("package defenseclaw.legacy\n")
-
-            # Targeting 0.4.0 only runs 0.3.0 + 0.4.0 — not 0.5.0.
-            run_migrations("0.2.0", "0.4.0", tempfile.mkdtemp(), data_dir)
-
-            # Stale file remains because 0.5.0 wasn't in range.
-            self.assertTrue(os.path.isfile(stale))
 
 
 class TestMigrate050StripCodexEnforcementKeys(unittest.TestCase):
@@ -1856,27 +1601,6 @@ class TestMigrate080Compatibility(unittest.TestCase):
         )
         self.assertTrue(any("verify_tls=false" in c for c in ctx.changes))
 
-    def test_run_migrations_applies_080_after_072_bootstrap(self):
-        self._write(
-            "guardrail:\n"
-            "  enabled: true\n"
-            "audit_sinks:\n"
-            "  - name: webhook\n"
-            "    kind: http_jsonl\n"
-            "    http_jsonl:\n"
-            "      url: https://hooks.local/events\n"
-            "      verify_tls: false\n"
-        )
-
-        count = run_migrations("0.7.2", "0.8.0", self.tmp, self.data_dir)
-
-        self.assertEqual(count, 1)
-        after = self._read()
-        self.assertIn("  hook_fail_mode: open\n", after)
-        self.assertIn("      insecure_skip_verify: true\n", after)
-        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
-        self.assertIn("0.7.0", cursor["applied"])
-        self.assertIn("0.8.0", cursor["applied"])
 
     @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_upgrade_persists_flat_otel_and_preserves_named_routes(self):
@@ -2026,38 +1750,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIs(safety.SafetyError, safety_error)
         self.assertIs(connector_paths.skill_dirs, skill_dirs)
 
-    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
-    def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
-        self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
 
-        # Bootstrapping from a published 0.8.x marks the release-owned 0.8.0
-        # migration as already applied. The config-shape migration must still
-        # run so existing 0.8.x hosts are not stranded on the flat schema.
-        count = run_migrations("0.8.2", "0.8.3", self.tmp, self.data_dir)
-
-        self.assertEqual(count, 1)
-        with open(self.cfg_path) as handle:
-            doc = yaml.safe_load(handle) or {}
-        self.assertEqual(doc["config_version"], 7)
-        self.assertEqual(
-            doc["otel"]["destinations"][0]["name"],
-            "local-observability",
-        )
-        cursor = _read_json(os.path.join(self.data_dir, ".migration_state.json"))
-        self.assertIn("0.8.0", cursor["applied"])
-
-    def test_run_migrations_applies_080_runtime_json_cleanup_after_072_bootstrap(self):
-        runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
-        self._write("guardrail:\n  enabled: true\n  mode: observe\n")
-        _write_json(runtime_path, {"mode": "action", "scanner_mode": "both"})
-
-        count = run_migrations("0.7.2", "0.8.0", self.tmp, self.data_dir)
-
-        self.assertEqual(count, 1)
-        after = self._read()
-        self.assertIn("  mode: action\n", after)
-        self.assertIn("  scanner_mode: both\n", after)
-        self.assertFalse(os.path.exists(runtime_path))
 
     def test_no_op_when_audit_sinks_absent(self):
         original = "guardrail:\n  hook_fail_mode: closed\n"
@@ -2105,23 +1798,6 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
         assert_owner_only_file(path)
 
-    def test_scopes_temp_prefix_to_valid_upgrade_attempt(self):
-        path = os.path.join(self.tmp, "config.yaml")
-        token = "0123456789abcdef" * 2
-        original_mkstemp = tempfile.mkstemp
-        with (
-            patch.dict(
-                os.environ,
-                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
-            ),
-            patch("tempfile.mkstemp", wraps=original_mkstemp) as mkstemp,
-        ):
-            self.assertTrue(_atomic_write_text(path, "new\n"))
-
-        self.assertEqual(
-            mkstemp.call_args.kwargs["prefix"],
-            f".tmp.upgrade-{token}.",
-        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,89 +50,6 @@ func (fn readinessRoundTripFunc) RoundTrip(request *http.Request) (*http.Respons
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	if defaultStartReadinessTimeout != 60*time.Second {
 		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
-	}
-}
-
-func TestUpgradeControllerReadinessDelegationIsExactAndNeverWeakensRotation(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		value               string
-		rotationTransaction bool
-		want                bool
-	}{
-		{name: "ordinary direct start"},
-		{name: "false-like value", value: "0"},
-		{name: "word-like value", value: "true"},
-		{name: "fresh upgrade controller", value: "1", want: true},
-		{name: "rotation remains synchronous", value: "1", rotationTransaction: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(upgradeFreshProcessEnv, tc.value)
-			if got := upgradeControllerOwnsGatewayStartReadiness(tc.rotationTransaction); got != tc.want {
-				t.Fatalf(
-					"upgradeControllerOwnsGatewayStartReadiness(rotation=%v, value=%q) = %v, want %v",
-					tc.rotationTransaction,
-					tc.value,
-					got,
-					tc.want,
-				)
-			}
-		})
-	}
-}
-
-func TestFreshProcessMarkerIsHiddenFromGatewayAndWatchdogChildren(t *testing.T) {
-	for _, value := range []string{"1", "unexpected"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv(upgradeFreshProcessEnv, value)
-			restore, err := isolateUpgradeFreshProcessMarkerFromChildren()
-			if err != nil {
-				t.Fatalf("isolate marker: %v", err)
-			}
-			if observed, present := os.LookupEnv(upgradeFreshProcessEnv); present {
-				t.Fatalf("gateway/watchdog child environment retained marker %q", observed)
-			}
-			restore()
-			if observed := os.Getenv(upgradeFreshProcessEnv); observed != value {
-				t.Fatalf("restored management marker = %q, want %q", observed, value)
-			}
-		})
-	}
-}
-
-func TestUpgradeWaitReadyCommandIsHiddenAndFailsClosedBeforeConfigLoading(t *testing.T) {
-	if !upgradeWaitReadyCmd.Hidden {
-		t.Fatal("upgrade readiness bridge must remain hidden")
-	}
-	if upgradeWaitReadyCmd.PersistentPreRunE == nil {
-		t.Fatal("upgrade readiness bridge would inherit the sidecar root pre-run")
-	}
-	if err := upgradeWaitReadyCmd.PersistentPreRunE(upgradeWaitReadyCmd, nil); err != nil {
-		t.Fatalf("upgrade readiness no-op pre-run: %v", err)
-	}
-
-	oldVersion := appVersion
-	oldTimeout, _ := upgradeWaitReadyCmd.Flags().GetDuration(upgradeWaitReadyTimeoutFlag)
-	oldExpected, _ := upgradeWaitReadyCmd.Flags().GetString(upgradeWaitReadyVersionFlag)
-	t.Cleanup(func() {
-		appVersion = oldVersion
-		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, oldTimeout.String())
-		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, oldExpected)
-	})
-	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, "60s")
-	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, "0.9.0")
-
-	for _, marker := range []string{"", "0"} {
-		t.Setenv(upgradeFreshProcessEnv, marker)
-		if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "fresh-process controller marker") {
-			t.Fatalf("marker %q error = %v, want exact handoff refusal", marker, err)
-		}
-	}
-
-	t.Setenv(upgradeFreshProcessEnv, "1")
-	appVersion = "0.8.5"
-	if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "control binary version") {
-		t.Fatalf("control binary mismatch error = %v, want candidate-version refusal", err)
 	}
 }
 
@@ -188,13 +106,20 @@ observability:
 }
 
 func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
-	cfg.OTel.Enabled = false
+	for _, version := range []int{config.ObservabilityV8ConfigVersion, config.ObservabilityV8ConfigVersion + 1} {
+		cfg := config.DefaultConfig()
+		cfg.ConfigVersion = version
+		cfg.OTel.Enabled = false
 
-	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
-	if !requirements.telemetryEnabled {
-		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
+		requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+		if !requirements.telemetryEnabled {
+			t.Fatalf("config_version %d observability runtime was treated as disabled telemetry", version)
+		}
+	}
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion - 1
+	if daemonReadinessRequirementsFromConfig(cfg, time.Time{}).telemetryEnabled {
+		t.Fatal("pre-v8 config expected the canonical observability runtime")
 	}
 }
 
@@ -1352,49 +1277,6 @@ func (p *fakeReadinessProcess) StopStarted(pid int, _ time.Duration) error {
 	return p.stopErr
 }
 
-func TestVerifyDelegatedGatewayStartReturnsBeforeFrozenControllerTimeout(t *testing.T) {
-	base := &fakeReadinessProcess{running: true, pid: 42}
-	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
-
-	started := time.Now()
-	err := verifyDelegatedGatewayStart(process, 42)
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("delegated launch verification took %s, want well below frozen controller's 30s timeout", elapsed)
-	}
-	if err != nil {
-		t.Fatalf("strong live delegated launch rejected: %v", err)
-	}
-	if base.stopCalls != 0 {
-		t.Fatalf("slow-but-live delegated gateway was stopped %d times", base.stopCalls)
-	}
-}
-
-func TestVerifyDelegatedGatewayStartFailsClosedBeforeReadinessDelegation(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		running    bool
-		pid        int
-		identityOK bool
-	}{
-		{name: "process exited", pid: 42, identityOK: true},
-		{name: "PID changed", running: true, pid: 43, identityOK: true},
-		{name: "strong identity missing", running: true, pid: 42},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			base := &fakeReadinessProcess{running: tc.running, pid: tc.pid}
-			process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: tc.identityOK}
-
-			err := verifyDelegatedGatewayStart(process, 42)
-			if err == nil || !strings.Contains(err.Error(), "process start identity") {
-				t.Fatalf("delegated launch error = %v, want strong live identity failure", err)
-			}
-			if base.stopCalls != 1 || base.stoppedPID != 42 {
-				t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
-			}
-		})
-	}
-}
-
 func TestWaitForStartedDaemonStopsSlowLiveProcessAfterDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
@@ -1916,6 +1798,100 @@ func TestWaitForGatewayReadinessFailsFastOnGuardrailError(t *testing.T) {
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
+	}
+}
+
+func admissionRefusedSnapshot() gateway.HealthSnapshot {
+	snap := readinessSnapshot(gateway.StateError, gateway.StateDisabled)
+	snap.Guardrail.LastError = "hook contract admission failed: connector codex hook contract drift detected"
+	snap.Guardrail.Details = map[string]interface{}{
+		gateway.GuardrailHookContractAdmissionRefused: []interface{}{"codex"},
+	}
+	return snap
+}
+
+func TestGatewaySnapshotReadyAcceptsOnlyAnAdmissionRefusedGuardrail(t *testing.T) {
+	allowed := daemonReadinessRequirements{guardrailEnabled: true, allowHookContractAdmissionRefusal: true}
+	if ready, err := gatewaySnapshotReady(admissionRefusedSnapshot(), allowed); err != nil || !ready {
+		t.Fatalf("admission-refused readiness = %v, %v; want ready", ready, err)
+	}
+
+	strict := allowed
+	strict.allowHookContractAdmissionRefusal = false
+	if _, err := gatewaySnapshotReady(admissionRefusedSnapshot(), strict); err == nil ||
+		!strings.Contains(err.Error(), "gateway guardrail failed during startup") {
+		t.Fatalf("strict admission-refused error = %v, want the guardrail startup failure", err)
+	}
+
+	unstructured := admissionRefusedSnapshot()
+	unstructured.Guardrail.Details = nil
+	if _, err := gatewaySnapshotReady(unstructured, allowed); err == nil {
+		t.Fatal("a guardrail error without the structured admission detail was accepted")
+	}
+
+	telemetryStarting := admissionRefusedSnapshot()
+	telemetryStarting.Telemetry.State = gateway.StateStarting
+	waiting := allowed
+	waiting.telemetryEnabled = true
+	if ready, err := gatewaySnapshotReady(telemetryStarting, waiting); err != nil || ready {
+		t.Fatalf("admission-refused readiness with starting telemetry = %v, %v; want still waiting", ready, err)
+	}
+
+	apiFailed := admissionRefusedSnapshot()
+	apiFailed.API = gateway.SubsystemHealth{State: gateway.StateError, LastError: "bind failed"}
+	if _, err := gatewaySnapshotReady(apiFailed, allowed); err == nil || !strings.Contains(err.Error(), "bind failed") {
+		t.Fatalf("admission-refused readiness with a failed API = %v, want the API failure", err)
+	}
+}
+
+func TestWaitForStartedDaemonLeavesAdmissionRefusedGatewayRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(admissionRefusedSnapshot())
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	snap, ready, err := waitForStartedDaemon(
+		process, 42, srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, allowHookContractAdmissionRefusal: true},
+	)
+	if err != nil || !ready || base.stopCalls != 0 {
+		t.Fatalf("admission-refused start ready=%v err=%v stopCalls=%d, want a running gateway", ready, err, base.stopCalls)
+	}
+	refused, ok := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	if !ok || !slices.Equal(refused, []string{"codex"}) {
+		t.Fatalf("refused connectors = %v, %v; want codex from the status document", refused, ok)
+	}
+
+	_, ready, err = waitForStartedDaemon(
+		process, 42, srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+	)
+	if err == nil || ready || base.stopCalls != 1 {
+		t.Fatalf("strict start ready=%v err=%v stopCalls=%d, want the launched gateway stopped", ready, err, base.stopCalls)
+	}
+}
+
+func TestHookContractAdmissionStartErrorUsesTheInstallerExitCode(t *testing.T) {
+	if gatewayStartAdmissionRefusedExitCode != 3 {
+		t.Fatalf("admission-refused exit code = %d; installers depend on 3", gatewayStartAdmissionRefusedExitCode)
+	}
+	err := hookContractAdmissionStartError(
+		[]string{"codex", "claudecode"},
+		"hook contract admission failed: connector codex hook contract drift detected",
+	)
+	if code := commandExitCode(err); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	for _, want := range []string{
+		"gateway is running",
+		"hook contract drift detected",
+		"`defenseclaw setup guardrail --connector codex` and `defenseclaw setup guardrail --connector claudecode`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("admission error %q is missing %q", err.Error(), want)
+		}
 	}
 }
 

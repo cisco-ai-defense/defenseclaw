@@ -101,7 +101,7 @@ def test_top_level_validate_reaches_canonical_diagnostics_for_malformed_v8(tmp_p
 
     assert result.exit_code == 1
     assert "$.observability: malformed YAML source" in result.output
-    assert "run 'defenseclaw upgrade' first" not in result.output
+    assert "run 'defenseclaw migrate' first" not in result.output
     root_preflight.assert_not_called()
     inspect.assert_called_once_with("validate", config_path=str(config_path))
 
@@ -286,5 +286,5 @@ def test_future_config_mutation_refuses_v7_source(tmp_path: Path) -> None:
         cmd_config.config_cmd.commands.pop("mutation-probe", None)
 
     assert result.exit_code == 1
-    assert "run 'defenseclaw upgrade' first" in result.output
+    assert "run 'defenseclaw migrate' first" in result.output
     root_preflight.assert_not_called()

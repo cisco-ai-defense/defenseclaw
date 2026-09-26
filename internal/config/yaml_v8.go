@@ -267,31 +267,32 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
 			"config_version is required by the v8 configuration entrypoint",
-			"run defenseclaw upgrade to create a config_version: 8 source")
+			"run `defenseclaw migrate` to create a current source")
 	}
 	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8",
-			"set config_version: 8 only after completing the DefenseClaw upgrade")
+			"config_version must be an integer",
+			"run `defenseclaw migrate` instead of editing config_version by hand")
 	}
 	var version int64
 	if err := value.Decode(&version); err != nil {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
 	switch {
-	case version == v8YAMLConfigVersion:
+	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
-			"this configuration requires the v7-to-v8 upgrade", "run defenseclaw upgrade before starting a v8 gateway")
-	case version > v8YAMLConfigVersion:
+			fmt.Sprintf("config_version %d is older than %d", version, v8YAMLConfigVersion),
+			"run `defenseclaw migrate`")
+	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
-			"this configuration version is newer than the supported v8 contract",
-			"use a DefenseClaw build that supports the newer configuration")
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			"upgrade DefenseClaw or restore ~/.defenseclaw/previous")
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
 }
 

@@ -37,6 +37,7 @@ actor AuditStore {
 
     private var db: OpaquePointer?
     private var openedIdentity: DatabaseFamilyIdentity?
+    private var lastQuerySucceeded = false
     private let path: String
 
     init(url: URL) {
@@ -117,8 +118,9 @@ actor AuditStore {
     }
 
     /// Runs a query, returning rows as [column: value] dictionaries.
-    private func query(_ sql: String, binds: [Any] = []) -> [[String: Any]] {
+    private func query(_ sql: String, binds: [Any] = [], maximumBytes: Int = .max) -> [[String: Any]] {
         ensureOpen()
+        lastQuerySucceeded = false
         guard let db else { return [] }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
@@ -135,6 +137,7 @@ actor AuditStore {
         }
 
         var rows: [[String: Any]] = []
+        var retainedBytes = 0
         var attempts = 0
         while true {
             let rc = sqlite3_step(stmt)
@@ -150,12 +153,19 @@ actor AuditStore {
                     default: break
                     }
                 }
+                let rowBytes = row.values.reduce(0) { $0 + (($1 as? String)?.utf8.count ?? 8) }
+                if rowBytes > maximumBytes - retainedBytes {
+                    lastQuerySucceeded = true // A valid bounded prefix, not a failed read.
+                    break
+                }
+                retainedBytes += rowBytes
                 rows.append(row)
             } else if rc == SQLITE_BUSY && attempts < 5 {
                 attempts += 1
                 usleep(50_000)
                 continue
             } else {
+                lastQuerySucceeded = rc == SQLITE_DONE
                 break
             }
         }
@@ -188,6 +198,50 @@ actor AuditStore {
     }
 
     // MARK: - Queries used by panels
+
+    /// Newest canonical logs, bounded in SQL before decoding. Nil/locked data
+    /// is distinct from an empty snapshot and must not revive a retired file.
+    func canonicalHistory(limit: Int = 1000) -> CanonicalEventHistory {
+        ensureOpen()
+        guard db != nil else { return .unavailable }
+        let columns = columnNames(in: "audit_events")
+        guard lastQuerySucceeded else { return .unavailable }
+        let required: Set<String> = [
+            "id", "timestamp", "bucket", "event_name", "source", "signal", "severity",
+            "action", "actor", "details", "connector", "payload_json", "projected_record_json",
+        ]
+        guard required.isSubset(of: columns) else {
+            // A partly migrated v8 table is not evidence of a legacy runtime.
+            return columns.contains("bucket") || columns.contains("payload_json")
+                ? .unavailable : .unsupported
+        }
+        let metadata = ["id", "timestamp", "bucket", "event_name", "source", "severity",
+                        "action", "actor", "details", "connector"]
+            .map { "substr(COALESCE(\($0), ''), 1, 4096) AS \($0)" }.joined(separator: ", ")
+        let rows = query("""
+            SELECT \(metadata),
+                CASE WHEN length(CAST(payload_json AS BLOB)) <= 65536
+                     THEN payload_json ELSE '' END AS payload_json,
+                CASE WHEN length(CAST(projected_record_json AS BLOB)) <= 65536
+                     THEN projected_record_json ELSE '' END AS projected_record_json,
+                CASE WHEN length(CAST(payload_json AS BLOB)) > 65536 THEN 1 ELSE 0 END AS omitted
+            FROM audit_events
+            WHERE signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''
+            ORDER BY timestamp DESC, rowid DESC LIMIT ?
+            """, binds: [max(1, min(limit, 1000))], maximumBytes: 4 * 1024 * 1024)
+        guard lastQuerySucceeded else { return .unavailable }
+        return .available(rows.map { row in
+            func text(_ key: String) -> String { row[key] as? String ?? "" }
+            return CanonicalEvent(
+                id: text("id"), timestamp: DCDates.parse(row["timestamp"]), bucket: text("bucket"),
+                eventName: text("event_name"), source: text("source"),
+                severity: Severity.parse(text("severity")), action: text("action"),
+                actor: text("actor"), details: text("details"), connector: text("connector"),
+                payloadJSON: text("payload_json"), projectionJSON: text("projected_record_json"),
+                payloadOmitted: (row["omitted"] as? Int) == 1
+            )
+        })
+    }
 
     func recentEvents(limit: Int, offset: Int = 0, search: String? = nil,
                       severities: [Severity]? = nil, actionLike: [String]? = nil) -> [AuditEvent] {

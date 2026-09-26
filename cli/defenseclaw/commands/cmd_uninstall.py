@@ -459,6 +459,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
+            "skill-scanner.cmd",
+            "mcp-scanner.cmd",
         )
     else:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
@@ -809,6 +811,8 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "skill-scanner.cmd",
+                "mcp-scanner.cmd",
             }
             if plan.platform_name == "win32"
             else {

@@ -93,7 +93,7 @@ def config_cmd(ctx: click.Context) -> None:
     ):
         raise click.ClickException(
             "configuration schema v8 is required for config changes; "
-            "run 'defenseclaw upgrade' first"
+            "run 'defenseclaw migrate' first"
         )
 
 
@@ -344,7 +344,7 @@ def validate_config() -> ValidationResult:
             res.errors.append("canonical v8 validator returned no validity decision")
         return res
 
-    res.errors.append("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+    res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
 
 

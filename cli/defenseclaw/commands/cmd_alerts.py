@@ -559,7 +559,7 @@ def _set_alert_disposition(
     yes: bool = False,
 ) -> int | None:
     if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
     selector = _alert_selector(
         alert_ids=alert_ids,

@@ -281,10 +281,10 @@ def test_make_and_release_workflow_enforce_extension_artifact_contract() -> None
 
     assert "_stage-extension-fingerprint: plugin" in makefile
     assert "dist-cli: _bundle-data _stage-extension-fingerprint" in makefile
-    assert "dist-plugin: _stage-extension-fingerprint" in makefile
-    assert "scripts/extension_runtime_fingerprint.py verify-archive" in makefile
-    assert "scripts/extension_runtime_fingerprint.py verify-contract" in makefile
-    assert "make dist-cli dist-plugin dist-extension-contract" in workflow
+    # The gateway embeds the plugin, so releases no longer ship a separate
+    # plugin tarball; the wheel still carries the staged fingerprint.
+    assert "make extensions" in workflow
+    assert "make dist-cli dist-installers dist-requirements" in workflow
     windows_package_job = windows_workflow[windows_workflow.index("  package-artifact:") :]
     assert "actions/setup-node@" in windows_package_job
     assert 'node-version: "24"' in windows_package_job

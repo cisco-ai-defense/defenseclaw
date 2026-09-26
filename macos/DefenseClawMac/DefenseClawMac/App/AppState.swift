@@ -114,6 +114,9 @@ final class AppState {
     let activity: CommandActivityStore
     let updater = UpdateChecker()
     private(set) var installationContext: InstallationContext
+    /// Source-root marker left by a source (checkout) install, if present.
+    /// install.sh would replace that runtime, so the app never runs it here.
+    private(set) var sourceRuntimeMarker: String?
     /// Changes before any path-owning actor is rebound. View-local async
     /// loaders capture this value and discard results from the old install.
     @ObservationIgnored private(set) var installationGeneration = 0
@@ -126,6 +129,8 @@ final class AppState {
     var installationReadOnlyReason: String? { installationContext.accessMode.reason }
     var installationContextSwitchAllowed: Bool {
         !installationBindInProgress
+            && !gatewayStartupInProgress
+            && !firstRunSetupInProgress
             && !updateOperationInProgress
             && !runtimeVersionCheckInProgress
             && !scanInFlight
@@ -136,51 +141,61 @@ final class AppState {
             && !activity.entries.contains(where: { $0.status == .running })
     }
 
-    // Self-update state (this Mac app)
-    var availableUpdate: ReleaseInfo?
-    var upgradeState: UpgradeState = .idle
+    // Install / update state. The app and the runtime (CLI + gateway) ship as
+    // one release, and that release's install.sh updates both.
+    /// Latest release from the last successful check.
+    var latestRelease: ReleaseInfo?
     var updateBannerDismissed = false
-    /// Persisted across launches: GitHub's unauthenticated API allows 60
-    /// requests/hour per IP, so app relaunches must not re-check each time.
-    @ObservationIgnored @AppStorage("lastUpdateCheckTime") private var lastUpdateCheckTime: Double = 0
-    @ObservationIgnored @AppStorage("lastMacAppUpdateCheckTime") private var lastMacAppUpdateCheckTime: Double = 0
-
-    // DefenseClaw runtime (CLI + gateway) update state
-    var installedRuntimeVersion: String?
-    var runtimeSetupCommands: Set<String>?
-    var runtimeVersionCheckInProgress = false
-    var runtimeVersionError: String?
-    var runtimeReleaseChecked = false
-    var availableRuntimeUpdate: ReleaseInfo?
-    var runtimeUpgradeState: UpgradeState = .idle
-    /// Bundled-payload fresh-install progress (RuntimeInstaller.swift).
-    var runtimeInstallState: RuntimeInstallState = .idle
-    /// Current installer step's activity runID — the Cancel target.
-    var runtimeInstallRunID: UUID?
-    /// First-run sheet dismissal for this launch (Open Activity / Esc); the
-    /// sheet re-presents next launch while no configuration exists.
-    var firstRunDismissed = false
-    var runtimeBannerDismissed = false
-    var runtimeUpgradeLogTail = ""
-    @ObservationIgnored @AppStorage("lastRuntimeUpdateCheckTime") private var lastRuntimeUpdateCheckTime: Double = 0
-    /// Human-readable action guidance, or diagnostic output from a failed runtime action.
-    /// The runnable command lives separately in UpgradeState.actionRequired.
-    var runtimeUpgradeLog = ""
+    var updateCheckInProgress = false
     /// True when the last release lookup failed (offline / GitHub rate limit) —
     /// "Up to date" must not be claimed on a failed check.
     var lastCheckFailed = false
-    var appUpdateCheckFailed = false
-    var runtimeUpdateCheckFailed = false
+    /// Pulse checks are throttled because GitHub's unauthenticated API is
+    /// limited. Each launch refreshes once because release details are not
+    /// persisted.
+    @ObservationIgnored @AppStorage("lastUpdateCheckTime") private var lastUpdateCheckTime: Double = 0
+    @ObservationIgnored private var releaseCheckedThisLaunch = false
+    /// install.sh progress, shared by the first-run sheet, Settings, and the
+    /// update banner.
+    var installerState: InstallerState = .idle
+    /// install.sh replaced this bundle; the running process is the old version.
+    var relaunchPending = false
+
+    // DefenseClaw runtime (CLI + gateway) detection
+    var installedRuntimeVersion: String?
+    var runtimeSetupCommands: Set<String>?
+    var runtimeDiscoveryCommands: Set<String>?
+    var runtimeVersionCheckInProgress = false
+    var runtimeVersionError: String?
+    /// First-run sheet dismissal for this launch (Open Activity / Esc); the
+    /// sheet re-presents next launch while no configuration exists.
+    var firstRunDismissed = false
+    var firstRunSetupInProgress = false
+    var firstRunSetupNeedsCompletion = false
     @ObservationIgnored private var alertRefreshInProgress = false
 
-    var updateOperationInProgress: Bool {
-        func busy(_ state: UpgradeState) -> Bool {
-            switch state {
-            case .checking, .downloading, .installing: true
-            default: false
-            }
+    var sourceRuntimeNotice: String? {
+        sourceRuntimeMarker.map {
+            "A source DefenseClaw installation was detected (\($0)). The app will not install over it; update it through its source workflow."
         }
-        return busy(upgradeState) || busy(runtimeUpgradeState) || runtimeInstallState.isRunning
+    }
+
+    /// The latest release when it is newer than this app or the installed
+    /// runtime; install.sh brings both to that version.
+    var availableUpdate: ReleaseInfo? {
+        guard let latestRelease else { return nil }
+        let installed = [UpdateChecker.currentVersion] + [installedRuntimeVersion].compactMap { $0 }
+        return installed.contains { UpdateChecker.isNewer(latestRelease.version, than: $0) } ? latestRelease : nil
+    }
+
+    /// install.sh swaps this bundle — and the app restarts — only when the
+    /// update is newer than the running app.
+    var updateRestartsApp: Bool {
+        availableUpdate.map { UpdateChecker.isNewer($0.version, than: UpdateChecker.currentVersion) } ?? false
+    }
+
+    var updateOperationInProgress: Bool {
+        updateCheckInProgress || installerState.isBusy
     }
 
     // Pulse state
@@ -270,6 +285,13 @@ final class AppState {
     @ObservationIgnored @AppStorage(SettingsKeys.notifyHigh) var notifyHigh = true
     @ObservationIgnored @AppStorage(SettingsKeys.notifyGatewayOffline) var notifyGatewayOffline = true
     @ObservationIgnored @AppStorage(SettingsKeys.seenAlertHighWater) var seenAlertHighWater: Double = 0
+
+    @ObservationIgnored private var hasStarted = false
+    @ObservationIgnored private let gatewayAutoStart = GatewayAutoStartCoordinator()
+    @ObservationIgnored private var commandGeneration = 0
+    private(set) var gatewayStartupInProgress = false
+    @ObservationIgnored private var gatewayStartupRunID: UUID?
+    private(set) var gatewayStartupError: String?
 
     private var pulseTask: Task<Void, Never>?
     private var wasReachable: Bool?
@@ -439,18 +461,13 @@ final class AppState {
     private func resetInstallationScopedState() {
         installedRuntimeVersion = nil
         runtimeSetupCommands = nil
+        runtimeDiscoveryCommands = nil
         runtimeVersionError = nil
-        runtimeReleaseChecked = false
-        availableRuntimeUpdate = nil
-        runtimeUpgradeState = .idle
-        runtimeInstallState = .idle
-        runtimeInstallRunID = nil
+        installerState = .idle
         firstRunDismissed = false
-        runtimeBannerDismissed = false
-        runtimeUpgradeLogTail = ""
-        runtimeUpgradeLog = ""
-        runtimeUpdateCheckFailed = false
-        lastRuntimeUpdateCheckTime = 0
+        firstRunSetupInProgress = false
+        firstRunSetupNeedsCompletion = false
+        gatewayStartupError = nil
 
         health = HealthSnapshot()
         scanners = []
@@ -491,17 +508,122 @@ final class AppState {
     }
 
     func start() {
+        // The main window can be recreated without relaunching the app. Do not
+        // restart a gateway the user stopped, or repeat authorization prompts.
+        guard !hasStarted else { return }
+        hasStarted = true
         Task {
             await bindSelectedInstallation()
             startPulse()
+            // Gateway startup can wait for readiness; the pulse and the launch
+            // checks below must not wait for it.
+            Task { await ensureGatewayStarted(origin: "App Launch") }
             // Local runtime detection is independent of the throttled GitHub
             // release lookup so every launch can report the installed CLI.
             await refreshInstalledRuntimeVersion()
-            // Respect the persisted 6h check window — relaunches must not
-            // burn the unauthenticated GitHub API quota (60/hr per IP).
+            // One release lookup per launch (release details are not
+            // persisted); the pulse then keeps to the 6h window.
             await checkForUpdates()
         }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+    }
+
+    private func gatewayStartupSnapshot() -> GatewayAutoStartSnapshot {
+        // Release lookups are read-only and run in the background during setup.
+        // A downloading or running install.sh owns the gateway: it stops,
+        // swaps, and restarts it, so automatic startup must never race it.
+        GatewayAutoStartSnapshot(
+            generation: installationGeneration,
+            commandGeneration: commandGeneration,
+            enabled: GatewayAutoStartPreference.isEnabled(),
+            permitsMutation: installationMutationsAllowed,
+            configurationReady: installDetected && config.loadError.isEmpty
+                && config.rosterError.isEmpty
+                && selectedInstallationContext() == installationContext,
+            operationInProgress: installationBindInProgress || firstRunSetupInProgress
+                || installerState.isBusy
+                || activity.entries.contains(where: { $0.status.isActive })
+        )
+    }
+
+    /// One automatic attempt per app launch. First-run completion uses a new
+    /// coordinator because an explicit setup retry is a new user action.
+    /// The exact lifecycle command preserves administrator routing and Activity.
+    @discardableResult
+    func ensureGatewayStarted(
+        origin: String,
+        runID: UUID = UUID(),
+        afterSetup: Bool = false
+    ) async -> GatewayAutoStartCoordinator.Outcome {
+        guard !gatewayStartupInProgress else { return .skipped }
+        let snapshot = gatewayStartupSnapshot()
+        guard snapshot.isEligible else { return .skipped }
+        gatewayStartupInProgress = true
+        defer { gatewayStartupInProgress = false }
+        let coordinator = afterSetup ? GatewayAutoStartCoordinator() : gatewayAutoStart
+        let outcome = await coordinator.ensureStarted(
+            snapshot: snapshot,
+            currentSnapshot: { self.gatewayStartupSnapshot() },
+            probe: {
+                do {
+                    _ = try await self.gateway.health()
+                    return .running
+                } catch GatewayError.offline {
+                    // Absence is the only safe automatic-start signal. A
+                    // timeout, rejected token, or bad response can belong to
+                    // an already-running process that must not be replaced.
+                    guard await self.cli.locateBinary(named: "defenseclaw-gateway") != nil else {
+                        if self.gatewayStartupSnapshot() == snapshot {
+                            self.gatewayStartupError = "The installed gateway could not be found. Check the runtime installation in Settings → Connection."
+                        }
+                        return .unavailable
+                    }
+                    return .offline
+                } catch {
+                    return .unavailable
+                }
+            },
+            start: {
+                self.gatewayStartupRunID = runID
+                defer { self.gatewayStartupRunID = nil }
+                self.gatewayStartupError = nil
+                let expectedCommandGeneration = self.commandGeneration + 1
+                let result = await self.runCommand(
+                    runID: runID,
+                    title: "Start gateway automatically",
+                    binary: "defenseclaw-gateway",
+                    arguments: ["start"],
+                    category: "daemon",
+                    origin: origin,
+                    successEffects: ["Gateway started"],
+                    suggestedNextAction: "Review gateway health on Overview."
+                )
+                guard self.installationSnapshotIsCurrent(snapshot.generation),
+                      self.selectedInstallationContext() == self.installationContext,
+                      self.commandGeneration == expectedCommandGeneration else { return .skipped }
+                guard result.succeeded else {
+                    self.gatewayStartupError = result.cancelled
+                        ? "Automatic gateway start was cancelled. Use Start Gateway in Overview when you are ready."
+                        : "The gateway could not start automatically. Review the result in Activity, then use Start Gateway in Overview to retry."
+                    return result.cancelled ? .cancelled : .failed
+                }
+                do {
+                    let health = try await self.gateway.health()
+                    guard self.installationSnapshotIsCurrent(snapshot.generation),
+                          self.commandGeneration == expectedCommandGeneration else { return .skipped }
+                    self.health = health
+                    self.gatewayReachable = true
+                    self.lastGatewayError = nil
+                    return .started
+                } catch {
+                    guard self.installationSnapshotIsCurrent(snapshot.generation),
+                          self.commandGeneration == expectedCommandGeneration else { return .skipped }
+                    self.gatewayStartupError = "The start command completed, but gateway readiness could not be confirmed. Review Activity and refresh Overview."
+                    return .failed
+                }
+            }
+        )
+        return outcome
     }
 
     func startPulse() {
@@ -605,6 +727,7 @@ final class AppState {
             }
             gatewayReachable = true
             lastGatewayError = nil
+            gatewayStartupError = nil
         } catch let err as GatewayError {
             guard installationSnapshotIsCurrent(generation) else { return }
             if gatewayReachable, notifyGatewayOffline, case .offline = err {
@@ -644,8 +767,10 @@ final class AppState {
         guard installationSnapshotIsCurrent(generation) else { return }
         sessionTotalScans = scanCount
 
-        // Tail the JSONL stream and refresh the alert set.
-        _ = await activeStream.poll()
+        // Prefer immutable canonical events; retain file fallback for older schemas.
+        let history = await activeAudit.canonicalHistory()
+        guard installationSnapshotIsCurrent(generation) else { return }
+        _ = await activeStream.poll(canonicalHistory: history)
         guard installationSnapshotIsCurrent(generation) else { return }
         await refreshAlerts()
         guard installationSnapshotIsCurrent(generation) else { return }
@@ -755,6 +880,17 @@ final class AppState {
                 output: "Operation refused by the Mac app: wait for the installation switch to finish."
             )
         }
+        if let startupRunID = gatewayStartupRunID, startupRunID != runID,
+           binary == "defenseclaw-gateway", let action = arguments.first,
+           GatewayAdminAction(rawValue: action) != nil {
+            return CLIResult(
+                exitCode: 75,
+                output: "Automatic gateway startup is still running. Wait for its result or cancel it in Activity before starting, stopping, or restarting the gateway."
+            )
+        }
+        // Any user mutation during the startup probe supersedes that probe,
+        // including an explicit Stop that finishes before the probe returns.
+        if mutation { commandGeneration += 1 }
         let result = await activity.run(
             id: runID,
             title: title,
@@ -930,68 +1066,38 @@ final class AppState {
         return logPanelRequest
     }
 
-    // MARK: - Self-update
+    // MARK: - Install / update
 
-    /// Check GitHub for newer releases of BOTH the Mac app and the
-    /// DefenseClaw runtime; re-checked every 6h by the pulse.
+    /// Check GitHub for the latest release once per launch, so a previous
+    /// process's throttle cannot hide an update prompt, then every 6h from the
+    /// pulse. The app and the runtime share one release, so one lookup covers
+    /// both.
     func checkForUpdates(force: Bool = false) async {
         guard !updateOperationInProgress else { return }
-        guard force || Date().timeIntervalSince1970 - lastUpdateCheckTime > 6 * 3600 else { return }
-        let now = Date().timeIntervalSince1970
-        lastUpdateCheckTime = now
-        lastMacAppUpdateCheckTime = now
-        lastRuntimeUpdateCheckTime = now
+        guard force || !releaseCheckedThisLaunch
+                || Date().timeIntervalSince1970 - lastUpdateCheckTime > 6 * 3600 else { return }
+        releaseCheckedThisLaunch = true
+        lastUpdateCheckTime = Date().timeIntervalSince1970
+        updateCheckInProgress = true
+        defer { updateCheckInProgress = false }
 
-        let appRelease = await refreshMacAppUpdate()
-        let runtimeRelease = await refreshRuntimeUpdate()
-        lastCheckFailed = (appRelease == nil || runtimeRelease == nil)
-    }
-
-    /// Check only this macOS app. Used by Settings when the user wants to keep
-    /// the DefenseClaw runtime untouched.
-    func checkForMacAppUpdate(force: Bool = false) async {
-        guard !updateOperationInProgress else { return }
-        guard force || Date().timeIntervalSince1970 - lastMacAppUpdateCheckTime > 6 * 3600 else { return }
-        lastMacAppUpdateCheckTime = Date().timeIntervalSince1970
-
-        _ = await refreshMacAppUpdate()
-        lastCheckFailed = appUpdateCheckFailed || runtimeUpdateCheckFailed
-    }
-
-    /// Check only the underlying DefenseClaw runtime.
-    func checkForRuntimeUpdate(force: Bool = false) async {
-        guard !updateOperationInProgress else { return }
-        // Always refresh the local version. Only the network release lookup is
-        // subject to the six-hour throttle.
         await refreshInstalledRuntimeVersion()
-        guard force || Date().timeIntervalSince1970 - lastRuntimeUpdateCheckTime > 6 * 3600 else { return }
-        lastRuntimeUpdateCheckTime = Date().timeIntervalSince1970
-
-        _ = await refreshRuntimeUpdate(refreshInstalledVersion: false)
-        lastCheckFailed = appUpdateCheckFailed || runtimeUpdateCheckFailed
+        // A nil release means the check FAILED (offline, API rate limit) —
+        // keep any previously known release rather than clearing it.
+        guard let release = await updater.latestRelease() else {
+            lastCheckFailed = true
+            return
+        }
+        lastCheckFailed = false
+        if release != latestRelease { updateBannerDismissed = false }
+        latestRelease = release
     }
 
-    private func refreshMacAppUpdate() async -> ReleaseInfo? {
-        upgradeState = .checking
-        defer {
-            if upgradeState == .checking { upgradeState = .idle }
-        }
-
-        // Mac app. A nil release means the check FAILED (offline, API rate
-        // limit) — keep any previously known update rather than clearing it.
-        let appRelease = await updater.latestRelease()
-        if let release = appRelease {
-            appUpdateCheckFailed = false
-            if UpdateChecker.isNewer(release.version, than: UpdateChecker.currentVersion) {
-                if release != availableUpdate { updateBannerDismissed = false }
-                availableUpdate = release
-            } else {
-                availableUpdate = nil
-            }
-        } else {
-            appUpdateCheckFailed = true
-        }
-        return appRelease
+    /// A source install disables the app's Install / Update actions.
+    func refreshSourceRuntimeMarker() {
+        sourceRuntimeMarker = UpdateChecker.sourceRuntimeMarker(
+            home: FileManager.default.homeDirectoryForCurrentUser.path
+        )
     }
 
     /// Detect the locally installed CLI without contacting GitHub. Settings
@@ -1003,194 +1109,145 @@ final class AppState {
         runtimeVersionCheckInProgress = true
         defer { runtimeVersionCheckInProgress = false }
 
+        refreshSourceRuntimeMarker()
         let locatedBinary = await cli.locateBinary()
         guard installationSnapshotIsCurrent(generation) else { return }
         guard locatedBinary != nil else {
             installedRuntimeVersion = nil
             runtimeSetupCommands = nil
+            runtimeDiscoveryCommands = nil
             runtimeVersionError = "DefenseClaw CLI not found. Set its path in Connection."
             return
         }
 
         let result = await cli.run(arguments: ["--version"], mutation: false)
         guard installationSnapshotIsCurrent(generation) else { return }
-        if let version = UpdateChecker.parseVersion(result.output) {
+        if result.succeeded, let version = UpdateChecker.parseVersion(result.output) {
             installedRuntimeVersion = version
             let setupHelp = await cli.run(arguments: ["setup", "--help"], mutation: false)
             guard installationSnapshotIsCurrent(generation) else { return }
             runtimeSetupCommands = setupHelp.succeeded
                 ? CommandRegistry.setupCommands(from: setupHelp.output)
                 : nil
+            let runtimeHelp = await cli.run(arguments: ["agent", "discovery", "runtime", "--help"], mutation: false)
+            guard installationSnapshotIsCurrent(generation) else { return }
+            runtimeDiscoveryCommands = runtimeHelp.succeeded
+                ? CommandRegistry.setupCommands(from: runtimeHelp.output) : nil
             runtimeVersionError = nil
-            // A detected, working CLI supersedes an earlier bundled-install
-            // failure (e.g. the user installed via the shell script instead);
-            // don't leave a stale red "failed" label for the life of this
-            // menu-bar process. Activity retains the full failure record.
-            if case .failed = runtimeInstallState { runtimeInstallState = .idle }
         } else {
             installedRuntimeVersion = nil
             runtimeSetupCommands = nil
+            runtimeDiscoveryCommands = nil
             runtimeVersionError = result.succeeded
                 ? "Could not read the installed runtime version."
                 : "Runtime version check failed (exit \(result.exitCode))."
         }
     }
 
-    private func refreshRuntimeUpdate(refreshInstalledVersion: Bool = true) async -> ReleaseInfo? {
-        runtimeUpgradeState = .checking
-        defer {
-            if runtimeUpgradeState == .checking { runtimeUpgradeState = .idle }
+    /// Download `version`'s install.sh, verify it against that release's
+    /// checksums.txt, and run it through the activity store. install.sh owns
+    /// the whole transaction — the runtime and this app bundle, with automatic
+    /// rollback — so the app only picks the version (its own on first run, the
+    /// latest release to update) and relaunches when the bundle changed.
+    func runReleaseInstaller(version: String) async {
+        guard !installerState.isBusy else { return }
+        guard installationMutationsAllowed, !installationBindInProgress else {
+            installerState = .failed(
+                version: version,
+                detail: installationReadOnlyReason ?? "This installation is read only."
+            )
+            return
+        }
+        guard !gatewayStartupInProgress,
+              !activity.entries.contains(where: { $0.status.isActive }) else {
+            installerState = .failed(
+                version: version,
+                detail: "Wait for the running DefenseClaw commands to finish, then try again."
+            )
+            return
+        }
+        refreshSourceRuntimeMarker()
+        if let notice = sourceRuntimeNotice {
+            installerState = .failed(version: version, detail: notice)
+            return
+        }
+        let appPath = Bundle.main.bundlePath
+        guard UpdateChecker.canReplaceBundle(atPath: appPath) else {
+            installerState = .failed(
+                version: version,
+                detail: "DefenseClaw can't replace itself at \(appPath). Move it to your Applications folder, reopen it from there, and try again."
+            )
+            return
         }
 
-        // DefenseClaw runtime: installed via `defenseclaw --version`,
-        // latest from the upstream repo's releases.
-        if refreshInstalledVersion {
-            await refreshInstalledRuntimeVersion()
+        installerState = .downloading(version: version)
+        let installer: URL
+        do {
+            installer = try await updater.fetchInstaller(version: version)
+        } catch {
+            installerState = .failed(version: version, detail: error.localizedDescription)
+            return
         }
-        let runtimeRelease = await updater.latestRuntimeRelease()
-        runtimeReleaseChecked = true
-        runtimeUpdateCheckFailed = runtimeRelease == nil
-        if let installed = installedRuntimeVersion, let latest = runtimeRelease {
-            if UpdateChecker.isNewer(latest.version, than: installed) {
-                if latest != availableRuntimeUpdate { runtimeBannerDismissed = false }
-                availableRuntimeUpdate = latest
-            } else {
-                availableRuntimeUpdate = nil
-            }
-        } else if installedRuntimeVersion == nil {
-            availableRuntimeUpdate = nil
-        }
-        return runtimeRelease
-    }
 
-    /// Turn historical runtime-upgrade output into a human message. Runtime
-    /// mutation is no longer launched by the app because only the release-owned
-    /// latest-mode resolver can select a required bridge and hand off to a
-    /// fresh controller.
-    /// The common
-    /// case today is an UPSTREAM packaging conflict (the 0.7.2 wheel pins
-    /// click==8.3.1 while its own cisco-ai-mcp-scanner→litellm dep pins
-    /// click==8.1.8) — unsatisfiable in any environment, so it is not an app
-    /// problem and no app-side flag fixes it. Name that explicitly.
-    nonisolated static func summarizeUpgradeFailure(_ output: String, exitCode: Int32) -> String {
-        if output.contains("No solution found when resolving dependencies") {
-            // Pull the conflicting package names if present, for specificity.
-            let pkg = output.contains("cisco-ai-mcp-scanner") ? "cisco-ai-mcp-scanner" : "a dependency"
-            return "Upstream packaging conflict in this DefenseClaw release: its Python wheel and \(pkg) pin incompatible versions of the same library, so it cannot be installed in any environment. This is a bug in the release itself — not the app — and there is no upgrade flag that fixes it. Wait for a corrected upstream release. (Copy Full Upgrade Log in Settings for details.)"
-        }
-        if output.localizedCaseInsensitiveContains("could not determine latest release") {
-            return "Couldn't reach the release server (offline or GitHub rate-limited). Try again shortly."
-        }
-        // Fall back to the most meaningful single line.
-        let errorLine = output.split(separator: "\n")
-            .first { $0.contains("×") || $0.localizedCaseInsensitiveContains("error:") }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        return errorLine ?? "defenseclaw upgrade exited \(exitCode). See Copy Full Upgrade Log in Settings."
-    }
-
-    func performMacAppUpgradeCheck() {
-        Task {
-            await checkForMacAppUpdate(force: true)
-            performUpgrade()
-        }
-    }
-
-    func performRuntimeUpgradeCheck() {
-        Task {
-            await checkForRuntimeUpdate(force: true)
-            _ = await runRuntimeUpgradeIfAvailable()
-        }
-    }
-
-    func performBothUpgrades() {
-        Task {
-            await checkForUpdates(force: true)
-            _ = await runRuntimeUpgradeIfAvailable()
-            if availableUpdate != nil { performUpgrade() }
-        }
-    }
-
-    func performRuntimeUpgrade() {
-        Task {
-            _ = await runRuntimeUpgradeIfAvailable()
-        }
-    }
-
-    private func runRuntimeUpgradeIfAvailable() async -> Bool {
-        switch runtimeUpgradeState {
-        case .checking, .downloading, .installing:
-            return false
-        default:
-            break
-        }
-        // The bundled-payload installer mutates the same venv and gateway
-        // binary — never present overlapping runtime actions.
-        guard !runtimeInstallState.isRunning else { return false }
-        guard let runtimeUpdate = availableRuntimeUpdate else { return true }
-        guard let resolverCommand = Self.authenticatedRuntimeUpgradeResolverCommand(
-            releaseTag: runtimeUpdate.tag
-        ) else {
-            let failure = """
-            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.
-            """
-            runtimeUpgradeLogTail = ""
-            runtimeUpgradeLog = failure
-            runtimeUpgradeState = .failed(failure)
-            return false
-        }
-        let guidance = """
-        Runtime upgrade was not started; no installed files or services were changed. Quit DefenseClaw, then copy the authenticated resolver command and run it in Terminal. It runs in latest mode without --version so tested-source policy, the 0.8.4 bridge, rollback, migrations, and health checks remain mandatory.
-        """
-        runtimeUpgradeLogTail = ""
-        runtimeUpgradeLog = guidance
-        runtimeUpgradeState = .actionRequired(guidance: guidance, command: resolverCommand)
-        return false
-    }
-
-    /// Targets the installation that produced the warning. The installed CLI
-    /// authenticates the release-owned resolver before replacing any audit
-    /// files; the app only prepares the explicit operator command.
-    func auditStoreRecoveryCommand(
-        expectedGeneration: Int,
-        expectedBinaryPath: String?
-    ) async -> String? {
-        guard installationSnapshotIsCurrent(expectedGeneration) else { return nil }
-        guard let expectedBinaryPath,
-              await cli.locateBinary() == expectedBinaryPath else { return nil }
-        let versionResult = await cli.run(
-            binary: expectedBinaryPath,
-            arguments: ["--version"],
-            mutation: false
+        installerState = .running(version: version)
+        let result = await runCommand(
+            title: "Install DefenseClaw \(version)",
+            binary: "/bin/bash",
+            arguments: [installer.path, "--yes"],
+            environment: [
+                "DEFENSECLAW_APP_PATH": appPath,
+                "DEFENSECLAW_INSTALL_CALLER": "app",
+            ],
+            category: "setup",
+            origin: "Installer",
+            successEffects: ["DefenseClaw \(version) installed"],
+            suggestedNextAction: installDetected ? "" : "Run Initialize DefenseClaw to create the configuration."
         )
-        guard installationSnapshotIsCurrent(expectedGeneration),
-              await cli.locateBinary() == expectedBinaryPath,
-              versionResult.succeeded,
-              let installedVersion = UpdateChecker.parseVersion(versionResult.output) else {
-            return nil
+        try? FileManager.default.removeItem(at: installer.deletingLastPathComponent())
+        installerState = .finished(
+            version: version,
+            exitCode: result.exitCode,
+            cancelled: result.cancelled,
+            output: result.output
+        )
+        switch installerState {
+        case .installed:
+            break
+        case .needsAttention(_, let detail):
+            // The surface that started the run may disappear once the
+            // versions match, so the warning also goes to a notification.
+            notify(
+                title: "DefenseClaw \(version) installed; a connector needs attention",
+                body: detail,
+                id: "installer-attention-\(Date().timeIntervalSince1970)"
+            )
+        default:
+            return
         }
-        return RuntimeAuditRecoveryCommand.command(for: RuntimeAuditRecoveryTarget(
-            homeRoot: installationContext.homeRoot,
-            configURL: installationContext.configURL,
-            venvURL: installationContext.venvURL,
-            runtimeCLIURL: URL(fileURLWithPath: expectedBinaryPath, isDirectory: false),
-            installedVersion: installedVersion,
-            permitsMutation: installationContext.permitsMutation
-        ))
+
+        await refreshInstalledRuntimeVersion()
+        reloadConfig()
+        // install.sh swapped the bundle under this process: restart into it.
+        // A connector warning stays on screen until the user restarts.
+        guard let onDisk = UpdateChecker.bundleShortVersion(atPath: appPath),
+              onDisk != UpdateChecker.currentVersion else { return }
+        relaunchPending = true
+        if case .installed = installerState { relaunch() }
     }
 
-    /// Download, install over the current bundle, and restart the app.
-    func performUpgrade() {
-        guard let release = availableUpdate, upgradeState == .idle || upgradeState == .checking else { return }
-        upgradeState = .downloading
-        Task {
-            let failure = await updater.downloadAndInstall(release) { state in
-                Task { @MainActor in self.upgradeState = state }
-            }
-            if let failure {
-                upgradeState = .failed(failure)
-            }
-            // On success the app terminates and relaunches — nothing to do here.
+    /// Restart into the bundle install.sh put in place.
+    func relaunch() {
+        do {
+            try UpdateChecker.relaunchAfterExit(bundlePath: Bundle.main.bundlePath)
+        } catch {
+            notify(
+                title: "DefenseClaw",
+                body: "Quit and reopen DefenseClaw to finish updating: \(error.localizedDescription)",
+                id: "relaunch-\(Date().timeIntervalSince1970)"
+            )
+            return
         }
+        NSApp.terminate(nil)
     }
 
     // MARK: - Services card (Overview hero, parity with the TUI SERVICES panel)
@@ -1501,7 +1558,10 @@ final class AppState {
             notices.append(.init(level: .info, message: "First time? Head to the Setup panel to configure DefenseClaw."))
         }
         if gatewayBroken {
-            notices.append(.init(level: .error, message: "Gateway is offline - use Start Gateway in Quick Actions"))
+            notices.append(.init(level: .error, message: gatewayStartupError
+                ?? (gatewayStartupInProgress
+                    ? "Starting the gateway automatically…"
+                    : "Gateway is offline - use Start Gateway in Quick Actions")))
         } else if gatewayStandalone {
             let details = health.subsystem("gateway")?.details ?? [:]
             if let hint = (details["hint"]?.nonEmpty ?? details["summary"]?.nonEmpty) {

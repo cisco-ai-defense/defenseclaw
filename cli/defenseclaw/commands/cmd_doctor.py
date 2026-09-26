@@ -1362,7 +1362,7 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         reason = health.reason_code
         if reason == "audit-db-schema-incomplete":
             detail = "required schema is incomplete"
-            remediation = "defenseclaw migrations apply"
+            remediation = "defenseclaw-gateway restart"
         elif reason == "audit-db-corrupt":
             detail = "SQLite quick_check reported corruption"
             remediation = "restore the audit database from a trusted backup"
@@ -7854,7 +7854,7 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
         AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
     }:
         remediation = (
-            "run `defenseclaw migrations apply` after a trusted backup review"
+            "run `defenseclaw-gateway restart` (it applies audit database migrations) after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
             else "restore the audit database from a trusted backup"
         )

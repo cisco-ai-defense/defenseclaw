@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import release_candidate, source_release_identity
+from scripts import source_release_identity
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash") or "/bin/bash"
@@ -126,7 +126,6 @@ def test_reviewed_source_identity_binds_every_canonical_version_source() -> None
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
-    assert release_candidate._reviewed_source_install_identity("0.8.10") == identity
 
 
 def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
@@ -138,7 +137,6 @@ def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() ->
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert release_candidate._reviewed_source_install_identity("9.8.7") == identity
 
 
 def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
@@ -261,42 +259,18 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
-    tracked = workflow.index("git ls-files --error-unmatch --")
-    stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', tracked)
-    build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', stamp + 1)
-    expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
-    extension_build = workflow.index("run: make extensions", expected)
-    restore_generated = workflow.index("git restore --worktree --", extension_build)
-    cleanliness_check = workflow.index("git status --porcelain --untracked-files=all", restore_generated)
-    gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    package_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1)
-    publish = workflow.index('gh release create "$RELEASE_TAG"')
+    tag = workflow.index('git tag "$VERSION"')
+    stamp = workflow.index('scripts/stamp-version.sh "$VERSION"', tag)
+    extension_build = workflow.index("make extensions", stamp)
+    restore = workflow.index("git restore --worktree -- .", extension_build)
+    clean = workflow.index('test -z "$(git status --porcelain)"', restore)
+    gateway_build = workflow.index("goreleaser/goreleaser-action@", clean)
+    package_stamp = workflow.index('scripts/stamp-version.sh "$VERSION"', gateway_build)
+    wheel_build = workflow.index("make dist-cli dist-installers dist-requirements", package_stamp)
+    publish = workflow.index('gh release create "$VERSION"')
 
-    assert (
-        tracked
-        < stamp
-        < build_stamp
-        < expected
-        < extension_build
-        < restore_generated
-        < cleanliness_check
-        < gateway_build
-        < package_stamp
-        < publish
-    )
-    for relative in VERSION_PATHS:
-        assert relative in workflow[tracked:stamp]
-        assert relative in workflow[restore_generated:cleanliness_check]
-    assert "Require reviewed source release identity" not in workflow
-    assert "git diff --exit-code --" not in workflow[tracked:expected]
-    assert '--target "$RELEASE_COMMIT"' in workflow[publish:]
-    proof = workflow.index("scripts/release_api_retry.py prove-published", publish)
-    assert publish < proof
-    proof_command = workflow[proof : proof + 500]
-    assert '--tag "$RELEASE_TAG"' in proof_command
-    assert '--commit "$RELEASE_COMMIT"' in proof_command
-    assert "--candidate-root release-candidate" in proof_command
-    assert "--omit-windows-binaries" not in proof_command
+    assert tag < stamp < extension_build < restore < clean < gateway_build < package_stamp < wheel_build < publish
+    assert '--target "$GITHUB_SHA"' in workflow[publish:]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")

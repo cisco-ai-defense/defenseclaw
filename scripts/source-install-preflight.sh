@@ -50,7 +50,7 @@ readonly MODE DEV_RECLAIM_SOURCE
 refuse() {
     echo "error: source install refused: $1" >&2
     echo "No installed files or services were changed." >&2
-    echo "Release-managed hosts must use the release-owned resolver: scripts/upgrade.sh (macOS/Linux) or scripts\\upgrade.ps1 (Windows)." >&2
+    echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
     echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
     exit 1
 }

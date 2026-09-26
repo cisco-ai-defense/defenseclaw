@@ -47,18 +47,16 @@ import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import __version__, codeguard_skill, migration_state
+from defenseclaw import __version__, codeguard_skill
 from defenseclaw.commands import cmd_version
 from defenseclaw.config import _coerce_bool, load
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
-from defenseclaw.migrations import run_migrations
 from defenseclaw.observability import resolve_preset
 from defenseclaw.observability.v8_presets import apply_secret
 
@@ -301,54 +299,8 @@ def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_f0081_future_schema_cursor_is_preserved(tmp_path):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    openclaw_home = tmp_path / "oc"
-    openclaw_home.mkdir()
-
-    cursor_path = migration_state.state_path(str(data_dir))
-    original = {
-        "schema": migration_state.CURRENT_SCHEMA_VERSION + 1,
-        "package_version": "9.9.9",
-        "applied": ["9.9.9"],
-        "applied_at": {"9.9.9": "future-build"},
-        "future_field": {"keep": True},
-    }
-    with open(cursor_path, "w") as f:
-        json.dump(original, f, sort_keys=True)
-    config_path = data_dir / "config.yaml"
-    legacy_config = "config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n"
-    config_path.write_text(legacy_config)
-
-    # Detection helpers tell a newer cursor apart from a missing one.
-    assert migration_state.detect_schema(str(data_dir)) == migration_state.CURRENT_SCHEMA_VERSION + 1
-    assert migration_state.is_future_schema(str(data_dir)) is True
-    # load() still collapses it to None (its documented contract)...
-    assert migration_state.load(str(data_dir)) is None
-
-    # ...but run_migrations refuses rather than bootstrapping over it.
-    with pytest.raises(migration_state.FutureSchemaError):
-        run_migrations("9.9.9", "9.9.9", str(openclaw_home), str(data_dir))
-
-    # The newer cursor is byte-for-byte intact.
-    with open(cursor_path) as f:
-        assert json.load(f) == original
-    # Refusal happens before any configuration-schema write as well. An older
-    # upgrader must not partially mutate a host owned by a newer cursor.
-    assert config_path.read_text() == legacy_config
-    assert not (data_dir / "config.yaml.pre-observability-migration.bak").exists()
 
 
-def test_f0081_missing_cursor_still_bootstraps(tmp_path):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    openclaw_home = tmp_path / "oc"
-    openclaw_home.mkdir()
-    assert migration_state.is_future_schema(str(data_dir)) is False
-    # No cursor → safe to bootstrap, no exception.
-    run_migrations("9.9.9", "9.9.9", str(openclaw_home), str(data_dir))
-    assert os.path.exists(migration_state.state_path(str(data_dir)))
 
 
 # ---------------------------------------------------------------------------
@@ -356,47 +308,8 @@ def test_f0081_missing_cursor_still_bootstraps(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _read_cursor(data_dir: str) -> dict:
-    with open(os.path.join(data_dir, ".migration_state.json")) as f:
-        return json.load(f)
 
 
-def test_f0681_unapplied_lower_migration_is_retried(tmp_path):
-    attempts = {"0.3.0": 0, "0.4.0": 0, "0.5.0": 0}
-
-    def flaky_repair(_ctx):
-        attempts["0.3.0"] += 1
-        if attempts["0.3.0"] == 1:
-            raise RuntimeError("transient repair failure")
-
-    def stable_040(_ctx):
-        attempts["0.4.0"] += 1
-
-    def stable_050(_ctx):
-        attempts["0.5.0"] += 1
-
-    migrations = [
-        ("0.3.0", "flaky repair/security migration", flaky_repair),
-        ("0.4.0", "later successful migration", stable_040),
-        ("0.5.0", "future normal upgrade migration", stable_050),
-    ]
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    openclaw_home = tmp_path / "oc"
-    openclaw_home.mkdir()
-
-    with patch("defenseclaw.migrations.MIGRATIONS", migrations):
-        run_migrations("0.2.0", "0.4.0", str(openclaw_home), str(data_dir))
-        after_first = _read_cursor(str(data_dir))
-        run_migrations("0.4.0", "0.5.0", str(openclaw_home), str(data_dir))
-        after_second = _read_cursor(str(data_dir))
-
-    # 0.3.0 failed on the first upgrade and was retried (and succeeded)
-    # on the later one, instead of being skipped by version comparison.
-    assert attempts == {"0.3.0": 2, "0.4.0": 1, "0.5.0": 1}
-    assert after_first["applied"] == ["0.4.0"]
-    assert sorted(after_second["applied"]) == ["0.3.0", "0.4.0", "0.5.0"]
 
 
 # ---------------------------------------------------------------------------

@@ -3424,7 +3424,7 @@ def _require_loaded_config(app: AppContext):
     if cfg is not None:
         if getattr(cfg, "_source_config_version", None) != 8:
             raise click.ClickException(
-                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+                "Configuration schema v8 is required — run 'defenseclaw migrate' first."
             )
         return cfg
     from defenseclaw import config as cfg_mod
