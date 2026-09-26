@@ -1142,24 +1142,6 @@
       "security_note": "Private authenticated executable binding only. It must remain tied to the exact signed Devin binary admitted by Setup and must never be treated as a general operator path override."
     },
     {
-      "name": "DEFENSECLAW_DIR",
-      "category": "runtime_path",
-      "purpose": "Used in generated openshell-sandbox shell wrappers to locate the DefenseClaw install dir from inside the sandbox.",
-      "default": "(templated at install time)",
-      "accepted_values": [
-        "any-absolute-path"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Sandbox shell wrappers reference this"
-        }
-      ],
-      "since": "0.4.0"
-    },
-    {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
       "category": "security_opt_out",
       "purpose": "Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. Disabling means Bedrock traffic bypasses the proxy.",
@@ -2867,71 +2849,6 @@
       "since": "0.4.0"
     },
     {
-      "name": "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
-      "category": "security_opt_out",
-      "purpose": "Accept a mutable OCI tag (e.g. 'latest') when installing openshell-sandbox instead of requiring a content-addressed digest or sha256 pin. Recommended only for local development.",
-      "default": "unset (fail-closed)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Skips integrity verification when set"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image.",
-      "replacement_hint": "Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256."
-    },
-    {
-      "name": "DEFENSECLAW_OPENSHELL_ARCH_DIGEST",
-      "category": "security_opt_out",
-      "purpose": "Pin the openshell-sandbox install to a specific platform manifest digest (sha256:...). Recommended pinning method for production. Read in conjunction with DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED.",
-      "default": "unset",
-      "accepted_values": [
-        "sha256:<hex>",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Verifies OCI manifest digest against this pin"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — content-addressed verification of the OCI manifest before extraction."
-    },
-    {
-      "name": "DEFENSECLAW_OPENSHELL_BINARY_SHA256",
-      "category": "security_opt_out",
-      "purpose": "Pin the final extracted openshell-sandbox binary to a specific sha256. Alternative to DEFENSECLAW_OPENSHELL_ARCH_DIGEST for cases where only the binary checksum is published.",
-      "default": "unset",
-      "accepted_values": [
-        "64-char hex sha256",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Marker check (presence enables sha256 verification path)"
-        },
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Verifies extracted binary sha256 against this pin"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — sha256 verification of the extracted binary."
-    },
-    {
       "name": "DEFENSECLAW_OTEL_ENABLED",
       "category": "telemetry",
       "purpose": "Upgrade-only v7 migration input for the former otel.enabled master toggle. The v8 runtime ignores this variable.",
@@ -3368,27 +3285,6 @@
       "since": "0.4.0"
     },
     {
-      "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
-      "category": "security_opt_out",
-      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw sandbox setup' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
-      "default": "unset (fail-closed)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "_pre_pair_device gates the provenance fail-closed branch on this var"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker).",
-      "replacement_hint": "Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed."
-    },
-    {
       "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD",
       "category": "test_fixture",
       "purpose": "Selects the inherited-output descendant subprocess fixture.",
@@ -3501,25 +3397,6 @@
         }
       ],
       "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_PROXY_TOKEN",
-      "category": "credential",
-      "purpose": "Test-harness proxy bearer. Used by scripts/test-proxy-sandbox.py only; aliases LITELLM_MASTER_KEY.",
-      "default": "unset",
-      "accepted_values": [
-        "any-string",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/test-proxy-sandbox.py",
-          "description": "Test proxy bearer"
-        }
-      ],
-      "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_REF",
@@ -3655,31 +3532,6 @@
         }
       ],
       "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
-      "category": "security_opt_out",
-      "purpose": "Opt into the legacy broad regex cleanup of sandbox/openshell network namespaces when no saved namespace file exists. Used by the generated pre-sandbox and cleanup-sandbox scripts.",
-      "default": "0 (no regex sweep)",
-      "accepted_values": [
-        "1",
-        "0",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Embedded pre-sandbox script reads it before namespace cleanup"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Embedded cleanup-sandbox script reads it"
-        }
-      ],
-      "since": "0.7.0",
-      "security_note": "Namespace cleanup scope — a broad regex sweep can delete unrelated network namespaces on a shared host."
     },
     {
       "name": "DEFENSECLAW_SCRUB_BIN",
