@@ -217,6 +217,11 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_OTEL_TLS_INSECURE",
         "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
         "DEFENSECLAW_REVEAL_PII",
+        # Set only by DefenseClaw inside a sandbox; a planted value would make
+        # the shell wrapper believe it already runs sandboxed.
+        "DEFENSECLAW_SANDBOX_ID",
+        "DEFENSECLAW_SANDBOX_NAME",
+        "DEFENSECLAW_SANDBOX_TOKEN",
         "DEFENSECLAW_STRICT_AVAILABILITY",
         "DEFENSECLAW_TEST",
         "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
