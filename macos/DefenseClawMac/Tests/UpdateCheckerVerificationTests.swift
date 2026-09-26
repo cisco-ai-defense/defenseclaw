@@ -30,6 +30,9 @@ struct UpdateCheckerVerificationTests {
         mapsInstallerExitCodes()
         readsBundleVersionFromDisk()
         detectsReplaceableBundleLocations()
+        parsesCosignVersions()
+        findsOnlyCosignTwoOrLater()
+        verifiesTheReleaseSignatureWithCosign()
         print("Update checker verification tests passed")
     }
 
@@ -232,6 +235,62 @@ struct UpdateCheckerVerificationTests {
                 "a bundle in a read-only folder (disk image, translocation) cannot be replaced"
             )
         }
+    }
+
+    private static func parsesCosignVersions() {
+        expect(UpdateChecker.cosignMajorVersion("GitVersion:    v2.6.3\n") == 2, "reads cosign 2.x")
+        expect(UpdateChecker.cosignMajorVersion("GitVersion:    v3.1.1") == 3, "reads cosign 3.x")
+        expect(UpdateChecker.cosignMajorVersion("cosign: command not found") == nil, "ignores other output")
+    }
+
+    private static func findsOnlyCosignTwoOrLater() {
+        withTemporaryDirectory { directory in
+            let old = fakeCosign(in: directory, name: "cosign-1", version: "v1.13.1", verifyStatus: 0)
+            let current = fakeCosign(in: directory, name: "cosign-2", version: "v2.6.3", verifyStatus: 0)
+            expect(UpdateChecker.installedCosign(candidates: [old.path]) == nil, "cosign 1.x is not used")
+            expect(
+                UpdateChecker.installedCosign(candidates: [directory.appendingPathComponent("missing").path, current.path])
+                    == current.path,
+                "the first cosign 2.x candidate is used"
+            )
+        }
+    }
+
+    private static func verifiesTheReleaseSignatureWithCosign() {
+        withTemporaryDirectory { directory in
+            let genuine = fakeCosign(in: directory, name: "cosign-ok", version: "v2.6.3", verifyStatus: 0)
+            let forged = fakeCosign(in: directory, name: "cosign-bad", version: "v2.6.3", verifyStatus: 1)
+            do {
+                try UpdateChecker.verifyReleaseSignature(cosign: genuine.path, directory: directory)
+            } catch {
+                fail("a verified signature was refused: \(error)")
+            }
+            let arguments = (try? String(contentsOf: directory.appendingPathComponent("cosign-ok.args"), encoding: .utf8)) ?? ""
+            expect(
+                arguments.contains("--certificate-identity-regexp ^https://github\\.com/cisco-ai-defense/defenseclaw/"),
+                "the signer is pinned to this repository's release workflow"
+            )
+            expectError(.signatureInvalid, "a signature cosign rejects stops the install") {
+                try UpdateChecker.verifyReleaseSignature(cosign: forged.path, directory: directory)
+            }
+        }
+    }
+
+    private static func fakeCosign(in directory: URL, name: String, version: String, verifyStatus: Int32) -> URL {
+        let url = directory.appendingPathComponent(name, isDirectory: false)
+        let log = directory.appendingPathComponent("\(name).args").path
+        let body = """
+        #!/bin/sh
+        if [ "$1" = version ]; then echo "GitVersion:    \(version)"; exit 0; fi
+        echo "$*" > '\(log)'
+        exit \(verifyStatus)
+        """
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: Data(body.utf8),
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o755))]
+        ) else { fail("could not write the fake cosign") }
+        return url
     }
 
     private static func withTemporaryDirectory(_ body: (URL) -> Void) {

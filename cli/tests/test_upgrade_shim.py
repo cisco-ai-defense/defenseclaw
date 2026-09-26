@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -29,6 +30,8 @@ from pathlib import Path
 
 import pytest
 from defenseclaw import entry, update_notice, upgrade_shim
+
+_FIND_COSIGN = upgrade_shim._cosign
 
 
 @pytest.fixture()
@@ -43,6 +46,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(upgrade_shim.REPO_ENV, raising=False)
     monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    # A developer's own cosign must not take part; the signature tests add a fake one.
+    monkeypatch.setattr(upgrade_shim, "_cosign", lambda: None)
     return data
 
 
@@ -196,6 +202,58 @@ def test_upgrade_refuses_an_installer_that_does_not_match_checksums(
     assert execs == []
 
 
+def _fake_cosign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, verify_rc: int) -> Path:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    log = tmp_path / "cosign.log"
+    cosign = tools / "cosign"
+    cosign.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log}"\n'
+        'if [ "$1" = version ]; then echo "GitVersion:    v2.6.3"; exit 0; fi\n'
+        f"exit {verify_rc}\n"
+    )
+    cosign.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(upgrade_shim, "_cosign", _FIND_COSIGN)
+    return log
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake cosign is a shell script")
+@pytest.mark.parametrize("verify_rc", [0, 1])
+def test_installed_cosign_checks_the_release_signature_first(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verify_rc: int
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    release = _release_dir(tmp_path, "1.0.1")
+    (release / "checksums.txt.bundle").write_text("{}")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
+    log = _fake_cosign(tmp_path, monkeypatch, verify_rc=verify_rc)
+
+    rc = upgrade_shim.run(["upgrade", "--yes"])
+
+    calls = log.read_text().splitlines()
+    assert any(call.startswith("verify-blob --bundle ") for call in calls)
+    assert any("--certificate-oidc-issuer https://token.actions.githubusercontent.com" in call for call in calls)
+    if verify_rc == 0:
+        assert rc == 0 and len(execs) == 1
+    else:
+        assert rc == 1 and execs == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake cosign is a shell script")
+def test_a_local_build_without_a_bundle_skips_the_signature(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.1")))
+    log = _fake_cosign(tmp_path, monkeypatch, verify_rc=1)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    assert len(execs) == 1
+    assert "verify-blob" not in log.read_text()
+
+
 def test_explicit_version_may_reinstall_or_go_back(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -270,8 +328,29 @@ def test_notice_is_silent_without_a_terminal(home: Path, monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("argv", [[], ["upgrade"], ["status", "--json"], ["audit", "-o", "json"]])
-def test_notice_skips_quiet_invocations(argv: list[str]) -> None:
-    assert not update_notice._interactive(argv) or argv == []
+def test_notice_skips_quiet_invocations(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(update_notice.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(update_notice.sys.stderr, "isatty", lambda: True, raising=False)
+
+    assert update_notice._interactive(["status"])
+    assert not update_notice._interactive(argv)
+
+
+def test_notice_never_creates_the_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = tmp_path / "not-initialized"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(missing))
+    monkeypatch.setattr(update_notice, "_lookup_latest", lambda: "9.9.9")
+
+    assert update_notice._latest_cached() == "9.9.9"
+    assert not missing.exists()
+
+
+def test_notice_reads_update_check_from_defenseclaw_config(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    external = tmp_path / "elsewhere.yaml"
+    external.write_text("config_version: 8\nupdate_check: false\n")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(external))
+
+    assert update_notice._disabled()
 
 
 def test_notice_uses_the_daily_cache(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

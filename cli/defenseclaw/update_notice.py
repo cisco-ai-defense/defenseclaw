@@ -81,7 +81,8 @@ def _disabled() -> bool:
     try:
         import yaml
 
-        with open(os.path.join(_data_dir(), "config.yaml"), encoding="utf-8") as stream:
+        config = os.environ.get("DEFENSECLAW_CONFIG", "").strip() or os.path.join(_data_dir(), "config.yaml")
+        with open(os.path.expanduser(config), encoding="utf-8") as stream:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - missing or unreadable config keeps the default
         return False
@@ -114,7 +115,7 @@ def _latest_cached() -> str | None:
 
     latest = _lookup_latest()
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Never create the data directory just to cache a notice.
         with open(path, "w", encoding="utf-8") as stream:
             json.dump({"checked_at": time.time(), "latest": latest}, stream)
     except OSError:

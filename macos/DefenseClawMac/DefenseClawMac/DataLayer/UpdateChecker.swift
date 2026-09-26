@@ -40,6 +40,7 @@ enum InstallerFetchError: Error, Equatable, LocalizedError {
     case missingChecksum
     case checksumMismatch
     case stagingFailed(String)
+    case signatureInvalid
 
     var errorDescription: String? {
         switch self {
@@ -55,6 +56,8 @@ enum InstallerFetchError: Error, Equatable, LocalizedError {
             "The downloaded install.sh does not match the release's checksums.txt; refusing to run it."
         case .stagingFailed(let reason):
             "Could not save the verified installer: \(reason)"
+        case .signatureInvalid:
+            "The release signature on checksums.txt did not verify with cosign; refusing to run the installer."
         }
     }
 }
@@ -184,7 +187,72 @@ actor UpdateChecker {
         defer { session.invalidateAndCancel() }
         let installer = try await Self.download("install.sh", version: version, session: session)
         let checksums = try await Self.download("checksums.txt", version: version, session: session)
-        return try Self.stageInstaller(installer, checksums: String(decoding: checksums, as: UTF8.self))
+        let script = try Self.stageInstaller(installer, checksums: String(decoding: checksums, as: UTF8.self))
+        // With cosign installed, check the release signature before trusting
+        // checksums.txt, as `defenseclaw upgrade` does. Every release carries
+        // the bundle, so a missing one is refused too.
+        guard let cosign = Self.installedCosign() else { return script }
+        let directory = script.deletingLastPathComponent()
+        do {
+            let bundle = try await Self.download("checksums.txt.bundle", version: version, session: session)
+            try bundle.write(to: directory.appendingPathComponent("checksums.txt.bundle", isDirectory: false))
+            try await Task.detached { try Self.verifyReleaseSignature(cosign: cosign, directory: directory) }.value
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        return script
+    }
+
+    /// cosign 2.0 or later where Homebrew and manual installs put it; a GUI
+    /// app does not inherit the login shell's PATH.
+    nonisolated static func installedCosign(
+        candidates: [String] = ["/opt/homebrew/bin/cosign", "/usr/local/bin/cosign"]
+    ) -> String? {
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            if let major = cosignMajorVersion(run(path, ["version"]).output), major >= 2 {
+                return path
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func cosignMajorVersion(_ output: String) -> Int? {
+        guard let range = output.range(of: #"GitVersion:\s*v?(\d+)\."#, options: .regularExpression) else { return nil }
+        let digits = output[range].drop { !$0.isNumber }.prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    /// Verify checksums.txt in `directory` against checksums.txt.bundle, signed
+    /// by this repository's release workflow on main.
+    nonisolated static func verifyReleaseSignature(cosign: String, directory: URL) throws {
+        let signer = "^https://github\\.com/" + repo.replacingOccurrences(of: ".", with: "\\.")
+            + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
+        let result = run(cosign, [
+            "verify-blob",
+            "--bundle", directory.appendingPathComponent("checksums.txt.bundle").path,
+            "--certificate-identity-regexp", signer,
+            "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
+            directory.appendingPathComponent("checksums.txt").path,
+        ])
+        guard result.status == 0 else { throw InstallerFetchError.signatureInvalid }
+    }
+
+    private nonisolated static func run(_ executable: String, _ arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            return (-1, "")
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
     nonisolated static func isReleaseVersion(_ version: String) -> Bool {

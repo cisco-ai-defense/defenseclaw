@@ -199,12 +199,75 @@ def _fetch_installer(repo: str, version: str, local_dir: str | None, workdir: st
         base = f"https://github.com/{repo}/releases/download/{version}"
         for asset, destination in ((name, installer), ("checksums.txt", checksums)):
             _download(f"{base}/{asset}", destination)
+    _verify_release_signature(repo, version, local_dir, workdir, checksums)
     expected = _expected_sha256(checksums, name)
     with open(installer, "rb") as stream:
         actual = hashlib.sha256(stream.read()).hexdigest()
     if actual != expected:
         raise ShimError(f"{name} for {version} does not match checksums.txt")
     return installer
+
+
+def _cosign() -> str | None:
+    """cosign 2.0 or later on PATH, or ``None``."""
+
+    path = shutil.which("cosign")
+    if not path:
+        return None
+    try:
+        output = subprocess.run(  # noqa: S603 - fixed arguments
+            [path, "version"], capture_output=True, text=True, timeout=_TIMEOUT, check=False
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"GitVersion:\s*v?(\d+)\.", output)
+    return path if match and int(match.group(1)) >= 2 else None
+
+
+def _verify_release_signature(repo: str, version: str, local_dir: str | None, workdir: str, checksums: str) -> None:
+    """With cosign installed, check checksums.txt's release signature before trusting it.
+
+    The installers check the same signature, but only once they are running;
+    this covers the installer itself. Every published release carries
+    ``checksums.txt.bundle``; a local directory without one is a test build.
+    """
+
+    cosign = _cosign()
+    if cosign is None:
+        return
+    bundle = os.path.join(workdir, "checksums.txt.bundle")
+    if local_dir:
+        source = os.path.join(local_dir, "checksums.txt.bundle")
+        if not os.path.isfile(source):
+            return
+        shutil.copyfile(source, bundle)
+    else:
+        _download(f"https://github.com/{repo}/releases/download/{version}/checksums.txt.bundle", bundle)
+    signer = (
+        "^https://github\\.com/" + repo.replace(".", "\\.") + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
+    )
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed verifier, arguments built from constants and paths
+            [
+                cosign,
+                "verify-blob",
+                "--bundle",
+                bundle,
+                "--certificate-identity-regexp",
+                signer,
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                checksums,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ShimError(f"could not run cosign to verify release {version}: {exc}") from None
+    if result.returncode != 0:
+        raise ShimError(f"the release signature on checksums.txt for {version} did not verify")
 
 
 def _expected_sha256(checksums: str, name: str) -> str:
