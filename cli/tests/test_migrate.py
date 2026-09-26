@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import re
+import stat
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-
 from defenseclaw import migrations
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
@@ -311,3 +310,42 @@ def test_check_skips_the_v8_preflight_when_earlier_0x_steps_come_first(
     result = migrate(str(data_dir), from_version="0.7.2", check=True, gateway_binary="/staged/defenseclaw-gateway")
 
     assert result.applied[0].startswith("0.x import 0.8.0:")
+
+
+def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_select_windows_agents", calls.append)
+    _write_config(data_dir, "config_version: 7\n")
+
+    migrate(str(data_dir), from_version="0.8.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)]
+
+
+def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "hermes"]),
+    )
+    requests: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        requests.append(list(connectors))
+        found = {"codex": SimpleNamespace(executable=r"C:\codex\codex.exe")}
+        return found, ({} if requests[1:] else {"hermes": "not installed"})
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._select_windows_agents(str(data_dir))
+
+    assert requests == [["codex", "hermes"], ["codex"]]
+    out = capsys.readouterr().out
+    assert r"selected C:\codex\codex.exe for the codex connector" in out
+    assert "run 'defenseclaw setup hermes'" in out

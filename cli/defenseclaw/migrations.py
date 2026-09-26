@@ -2885,7 +2885,39 @@ def migrate(
             f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
         )
     _refresh_local_observability_bundle(data_dir, __version__)
+    if version < _FIRST_V8_CONFIG_VERSION:
+        _select_windows_agents(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _select_windows_agents(data_dir: str) -> None:
+    """Record the agent executables a 0.x Windows install's connectors run.
+
+    On Windows the gateway runs an agent such as codex.exe only from a
+    setup-selected, hashed executable, which 0.x never recorded, so the first
+    1.x gateway start would refuse the imported connectors. The selection is
+    what ``defenseclaw setup`` records. An agent that is not installed is
+    reported, not fatal: its connector then needs ``defenseclaw setup``.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw import config as config_module
+    from defenseclaw.agent_selection import record_setup_agent_selections
+
+    try:
+        connectors = config_module.load(data_dir=data_dir).active_connectors()
+        selections, errors = record_setup_agent_selections(data_dir, connectors)
+        if errors and selections:
+            # A failed probe records nothing; keep the agents that were found.
+            selections, _ = record_setup_agent_selections(data_dir, list(selections))
+    except Exception as exc:  # noqa: BLE001 - the gateway start reports what it needs
+        ux.warn(f"could not record the agent executables for the imported connectors: {exc}", indent="    ")
+        return
+    for name, selection in sorted(selections.items()):
+        ux.ok(f"selected {selection.executable} for the {name} connector", indent="    ")
+    for name, detail in sorted(errors.items()):
+        ux.warn(f"no {name} executable to select ({detail}); run 'defenseclaw setup {name}'", indent="    ")
 
 
 def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:

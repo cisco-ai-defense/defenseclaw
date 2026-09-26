@@ -20,12 +20,15 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"] [-Root DIR] [-Keep]
+          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
+          [-CodexExe PATH] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
     other lanes start from it when it is given, else from -Assets. The policy
     lane sets the HKLM DisableSelfUpdate policy for its duration, so it needs
-    an elevated shell.
+    an elevated shell. upgrade-0.X.Y needs -CodexExe, a Codex CLI codex.exe:
+    0.x configures the codex connector, and 1.x on Windows runs Codex only
+    from an installed codex.exe that it has selected.
 
     Every lane runs with its own USERPROFILE, LOCALAPPDATA, APPDATA and TEMP,
     -NoPersistPath, and the gateway on a free port, so it never touches the
@@ -40,6 +43,7 @@ param(
     [string]$PreviousAssets = "",
     [string]$Lanes = "fresh",
     [string]$Root = "",
+    [string]$CodexExe = "",
     [switch]$Keep
 )
 
@@ -49,6 +53,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $Assets = (Resolve-Path -LiteralPath $Assets).ProviderPath
 if ($PreviousAssets) { $PreviousAssets = (Resolve-Path -LiteralPath $PreviousAssets).ProviderPath }
+if ($CodexExe) { $CodexExe = (Resolve-Path -LiteralPath $CodexExe).ProviderPath }
 if (-not $Root) { $Root = Join-Path ([IO.Path]::GetTempPath()) ("dc-lifecycle-" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 # Real path: DefenseClaw refuses a data dir reached through a junction.
@@ -404,6 +409,11 @@ function Test-UpgradePrevious {
 # is put back afterwards.
 function Test-UpgradeLegacy([string]$From) {
     Enter-Lane "upgrade-$From"
+    if (-not $CodexExe) { Fail "upgrade-$From needs -CodexExe"; return }
+    # Where the Codex installer puts it, one of the places DefenseClaw selects it from.
+    $codexBin = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin"
+    New-Item -ItemType Directory -Path $codexBin -Force | Out-Null
+    Copy-Item -LiteralPath $CodexExe -Destination (Join-Path $codexBin "codex.exe")
     $pathRaw = Get-UserPathRaw
     $pathKind = Get-UserPathKind
     try {
