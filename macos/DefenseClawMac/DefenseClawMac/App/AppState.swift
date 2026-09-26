@@ -514,8 +514,10 @@ final class AppState {
         hasStarted = true
         Task {
             await bindSelectedInstallation()
-            await ensureGatewayStarted(origin: "App Launch")
             startPulse()
+            // Gateway startup can wait for readiness; the pulse and the launch
+            // checks below must not wait for it.
+            Task { await ensureGatewayStarted(origin: "App Launch") }
             // Local runtime detection is independent of the throttled GitHub
             // release lookup so every launch can report the installed CLI.
             await refreshInstalledRuntimeVersion()

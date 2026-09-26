@@ -43,6 +43,8 @@ actor EventStreamReader {
     private var rowCounter = 0
     private var plainLogCounter = 0
     private var canonicalHistory: CanonicalEventHistory = .unsupported
+    /// IDs of the canonical snapshot last applied; polls rebuild only when they change.
+    private var appliedCanonicalIDs: [String]?
     private(set) var structuredSource = "gateway.jsonl (legacy)"
     private(set) var structuredError: String?
 
@@ -189,6 +191,7 @@ actor EventStreamReader {
         var readLegacy = false
         switch self.canonicalHistory {
         case .unsupported:
+            appliedCanonicalIDs = nil
             if structuredSource != "gateway.jsonl (legacy)" {
                 replaceCanonicalHistory([], into: &delta)
                 offset = 0
@@ -203,7 +206,11 @@ actor EventStreamReader {
         case .available(let rows):
             structuredSource = "audit.db · canonical events"
             structuredError = nil
-            replaceCanonicalHistory(rows, into: &delta)
+            let ids = rows.map(\.id)
+            if ids != appliedCanonicalIDs {
+                replaceCanonicalHistory(rows, into: &delta)
+                appliedCanonicalIDs = ids
+            }
         }
         if readLegacy, let handle = try? FileHandle(forReadingFrom: url) {
             defer { try? handle.close() }
@@ -385,6 +392,7 @@ actor EventStreamReader {
             return poll(canonicalHistory: canonicalHistory)
         }
         offset = 0
+        appliedCanonicalIDs = nil
         logBuffers = [:]
         findings = []
         activity = []

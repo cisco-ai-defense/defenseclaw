@@ -275,10 +275,13 @@ struct UpdateCheckerVerificationTests {
                     ofItemAtPath: readOnly.path
                 )
             }
-            expect(
-                !UpdateChecker.canReplaceBundle(atPath: readOnly.appendingPathComponent("DefenseClawMac.app").path),
-                "a bundle in a read-only folder (disk image, translocation) cannot be replaced"
-            )
+            // root may write anywhere, so the read-only case only holds for other users.
+            if geteuid() != 0 {
+                expect(
+                    !UpdateChecker.canReplaceBundle(atPath: readOnly.appendingPathComponent("DefenseClawMac.app").path),
+                    "a bundle in a read-only folder (disk image, translocation) cannot be replaced"
+                )
+            }
         }
     }
 

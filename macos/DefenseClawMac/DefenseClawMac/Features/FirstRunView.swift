@@ -491,7 +491,26 @@ struct FirstRunView: View {
                         setupError = "Setup completed, but automatic gateway startup was deferred. Review Activity and the selected installation, then use Start Gateway from Overview."
                         return
                     }
-                case .alreadyRunning, .started:
+                case .alreadyRunning:
+                    // A gateway that was already running still has the
+                    // configuration from before setup; restart it to load it.
+                    let restart = await appState.runCommand(
+                        runID: id,
+                        title: "Restart gateway",
+                        binary: "defenseclaw-gateway",
+                        arguments: ["restart"],
+                        category: "daemon",
+                        origin: "First Run",
+                        successEffects: ["Gateway restarted"],
+                        suggestedNextAction: "Review gateway health on Overview."
+                    )
+                    guard !stopIfSetupCancelled() else { return }
+                    guard restart.succeeded else {
+                        exitCode = restart.cancelled ? 130 : 1
+                        setupError = "Setup completed, but the running gateway could not be restarted to load it. Use Restart Gateway from Overview."
+                        return
+                    }
+                case .started:
                     break
                 }
             }
