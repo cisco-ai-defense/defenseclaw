@@ -1060,7 +1060,7 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		// The canonical schema-v8 observability runtime always binds the
 		// sidecar telemetry health source.
 		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion,
+		telemetryEnabled: cfg.ConfigVersion >= config.ObservabilityV8ConfigVersion,
 		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,

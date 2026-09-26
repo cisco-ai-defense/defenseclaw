@@ -2841,13 +2841,16 @@ func loadConfigSource(
 		cfg.OTel.Resource.Attributes = otelAttrs
 	}
 
+	// migrateConfig stamps pre-v7 compatibility sources as v7, so the runtime
+	// gate reports the version the file actually declares.
+	sourceConfigVersion := cfg.ConfigVersion
 	migrateConfig(&cfg)
 	if !runtimeV8 {
 		normalizeRelativeGatewayDeviceKeyFile(&cfg)
 	}
 	if runtimeV8 {
-		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
-			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
+		if err := checkRuntimeConfigVersion(sourceConfigVersion); err != nil {
+			return nil, err
 		}
 		clearLegacyObservabilityRuntimeConfig(&cfg)
 	} else {
@@ -3411,6 +3414,21 @@ func yamlKindName(k yaml.Kind) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", k)
 	}
+}
+
+// checkRuntimeConfigVersion admits config_version 8 through
+// MaxSupportedConfigVersion. Older sources are rewritten by the CLI migration;
+// newer ones belong to a newer DefenseClaw and are never guessed at.
+func checkRuntimeConfigVersion(version int) error {
+	switch {
+	case version < ObservabilityV8ConfigVersion:
+		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
+			version, ObservabilityV8ConfigVersion)
+	case version > MaxSupportedConfigVersion:
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
+			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+	}
+	return nil
 }
 
 // migrateConfig applies forward migrations when config_version is behind

@@ -65,6 +65,12 @@ const (
 	ObservabilityV8BucketCatalogVersion = 1
 )
 
+// MaxSupportedConfigVersion is the newest config_version this build loads. A
+// newer file was written by a newer DefenseClaw and is refused instead of
+// being decoded without its new semantics. Raise it together with the CLI
+// migration that writes the new version.
+const MaxSupportedConfigVersion = 8
+
 // ObservabilityV8Source is the typed source form of the v8 observability block.
 // A nil *ObservabilityV8Source and an empty value compile identically.
 type ObservabilityV8Source struct {
