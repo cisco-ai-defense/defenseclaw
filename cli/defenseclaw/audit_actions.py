@@ -118,6 +118,16 @@ ACTION_CODEX_NOTIFY: Final[str]                     = "codex.notify"
 ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE: Final[str] = "codex.notify.agent-turn-complete"
 ACTION_CODEX_NOTIFY_MALFORMED: Final[str]           = "codex.notify.malformed"
 
+# OpenShell sandbox telemetry. Each key is emitted only by the typed Go
+# SandboxRecorder, which always names the generated v8 family.
+ACTION_SANDBOX_LIFECYCLE: Final[str] = "sandbox-lifecycle"
+ACTION_SANDBOX_WORKSPACE: Final[str] = "sandbox-workspace"
+ACTION_SANDBOX_EGRESS: Final[str]    = "sandbox-egress"
+ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
+ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
+ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
+ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
 ACTION_SIDECAR_STOP: Final[str] = "sidecar-stop"
@@ -321,6 +331,13 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
+    ACTION_SANDBOX_LIFECYCLE,
+    ACTION_SANDBOX_WORKSPACE,
+    ACTION_SANDBOX_EGRESS,
+    ACTION_SANDBOX_APPROVAL,
+    ACTION_SANDBOX_POLICY,
+    ACTION_SANDBOX_HEALTH,
+    ACTION_SANDBOX_FINDING,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,

@@ -897,3 +897,191 @@ examples:
       /defenseclaw.scan.id: identifier
       /defenseclaw.scan.scanner: identifier
   expected_error: compatibility_only_identity_has_no_family
+- id: valid-sandbox-lifecycle-ready
+  valid: true
+  signal: logs
+  family: log.sandbox.lifecycle
+  description: A gateway status update moves a mounted-workspace sandbox to ready; the record carries the sandbox correlation group and the condition behind the transition.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-09-26T12:00:00Z', record_id: rec-sandbox-lifecycle-001}
+    condition_facts: {}
+    mandatory_facts: {}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:00:00Z'
+    record_id: rec-sandbox-lifecycle-001
+    bucket: agent.lifecycle
+    signal: logs
+    event_name: sandbox.lifecycle
+    severity: INFO
+    source: gateway
+    connector: claudecode
+    outcome: completed
+    mandatory: false
+    correlation:
+      connector_id: claudecode
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    body:
+      defenseclaw.sandbox.id: 0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33
+      defenseclaw.sandbox.name: dc-claudecode-myapp-7f3a
+      defenseclaw.sandbox.runtime: openshell
+      defenseclaw.sandbox.driver: docker
+      defenseclaw.sandbox.image.digest: sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b
+      defenseclaw.sandbox.policy.version: 3
+      defenseclaw.sandbox.profile: open
+      defenseclaw.sandbox.pack: open
+      defenseclaw.sandbox.phase: ready
+      defenseclaw.sandbox.workdir.mode: mount
+      defenseclaw.sandbox.phase.previous: starting
+      defenseclaw.sandbox.lifecycle.trigger: watch
+      defenseclaw.sandbox.condition.type: Ready
+      defenseclaw.sandbox.condition.status: 'True'
+      defenseclaw.sandbox.condition.reason: SupervisorReady
+    field_classes:
+      /defenseclaw.sandbox.id: identifier
+      /defenseclaw.sandbox.name: identifier
+      /defenseclaw.sandbox.runtime: metadata
+      /defenseclaw.sandbox.driver: metadata
+      /defenseclaw.sandbox.image.digest: identifier
+      /defenseclaw.sandbox.policy.version: metadata
+      /defenseclaw.sandbox.profile: metadata
+      /defenseclaw.sandbox.pack: identifier
+      /defenseclaw.sandbox.phase: metadata
+      /defenseclaw.sandbox.workdir.mode: metadata
+      /defenseclaw.sandbox.phase.previous: metadata
+      /defenseclaw.sandbox.lifecycle.trigger: metadata
+      /defenseclaw.sandbox.condition.type: identifier
+      /defenseclaw.sandbox.condition.status: metadata
+      /defenseclaw.sandbox.condition.reason: identifier
+- id: valid-sandbox-workspace-review
+  valid: true
+  signal: logs
+  family: log.sandbox.workspace
+  description: The end-of-session review reports the diffstat and flags changed files that can run code on the host.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-09-26T12:30:00Z', record_id: rec-sandbox-workspace-001}
+    condition_facts: {}
+    mandatory_facts: {}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:30:00Z'
+    record_id: rec-sandbox-workspace-001
+    bucket: enforcement.action
+    signal: logs
+    event_name: sandbox.workspace
+    severity: MEDIUM
+    source: gateway
+    connector: claudecode
+    outcome: completed
+    mandatory: false
+    correlation:
+      connector_id: claudecode
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    body:
+      defenseclaw.sandbox.name: dc-claudecode-myapp-7f3a
+      defenseclaw.sandbox.workdir.mode: mount
+      defenseclaw.sandbox.workspace.operation: review
+      defenseclaw.sandbox.workspace.file_count: 8
+      defenseclaw.sandbox.workspace.lines_added: 212
+      defenseclaw.sandbox.workspace.lines_removed: 37
+      defenseclaw.sandbox.workspace.flagged_count: 2
+      defenseclaw.sandbox.workspace.paths: [package.json, .envrc]
+    field_classes:
+      /defenseclaw.sandbox.name: identifier
+      /defenseclaw.sandbox.workdir.mode: metadata
+      /defenseclaw.sandbox.workspace.operation: metadata
+      /defenseclaw.sandbox.workspace.file_count: metadata
+      /defenseclaw.sandbox.workspace.lines_added: metadata
+      /defenseclaw.sandbox.workspace.lines_removed: metadata
+      /defenseclaw.sandbox.workspace.flagged_count: metadata
+      /defenseclaw.sandbox.workspace.paths/0: content
+      /defenseclaw.sandbox.workspace.paths/1: content
+- id: valid-sandbox-transition-metric
+  valid: true
+  signal: metrics
+  family: metric.defenseclaw.sandbox.transitions
+  description: One sandbox phase transition increments a counter keyed only by the harness connector and the phase pair.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-09-26T12:00:00Z', record_id: rec-sandbox-transition-001}
+    condition_facts: {}
+    mandatory_facts: {}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:00:00Z'
+    record_id: rec-sandbox-transition-001
+    bucket: agent.lifecycle
+    signal: metrics
+    event_name: defenseclaw.sandbox.transitions
+    source: gateway
+    correlation: {}
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    instrument_data:
+      value: 1
+      attributes:
+        defenseclaw.connector.source: claudecode
+        defenseclaw.sandbox.phase.from: starting
+        defenseclaw.sandbox.phase.to: ready
+    field_classes:
+      /value: metadata
+      /attributes/defenseclaw.connector.source: identifier
+      /attributes/defenseclaw.sandbox.phase.from: metadata
+      /attributes/defenseclaw.sandbox.phase.to: metadata
+- id: invalid-sandbox-identity-metric-label
+  valid: false
+  signal: metrics
+  family: metric.defenseclaw.sandbox.transitions
+  base_example: valid-sandbox-transition-metric
+  builder_context: {inheritance: {mode: exact_base, base_example: valid-sandbox-transition-metric}}
+  mutation:
+    kind: metric_label_not_registered
+    changes:
+    - {op: add, path: /record/instrument_data/attributes/defenseclaw.sandbox.id, value: 0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33}
+    - {op: add, path: /record/field_classes/~1attributes~1defenseclaw.sandbox.id, value: identifier}
+  description: This complete metric record is invalid only because a sandbox identity from correlation.sandbox is never a metric label.
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:00:00Z'
+    record_id: rec-sandbox-transition-001
+    bucket: agent.lifecycle
+    signal: metrics
+    event_name: defenseclaw.sandbox.transitions
+    source: gateway
+    correlation: {}
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    instrument_data:
+      value: 1
+      attributes:
+        defenseclaw.connector.source: claudecode
+        defenseclaw.sandbox.phase.from: starting
+        defenseclaw.sandbox.phase.to: ready
+        defenseclaw.sandbox.id: 0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33
+    field_classes:
+      /value: metadata
+      /attributes/defenseclaw.connector.source: identifier
+      /attributes/defenseclaw.sandbox.phase.from: metadata
+      /attributes/defenseclaw.sandbox.phase.to: metadata
+      /attributes/defenseclaw.sandbox.id: identifier
+  expected_error: metric_label_not_registered

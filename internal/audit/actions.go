@@ -137,6 +137,18 @@ const (
 	ActionCodexNotifyAgentTurnComplete Action = "codex.notify.agent-turn-complete"
 	ActionCodexNotifyMalformed         Action = "codex.notify.malformed"
 
+	// OpenShell sandbox telemetry. Each action is the producer key of one
+	// typed SandboxRecorder operation (sandbox_v8.go) and always names its
+	// generated family explicitly, so a bare LogAction with one of these
+	// keys is rejected rather than guessed.
+	ActionSandboxLifecycle Action = "sandbox-lifecycle"
+	ActionSandboxWorkspace Action = "sandbox-workspace"
+	ActionSandboxEgress    Action = "sandbox-egress"
+	ActionSandboxApproval  Action = "sandbox-approval"
+	ActionSandboxPolicy    Action = "sandbox-policy"
+	ActionSandboxHealth    Action = "sandbox-health"
+	ActionSandboxFinding   Action = "sandbox-finding"
+
 	// Sidecar lifecycle and bootstrap instrumentation. These actions
 	// describe gateway-side startup, shutdown, WebSocket connectivity,
 	// and watcher decisions that are proxied through the sidecar.
@@ -359,6 +371,13 @@ func AllActions() []Action {
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,
+		ActionSandboxLifecycle,
+		ActionSandboxWorkspace,
+		ActionSandboxEgress,
+		ActionSandboxApproval,
+		ActionSandboxPolicy,
+		ActionSandboxHealth,
+		ActionSandboxFinding,
 		ActionSidecarStart,
 		ActionSidecarStop,
 		ActionSidecarConnected,
