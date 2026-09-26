@@ -400,7 +400,17 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	// Spelled out rather than taken from winpath so the test fails if the
+	// shared layout drifts from the installer's default InstallRoot.
+	defaultInstallRoot := filepath.Join(
+		defaultProgramFiles,
+		"Cisco",
+		"Cisco Secure Client",
+		"DefenseClaw",
+	)
+	// Nothing is installed here. Before #897 the guard checked this root
+	// and never matched a real install.
+	unusedCiscoRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
 	explicitInstalledCLI := filepath.Join(
 		explicitInstallRoot,
 		"bin",
@@ -411,13 +421,21 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 		"bin",
 		"defenseclaw.exe",
 	)
+	unusedCiscoRootCLI := filepath.Join(
+		unusedCiscoRoot,
+		"bin",
+		"defenseclaw.exe",
+	)
 	replacement := filepath.Join(root, "release", "defenseclaw.exe")
 	aliasCLI := filepath.Join(root, "stage", "defenseclaw.exe")
+	defaultAliasCLI := filepath.Join(root, "default-stage", "defenseclaw.exe")
 	for _, directory := range []string{
 		filepath.Dir(explicitInstalledCLI),
 		filepath.Dir(defaultInstalledCLI),
+		filepath.Dir(unusedCiscoRootCLI),
 		filepath.Dir(replacement),
 		filepath.Dir(aliasCLI),
+		filepath.Dir(defaultAliasCLI),
 	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", directory, err)
@@ -426,18 +444,24 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 	for _, path := range []string{
 		explicitInstalledCLI,
 		defaultInstalledCLI,
+		unusedCiscoRootCLI,
 		replacement,
 	} {
 		if err := os.WriteFile(path, []byte("MZ fixture"), 0o600); err != nil {
 			t.Fatalf("WriteFile(%q): %v", path, err)
 		}
 	}
-	if err := os.Link(explicitInstalledCLI, aliasCLI); err != nil {
-		// Some filesystems (ReFS, mounted dev drives) do not support hard
-		// links. Treat that as an environment limitation, not a product
-		// failure — the symlink test below already uses t.Skipf for the
-		// same class of limitation.
-		t.Skipf("hard-link creation unavailable on this filesystem: %v", err)
+	for source, alias := range map[string]string{
+		explicitInstalledCLI: aliasCLI,
+		defaultInstalledCLI:  defaultAliasCLI,
+	} {
+		if err := os.Link(source, alias); err != nil {
+			// Some filesystems (ReFS, mounted dev drives) do not support hard
+			// links. Treat that as an environment limitation, not a product
+			// failure — the symlink test below already uses t.Skipf for the
+			// same class of limitation.
+			t.Skipf("hard-link creation unavailable on this filesystem: %v", err)
+		}
 	}
 
 	originalProgramFilesResolver := windowsEnterpriseProgramFilesResolver
@@ -478,6 +502,19 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 			executable:  aliasCLI,
 			cliBinary:   replacement,
 			conflict:    true,
+		},
+		{
+			name:       "default installed root file identity alias",
+			action:     "upgrade",
+			executable: defaultAliasCLI,
+			cliBinary:  replacement,
+			conflict:   true,
+		},
+		{
+			name:       "CLI under Program Files Cisco DefenseClaw is not the install",
+			action:     "upgrade",
+			executable: unusedCiscoRootCLI,
+			cliBinary:  replacement,
 		},
 		{
 			name:        "external release CLI explicit root",
@@ -521,6 +558,35 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 				t.Fatalf("conflict = %t, want %t", conflict, test.conflict)
 			}
 		})
+	}
+}
+
+func TestWindowsEnterpriseSelfUpgradeDefaultInstallRootIsSecureClientRoot(t *testing.T) {
+	originalProgramFilesResolver := windowsEnterpriseProgramFilesResolver
+	t.Cleanup(func() {
+		windowsEnterpriseProgramFilesResolver = originalProgramFilesResolver
+	})
+	windowsEnterpriseProgramFilesResolver = func() (string, error) {
+		return `C:\Program Files`, nil
+	}
+
+	got, err := resolveWindowsEnterpriseSelfUpgradeInstallRoot("")
+	if err != nil {
+		t.Fatalf("resolveWindowsEnterpriseSelfUpgradeInstallRoot: %v", err)
+	}
+	// Must equal install-enterprise.ps1's default InstallRoot.
+	const want = `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`
+	if got != want {
+		t.Fatalf("default self-upgrade install root = %q, want %q", got, want)
+	}
+
+	explicit := `D:\Custom\DefenseClaw`
+	got, err = resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit)
+	if err != nil {
+		t.Fatalf("resolveWindowsEnterpriseSelfUpgradeInstallRoot(%q): %v", explicit, err)
+	}
+	if got != explicit {
+		t.Fatalf("explicit self-upgrade install root = %q, want %q", got, explicit)
 	}
 }
 
@@ -596,7 +662,12 @@ func TestRunWindowsEnterpriseLifecycleSelfUpgradeConflictStopsBeforeRunnerAndEmi
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	defaultInstallRoot := filepath.Join(
+		defaultProgramFiles,
+		"Cisco",
+		"Cisco Secure Client",
+		"DefenseClaw",
+	)
 	externalInstaller := filepath.Join(root, "release", "install-enterprise.ps1")
 	replacement := filepath.Join(root, "release", "defenseclaw.exe")
 	windowsEnterpriseScriptFinder = func(string) (string, error) {
