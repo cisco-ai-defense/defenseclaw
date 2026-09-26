@@ -2567,8 +2567,15 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 		writeEnterpriseHookStandaloneGuardianStateOrLog(w, state)
 		return
 	}
-	statePath := guardianstate.PathForStateRoot(filepath.Dir(filepath.Clean(enterpriseHookManifest)))
-	if err := guardianstate.WriteState(statePath, state); err != nil {
+	if cfg == nil {
+		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file: config is not loaded\n", state)
+		return
+	}
+	// Resolve through the same helper the gateway sidecar reads from
+	// (the protected authorization directory), not the manifest directory:
+	// the two are different directories in every shipped layout (#896).
+	statePath, err := writeEnterpriseHookGuardianReadinessState(cfg.DataDir, state)
+	if err != nil {
 		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file %s: %v\n", state, statePath, err)
 	}
 }

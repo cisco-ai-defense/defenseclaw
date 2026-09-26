@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestReadStateHappyPath(t *testing.T) {
@@ -91,13 +93,50 @@ func TestWriteStateRejectsUnknownLiteral(t *testing.T) {
 	}
 }
 
-func TestPathForStateRoot(t *testing.T) {
-	// Ensures callers don't have to know FileName; the layout is a
-	// single-source-of-truth join.
-	got := PathForStateRoot("/tmp/dc/hook-guardian")
-	want := filepath.Join("/tmp/dc/hook-guardian", FileName)
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+// TestPathForDataDirUsesProtectedAuthorizationDir pins the single
+// writer/reader helper (issue #896): the state file lives in the protected
+// hook guardian authorization directory the services are configured with,
+// and never inside the gateway-writable data_dir.
+func TestPathForDataDirUsesProtectedAuthorizationDir(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "runtime")
+	authDir := filepath.Join(root, "hook-guardian-state")
+
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authDir)
+	if got, want := PathForDataDir(dataDir), filepath.Join(authDir, FileName); got != want {
+		t.Fatalf("configured authorization dir: got %q, want %q", got, want)
+	}
+
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "")
+	got := PathForDataDir(dataDir)
+	if want := filepath.Join(dataDir+"-hook-guardian", FileName); got != want {
+		t.Fatalf("default authorization dir: got %q, want %q", got, want)
+	}
+	if rel, err := filepath.Rel(dataDir, got); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("state path %q is inside the gateway-writable data_dir %q", got, dataDir)
+	}
+}
+
+func TestEncodeMatchesWriteStateBody(t *testing.T) {
+	for _, state := range []string{StateWaitingForTargets, StateReady} {
+		body, err := Encode(state)
+		if err != nil {
+			t.Fatalf("Encode(%q): %v", state, err)
+		}
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := WriteState(path, state); err != nil {
+			t.Fatalf("WriteState(%q): %v", state, err)
+		}
+		written, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(written) != string(body) {
+			t.Fatalf("WriteState body %q != Encode body %q", written, body)
+		}
+	}
+	if _, err := Encode("waiting_for_config"); err == nil {
+		t.Fatal("Encode accepted a literal the sidecar cannot map")
 	}
 }
 

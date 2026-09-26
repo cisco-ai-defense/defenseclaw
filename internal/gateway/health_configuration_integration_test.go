@@ -4,12 +4,11 @@
 package gateway
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // TestConfigurationEndToEndDeferredFlow exercises the full spec 003
@@ -19,18 +18,17 @@ import (
 //  2. UCB writes config.yaml               →  waiting_for_targets.
 //  3. UCB writes targets.yaml              →  ready.
 //
-// The test wires a real `<StateRoot>\hook-guardian\.state` file
-// through guardianstate.PathForDataDir + ReadState, matching the
-// production sidecar layout at internal/cli/sidecar.go. This is the
+// The test wires a real `.state` file in the protected hook guardian
+// authorization directory (DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR) through
+// guardianstate.PathForDataDir + ReadState, the single helper both the
+// guardian writer and the production sidecar reader resolve. This is the
 // integration counterpart to the unit-level collapsing tests in
 // health_configuration_test.go — those pin the rule; this pins the
 // actual filesystem-round-trip cross-process signalling.
 func TestConfigurationEndToEndDeferredFlow(t *testing.T) {
 	dataDir := t.TempDir()
-	guardianDir := filepath.Join(dataDir, guardianstate.StateDirName)
-	if err := os.MkdirAll(guardianDir, 0o755); err != nil {
-		t.Fatalf("mkdir guardian dir: %v", err)
-	}
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
 	statePath := guardianstate.PathForDataDir(dataDir)
 
 	h := NewSidecarHealth()
@@ -91,10 +89,8 @@ func TestConfigurationEndToEndDeferredFlow(t *testing.T) {
 // waiting_for_targets tick).
 func TestConfigurationEndToEndTargetsArriveFirst(t *testing.T) {
 	dataDir := t.TempDir()
-	guardianDir := filepath.Join(dataDir, guardianstate.StateDirName)
-	if err := os.MkdirAll(guardianDir, 0o755); err != nil {
-		t.Fatalf("mkdir guardian dir: %v", err)
-	}
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
 	statePath := guardianstate.PathForDataDir(dataDir)
 
 	// Guardian has already run (perhaps because it started faster
@@ -133,6 +129,7 @@ func TestConfigurationEndToEndTargetsArriveFirst(t *testing.T) {
 // missing.
 func TestConfigurationEndToEndGuardianCrashesMidBoot(t *testing.T) {
 	dataDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, t.TempDir())
 	statePath := guardianstate.PathForDataDir(dataDir)
 	// Do NOT create the state file — this simulates the guardian
 	// having crashed before writing its first state transition.

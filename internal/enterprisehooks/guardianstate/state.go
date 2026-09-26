@@ -18,10 +18,21 @@
 //     collapsing rule treats as `waiting_for_targets` (safe default —
 //     never a false-positive `ready`).
 //
-//   - Uninstall removes the entire `<StateRoot>\hook-guardian\`
-//     directory (via the transactional path in
-//     packaging/windows/DefenseClawEnterprise.psm1:6003-6086), so the
-//     state file goes with it.
+//   - Writer and reader resolve the path through the single helper
+//     PathForDataDir, which places the file in the protected hook
+//     guardian authorization directory
+//     (managed.HookGuardianAuthorizationDir): `<StateRoot>\hook-guardian-state`
+//     on Windows and `/opt/cisco/secureclient/defenseclaw/hook-guardian-state`
+//     on macOS, both selected by DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR in the
+//     gateway AND guardian service environments. That directory is
+//     writable only by SYSTEM/Administrators (root on macOS) and readable
+//     by the gateway, so the gateway can observe the state without being
+//     able to forge it. Neither the manifest directory (administrator-only,
+//     not gateway-readable on Windows) nor the gateway-writable data_dir is
+//     a valid location.
+//
+//   - The state is diagnostic health only. It never authorizes a target,
+//     enrollment, or enforcement decision.
 //
 // This package deliberately has no dependency on internal/gateway to
 // avoid an import cycle: the sidecar imports guardianstate, and the
@@ -35,6 +46,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // State names — the exact bytes the guardian writes and the sidecar
@@ -51,35 +64,34 @@ const (
 	StateUnknown = ""
 )
 
-// FileName is the state file's basename under the guardian's state
-// root directory. Constant so tests and callers don't guess.
+// FileName is the state file's basename inside the protected hook
+// guardian authorization directory. Constant so tests and callers don't
+// guess.
 const FileName = ".state"
 
-// StateDirName is the subdirectory under the daemon's data dir
-// (cfg.DataDir on both platforms) that the hook-guardian owns. The
-// guardian's targets.yaml AND its .state file both live here. Windows
-// installer maps this to `<StateRoot>\hook-guardian\` via the psm1
-// module's directory-prep block; Linux/macOS keep the same subdir
-// name for consistency across the two `.state` reader-writer paths.
-const StateDirName = "hook-guardian"
-
-// PathForStateRoot returns the full state file path for a given
-// hook-guardian state root. The state root is
-// `<StateRoot>\hook-guardian\` on Windows (matches the runtime layout
-// in DefenseClawEnterprise.psm1); pass the containing directory here,
-// not the state file itself.
-func PathForStateRoot(stateRoot string) string {
-	return filepath.Join(stateRoot, FileName)
+// PathForDataDir returns the one state file path both the guardian
+// (writer) and the gateway sidecar (reader) use. Both processes load the
+// same managed config and receive the same DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR,
+// so resolving through managed.HookGuardianAuthorizationDir(cfg.DataDir)
+// lands on the same protected directory on every platform; without the
+// environment override the shared default is `<data_dir>-hook-guardian`,
+// which still agrees on both sides and stays outside the gateway-writable
+// data_dir.
+func PathForDataDir(dataDir string) string {
+	return filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), FileName)
 }
 
-// PathForDataDir returns the state file path derived from the
-// daemon's data dir. Callers on the READ side (the sidecar) don't
-// know the manifest path directly — they resolve it from cfg.DataDir
-// plus the fixed hook-guardian subdirectory convention. The writer
-// side (the guardian) uses PathForStateRoot with
-// filepath.Dir(manifestPath).
-func PathForDataDir(dataDir string) string {
-	return filepath.Join(dataDir, StateDirName, FileName)
+// Encode returns the exact bytes WriteState and the protected guardian
+// writer publish for state. It rejects any literal the sidecar cannot map
+// so a typo never ships a state string the reader won't recognise.
+func Encode(state string) ([]byte, error) {
+	if state != StateWaitingForTargets && state != StateReady {
+		return nil, fmt.Errorf("guardianstate: refusing to write unknown state %q", state)
+	}
+	// One-line ASCII body plus LF. The sidecar's ReadState trims
+	// whitespace so the newline is cosmetic; keep it for `type` /
+	// `cat` friendliness on the Windows box during triage.
+	return []byte(state + "\n"), nil
 }
 
 // PathForPlatform is the single state-file path both the guardian (writer)
@@ -144,8 +156,9 @@ func ReadState(path string) string {
 // value returns a validation error so a typo doesn't ship a
 // state string the sidecar won't recognise.
 func WriteState(path, state string) error {
-	if state != StateWaitingForTargets && state != StateReady {
-		return fmt.Errorf("guardianstate: refusing to write unknown state %q", state)
+	body, err := Encode(state)
+	if err != nil {
+		return err
 	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, FileName+".tmp-*")
@@ -162,10 +175,7 @@ func WriteState(path, state string) error {
 		}
 	}()
 
-	// One-line ASCII body plus LF. The sidecar's ReadState trims
-	// whitespace so the newline is cosmetic; keep it for `type` /
-	// `cat` friendliness on the Windows box during triage.
-	if _, err := tmp.WriteString(state + "\n"); err != nil {
+	if _, err := tmp.Write(body); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("guardianstate: write body: %w", err)
 	}
