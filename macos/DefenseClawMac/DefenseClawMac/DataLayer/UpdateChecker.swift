@@ -14,73 +14,107 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Self-update against the unified Cisco DefenseClaw GitHub Releases.
+// Release check and installer fetch against the unified Cisco DefenseClaw
+// GitHub Releases.
 //
-// The repo is public: both the release check and the asset download go
+// The repo is public: both the release check and the installer download go
 // through unauthenticated HTTPS to github.com — no gh CLI, no credentials.
-// Install: download the release zip, unpack with ditto, swap the running
-// .app bundle in place, strip quarantine, and relaunch.
+// The app and the runtime ship as one release, and that release's install.sh
+// is the only updater: it installs the runtime and swaps this .app bundle,
+// rolling back on failure. The app downloads it, verifies it against the
+// release's checksums.txt, runs it, and relaunches if the bundle changed.
 
-import AppKit
+import CryptoKit
 import Foundation
 
 struct ReleaseInfo: Sendable, Equatable {
-    var tag: String          // e.g. "v0.3.1"
-    var version: String      // e.g. "0.3.1"
-    var assetName: String
-    var assetURL: String     // browser_download_url
-    var assetSHA256: String  // GitHub asset digest, without "sha256:"
+    var tag: String          // e.g. "1.0.1"
+    var version: String      // e.g. "1.0.1"
     var htmlURL: String
-    var notes: String
 }
 
-struct RuntimeInstallerInfo: Sendable, Equatable {
-    var tag: String
-    var assetURL: URL
-    var assetSHA256: String
-    var releaseURL: URL
+enum InstallerFetchError: Error, Equatable, LocalizedError {
+    case invalidVersion(String)
+    case unsupportedVersion(String)
+    case downloadFailed(asset: String, reason: String)
+    case missingChecksum
+    case checksumMismatch
+    case stagingFailed(String)
 
-    var localFileName: String {
-        "defenseclaw-install-\(tag).sh"
-    }
-
-    var downloadCommand: String {
-        let destination = "$HOME/Downloads/\(localFileName)"
-        let temporary = destination + ".download"
-        return "tmp=\"\(temporary)\"; dest=\"\(destination)\"; /usr/bin/curl -fL --proto '=https' --tlsv1.2 --output \"$tmp\" '\(assetURL.absoluteString)' && actual=\"$(/usr/bin/shasum -a 256 \"$tmp\" | /usr/bin/awk '{print $1}')\" && test \"$actual\" = '\(assetSHA256)' && /bin/mv -f \"$tmp\" \"$dest\""
-    }
-
-    var reviewCommand: String {
-        "/usr/bin/open -a TextEdit \"$HOME/Downloads/\(localFileName)\""
-    }
-
-    var runCommand: String {
-        let script = "$HOME/Downloads/\(localFileName)"
-        return "script=\"\(script)\"; actual=\"$(/usr/bin/shasum -a 256 \"$script\" | /usr/bin/awk '{print $1}')\"; test \"$actual\" = '\(assetSHA256)' && /bin/bash \"$script\""
+    var errorDescription: String? {
+        switch self {
+        case .invalidVersion(let version):
+            "\(version) is not a DefenseClaw release version (expected X.Y.Z)."
+        case .unsupportedVersion(let version):
+            "DefenseClaw \(version) predates the 1.0 installer; install \(UpdateChecker.minimumInstallerVersion) or later."
+        case .downloadFailed(let asset, let reason):
+            "Could not download \(asset) from the DefenseClaw release: \(reason)"
+        case .missingChecksum:
+            "The release's checksums.txt has no single entry for install.sh; refusing to run an unverifiable installer."
+        case .checksumMismatch:
+            "The downloaded install.sh does not match the release's checksums.txt; refusing to run it."
+        case .stagingFailed(let reason):
+            "Could not save the verified installer: \(reason)"
+        }
     }
 }
 
-enum UpgradeState: Equatable {
+/// install.sh progress — one flow for the first-run install and for updates.
+enum InstallerState: Equatable {
     case idle
-    case checking
-    case downloading
-    case installing
-    /// No mutation failed; the operator must complete an external authenticated action.
-    /// Keep human-readable guidance separate from the exact runnable command so
-    /// copy actions never put explanatory prose on the operator's pasteboard.
-    case actionRequired(guidance: String, command: String)
-    case failed(String)
+    case downloading(version: String)
+    case running(version: String)
+    /// install.sh exited 0.
+    case installed(version: String)
+    /// install.sh exited 3: installed, but a connector needs attention.
+    case needsAttention(version: String, detail: String)
+    /// Any other outcome. install.sh has already rolled back on its own.
+    case failed(version: String, detail: String)
+
+    var isBusy: Bool {
+        switch self {
+        case .downloading, .running: true
+        default: false
+        }
+    }
+
+    var version: String? {
+        switch self {
+        case .idle: nil
+        case .downloading(let version), .running(let version), .installed(let version),
+             .needsAttention(let version, _), .failed(let version, _): version
+        }
+    }
+
+    /// The installer contract: exit 0 installed, exit 3 installed with a
+    /// connector warning, anything else failed. Both carry the last lines.
+    static func finished(version: String, exitCode: Int32, cancelled: Bool, output: String) -> InstallerState {
+        guard !cancelled else {
+            return .failed(
+                version: version,
+                detail: "The installer was interrupted before it finished. Try again to complete the installation."
+            )
+        }
+        let tail = output.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .suffix(4)
+            .joined(separator: "\n")
+        switch exitCode {
+        case 0:
+            return .installed(version: version)
+        case 3:
+            return .needsAttention(version: version, detail: tail.isEmpty ? "Run defenseclaw doctor for details." : tail)
+        default:
+            return .failed(version: version, detail: tail.isEmpty ? "install.sh exited \(exitCode)." : tail)
+        }
+    }
 }
 
 actor UpdateChecker {
     static let repo = "cisco-ai-defense/defenseclaw"
-    /// The underlying DefenseClaw runtime (CLI + gateway) — upgraded via
-    /// `defenseclaw upgrade`, but version-checked against its releases here.
-    static let runtimeRepo = "cisco-ai-defense/defenseclaw"
-    nonisolated static let expectedBundleIdentifier = "com.cisco.defenseclaw.macos"
-    nonisolated static let expectedTeamIdentifier = ""
-    nonisolated static let expectedCodeRequirement =
-        #"anchor apple generic and identifier "com.cisco.defenseclaw.macos""#
+    /// Earlier installers predate the app contract (exit 3, DEFENSECLAW_APP_PATH).
+    static let minimumInstallerVersion = "1.0.0"
 
     static var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
@@ -103,36 +137,6 @@ actor UpdateChecker {
         return false
     }
 
-    // MARK: - Check
-
-    /// Latest Mac-app release.
-    func latestRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.repo, requireSelfUpdateAsset: true)
-    }
-
-    /// Latest DefenseClaw runtime release (upstream repo).
-    func latestRuntimeRelease() async -> ReleaseInfo? {
-        await fetchLatest(repo: Self.runtimeRepo, requireSelfUpdateAsset: false)
-    }
-
-    /// Latest release-owned shell installer. Unlike a raw branch URL, this
-    /// asset is bound to the release's GitHub-provided SHA-256 digest; the
-    /// generated Terminal commands verify that digest before both review and
-    /// execution.
-    func latestRuntimeInstaller() async -> RuntimeInstallerInfo? {
-        guard let url = URL(
-            string: "https://api.github.com/repos/\(Self.runtimeRepo)/releases/latest"
-        ) else { return nil }
-        var request = URLRequest(url: url, timeoutInterval: 10)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = dict["tag_name"] as? String
-        else { return nil }
-        return Self.runtimeInstallerInfo(from: dict, tag: tag)
-    }
-
     /// Parse "defenseclaw, version 0.7.0"-style output into "0.7.0".
     static func parseVersion(_ output: String) -> String? {
         let pattern = #"[0-9]+(\.[0-9]+)+"#
@@ -140,8 +144,12 @@ actor UpdateChecker {
         return String(output[range])
     }
 
-    private func fetchLatest(repo: String, requireSelfUpdateAsset: Bool) async -> ReleaseInfo? {
-        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return nil }
+    // MARK: - Check
+
+    /// Latest DefenseClaw release. The app and the runtime ship together, so
+    /// one lookup covers both; nil means the lookup failed.
+    func latestRelease() async -> ReleaseInfo? {
+        guard let url = URL(string: "https://api.github.com/repos/\(Self.repo)/releases/latest") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
@@ -149,347 +157,158 @@ actor UpdateChecker {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = dict["tag_name"] as? String
         else { return nil }
-        return Self.releaseInfo(
-            from: dict,
-            repo: repo,
+        return Self.releaseInfo(from: dict, tag: tag)
+    }
+
+    nonisolated static func releaseInfo(from dict: [String: Any], tag: String) -> ReleaseInfo {
+        ReleaseInfo(
             tag: tag,
-            requireSelfUpdateAsset: requireSelfUpdateAsset
+            version: tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+            htmlURL: (dict["html_url"] as? String) ?? "https://github.com/\(repo)/releases"
         )
     }
 
-    nonisolated static func releaseInfo(
-        from dict: [String: Any],
-        repo: String,
-        tag: String,
-        requireSelfUpdateAsset: Bool
-    ) -> ReleaseInfo? {
-        let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        let zip = Self.selectSelfUpdateAsset(from: assets, version: version)
-        if requireSelfUpdateAsset && zip == nil {
-            return nil
+    // MARK: - Installer
+
+    /// Download `version`'s install.sh and checksums.txt, verify the script's
+    /// SHA-256, and stage both in a private directory. Returns install.sh.
+    func fetchInstaller(version: String) async throws -> URL {
+        guard Self.isReleaseVersion(version) else { throw InstallerFetchError.invalidVersion(version) }
+        guard !Self.isNewer(Self.minimumInstallerVersion, than: version) else {
+            throw InstallerFetchError.unsupportedVersion(version)
         }
-        return ReleaseInfo(
-            tag: tag,
-            version: version,
-            assetName: (zip?["name"] as? String) ?? "",
-            assetURL: (zip?["browser_download_url"] as? String) ?? "",
-            assetSHA256: ((zip?["digest"] as? String) ?? "")
-                .replacingOccurrences(of: "sha256:", with: ""),
-            htmlURL: (dict["html_url"] as? String) ?? "https://github.com/\(repo)/releases",
-            notes: (dict["body"] as? String) ?? ""
-        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 120
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let installer = try await Self.download("install.sh", version: version, session: session)
+        let checksums = try await Self.download("checksums.txt", version: version, session: session)
+        return try Self.stageInstaller(installer, checksums: String(decoding: checksums, as: UTF8.self))
     }
 
-    nonisolated static func isEligibleSelfUpdateAsset(name: String, version: String) -> Bool {
-        name == "DefenseClawMac-\(version)-macos-arm64.zip"
+    nonisolated static func isReleaseVersion(_ version: String) -> Bool {
+        version.range(
+            of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,
+            options: .regularExpression
+        ) != nil
     }
 
-    nonisolated static func selectSelfUpdateAsset(
-        from assets: [[String: Any]],
-        version: String
-    ) -> [String: Any]? {
-        assets.first {
-            let name = ($0["name"] as? String) ?? ""
-            return Self.isEligibleSelfUpdateAsset(name: name, version: version)
-        }
+    /// The release's immutable asset URL — never a branch or `latest` URL.
+    nonisolated static func releaseAssetURL(_ asset: String, version: String) -> URL? {
+        guard isReleaseVersion(version) else { return nil }
+        return URL(string: "https://github.com/\(repo)/releases/download/\(version)/\(asset)")
     }
 
-    nonisolated static func runtimeInstallerInfo(
-        from dict: [String: Any],
-        tag: String
-    ) -> RuntimeInstallerInfo? {
-        guard tag.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
-            return nil
+    private static func download(_ asset: String, version: String, session: URLSession) async throws -> Data {
+        guard let url = releaseAssetURL(asset, version: version) else {
+            throw InstallerFetchError.invalidVersion(version)
         }
-        let assets = (dict["assets"] as? [[String: Any]]) ?? []
-        guard let asset = assets.first(where: { ($0["name"] as? String) == "install.sh" }),
-              let urlString = asset["browser_download_url"] as? String,
-              let assetURL = URL(string: urlString),
-              assetURL.scheme == "https",
-              assetURL.host == "github.com",
-              assetURL.path == "/cisco-ai-defense/defenseclaw/releases/download/\(tag)/install.sh"
-        else { return nil }
-        let digest = ((asset["digest"] as? String) ?? "")
-            .replacingOccurrences(of: "sha256:", with: "")
-            .lowercased()
-        guard digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
-              let releaseURL = URL(
-                  string: "https://github.com/cisco-ai-defense/defenseclaw/releases/tag/\(tag)"
-              )
-        else { return nil }
-        return RuntimeInstallerInfo(
-            tag: tag,
-            assetURL: assetURL,
-            assetSHA256: digest,
-            releaseURL: releaseURL
-        )
-    }
-
-    // MARK: - Download + install + restart
-
-    struct ZipArchiveEntry: Equatable {
-        var path: String
-        var mode: String
-    }
-
-    enum ArchiveValidationResult: Equatable {
-        case success(appBundleName: String)
-        case failure(String)
-    }
-
-    /// Downloads the release zip, swaps the current bundle, and relaunches.
-    /// Returns an error message, or never returns (the app restarts) on success.
-    func downloadAndInstall(_ release: ReleaseInfo, progress: @Sendable @escaping (UpgradeState) -> Void) async -> String? {
-        guard Self.isNewer(release.version, than: Self.currentVersion) else {
-            return "Refusing to install version \(release.version) over \(Self.currentVersion)."
-        }
-        guard Self.isEligibleSelfUpdateAsset(name: release.assetName, version: release.version) else {
-            return "The release asset is not the exact verified macOS app update for \(release.version)."
-        }
-        guard let assetURL = URL(string: release.assetURL), !release.assetURL.isEmpty else {
-            return "The latest release has no downloadable zip asset."
-        }
-        guard release.assetSHA256.count == 64 else {
-            return "The release asset has no SHA-256 digest; refusing to install an unverifiable update."
-        }
-
-        progress(.downloading)
-        let stage = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dc-update-\(release.version)")
-        try? FileManager.default.removeItem(at: stage)
-        try? FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
-        let zipPath = stage.appendingPathComponent(release.assetName.isEmpty ? "update.zip" : release.assetName)
-
+        var request = URLRequest(url: url)
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        let data: Data
+        let response: URLResponse
         do {
-            var request = URLRequest(url: assetURL, timeoutInterval: 30)
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 30
-            configuration.timeoutIntervalForResource = 300
-            let session = URLSession(configuration: configuration)
-            defer { session.invalidateAndCancel() }
-            let (tmp, response) = try await session.download(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                return "Download failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1))."
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw InstallerFetchError.downloadFailed(asset: asset, reason: error.localizedDescription)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200 else {
+            throw InstallerFetchError.downloadFailed(asset: asset, reason: "HTTP \(status)")
+        }
+        return data
+    }
+
+    /// The digest checksums.txt (`<sha256>  <name>` lines) records for
+    /// `asset`, or nil when the entry is missing, duplicated, or malformed.
+    nonisolated static func expectedSHA256(of asset: String, in checksums: String) -> String? {
+        let entries = checksums.split(whereSeparator: \.isNewline)
+            .map { $0.split(whereSeparator: \.isWhitespace) }
+            .filter { $0.count == 2 && $0[1] == asset }
+        guard entries.count == 1 else { return nil }
+        let digest = entries[0][0].lowercased()
+        return digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil ? nil : digest
+    }
+
+    /// Verify `installer` against checksums.txt, then write both into a fresh
+    /// 0700 directory under `parent`. Nothing is written unless verified.
+    nonisolated static func stageInstaller(
+        _ installer: Data,
+        checksums: String,
+        in parent: URL = FileManager.default.temporaryDirectory
+    ) throws -> URL {
+        guard let expected = expectedSHA256(of: "install.sh", in: checksums) else {
+            throw InstallerFetchError.missingChecksum
+        }
+        let actual = SHA256.hash(data: installer).map { String(format: "%02x", $0) }.joined()
+        guard actual == expected else { throw InstallerFetchError.checksumMismatch }
+
+        let fileManager = FileManager.default
+        let directory = parent.appendingPathComponent(
+            "DefenseClaw-installer-" + UUID().uuidString,
+            isDirectory: true
+        )
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+            )
+        } catch {
+            throw InstallerFetchError.stagingFailed(error.localizedDescription)
+        }
+        let script = directory.appendingPathComponent("install.sh", isDirectory: false)
+        let files = [
+            (script, installer),
+            (directory.appendingPathComponent("checksums.txt", isDirectory: false), Data(checksums.utf8)),
+        ]
+        for (url, contents) in files {
+            guard fileManager.createFile(
+                atPath: url.path,
+                contents: contents,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o600))]
+            ) else {
+                try? fileManager.removeItem(at: directory)
+                throw InstallerFetchError.stagingFailed("could not write \(url.lastPathComponent)")
             }
-            try? FileManager.default.removeItem(at: zipPath)
-            try FileManager.default.moveItem(at: tmp, to: zipPath)
-        } catch {
-            return "Download failed: \(error.localizedDescription)"
         }
-        guard RuntimePayload.sha256(of: zipPath) == release.assetSHA256.lowercased() else {
-            return "Downloaded update failed SHA-256 verification."
-        }
+        return script
+    }
 
-        progress(.installing)
-        // Unpack with ditto (preserves bundle structure + signature).
-        let unpackDir = stage.appendingPathComponent("unpacked")
-        try? FileManager.default.createDirectory(at: unpackDir, withIntermediateDirectories: true)
-        let entries = await Self.listZipEntries(zipPath)
-        guard entries.exitCode == 0 else {
-            return "Could not inspect update archive: \(entries.output)"
-        }
-        switch Self.validateUpdateArchive(entries: Self.parseZipEntries(entries.output)) {
-        case .success:
-            break
-        case .failure(let message):
-            return "Refusing unsafe update archive: \(message)"
-        }
-        let unzip = await Self.runProcess("/usr/bin/ditto", ["-xk", zipPath.path, unpackDir.path])
-        guard unzip.exitCode == 0 else { return "Unpack failed: \(unzip.output)" }
-        let appNames = (try? FileManager.default.contentsOfDirectory(atPath: unpackDir.path))?
-            .filter { $0.hasSuffix(".app") } ?? []
-        guard appNames.count == 1, let appName = appNames.first else {
-            return "The release zip must contain exactly one .app bundle."
-        }
-        let newApp = unpackDir.appendingPathComponent(appName)
+    // MARK: - Bundle swap
 
-        guard let bundle = Bundle(url: newApp),
-              bundle.bundleIdentifier == Self.expectedBundleIdentifier,
-              (bundle.infoDictionary?["CFBundleShortVersionString"] as? String) == release.version
-        else {
-            return "The downloaded app has an unexpected bundle identifier or version."
-        }
-        let runtimePayload = newApp.appendingPathComponent("Contents/Resources/RuntimePayload")
-        guard !FileManager.default.fileExists(atPath: runtimePayload.path) else {
-            return "The app-only update unexpectedly contains a runtime payload."
-        }
-        let signature = await Self.runProcess(
-            "/usr/bin/codesign", [
-                "--verify", "--deep", "--strict", "--verbose=2",
-                "-R=\(Self.expectedCodeRequirement)", newApp.path,
-            ]
+    /// install.sh replaces the bundle at DEFENSECLAW_APP_PATH, so the folder
+    /// holding it must be writable — a mounted disk image or an App
+    /// Translocation mount is not.
+    nonisolated static func canReplaceBundle(atPath path: String) -> Bool {
+        FileManager.default.isWritableFile(
+            atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path
         )
-        guard signature.exitCode == 0 else {
-            return "The downloaded app failed code-signature verification: \(signature.output)"
-        }
-        let assessment = await Self.runProcess(
-            "/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", newApp.path]
-        )
-        guard assessment.exitCode == 0 else {
-            return "The downloaded app failed Gatekeeper assessment: \(assessment.output)"
-        }
+    }
 
-        // Swap the running bundle: move the old aside (the running process keeps
-        // executing from the moved inode), copy the new one into place.
-        let targetPath = Bundle.main.bundlePath
-        let backup = stage.appendingPathComponent("previous.app")
-        do {
-            try FileManager.default.moveItem(atPath: targetPath, toPath: backup.path)
-        } catch {
-            return "Could not replace \(targetPath): \(error.localizedDescription)"
-        }
-        let copy = await Self.runProcess("/usr/bin/ditto", [newApp.path, targetPath])
-        if copy.exitCode != 0 {
-            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
-            return "Install failed: \(copy.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
-        }
-        let installedSignature = await Self.runProcess(
-            "/usr/bin/codesign", [
-                "--verify", "--deep", "--strict", "--verbose=2",
-                "-R=\(Self.expectedCodeRequirement)", targetPath,
-            ]
-        )
-        if installedSignature.exitCode != 0 {
-            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
-            return "Installed app failed code-signature verification: \(installedSignature.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
-        }
-        let xattr = await Self.runProcess("/usr/bin/xattr", ["-dr", "com.apple.quarantine", targetPath])
-        if xattr.exitCode != 0 {
-            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
-            return "Could not prepare the installed app for launch: \(xattr.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
-        }
+    /// The version of the bundle now on disk at `path`, read from Info.plist
+    /// directly: Bundle caches the dictionary it loaded at launch.
+    nonisolated static func bundleShortVersion(atPath path: String) -> String? {
+        let plist = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist", isDirectory: false)
+        guard let data = try? Data(contentsOf: plist),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        return info["CFBundleShortVersionString"] as? String
+    }
 
-        // Relaunch: detached child outlives this process. It must WAIT for
-        // this process to fully exit before calling open — with the old
-        // instance still alive, LaunchServices sees a running app with the
-        // same bundle ID and merely activates it (the moved previous.app
-        // backup!) instead of launching the updated bundle. Bounded at ~30s
-        // so a hung teardown still eventually relaunches.
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let relaunch = Process()
-        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
-        relaunch.arguments = ["-c", """
-            pid="$1"; target="$2"; stage="$3"
+    /// Start a detached helper that reopens `bundlePath` after this process
+    /// exits. It must WAIT: with this instance still alive, LaunchServices
+    /// only activates it instead of launching the replaced bundle. Bounded at
+    /// ~30s so a hung teardown still relaunches.
+    nonisolated static func relaunchAfterExit(bundlePath: String) throws {
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = ["-c", """
+            pid="$1"; target="$2"
             for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-            /usr/bin/open "$target"
-            rc=$?
-            /bin/rm -rf "$stage"
-            exit $rc
-            """, "defenseclaw-relaunch", "\(pid)", targetPath, stage.path]
-        do {
-            try relaunch.run()
-        } catch {
-            let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)
-            return "Could not start the app relaunch helper: \(error.localizedDescription)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
-        }
-
-        await MainActor.run { NSApp.terminate(nil) }
-        return nil // unreachable in practice
-    }
-
-    // MARK: - Process helper
-
-    nonisolated static func validateUpdateArchive(entries: [ZipArchiveEntry]) -> ArchiveValidationResult {
-        guard !entries.isEmpty else {
-            return .failure("archive is empty")
-        }
-        var topLevelNames = Set<String>()
-        var appBundleName: String?
-        for entry in entries {
-            let path = entry.path.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let first = path.split(separator: "/", omittingEmptySubsequences: true).first else {
-                return .failure("empty archive path")
-            }
-            guard !path.hasPrefix("/"), !path.hasPrefix("~") else {
-                return .failure("unsafe path \(path)")
-            }
-            let components = path.split(separator: "/", omittingEmptySubsequences: true)
-            guard !components.contains("..") else {
-                return .failure("unsafe path \(path)")
-            }
-            guard !entry.mode.hasPrefix("l") && !entry.mode.hasPrefix("h") else {
-                return .failure("link entry \(path) is not allowed")
-            }
-            guard entry.mode.hasPrefix("-") || entry.mode.hasPrefix("d") else {
-                return .failure("unsupported archive entry type for \(path)")
-            }
-            let root = String(first)
-            topLevelNames.insert(root)
-            if root.hasSuffix(".app") {
-                if appBundleName == nil {
-                    appBundleName = root
-                } else if appBundleName != root {
-                    return .failure("archive must contain a single top-level .app bundle")
-                }
-            }
-        }
-        guard topLevelNames.count == 1, let appBundleName else {
-            return .failure("archive must contain a single top-level .app bundle")
-        }
-        return .success(appBundleName: appBundleName)
-    }
-
-    nonisolated static func parseZipEntries(_ output: String) -> [ZipArchiveEntry] {
-        output.split(whereSeparator: \.isNewline).compactMap { rawLine in
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { return nil }
-            let fields = line.split(separator: " ", maxSplits: 9, omittingEmptySubsequences: true)
-            guard fields.count == 10, fields[0].count == 10 else { return nil }
-            return ZipArchiveEntry(path: String(fields[9]), mode: String(fields[0]))
-        }
-    }
-
-    nonisolated static func listZipEntries(_ zipPath: URL) async -> (exitCode: Int32, output: String) {
-        await runProcess("/usr/bin/zipinfo", ["-l", zipPath.path])
-    }
-
-    nonisolated static func runProcess(
-        _ launchPath: String,
-        _ arguments: [String]
-    ) async -> (exitCode: Int32, output: String) {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: launchPath)
-            process.arguments = arguments
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            let readTask = Task.detached {
-                pipe.fileHandleForReading.readDataToEndOfFile()
-            }
-            process.terminationHandler = { process in
-                Task {
-                    let data = await readTask.value
-                    continuation.resume(returning: (
-                        process.terminationStatus,
-                        String(data: data, encoding: .utf8) ?? "[process output was not valid UTF-8]"
-                    ))
-                }
-            }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                try? pipe.fileHandleForWriting.close()
-                continuation.resume(returning: (
-                    126,
-                    "failed to launch \(launchPath): \(error.localizedDescription)"
-                ))
-            }
-        }
-    }
-
-    nonisolated private static func restoreBackup(backup: URL, targetPath: String) -> String? {
-        do {
-            if FileManager.default.fileExists(atPath: targetPath) {
-                try FileManager.default.removeItem(atPath: targetPath)
-            }
-            try FileManager.default.moveItem(atPath: backup.path, toPath: targetPath)
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
+            exec /usr/bin/open "$target"
+            """, "defenseclaw-relaunch", "\(ProcessInfo.processInfo.processIdentifier)", bundlePath]
+        try helper.run()
     }
 }

@@ -66,9 +66,6 @@ struct MainWindow: View {
                 if appState.availableUpdate != nil, !appState.updateBannerDismissed {
                     updateBanner
                 }
-                if appState.availableRuntimeUpdate != nil, !appState.runtimeBannerDismissed {
-                    runtimeUpdateBanner
-                }
             }
         }
         // A real (writable) binding so the environment DismissAction works —
@@ -176,23 +173,34 @@ struct MainWindow: View {
         }
     }
 
+    /// One banner for the app and the runtime: the release's install.sh
+    /// updates both, then the app restarts if its bundle was replaced.
     private var updateBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.down.circle.fill")
             VStack(alignment: .leading, spacing: 1) {
-                Text("DefenseClaw for macOS \(appState.availableUpdate?.tag ?? "") is available")
+                Text("DefenseClaw \(appState.availableUpdate?.version ?? "") is available")
                     .font(.callout.weight(.semibold))
-                Text(upgradeStatusText)
+                Text(updateStatusText)
                     .font(.caption2)
                     .opacity(0.85)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            switch appState.upgradeState {
-            case .downloading, .installing:
+            if appState.installerState.isBusy {
                 ProgressView().controlSize(.small).padding(.leading, 4)
-            default:
-                Button("Upgrade & Restart") { appState.performUpgrade() }
+            } else {
+                if appState.relaunchPending {
+                    Button("Restart Now") { appState.relaunch() }
+                        .controlSize(.small)
+                } else if let update = appState.availableUpdate {
+                    Button(updateFailed ? "Try Again" : (appState.updateRestartsApp ? "Update & Restart" : "Update Runtime")) {
+                        Task { await appState.runReleaseInstaller(version: update.version) }
+                    }
                     .controlSize(.small)
                     .keyboardShortcut("u", modifiers: [.command, .shift])
+                    .disabled(!appState.installationMutationsAllowed)
+                }
                 if let url = appState.availableUpdate.flatMap({ URL(string: $0.htmlURL) }) {
                     Link("Release notes", destination: url)
                         .font(.caption)
@@ -201,7 +209,7 @@ struct MainWindow: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Dismiss app update")
+                .accessibilityLabel("Dismiss update")
             }
         }
         .padding(10)
@@ -210,96 +218,30 @@ struct MainWindow: View {
         .padding(.top, 6)
     }
 
-    private var upgradeStatusText: String {
-        switch appState.upgradeState {
-        case .idle, .checking: "Mac app update — installed: \(UpdateChecker.currentVersion). ⌘⇧U upgrades this app and restarts it."
-        case .downloading: "Downloading release…"
-        case .installing: "Installing and restarting…"
-        case .actionRequired(let guidance, _): "Action required: \(guidance)"
-        case .failed(let why): "Upgrade failed: \(why)"
-        }
+    /// Installer progress for this update — not for a first-run install of
+    /// the app's own version, which the first-run sheet reports.
+    private var bannerInstallerState: InstallerState {
+        appState.installerState.version == appState.availableUpdate?.version ? appState.installerState : .idle
     }
 
-    /// Distinct from the Mac-app banner: runtime mutation must happen through
-    /// the release-owned latest-mode resolver outside this app.
-    private var runtimeUpdateBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "server.rack")
-                .foregroundStyle(Cisco.green)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("DefenseClaw runtime \(appState.availableRuntimeUpdate?.tag ?? "") is available")
-                    .font(.callout.weight(.semibold))
-                Text(runtimeStatusText)
-                    .font(.caption2)
-                    .foregroundStyle(isRuntimeFailed ? Cisco.red : .secondary)
-                    .lineLimit(isRuntimeFailed || isRuntimeActionRequired ? 4 : 1)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            switch appState.runtimeUpgradeState {
-            case .checking, .installing, .downloading:
-                ProgressView().controlSize(.small).padding(.leading, 4)
-            case .actionRequired(_, let command):
-                Button("Copy Upgrade Command") { copyToPasteboard(command) }
-                    .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Cisco.green)
-                    .help("Copy the authenticated resolver command to run in Terminal")
-                if let url = appState.availableRuntimeUpdate.flatMap({ URL(string: $0.htmlURL) }) {
-                    Link("Release notes", destination: url)
-                        .font(.caption)
-                }
-                Button { appState.runtimeBannerDismissed = true } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Dismiss runtime update")
-            default:
-                Button("Show Upgrade Command") { appState.performRuntimeUpgrade() }
-                    .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Cisco.green)
-                    .disabled(!appState.installationMutationsAllowed)
-                if let url = appState.availableRuntimeUpdate.flatMap({ URL(string: $0.htmlURL) }) {
-                    Link("Release notes", destination: url)
-                        .font(.caption)
-                }
-                Button { appState.runtimeBannerDismissed = true } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Dismiss runtime update")
-            }
-        }
-        .padding(10)
-        .background(Cisco.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Cisco.green.opacity(0.6)))
-        .padding(.top, 6)
-    }
-
-    private var isRuntimeFailed: Bool {
-        if case .failed = appState.runtimeUpgradeState { return true }
+    private var updateFailed: Bool {
+        if case .failed = bannerInstallerState { return true }
         return false
     }
 
-    private var isRuntimeActionRequired: Bool {
-        if case .actionRequired = appState.runtimeUpgradeState { return true }
-        return false
-    }
-
-    private var runtimeStatusText: String {
-        switch appState.runtimeUpgradeState {
-        case .checking:
-            return "Checking for the latest DefenseClaw runtime…"
-        case .installing, .downloading:
-            return appState.runtimeUpgradeLogTail.isEmpty
-                ? "Preparing release-owned resolver guidance…"
-                : appState.runtimeUpgradeLogTail
-        case .actionRequired(let guidance, _):
-            return guidance
-        case .failed(let why):
-            return why
-        default:
-            return "Runtime update (CLI + gateway) — installed: \(appState.installedRuntimeVersion ?? "unknown"). Use the release-owned resolver in latest mode without --version."
+    private var updateStatusText: String {
+        switch bannerInstallerState {
+        case .downloading:
+            return "Downloading and verifying the release installer…"
+        case .running:
+            return "Installing; progress is in Activity…"
+        case .needsAttention(_, let detail):
+            return "Installed, but a connector needs attention: \(detail)"
+        case .failed(_, let detail):
+            return "Update failed: \(detail)"
+        case .installed, .idle:
+            if appState.relaunchPending { return "Installed. Restart DefenseClaw to finish the update." }
+            return "Installed: app \(UpdateChecker.currentVersion), runtime \(appState.installedRuntimeVersion ?? "not detected"). ⌘⇧U updates both."
         }
     }
 

@@ -41,7 +41,7 @@ private struct CatalogRows {
 }
 
 enum CatalogCLI {
-    static let auditHistoryUnavailableMessage = "Audit history is unavailable. Showing a read-only host catalog; repair the DefenseClaw audit store before running catalog actions."
+    static let auditHistoryUnavailableMessage = "Audit history is unavailable. Showing a read-only host catalog; run `defenseclaw doctor --fix` to repair the audit store, then refresh before running catalog actions."
 
     static func skills(using cli: CLIRunner) async throws -> CatalogListing<SkillItem> {
         let groups = try await rows(resource: "skill", collection: "skills", using: cli)

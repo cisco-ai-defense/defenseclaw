@@ -136,51 +136,50 @@ final class AppState {
             && !activity.entries.contains(where: { $0.status == .running })
     }
 
-    // Self-update state (this Mac app)
-    var availableUpdate: ReleaseInfo?
-    var upgradeState: UpgradeState = .idle
+    // Install / update state. The app and the runtime (CLI + gateway) ship as
+    // one release, and that release's install.sh updates both.
+    /// Latest release from the last successful check.
+    var latestRelease: ReleaseInfo?
     var updateBannerDismissed = false
+    var updateCheckInProgress = false
+    /// True when the last release lookup failed (offline / GitHub rate limit) —
+    /// "Up to date" must not be claimed on a failed check.
+    var lastCheckFailed = false
     /// Persisted across launches: GitHub's unauthenticated API allows 60
     /// requests/hour per IP, so app relaunches must not re-check each time.
     @ObservationIgnored @AppStorage("lastUpdateCheckTime") private var lastUpdateCheckTime: Double = 0
-    @ObservationIgnored @AppStorage("lastMacAppUpdateCheckTime") private var lastMacAppUpdateCheckTime: Double = 0
+    /// install.sh progress, shared by the first-run sheet, Settings, and the
+    /// update banner.
+    var installerState: InstallerState = .idle
+    /// install.sh replaced this bundle; the running process is the old version.
+    var relaunchPending = false
 
-    // DefenseClaw runtime (CLI + gateway) update state
+    // DefenseClaw runtime (CLI + gateway) detection
     var installedRuntimeVersion: String?
     var runtimeSetupCommands: Set<String>?
     var runtimeVersionCheckInProgress = false
     var runtimeVersionError: String?
-    var runtimeReleaseChecked = false
-    var availableRuntimeUpdate: ReleaseInfo?
-    var runtimeUpgradeState: UpgradeState = .idle
-    /// Bundled-payload fresh-install progress (RuntimeInstaller.swift).
-    var runtimeInstallState: RuntimeInstallState = .idle
-    /// Current installer step's activity runID — the Cancel target.
-    var runtimeInstallRunID: UUID?
     /// First-run sheet dismissal for this launch (Open Activity / Esc); the
     /// sheet re-presents next launch while no configuration exists.
     var firstRunDismissed = false
-    var runtimeBannerDismissed = false
-    var runtimeUpgradeLogTail = ""
-    @ObservationIgnored @AppStorage("lastRuntimeUpdateCheckTime") private var lastRuntimeUpdateCheckTime: Double = 0
-    /// Human-readable action guidance, or diagnostic output from a failed runtime action.
-    /// The runnable command lives separately in UpgradeState.actionRequired.
-    var runtimeUpgradeLog = ""
-    /// True when the last release lookup failed (offline / GitHub rate limit) —
-    /// "Up to date" must not be claimed on a failed check.
-    var lastCheckFailed = false
-    var appUpdateCheckFailed = false
-    var runtimeUpdateCheckFailed = false
     @ObservationIgnored private var alertRefreshInProgress = false
 
+    /// The latest release when it is newer than this app or the installed
+    /// runtime; install.sh brings both to that version.
+    var availableUpdate: ReleaseInfo? {
+        guard let latestRelease else { return nil }
+        let installed = [UpdateChecker.currentVersion] + [installedRuntimeVersion].compactMap { $0 }
+        return installed.contains { UpdateChecker.isNewer(latestRelease.version, than: $0) } ? latestRelease : nil
+    }
+
+    /// install.sh swaps this bundle — and the app restarts — only when the
+    /// update is newer than the running app.
+    var updateRestartsApp: Bool {
+        availableUpdate.map { UpdateChecker.isNewer($0.version, than: UpdateChecker.currentVersion) } ?? false
+    }
+
     var updateOperationInProgress: Bool {
-        func busy(_ state: UpgradeState) -> Bool {
-            switch state {
-            case .checking, .downloading, .installing: true
-            default: false
-            }
-        }
-        return busy(upgradeState) || busy(runtimeUpgradeState) || runtimeInstallState.isRunning
+        updateCheckInProgress || installerState.isBusy
     }
 
     // Pulse state
@@ -440,17 +439,8 @@ final class AppState {
         installedRuntimeVersion = nil
         runtimeSetupCommands = nil
         runtimeVersionError = nil
-        runtimeReleaseChecked = false
-        availableRuntimeUpdate = nil
-        runtimeUpgradeState = .idle
-        runtimeInstallState = .idle
-        runtimeInstallRunID = nil
+        installerState = .idle
         firstRunDismissed = false
-        runtimeBannerDismissed = false
-        runtimeUpgradeLogTail = ""
-        runtimeUpgradeLog = ""
-        runtimeUpdateCheckFailed = false
-        lastRuntimeUpdateCheckTime = 0
 
         health = HealthSnapshot()
         scanners = []
@@ -930,68 +920,27 @@ final class AppState {
         return logPanelRequest
     }
 
-    // MARK: - Self-update
+    // MARK: - Install / update
 
-    /// Check GitHub for newer releases of BOTH the Mac app and the
-    /// DefenseClaw runtime; re-checked every 6h by the pulse.
+    /// Check GitHub for the latest release; re-checked every 6h by the pulse.
+    /// The app and the runtime share one release, so one lookup covers both.
     func checkForUpdates(force: Bool = false) async {
         guard !updateOperationInProgress else { return }
         guard force || Date().timeIntervalSince1970 - lastUpdateCheckTime > 6 * 3600 else { return }
-        let now = Date().timeIntervalSince1970
-        lastUpdateCheckTime = now
-        lastMacAppUpdateCheckTime = now
-        lastRuntimeUpdateCheckTime = now
+        lastUpdateCheckTime = Date().timeIntervalSince1970
+        updateCheckInProgress = true
+        defer { updateCheckInProgress = false }
 
-        let appRelease = await refreshMacAppUpdate()
-        let runtimeRelease = await refreshRuntimeUpdate()
-        lastCheckFailed = (appRelease == nil || runtimeRelease == nil)
-    }
-
-    /// Check only this macOS app. Used by Settings when the user wants to keep
-    /// the DefenseClaw runtime untouched.
-    func checkForMacAppUpdate(force: Bool = false) async {
-        guard !updateOperationInProgress else { return }
-        guard force || Date().timeIntervalSince1970 - lastMacAppUpdateCheckTime > 6 * 3600 else { return }
-        lastMacAppUpdateCheckTime = Date().timeIntervalSince1970
-
-        _ = await refreshMacAppUpdate()
-        lastCheckFailed = appUpdateCheckFailed || runtimeUpdateCheckFailed
-    }
-
-    /// Check only the underlying DefenseClaw runtime.
-    func checkForRuntimeUpdate(force: Bool = false) async {
-        guard !updateOperationInProgress else { return }
-        // Always refresh the local version. Only the network release lookup is
-        // subject to the six-hour throttle.
         await refreshInstalledRuntimeVersion()
-        guard force || Date().timeIntervalSince1970 - lastRuntimeUpdateCheckTime > 6 * 3600 else { return }
-        lastRuntimeUpdateCheckTime = Date().timeIntervalSince1970
-
-        _ = await refreshRuntimeUpdate(refreshInstalledVersion: false)
-        lastCheckFailed = appUpdateCheckFailed || runtimeUpdateCheckFailed
-    }
-
-    private func refreshMacAppUpdate() async -> ReleaseInfo? {
-        upgradeState = .checking
-        defer {
-            if upgradeState == .checking { upgradeState = .idle }
+        // A nil release means the check FAILED (offline, API rate limit) —
+        // keep any previously known release rather than clearing it.
+        guard let release = await updater.latestRelease() else {
+            lastCheckFailed = true
+            return
         }
-
-        // Mac app. A nil release means the check FAILED (offline, API rate
-        // limit) — keep any previously known update rather than clearing it.
-        let appRelease = await updater.latestRelease()
-        if let release = appRelease {
-            appUpdateCheckFailed = false
-            if UpdateChecker.isNewer(release.version, than: UpdateChecker.currentVersion) {
-                if release != availableUpdate { updateBannerDismissed = false }
-                availableUpdate = release
-            } else {
-                availableUpdate = nil
-            }
-        } else {
-            appUpdateCheckFailed = true
-        }
-        return appRelease
+        lastCheckFailed = false
+        if release != latestRelease { updateBannerDismissed = false }
+        latestRelease = release
     }
 
     /// Detect the locally installed CLI without contacting GitHub. Settings
@@ -1022,11 +971,6 @@ final class AppState {
                 ? CommandRegistry.setupCommands(from: setupHelp.output)
                 : nil
             runtimeVersionError = nil
-            // A detected, working CLI supersedes an earlier bundled-install
-            // failure (e.g. the user installed via the shell script instead);
-            // don't leave a stale red "failed" label for the life of this
-            // menu-bar process. Activity retains the full failure record.
-            if case .failed = runtimeInstallState { runtimeInstallState = .idle }
         } else {
             installedRuntimeVersion = nil
             runtimeSetupCommands = nil
@@ -1036,161 +980,104 @@ final class AppState {
         }
     }
 
-    private func refreshRuntimeUpdate(refreshInstalledVersion: Bool = true) async -> ReleaseInfo? {
-        runtimeUpgradeState = .checking
-        defer {
-            if runtimeUpgradeState == .checking { runtimeUpgradeState = .idle }
+    /// Download `version`'s install.sh, verify it against that release's
+    /// checksums.txt, and run it through the activity store. install.sh owns
+    /// the whole transaction — the runtime and this app bundle, with automatic
+    /// rollback — so the app only picks the version (its own on first run, the
+    /// latest release to update) and relaunches when the bundle changed.
+    func runReleaseInstaller(version: String) async {
+        guard !installerState.isBusy else { return }
+        guard installationMutationsAllowed, !installationBindInProgress else {
+            installerState = .failed(
+                version: version,
+                detail: installationReadOnlyReason ?? "This installation is read only."
+            )
+            return
+        }
+        guard !activity.entries.contains(where: { $0.status.isActive }) else {
+            installerState = .failed(
+                version: version,
+                detail: "Wait for the running DefenseClaw commands to finish, then try again."
+            )
+            return
+        }
+        let appPath = Bundle.main.bundlePath
+        guard UpdateChecker.canReplaceBundle(atPath: appPath) else {
+            installerState = .failed(
+                version: version,
+                detail: "DefenseClaw can't replace itself at \(appPath). Move it to your Applications folder, reopen it from there, and try again."
+            )
+            return
         }
 
-        // DefenseClaw runtime: installed via `defenseclaw --version`,
-        // latest from the upstream repo's releases.
-        if refreshInstalledVersion {
-            await refreshInstalledRuntimeVersion()
+        installerState = .downloading(version: version)
+        let installer: URL
+        do {
+            installer = try await updater.fetchInstaller(version: version)
+        } catch {
+            installerState = .failed(version: version, detail: error.localizedDescription)
+            return
         }
-        let runtimeRelease = await updater.latestRuntimeRelease()
-        runtimeReleaseChecked = true
-        runtimeUpdateCheckFailed = runtimeRelease == nil
-        if let installed = installedRuntimeVersion, let latest = runtimeRelease {
-            if UpdateChecker.isNewer(latest.version, than: installed) {
-                if latest != availableRuntimeUpdate { runtimeBannerDismissed = false }
-                availableRuntimeUpdate = latest
-            } else {
-                availableRuntimeUpdate = nil
-            }
-        } else if installedRuntimeVersion == nil {
-            availableRuntimeUpdate = nil
-        }
-        return runtimeRelease
-    }
 
-    /// Turn historical runtime-upgrade output into a human message. Runtime
-    /// mutation is no longer launched by the app because only the release-owned
-    /// latest-mode resolver can select a required bridge and hand off to a
-    /// fresh controller.
-    /// The common
-    /// case today is an UPSTREAM packaging conflict (the 0.7.2 wheel pins
-    /// click==8.3.1 while its own cisco-ai-mcp-scanner→litellm dep pins
-    /// click==8.1.8) — unsatisfiable in any environment, so it is not an app
-    /// problem and no app-side flag fixes it. Name that explicitly.
-    nonisolated static func summarizeUpgradeFailure(_ output: String, exitCode: Int32) -> String {
-        if output.contains("No solution found when resolving dependencies") {
-            // Pull the conflicting package names if present, for specificity.
-            let pkg = output.contains("cisco-ai-mcp-scanner") ? "cisco-ai-mcp-scanner" : "a dependency"
-            return "Upstream packaging conflict in this DefenseClaw release: its Python wheel and \(pkg) pin incompatible versions of the same library, so it cannot be installed in any environment. This is a bug in the release itself — not the app — and there is no upgrade flag that fixes it. Wait for a corrected upstream release. (Copy Full Upgrade Log in Settings for details.)"
-        }
-        if output.localizedCaseInsensitiveContains("could not determine latest release") {
-            return "Couldn't reach the release server (offline or GitHub rate-limited). Try again shortly."
-        }
-        // Fall back to the most meaningful single line.
-        let errorLine = output.split(separator: "\n")
-            .first { $0.contains("×") || $0.localizedCaseInsensitiveContains("error:") }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        return errorLine ?? "defenseclaw upgrade exited \(exitCode). See Copy Full Upgrade Log in Settings."
-    }
-
-    func performMacAppUpgradeCheck() {
-        Task {
-            await checkForMacAppUpdate(force: true)
-            performUpgrade()
-        }
-    }
-
-    func performRuntimeUpgradeCheck() {
-        Task {
-            await checkForRuntimeUpdate(force: true)
-            _ = await runRuntimeUpgradeIfAvailable()
-        }
-    }
-
-    func performBothUpgrades() {
-        Task {
-            await checkForUpdates(force: true)
-            _ = await runRuntimeUpgradeIfAvailable()
-            if availableUpdate != nil { performUpgrade() }
-        }
-    }
-
-    func performRuntimeUpgrade() {
-        Task {
-            _ = await runRuntimeUpgradeIfAvailable()
-        }
-    }
-
-    private func runRuntimeUpgradeIfAvailable() async -> Bool {
-        switch runtimeUpgradeState {
-        case .checking, .downloading, .installing:
-            return false
-        default:
-            break
-        }
-        // The bundled-payload installer mutates the same venv and gateway
-        // binary — never present overlapping runtime actions.
-        guard !runtimeInstallState.isRunning else { return false }
-        guard let runtimeUpdate = availableRuntimeUpdate else { return true }
-        guard let resolverCommand = Self.authenticatedRuntimeUpgradeResolverCommand(
-            releaseTag: runtimeUpdate.tag
-        ) else {
-            let failure = """
-            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.
-            """
-            runtimeUpgradeLogTail = ""
-            runtimeUpgradeLog = failure
-            runtimeUpgradeState = .failed(failure)
-            return false
-        }
-        let guidance = """
-        Runtime upgrade was not started; no installed files or services were changed. Quit DefenseClaw, then copy the authenticated resolver command and run it in Terminal. It runs in latest mode without --version so tested-source policy, the 0.8.4 bridge, rollback, migrations, and health checks remain mandatory.
-        """
-        runtimeUpgradeLogTail = ""
-        runtimeUpgradeLog = guidance
-        runtimeUpgradeState = .actionRequired(guidance: guidance, command: resolverCommand)
-        return false
-    }
-
-    /// Targets the installation that produced the warning. The installed CLI
-    /// authenticates the release-owned resolver before replacing any audit
-    /// files; the app only prepares the explicit operator command.
-    func auditStoreRecoveryCommand(
-        expectedGeneration: Int,
-        expectedBinaryPath: String?
-    ) async -> String? {
-        guard installationSnapshotIsCurrent(expectedGeneration) else { return nil }
-        guard let expectedBinaryPath,
-              await cli.locateBinary() == expectedBinaryPath else { return nil }
-        let versionResult = await cli.run(
-            binary: expectedBinaryPath,
-            arguments: ["--version"],
-            mutation: false
+        installerState = .running(version: version)
+        let result = await runCommand(
+            title: "Install DefenseClaw \(version)",
+            binary: "/bin/bash",
+            arguments: [installer.path, "--yes"],
+            environment: [
+                "DEFENSECLAW_APP_PATH": appPath,
+                "DEFENSECLAW_INSTALL_CALLER": "app",
+            ],
+            category: "setup",
+            origin: "Installer",
+            successEffects: ["DefenseClaw \(version) installed"],
+            suggestedNextAction: installDetected ? "" : "Run Initialize DefenseClaw to create the configuration."
         )
-        guard installationSnapshotIsCurrent(expectedGeneration),
-              await cli.locateBinary() == expectedBinaryPath,
-              versionResult.succeeded,
-              let installedVersion = UpdateChecker.parseVersion(versionResult.output) else {
-            return nil
+        try? FileManager.default.removeItem(at: installer.deletingLastPathComponent())
+        installerState = .finished(
+            version: version,
+            exitCode: result.exitCode,
+            cancelled: result.cancelled,
+            output: result.output
+        )
+        switch installerState {
+        case .installed:
+            break
+        case .needsAttention(_, let detail):
+            // The surface that started the run may disappear once the
+            // versions match, so the warning also goes to a notification.
+            notify(
+                title: "DefenseClaw \(version) installed; a connector needs attention",
+                body: detail,
+                id: "installer-attention-\(Date().timeIntervalSince1970)"
+            )
+        default:
+            return
         }
-        return RuntimeAuditRecoveryCommand.command(for: RuntimeAuditRecoveryTarget(
-            homeRoot: installationContext.homeRoot,
-            configURL: installationContext.configURL,
-            venvURL: installationContext.venvURL,
-            runtimeCLIURL: URL(fileURLWithPath: expectedBinaryPath, isDirectory: false),
-            installedVersion: installedVersion,
-            permitsMutation: installationContext.permitsMutation
-        ))
+
+        await refreshInstalledRuntimeVersion()
+        reloadConfig()
+        // install.sh swapped the bundle under this process: restart into it.
+        // A connector warning stays on screen until the user restarts.
+        guard let onDisk = UpdateChecker.bundleShortVersion(atPath: appPath),
+              onDisk != UpdateChecker.currentVersion else { return }
+        relaunchPending = true
+        if case .installed = installerState { relaunch() }
     }
 
-    /// Download, install over the current bundle, and restart the app.
-    func performUpgrade() {
-        guard let release = availableUpdate, upgradeState == .idle || upgradeState == .checking else { return }
-        upgradeState = .downloading
-        Task {
-            let failure = await updater.downloadAndInstall(release) { state in
-                Task { @MainActor in self.upgradeState = state }
-            }
-            if let failure {
-                upgradeState = .failed(failure)
-            }
-            // On success the app terminates and relaunches — nothing to do here.
+    /// Restart into the bundle install.sh put in place.
+    func relaunch() {
+        do {
+            try UpdateChecker.relaunchAfterExit(bundlePath: Bundle.main.bundlePath)
+        } catch {
+            notify(
+                title: "DefenseClaw",
+                body: "Quit and reopen DefenseClaw to finish updating: \(error.localizedDescription)",
+                id: "relaunch-\(Date().timeIntervalSince1970)"
+            )
+            return
         }
+        NSApp.terminate(nil)
     }
 
     // MARK: - Services card (Overview hero, parity with the TUI SERVICES panel)

@@ -71,16 +71,8 @@ struct FirstRunView: View {
     @State private var verify = true
     @State private var runID: UUID?
     @State private var exitCode: Int32?
-    @State private var installerRelease: RuntimeInstallerInfo?
-    @State private var installerMetadataLoading = false
-    @State private var installerMetadataError: String?
 
     private static let connectors = ConnectorDiscoverySelection.onboardingConnectors
-    private static let installerURL = URL(
-        string: "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh"
-    )!
-    private static let downloadCommand = "curl -fL --proto '=https' --tlsv1.2 --output ~/Downloads/defenseclaw-install.sh \(installerURL.absoluteString)"
-    private static let runCommand = "bash ~/Downloads/defenseclaw-install.sh"
 
     private var runningEntry: CommandActivityEntry? {
         guard let runID else { return nil }
@@ -90,16 +82,6 @@ struct FirstRunView: View {
     private var isRunning: Bool { runningEntry?.status.isActive == true }
     private var isCancelling: Bool { runningEntry?.status == .cancelling }
     private var isFinishing: Bool { runningEntry?.status == .finishing }
-
-    private var runtimeInstallIsCancelling: Bool {
-        guard let id = appState.runtimeInstallRunID else { return false }
-        return appState.activity.entries.first(where: { $0.id == id })?.status == .cancelling
-    }
-
-    private var runtimeInstallIsFinishing: Bool {
-        guard let id = appState.runtimeInstallRunID else { return false }
-        return appState.activity.entries.first(where: { $0.id == id })?.status == .finishing
-    }
 
     private var registeredSelection: [String] {
         detectedConnectors.filter { registeredConnectors.contains($0) }
@@ -152,19 +134,7 @@ struct FirstRunView: View {
                     dismiss()
                 }
                 Spacer()
-                if appState.runtimeInstallState.isRunning {
-                    Button(role: .destructive) {
-                        if let id = appState.runtimeInstallRunID { appState.activity.cancel(id) }
-                    } label: {
-                        Label(
-                            runtimeInstallIsCancelling
-                                ? "Cancelling..."
-                                : (runtimeInstallIsFinishing ? "Finishing..." : "Cancel Install"),
-                            systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
-                        )
-                    }
-                    .disabled(runtimeInstallIsCancelling || runtimeInstallIsFinishing)
-                } else if isRunning {
+                if isRunning {
                     Button(role: .destructive) {
                         if let runID { appState.activity.cancel(runID) }
                     } label: {
@@ -207,9 +177,6 @@ struct FirstRunView: View {
             // until a config exists — never exec other binaries without an
             // explicit user action.
             cliFound = await appState.cli.locateBinary() != nil
-            if !cliFound {
-                await loadInstallerRelease()
-            }
         }
     }
 
@@ -332,122 +299,64 @@ struct FirstRunView: View {
         .formStyle(.grouped)
     }
 
-    @ViewBuilder
+    /// First run installs the release matching this app, so app and runtime
+    /// agree; the release's install.sh does the work.
     private var installer: some View {
-        if let payload = RuntimePayload.bundled {
+        GroupBox("Install the DefenseClaw Runtime") {
             VStack(alignment: .leading, spacing: 10) {
-                GroupBox("Install the Bundled DefenseClaw Runtime") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into \(appState.installationContext.homeRoot.path) and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        installStateRow
-                        HStack {
-                            Button {
-                                Task {
-                                    await appState.installBundledRuntime()
-                                    checkInstallation()
-                                }
-                            } label: {
-                                Label("Install DefenseClaw Runtime v\(payload.version)", systemImage: "arrow.down.circle.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(
-                                appState.runtimeInstallState.isRunning
-                                    || !appState.installationMutationsAllowed
-                            )
-                            Button("Open Activity") {
-                                appState.selectedPanel = .activity
-                                dismiss()
-                            }
-                            .disabled(appState.runtimeInstallState == .idle)
+                Text("Downloads the DefenseClaw \(UpdateChecker.currentVersion) install.sh from its GitHub release, verifies it against the release's checksums.txt, and runs it to install the CLI and gateway into \(appState.installationContext.homeRoot.path) and ~/.local/bin. Progress streams to Activity; the installer rolls back if a step fails.")
+                    .font(.callout).foregroundStyle(.secondary)
+                installStateRow
+                HStack {
+                    Button {
+                        Task {
+                            await appState.runReleaseInstaller(version: UpdateChecker.currentVersion)
+                            checkInstallation()
                         }
+                    } label: {
+                        Label("Install DefenseClaw Runtime v\(UpdateChecker.currentVersion)", systemImage: "arrow.down.circle.fill")
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(appState.installerState.isBusy || !appState.installationMutationsAllowed)
+                    Button("Open Activity") {
+                        appState.selectedPanel = .activity
+                        dismiss()
+                    }
+                    .disabled(appState.installerState == .idle)
                 }
-                DisclosureGroup("Install with the shell script instead") {
-                    scriptInstaller.padding(.top, 6)
-                }
-                .font(.callout)
             }
-        } else {
-            GroupBox("Install the DefenseClaw Runtime") {
-                scriptInstaller
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
     private var installStateRow: some View {
-        switch appState.runtimeInstallState {
+        switch appState.installerState {
         case .idle:
             EmptyView()
-        case .running(let step):
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(step).font(.caption).foregroundStyle(.secondary)
-            }
-        case .failed(let why):
-            Label(why, systemImage: "xmark.circle.fill")
-                .font(.caption).foregroundStyle(Cisco.red)
-                .textSelection(.enabled)
-        case .succeeded:
+        case .downloading:
+            progressRow("Downloading and verifying the installer")
+        case .running:
+            progressRow("Installing (progress is in Activity)")
+        case .installed:
             Label("Runtime installed. Configure it below.", systemImage: "checkmark.circle.fill")
                 .font(.caption).foregroundStyle(Cisco.green)
+        case .needsAttention(_, let detail):
+            Label("Runtime installed, but a connector needs attention:\n\(detail)", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(Cisco.orange)
+                .textSelection(.enabled)
+        case .failed(_, let detail):
+            Label(detail, systemImage: "xmark.circle.fill")
+                .font(.caption).foregroundStyle(Cisco.red)
+                .textSelection(.enabled)
         }
     }
 
-    private var scriptInstaller: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Download the release installer, verify its published SHA-256 digest, review the verified local file, then run it from Terminal. The Mac app does not execute a remote script automatically.")
-                .font(.callout).foregroundStyle(.secondary)
-            if installerMetadataLoading {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading authenticated release metadata...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else if let installerRelease {
-                Link(destination: installerRelease.releaseURL) {
-                    Label("Open DefenseClaw \(installerRelease.tag) Release", systemImage: "safari")
-                }
-                installCommandRow("1. Download and Verify", command: installerRelease.downloadCommand)
-                installCommandRow("2. Review Verified Local File", command: installerRelease.reviewCommand)
-                installCommandRow("3. Verify Again and Run", command: installerRelease.runCommand)
-                Text("Expected SHA-256: \(installerRelease.assetSHA256)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            } else {
-                Label(
-                    installerMetadataError
-                        ?? "Authenticated installer metadata is unavailable. No shell command was generated.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(Cisco.orange)
-                Link(
-                    "Open Official DefenseClaw Releases",
-                    destination: URL(
-                        string: "https://github.com/cisco-ai-defense/defenseclaw/releases"
-                    )!
-                )
-            }
+    private func progressRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @MainActor
-    private func loadInstallerRelease() async {
-        guard !installerMetadataLoading else { return }
-        installerMetadataLoading = true
-        installerMetadataError = nil
-        defer { installerMetadataLoading = false }
-        guard let release = await appState.updater.latestRuntimeInstaller() else {
-            installerMetadataError = "The latest release has no digest-bound install.sh asset. Use the official release page and verify its published checksum manually."
-            return
-        }
-        installerRelease = release
     }
 
     private func execution(_ entry: CommandActivityEntry) -> some View {
@@ -531,7 +440,6 @@ struct FirstRunView: View {
         Task {
             cliFound = await appState.cli.locateBinary() != nil
             appState.installDetected = await appState.configStore.installPresent
-            if !cliFound { await loadInstallerRelease() }
             // Re-discover only after the user opted into discovery — Check
             // Again must not become a back door into exec'ing agent CLIs.
             if cliFound, discoveryRequested { await discoverConnectors() }
@@ -605,18 +513,6 @@ struct FirstRunView: View {
         Label(label, systemImage: ok ? "checkmark.circle.fill" : "xmark.circle")
             .font(.caption)
             .foregroundStyle(ok ? Cisco.green : .secondary)
-    }
-
-    private func installCommandRow(_ label: String, command: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            HStack {
-                Text(command).font(.caption.monospaced()).lineLimit(2).textSelection(.enabled)
-                Spacer(minLength: 8)
-                Button { copyToPasteboard(command) } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.borderless).help("Copy Command")
-            }
-        }
     }
 
     private func statusIcon(_ status: CommandActivityStatus) -> String {
