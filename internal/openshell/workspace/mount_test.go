@@ -312,6 +312,45 @@ func TestReleaseMountKeepsPinsTheOperatorChanged(t *testing.T) {
 	}
 }
 
+func TestReleaseMountKeepsPinsAnotherSandboxBinds(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	if err := os.RemoveAll(filepath.Join(e.project, ".git", "hooks")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanMount(bg, e.mountOpts("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanMount(bg, e.mountOpts("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseMount(e.data, "first"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".git/commondir", ".git/hooks"} {
+		if !pathExists(filepath.Join(e.project, p)) {
+			t.Fatalf("%s removed while the second sandbox still binds it", p)
+		}
+	}
+	if err := ReleaseMount(e.data, "second"); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(filepath.Join(e.project, ".git", "commondir")) {
+		t.Fatal("last release must remove the commondir pin")
+	}
+	// A corrupt state of some other sandbox makes release conservative.
+	if _, err := PlanMount(bg, e.mountOpts("third")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.data, "sandboxes/broken/workspace/mount.json", "{not json")
+	if err := ReleaseMount(e.data, "third"); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(filepath.Join(e.project, ".git", "commondir")) {
+		t.Fatal("release with an unreadable peer state must keep pins")
+	}
+}
+
 func TestPlanMountContextFolders(t *testing.T) {
 	e := newEnv(t)
 	lib := filepath.Join(e.home, "code", "lib")

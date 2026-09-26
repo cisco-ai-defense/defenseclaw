@@ -145,6 +145,10 @@ type mountState struct {
 	Name    string      `json:"name"`
 	Project string      `json:"project"`
 	Pins    []pinRecord `json:"pins,omitempty"`
+	// Sources are every host path the sandbox binds; a pin another
+	// sandbox still binds is not released (a stopped sandbox needs its
+	// bind sources to start again).
+	Sources []string `json:"sources,omitempty"`
 }
 
 // PlanMount validates opts.Project and prepares a live mount. Besides
@@ -266,6 +270,9 @@ func PlanMount(ctx context.Context, opts MountOptions) (*MountPlan, error) {
 		plan.Mounts = append(plan.Mounts, Mount{Kind: MountContext, Source: c.Source, Target: c.Target, ReadOnly: true})
 	}
 	sortMounts(plan.Mounts)
+	for _, m := range plan.Mounts {
+		state.Sources = append(state.Sources, m.Source)
+	}
 
 	if err := writeJSON(lay.mountState(opts.Name), state); err != nil {
 		return nil, err
@@ -660,7 +667,16 @@ func ReleaseMount(dataDir, name string) error {
 		}
 		return err
 	}
-	releasePins(state.Pins)
+	inUse := sourcesInUse(lay, name)
+	var mine []pinRecord
+	if _, unknown := inUse["*"]; !unknown {
+		for _, p := range state.Pins {
+			if _, shared := inUse[p.Path]; !shared {
+				mine = append(mine, p)
+			}
+		}
+	}
+	releasePins(mine)
 	if err := os.RemoveAll(lay.maskDir(name)); err != nil {
 		if chmodTree(lay.maskDir(name)) == nil {
 			err = os.RemoveAll(lay.maskDir(name))
@@ -670,6 +686,40 @@ func ReleaseMount(dataDir, name string) error {
 		}
 	}
 	return os.Remove(lay.mountState(name))
+}
+
+// sourcesInUse collects the bind sources of every other sandbox's mount
+// state. When the state of another sandbox cannot be read its sources
+// are unknown, so nothing it might share is released.
+func sourcesInUse(lay layout, except string) map[string]struct{} {
+	out := map[string]struct{}{}
+	entries, err := os.ReadDir(filepath.Join(lay.dataDir, "sandboxes"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == except || ValidateName(e.Name()) != nil {
+			continue
+		}
+		var st mountState
+		if err := readJSON(lay.mountState(e.Name()), &st); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				out["*"] = struct{}{}
+			}
+			continue
+		}
+		for _, s := range st.Sources {
+			out[s] = struct{}{}
+		}
+		for _, p := range st.Pins {
+			out[p.Path] = struct{}{}
+		}
+	}
+	if _, unknown := out["*"]; unknown {
+		// Treat every pin as shared rather than guess.
+		return map[string]struct{}{"*": {}}
+	}
+	return out
 }
 
 // releasePins removes created pins in reverse order, but only while each
