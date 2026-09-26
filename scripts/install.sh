@@ -71,7 +71,6 @@ readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
-readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
 readonly ACP_GUARD_START_VERSION="0.8.11"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
@@ -1414,30 +1413,6 @@ verify_checksum() {
     VERIFIED_CHECKSUM="${actual}"
 }
 
-install_openshell_sandbox() {
-    step "Installing openshell-sandbox"
-    [[ "${MODERN_RELEASE:-false}" == true ]] \
-        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
-    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
-        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
-
-    local asset_name="install-openshell-sandbox.sh"
-    local sandbox_installer="${POLICY_DIR}/${asset_name}"
-    local verified_sha256=""
-    info "Downloading the signed release sandbox installer..."
-    fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"
-    verify_checksum "${sandbox_installer}" "${asset_name}"
-    verified_sha256="${VERIFIED_CHECKSUM}"
-    [[ "${verified_sha256}" =~ ^[0-9A-Fa-f]{64}$ ]] \
-        || die "Signed checksums do not authenticate the sandbox installer; no sandbox installer was executed"
-    chmod 500 "${sandbox_installer}" \
-        || die "Could not protect the authenticated sandbox installer; no sandbox installer was executed"
-    [[ "$(sha256_file "${sandbox_installer}")" == "${verified_sha256}" ]] \
-        || die "Authenticated sandbox installer changed before execution; no sandbox installer was executed"
-    bash "${sandbox_installer}" \
-        || die "OpenShell sandbox installation failed"
-}
-
 # ── Install: Gateway binary ──────────────────────────────────────────────────
 
 install_gateway() {
@@ -1895,20 +1870,13 @@ print_success() {
     # which `defenseclaw` command to run next.
     if [[ "${CONNECTOR}" == "openclaw" ]]; then
         printf "  Get started:\n\n"
-        if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
-            printf "    ${CYAN}defenseclaw init --connector openclaw --sandbox${NC}\n"
-        else
-            printf "    ${CYAN}defenseclaw init --connector openclaw --profile observe${NC}\n"
-        fi
+        printf "    ${CYAN}defenseclaw init --connector openclaw --profile observe${NC}\n"
     elif is_hook_connector "${CONNECTOR}"; then
         printf "  Get started (%s):\n\n" "$(connector_display_name "${CONNECTOR}")"
         printf "    ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
     else
         printf "  Get started (pick a connector later):\n\n"
         printf "    ${CYAN}defenseclaw init${NC}\n"
-    fi
-    if [[ "${INSTALL_SANDBOX}" == true && "${CONNECTOR}" != "openclaw" ]]; then
-        warn "Sandbox setup is experimental and currently applies to the OpenClaw/OpenShell path only."
     fi
     echo ""
 }
@@ -2000,11 +1968,10 @@ while [[ $# -gt 0 ]]; do
             echo '  curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash'
             echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
-            echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
             echo "  curl ... | bash -s -- --quickstart                # run quickstart after install"
             echo ""
             echo "Options:"
-            echo "  --sandbox             Also install openshell-sandbox (experimental Linux/OpenClaw path)"
+            echo "  --sandbox             Deprecated no-op (the legacy openshell-sandbox installer was removed)"
             echo "  --local <dir>         Install from a complete local release-asset directory"
             echo "  --yes, -y             Skip all confirmation prompts"
             echo "  --connector <name>    Pick agent connector (${CONNECTOR_CHOICES[*]})"
@@ -2016,7 +1983,6 @@ while [[ $# -gt 0 ]]; do
             echo "Environment variables:"
             echo "  DEFENSECLAW_HOME   Install directory (default: ~/.defenseclaw)"
             echo "  VERSION            Specific release version to install"
-            echo "  OPENSHELL_VERSION  openshell-sandbox version (default: 0.0.16)"
             echo "  Retired install custody is kept privately at ~/.defenseclaw-install-custody."
             echo "  A custom DEFENSECLAW_HOME uses same-filesystem custody beside that directory."
             echo "  After health verification and with no installer running, operators may inspect"
@@ -2068,10 +2034,9 @@ ensure_uv
 ensure_python
 load_release_policy
 if [[ "${INSTALL_SANDBOX}" == true ]]; then
-    [[ "${MODERN_RELEASE}" == true ]] \
-        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
-    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
-        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+    # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
+    # accepted so existing automation keeps working, and does nothing.
+    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. OpenShell 0.1 sandbox support is being rebuilt; to remove an old standalone sandbox run 'defenseclaw sandbox legacy-cleanup --dry-run'."
 fi
 if [[ "${MODERN_RELEASE}" == true ]]; then
     # Bind both roots before publishing payloads or rollback-token hardlinks.
@@ -2139,16 +2104,6 @@ else
 fi
 
 record_picked_connector
-
-if [[ "${INSTALL_SANDBOX}" == true ]]; then
-    if [[ "${CONNECTOR}" != "openclaw" ]]; then
-        warn "Sandbox setup is experimental and currently applies to the OpenClaw/OpenShell path only — skipping openshell-sandbox"
-    elif [[ "${OS}" != "linux" ]]; then
-        warn "Sandbox mode requires Linux — skipping openshell-sandbox"
-    else
-        install_openshell_sandbox
-    fi
-fi
 
 run_quickstart
 ensure_path

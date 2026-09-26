@@ -577,12 +577,6 @@ print_next_steps() {
     echo -e "  • Rebuild gateway after changes:"
     echo -e "    ${CYAN}make gateway${NC}"
     echo ""
-    
-    if [[ "${OS}" == "darwin" ]]; then
-        echo -e "  ${YELLOW}Note:${NC} OpenShell sandbox is not available on macOS."
-        echo "  Scanning, governance, and audit features work normally."
-        echo ""
-    fi
 }
 
 # -----------------------------------------------------------------------------

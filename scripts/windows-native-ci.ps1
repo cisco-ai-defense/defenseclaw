@@ -1608,7 +1608,6 @@ function Stage-PackageData(
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\rego\*.rego') (Join-Path $data 'policies\rego') '*_test.rego'
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\rego\data.json') -Destination (Join-Path $data 'policies\rego') -Force
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\*.yaml') (Join-Path $data 'policies')
-    Copy-Tree (Join-Path $WorkspaceRoot 'policies\openshell') (Join-Path $data 'policies\openshell')
     foreach ($name in @('default', 'strict', 'permissive')) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
@@ -1621,8 +1620,6 @@ function Stage-PackageData(
     )) {
         Copy-Item -LiteralPath $generatedRegistry -Destination $targetRegistry -Force
     }
-    [IO.Directory]::CreateDirectory((Join-Path $data 'scripts')) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'scripts\install-openshell-sandbox.sh') -Destination (Join-Path $data 'scripts') -Force
     Copy-Tree (Join-Path $WorkspaceRoot 'skills\codeguard') (Join-Path $data 'skills\codeguard')
     [IO.Directory]::CreateDirectory((Join-Path $data 'llm')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'bundles\llm\model_catalog.json') -Destination (Join-Path $data 'llm') -Force

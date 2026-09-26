@@ -42,6 +42,9 @@ const (
 type SubprocessPolicy string
 
 const (
+	// SubprocessSandbox is retained for inventory/telemetry schema stability.
+	// The legacy openshell-sandbox tier it named was removed; no connector
+	// reports it and ResolveSubprocessPolicy maps it to shims.
 	SubprocessSandbox SubprocessPolicy = "sandbox"
 	SubprocessShims   SubprocessPolicy = "shims"
 	SubprocessNone    SubprocessPolicy = "none"

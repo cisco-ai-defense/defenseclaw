@@ -175,6 +175,9 @@ ACP_GUARD_START_VERSION = (0, 8, 11)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024
 INSTALLER_ASSETS = {
+    # The legacy openshell-sandbox installer was removed. The asset is still
+    # published as an inert stub so installers cached from earlier releases
+    # that fetch it for --sandbox print a notice instead of failing.
     "install-openshell-sandbox.sh": ReviewedScriptAsset(
         ROOT / "scripts" / "install-openshell-sandbox.sh",
         b"# DefenseClaw OpenShell sandbox installer complete v1",

@@ -154,11 +154,6 @@ func DefaultConfig() *Config {
 			PluginScanner: "defenseclaw",
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
 		},
-		OpenShell: OpenShellConfig{
-			Binary:    "openshell",
-			PolicyDir: "/etc/openshell/policies",
-			Version:   DefaultOpenShellVersion,
-		},
 		Watch: WatchConfig{
 			DebounceMs:          500,
 			AutoBlock:           true,

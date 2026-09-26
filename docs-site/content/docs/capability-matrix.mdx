@@ -17,7 +17,7 @@ Platform availability, setup, and operating-system-specific limits live in the
 [connector platform table](/docs/connectors#platform-support) and on each
 connector page. A supported native Windows path does not fabricate
 official-client validation evidence, and the Windows package does not provide
-the proxy or subprocess-sandbox topology used by some connectors elsewhere.
+the proxy or subprocess-shim wiring used by some connectors elsewhere.
 </Callout>
 
 <CapabilityMatrix />
@@ -27,7 +27,7 @@ the proxy or subprocess-sandbox topology used by some connectors elsewhere.
 <Cards>
   <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
   <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
-  <Card title="Subprocess policy" description="sandbox = connector setup calls DefenseClaw's OpenShell/shim enforcement wiring. none = the agent's own runtime executes commands; DefenseClaw observes or blocks only through the connector's hook/proxy surface." />
+  <Card title="Subprocess policy" description="shims = connector setup installs DefenseClaw's PATH shims for curl, wget, ssh, nc, pip, and npm, which ask the gateway to inspect each invocation before it runs; shims do not isolate the process. none = the agent's own runtime executes commands; DefenseClaw observes or blocks only through the connector's hook/proxy surface." />
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />

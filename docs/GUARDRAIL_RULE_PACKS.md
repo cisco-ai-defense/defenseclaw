@@ -14,7 +14,7 @@ DefenseClaw deliberately ships two distinct policy mechanisms:
 
 | Layer | Repository authority | Purpose |
 | --- | --- | --- |
-| Admission and policy domains | [`../policies/rego/`](../policies/rego/) | OPA decisions for admission, guardrail actions, firewall, audit, sandbox, and skill actions |
+| Admission and policy domains | [`../policies/rego/`](../policies/rego/) | OPA decisions for admission, guardrail actions, firewall, audit, and skill actions |
 | Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Trusted tool-call CEL rules with bounded regex fallback, unstructured runtime rules, sensitive-tool metadata, judge prompts, and suppressions |
 
 Activating an admission policy does not select a rule-pack directory, and

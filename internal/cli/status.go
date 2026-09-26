@@ -107,13 +107,7 @@ func gatewayBindHost(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
-	bind := "127.0.0.1"
-	if c.Gateway.APIBind != "" {
-		bind = c.Gateway.APIBind
-	} else if c.OpenShell.IsStandalone() && c.Guardrail.Host != "" && c.Guardrail.Host != "localhost" {
-		bind = c.Guardrail.Host
-	}
-	return bind
+	return config.APIBindHost(c)
 }
 
 func sidecarHealthURL(c *config.Config) string {

@@ -51,7 +51,7 @@
       "summary": "Reference proxy with bundled fetch interception and before-tool-call enforcement.",
       "family": "proxy",
       "toolInspection": "pre-execution + response-scan",
-      "subprocessPolicy": "sandbox",
+      "subprocessPolicy": "shims",
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
@@ -61,7 +61,7 @@
         "scope": "user"
       },
       "hilt": "OpenClaw supports DefenseClaw approval prompts for tool actions. Approvals reach chat-origin sessions via the bundled plugin.",
-      "notes": "Reference proxy connector — full data-path interception, sandbox enforcement, plugin-mediated HITL."
+      "notes": "Reference proxy connector — full data-path interception, command-shim subprocess enforcement, plugin-mediated HITL."
     },
     {
       "id": "cursor",
@@ -281,7 +281,7 @@
       "summary": "API base redirect through the DefenseClaw proxy with response scanning.",
       "family": "proxy",
       "toolInspection": "pre-execution + response-scan",
-      "subprocessPolicy": "sandbox",
+      "subprocessPolicy": "shims",
       "hooks": {
         "canBlock": true,
         "canAskNative": false,

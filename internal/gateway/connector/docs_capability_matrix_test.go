@@ -106,10 +106,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			t.Errorf("%s toolInspection=%q want %q", conn.Name(), row.toolInspection, wantToolInspection)
 		}
 		actualSubprocess := string(conn.SubprocessPolicy())
-		// Proxy connectors prefer sandbox but resolve to shims off Linux. The
-		// docs describe that configured policy rather than the host fallback.
-		subprocessMatches := row.subprocessPolicy == actualSubprocess || (row.subprocessPolicy == "sandbox" && actualSubprocess == "shims")
-		if !subprocessMatches {
+		if row.subprocessPolicy != actualSubprocess {
 			t.Errorf("%s subprocessPolicy=%q want %q", conn.Name(), row.subprocessPolicy, conn.SubprocessPolicy())
 		}
 

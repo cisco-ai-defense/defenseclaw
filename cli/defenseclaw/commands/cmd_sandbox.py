@@ -1,7 +1,8 @@
-"""defenseclaw sandbox — Experimental sandbox mode commands.
+"""defenseclaw sandbox — sandbox lifecycle commands.
 
-Groups sandbox init and setup under ``defenseclaw sandbox``, plus
-``legacy-cleanup``, which undoes a legacy openshell-sandbox (0.0.x) install.
+The legacy openshell-sandbox (0.0.x) standalone integration was removed. The
+group currently carries only ``legacy-cleanup``, which undoes an old install;
+NVIDIA OpenShell 0.1 support is being rebuilt.
 """
 
 from __future__ import annotations
@@ -9,31 +10,20 @@ from __future__ import annotations
 import click
 
 from defenseclaw import ux
-from defenseclaw.commands.cmd_init_sandbox import sandbox_init_cmd
-from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
 from defenseclaw.context import AppContext, pass_ctx
 
 
 @click.group()
 def sandbox() -> None:
-    """[experimental] Manage openshell-sandbox standalone mode.
+    """Manage DefenseClaw sandboxes.
 
-    Linux-only. Creates an isolated sandbox environment with Landlock,
-    seccomp, and network namespaces for running OpenClaw agents.
-
-    \b
-    Requires 'defenseclaw init' to have been run first.
+    The legacy openshell-sandbox standalone mode was removed; OpenShell 0.1
+    sandbox support is being rebuilt.
 
     \b
     Commands:
-      init             Create sandbox user, transfer OpenClaw, configure networking
-      setup            Customize sandbox networking, policy, and device pairing
       legacy-cleanup   Undo a legacy openshell-sandbox (0.0.x) install
     """
-
-
-sandbox.add_command(sandbox_init_cmd, "init")
-sandbox.add_command(setup_sandbox, "setup")
 
 
 @sandbox.command("legacy-cleanup")

@@ -118,7 +118,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "MCP Actions",
         "Plugin Actions",
         "Watch",
-        "OpenShell",
+        "OpenShell (legacy - read-only)",
         "Inspect LLM (legacy - read-only)",
         "Cisco AI Defense",
         "Firewall",
@@ -1219,12 +1219,30 @@ def test_setup_panel_credentials_restart_and_config_save_state() -> None:
 
 def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None:
     sections = build_setup_sections(
-        {"llm": {"api_key": "sk-abcdefghijklmnopqrstuvwxyz"}, "openshell": {"auto_pair": None}}
+        {"llm": {"api_key": "sk-abcdefghijklmnopqrstuvwxyz"}, "openshell": {"mode": "standalone"}}
     )
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
-    assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
     assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
+    # The legacy openshell section is read-only: nothing there is editable.
+    openshell = next(section for section in sections if section.name.startswith("OpenShell"))
+    assert openshell.name == "OpenShell (legacy - read-only)"
+    assert [(field.label, field.value, field.interactive) for field in openshell.fields] == [
+        ("Mode", "standalone", False),
+        ("Sandbox Home", "(unset)", False),
+    ]
+
+
+def test_legacy_sandbox_wizard_slot_is_kept_but_unavailable() -> None:
+    from defenseclaw.tui.panels.setup import SANDBOX_WIZARD_REMOVED_REASON
+
+    model = SetupPanelModel({})
+    assert int(SetupWizard.SANDBOX) == 13
+    assert model.wizard_available(SetupWizard.SANDBOX) is False
+    assert model.wizard_unavailable_reason(SetupWizard.SANDBOX) == SANDBOX_WIZARD_REMOVED_REASON
+    assert model.open_goal_menu(SetupWizard.SANDBOX) is False
+    assert model.form_error == SANDBOX_WIZARD_REMOVED_REASON
+    assert model.wizard_infos()[13].status == "unsupported"
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -2481,6 +2499,11 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     runner = CliRunner()
     cfg = _guardrail_on_cfg("openclaw")
     for wizard in SetupWizard:
+        if not SetupPanelModel(cfg=cfg).wizard_available(wizard):
+            # An unavailable slot (the removed legacy sandbox wizard) never
+            # opens a form; test_legacy_sandbox_wizard_slot_is_kept_but_unavailable
+            # pins that behavior.
+            continue
         goals = wizard_goals(wizard, cfg)
         for goal in goals:
             model = SetupPanelModel(cfg=cfg)

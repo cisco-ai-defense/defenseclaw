@@ -989,7 +989,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
-	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil, nil); err == nil || sidecar != nil {
+	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
 }
@@ -1019,7 +1019,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
-			sidecar, err := NewSidecar(candidate, nil, nil, nil)
+			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)
 			}

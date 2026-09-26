@@ -67,7 +67,8 @@ enum TUIWizards {
         splunk,
         observability,
         webhooks,
-        sandbox,
+        // No sandbox wizard: the legacy standalone OpenShell `sandbox setup`
+        // was removed, and the OpenShell 0.1 setup flow has not landed yet.
         registries,
         notificationsRouting,
         aiDiscovery,
@@ -714,29 +715,6 @@ enum TUIWizards {
             WizardField(key: "json", label: "JSON output", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["list", "show"])),
             WizardField(key: "test-timeout", label: "Test timeout", kind: .text(placeholder: "5"), defaultValue: "5", visibleWhen: (key: "action", equals: ["test"])),
             WizardField(key: "dry-run-test", label: "Format test payload without delivery", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["test"])),
-        ]
-    )
-
-    private static let sandbox = WizardDefinition(
-        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
-        blurb: "Initialize OpenShell sandbox networking and policy controls (Linux hosts only).",
-        baseArgs: ["sandbox", "setup"], appendNonInteractive: true,
-        validation: { _ in
-            // cmd_init_sandbox exits on non-Linux, and --disable needs sudo
-            // this GUI can't provide — surface that before Run.
-            "Sandbox setup requires a Linux host; run `defenseclaw sandbox setup` there instead."
-        },
-        fields: [
-            WizardField(key: "sandbox-ip", label: "Sandbox IP", kind: .text(placeholder: "10.200.0.2"), defaultValue: "10.200.0.2"),
-            WizardField(key: "host-ip", label: "Host IP", kind: .text(placeholder: "10.200.0.1"), defaultValue: "10.200.0.1"),
-            WizardField(key: "sandbox-home", label: "Sandbox home", kind: .text(placeholder: "/home/sandbox"), defaultValue: "/home/sandbox"),
-            WizardField(key: "openclaw-port", label: "OpenClaw port", kind: .text(placeholder: "18789"), defaultValue: "18789"),
-            WizardField(key: "policy", label: "Policy", kind: .choice(options: ["default", "strict", "permissive"]), defaultValue: "permissive"),
-            WizardField(key: "dns", label: "DNS servers", kind: .text(placeholder: "8.8.8.8,1.1.1.1"), defaultValue: "8.8.8.8,1.1.1.1"),
-            WizardField(key: "no-auto-pair", label: "Disable automatic pairing", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-host-networking", label: "Disable host networking", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-guardrail", label: "Disable guardrail", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "disable", label: "Disable sandbox", kind: .flagOnly, defaultValue: "no"),
         ]
     )
 

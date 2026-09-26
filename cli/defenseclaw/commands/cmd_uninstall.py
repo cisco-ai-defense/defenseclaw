@@ -321,8 +321,7 @@ def _resolve_active_connector(cfg) -> str:
     """Return the active connector for ``cfg``, lowercased.
 
     Mirrors :meth:`Config.active_connector` but tolerates older
-    in-process configs that haven't been migrated yet — the same
-    pattern used in :mod:`cmd_setup_sandbox`. We can't rely on
+    in-process configs that haven't been migrated yet. We can't rely on
     ``Config.active_connector`` existing because ``_build_plan`` is
     called even when config loading raised.
     """

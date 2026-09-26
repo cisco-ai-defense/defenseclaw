@@ -635,20 +635,18 @@ enum ConfigEditorCatalog {
             ]
         ))
 
+        // Legacy standalone sandbox keys stay visible (read-only) so an old
+        // install can be recognised; binary/policy_dir/version/auto_pair/
+        // host_networking are ignored by the runtime and fall through to the
+        // read-only "Other (uncatalogued)" section if still present.
         sections.append(ConfigEditorSection(
-            name: "OpenShell",
-            summary: "OpenShell sandbox integration.",
+            name: "OpenShell (legacy - read-only)",
+            summary: "Legacy standalone sandbox settings (read by `defenseclaw sandbox legacy-cleanup` only). "
+                + "OpenShell 0.1 support is being rebuilt.",
+            help: "On the Linux host, run `defenseclaw sandbox legacy-cleanup --dry-run` to review the cleanup.",
             fields: [
-                .init(label: "Binary", key: "openshell.binary", hint: "Path to the openshell executable."),
-                .init(label: "Policy Dir", key: "openshell.policy_dir", hint: "OpenShell policy YAML directory."),
-                .init(label: "Mode", key: "openshell.mode", kind: .choice, options: ["", "docker", "standalone"],
-                      hint: "docker, standalone, or blank auto-detect."),
-                .init(label: "Version", key: "openshell.version", hint: "Pinned OpenShell version."),
-                .init(label: "Sandbox Home", key: "openshell.sandbox_home", hint: "Root of per-sandbox state."),
-                .init(label: "Auto Pair (tristate)", key: "openshell.auto_pair", kind: .choice,
-                      options: ["", "true", "false"], hint: "Blank=default true."),
-                .init(label: "Host Networking (tristate)", key: "openshell.host_networking", kind: .choice,
-                      options: ["", "true", "false"], hint: "Blank=default false."),
+                .init(label: "Mode", key: "openshell.mode", kind: .header),
+                .init(label: "Sandbox Home", key: "openshell.sandbox_home", kind: .header),
             ]
         ))
 

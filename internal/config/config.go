@@ -1526,58 +1526,32 @@ type ScannersConfig struct {
 	CodeGuard        string    `mapstructure:"codeguard"       yaml:"codeguard"`
 }
 
+// OpenShellConfig is the read-only remnant of the legacy openshell-sandbox
+// (0.0.x) standalone integration. The v8 schema still accepts the section so
+// existing configs load unchanged; binary, policy_dir, version, auto_pair, and
+// host_networking are accepted and ignored. Mode and SandboxHome are read only
+// by the legacy shim (legacy_openshell.go) until legacy-cleanup resets them.
+//
+// LEGACY(openshell-0.0.x): delete one release after cleanup.
 type OpenShellConfig struct {
-	Binary         string `mapstructure:"binary"        yaml:"binary"`
-	PolicyDir      string `mapstructure:"policy_dir"    yaml:"policy_dir"`
-	Mode           string `mapstructure:"mode"           yaml:"mode,omitempty"`
-	Version        string `mapstructure:"version"        yaml:"version,omitempty"`
-	SandboxHome    string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
-	AutoPair       *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
-	HostNetworking *bool  `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
+	Mode        string `mapstructure:"mode"         yaml:"mode,omitempty"`
+	SandboxHome string `mapstructure:"sandbox_home" yaml:"sandbox_home,omitempty"`
 }
 
-const DefaultOpenShellVersion = "0.6.2"
 const DefaultSandboxHome = "/home/sandbox"
 
-// IsStandalone returns true when openshell-sandbox is running in standalone
-// Linux supervisor mode (Landlock + seccomp + network namespace, no Docker).
+// IsStandalone reports whether the config still records the legacy
+// openshell-sandbox standalone mode.
 func (o *OpenShellConfig) IsStandalone() bool {
 	return o.Mode == "standalone"
 }
 
-// EffectiveVersion returns the configured OpenShell version or the default.
-func (o *OpenShellConfig) EffectiveVersion() string {
-	if o.Version != "" {
-		return o.Version
-	}
-	return DefaultOpenShellVersion
-}
-
-// EffectiveSandboxHome returns the configured sandbox home or the default.
+// EffectiveSandboxHome returns the recorded legacy sandbox home or the default.
 func (o *OpenShellConfig) EffectiveSandboxHome() string {
 	if o.SandboxHome != "" {
 		return o.SandboxHome
 	}
 	return DefaultSandboxHome
-}
-
-// ShouldAutoPair returns whether device pre-pairing is enabled.
-// Defaults to true when not explicitly set.
-func (o *OpenShellConfig) ShouldAutoPair() bool {
-	if o.AutoPair != nil {
-		return *o.AutoPair
-	}
-	return true
-}
-
-// HostNetworkingEnabled returns whether DefenseClaw should manage host-side
-// iptables rules for the sandbox (DNS forwarding, UI port forwarding,
-// guardrail redirect, MASQUERADE). Defaults to true when not explicitly set.
-func (o *OpenShellConfig) HostNetworkingEnabled() bool {
-	if o.HostNetworking != nil {
-		return *o.HostNetworking
-	}
-	return true
 }
 
 type GatewayWatcherSkillConfig struct {
@@ -2453,21 +2427,21 @@ func (g *GatewayConfig) RequiresTLS() bool {
 	}
 }
 
-// RequiresTLSWithMode is like RequiresTLS but treats openshell standalone mode as
-// point-to-point (no TLS) unless gateway.tls forces it on.
-func (g *GatewayConfig) RequiresTLSWithMode(openshell *OpenShellConfig) bool {
-	if g.TLS {
-		return true
+// APIBindHost returns the address the gateway REST API listens on: an explicit
+// gateway.api_bind, else the legacy standalone shim's host, else loopback.
+// Every listener, hook/plugin address, and health probe derives the API host
+// from here so they cannot disagree.
+func APIBindHost(cfg *Config) string {
+	if cfg == nil {
+		return "127.0.0.1"
 	}
-	if openshell != nil && openshell.IsStandalone() {
-		return false
+	if cfg.Gateway.APIBind != "" {
+		return cfg.Gateway.APIBind
 	}
-	switch g.Host {
-	case "", "127.0.0.1", "localhost", "::1", "[::1]":
-		return false
-	default:
-		return true
+	if host, ok := LegacyStandaloneAPIHost(cfg); ok {
+		return host
 	}
+	return "127.0.0.1"
 }
 
 type RuntimeAction string
@@ -3032,9 +3006,7 @@ func loadConfigSource(
 		}
 	}
 
-	if cfg.OpenShell.IsStandalone() {
-		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
-	}
+	cfg.Gateway.SandboxHome = LegacySandboxHome(&cfg)
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
@@ -3937,10 +3909,6 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
 	viper.SetDefault("scanners.plugin_scanner", "defenseclaw")
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
-	viper.SetDefault("openshell.binary", "openshell")
-	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
-	viper.SetDefault("openshell.version", DefaultOpenShellVersion)
-	viper.SetDefault("openshell.host_networking", true)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

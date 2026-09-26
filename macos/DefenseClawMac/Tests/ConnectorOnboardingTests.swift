@@ -34,6 +34,7 @@ struct ConnectorOnboardingTests {
         commandRegistryIncludesAmpSetup()
         commandRegistryIncludesOmniGentSetup()
         commandRegistryIncludesCanonicalDevinSetup()
+        commandRegistryOmitsRemovedStandaloneSandboxCommands()
         parsesCommandArguments()
         rejectsMalformedCommandArguments()
         quotesDisplayedShellArguments()
@@ -240,6 +241,13 @@ struct ConnectorOnboardingTests {
         expect(command?.arguments == ["setup", "devin", "--yes"], "Devin setup command is available")
         expect(CommandRegistry.all.allSatisfy { !$0.arguments.contains("windsurf") },
                "legacy Windsurf setup is absent from the native command registry")
+    }
+
+    private static func commandRegistryOmitsRemovedStandaloneSandboxCommands() {
+        expect(CommandRegistry.all.allSatisfy { !($0.binary == "defenseclaw-gateway" && $0.arguments.first == "sandbox") },
+               "removed gateway sandbox lifecycle commands are absent from the native command registry")
+        expect(CommandRegistry.all.allSatisfy { $0.arguments != ["sandbox", "init"] },
+               "removed sandbox init is absent from the native command registry")
     }
 
     private static func parsesCommandArguments() {

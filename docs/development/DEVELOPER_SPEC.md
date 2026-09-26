@@ -7,6 +7,8 @@ The original specification described the first DefenseClaw CLI/TUI concept:
 pre-use scanning, block/allow policy, and an operator alert surface layered over
 OpenClaw and OpenShell. The implemented product has since expanded and changed
 its connector, configuration, observability, packaging, and release contracts.
+The legacy standalone OpenShell sandbox integration was removed; see
+[`../SANDBOX.md`](../SANDBOX.md).
 
 Use current authorities instead:
 

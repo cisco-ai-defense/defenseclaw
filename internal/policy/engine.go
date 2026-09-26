@@ -32,7 +32,7 @@ import (
 )
 
 // Engine evaluates OPA Rego policies for admission, guardrail, firewall,
-// sandbox, audit, and skill_actions domains.
+// audit, and skill_actions domains.
 type Engine struct {
 	mu                sync.RWMutex
 	regoDir           string
@@ -205,25 +205,6 @@ func (e *Engine) EvaluateFirewall(ctx context.Context, input FirewallInput) (*Fi
 	return &FirewallOutput{
 		Action:   stringVal(result, "action"),
 		RuleName: stringVal(result, "rule_name"),
-	}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Sandbox
-// ---------------------------------------------------------------------------
-
-// EvaluateSandbox runs the sandbox policy for skill endpoint/permission shaping.
-func (e *Engine) EvaluateSandbox(ctx context.Context, input SandboxInput) (*SandboxOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.sandbox", input)
-	if err != nil {
-		return nil, fmt.Errorf("policy: sandbox eval: %w", err)
-	}
-	return &SandboxOutput{
-		AllowedEndpoints:  toStringSlice(result, "allowed_endpoints"),
-		DeniedEndpoints:   toStringSlice(result, "denied_endpoints"),
-		DeniedFromRequest: toStringSlice(result, "denied_from_request"),
-		Permissions:       toStringSlice(result, "permissions"),
-		AllowedSkills:     toStringSlice(result, "allowed_skills"),
 	}, nil
 }
 

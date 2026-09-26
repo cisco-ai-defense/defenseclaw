@@ -119,6 +119,7 @@ struct SetupDefinitionsParityTests {
         secureSetupSecretsUseChildEnvironment()
         webhookBuilderCoversCurrentNotifierOptions()
         webhookValidationRequiresProviderCredentials()
+        removedStandaloneSandboxWizardStaysHidden()
         print("Setup definition parity tests passed")
     }
 
@@ -669,6 +670,16 @@ struct SetupDefinitionsParityTests {
             "events": "block,health",
         ]
         expect(TUIWizards.webhookValidation(pagerDuty) == nil, "valid PagerDuty notifier")
+    }
+
+    private static func removedStandaloneSandboxWizardStaysHidden() {
+        // `defenseclaw sandbox setup --sandbox-ip/--host-ip/...` was deleted
+        // with the legacy standalone OpenShell integration.
+        let legacyKeys: Set<String> = ["sandbox-ip", "host-ip", "no-auto-pair", "no-host-networking"]
+        expect(
+            TUIWizards.all.allSatisfy { wizard in wizard.fields.allSatisfy { !legacyKeys.contains($0.key) } },
+            "no setup wizard offers the removed standalone sandbox options"
+        )
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {

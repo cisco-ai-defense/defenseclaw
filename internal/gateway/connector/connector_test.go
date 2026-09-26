@@ -6968,14 +6968,13 @@ func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
 // --- Subprocess policy tests ---
 
 func TestResolveSubprocessPolicy(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessSandbox {
-			t.Errorf("linux: expected sandbox, got %q", got)
-		}
-	} else {
-		if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessShims {
-			t.Errorf("non-linux: expected shims fallback, got %q", got)
-		}
+	// The legacy openshell-sandbox tier is gone on every platform; a sandbox
+	// preference must never resolve to a tier nothing enforces.
+	if got := ResolveSubprocessPolicy(SubprocessSandbox); got != SubprocessShims {
+		t.Errorf("sandbox preference resolved to %q, want shims", got)
+	}
+	if got := ResolveSubprocessPolicy(SubprocessShims); got != SubprocessShims {
+		t.Errorf("expected shims, got %q", got)
 	}
 	if got := ResolveSubprocessPolicy(SubprocessNone); got != SubprocessNone {
 		t.Errorf("expected none, got %q", got)
@@ -7533,26 +7532,37 @@ func runHookAndReturnCurlArgsWithHome(t *testing.T, scriptPath, dcHome string, e
 	return string(data)
 }
 
-func TestWriteSandboxPolicy(t *testing.T) {
+func TestSandboxPreferenceWritesShimsWithoutPolicyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
-	if err := WriteSandboxPolicy(dir, "127.0.0.1:4000", "127.0.0.1:18970"); err != nil {
-		t.Fatalf("WriteSandboxPolicy failed: %v", err)
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
+	if err := SetupSubprocessEnforcement(SubprocessSandbox, opts); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "shims", "curl")); err != nil {
+		t.Fatalf("sandbox preference did not install shims: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "policies", "defenseclaw-policy.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("legacy sandbox policy file was written (stat err=%v)", err)
+	}
+}
 
-	path := filepath.Join(dir, "policies", "defenseclaw-policy.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("sandbox policy not created: %v", err)
+func TestTeardownRemovesStaleLegacySandboxPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policies", "defenseclaw-policy.yaml")
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	content := string(data)
-	if !strings.Contains(content, "127.0.0.1:4000") {
-		t.Error("policy missing proxy addr")
+	if err := os.WriteFile(policyPath, []byte("sandbox:\n  mode: enforce\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "127.0.0.1:18970") {
-		t.Error("policy missing API addr")
+	if err := TeardownSubprocessEnforcement(SetupOpts{DataDir: dir}); err != nil {
+		t.Fatalf("teardown: %v", err)
 	}
-	if !strings.Contains(content, "enforce") {
-		t.Error("policy missing enforce mode")
+	if _, err := os.Stat(policyPath); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy sandbox policy survived teardown (stat err=%v)", err)
 	}
 }
 
@@ -7677,8 +7687,8 @@ func TestSecuritySurfaceCoverage(t *testing.T) {
 	}
 
 	expectations := []expectation{
-		{"openclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
-		{"zeptoclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
+		{"openclaw", ToolModeBoth, SubprocessShims},
+		{"zeptoclaw", ToolModeBoth, SubprocessShims},
 		{"claudecode", ToolModeBoth, SubprocessNone},
 		{"codex", ToolModeBoth, SubprocessNone},
 	}

@@ -182,7 +182,9 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.SPLUNK: ("setup", "splunk"),
     SetupWizard.OBSERVABILITY: ("setup", "observability", "add"),
     SetupWizard.WEBHOOKS: ("setup", "webhook", "add"),
-    SetupWizard.SANDBOX: ("sandbox", "setup"),
+    # Slot kept so wizard numbering stays stable. The legacy openshell-sandbox
+    # wizard was removed; the slot is unavailable and names the cleanup.
+    SetupWizard.SANDBOX: ("sandbox", "legacy-cleanup"),
     SetupWizard.REGISTRIES: ("registry", "add"),
     # NOTIFICATIONS_ROUTING fan-outs to multiple
     # ``setup notifications-set <slot> <value>`` calls; the first
@@ -202,6 +204,11 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.REDACTION: ("setup", "redaction"),
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
+
+SANDBOX_WIZARD_REMOVED_REASON = (
+    "The legacy openshell-sandbox wizard was removed; OpenShell 0.1 sandbox support is being rebuilt. "
+    "To undo an old standalone install, run 'defenseclaw sandbox legacy-cleanup' on the Linux host."
+)
 
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     # (slot id, label, default state)
@@ -227,7 +234,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Configure Splunk HEC or local Splunk integration.",
     "Add and manage canonical v8 observability destinations.",
     "Add chat or incident notifier webhooks.",
-    "Initialize and configure OpenShell sandbox policy.",
+    "Removed: the legacy openshell-sandbox setup. OpenShell 0.1 support is being rebuilt.",
     "Register an external skill or MCP catalog source.",
     "Toggle notification categories and event sources.",
     "Enable or tune the sidecar AI Discovery service.",
@@ -254,7 +261,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
     "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
-    "Runs: defenseclaw sandbox setup. Need OpenShell policy choices and optional sandbox home/network settings.",
+    "Unavailable. Undo an old standalone install on Linux with: defenseclaw sandbox legacy-cleanup --dry-run.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",
@@ -721,13 +728,17 @@ class SetupPanelModel:
         )
 
     def wizard_available(self, wizard: SetupWizard | int) -> bool:
-        return not (
-            SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
-            and not local_observability_stack_supported(self.os_name)
-        )
+        wizard = SetupWizard(wizard)
+        if wizard == SetupWizard.SANDBOX:
+            return False
+        return not (wizard == SetupWizard.LOCAL_OBSERVABILITY and not local_observability_stack_supported(self.os_name))
 
     def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
-        return "" if self.wizard_available(wizard) else LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+        if self.wizard_available(wizard):
+            return ""
+        if SetupWizard(wizard) == SetupWizard.SANDBOX:
+            return SANDBOX_WIZARD_REMOVED_REASON
+        return LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -1134,7 +1145,7 @@ class SetupPanelModel:
         if not self.wizard_available(self.active_wizard):
             self.form_active = False
             self.goal_active = False
-            self.form_error = LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+            self.form_error = self.wizard_unavailable_reason(self.active_wizard)
             return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
@@ -2643,24 +2654,17 @@ def wizard_form_defs(
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
     if wizard == SetupWizard.SANDBOX:
+        # The slot is unavailable (see SANDBOX_WIZARD_REMOVED_REASON); this
+        # single row documents the only command it names.
         return (
-            WizardFormField("Sandbox IP", "string", "--sandbox-ip", value="10.200.0.2", default="10.200.0.2"),
-            WizardFormField("Host IP", "string", "--host-ip", value="10.200.0.1", default="10.200.0.1"),
-            WizardFormField("Sandbox Home", "string", "--sandbox-home", value="/home/sandbox", default="/home/sandbox"),
-            WizardFormField("OpenClaw Port", "int", "--openclaw-port", value="18789", default="18789"),
             WizardFormField(
-                "Policy",
-                "choice",
-                "--policy",
-                value="permissive",
-                default="permissive",
-                options=("default", "strict", "permissive"),
+                "Dry Run",
+                "bool",
+                "--dry-run",
+                value="yes",
+                default="yes",
+                hint="Preview the legacy openshell-sandbox cleanup; run it on the Linux host.",
             ),
-            WizardFormField("DNS", "string", "--dns", value="8.8.8.8,1.1.1.1", default="8.8.8.8,1.1.1.1"),
-            WizardFormField("No Auto Pair", "bool", "--no-auto-pair", value="no", default="no"),
-            WizardFormField("No Host Networking", "bool", "--no-host-networking", value="no", default="no"),
-            WizardFormField("No Guardrail", "bool", "--no-guardrail", value="no", default="no"),
-            WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
         )
     return ()
 
@@ -3383,37 +3387,6 @@ def _webhooks_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal,
     )
 
 
-def _sandbox_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
-    del cfg
-    return (
-        WizardGoal(
-            "init",
-            "Initialize the sandbox (defaults)",
-            summary="Set up the OpenShell sandbox with a policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "network",
-            "Set the sandbox network (IPs / DNS)",
-            summary="Configure sandbox/host IPs and DNS.",
-            fields=("Sandbox IP", "Host IP", "DNS", "No Host Networking"),
-        ),
-        WizardGoal(
-            "policy",
-            "Change the sandbox policy",
-            summary="Switch the sandbox enforcement policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "disable",
-            "Disable the sandbox",
-            summary="Turn the sandbox off.",
-            presets={"--disable": "yes"},
-            fields=("Disable",),
-        ),
-    )
-
-
 def _registries_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
     del cfg
     return (
@@ -3738,7 +3711,6 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.SPLUNK: _splunk_goals,
     SetupWizard.OBSERVABILITY: _observability_goals,
     SetupWizard.WEBHOOKS: _webhooks_goals,
-    SetupWizard.SANDBOX: _sandbox_goals,
     SetupWizard.REGISTRIES: _registries_goals,
     SetupWizard.NOTIFICATIONS_ROUTING: _notifications_routing_goals,
     SetupWizard.AI_DISCOVERY: _ai_discovery_goals,
@@ -4651,6 +4623,8 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
     SetupWizard.OBSERVABILITY: lambda fields: _build_observability_args(fields),
     SetupWizard.WEBHOOKS: lambda fields: _build_webhook_args(fields),
+    # The slot is unavailable; its only argv is the read-only cleanup preview.
+    SetupWizard.SANDBOX: lambda fields: ("sandbox", "legacy-cleanup", "--dry-run"),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda fields: _build_notifications_routing_args(fields),
     SetupWizard.AI_DISCOVERY: lambda fields: _build_ai_discovery_args(fields),
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
@@ -6889,39 +6863,16 @@ def _watch_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
 
 
 def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
+    # Read-only: the legacy openshell-sandbox integration was removed, and
+    # only its shim fields are still read (by legacy-cleanup and the bind shim).
     return ConfigSection(
-        "OpenShell",
+        "OpenShell (legacy - read-only)",
         (
-            _field(cfg, "Binary", "openshell.binary", hint="Path to openshell executable."),
-            _field(cfg, "Policy Dir", "openshell.policy_dir", hint="OpenShell policy YAML directory."),
-            _field(
-                cfg,
-                "Mode",
-                "openshell.mode",
-                "choice",
-                ("", "docker", "standalone"),
-                "docker, standalone, or blank auto-detect.",
-            ),
-            _field(cfg, "Version", "openshell.version", hint="Pinned OpenShell version."),
-            _field(cfg, "Sandbox Home", "openshell.sandbox_home", hint="Root of per-sandbox state."),
-            _field(
-                cfg,
-                "Auto Pair (tristate)",
-                "openshell.auto_pair",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default true.",
-            ),
-            _field(
-                cfg,
-                "Host Networking (tristate)",
-                "openshell.host_networking",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default false.",
-            ),
+            _header("Mode", value=_value(cfg, "openshell.mode") or "(unset)"),
+            _header("Sandbox Home", value=_value(cfg, "openshell.sandbox_home") or "(unset)"),
         ),
-        "NVIDIA OpenShell sandbox integration.",
+        "Legacy openshell-sandbox (0.0.x) settings, read only by 'defenseclaw sandbox legacy-cleanup'. "
+        "OpenShell 0.1 support is being rebuilt.",
     )
 
 

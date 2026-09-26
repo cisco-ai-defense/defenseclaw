@@ -371,11 +371,20 @@ webhooks:
     min_severity: HIGH
 ```
 
-When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1` except in
-standalone OpenShell mode: if `guardrail.host` is non-empty and is not the
-literal `localhost`, the management API inherits that host. Pin
-`gateway.api_bind: 127.0.0.1` when the API must stay loopback-only. See
+When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. The only
+exception is a host that still carries the removed legacy standalone sandbox
+(`openshell.mode: standalone` with a `guardrail.host` that is non-empty and not
+the literal `localhost`): the management API inherits `guardrail.host` until
+`defenseclaw sandbox legacy-cleanup` resets the config. An explicit
+`gateway.api_bind` always wins. See
 [Gateway API: bind address](/docs/reference/gateway-api#bind-address).
+
+The `openshell:` block stays in the v8 schema so existing files load
+unchanged, but it no longer configures a sandbox. `mode` and `sandbox_home`
+are read only by the legacy bind rule above and by
+[`defenseclaw sandbox legacy-cleanup`](/docs/setup/sandbox); `binary`,
+`policy_dir`, `version`, `auto_pair`, and `host_networking` are accepted and
+ignored. No migration rewrites the block.
 
 The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
 OpenAI-compatible Chat Completions path. Hook connectors and other provider API

@@ -4302,13 +4302,13 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "label": "OpenClaw",
         "description": "fetch interceptor + before_tool_call plugin",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "shims",
     },
     "zeptoclaw": {
         "label": "ZeptoClaw",
         "description": "api_base redirect + proxy response-scan",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "shims",
     },
     "claudecode": {
         "label": "Claude Code",
@@ -12512,21 +12512,6 @@ def _find_plugin_source() -> str | None:
     if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
         return resolved
     return None
-
-
-def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
-    """Remove the DefenseClaw plugin from the sandbox user's OpenClaw extensions."""
-    import shutil
-
-    target_dir = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw")
-    if os.path.isdir(target_dir):
-        try:
-            shutil.rmtree(target_dir)
-            click.echo(f"  ✓ Sandbox plugin removed from {target_dir}")
-        except OSError as exc:
-            click.echo(f"  ✗ Could not remove sandbox plugin: {exc}")
-    else:
-        click.echo("  ✓ Sandbox plugin not installed (nothing to remove)")
 
 
 # ---------------------------------------------------------------------------

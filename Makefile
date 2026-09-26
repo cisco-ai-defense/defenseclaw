@@ -106,7 +106,7 @@ endef
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -337,16 +337,6 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  defenseclaw init         # or initialize via CLI (scripting / CI)"
 	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
-	@if [ "$$(uname -s)" = "Linux" ]; then \
-		echo "Sandbox mode (Linux):"; \
-		echo "  defenseclaw init --sandbox          # create sandbox user + directories"; \
-		echo "  defenseclaw setup sandbox            # configure networking + systemd"; \
-		echo "  scripts/install-openshell-sandbox.sh  # install openshell-sandbox binary"; \
-	else \
-		echo "Sandbox mode (Linux only):"; \
-		echo "  On a Linux host, use 'defenseclaw init --sandbox' to set up"; \
-		echo "  openshell-sandbox standalone mode with network isolation."; \
-	fi
 
 maybe-openclaw-plugin-install: _source-install-preflight
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
@@ -1169,7 +1159,7 @@ go-lint: sync-openclaw-extension
 # Distribution targets — build release artifacts into dist/
 # ---------------------------------------------------------------------------
 
-dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
+dist: dist-cli dist-gateway dist-plugin dist-upgrade-manifest dist-checksums
 	@$(MAKE) --no-print-directory dist-extension-contract
 	@echo ""
 	@echo "Unsigned release-build inputs:"
@@ -1201,9 +1191,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 
 _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/rego
-	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
-	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
@@ -1220,14 +1208,11 @@ _bundle-data: _checkout-write-preflight
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
-	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
-	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	@# Use the canonical generator without repairing tracked docs before CI checks.
 	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
-	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
@@ -1283,7 +1268,9 @@ _bundle-data: _checkout-write-preflight
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
-	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
+	@# The legacy openshell-sandbox assets were removed; drop copies an older
+	@# build left in this ignored staging tree so wheels cannot ship them.
+	@rm -rf cli/defenseclaw/_data/policies/openshell cli/defenseclaw/_data/scripts
 
 dist-gateway: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)
@@ -1322,23 +1309,12 @@ dist-extension-contract:
 		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
 		--wheel $(DIST_DIR)/defenseclaw-$(VERSION)-py3-none-any.whl
 
-dist-sandbox: _checkout-write-preflight
-	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts
-	cp policies/openshell/*.rego $(DIST_DIR)/sandbox/policies/
-	cp policies/openshell/*.yaml $(DIST_DIR)/sandbox/policies/
-	cp scripts/install-openshell-sandbox.sh $(DIST_DIR)/sandbox/scripts/
-	chmod +x $(DIST_DIR)/sandbox/scripts/install-openshell-sandbox.sh
-	@echo "Sandbox artifacts copied to $(DIST_DIR)/sandbox/"
-
 dist-test: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/test
-	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
 	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
-	cp scripts/test-e2e-sandbox-policy-diff.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-cli.py $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-spark.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-mac.sh $(DIST_DIR)/test/ 2>/dev/null || true
-	cp scripts/bundle-sandbox-test.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
@@ -1354,7 +1330,6 @@ dist-checksums: _checkout-write-preflight
 dist-clean: _checkout-write-preflight
 	rm -rf $(DIST_DIR)
 	rm -rf cli/defenseclaw/_data
-	rm -rf sandbox-test-*
 
 clean:
 	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe

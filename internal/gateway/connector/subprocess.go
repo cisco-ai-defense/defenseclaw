@@ -28,8 +28,6 @@ import (
 	"runtime"
 	"strings"
 	"text/template"
-
-	"gopkg.in/yaml.v3"
 )
 
 //go:embed shims/*.sh
@@ -1409,66 +1407,11 @@ func HookScripts() []string {
 	return out
 }
 
-type sandboxPolicy struct {
-	Sandbox struct {
-		Mode       string         `yaml:"mode"`
-		Exec       sandboxExec    `yaml:"exec"`
-		Network    sandboxNetwork `yaml:"network"`
-		Filesystem sandboxFilesys `yaml:"filesystem"`
-	} `yaml:"sandbox"`
-}
-
-type sandboxExec struct {
-	Allow []string `yaml:"allow"`
-	Deny  []string `yaml:"deny"`
-}
-
-type sandboxNetwork struct {
-	AllowEgress []string `yaml:"allow_egress"`
-	DenyEgress  string   `yaml:"deny_egress"`
-}
-
-type sandboxFilesys struct {
-	DenyWrite []string `yaml:"deny_write"`
-}
-
-// WriteSandboxPolicy generates a sandbox policy YAML for OpenShell enforcement.
-// The policy restricts exec, network egress, and filesystem writes.
-func WriteSandboxPolicy(dataDir, proxyAddr, apiAddr string) error {
-	policyDir := filepath.Join(dataDir, "policies")
-	if err := os.MkdirAll(policyDir, 0o755); err != nil {
-		return fmt.Errorf("create policy dir: %w", err)
-	}
-
-	var pol sandboxPolicy
-	pol.Sandbox.Mode = "enforce"
-	pol.Sandbox.Exec.Allow = []string{
-		"/usr/bin/git", "/usr/bin/node", "/usr/bin/python3", "/usr/bin/npm",
-	}
-	pol.Sandbox.Exec.Deny = []string{
-		"/usr/bin/curl", "/usr/bin/wget", "**/nc", "**/ncat", "**/ssh",
-	}
-	pol.Sandbox.Network.AllowEgress = []string{proxyAddr, apiAddr}
-	pol.Sandbox.Network.DenyEgress = "*"
-	pol.Sandbox.Filesystem.DenyWrite = []string{"/etc/", "~/.ssh/", "~/.aws/credentials"}
-
-	out, err := yaml.Marshal(&pol)
-	if err != nil {
-		return fmt.Errorf("marshal sandbox policy: %w", err)
-	}
-
-	policyPath := filepath.Join(policyDir, "defenseclaw-policy.yaml")
-	return os.WriteFile(policyPath, out, 0o644)
-}
-
-// ResolveSubprocessPolicy determines the effective subprocess policy for
-// this platform. Sandbox requires Linux (Landlock + seccomp); macOS and
-// other platforms fall back to shims.
+// ResolveSubprocessPolicy determines the effective subprocess policy. The
+// legacy openshell-sandbox tier is gone (its generated policy file was never
+// enforced), so a sandbox preference resolves to shims on every platform.
 func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
-	if preferred == SubprocessNone {
-		return SubprocessNone
-	}
-	if preferred == SubprocessSandbox && runtime.GOOS != "linux" {
+	if preferred == SubprocessSandbox {
 		return SubprocessShims
 	}
 	return preferred
@@ -1477,22 +1420,13 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
 // tier based on the resolved policy.
 func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
-	switch policy {
-	case SubprocessSandbox:
-		if err := WriteSandboxPolicy(opts.DataDir, opts.ProxyAddr, opts.APIAddr); err != nil {
-			return fmt.Errorf("sandbox policy: %w", err)
-		}
+	switch ResolveSubprocessPolicy(policy) {
+	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
 		// F-2029 / F-3397: persist the gateway bearer token alongside
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
-			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
-		}
-
-	case SubprocessShims:
-		shimDir := filepath.Join(opts.DataDir, "shims")
 		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
@@ -1503,8 +1437,9 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	return nil
 }
 
-// TeardownSubprocessEnforcement removes shim scripts and the sandbox
-// policy file. It deliberately does NOT touch the shared hooks/
+// TeardownSubprocessEnforcement removes shim scripts and any stale policy
+// file an older release wrote for the removed openshell-sandbox tier. It
+// deliberately does NOT touch the shared hooks/
 // directory anymore: the previous implementation iterated the GLOBAL
 // `hookScripts` slice (= every connector's *-hook.sh + every generic
 // inspect-*.sh) and deleted them all from the shared dir. When called

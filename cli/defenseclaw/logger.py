@@ -376,17 +376,12 @@ class Logger:
 
 
 def _gateway_api_host(cfg: Any) -> str:
+    from defenseclaw.config import legacy_standalone_api_host
+
     gateway = cfg.gateway
     bind = str(getattr(gateway, "api_bind", "") or "").strip()
     if not bind:
-        openshell = getattr(cfg, "openshell", None)
-        guardrail = getattr(cfg, "guardrail", None)
-        standalone = bool(
-            openshell is not None and callable(getattr(openshell, "is_standalone", None)) and openshell.is_standalone()
-        )
-        guardrail_host = str(getattr(guardrail, "host", "") or "").strip()
-        if standalone and guardrail_host and guardrail_host != "localhost":
-            bind = guardrail_host
+        bind = legacy_standalone_api_host(cfg) or ""
     if bind in {"", "0.0.0.0", "::", "[::]", "localhost"}:
         return "127.0.0.1"
     return bind

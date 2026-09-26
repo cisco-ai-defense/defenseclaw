@@ -66,7 +66,8 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 @click.option(
     "--sandbox",
     is_flag=True,
-    help="Set up experimental OpenClaw/OpenShell sandbox mode (Linux only).",
+    hidden=True,
+    help="Deprecated and ignored: the legacy openshell-sandbox mode was removed.",
 )
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
@@ -230,12 +231,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     (the two compose). With neither flag (nor --connector), init keeps the
     legacy single-connector default.
 
-    Use --sandbox to set up OpenClaw/OpenShell standalone sandbox mode
-    (experimental, Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
-    import platform
-
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -337,6 +334,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         )
         return
 
+    from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -347,9 +345,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
-    if sandbox and platform.system() != "Linux":
-        ux.err("Sandbox mode requires Linux.", indent="  ")
-        raise SystemExit(1)
+    if sandbox:
+        click.echo(f"  warning: {SANDBOX_FLAG_DEPRECATION}", err=True)
 
     ux.banner("Environment")
 
@@ -482,50 +479,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    # Sandbox setup (Linux only)
-    if sandbox:
-        already_configured = cfg.openshell.is_standalone()
-        if already_configured:
-            ux.banner("Sandbox")
-            click.echo(
-                "  Sandbox:       "
-                + ux._style("already configured", fg="green")
-                + ux.dim(" (openshell.mode=standalone)")
-            )
-        else:
-            ux.banner("Sandbox")
-            from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
+    ux.banner("Sidecar")
+    _start_gateway(cfg, logger)
 
-            sandbox_ok = _init_sandbox(cfg, logger)
-
-            if sandbox_ok:
-                ux.banner("Sandbox Networking")
-                from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
-
-                app.cfg = cfg
-                ctx = click.Context(setup_sandbox, parent=click.get_current_context())
-                ctx.invoke(
-                    setup_sandbox,
-                    sandbox_ip="10.200.0.2",
-                    host_ip="10.200.0.1",
-                    sandbox_home=None,
-                    openclaw_port=18789,
-                    dns="8.8.8.8,1.1.1.1",
-                    policy="default",
-                    no_auto_pair=False,
-                    disable=False,
-                    non_interactive=True,
-                )
-
-    sidecar_started = False
-    if not sandbox:
-        ux.banner("Sidecar")
-        _start_gateway(cfg, logger)
-        sidecar_started = True
-
-        if guardrail_ok and sidecar_started:
-            click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
-            _restart_gateway_quiet()
+    if guardrail_ok:
+        click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
+        _restart_gateway_quiet()
 
     from defenseclaw.bootstrap import finalize_first_run_config
 
@@ -547,12 +506,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
     click.echo("  " + ux.bold("Next steps:"))
-    if sandbox and not guardrail_ok:
+    if not guardrail_ok:
         click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
-    elif not guardrail_ok:
-        click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
-    if not sidecar_started and not sandbox:
-        click.echo(f"    {ux.accent('defenseclaw-gateway start')}     " + ux.dim("Start the sidecar"))
     click.echo(f"    {ux.accent('defenseclaw setup')}            " + ux.dim("Customize scanners and policies"))
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
@@ -3088,9 +3043,9 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
 
     if started:
-        bind = "127.0.0.1"
-        if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
-            bind = cfg.guardrail.host
+        from defenseclaw.config import legacy_standalone_api_host
+
+        bind = legacy_standalone_api_host(cfg) or "127.0.0.1"
         _check_sidecar_health(cfg.gateway.api_port, bind=bind)
 
 

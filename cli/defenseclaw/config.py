@@ -468,39 +468,6 @@ def _warn_untrusted_managed_config(path: str, data: dict[str, Any]) -> None:
     )
 
 
-_sandbox_mode_cache: bool | None = None
-
-
-def openclaw_cmd_prefix() -> list[str]:
-    """Return ``["sudo", "-u", "sandbox"]`` when in standalone sandbox mode.
-
-    Used by any code that shells out to the ``openclaw`` CLI so that
-    config writes target the sandbox-owned OpenClaw home.  The prefix
-    does NOT include the ``openclaw`` binary itself — callers append it.
-    When in sandbox mode, ``sudo -u sandbox`` won't inherit the invoking
-    user's PATH, so callers should use :func:`openclaw_bin` for the
-    binary path.
-    """
-    global _sandbox_mode_cache
-    if _sandbox_mode_cache is None:
-        try:
-            cp = config_path()
-            if cp.is_file():
-                import yaml
-
-                with open(cp) as f:
-                    raw = yaml.safe_load(f) or {}
-                mode = raw.get("openshell", {}).get("mode", "")
-                _sandbox_mode_cache = mode == "standalone"
-            else:
-                _sandbox_mode_cache = False
-        except Exception:
-            _sandbox_mode_cache = False
-    if _sandbox_mode_cache:
-        return ["sudo", "-u", "sandbox"]
-    return []
-
-
 _openclaw_bin_cache: str | None = None
 
 
@@ -964,33 +931,31 @@ class ScannersConfig:
     codeguard: str = ""
 
 
-DEFAULT_OPENSHELL_VERSION = "0.6.2"
 DEFAULT_SANDBOX_HOME = "/home/sandbox"
 
 
 @dataclass
 class OpenShellConfig:
-    binary: str = "openshell"
-    policy_dir: str = "/etc/openshell/policies"
+    """Read-only remnant of the removed openshell-sandbox (0.0.x) integration.
+
+    The v8 schema still accepts the ``openshell`` section so existing configs
+    load unchanged; ``binary``, ``policy_dir``, ``version``, ``auto_pair`` and
+    ``host_networking`` are accepted and ignored (the v8 save only writes
+    modeled fields, so they stay on disk untouched). ``mode`` and
+    ``sandbox_home`` are read only by :func:`legacy_standalone_api_host` and
+    ``defenseclaw sandbox legacy-cleanup``.
+
+    LEGACY(openshell-0.0.x): delete one release after cleanup.
+    """
+
     mode: str = ""
-    version: str = DEFAULT_OPENSHELL_VERSION
     sandbox_home: str = DEFAULT_SANDBOX_HOME
-    auto_pair: bool | None = None
-    host_networking: bool = True
 
     def is_standalone(self) -> bool:
         return self.mode == "standalone"
 
-    def effective_version(self) -> str:
-        return self.version or DEFAULT_OPENSHELL_VERSION
-
     def effective_sandbox_home(self) -> str:
         return self.sandbox_home or DEFAULT_SANDBOX_HOME
-
-    def should_auto_pair(self) -> bool:
-        if self.auto_pair is not None:
-            return self.auto_pair
-        return True
 
 
 def legacy_standalone_configured(cfg: Any) -> bool:
@@ -2719,9 +2684,7 @@ class Config:
         """Return MCP server registrations for a connector.
 
         For OpenClaw the lookup prefers ``openclaw config get
-        mcp.servers`` and falls back to a direct
-        ``openclaw.json`` parse (with ``sudo -u sandbox`` prefix when
-        running standalone-sandbox mode).
+        mcp.servers`` and falls back to a direct ``openclaw.json`` parse.
 
         ``connector`` overrides the resolved connector (used by
         ``mcp list --connector <name>`` for multi-connector focus);
@@ -2737,7 +2700,6 @@ class Config:
             openclaw_config=self.claw.config_file,
             workspace_dir=self.connector_workspace_dir(),
             openclaw_bin_resolver=openclaw_bin,
-            openclaw_cmd_prefix=openclaw_cmd_prefix(),
             infer_workspace_from_cwd=infer_workspace_from_cwd,
             diagnostic_sink=diagnostic_sink,
         )
@@ -4748,24 +4710,13 @@ def _merge_acp(raw: Any) -> ACPConfig:
 
 
 def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
+    # Only the legacy shim fields are modeled; the other legacy sub-keys are
+    # accepted by the schema and deliberately ignored.
     if not raw:
         return OpenShellConfig()
-    auto_pair = raw.get("auto_pair")
-    if auto_pair is not None:
-        auto_pair = bool(auto_pair)
-    host_networking = raw.get("host_networking")
-    if host_networking is not None:
-        host_networking = bool(host_networking)
-    else:
-        host_networking = True
     return OpenShellConfig(
-        binary=raw.get("binary", "openshell"),
-        policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
-        mode=raw.get("mode", ""),
-        version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
-        sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME),
-        auto_pair=auto_pair,
-        host_networking=host_networking,
+        mode=raw.get("mode", "") or "",
+        sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME) or DEFAULT_SANDBOX_HOME,
     )
 
 

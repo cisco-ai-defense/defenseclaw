@@ -66,17 +66,12 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
 
 def gateway_api_client_host(cfg: Any) -> str:
     """Return a connectable host for the configured sidecar API bind."""
+    from defenseclaw.config import legacy_standalone_api_host
+
     gateway = getattr(cfg, "gateway", None)
     bind = str(getattr(gateway, "api_bind", "") or "").strip()
     if not bind:
-        openshell = getattr(cfg, "openshell", None)
-        guardrail = getattr(cfg, "guardrail", None)
-        standalone = bool(
-            openshell is not None and callable(getattr(openshell, "is_standalone", None)) and openshell.is_standalone()
-        )
-        guardrail_host = str(getattr(guardrail, "host", "") or "").strip()
-        if standalone and guardrail_host and guardrail_host != "localhost":
-            bind = guardrail_host
+        bind = legacy_standalone_api_host(cfg) or ""
     if bind in {"::", "[::]"}:
         # An unspecified IPv6 bind is reachable on the IPv6 loopback, which is
         # the exact target. But a host can have IPv6 disabled at the kernel or

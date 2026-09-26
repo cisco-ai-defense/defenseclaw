@@ -7976,9 +7976,9 @@ def _api_bind_host(cfg) -> str:
     api_bind = getattr(cfg.gateway, "api_bind", "")
     if api_bind:
         return api_bind
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        return cfg.guardrail.host
-    return "127.0.0.1"
+    from defenseclaw.config import legacy_standalone_api_host
+
+    return legacy_standalone_api_host(cfg) or "127.0.0.1"
 
 
 def _download_file(url: str, dest: str) -> None:

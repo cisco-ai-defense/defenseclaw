@@ -1246,4 +1246,4 @@ _CSV_FIELD_KEYS = frozenset(
 
 _KV_CSV_FIELD_KEYS: frozenset[str] = frozenset()
 
-_TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})
+_TRISTATE_FIELD_KEYS: frozenset[str] = frozenset()

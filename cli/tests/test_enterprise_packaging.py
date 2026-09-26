@@ -315,7 +315,7 @@ def test_third_party_license_text_and_platform_packaging_contracts():
 
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     dist_plugin = makefile[
-        makefile.index("\ndist-plugin:") : makefile.index("\ndist-sandbox:")
+        makefile.index("\ndist-plugin:") : makefile.index("\ndist-extension-contract:")
     ]
     assert "package.json openclaw.plugin.json dist/" in dist_plugin
     assert "package-lock.json" not in dist_plugin

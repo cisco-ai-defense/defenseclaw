@@ -57,7 +57,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -88,7 +87,6 @@ type Sidecar struct {
 	store         *audit.Store
 	logger        *audit.Logger
 	health        *SidecarHealth
-	shell         *sandbox.OpenShell
 	notify        *NotificationQueue
 	opa           *policy.Engine
 	hilt          *HILTApprovalManager
@@ -212,7 +210,7 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
-func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell) (*Sidecar, error) {
+func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion {
 		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
 	}
@@ -282,9 +280,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	retainJudge := cfg.Guardrail.RetainJudgeBodies
 	SetRetainJudgeBodies(retainJudge)
 
-	// In standalone sandbox mode the veth link is point-to-point;
-	// TLS is not needed and the gateway serves plain WS.
-	if !cfg.Gateway.RequiresTLSWithMode(&cfg.OpenShell) {
+	// Loopback gateways serve plain WS, and so does a legacy standalone
+	// install's point-to-point veth link unless gateway.tls forces TLS on.
+	if !cfg.Gateway.RequiresTLS() || config.LegacyStandalonePlainGatewayWS(cfg) {
 		cfg.Gateway.NoTLS = true
 	}
 
@@ -371,9 +369,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				len(webhooks.endpoints), len(webhooks.connectorOverride))
 		}
 	}
-	if shell != nil && logger != nil {
-		shell.BindObservabilityV8(logger)
-	}
 
 	var (
 		judgeStore              *JudgeStore
@@ -384,9 +379,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	cleanupFailedConstruction := func() {
 		alertCancel()
 		client.OnEvent = previousClientOnEvent
-		if shell != nil {
-			shell.BindObservabilityV8(nil)
-		}
 		if webhooks != nil {
 			webhooks.Close()
 		}
@@ -464,7 +456,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		store:                   store,
 		logger:                  logger,
 		health:                  NewSidecarHealth(),
-		shell:                   shell,
 		notify:                  notify,
 		webhooks:                webhooks,
 		hilt:                    hilt,
@@ -1137,8 +1128,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}()
 	}
-	// Report sandbox health — only present when standalone mode is active
-	s.reportSandboxHealth(runCtx)
+	// The sandbox subsystem is only reported for a legacy standalone install.
+	s.reportLegacySandboxHealth()
 
 	// Wait for context cancellation (signal handler in CLI layer)
 	<-runCtx.Done()
@@ -1274,13 +1265,7 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 			fmt.Fprintf(os.Stderr, "[application-protection] plugin discovery: %v\n", err)
 		}
 	}
-	apiBind := "127.0.0.1"
-	if s.currentConfig().Gateway.APIBind != "" {
-		apiBind = s.currentConfig().Gateway.APIBind
-	} else if s.currentConfig().OpenShell.IsStandalone() && s.currentConfig().Guardrail.Host != "" && s.currentConfig().Guardrail.Host != "localhost" {
-		apiBind = s.currentConfig().Guardrail.Host
-	}
-	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort)
+	apiAddr := apiListenAddr(s.currentConfig())
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	if s.appProtection == nil {
@@ -2059,9 +2044,11 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
+	// The legacy openshell section only matters through the bind shim; its
+	// ignored sub-keys must not bounce the API listener.
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
-		!reflect.DeepEqual(oldCfg.OpenShell, newCfg.OpenShell) ||
+		config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host
 }
 
@@ -2967,7 +2954,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.shell, s.opa, func(r watcher.AdmissionResult) {
+	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
 	if conn != nil {
@@ -3368,11 +3355,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return fmt.Errorf("guardrail: compile connector %s rule pack: %w", conn.Name(), err)
 	}
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
-	apiBind := "127.0.0.1"
-	if s.currentConfig().Gateway.APIBind != "" {
-		apiBind = s.currentConfig().Gateway.APIBind
-	}
-	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort)
+	apiAddr := apiListenAddr(s.currentConfig())
 
 	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
 	// configured, BEFORE Setup writes hook scripts (which bake the
@@ -3805,14 +3788,10 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 			}
 		}
 	}
-	apiBind := "127.0.0.1"
-	if s.currentConfig().Gateway.APIBind != "" {
-		apiBind = s.currentConfig().Gateway.APIBind
-	}
 	opts := connector.SetupOpts{
 		DataDir:      s.currentConfig().DataDir,
 		ProxyAddr:    guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host),
-		APIAddr:      fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort),
+		APIAddr:      apiListenAddr(s.currentConfig()),
 		WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 	}
 	failed := teardownRemovedConnectors(registry, previous, nil, opts, ctx)
@@ -3922,11 +3901,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 	}
 
-	apiBind := "127.0.0.1"
-	if s.currentConfig().Gateway.APIBind != "" {
-		apiBind = s.currentConfig().Gateway.APIBind
-	}
-	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort)
+	apiAddr := apiListenAddr(s.currentConfig())
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 
 	// Synthesize a first-boot gateway token once for all connectors — the
@@ -6171,13 +6146,7 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
-	bind := "127.0.0.1"
-	if s.currentConfig().Gateway.APIBind != "" {
-		bind = s.currentConfig().Gateway.APIBind
-	} else if s.currentConfig().OpenShell.IsStandalone() && s.currentConfig().Guardrail.Host != "" && s.currentConfig().Guardrail.Host != "localhost" {
-		bind = s.currentConfig().Guardrail.Host
-	}
-	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
+	addr := apiListenAddr(s.currentConfig())
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
@@ -6303,61 +6272,33 @@ func (s *Sidecar) logHello(h *HelloOK) {
 	}
 }
 
-// reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
-// It starts a background goroutine that probes the sandbox endpoint and
-// transitions the state to running once reachable, or error on timeout.
-func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
-	if !s.currentConfig().OpenShell.IsStandalone() {
-		return
-	}
-
-	details := map[string]interface{}{
-		"sandbox_ip":   s.currentConfig().Gateway.Host,
-		"gateway_port": s.currentConfig().Gateway.Port,
-	}
-	s.health.SetSandbox(StateStarting, "", details)
-
-	go s.probeSandbox(ctx, details)
+// apiListenAddr is the host:port the REST API listens on and the address every
+// hook script, plugin, and health probe must dial. config.APIBindHost owns the
+// host so a legacy standalone install keeps one consistent listener.
+func apiListenAddr(cfg *config.Config) string {
+	return fmt.Sprintf("%s:%d", config.APIBindHost(cfg), cfg.Gateway.APIPort)
 }
 
-// probeSandbox tries to TCP-dial the sandbox endpoint with back-off.
-// On success it transitions sandbox health to running; on context
-// cancellation or too many failures it transitions to error/stopped.
-func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
-	addr := net.JoinHostPort(s.currentConfig().Gateway.Host, fmt.Sprintf("%d", s.currentConfig().Gateway.Port))
-	const maxAttempts = 20
-	backoff := 500 * time.Millisecond
+// legacySandboxHealthError is the remediation surfaced while a host still
+// carries the removed openshell-sandbox standalone configuration.
+const legacySandboxHealthError = "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`"
 
-	for i := 0; i < maxAttempts; i++ {
-		select {
-		case <-ctx.Done():
-			s.health.SetSandbox(StateStopped, "context cancelled", details)
-			return
-		default:
-		}
-
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err == nil {
-			conn.Close()
-			fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe succeeded (%s reachable)\n", addr)
-			s.health.SetSandbox(StateRunning, "", details)
-			return
-		}
-
-		fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe attempt %d/%d failed: %v\n", i+1, maxAttempts, err)
-
-		select {
-		case <-ctx.Done():
-			s.health.SetSandbox(StateStopped, "context cancelled", details)
-			return
-		case <-time.After(backoff):
-		}
-		if backoff < 5*time.Second {
-			backoff = backoff * 3 / 2
-		}
+// reportLegacySandboxHealth marks the sandbox subsystem degraded while the
+// config still records the removed openshell-sandbox (0.0.x) standalone mode.
+// Nothing supervises that sandbox anymore; the gateway only keeps its API on
+// the legacy bind host until legacy-cleanup resets the config. Hosts without
+// the legacy config report no sandbox subsystem at all.
+//
+// LEGACY(openshell-0.0.x): delete one release after cleanup.
+func (s *Sidecar) reportLegacySandboxHealth() {
+	cfg := s.currentConfig()
+	if !config.IsLegacyStandalone(cfg) {
+		return
 	}
-
-	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
+	s.health.SetSandbox(StateDegraded, legacySandboxHealthError, map[string]interface{}{
+		"api_bind":    config.APIBindHost(cfg),
+		"remediation": "defenseclaw sandbox legacy-cleanup",
+	})
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

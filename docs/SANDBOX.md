@@ -1,25 +1,39 @@
-# OpenShell sandbox implementation
+# OpenShell sandbox
 
-Setup, operation, monitoring, debugging, and teardown are documented in the
-[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/).
+The legacy standalone sandbox integration was removed. It targeted the
+standalone `openshell-sandbox` 0.0.x binary on Linux, for OpenClaw only, and
+its generated sandbox policy was never enforced. The `sandbox init` and
+`sandbox setup` commands and the gateway's `sandbox` subcommands no longer
+exist. OpenClaw and ZeptoClaw use the `shims` subprocess policy on every
+platform.
 
-The implemented sandbox surface is **experimental**, **Linux-only**, and
-**OpenClaw-only**. The init/setup entry points reject non-Linux hosts and fail
-closed unless OpenClaw is the active connector. Do not describe it as a general
-sandbox for every connector.
+Support for NVIDIA OpenShell 0.1 is being rebuilt and is coming in a future
+release.
+
+## Hosts that still have the legacy install
+
+Review the plan, then run the cleanup:
+
+```bash
+defenseclaw sandbox legacy-cleanup --dry-run
+defenseclaw sandbox legacy-cleanup
+```
+
+The [published legacy sandbox cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
+and the follow-up commands.
+
+Until cleanup runs, a config that still says `openshell.mode: standalone` with
+a non-localhost `guardrail.host` keeps the gateway API bound to that host
+(an explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
+remains, `/health` reports the `sandbox` subsystem as `degraded`, and
+`defenseclaw doctor` and `defenseclaw status` point at
+`defenseclaw sandbox legacy-cleanup`.
 
 ## Code ownership
 
 | Concern | Source |
 | --- | --- |
-| CLI command group and platform status | [`cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
-| Initial user, home, policy, and OpenShell preparation | [`cli/defenseclaw/commands/cmd_init_sandbox.py`](../cli/defenseclaw/commands/cmd_init_sandbox.py) |
-| Configuration, systemd units, networking, pairing, and disable flow | [`cli/defenseclaw/commands/cmd_setup_sandbox.py`](../cli/defenseclaw/commands/cmd_setup_sandbox.py) |
-| OpenShell binary installation and checksum verification | [`scripts/install-openshell-sandbox.sh`](../scripts/install-openshell-sandbox.sh) |
-| Go-side OpenShell configuration, policy, and endpoint handling | [`internal/sandbox/`](../internal/sandbox/) |
-| Bundled policy inputs | [`policies/openshell/`](../policies/openshell/) |
-| Focused lifecycle and protection tests | [`scripts/test-e2e-sandbox.sh`](../scripts/test-e2e-sandbox.sh), [`scripts/test-e2e-sandbox-protection.sh`](../scripts/test-e2e-sandbox-protection.sh), and [`scripts/test-e2e-sandbox-policy-diff.sh`](../scripts/test-e2e-sandbox-policy-diff.sh) |
-
-OpenShell itself owns its kernel-containment and proxy implementation.
-DefenseClaw owns only the orchestration, configuration, policies, integration,
-and verification represented by the sources above.
+| `sandbox` command group | [`cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
+| Legacy detection, plan, apply, and receipt | [`cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |

@@ -92,7 +92,7 @@ the authentication, redaction, and local-storage boundaries.
 | Elevated, service, session-zero, or background Setup | **Unsupported** | State-changing Setup actions require the signed-in, non-elevated interactive user. |
 | Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
-| OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
+| Sandbox commands, including `sandbox legacy-cleanup` | **Unsupported** | The removed legacy standalone sandbox and its cleanup command are Linux-only. |
 | `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
 | Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
@@ -105,7 +105,7 @@ For a normal-mode migration from macOS or Linux, expect a per-user Setup EXE ins
 HKCU `PATH` and Run registration instead of a service manager, native process
 identity instead of PID-only signaling, and the selected connector's native
 hook, adapter, plugin, or awaited-policy lane instead of a DefenseClaw POSIX
-hook script. Sandbox and proxy connector features do not move with you.
+hook script. Proxy connector features do not move with you.
 
 From WSL, perform a fresh native install. Install the selected
 [supported connector](/docs/connectors#platform-support) natively for the same

@@ -11,7 +11,7 @@ keywords:
 DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It sits between your agent (Claude Code, Codex, Cursor, OpenClaw, ...) and the rest of the world, and answers three questions for you, by default:
 
 1. **What is this agent allowed to do?** Skills, MCP servers, plugins, and generated code are scanned before they run.
-2. **What is the agent doing right now?** Prompts, completions, tool calls, and sandbox activity are inspected at runtime.
+2. **What is the agent doing right now?** Prompts, completions, and tool calls are inspected at runtime.
 3. **What did the agent do?** Every decision lands in an SQLite audit DB and your existing telemetry sinks (OTLP, Splunk, webhooks).
 
 ## Three modes, one command
@@ -52,7 +52,7 @@ Inserting an inspection step inside the agent process means every agent has to g
 ## What DefenseClaw is not
 
 <Callout type="warn">
-DefenseClaw does not prove an agent's behaviour is safe. It improves safety by combining static scanner results, runtime inspection, policy decisions, sandbox controls, and audit trails. High-risk deployments should pair it with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring.
+DefenseClaw does not prove an agent's behaviour is safe. It improves safety by combining static scanner results, runtime inspection, policy decisions, and audit trails. High-risk deployments should pair it with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring.
 </Callout>
 
 ## Next

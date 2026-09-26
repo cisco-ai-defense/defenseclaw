@@ -27,8 +27,8 @@ It mirrors:
 
 Importing this module instead of reaching into private helpers in
 :mod:`defenseclaw.config` lets other CLI commands (``cmd_doctor``,
-``cmd_uninstall``, ``cmd_setup_sandbox``) walk the connector matrix
-without circular imports through ``Config``.
+``cmd_uninstall``) walk the connector matrix without circular imports
+through ``Config``.
 
 Public surface
 --------------
@@ -2116,7 +2116,6 @@ def mcp_servers(
     openclaw_config: str | None = None,
     workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     infer_workspace_from_cwd: bool = False,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
@@ -2142,10 +2141,8 @@ def mcp_servers(
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
-    *openclaw_bin_resolver* and *openclaw_cmd_prefix* let callers
-    inject test doubles or sandbox-mode prefixes (``sudo -u sandbox``);
-    when omitted, lookups go through ``shutil.which`` and an empty
-    prefix.
+    *openclaw_bin_resolver* lets callers inject a test double; when
+    omitted, the lookup goes through ``shutil.which``.
     """
     name = normalize(connector)
     infer = infer_workspace_from_cwd
@@ -2220,7 +2217,6 @@ def mcp_servers(
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -3912,12 +3908,10 @@ def _openclaw_mcp_servers(
     openclaw_config: str | None,
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     cli_entries = _read_mcp_servers_via_openclaw_cli(
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
     if cli_entries is not None:
@@ -4757,14 +4751,12 @@ def _devin_config_paths(workspace_dir: str | None = None) -> list[str]:
 def _read_mcp_servers_via_openclaw_cli(
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry] | None:
     """Run ``openclaw config get mcp.servers`` and parse the JSON.
 
     Returns ``None`` (not ``[]``) on any failure so callers can fall
-    back to direct ``openclaw.json`` parsing. Honors *openclaw_cmd_prefix*
-    so sandbox-mode setups can prepend ``sudo -u sandbox``.
+    back to direct ``openclaw.json`` parsing.
     """
     if openclaw_bin_resolver is None:
         import shutil
@@ -4772,10 +4764,9 @@ def _read_mcp_servers_via_openclaw_cli(
         bin_path = shutil.which("openclaw") or "openclaw"
     else:
         bin_path = openclaw_bin_resolver()
-    prefix = list(openclaw_cmd_prefix or [])
     try:
         result = subprocess.run(
-            [*prefix, bin_path, "config", "get", "mcp.servers"],
+            [bin_path, "config", "get", "mcp.servers"],
             capture_output=True,
             text=True,
             timeout=10,

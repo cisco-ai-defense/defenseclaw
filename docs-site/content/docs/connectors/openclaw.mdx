@@ -25,7 +25,7 @@ observable.
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party OpenClaw plugin. Linux can use the real OpenShell sandbox; macOS resolves that preference to shell shims. |
+| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party OpenClaw plugin. Subprocess policy is shell shims on both. |
 | Native Windows x64 | **Unsupported** | DefenseClaw is hook-only on Windows, while the OpenClaw connector requires the guardrail proxy. |
 
 ## Setup
@@ -143,9 +143,8 @@ defenseclaw setup openclaw \
 ```
 
 Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with the
-[OpenShell sandbox profile](/docs/setup/sandbox) and a reviewed first-party
-allow-list for additional containment.
+that have already crossed the block threshold. Pair it with a reviewed
+first-party allow-list for additional containment.
 
 </Tab>
 
@@ -243,11 +242,11 @@ chat-origin sessions.
 
 ## Subprocess policy
 
-The preferred policy is `sandbox`. On Linux, DefenseClaw installs the real
-OpenShell sandbox policy using Landlock and seccomp, with shell shims as a
-supplement. On macOS, `sandbox` resolves to shell shims only; those shims
-inspect supported command paths but do not provide Linux syscall or filesystem
-isolation. See [Sandbox setup](/docs/setup/sandbox) for the Linux workflow.
+The policy is `shims` on every platform. Connector setup installs PATH shims
+for `curl`, `wget`, `ssh`, `nc`, `pip`, and `npm` that send each invocation to
+the gateway's tool-inspection endpoint before running the real binary. Shims
+inspect those command paths only; they do not provide syscall, filesystem, or
+network isolation.
 
 ## Disable
 
