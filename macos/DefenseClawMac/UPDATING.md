@@ -58,7 +58,7 @@ images/
 .gitignore
 ```
 
-Do not import upstream Git metadata, `.codex`, personal signing identities, a duplicate `LICENSE`, or design/planning documents that the monorepo supersedes. Port relevant changes from the standalone DMG script into `scripts/build-macos-app-release.sh`; do not restore its hard-coded team, keychain profile, or download-from-an-already-published-release assumptions.
+Do not import upstream Git metadata, `.codex`, personal signing identities, a duplicate `LICENSE`, or design/planning documents that the monorepo supersedes. Port relevant changes from the standalone DMG script into `scripts/build-macos-app-release.sh`; do not restore its hard-coded team, keychain profile, embedded runtime payload, or download-from-an-already-published-release assumptions.
 
 ## 2. Preserve Cisco integration points
 
@@ -67,10 +67,9 @@ After syncing, review and restore these intentional differences:
 - Bundle identifier: `com.cisco.defenseclaw.macos`.
 - No personal Apple development team or signing identity in the project file.
 - App `MARKETING_VERSION` matches the repository `VERSION`.
-- `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw`, selects only verified `DefenseClawMac-*-macos-arm64.zip` assets, and never offers `-unverified` artifacts through in-app self-update.
-- Before extraction, `UpdateChecker` rejects empty or malformed ZIP manifests, absolute and traversal paths, link entries, multiple app bundles, and content outside one top-level `.app` bundle.
-- `RuntimeInstaller` continues to understand `Contents/Resources/RuntimePayload`.
-- Release packaging remains in `scripts/build-macos-app-release.sh` and `.github/workflows/release.yaml`, producing a runtime-bearing DMG and app-only self-update zip.
+- `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw` and fetches only that release's `install.sh`, verified against the same release's `checksums.txt`.
+- The app embeds no runtime and never replaces its own bundle: install and update run the release's `install.sh`, which installs the runtime and swaps the app.
+- Release packaging remains in `scripts/build-macos-app-release.sh` and `.github/workflows/release.yaml`, producing the DMG and the zip that `install.sh` installs.
 
 Search for stale personal/repository settings:
 
@@ -98,34 +97,27 @@ Run from the repository root:
 ```bash
 make check-version-sync
 make macos-app-test
-make extensions
-make dist-cli
 make macos-app-release
 make macos-app-release-verify
 ```
 
-Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Local development builds may produce clearly named `-unverified` artifacts, but the in-app self-updater ignores those assets.
-
-Confirm the app-only ZIP contains exactly one top-level `.app` bundle and no absolute paths, `..` components, symlinks, hardlinks, or unrelated top-level files. The updater performs this validation before `ditto` extraction, then requires bundle identity/version checks, code-signature validation, and Gatekeeper assessment before installation.
-
-The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
+Mount the resulting DMG and confirm it contains `DefenseClawMac.app` and an `/Applications` symlink, and that the zip holds only `DefenseClawMac.app` at its root. Neither app may contain `Contents/Resources/RuntimePayload`; `make macos-app-release-verify` checks both and that they are the same build.
 
 All five release-environment secrets
 (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
 `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and
-`MACOS_NOTARY_ISSUER_ID`) produce verified macOS app-update assets. Production
-and local builds may omit all five and produce ad-hoc-signed `-unverified`
-assets for manual download and installation; the in-app self-updater rejects
-them. Partial credentials, or any invalid configured credential, stop the
-workflow before publication.
+`MACOS_NOTARY_ISSUER_ID`) produce notarized macOS assets. Production and local
+builds may omit all five and produce ad-hoc-signed assets under the same names,
+reported as unverified. Partial credentials, or any invalid configured
+credential, stop the workflow before publication.
 
 ## 5. Review before merging
 
-- Inspect the complete upstream diff, especially process execution, update URLs, token handling, filesystem writes, and embedded payload installation.
+- Inspect the complete upstream diff, especially process execution, update URLs, token handling, filesystem writes, and installer execution.
 - Confirm no credentials, signing certificates, developer-team IDs, generated build products, or local user paths were imported.
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
 - Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
-- Confirm `test_update_checker_verification.sh` and `test_update_checker_safety.sh` pass, covering verified-only asset selection and pre-extraction archive rejection.
+- Confirm `test_update_checker_verification.sh` passes, covering installer checksum verification and exit-code handling.
 - Confirm `python3 scripts/check-macos-upstream.py` succeeds online. Release
   preflight validates the lock offline; the scheduled freshness workflow owns
   detection of a newer upstream release.

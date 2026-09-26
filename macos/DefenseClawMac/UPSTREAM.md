@@ -25,9 +25,9 @@ The macOS app was imported from [`keitheobrien/defenseclaw_mac`](https://github.
 - Commit title: `Merge pull request #18 from keitheobrien/kobrien/splunk-flow-yaml-compatibility`
 - Imported: 2026-09-03
 
-The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh` so the unified DMG is built from the same unpublished commit as the backend release rather than downloading an already-published runtime.
+The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh`, which builds the DMG and zip from the same unpublished commit as the backend release; the runtime is installed by that release's `install.sh` rather than embedded in the app.
 
-Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, the runtime-bearing DMG plus app-only update zip, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
+Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, install and update through the release's `install.sh`, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
 
 The same immutable release and commit are recorded in
 [upstream.lock.toml](upstream.lock.toml). The weekly freshness workflow reports
