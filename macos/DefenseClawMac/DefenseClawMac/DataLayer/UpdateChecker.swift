@@ -123,15 +123,20 @@ actor UpdateChecker {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
     }
 
-    /// Numeric dotted-version comparison: true when `candidate` > `current`.
+    /// True when `candidate` is a plain release (`X.Y.Z`, optional leading
+    /// `v`) whose number is greater than `current`. `current` may carry a
+    /// source/build suffix; an equal-number development install is left in
+    /// place, and a pre-release or unknown candidate never looks newer.
     static func isNewer(_ candidate: String, than current: String) -> Bool {
-        func components(_ version: String) -> [Int]? {
-            let parts = version.split(separator: ".", omittingEmptySubsequences: false)
-            guard parts.count >= 2 else { return nil }
-            let values = parts.compactMap { Int($0) }
-            return values.count == parts.count ? values : nil
-        }
-        guard let a = components(candidate), let b = components(current) else { return false }
+        candidate.range(of: #"^v?[0-9]+(\.[0-9]+)+$"#, options: .regularExpression) != nil
+            && releaseNumber(candidate, exceeds: current)
+    }
+
+    /// Numeric comparison that ignores a source/build suffix on either side.
+    /// Unknown versions never compare greater.
+    static func releaseNumber(_ version: String, exceeds other: String) -> Bool {
+        guard let a = numericVersionComponents(version),
+              let b = numericVersionComponents(other) else { return false }
         for i in 0..<max(a.count, b.count) {
             let x = i < a.count ? a[i] : 0
             let y = i < b.count ? b[i] : 0
@@ -140,10 +145,23 @@ actor UpdateChecker {
         return false
     }
 
-    /// Parse "defenseclaw, version 0.7.0"-style output into "0.7.0".
+    private static func numericVersionComponents(_ version: String) -> [Int]? {
+        let pattern = #"^v?([0-9]+(?:\.[0-9]+)+)(?:[-+][A-Za-z0-9][A-Za-z0-9.+-]*)?$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: version, range: NSRange(version.startIndex..., in: version)),
+              let range = Range(match.range(at: 1), in: version) else { return nil }
+        let parts = version[range].split(separator: ".")
+        let numbers = parts.compactMap { Int($0) }
+        return numbers.count == parts.count ? numbers : nil
+    }
+
+    /// Read only an explicit CLI/gateway version line. Runtime startup can
+    /// emit Go/Sonic warnings containing unrelated version numbers first.
     static func parseVersion(_ output: String) -> String? {
-        let pattern = #"[0-9]+(\.[0-9]+)+"#
-        guard let range = output.range(of: pattern, options: .regularExpression) else { return nil }
+        let pattern = #"(?im)^\s*defenseclaw(?:-gateway)?(?:,)?\s+(?:version\s+)?v?([0-9]+(?:\.[0-9]+)+(?:[-+][A-Za-z0-9][A-Za-z0-9.+-]*)?)(?=\s|$)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
+              let range = Range(match.range(at: 1), in: output) else { return nil }
         return String(output[range])
     }
 
@@ -342,6 +360,15 @@ actor UpdateChecker {
             }
         }
         return script
+    }
+
+    /// A source install from a checkout leaves this marker beside its CLI.
+    /// install.sh would replace that runtime, so the app never runs it while
+    /// the marker (or anything at its path, including a dangling link) exists.
+    nonisolated static func sourceRuntimeMarker(home: String) -> String? {
+        let marker = home + "/.local/bin/.defenseclaw-source-root"
+        var metadata = stat()
+        return lstat(marker, &metadata) == 0 ? marker : nil
     }
 
     // MARK: - Bundle swap

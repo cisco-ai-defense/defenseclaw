@@ -20,14 +20,8 @@ import Foundation
 @main
 struct InspectorLayoutPolicyTests {
     static func main() {
-        expect(
-            InspectorLayoutPolicy.minimumWidth <= InspectorLayoutPolicy.idealWidth,
-            "minimum inspector width must not exceed ideal"
-        )
-        expect(
-            InspectorLayoutPolicy.idealWidth <= InspectorLayoutPolicy.maximumWidth,
-            "ideal inspector width must not exceed maximum"
-        )
+        expect(InspectorLayoutPolicy.width.isFinite, "inspector width must be finite")
+        expect(InspectorLayoutPolicy.width > 0, "inspector width must be positive")
 
         print("InspectorLayoutPolicyTests passed")
     }

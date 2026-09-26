@@ -168,6 +168,16 @@ sign_args=(--force --options runtime --sign "${SIGNING_IDENTITY}")
 if [[ "${SIGNING_IDENTITY}" != "-" ]]; then
     sign_args+=(--timestamp)
 fi
+# The Xcode build phase compiles the on-demand administrator helper ad hoc.
+# Sign it with the app's identity first: notarization requires every nested
+# executable to carry the Developer ID signature, and the helper and app each
+# require their peer to be signed by their own team.
+GATEWAY_ADMIN_HELPER="${APP}/Contents/Library/LaunchServices/DefenseClawGatewayHelper"
+[[ -f "${GATEWAY_ADMIN_HELPER}" && ! -L "${GATEWAY_ADMIN_HELPER}" ]] || {
+    echo "administrator helper missing from the app build: ${GATEWAY_ADMIN_HELPER}" >&2
+    exit 1
+}
+codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.macos.GatewayAdmin "${GATEWAY_ADMIN_HELPER}"
 codesign "${sign_args[@]}" "${APP}"
 codesign --verify --deep --strict --verbose=2 "${APP}"
 

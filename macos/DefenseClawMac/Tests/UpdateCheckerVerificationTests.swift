@@ -30,6 +30,7 @@ struct UpdateCheckerVerificationTests {
         mapsInstallerExitCodes()
         readsBundleVersionFromDisk()
         detectsReplaceableBundleLocations()
+        detectsSourceRuntimeMarker()
         parsesCosignVersions()
         findsOnlyCosignTwoOrLater()
         verifiesTheReleaseSignatureWithCosign()
@@ -48,12 +49,35 @@ struct UpdateCheckerVerificationTests {
         expect(!UpdateChecker.isNewer("1.0.0", than: "1.0.0"), "a version is not newer than itself")
         expect(!UpdateChecker.isNewer("1.0.0-rc1", than: "0.8.10"), "non-numeric versions never look newer")
         expect(UpdateChecker.parseVersion("defenseclaw, version 1.0.2") == "1.0.2", "CLI version output is parsed")
+        preservesNewerRuntimeVersions()
+        parsesOnlyRuntimeVersionLines()
         let release = UpdateChecker.releaseInfo(
             from: ["html_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/tag/v1.2.3"],
             tag: "v1.2.3"
         )
         expect(release.version == "1.2.3", "a leading v is stripped from the release tag")
         expect(release.htmlURL.hasSuffix("/releases/tag/v1.2.3"), "the release page URL is preserved")
+    }
+
+    private static func preservesNewerRuntimeVersions() {
+        expect(UpdateChecker.isNewer("1.0.1", than: "1.0.0"), "an older runtime is offered the published update")
+        expect(!UpdateChecker.isNewer("1.0.1", than: "1.0.2"), "a newer runtime is never downgraded")
+        expect(!UpdateChecker.isNewer("1.0.1", than: "1.0.1-dev.runtime-repair"), "a same-number source runtime is preserved")
+        expect(!UpdateChecker.isNewer("1.0.1", than: "1.1.0+source"), "a newer source runtime is preserved")
+        expect(UpdateChecker.isNewer("v1.0.2", than: "1.0.1+source"), "an older source runtime can show release availability")
+        expect(!UpdateChecker.isNewer("unknown", than: "1.0.1"), "an unknown published version cannot authorize an update")
+        expect(!UpdateChecker.isNewer("1.0.1", than: "unknown"), "an unknown installed version cannot authorize replacement")
+        expect(UpdateChecker.releaseNumber("1.1.0+source", exceeds: "1.0.9"), "a suffixed installed version compares by number")
+        expect(!UpdateChecker.releaseNumber("1.0.1+source", exceeds: "1.0.1"), "a suffix alone is not a newer release")
+    }
+
+    private static func parsesOnlyRuntimeVersionLines() {
+        let warning = "WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU)"
+        expect(UpdateChecker.parseVersion(warning + "\ndefenseclaw, version 1.0.1\n") == "1.0.1", "compiler warnings cannot hide an older runtime")
+        expect(UpdateChecker.parseVersion(warning) == nil, "a warning alone is not a runtime version")
+        expect(UpdateChecker.parseVersion("defenseclaw-gateway version 1.0.1 (commit abc, built today)") == "1.0.1", "the gateway release version parses")
+        expect(UpdateChecker.parseVersion("defenseclaw-gateway 1.0.1-dev.runtime-repair") == "1.0.1-dev.runtime-repair", "a source identity suffix is retained")
+        expect(UpdateChecker.parseVersion("error: incompatible with 1.0.1") == nil, "error version numbers are not installed identities")
     }
 
     private static func buildsImmutableReleaseAssetURLs() {
@@ -206,6 +230,27 @@ struct UpdateCheckerVerificationTests {
             expect(
                 UpdateChecker.bundleShortVersion(atPath: parent.appendingPathComponent("Missing.app").path) == nil,
                 "a missing bundle has no version"
+            )
+        }
+    }
+
+    private static func detectsSourceRuntimeMarker() {
+        withTemporaryDirectory { home in
+            expect(UpdateChecker.sourceRuntimeMarker(home: home.path) == nil, "no marker means no source install")
+            let bin = home.appendingPathComponent(".local/bin", isDirectory: true)
+            let marker = bin.appendingPathComponent(".defenseclaw-source-root")
+            do {
+                try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+                try FileManager.default.createSymbolicLink(
+                    at: marker,
+                    withDestinationURL: home.appendingPathComponent("missing-checkout")
+                )
+            } catch {
+                fail("could not create the source marker fixture: \(error)")
+            }
+            expect(
+                UpdateChecker.sourceRuntimeMarker(home: home.path) == marker.path,
+                "even a dangling source marker protects the source install"
             )
         }
     }

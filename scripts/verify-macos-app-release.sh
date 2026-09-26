@@ -46,7 +46,7 @@ esac
     exit 1
 }
 
-for command in codesign ditto hdiutil spctl xcrun; do
+for command in codesign ditto hdiutil python3 spctl xcrun; do
     command -v "${command}" >/dev/null || {
         echo "required command not found: ${command}" >&2
         exit 1
@@ -99,6 +99,46 @@ for app in "${DMG_APP}" "${ZIP_APP}"; do
         echo "the app must not embed a runtime payload; install.sh installs the runtime" >&2
         exit 1
     }
+    # The on-demand administrator helper: a regular executable, no bundled
+    # gateway, and a LaunchDaemon that runs exactly that helper.
+    python3 - "${app}" <<'PY'
+import os
+import plistlib
+import stat
+import sys
+from pathlib import Path
+
+app = Path(sys.argv[1])
+identifier = "com.cisco.defenseclaw.macos.GatewayAdmin"
+helper = "Contents/Library/LaunchServices/DefenseClawGatewayHelper"
+daemon = f"Contents/Library/LaunchDaemons/{identifier}.plist"
+for relative in ("Contents/Library", "Contents/Library/LaunchServices", "Contents/Library/LaunchDaemons"):
+    if (app / relative).is_symlink() or not (app / relative).is_dir():
+        raise SystemExit(f"administrator helper directory must be a regular directory: {relative}")
+for relative in (helper, daemon):
+    try:
+        mode = (app / relative).lstat().st_mode
+    except FileNotFoundError:
+        raise SystemExit(f"administrator helper artifact is missing: {relative}")
+    if not stat.S_ISREG(mode):
+        raise SystemExit(f"administrator helper artifact must be a regular file: {relative}")
+if not os.access(app / helper, os.X_OK):
+    raise SystemExit("administrator helper is not executable")
+if os.path.lexists(app / "Contents/Library/LaunchServices/defenseclaw-gateway"):
+    raise SystemExit("the app must not bundle a replacement gateway")
+with (app / daemon).open("rb") as source:
+    actual = plistlib.load(source)
+expected = {
+    "Label": identifier,
+    "BundleProgram": helper,
+    "ProgramArguments": ["DefenseClawGatewayHelper"],
+    "MachServices": {identifier: True},
+    "AssociatedBundleIdentifiers": ["com.cisco.defenseclaw.macos"],
+    "UserName": "root",
+}
+if actual != expected:
+    raise SystemExit("the administrator LaunchDaemon differs from the on-demand helper contract")
+PY
     codesign --verify --deep --strict --verbose=2 "${app}"
 done
 
@@ -124,8 +164,15 @@ if [[ "${SIGNED_STATUS}" == "notarized" ]]; then
         exit 1
     }
     APP_REQUIREMENT="=identifier \"com.cisco.defenseclaw.macos\" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
+    HELPER_REQUIREMENT="=identifier \"com.cisco.defenseclaw.macos.GatewayAdmin\" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
     for app in "${DMG_APP}" "${ZIP_APP}"; do
         codesign --verify --strict -R "${APP_REQUIREMENT}" --verbose=2 "${app}"
+        helper="${app}/Contents/Library/LaunchServices/DefenseClawGatewayHelper"
+        codesign --verify --strict -R "${HELPER_REQUIREMENT}" --verbose=2 "${helper}"
+        grep -Eq '^CodeDirectory .* flags=.*\([^)]*runtime[^)]*\)' <<<"$(codesign -dvvv "${helper}" 2>&1)" || {
+            echo "administrator helper is missing the hardened runtime" >&2
+            exit 1
+        }
         xcrun stapler validate "${app}"
         spctl --assess --type execute --verbose=2 "${app}"
     done

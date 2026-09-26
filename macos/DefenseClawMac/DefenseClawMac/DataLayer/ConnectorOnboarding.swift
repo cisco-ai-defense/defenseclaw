@@ -46,6 +46,36 @@ enum ConnectorOnboarding {
         }
     }
 
+    /// JSON-summary mode can exit successfully even when initialization failed.
+    /// Treat the structured report as the result before starting the gateway or
+    /// running additive setup. Diagnostic text outside the JSON is permitted;
+    /// ambiguous or incomplete reports cannot authorize a gateway start.
+    static func initializationFailure(from output: String) -> String? {
+        let unreadable = "Setup did not return a valid completion report. Review Setup Output before trying again. The gateway was not started."
+        let failed = "Setup needs attention. Review Setup Output and resolve the reported failures before trying again. The gateway was not started."
+        guard let start = output.firstIndex(of: "{"),
+              let end = output.lastIndex(of: "}"),
+              start <= end,
+              let root = try? JSONSerialization.jsonObject(
+                  with: Data(output[start...end].utf8)
+              ) as? [String: Any],
+              let status = root["status"] as? String
+        else { return unreadable }
+        guard status == "ready" || status == "partial" else {
+            return status == "needs_attention" ? failed : unreadable
+        }
+        let acceptedStepStatuses: Set<String> = ["pass", "warn", "skip"]
+        for key in ["setup", "readiness"] {
+            guard let steps = root[key] as? [[String: Any]] else { return unreadable }
+            for step in steps {
+                guard let stepStatus = step["status"] as? String else { return unreadable }
+                if stepStatus == "fail" { return failed }
+                guard acceptedStepStatuses.contains(stepStatus) else { return unreadable }
+            }
+        }
+        return nil
+    }
+
     /// `defenseclaw setup` subcommand for a hook connector — only Claude Code
     /// is hyphenated in the CLI's command set.
     static func setupCommandName(_ connector: String) -> String {

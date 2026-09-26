@@ -32,7 +32,10 @@ struct CommandPaletteView: View {
     @State private var pendingConfirmedRun = false
 
     private var commands: [CommandDefinition] {
-        CommandRegistry.paletteCommands(supportedSetupCommands: appState.runtimeSetupCommands)
+        CommandRegistry.paletteCommands(
+            supportedSetupCommands: appState.runtimeSetupCommands,
+            supportedRuntimeCommands: appState.runtimeDiscoveryCommands
+        )
     }
 
     private var categories: [String] {

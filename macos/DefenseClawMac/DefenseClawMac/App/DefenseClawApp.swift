@@ -28,7 +28,9 @@ struct DefenseClawApp: App {
 
     init() {
         CLIProcessGroupLauncher.execIfRequested()
-        _appState = State(initialValue: AppState())
+        let state = AppState()
+        _appState = State(initialValue: state)
+        AppDelegate.startApplication = { [weak state] in state?.start() }
     }
 
     var body: some Scene {
@@ -187,10 +189,14 @@ private struct MenuBarIcon: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var recreateMainWindow: (() -> Void)?
+    static var startApplication: (() -> Void)?
     private var miniaturizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyActivationPolicy()
+        // Restored minimized/hidden windows may not call onAppear until opened.
+        // Gateway startup belongs to the application lifecycle, independently.
+        Self.startApplication?()
         DCToolbarQuickHelpMonitor.shared.start()
 
         // Optional hide-instead-of-minimize behavior. Standard macOS minimize is

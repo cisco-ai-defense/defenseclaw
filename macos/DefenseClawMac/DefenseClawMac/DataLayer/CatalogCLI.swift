@@ -171,7 +171,12 @@ enum CatalogCLI {
             )
         let result = command.result
         guard result.succeeded else {
-            throw CatalogCLIError.commandFailed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw CatalogCLIError.commandFailed(
+                detail.isEmpty
+                    ? "DefenseClaw \(resource) list failed (exit \(result.exitCode))."
+                    : detail
+            )
         }
         let data = try jsonData(from: result.output)
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {

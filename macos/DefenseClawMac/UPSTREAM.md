@@ -20,14 +20,14 @@ SPDX-License-Identifier: Apache-2.0
 
 The macOS app was imported from [`keitheobrien/defenseclaw_mac`](https://github.com/keitheobrien/defenseclaw_mac) at:
 
-- Stable release: `v1.1.19`
-- Commit: `8bb84f18c5c29b99edf3c93175ddbc259e9ff7a9`
-- Commit title: `Merge pull request #18 from keitheobrien/kobrien/splunk-flow-yaml-compatibility`
-- Imported: 2026-09-03
+- Stable release: `v1.1.25`
+- Commit: `22e1aeb38cc37546976ab98a725d1c8194d3f523`
+- Commit title: `Merge pull request #27 from keitheobrien/kobrien/gateway-auto-start`
+- Imported: 2026-09-26
 
-The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh`, which builds the DMG and zip from the same unpublished commit as the backend release; the runtime is installed by that release's `install.sh` rather than embedded in the app.
+The import includes the Xcode project, Swift sources, the gateway administrator helper and its build script, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh`, which builds the DMG and zip from the same unpublished commit as the backend release; the runtime is installed by that release's `install.sh` rather than embedded in the app.
 
-Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, install and update through the release's `install.sh`, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
+Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, install and update through the release's `install.sh`, an administrator helper that trusts its own signing team instead of a pinned personal team, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
 
 The same immutable release and commit are recorded in
 [upstream.lock.toml](upstream.lock.toml). The weekly freshness workflow reports

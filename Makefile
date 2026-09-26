@@ -896,6 +896,12 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_gateway_auto_start.sh
+	macos/DefenseClawMac/script/test_gateway_administrator.sh
+	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
+	macos/DefenseClawMac/script/test_canonical_event_history.sh
+	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
+	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check

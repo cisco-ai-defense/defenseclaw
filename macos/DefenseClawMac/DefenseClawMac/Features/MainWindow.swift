@@ -73,7 +73,7 @@ struct MainWindow: View {
         // installDetected (that flag means "config.yaml exists" and feeds
         // guardrail notices).
         .sheet(isPresented: Binding(
-            get: { !appState.installDetected && !appState.firstRunDismissed },
+            get: { (!appState.installDetected || appState.firstRunSetupNeedsCompletion) && !appState.firstRunDismissed },
             set: { if !$0 { appState.firstRunDismissed = true } }
         )) {
             FirstRunView()
@@ -193,7 +193,7 @@ struct MainWindow: View {
                 if appState.relaunchPending {
                     Button("Restart Now") { appState.relaunch() }
                         .controlSize(.small)
-                } else if let update = appState.availableUpdate {
+                } else if let update = appState.availableUpdate, appState.sourceRuntimeMarker == nil {
                     Button(updateFailed ? "Try Again" : (appState.updateRestartsApp ? "Update & Restart" : "Update Runtime")) {
                         Task { await appState.runReleaseInstaller(version: update.version) }
                     }
@@ -241,6 +241,9 @@ struct MainWindow: View {
             return "Update failed: \(detail)"
         case .installed, .idle:
             if appState.relaunchPending { return "Installed. Restart DefenseClaw to finish the update." }
+            if appState.sourceRuntimeMarker != nil {
+                return "Your source installation is preserved; update it through its source workflow."
+            }
             return "Installed: app \(UpdateChecker.currentVersion), runtime \(appState.installedRuntimeVersion ?? "not detected"). ⌘⇧U updates both."
         }
     }

@@ -19,16 +19,6 @@
 
 import SwiftUI
 
-extension View {
-    func dcInspectorColumnWidth() -> some View {
-        inspectorColumnWidth(
-            min: InspectorLayoutPolicy.minimumWidth,
-            ideal: InspectorLayoutPolicy.idealWidth,
-            max: InspectorLayoutPolicy.maximumWidth
-        )
-    }
-}
-
 struct SeverityBadge: View {
     let severity: Severity
 

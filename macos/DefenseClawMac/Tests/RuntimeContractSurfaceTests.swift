@@ -19,12 +19,13 @@ import Foundation
 @main
 enum RuntimeContractSurfaceTests {
     static func main() {
-        precondition(CommandRegistry.sourceCount == 232, "unexpected upstream command count")
+        precondition(CommandRegistry.sourceCount == 235, "unexpected upstream command count")
         precondition(CommandRegistry.all.count == CommandRegistry.sourceCount, "registry count mismatch")
 
         let titles = CommandRegistry.all.map(\.title)
         precondition(Set(titles).count == titles.count, "command titles must be unique")
         precondition(titles.contains("setup amp"), "Amp setup command is missing")
+        precondition(titles.contains("setup kiro"), "Kiro setup command is missing")
         precondition(titles.contains("setup omnigent"), "OmniGent setup command is missing")
         precondition(titles.contains("setup galileo"), "Galileo setup command is missing")
         precondition(titles.contains("config show effective observability"), "effective observability command is missing")
@@ -34,17 +35,32 @@ enum RuntimeContractSurfaceTests {
 
         let bundledTitles = CommandRegistry.paletteCommands(supportedSetupCommands: []).map(\.title)
         precondition(!bundledTitles.contains("setup amp"), "runtime 0.8.10 must not expose setup amp")
+        precondition(!bundledTitles.contains("setup kiro"), "runtimes without Kiro must not expose setup kiro")
+        let unknownTitles = CommandRegistry.paletteCommands(supportedSetupCommands: nil).map(\.title)
+        precondition(!unknownTitles.contains("setup kiro"), "unknown setup capability must fail closed")
         let futureTitles = CommandRegistry.paletteCommands(supportedSetupCommands: ["amp"]).map(\.title)
+        precondition(!bundledTitles.contains("agent discovery runtime scan"), "unknown runtime capability must fail closed")
+        let runtimeTitles = CommandRegistry.paletteCommands(
+            supportedSetupCommands: [], supportedRuntimeCommands: ["scan"]
+        ).map(\.title)
+        precondition(runtimeTitles.contains("agent discovery runtime scan"), "supported Runtime scan is exposed")
+        precondition(!runtimeTitles.contains("agent discovery runtime enable"), "each Runtime command is gated independently")
         precondition(futureTitles.contains("setup amp"), "runtimes reporting Amp may expose setup amp")
+        precondition(!futureTitles.contains("setup kiro"), "Amp support must not imply Kiro support")
+        let kiroTitles = CommandRegistry.paletteCommands(supportedSetupCommands: ["kiro"]).map(\.title)
+        precondition(kiroTitles.contains("setup kiro"), "runtimes reporting Kiro may expose setup kiro")
+        precondition(!kiroTitles.contains("setup amp"), "Kiro support must not imply Amp support")
+        precondition(command(titled: "setup kiro").arguments == ["setup", "kiro", "--yes"])
         let setupCommands = CommandRegistry.setupCommands(from: """
         Usage: defenseclaw setup [OPTIONS] [COMMAND] [ARGS]...
 
         Commands:
           amp          Configure Amp.
+          kiro         Configure Kiro.
           omnigent     Configure OmniGent.
                        Wrapped description text must not become a command.
         """)
-        precondition(setupCommands == ["amp", "omnigent"], "setup help capabilities must parse exactly")
+        precondition(setupCommands == ["amp", "kiro", "omnigent"], "setup help capabilities must parse exactly")
 
         let galileo = command(titled: "setup galileo")
         precondition(galileo.requiresTerminal, "interactive Galileo setup must be terminal-only")

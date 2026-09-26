@@ -153,7 +153,7 @@ struct AIRuntimeSnapshot: Sendable {
     /// be named.
     var unattributedShare: Double {
         guard connectionsObserved > 0 else { return 0 }
-        return Double(connectionsUnattributed) / Double(connectionsObserved)
+        return min(1, max(0, Double(connectionsUnattributed) / Double(connectionsObserved)))
     }
 
     /// The one-line coverage statement shown beside the finding count.
@@ -174,6 +174,15 @@ struct AIRuntimeSnapshot: Sendable {
 /// value rather than an error, because an app that fails to render on version
 /// skew is worse than one that renders less.
 enum AIRuntimeDecoding {
+    private static func unique<T: Identifiable>(_ rows: [T]) -> [T] {
+        var seen = Set<T.ID>()
+        return rows.prefix(1000).filter { seen.insert($0.id).inserted }
+    }
+
+    private static func displayText(_ value: String) -> String {
+        DisplayRedaction.text(value)
+    }
+
     static func snapshot(from json: Any?) -> AIRuntimeSnapshot {
         guard let dict = json as? [String: Any] else { return AIRuntimeSnapshot() }
         var snapshot = AIRuntimeSnapshot()
@@ -186,14 +195,14 @@ enum AIRuntimeDecoding {
         snapshot.degraded = (dict["degraded"] as? Bool) ?? false
         snapshot.degradedReasons = (dict["degraded_reasons"] as? [Any])?
             .compactMap { $0 as? String } ?? []
-        snapshot.planes = ((dict["planes"] as? [Any]) ?? []).compactMap(plane)
-        snapshot.findings = ((dict["findings"] as? [Any]) ?? [])
+        snapshot.planes = unique(((dict["planes"] as? [Any]) ?? []).compactMap(plane))
+        snapshot.findings = unique(((dict["findings"] as? [Any]) ?? [])
             .compactMap(finding)
             .sorted { lhs, rhs in
                 if lhs.severityRank != rhs.severityRank { return lhs.severityRank < rhs.severityRank }
                 if lhs.score != rhs.score { return lhs.score > rhs.score }
                 return lhs.process < rhs.process
-            }
+            })
         return snapshot
     }
 
@@ -205,7 +214,7 @@ enum AIRuntimeDecoding {
         plane.available = (dict["available"] as? Bool) ?? false
         plane.running = (dict["running"] as? Bool) ?? false
         plane.mechanism = (dict["mechanism"] as? String) ?? ""
-        plane.reason = (dict["reason"] as? String) ?? ""
+        plane.reason = displayText((dict["reason"] as? String) ?? "")
         return plane
     }
 
@@ -215,23 +224,23 @@ enum AIRuntimeDecoding {
         finding.findingID = (dict["finding_id"] as? String) ?? ""
         finding.pid = (dict["pid"] as? Int) ?? 0
         finding.process = (dict["process"] as? String) ?? ""
-        finding.cmdline = (dict["cmdline"] as? String) ?? ""
+        finding.cmdline = displayText((dict["cmdline"] as? String) ?? "")
         finding.user = (dict["user"] as? String) ?? ""
         finding.agentName = (dict["agent_name"] as? String) ?? ""
         finding.score = (dict["score"] as? Int) ?? 0
         finding.severity = (dict["severity"] as? String) ?? "info"
         finding.firstSeen = DCDates.parse(dict["first_seen"])
         finding.lastSeen = DCDates.parse(dict["last_seen"])
-        finding.signals = ((dict["signals"] as? [Any]) ?? []).compactMap { entry in
+        finding.signals = unique(((dict["signals"] as? [Any]) ?? []).compactMap { entry in
             guard let signal = entry as? [String: Any] else { return nil }
             return AIRuntimeSignal(
                 signalID: (signal["id"] as? String) ?? "",
                 title: (signal["title"] as? String) ?? "",
-                detail: (signal["detail"] as? String) ?? "",
+                detail: displayText((signal["detail"] as? String) ?? ""),
                 weight: (signal["weight"] as? Int) ?? 0
             )
-        }
-        finding.providers = ((dict["providers"] as? [Any]) ?? []).compactMap { entry in
+        })
+        finding.providers = unique(((dict["providers"] as? [Any]) ?? []).compactMap { entry in
             guard let provider = entry as? [String: Any] else { return nil }
             return AIRuntimeProvider(
                 hostname: (provider["hostname"] as? String) ?? "",
@@ -241,11 +250,11 @@ enum AIRuntimeDecoding {
                 confidence: (provider["confidence"] as? Double) ?? 0,
                 attributionSource: (provider["attribution_source"] as? String) ?? ""
             )
-        }
+        })
         if let correlation = dict["correlation"] as? [String: Any] {
             finding.correlation = AIRuntimeCorrelation(
                 verdict: (correlation["verdict"] as? String) ?? "",
-                reason: (correlation["reason"] as? String) ?? "",
+                reason: displayText((correlation["reason"] as? String) ?? ""),
                 matchedSignalIDs: (correlation["matched_signal_ids"] as? [Any])?
                     .compactMap { $0 as? String } ?? [],
                 categories: (correlation["categories"] as? [Any])?

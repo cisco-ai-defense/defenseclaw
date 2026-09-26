@@ -49,6 +49,7 @@ struct ResourceBoundaryTests {
         try await eventReaderEnforcesAggregateRetainedByteLimit()
         try await gatewayAcceptsLegitimateResponse()
         try await gatewayDecodesOptionalAIDiscoveryMetadata()
+        try await gatewayRuntimeCapabilities()
         try await gatewayRejectsDeclaredOversizedResponse()
         try await gatewayStopsUnknownLengthOversizedResponse()
         print("Resource boundary tests passed")
@@ -269,6 +270,54 @@ struct ResourceBoundaryTests {
         let client = gatewayClient(maximumResponseBytes: 256)
         let health = try await client.health()
         expect(health.state == "running", "normal bounded gateway JSON is parsed")
+    }
+
+    private static func gatewayRuntimeCapabilities() async throws {
+        StubGatewayURLProtocol.headers = ["Content-Type": "application/json"]
+        StubGatewayURLProtocol.statusCode = 404
+        StubGatewayURLProtocol.body = Data("{}".utf8)
+        let client = gatewayClient(maximumResponseBytes: 4096)
+        do {
+            _ = try await client.aiRuntime()
+            preconditionFailure("missing Runtime route must not produce a clean snapshot")
+        } catch GatewayError.degraded(let status, _) {
+            expect(status == 404, "missing route is distinguishable from authentication and transport")
+        }
+        StubGatewayURLProtocol.statusCode = 200
+        do {
+            _ = try await client.aiRuntime()
+            preconditionFailure("malformed Runtime response must not erase coverage")
+        } catch GatewayError.badResponse { }
+        StubGatewayURLProtocol.body = Data(#"""
+        {"enabled":true,"scanned_at":"2026-09-18T12:00:00Z","degraded":true,
+         "connections_observed":1,"connections_unattributed":9223372036854775807,
+         "planes":[{"plane":"host","available":false,"running":false,"reason":"permission unavailable"}],
+         "findings":[{"finding_id":"b","severity":"low","score":10},
+                     {"finding_id":"a","severity":"high","score":90}]}
+        """#.utf8)
+        let snapshot = try await client.aiRuntime()
+        expect(snapshot.enabled && snapshot.degraded, "coverage decoded")
+        expect(snapshot.planesNotRunning.first?.reason == "permission unavailable", "blind reason preserved")
+        expect(snapshot.findings.first?.findingID == "a", "findings sorted by severity")
+        expect(snapshot.unattributedShare == 1, "untrusted counters cannot overflow percentage rendering")
+        let hostile = AIRuntimeDecoding.snapshot(from: [
+            "findings": [
+                ["finding_id": "same", "cmdline": #"worker --token "private value""#],
+                ["finding_id": "same"],
+            ],
+            "planes": [["plane": "host"], ["plane": "host"]],
+        ])
+        expect(hostile.findings.count == 1 && hostile.planes.count == 1, "duplicate identities cannot collide in SwiftUI")
+        expect(!hostile.findings[0].cmdline.contains("private value"), "runtime argument secrets are redacted")
+        let header = AIRuntimeDecoding.snapshot(from: [
+            "findings": [["finding_id": "auth", "cmdline": "Authorization: Bearer header-placeholder"]],
+        ])
+        expect(!header.findings[0].cmdline.contains("header-placeholder"), "authorization schemes must not hide a remaining credential")
+        do {
+            try await client.scanAIRuntime()
+            preconditionFailure("read-only client must refuse Runtime mutations")
+        } catch { }
+        StubGatewayURLProtocol.body = Data("{}".utf8)
     }
 
     private static func gatewayDecodesOptionalAIDiscoveryMetadata() async throws {

@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Incremental tailer for ~/.defenseclaw/gateway.jsonl.
+// Bounded canonical event snapshots plus incremental plain/legacy file tails.
 // Remembers byte offset, handles truncation/rotation (falls back to the last
 // 512 KiB — the same budget the Go reader and TUI use), classifies rows into
 // the four TUI log streams, and extracts scan findings / activity / egress rows.
@@ -42,6 +42,9 @@ actor EventStreamReader {
     private var watchdogLogOffset: UInt64 = 0
     private var rowCounter = 0
     private var plainLogCounter = 0
+    private var canonicalHistory: CanonicalEventHistory = .unsupported
+    private(set) var structuredSource = "gateway.jsonl (legacy)"
+    private(set) var structuredError: String?
 
     private(set) var logBuffers: [LogStream: [LogRow]] = [:]
     private(set) var findings: [ScanFindingEvent] = []
@@ -180,10 +183,29 @@ actor EventStreamReader {
     }
 
     /// Reads any new bytes appended since the last call; first call reads the tail budget.
-    func poll() -> StreamDelta {
-        refreshScanBlocksFromTail()
+    func poll(canonicalHistory: CanonicalEventHistory? = nil) -> StreamDelta {
+        if let canonicalHistory { self.canonicalHistory = canonicalHistory }
         var delta = StreamDelta()
-        if let handle = try? FileHandle(forReadingFrom: url) {
+        var readLegacy = false
+        switch self.canonicalHistory {
+        case .unsupported:
+            if structuredSource != "gateway.jsonl (legacy)" {
+                replaceCanonicalHistory([], into: &delta)
+                offset = 0
+            }
+            structuredSource = "gateway.jsonl (legacy)"
+            structuredError = nil
+            readLegacy = true
+            refreshScanBlocksFromTail()
+        case .unavailable:
+            structuredSource = "audit.db · canonical events"
+            structuredError = "Audit history unavailable; showing the last successful snapshot."
+        case .available(let rows):
+            structuredSource = "audit.db · canonical events"
+            structuredError = nil
+            replaceCanonicalHistory(rows, into: &delta)
+        }
+        if readLegacy, let handle = try? FileHandle(forReadingFrom: url) {
             defer { try? handle.close() }
             let size = (try? handle.seekToEnd()) ?? 0
 
@@ -223,8 +245,145 @@ actor EventStreamReader {
         return delta
     }
 
+    /// Replace the bounded immutable snapshot instead of appending duplicates
+    /// every pulse. Canonical findings already feed AuditStore's alert queue;
+    /// do not add legacy scan blocks on top of those same findings.
+    private func replaceCanonicalHistory(_ rows: [CanonicalEvent], into delta: inout StreamDelta) {
+        logBuffers[.verdicts] = []
+        logBuffers[.otel] = []
+        findings = []
+        activity = []
+        egress = []
+        scanBlockMap = [:]
+        scanSummaryCounts = [:]
+        observedFindingCounts = [:]
+        retainedBufferBytes = logBuffers.values.flatMap { $0 }.reduce(0) { $0 + retainedBytes(of: $1) }
+        for row in rows.reversed() {
+            let payload = Self.safeProjectionJSON(row.payloadJSON)
+            let projection = Self.safeProjectionJSON(row.projectionJSON)
+            func value(_ keys: String...) -> String {
+                for key in keys {
+                    if let text = payload[key] as? String, !text.isEmpty { return text }
+                    if let number = payload[key] as? NSNumber { return number.stringValue }
+                }
+                return ""
+            }
+            let type: String
+            if row.eventName.hasPrefix("guardrail.judge.") { type = "judge" }
+            else {
+                switch row.bucket {
+                case "guardrail.evaluation", "enforcement.action": type = "verdict"
+                case "security.finding": type = "scan_finding"
+                case "asset.scan": type = "scan"
+                case "compliance.activity": type = "activity"
+                case "platform.health", "diagnostic", "telemetry.ingest":
+                    type = row.severity >= .high ? "error" : "diagnostic"
+                default: type = "lifecycle"
+                }
+            }
+            let decision = value("defenseclaw.guardrail.decision", "defenseclaw.judge.action",
+                                 "defenseclaw.guardrail.effective_action", "defenseclaw.hook.result",
+                                 "defenseclaw.enforcement.effective_action", "defenseclaw.approval.result")
+            let action = decision.isEmpty ? (projection["outcome"] as? String ?? row.action) : decision
+            let reason = value("defenseclaw.guardrail.reason", "defenseclaw.guardrail.evidence_summary",
+                               "defenseclaw.finding.description", "defenseclaw.judge.error_summary",
+                               "defenseclaw.error.summary")
+            let message = Self.safeText("\(row.eventName) \(action) — \(reason.isEmpty ? row.details : reason)")
+            let raw: [String: Any] = [
+                "event_name": Self.safeText(row.eventName), "bucket": Self.safeText(row.bucket),
+                "source": Self.safeText(row.source),
+                "severity": row.severity.rawValue, "body": payload, "payload_omitted": row.payloadOmitted,
+            ]
+            let rawJSON = (try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            for stream in [LogStream.otel, .verdicts] {
+                if stream == .verdicts, !["verdict", "judge", "scan", "scan_finding", "error"].contains(type) { continue }
+                var log = LogRow(
+                    id: "v8:\(row.id)", timestamp: row.timestamp ?? .distantPast, stream: stream,
+                    severity: row.severity, action: Self.safeText(action), eventType: type,
+                    message: message, rawJSON: rawJSON, connector: Self.safeText(row.connector)
+                )
+                if retainedBytes(of: log) > recordByteLimit {
+                    log.rawJSON = #"{"payload_omitted":true}"#
+                    log.message = String(message.prefix(4096)) + " [payload omitted: size limit]"
+                }
+                if retainedBytes(of: log) <= recordByteLimit {
+                    delta.logRows.append(log)
+                } else {
+                    delta.logRows.append(oversizedRecordNotice(stream: stream, actualBytes: retainedBytes(of: log)))
+                }
+            }
+            if ["compliance.activity", "enforcement.action"].contains(row.bucket) {
+                let actor = value("defenseclaw.operator.id", "enduser.id")
+                let target = value("defenseclaw.config.path", "defenseclaw.policy.id",
+                                   "defenseclaw.approval.id", "defenseclaw.enforcement.id",
+                                   "defenseclaw.finding.target_ref")
+                let mutation = ActivityMutation(
+                    id: "v8:\(row.id)", timestamp: row.timestamp ?? .distantPast,
+                    actor: Self.safeText(actor.isEmpty ? row.actor : actor),
+                    action: Self.safeText(row.action.isEmpty ? row.eventName : row.action),
+                    targetType: Self.safeText(row.bucket), targetID: target.isEmpty ? Self.safeText(row.eventName) : target,
+                    reason: message, versionFrom: value("defenseclaw.config.generation.previous", "defenseclaw.policy.version.previous"),
+                    versionTo: value("defenseclaw.config.generation", "defenseclaw.policy.version"),
+                    beforeJSON: "", afterJSON: "", connector: Self.safeText(row.connector)
+                )
+                if retainedBytes(of: mutation) <= recordByteLimit { delta.activity.append(mutation) }
+            }
+            if row.bucket == "network.egress" {
+                let decision = value("defenseclaw.network.decision", "defenseclaw.network.policy_outcome")
+                let branch = value("defenseclaw.network.branch")
+                let llm = (payload["defenseclaw.network.looks_like_llm"] as? Bool) == true
+                let event = EgressEvent(
+                    id: "v8:\(row.id)", timestamp: row.timestamp ?? .distantPast,
+                    target: value("defenseclaw.network.target_ref"), decision: decision,
+                    reason: value("defenseclaw.network.reason"), looksLikeLLM: llm, branch: branch,
+                    severity: decision == "block" || (branch == "shape" && llm) ? .medium : .info,
+                    connector: Self.safeText(row.connector), targetPath: value("defenseclaw.network.target_path"),
+                    bodyShape: value("defenseclaw.network.body_shape"), source: Self.safeText(row.source),
+                    timestampParsed: row.timestamp != nil
+                )
+                if retainedBytes(of: event) <= recordByteLimit { delta.egress.append(event) }
+            }
+        }
+    }
+
+    /// Runtime projections are already redacted. Defense in depth for older
+    /// producers: never render obvious secret/content fields from an inspector.
+    private static func safeProjectionJSON(_ text: String) -> [String: Any] {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        func clean(_ value: Any, depth: Int) -> Any {
+            guard depth < 12 else { return "[omitted: nesting limit]" }
+            if let dictionary = value as? [String: Any] {
+                return dictionary.reduce(into: [String: Any]()) { result, entry in
+                    let sensitive = DisplayRedaction.isSensitiveKey(entry.key)
+                    result[entry.key] = sensitive ? "[redacted]" : clean(entry.value, depth: depth + 1)
+                }
+            }
+            if let array = value as? [Any] { return array.prefix(256).map { clean($0, depth: depth + 1) } }
+            if let string = value as? String { return safeText(string) }
+            return value
+        }
+        return clean(object, depth: 0) as? [String: Any] ?? [:]
+    }
+
+    private static func safeText(_ value: String) -> String {
+        DisplayRedaction.text(value)
+    }
+
     /// Reset and re-read the tail (the Logs panel's "reload from disk").
-    func reload() -> StreamDelta {
+    func reload(canonicalHistory: CanonicalEventHistory? = nil) -> StreamDelta {
+        if case .unavailable = canonicalHistory ?? self.canonicalHistory {
+            // Keep the last successful structured snapshot, but the plain
+            // files have an independent source and must still honor Reload.
+            for stream in [LogStream.gateway, .watchdog] {
+                retainedBufferBytes -= (logBuffers[stream] ?? []).reduce(0) { $0 + retainedBytes(of: $1) }
+                logBuffers[stream] = []
+            }
+            gatewayLogOffset = 0
+            watchdogLogOffset = 0
+            return poll(canonicalHistory: canonicalHistory)
+        }
         offset = 0
         logBuffers = [:]
         findings = []
@@ -236,7 +395,7 @@ actor EventStreamReader {
         observedFindingCounts = [:]
         gatewayLogOffset = 0
         watchdogLogOffset = 0
-        return poll()
+        return poll(canonicalHistory: canonicalHistory)
     }
 
     private func ingestPlainLog(_ url: URL, stream: LogStream, offset: inout UInt64, into delta: inout StreamDelta) {

@@ -582,15 +582,17 @@ actor GatewayClient {
 
     /// Fetch the runtime-plane snapshot.
     ///
-    /// Throws on a malformed payload so the caller keeps the last good
-    /// snapshot: replacing a stale-but-true coverage report with an empty one
-    /// would read as a clean host rather than as a lost connection.
+    /// Throws on a malformed or incomplete payload so the caller keeps the
+    /// last good snapshot: replacing a stale-but-true coverage report with an
+    /// empty one would read as a clean host rather than as a lost connection.
     func aiRuntime() async throws -> AIRuntimeSnapshot {
         let json = try await getJSON("/api/v1/ai-usage/runtime")
-        guard json is [String: Any] else {
-            throw GatewayError.badResponse("/api/v1/ai-usage/runtime not an object")
+        guard let object = json as? [String: Any],
+              object["enabled"] is Bool, object["planes"] is [Any],
+              object["findings"] is [Any] else {
+            throw GatewayError.badResponse("Runtime coverage response is incomplete.")
         }
-        return AIRuntimeDecoding.snapshot(from: json)
+        return AIRuntimeDecoding.snapshot(from: object)
     }
 
     /// Trigger one immediate runtime-plane poll.

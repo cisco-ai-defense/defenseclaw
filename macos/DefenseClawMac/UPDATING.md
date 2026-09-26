@@ -50,8 +50,10 @@ Only sync these maintained paths:
 ```text
 DefenseClawMac.xcodeproj/
 DefenseClawMac/
+GatewayAdminHelper/
 Tests/
 script/build_and_run.sh
+script/build_gateway_admin_helper.sh
 script/test_connector_onboarding.sh
 tools/
 images/
@@ -66,6 +68,8 @@ After syncing, review and restore these intentional differences:
 
 - Bundle identifier: `com.cisco.defenseclaw.macos`.
 - No personal Apple development team or signing identity in the project file.
+- The administrator helper uses `com.cisco.defenseclaw.macos.GatewayAdmin` (service, LaunchDaemon, and helper identifier) in `GatewayAdminProtocol.swift` and `script/build_gateway_admin_helper.sh`. `GatewayAdminPolicy` requires the peer to carry the running code's own signing team; do not restore a pinned team ID. `scripts/build-macos-app-release.sh` signs the helper before the app.
+- The app never runs `install.sh` over a source install (`~/.local/bin/.defenseclaw-source-root`).
 - App `MARKETING_VERSION` matches the repository `VERSION`.
 - `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw` and fetches only that release's `install.sh`, verified against the same release's `checksums.txt`.
 - The app embeds no runtime and never replaces its own bundle: install and update run the release's `install.sh`, which installs the runtime and swaps the app.
