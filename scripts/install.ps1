@@ -133,7 +133,14 @@ function Test-SamePath([string]$Entry, [string]$Path) {
 }
 
 function Remove-Tree([string]$Path) {
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+    # Antivirus and the search indexer hold freshly written files for a moment,
+    # so a delete that fails is retried for up to 30 seconds.
+    for ($attempt = 1; Test-Path -LiteralPath $Path; $attempt++) {
+        try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
+            if ($attempt -ge 30) { throw }
+            Start-Sleep -Seconds 1
+        }
+    }
 }
 
 function New-InstallDirectory([string]$Path) {

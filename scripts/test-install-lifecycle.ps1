@@ -237,6 +237,25 @@ function Get-LaunchDirCount {
 }
 
 # Start-Held FILE ARGS...: a process that keeps running (stdin open) until Stop-Held.
+# New-DrillAssets NAME EDIT: a copy of -Assets whose Windows zip EDIT changed
+# (EDIT gets the expanded zip directory), with checksums.txt rewritten.
+function New-DrillAssets([string]$Name, [scriptblock]$Edit) {
+    $drill = Join-Path $Lane $Name
+    $zip = Join-Path $Lane "$Name-zip"
+    New-Item -ItemType Directory -Path $drill, $zip -Force | Out-Null
+    Copy-Item -Path (Join-Path $Assets "*") -Destination $drill
+    $archive = "defenseclaw-$Target-windows-amd64.zip"
+    Expand-Archive -LiteralPath (Join-Path $Assets $archive) -DestinationPath $zip
+    & $Edit $zip
+    Remove-Item -LiteralPath (Join-Path $drill $archive)
+    Compress-Archive -Path (Join-Path $zip "*") -DestinationPath (Join-Path $drill $archive)
+    $sums = foreach ($file in Get-ChildItem -LiteralPath $drill -File | Where-Object { $_.Name -notlike "checksums.txt*" } | Sort-Object Name) {
+        "$((Get-Sha256 $file.FullName).ToLowerInvariant())  $($file.Name)"
+    }
+    [IO.File]::WriteAllText((Join-Path $drill "checksums.txt"), (($sums -join "`n") + "`n"))
+    return $drill
+}
+
 function Start-Held([string]$File, [string[]]$Arguments = @()) {
     $info = New-Object Diagnostics.ProcessStartInfo $File
     $info.Arguments = ($Arguments | ForEach-Object { '"' + $_ + '"' }) -join " "
@@ -400,16 +419,21 @@ function Test-FilesInUse {
     Enter-Lane files-in-use
     Check ((Install-Candidate $Seed) -eq 0) "install of $(Get-AssetVersion $Seed) failed"
     if (-not (Initialize-Gateway)) { return }
+    $next = $Assets
     if ($Seed -eq $Assets) {
-        # Without an older release, a damaged hook makes the re-run replace it.
-        [IO.File]::AppendAllText((Join-Path $Bin "defenseclaw-hook.exe"), "damaged")
+        # Without an older release, a release with a different hook build makes
+        # the re-run replace the running one.
+        $next = New-DrillAssets "hook-assets" {
+            param([string]$Zip)
+            [IO.File]::AppendAllText((Join-Path $Zip "defenseclaw-hook.exe"), "rebuilt")
+        }
     }
     # A hook waiting for its payload, as an agent runs it.
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
     Check (-not $hook.HasExited) "defenseclaw-hook.exe did not stay running"
     Write-Log "install $Target while defenseclaw-hook.exe runs"
-    Check ((Install-Candidate $Assets) -eq 0) "an install with a running hook failed"
+    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
     Assert-Versions $Target
     Assert-Healthy
     Check (-not $hook.HasExited) "the running hook was stopped"
@@ -448,13 +472,6 @@ function Test-FailureDrill {
     $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
     $goodGateway = Get-Sha256 $gateway
     $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
-    $drill = Join-Path $Lane "drill-assets"
-    $zip = Join-Path $Lane "drill-zip"
-    New-Item -ItemType Directory -Path $drill, $zip -Force | Out-Null
-    Copy-Item -Path (Join-Path $Assets "*") -Destination $drill
-    $archive = "defenseclaw-$Target-windows-amd64.zip"
-    Expand-Archive -LiteralPath (Join-Path $Assets $archive) -DestinationPath $zip
-    Remove-Item -LiteralPath (Join-Path $zip "defenseclaw-gateway.exe")
     $source = Join-Path $Lane "DrillGateway.cs"
     [IO.File]::WriteAllText($source, @"
 public static class DrillGateway {
@@ -465,16 +482,14 @@ public static class DrillGateway {
     }
 }
 "@)
-    # Only Windows PowerShell's Add-Type builds a standalone .exe.
-    $built = Invoke-Exe $PowerShell @("-NoProfile", "-Command",
-        "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
-    Check ($built -eq 0) "could not build the drill gateway"
-    Remove-Item -LiteralPath (Join-Path $drill $archive)
-    Compress-Archive -Path (Join-Path $zip "*") -DestinationPath (Join-Path $drill $archive)
-    $sums = foreach ($file in Get-ChildItem -LiteralPath $drill -File | Where-Object { $_.Name -notlike "checksums.txt*" } | Sort-Object Name) {
-        "$((Get-Sha256 $file.FullName).ToLowerInvariant())  $($file.Name)"
+    $drill = New-DrillAssets "drill-assets" {
+        param([string]$Zip)
+        Remove-Item -LiteralPath (Join-Path $Zip "defenseclaw-gateway.exe")
+        # Only Windows PowerShell's Add-Type builds a standalone .exe.
+        $built = Invoke-Exe $PowerShell @("-NoProfile", "-Command",
+            "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $Zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
+        Check ($built -eq 0) "could not build the drill gateway"
     }
-    [IO.File]::WriteAllText((Join-Path $drill "checksums.txt"), (($sums -join "`n") + "`n"))
 
     Write-Log "an install whose gateway does not start is undone"
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
