@@ -790,7 +790,7 @@ packaging-macos-bundle:
 #   Clones ai-common at $(WINDOWS_MANAGED_REF), applies the cloudreg overlay,
 #   pins the ai-common/cmid pseudo-version, cross-builds defenseclaw.exe +
 #   defenseclaw-hook.exe with -tags cmid, stamps VERSIONINFO / icon on both,
-#   and packages them into $(DIST_DIR)/defenseclaw_$(VERSION)_windows_amd64.zip
+#   and packages them into $(DIST_DIR)/defenseclaw-$(VERSION)-windows-amd64.zip
 #   alongside a gateway-source-commit.txt sidecar. Restores the OSS working
 #   tree on exit.
 #
