@@ -93,15 +93,10 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	if managedPolicy && claudeCodeOSAdminPolicyComposition &&
 		activeManaged != nil && activeManaged == managed.osAdmin &&
 		claudeCodeSourceRequestsManagedMerge(managed.osAdmin) {
-		if !claudeCodeClientHonorsManagedMerge(opts.AgentVersion) {
-			// An older client keeps first-wins precedence, so the OS-admin
-			// policy alone must carry the contract.
-			if err := claudeCodeOSAdminAdmitsManagedHooks(managed.osAdmin, opts); err != nil {
-				return false, err
-			}
-			return claudeCodeSourceHasHookContract(managed.osAdmin, opts, true)
-		}
 		// A merge-honoring client unions both administrator tiers' hooks.
+		// The recorded agent_version cannot show whether the running client
+		// honors merge, so the client floor is enforced host-wide rather
+		// than per target (see claudeCodeOSAdminAdmitsManagedHooks).
 		// Either tier's gate still disables them, and the file tier is ours,
 		// so its absence is repairable rather than an administrator failure.
 		for _, source := range []*claudeCodeSettingsSource{managed.osAdmin, managed.file} {

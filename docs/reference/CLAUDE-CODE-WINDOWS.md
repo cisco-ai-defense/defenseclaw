@@ -116,8 +116,15 @@ policy only when the DefenseClaw hooks stay effective:
 
 - the policy sets `"managedSourcesBehavior": "merge"`, which Claude Code
   v2.1.242 and newer honor by composing every administrator source and
-  unioning their hook lists. Targets on an older client are refused with an
-  upgrade message, because they still load only the HKLM policy; or
+  unioning their hook lists. An older client ignores the key and still loads
+  only the HKLM policy, so under such a policy v2.1.242 is the approved-client
+  floor: enforce Claude Code v2.1.242 or newer with WDAC/AppLocker and run
+  `Repair -AttestAgentApplicationControl`. Until application control is attested
+  at that floor, `status` reports `claude_effective_policy_verified=false` and
+  lists the targets whose recorded client is older in
+  `claude_policy_hklm_merge_pending_targets`. The targets still enroll: a
+  recorded version is written once, at discovery, and cannot show which client
+  runs, so it neither admits nor refuses a target; or
 - the policy already carries the exact DefenseClaw hook matrix. Print it on an
   installed endpoint with
   `defenseclaw-gateway enterprise windows export-claude-policy` (add
@@ -127,8 +134,13 @@ policy only when the DefenseClaw hooks stay effective:
 
 An HKLM policy that sets `disableAllHooks` or `policyHelper` is still refused,
 as is any other HKLM policy, with a message naming both fixes. `enterprise
-windows status --json` reports `claude_policy_shadowed_by_hklm` and
-`claude_policy_hklm_detail`, and a shadowed policy reports
+windows status --json` reports `claude_policy_shadowed_by_hklm`,
+`claude_policy_hklm_managed_sources_merge`, `claude_policy_hklm_detail`,
+`claude_minimum_client_version` (v2.1.242 under a merge policy that does not
+carry the DefenseClaw hooks) and
+`agent_application_control_claude_minimum_version` (the floor the
+application-control evidence was attested at). A shadowed policy, or a merge
+policy whose floor is not attested, reports
 `claude_effective_policy_verified=false`.
 
 ## Hook contract

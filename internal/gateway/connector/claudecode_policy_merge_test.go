@@ -5,7 +5,6 @@ package connector
 
 import (
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,24 +79,27 @@ func TestClaudeOSAdminPolicyRejectsAMatrixForAnotherContractOrHook(t *testing.T)
 	}
 }
 
-func TestClaudeOSAdminPolicyMergeRequiresAClientThatHonorsIt(t *testing.T) {
+// TestClaudeOSAdminPolicyMergeDoesNotTrustTheRecordedClientVersion is the
+// #899 review regression. The recorded agent_version is written once, at
+// discovery, and is often the installer's placeholder (2.1.154 for a user
+// with no detected client), so refusing on it failed every lifecycle on an
+// AVC-first host even after its users upgraded. It is not proof in the other
+// direction either. The client floor for merge is enforced host-wide by the
+// lifecycle module's application-control gate, never per target here.
+func TestClaudeOSAdminPolicyMergeDoesNotTrustTheRecordedClientVersion(t *testing.T) {
 	raw := `{"managedSourcesBehavior":"merge","model":"managed-by-mdm"}`
-	for _, version := range []string{ClaudeCodeManagedSourcesMergeMinimumVersion, "2.1.250", "Claude Code 2.1.242"} {
+	for _, version := range []string{
+		ClaudeCodeManagedSourcesMergeMinimumVersion,
+		"2.1.250",
+		"Claude Code 2.1.242",
+		"2.1.241",
+		"2.1.154",
+		"not-a-version",
+		"",
+	} {
 		if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, claudeOSAdminTestOpts(t, version)); err != nil {
-			t.Fatalf("merge on Claude %q was refused: %v", version, err)
+			t.Fatalf("merge with recorded Claude %q was refused: %v", version, err)
 		}
-	}
-	for _, version := range []string{"2.1.241", "2.1.154", "not-a-version"} {
-		err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, claudeOSAdminTestOpts(t, version))
-		if !errors.Is(err, ErrClaudeCodeManagedMergeUnsupported) ||
-			!strings.Contains(err.Error(), ClaudeCodeManagedSourcesMergeMinimumVersion) ||
-			!strings.Contains(err.Error(), ClaudeCodeManagedPolicyExportCommand) {
-			t.Fatalf("merge on Claude %q = %v, want an actionable merge-unsupported refusal", version, err)
-		}
-	}
-	// An identity re-render has no client; the enrolling caller decides.
-	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, claudeOSAdminTestOpts(t, "")); err != nil {
-		t.Fatalf("versionless identity render under merge = %v, want admitted", err)
 	}
 	// Any other value keeps first-wins precedence.
 	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
@@ -109,7 +111,7 @@ func TestClaudeOSAdminPolicyMergeRequiresAClientThatHonorsIt(t *testing.T) {
 
 func TestClaudeOSAdminPolicyRefusalNamesBothFixes(t *testing.T) {
 	err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(`{"model":"managed-by-mdm"}`, claudeOSAdminLabel, claudeOSAdminTestOpts(t, "2.1.250"))
-	if err == nil || errors.Is(err, ErrClaudeCodeManagedMergeUnsupported) {
+	if err == nil {
 		t.Fatalf("shadowing policy = %v, want a refusal", err)
 	}
 	for _, want := range []string{claudeOSAdminLabel, `"managedSourcesBehavior": "merge"`, ClaudeCodeManagedPolicyExportCommand} {

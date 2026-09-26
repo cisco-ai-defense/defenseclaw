@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -14,7 +13,11 @@ import (
 // release in which "managedSourcesBehavior": "merge" in the highest-ranked
 // managed source composes every administrator source, with hook lists
 // unioned across them. Older clients ignore the key and keep first-wins
-// precedence, so only the highest-ranked source applies.
+// precedence, so only the highest-ranked source applies. Under a merge
+// policy that does not itself carry the DefenseClaw hooks this is therefore
+// the effective approved-client floor; the Windows lifecycle module reports
+// Claude effective policy unverified until application control is attested
+// at this floor.
 const ClaudeCodeManagedSourcesMergeMinimumVersion = "2.1.242"
 
 // ClaudeCodeManagedPolicyExportCommand prints the exact DefenseClaw hook
@@ -26,24 +29,12 @@ const ClaudeCodeManagedPolicyExportCommand = "defenseclaw-gateway enterprise win
 // policy until their MDM composition is certified.
 var claudeCodeOSAdminPolicyComposition = runtime.GOOS == "windows"
 
-// ErrClaudeCodeManagedMergeUnsupported marks an OS-admin policy that opts
-// into merging managed sources for a client too old to honor it.
-var ErrClaudeCodeManagedMergeUnsupported = errors.New("Claude Code client does not support managedSourcesBehavior merge")
-
 func claudeCodeSourceRequestsManagedMerge(source *claudeCodeSettingsSource) bool {
 	if !source.active() {
 		return false
 	}
 	behavior, ok := source.settings["managedSourcesBehavior"].(string)
 	return ok && behavior == "merge"
-}
-
-// claudeCodeClientHonorsManagedMerge fails closed for an unversioned or
-// unparseable client: merge is honored only when the version proves it.
-func claudeCodeClientHonorsManagedMerge(agentVersion string) bool {
-	normalized := NormalizeAgentVersion("claudecode", agentVersion)
-	return normalized != "" &&
-		compareVersion(normalized, ClaudeCodeManagedSourcesMergeMinimumVersion) >= 0
 }
 
 func claudeCodeOSAdminRemedy() string {
@@ -58,9 +49,9 @@ func claudeCodeOSAdminRemedy() string {
 // hooks are effective under an active OS-admin (HKLM) policy that outranks
 // the file-based tier DefenseClaw owns. They are when that policy itself
 // carries the complete DefenseClaw contract (first-wins then selects it), or
-// when it opts into merging managed sources and the client honors that. A
-// policy that disables hooks defeats both, and anything else fails closed
-// with the two ways to fix it.
+// when it opts into merging managed sources, which clients honor from
+// ClaudeCodeManagedSourcesMergeMinimumVersion. A policy that disables hooks
+// defeats both, and anything else fails closed with the two ways to fix it.
 func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) error {
 	if !source.active() {
 		return nil
@@ -76,25 +67,19 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 		return nil
 	}
 	if claudeCodeSourceRequestsManagedMerge(source) {
-		// A caller with no client version is re-rendering the machine-wide
-		// policy to prove its identity (VerifyManagedHookPolicy), not
-		// enrolling a client. Every enrollment and audit path carries the
-		// target's version, so the client decision is made there.
-		if strings.TrimSpace(opts.AgentVersion) == "" ||
-			claudeCodeClientHonorsManagedMerge(opts.AgentVersion) {
-			// The guardian audits the union of both tiers, so a hook list
-			// that cannot be merged is refused here rather than there.
-			_, err := claudeCodeMergedManagedSource(source, nil)
-			return err
-		}
-		return fmt.Errorf(
-			"%w: Claude Code %s requests managedSourcesBehavior merge, which Claude Code %s or newer honors, but this client is %q and applies only that policy; upgrade Claude Code or add the DefenseClaw hook matrix printed by %s to its hooks",
-			ErrClaudeCodeManagedMergeUnsupported,
-			source.label(),
-			ClaudeCodeManagedSourcesMergeMinimumVersion,
-			strings.TrimSpace(opts.AgentVersion),
-			ClaudeCodeManagedPolicyExportCommand,
-		)
+		// Merge makes the DefenseClaw hooks effective on Claude Code
+		// ClaudeCodeManagedSourcesMergeMinimumVersion or newer. The target's
+		// recorded agent_version cannot show which client actually runs: it
+		// is recorded once, at discovery, and is often the installer's
+		// placeholder. So it neither admits nor refuses the target here.
+		// Refusing on it failed the whole lifecycle for rows that could never
+		// be updated, while a row recorded as new proved nothing. The floor
+		// is enforced host-wide instead: Status reports the Claude effective
+		// policy unverified until approved-client application control is
+		// attested at that version. The guardian audits the union of both
+		// tiers, so a hook list that cannot be merged is refused here.
+		_, err := claudeCodeMergedManagedSource(source, nil)
+		return err
 	}
 	return fmt.Errorf(
 		"Claude Code %s has higher precedence than the DefenseClaw managed-settings.d policy, so Claude would never load the DefenseClaw hooks; %s",

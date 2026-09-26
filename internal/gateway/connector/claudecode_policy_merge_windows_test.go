@@ -7,7 +7,6 @@ package connector
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,13 +89,22 @@ func TestClaudeHKLMMergeAdmitsAndAuditsTheUnionOnWindows(t *testing.T) {
 		t.Fatalf("versionless identity verification under HKLM merge = %v", err)
 	}
 
-	old := opts
-	old.AgentVersion = "2.1.241"
-	if _, err := NewClaudeCodeConnector().ManagedHookPolicy(old); !errors.Is(err, ErrClaudeCodeManagedMergeUnsupported) {
-		t.Fatalf("pre-merge client = %v, want merge-unsupported refusal", err)
-	}
-	if present, err := claudeCodeEffectiveHookContract(old); present || !errors.Is(err, ErrClaudeCodeManagedMergeUnsupported) {
-		t.Fatalf("pre-merge client audit = (present=%v, err=%v), want merge-unsupported", present, err)
+	// #899 review: a row recorded below the merge floor (for example the
+	// installer's 2.1.154 placeholder for a user with no detected client)
+	// is enrolled and audited like any other. The recorded version cannot
+	// show the running client; the lifecycle module withholds the Claude
+	// effective-policy claim until application control is attested at the
+	// merge floor.
+	for _, recorded := range []string{"2.1.241", "2.1.154"} {
+		row := opts
+		row.AgentVersion = recorded
+		if _, err := NewClaudeCodeConnector().ManagedHookPolicy(row); err != nil {
+			t.Fatalf("row recorded at %s under HKLM merge was refused: %v", recorded, err)
+		}
+		writeClaudeManagedFileTier(t, policyPath, row)
+		if present, err := claudeCodeEffectiveHookContract(row); err != nil || !present {
+			t.Fatalf("row recorded at %s audit = (present=%v, err=%v), want the merged contract", recorded, present, err)
+		}
 	}
 }
 

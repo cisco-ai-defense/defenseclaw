@@ -1171,9 +1171,10 @@ func defaultWindowsClaudeManagedPolicyPath() (string, error) {
 
 // defaultWindowsClaudeHigherPolicyCheck authenticates the HKLM policy key,
 // then lets the connector decide whether its Settings leave the DefenseClaw
-// managed-settings.d hooks effective for this target's client: the policy
-// either carries the DefenseClaw contract itself or opts into merging
-// managed sources on a client that honors it.
+// managed-settings.d hooks effective: the policy either carries the
+// DefenseClaw contract itself or opts into merging managed sources. Merge is
+// honored only by Claude Code 2.1.242 or newer; that client floor is
+// enforced host-wide by the lifecycle module, not by the recorded version.
 func defaultWindowsClaudeHigherPolicyCheck(opts connector.SetupOpts) error {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\ClaudeCode`, registry.READ)
 	if errors.Is(err, registry.ErrNotExist) {

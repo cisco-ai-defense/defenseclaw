@@ -122,7 +122,7 @@ try {
         # The Status view reads the live registry and must never throw.
         try {
             $state = Get-DefenseClawClaudeHKLMPolicyState -Layout $layout
-            foreach ($field in @('shadowed', 'managed_sources_merge', 'detail')) {
+            foreach ($field in @('shadowed', 'managed_sources_merge', 'merge_client_floor_required', 'detail')) {
                 if ($null -eq $state.PSObject.Properties[$field]) {
                     $failures.Add("HKLM policy state is missing $field")
                 }
@@ -130,6 +130,45 @@ try {
         }
         catch {
             $failures.Add("HKLM policy state threw: $($_.Exception.Message)")
+        }
+        # #899 review: under an HKLM merge policy the recorded client version
+        # neither admits nor refuses a target; Status lists the targets whose
+        # recorded version is below the merge floor.
+        foreach ($case in @(
+            @("2.1.242", "2.1.242", $true),
+            @("2.1.250", "2.1.242", $true),
+            @("2.1.241", "2.1.242", $false),
+            @("", "2.1.242", $false),
+            @("not-a-version", "2.1.242", $false)
+        )) {
+            $got = Test-DefenseClawClaudeVersionAtLeast -Value $case[0] -Minimum $case[1]
+            if ([bool]$got -ne [bool]$case[2]) {
+                $failures.Add("version $($case[0]) at least $($case[1]) = $got")
+            }
+        }
+        foreach ($floor in @("2.1.154", "2.1.242", "2.1.152")) {
+            if (-not (Test-DefenseClawClaudeMinimumClientVersion -Value $floor)) {
+                $failures.Add("attested Claude floor $floor was not accepted")
+            }
+        }
+        if (Test-DefenseClawClaudeMinimumClientVersion -Value "2.1.200") {
+            $failures.Add("an arbitrary Claude floor was accepted")
+        }
+        $report = [pscustomobject]@{
+            verification = @(
+                [pscustomobject]@{ connector = "claudecode"; sid = "S-1-5-21-1-1001"; result = [pscustomobject]@{ agent_version = "2.1.154" } },
+                [pscustomobject]@{ connector = "claudecode"; sid = "S-1-12-1-2-3-4-5"; result = [pscustomobject]@{ agent_version = "2.1.250" } },
+                [pscustomobject]@{ connector = "claudecode"; sid = "S-1-5-21-1-1002"; result = [pscustomobject]@{ agent_version = "" } },
+                [pscustomobject]@{ connector = "codex"; sid = "S-1-5-21-1-1003"; result = [pscustomobject]@{ agent_version = "0.131.0" } }
+            )
+        }
+        $pending = @(Get-DefenseClawClaudeMergePendingTargets -Report $report)
+        $want = @("claudecode@S-1-5-21-1-1001 (recorded 2.1.154)", "claudecode@S-1-5-21-1-1002 (recorded unknown)")
+        if (($pending -join "|") -cne ($want -join "|")) {
+            $failures.Add("merge pending targets = $($pending -join "|")")
+        }
+        if (@(Get-DefenseClawClaudeMergePendingTargets -Report $null).Count -ne 0) {
+            $failures.Add("a missing guardian report listed merge pending targets")
         }
         return @($failures)
     } $root
