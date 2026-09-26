@@ -1482,6 +1482,19 @@ func HookContractChangedByDefenseClawRelease(previous, current HookContractLockE
 		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
 }
 
+// AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
+// recorded when a DefenseClaw release last admitted the connector. A refusal
+// for an unchanged agent comes from the running release's own contract table,
+// not from the agent.
+func AgentUnchangedSinceLock(previous HookContractLockEntry, rawAgentVersion string) bool {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	current := HookContractLockEntry{Connector: previous.Connector, RawAgentVersion: rawAgentVersion}
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current)
+}
+
 // stableRawAgentVersionForContract removes only upstream presentation text
 // known to change without a binary change. Amp appends a relative release-age
 // annotation to `amp --version` (for example, "..., 2h ago"), so persisting the

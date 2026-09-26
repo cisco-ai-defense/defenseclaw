@@ -3202,3 +3202,20 @@ func TestProtectedCodexLockIsRuntimeExecutableAuthority(t *testing.T) {
 		t.Fatalf("locked executable = %q, want %q", got, executable)
 	}
 }
+
+func TestAgentUnchangedSinceLock(t *testing.T) {
+	admitted := HookContractLockEntry{Connector: "claudecode", RawAgentVersion: "Claude Code v0.0.1"}
+	if AgentUnchangedSinceLock(HookContractLockEntry{}, "Claude Code v0.0.1") {
+		t.Fatal("a missing lock must not claim an unchanged agent")
+	}
+	if !AgentUnchangedSinceLock(admitted, "Claude Code v0.0.1") {
+		t.Fatal("the same raw agent version must count as unchanged")
+	}
+	if AgentUnchangedSinceLock(admitted, "Claude Code v0.0.2") {
+		t.Fatal("a different agent version must count as changed")
+	}
+	amp := HookContractLockEntry{Connector: "amp", RawAgentVersion: "0.0.1760000000-g1234567 (released 2026-01-01T00:00:00.000Z, 2h ago)"}
+	if !AgentUnchangedSinceLock(amp, "0.0.1760000000-g1234567 (released 2026-01-01T00:00:00.000Z, 3d ago)") {
+		t.Fatal("Amp's release-age annotation must not count as an agent change")
+	}
+}

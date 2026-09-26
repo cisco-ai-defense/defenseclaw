@@ -195,3 +195,61 @@ func TestRunActiveGuardrailReportsSingleConnectorAdmissionRefusal(t *testing.T) 
 		t.Fatalf("admission detail = %#v, want the refused connector", got)
 	}
 }
+
+func TestRunActiveGuardrailReportsReleaseCausedRefusalAsFailure(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	settings := filepath.Join(t.TempDir(), ".claude", "settings.json")
+	previousSettings := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = settings
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previousSettings })
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Dir(settings))
+
+	// An earlier release admitted this agent version; this release's contract
+	// table no longer covers it.
+	const unknownVersion = "Claude Code v0.0.1"
+	if status := connector.ResolveHookContract("claudecode", unknownVersion).Status; status != connector.HookCompatibilityUnknown {
+		t.Fatalf("fixture version resolves to %s, want unknown", status)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"agents": map[string]any{"claudecode": map[string]any{"version": unknownVersion}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+		Connector:          "claudecode",
+		RawAgentVersion:    unknownVersion,
+		ContractID:         "claudecode-hooks-v1",
+		DefenseClawVersion: "0.0.1-previous",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir: dataDir,
+			Gateway: config.GatewayConfig{Token: "gateway-token"},
+			Guardrail: config.GuardrailConfig{
+				Enabled:   true,
+				Connector: "claudecode",
+				Mode:      "action",
+			},
+		},
+		health: NewSidecarHealth(),
+		router: routerWithDefaultRulePack(t),
+	}
+
+	err = s.runActiveGuardrail(context.Background())
+	if !errors.Is(err, errReleaseContractRefusal) || !errors.Is(err, ErrHookContractAdmission) {
+		t.Fatalf("runActiveGuardrail error = %v, want a release-caused admission failure", err)
+	}
+	var refusal *hookContractAdmissionRefusal
+	if errors.As(err, &refusal) {
+		t.Fatal("a release-caused refusal must not be reported as upstream drift")
+	}
+	if details := s.health.Snapshot().Guardrail.Details; details[GuardrailHookContractAdmissionRefused] != nil {
+		t.Fatalf("admission detail = %#v, want none so start fails and an upgrade rolls back", details)
+	}
+}

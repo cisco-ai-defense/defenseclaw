@@ -3441,17 +3441,26 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	refuseAdmission := func(err error) error {
 		return &hookContractAdmissionRefusal{connectors: []string{conn.Name()}, err: err}
 	}
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return refuseAdmission(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
-	}
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return refuseAdmission(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
-	}
 	// Compatibility checks intentionally use the filtered read below, so a
 	// fresh protected Windows Codex repair receipt can supersede the old lock.
 	// Rollback authority is captured separately from the raw lock bytes before
 	// Setup mutates registration posture.
 	previousLock := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name())
+	// An earlier release admitted this exact agent, so an unknown/unversioned
+	// verdict comes from this release's contract table. Report it as a plain
+	// failure so an upgrade rolls back instead of keeping the agent unguarded.
+	refuseUnverified := func(err error) error {
+		if connector.AgentUnchangedSinceLock(previousLock, agentVersion) {
+			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
+		}
+		return refuseAdmission(err)
+	}
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+	}
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+	}
 	singleRollback := multiConnectorSetupTransaction{}
 	if !guardianManagedLifecycle {
 		if previous := previousLock; previous.Connector != "" {
@@ -4100,7 +4109,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rather than idling on a gateway that protects nothing.
 	if len(succeeded) == 0 {
 		err := fmt.Errorf("multi-connector boot: all %d configured connectors failed setup", len(conns))
-		if refused := setupTransaction.admissionRefused; len(refused) == len(conns) {
+		if refused := setupTransaction.admissionRefused; len(refused) == len(conns) && !setupTransaction.releaseRefused {
 			err = &hookContractAdmissionRefusal{connectors: refused, err: fmt.Errorf(
 				"%w: multi-connector boot: all %d configured connectors were refused: %s (rerun discovery/setup to refresh the lock; see the gateway log for each connector)",
 				ErrHookContractAdmission, len(conns), strings.Join(refused, ", "),
@@ -4598,6 +4607,9 @@ type multiConnectorSetupTransaction struct {
 	// admissionRefused lists connectors skipped cleanly at the hook-contract
 	// admission gate, before Setup touched them.
 	admissionRefused []string
+	// releaseRefused is set when a refusal came from this release's contract
+	// table for an agent an earlier release admitted.
+	releaseRefused bool
 }
 
 func captureSingleConnectorRollbackAuthority(
@@ -4807,6 +4819,9 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
 				transaction.admissionRefused = append(transaction.admissionRefused, registration.conn.Name())
+				if errors.Is(err, errReleaseContractRefusal) {
+					transaction.releaseRefused = true
+				}
 				continue
 			}
 			// Isolate: roll back this connector's partial state, log, leave
@@ -5213,10 +5228,19 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
 	strictUnknownVersion := strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode")
+	previousLock := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name())
+	// See runGuardrail: an unchanged agent refused by this release's contract
+	// table is a release problem, not upstream drift.
+	markUnverified := func(err error) error {
+		if connector.AgentUnchangedSinceLock(previousLock, opts.AgentVersion) {
+			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
+		}
+		return err
+	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		!actionMode && !strictUnknownVersion &&
@@ -5226,9 +5250,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
-	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
+	if previous := previousLock; previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 		// Setup refreshes generated hook artifacts for every configured
 		// connector on boot. A stale generated digest is therefore a repair
@@ -6025,6 +6049,11 @@ var ErrHookContractAdmission = errors.New("hook contract admission failed")
 // lists the connectors refused by the hook-contract admission gate when that
 // refusal alone stopped the guardrail. The rest of the gateway keeps running.
 const GuardrailHookContractAdmissionRefused = "hook_contract_admission_refused"
+
+// errReleaseContractRefusal marks an admission refusal that this release's
+// hook-contract table caused for an agent a previous release admitted. It is
+// never reported as upstream drift (exit 3): an upgrade must roll back.
+var errReleaseContractRefusal = errors.New("refused by this release's hook-contract table for an agent that an earlier release admitted")
 
 // hookContractAdmissionRefusal names the connectors behind a guardrail that
 // stopped at the admission gate, so health can report them without parsing
