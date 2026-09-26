@@ -1526,34 +1526,6 @@ type ScannersConfig struct {
 	CodeGuard        string    `mapstructure:"codeguard"       yaml:"codeguard"`
 }
 
-// OpenShellConfig is the read-only remnant of the legacy openshell-sandbox
-// (0.0.x) standalone integration. The v8 schema still accepts the section so
-// existing configs load unchanged; binary, policy_dir, version, auto_pair, and
-// host_networking are accepted and ignored. Mode and SandboxHome are read only
-// by the legacy shim (legacy_openshell.go) until legacy-cleanup resets them.
-//
-// LEGACY(openshell-0.0.x): delete one release after cleanup.
-type OpenShellConfig struct {
-	Mode        string `mapstructure:"mode"         yaml:"mode,omitempty"`
-	SandboxHome string `mapstructure:"sandbox_home" yaml:"sandbox_home,omitempty"`
-}
-
-const DefaultSandboxHome = "/home/sandbox"
-
-// IsStandalone reports whether the config still records the legacy
-// openshell-sandbox standalone mode.
-func (o *OpenShellConfig) IsStandalone() bool {
-	return o.Mode == "standalone"
-}
-
-// EffectiveSandboxHome returns the recorded legacy sandbox home or the default.
-func (o *OpenShellConfig) EffectiveSandboxHome() string {
-	if o.SandboxHome != "" {
-		return o.SandboxHome
-	}
-	return DefaultSandboxHome
-}
-
 type GatewayWatcherSkillConfig struct {
 	Enabled    bool     `mapstructure:"enabled"      yaml:"enabled"`
 	TakeAction bool     `mapstructure:"take_action"   yaml:"take_action"`
@@ -2660,6 +2632,9 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	if !has("guardrail", "rule_pack_dir") {
 		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
 	}
+	if !has("openshell", "pack_dir") {
+		candidate.OpenShell.PackDir = filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
 	} else if gateway := v8YAMLMapValue(root, "gateway"); gateway != nil {
@@ -2972,6 +2947,12 @@ func loadConfigSource(
 			ReportConfigLoadError(context.Background(), "application_protection_invalid")
 		}
 		return nil, fmt.Errorf("config: application_protection: %w", err)
+	}
+	if err := cfg.OpenShell.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "openshell_invalid")
+		}
+		return nil, fmt.Errorf("config: openshell: %w", err)
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI
@@ -3909,6 +3890,15 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
 	viper.SetDefault("scanners.plugin_scanner", "defenseclaw")
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
+	// Pack-governed openshell keys (profile, yolo, workdir.mode, upload caps,
+	// egress lists, mcp.import) deliberately have no loader default so an
+	// unset key inherits the selected sandbox policy pack.
+	viper.SetDefault("openshell.binary", DefaultOpenShellBinary)
+	viper.SetDefault("openshell.pack_dir", filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName))
+	viper.SetDefault("openshell.workdir.git_depth", DefaultOpenShellGitDepth)
+	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
+	viper.SetDefault("openshell.approvals.debounce_ms", DefaultOpenShellApprovalDebounceMs)
+	viper.SetDefault("openshell.token_delivery", DefaultOpenShellTokenDelivery)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

@@ -933,21 +933,143 @@ class ScannersConfig:
 
 DEFAULT_SANDBOX_HOME = "/home/sandbox"
 
+# Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
+# internal/config/openshell.go).
+OPENSHELL_PROFILES = ("open", "balanced", "strict")
+# openshell keys an administrator can lock against ``sandbox run`` flags
+# (mirrors OpenShellLockableKeys).
+OPENSHELL_LOCKABLE_KEYS = (
+    "mcp.host_ports",
+    "mcp.import",
+    "pack",
+    "profile",
+    "resources",
+    "workdir.mode",
+    "workdir.unmask",
+    "yolo",
+)
+
+
+@dataclass
+class OpenShellGatewayConfig:
+    name: str = ""
+    workspace: str = ""
+
+
+@dataclass
+class OpenShellWorkdirConfig:
+    # Empty/zero values inherit the selected sandbox policy pack.
+    mode: str = ""
+    masks: list[str] = field(default_factory=list)
+    unmask: list[str] = field(default_factory=list)
+    max_upload_mb: int = 0
+    git_depth: int = 200
+    on_exit: str = "ask"
+
+
+@dataclass
+class OpenShellEgressConfig:
+    block: list[str] = field(default_factory=list)
+    allow: list[str] = field(default_factory=list)
+    ports: list[int] = field(default_factory=list)
+    large_upload_mb: int = 0
+    feed: str = ""
+
+
+@dataclass
+class OpenShellImageConfig:
+    base: str = ""
+    harness_versions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class OpenShellApprovalsConfig:
+    debounce_ms: int = 3000
+    agent_proposals: bool | None = None
+
+    def agent_proposals_enabled(self) -> bool:
+        return self.agent_proposals is None or bool(self.agent_proposals)
+
+
+@dataclass
+class OpenShellResourcesConfig:
+    cpu: str = ""
+    memory: str = ""
+
+
+@dataclass
+class OpenShellMCPConfig:
+    # ``import`` is a Python keyword; the YAML key stays ``import``
+    # (see _serialize_openshell).
+    import_: bool | None = None
+    host_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class OpenShellMiddlewareConfig:
+    enabled: bool = False
+
+
+@dataclass
+class OpenShellAdminConfig:
+    """Administrator sandbox constraints (``openshell.admin``).
+
+    Every field is optional; ``None`` / empty imposes no constraint. The Go
+    resolver (internal/openshell/packs) enforces them at every decision point.
+    """
+
+    required_pack: str = ""
+    min_profile: str = ""
+    allow_yolo: bool | None = None
+    allow_mount: bool | None = None
+    allow_host_ports: bool | None = None
+    allow_unblock: bool | None = None
+    allow_learn_mode: bool | None = None
+    allowed_harnesses: list[str] = field(default_factory=list)
+    egress_block: list[str] = field(default_factory=list)
+    egress_allow_only: list[str] = field(default_factory=list)
+    require_copy_for: list[str] = field(default_factory=list)
+    max_resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
+    locked: list[str] = field(default_factory=list)
+
 
 @dataclass
 class OpenShellConfig:
-    """Read-only remnant of the removed openshell-sandbox (0.0.x) integration.
+    """The NVIDIA OpenShell 0.1.x sandbox integration (``openshell:``).
 
-    The v8 schema still accepts the ``openshell`` section so existing configs
-    load unchanged; ``binary``, ``policy_dir``, ``version``, ``auto_pair`` and
-    ``host_networking`` are accepted and ignored (the v8 save only writes
-    modeled fields, so they stay on disk untouched). ``mode`` and
-    ``sandbox_home`` are read only by :func:`legacy_standalone_api_host` and
-    ``defenseclaw sandbox legacy-cleanup``.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
+    Mirrors ``OpenShellConfig`` in internal/config/openshell.go. Keys the
+    sandbox policy pack governs (``profile``, ``yolo``, ``workdir.mode``, upload
+    caps, egress lists, ``mcp.import``) stay empty unless the operator sets
+    them, so they inherit the pack. The legacy openshell-sandbox (0.0.x)
+    sub-keys ``policy_dir``, ``version``, ``auto_pair`` and ``host_networking``
+    are accepted and ignored (the v8 save only writes modeled fields that
+    changed, so they stay on disk untouched). ``mode`` and ``sandbox_home`` are
+    read only by :func:`legacy_standalone_api_host` and ``defenseclaw sandbox
+    legacy-cleanup``.
     """
 
+    enabled: bool = False
+    binary: str = "openshell"
+    gateway: OpenShellGatewayConfig = field(default_factory=OpenShellGatewayConfig)
+    ingress_port: int = 0
+    egress_port: int = 0
+    pack: str = ""
+    pack_dir: str = ""
+    profile: str = ""
+    yolo: bool | None = None
+    workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
+    egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
+    image: OpenShellImageConfig = field(default_factory=OpenShellImageConfig)
+    approvals: OpenShellApprovalsConfig = field(default_factory=OpenShellApprovalsConfig)
+    resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
+    harnesses: list[str] = field(default_factory=list)
+    wrappers: list[str] = field(default_factory=list)
+    mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
+    upstream_telemetry: bool = False
+    token_delivery: str = "provider"
+    middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
+    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+    # LEGACY(openshell-0.0.x): delete one release after cleanup.
     mode: str = ""
     sandbox_home: str = DEFAULT_SANDBOX_HOME
 
@@ -956,6 +1078,18 @@ class OpenShellConfig:
 
     def effective_sandbox_home(self) -> str:
         return self.sandbox_home or DEFAULT_SANDBOX_HOME
+
+    def effective_ingress_port(self, api_port: int) -> int:
+        """Sandbox hook ingress port; 0 means ``api_port + 1``."""
+        if self.ingress_port > 0:
+            return self.ingress_port
+        return (api_port if api_port > 0 else 18970) + 1
+
+    def effective_egress_port(self, api_port: int) -> int:
+        """DefenseClaw egress proxy port; 0 means ``api_port + 2``."""
+        if self.egress_port > 0:
+            return self.egress_port
+        return (api_port if api_port > 0 else 18970) + 2
 
 
 def legacy_standalone_configured(cfg: Any) -> bool:
@@ -2626,6 +2760,23 @@ class Config:
             return []
         return [self.active_connector()]
 
+    def policy_connectors(self) -> list[str]:
+        """Return the connectors whose rule packs and hook config DefenseClaw serves.
+
+        Mirrors ``Config.PolicyConnectors`` in internal/config/openshell.go:
+        :meth:`active_connectors` plus every harness enabled for OpenShell
+        sandboxes (``openshell.harnesses``), which can run in a sandbox without
+        being installed on the host. Normalized, deduplicated and sorted. Use
+        it for rule packs and hook config only; roster, status and inventory
+        surfaces keep using :meth:`active_connectors`.
+        """
+        names = set(self.active_connectors())
+        openshell = getattr(self, "openshell", None)
+        for harness in getattr(openshell, "harnesses", None) or []:
+            if str(harness).strip():
+                names.add(connector_paths.normalize(str(harness)))
+        return sorted(names)
+
     def skill_dirs(self, connector: str | None = None) -> list[str]:
         """Return skill directories for a connector.
 
@@ -3253,6 +3404,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         sources = registries.get("sources") or []
         if not sources:
             d.pop("registries", None)
+    _serialize_openshell(d)
     _serialize_routing(d)
     return d
 
@@ -4709,15 +4861,153 @@ def _merge_acp(raw: Any) -> ACPConfig:
     )
 
 
-def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
-    # Only the legacy shim fields are modeled; the other legacy sub-keys are
-    # accepted by the schema and deliberately ignored.
-    if not raw:
-        return OpenShellConfig()
-    return OpenShellConfig(
-        mode=raw.get("mode", "") or "",
-        sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME) or DEFAULT_SANDBOX_HOME,
+def _openshell_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _openshell_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _openshell_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _openshell_optional_bool(value: Any) -> bool | None:
+    # Tri-state: an absent/null key means "inherit" (pack) or "no constraint"
+    # (admin), never False.
+    if value is None:
+        return None
+    return _coerce_bool(value)
+
+
+def _openshell_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if item is not None and str(item).strip()]
+
+
+def _openshell_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            continue
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _merge_openshell_resources(raw: Any) -> OpenShellResourcesConfig:
+    raw = _openshell_mapping(raw)
+    return OpenShellResourcesConfig(
+        cpu=_openshell_str(raw.get("cpu")),
+        memory=_openshell_str(raw.get("memory")),
     )
+
+
+def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShellConfig:
+    """Build :class:`OpenShellConfig` from the raw ``openshell:`` mapping.
+
+    Loader defaults mirror ``setDefaults`` in internal/config/config.go. The
+    legacy sub-keys ``policy_dir``, ``version``, ``auto_pair`` and
+    ``host_networking`` are accepted by the schema and deliberately ignored.
+    """
+    raw = _openshell_mapping(raw)
+    pack_dir_default = os.path.join(data_dir, "policies", "sandbox") if data_dir else ""
+    gateway = _openshell_mapping(raw.get("gateway"))
+    workdir = _openshell_mapping(raw.get("workdir"))
+    egress = _openshell_mapping(raw.get("egress"))
+    image = _openshell_mapping(raw.get("image"))
+    approvals = _openshell_mapping(raw.get("approvals"))
+    mcp = _openshell_mapping(raw.get("mcp"))
+    middleware = _openshell_mapping(raw.get("middleware"))
+    admin = _openshell_mapping(raw.get("admin"))
+    harness_versions = _openshell_mapping(image.get("harness_versions"))
+    return OpenShellConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        binary=_openshell_str(raw.get("binary")) or "openshell",
+        gateway=OpenShellGatewayConfig(
+            name=_openshell_str(gateway.get("name")),
+            workspace=_openshell_str(gateway.get("workspace")),
+        ),
+        ingress_port=_openshell_int(raw.get("ingress_port")),
+        egress_port=_openshell_int(raw.get("egress_port")),
+        pack=_openshell_str(raw.get("pack")),
+        pack_dir=_openshell_str(raw.get("pack_dir")) or pack_dir_default,
+        profile=_openshell_str(raw.get("profile")),
+        yolo=_openshell_optional_bool(raw.get("yolo")),
+        workdir=OpenShellWorkdirConfig(
+            mode=_openshell_str(workdir.get("mode")),
+            masks=_openshell_str_list(workdir.get("masks")),
+            unmask=_openshell_str_list(workdir.get("unmask")),
+            max_upload_mb=_openshell_int(workdir.get("max_upload_mb")),
+            git_depth=_openshell_int(workdir.get("git_depth"), 200),
+            on_exit=_openshell_str(workdir.get("on_exit")) or "ask",
+        ),
+        egress=OpenShellEgressConfig(
+            block=_openshell_str_list(egress.get("block")),
+            allow=_openshell_str_list(egress.get("allow")),
+            ports=_openshell_int_list(egress.get("ports")),
+            large_upload_mb=_openshell_int(egress.get("large_upload_mb")),
+            feed=_openshell_str(egress.get("feed")),
+        ),
+        image=OpenShellImageConfig(
+            base=_openshell_str(image.get("base")),
+            harness_versions={str(k): str(v) for k, v in harness_versions.items() if v is not None},
+        ),
+        approvals=OpenShellApprovalsConfig(
+            debounce_ms=_openshell_int(approvals.get("debounce_ms"), 3000),
+            agent_proposals=_openshell_optional_bool(approvals.get("agent_proposals")),
+        ),
+        resources=_merge_openshell_resources(raw.get("resources")),
+        harnesses=_openshell_str_list(raw.get("harnesses")),
+        wrappers=_openshell_str_list(raw.get("wrappers")),
+        mcp=OpenShellMCPConfig(
+            import_=_openshell_optional_bool(mcp.get("import")),
+            host_ports=_openshell_int_list(mcp.get("host_ports")),
+        ),
+        upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
+        token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
+        middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
+        admin=OpenShellAdminConfig(
+            required_pack=_openshell_str(admin.get("required_pack")),
+            min_profile=_openshell_str(admin.get("min_profile")),
+            allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
+            allow_mount=_openshell_optional_bool(admin.get("allow_mount")),
+            allow_host_ports=_openshell_optional_bool(admin.get("allow_host_ports")),
+            allow_unblock=_openshell_optional_bool(admin.get("allow_unblock")),
+            allow_learn_mode=_openshell_optional_bool(admin.get("allow_learn_mode")),
+            allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
+            egress_block=_openshell_str_list(admin.get("egress_block")),
+            egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
+            require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
+            max_resources=_merge_openshell_resources(admin.get("max_resources")),
+            locked=_openshell_str_list(admin.get("locked")),
+        ),
+        mode=_openshell_str(raw.get("mode")),
+        sandbox_home=_openshell_str(raw.get("sandbox_home")) or DEFAULT_SANDBOX_HOME,
+    )
+
+
+def _serialize_openshell(d: dict[str, Any]) -> None:
+    """Restore YAML key names the dataclass cannot spell (``mcp.import``)."""
+    openshell = d.get("openshell")
+    if not isinstance(openshell, dict):
+        return
+    mcp = openshell.get("mcp")
+    if isinstance(mcp, dict) and "import_" in mcp:
+        mcp["import"] = mcp.pop("import_")
 
 
 def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
@@ -5019,7 +5309,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             plugin_llm=_merge_llm(scanners_raw.get("plugin_llm")),
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
-        openshell=_merge_openshell(raw.get("openshell")),
+        openshell=_merge_openshell(raw.get("openshell"), data_dir),
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),

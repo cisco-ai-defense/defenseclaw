@@ -154,6 +154,16 @@ func DefaultConfig() *Config {
 			PluginScanner: "defenseclaw",
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
 		},
+		OpenShell: OpenShellConfig{
+			Binary:  DefaultOpenShellBinary,
+			PackDir: filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName),
+			Workdir: OpenShellWorkdirConfig{
+				GitDepth: DefaultOpenShellGitDepth,
+				OnExit:   DefaultOpenShellOnExit,
+			},
+			Approvals:     OpenShellApprovalsConfig{DebounceMs: DefaultOpenShellApprovalDebounceMs},
+			TokenDelivery: DefaultOpenShellTokenDelivery,
+		},
 		Watch: WatchConfig{
 			DebounceMs:          500,
 			AutoBlock:           true,

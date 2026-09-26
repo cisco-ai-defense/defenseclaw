@@ -2044,12 +2044,26 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	// The legacy openshell section only matters through the bind shim; its
-	// ignored sub-keys must not bounce the API listener.
+	// The legacy openshell sub-keys only matter through the bind shim, and
+	// every other openshell key is read per sandbox launch, so neither may
+	// bounce the API listener.
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
 		config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) ||
-		oldCfg.Guardrail.Host != newCfg.Guardrail.Host
+		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
+		openShellListenersChanged(oldCfg, newCfg)
+}
+
+// openShellListenersChanged reports whether the sandbox hook ingress or egress
+// proxy listener must be rebound: the integration was switched on or off, or
+// an enabled integration moved either port.
+func openShellListenersChanged(oldCfg, newCfg *config.Config) bool {
+	if !oldCfg.OpenShell.Enabled && !newCfg.OpenShell.Enabled {
+		return false
+	}
+	return oldCfg.OpenShell.Enabled != newCfg.OpenShell.Enabled ||
+		oldCfg.OpenShellIngressPort() != newCfg.OpenShellIngressPort() ||
+		oldCfg.OpenShellEgressPort() != newCfg.OpenShellEgressPort()
 }
 
 func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {

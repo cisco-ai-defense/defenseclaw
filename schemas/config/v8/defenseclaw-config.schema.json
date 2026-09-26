@@ -636,34 +636,405 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "default": "openshell"
+        },
+        "gateway": {
+          "$ref": "#/$defs/openShellGateway"
+        },
+        "ingress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "egress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "pack": {
+          "$ref": "#/$defs/openShellPackRef"
+        },
+        "pack_dir": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "profile": {
+          "$ref": "#/$defs/openShellProfileOrInherit"
+        },
+        "yolo": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "workdir": {
+          "$ref": "#/$defs/openShellWorkdir"
+        },
+        "egress": {
+          "$ref": "#/$defs/openShellEgress"
+        },
+        "image": {
+          "$ref": "#/$defs/openShellImage"
+        },
+        "approvals": {
+          "$ref": "#/$defs/openShellApprovals"
+        },
+        "resources": {
+          "$ref": "#/$defs/openShellResources"
+        },
+        "harnesses": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "wrappers": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "mcp": {
+          "$ref": "#/$defs/openShellMCP"
+        },
+        "upstream_telemetry": {
+          "type": "boolean",
+          "default": false
+        },
+        "token_delivery": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "env"
+          ],
+          "default": "provider"
+        },
+        "middleware": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/openShellAdmin"
         },
         "policy_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
         },
         "mode": {
           "type": "string",
-          "maxLength": 64
+          "maxLength": 64,
+          "deprecated": true
         },
         "version": {
           "type": "string",
           "maxLength": 128,
-          "default": "0.6.2"
+          "default": "0.6.2",
+          "deprecated": true
         },
         "sandbox_home": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
         },
         "auto_pair": {
           "type": [
             "boolean",
             "null"
           ],
-          "default": true
+          "default": true,
+          "deprecated": true
         },
         "host_networking": {
           "type": "boolean",
+          "default": true,
+          "deprecated": true
+        }
+      }
+    },
+    "openShellPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "openShellListenPort": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "default": 0
+    },
+    "openShellPortList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/openShellPort"
+      }
+    },
+    "openShellPackRef": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "openShellProfileOrInherit": {
+      "type": "string",
+      "enum": [
+        "",
+        "open",
+        "balanced",
+        "strict"
+      ]
+    },
+    "openShellHostGlob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\s/@]+$"
+    },
+    "openShellHostGlobList": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/openShellHostGlob"
+      }
+    },
+    "openShellNameList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/connectorName"
+      }
+    },
+    "openShellGlobList": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/pathString"
+      }
+    },
+    "openShellGateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "workspace": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "openShellWorkdir": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "",
+            "mount",
+            "copy"
+          ]
+        },
+        "masks": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "unmask": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "max_upload_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "git_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 200
+        },
+        "on_exit": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "keep",
+            "undo"
+          ],
+          "default": "ask"
+        }
+      }
+    },
+    "openShellEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "$ref": "#/$defs/openShellHostGlobList"
+        },
+        "allow": {
+          "$ref": "#/$defs/openShellHostGlobList"
+        },
+        "ports": {
+          "$ref": "#/$defs/openShellPortList"
+        },
+        "large_upload_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "feed": {
+          "type": "string",
+          "enum": [
+            "",
+            "builtin",
+            "none"
+          ]
+        }
+      }
+    },
+    "openShellImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "harness_versions": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "openShellApprovals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debounce_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000,
+          "default": 3000
+        },
+        "agent_proposals": {
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": true
+        }
+      }
+    },
+    "openShellResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "pattern": "^(|[0-9]{1,6}(\\.[0-9]{1,3})?|[0-9]{1,9}m)$"
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^(|[0-9]{1,15}(Ki|Mi|Gi|Ti|k|K|M|G|T)?)$"
+        }
+      }
+    },
+    "openShellMCP": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "import": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "host_ports": {
+          "$ref": "#/$defs/openShellPortList"
+        }
+      }
+    },
+    "openShellAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_pack": {
+          "$ref": "#/$defs/openShellPackRef"
+        },
+        "min_profile": {
+          "$ref": "#/$defs/openShellProfileOrInherit"
+        },
+        "allow_yolo": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_mount": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_host_ports": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_unblock": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_learn_mode": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowed_harnesses": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "egress_block": {
+          "$ref": "#/$defs/openShellHostGlobList"
+        },
+        "egress_allow_only": {
+          "$ref": "#/$defs/openShellHostGlobList"
+        },
+        "require_copy_for": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "max_resources": {
+          "$ref": "#/$defs/openShellResources"
+        },
+        "locked": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "mcp.host_ports",
+              "mcp.import",
+              "pack",
+              "profile",
+              "resources",
+              "workdir.mode",
+              "workdir.unmask",
+              "yolo"
+            ]
+          }
         }
       }
     },
