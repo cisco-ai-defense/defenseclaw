@@ -96,9 +96,14 @@ installed. Every path keeps your configuration and data.
 `defenseclaw rollback` swaps the live install with the one the last upgrade
 replaced: binaries, Python environment, and the configuration and data as they
 were at upgrade time. Anything written since then moves into
-`~/.defenseclaw/previous` and comes back if you roll forward. One previous
-install is kept, and rolling back needs no network. Reinstalling the same
-version does not replace the rollback copy.
+`~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
+again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
+One previous install is kept, and rolling back needs no network. Reinstalling
+the same version does not replace the rollback copy.
+
+If an upgrade or rollback is interrupted (the terminal closes or the machine
+loses power), run the same command again. The installer first restores the
+install the interrupted run was replacing, then continues.
 
 ## Migrations
 
