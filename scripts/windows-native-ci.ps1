@@ -5310,9 +5310,6 @@ function Invoke-WizardConfigureLaterAcceptance(
     if (-not (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml') -PathType Leaf)) {
         throw 'Configure later did not create the canonical DefenseClaw configuration'
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot '.migration_state.json') -PathType Leaf)) {
-        throw 'Configure later did not create the release-bound migration cursor'
-    }
     $hookDir = Join-Path $DataRoot 'hooks'
     if (Test-Path -LiteralPath $hookDir) {
         $hookFiles = @(Get-ChildItem -LiteralPath $hookDir -File -Force -ErrorAction Stop)
@@ -5781,17 +5778,14 @@ otel:
     protocol: http
 "@.Replace("`r`n", "`n")
         [IO.File]::WriteAllText($configPath, $v7Fixture, [Text.UTF8Encoding]::new($false))
+        # The cursor 0.8.0 left behind: 1.x migrate() reads it to know which 0.x
+        # steps already ran.
         $seedCursor = @'
-import sys
-from defenseclaw import migration_state
+import json, os, sys
 from defenseclaw.migrations import MIGRATIONS
-state = migration_state.bootstrap(
-    None,
-    from_version="0.8.0",
-    package_version="0.8.0",
-    registry_versions=[version for version, _description, _migration in MIGRATIONS],
-)
-migration_state.save(sys.argv[1], state)
+applied = [v for v, _d, _m in MIGRATIONS if tuple(int(p) for p in v.split(".")) <= (0, 8, 0)]
+with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf-8") as stream:
+    json.dump({"applied": applied}, stream)
 '@
         Invoke-Installed $python @('-I', '-c', $seedCursor, $dataRoot) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seed-080-migration-cursor.log') | Out-Null
@@ -5866,10 +5860,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        $migrationCursor = Get-Content -LiteralPath (Join-Path $dataRoot '.migration_state.json') `
-            -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ('0.8.5' -notin @($migrationCursor.applied)) {
-            throw 'seeded setup upgrade did not durably record observability-v8 activation'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v8'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot

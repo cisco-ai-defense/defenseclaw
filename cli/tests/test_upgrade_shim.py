@@ -187,7 +187,7 @@ def test_upgrade_runs_the_verified_release_installer(
 
     assert len(execs) == 1
     bash, script, *args = execs[0]
-    assert Path(script).name == "install.sh"
+    assert os.path.basename(script) == "install.sh"
     assert Path(script).read_text(encoding="utf-8") == (release / "install.sh").read_text(encoding="utf-8")
     assert args == ["--yes", "--local", str(release)]
 
