@@ -188,7 +188,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) refuseForward(w http.ResponseWriter, pr Principal, method string, dec Decision, start time.Time) {
 	status := statusFor(dec)
-	p.recordRefusal(pr, method, dec, status, start)
+	p.recordRefusal(pr, method, dec, status, start, "")
 	writeJSON(w, status, p.blockResponse(pr, dec))
 }
 

@@ -17,6 +17,7 @@
 package egress
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -82,7 +83,8 @@ type Options struct {
 	// tunnels are never terminated). Nil uses the system roots, TLS 1.2+.
 	UpstreamTLS *tls.Config
 
-	// HeaderTimeout bounds reading a request's headers (slowloris).
+	// HeaderTimeout bounds reading a request's headers (slowloris), and
+	// reading a tunnel's TLS ClientHello once its first byte arrived.
 	HeaderTimeout time.Duration
 	// IdleTimeout closes keep-alive client connections idle between
 	// requests, and idle pooled upstream connections.
@@ -123,6 +125,8 @@ type Proxy struct {
 	dialer  *guardDialer
 	hint    func(Principal, Decision) string
 	idle    time.Duration
+	// helloTimeout bounds reading a tunnel's ClientHello.
+	helloTimeout time.Duration
 
 	srv       *http.Server
 	transport *http.Transport
@@ -192,15 +196,16 @@ func New(opts Options) (*Proxy, error) {
 	}
 
 	p := &Proxy{
-		auth:    opts.Auth,
-		sink:    opts.Sink,
-		counter: opts.Counter,
-		dialer:  &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
-		hint:    opts.UnblockHint,
-		idle:    opts.TunnelIdleTimeout,
-		limits:  newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
-		sem:     make(chan struct{}, opts.MaxConns),
-		tunnels: map[*tunnel]struct{}{},
+		auth:         opts.Auth,
+		sink:         opts.Sink,
+		counter:      opts.Counter,
+		dialer:       &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
+		hint:         opts.UnblockHint,
+		idle:         opts.TunnelIdleTimeout,
+		helloTimeout: opts.HeaderTimeout,
+		limits:       newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
+		sem:          make(chan struct{}, opts.MaxConns),
+		tunnels:      map[*tunnel]struct{}{},
 	}
 	p.decider.Store(opts.Decider)
 	p.ctx, p.cancel = context.WithCancel(context.Background())
@@ -376,6 +381,8 @@ type tunnel struct {
 	flow      *flow
 	exempt    bool
 	cut       atomic.Bool
+	// refused marks a CONNECT tunnel ended for its TLS server name.
+	refused atomic.Bool
 
 	closeMu sync.Mutex
 	// closeFn force-closes the tunnel's connections. It stays nil while the
@@ -598,12 +605,12 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	allowed.TunnelID, allowed.RemoteAddr, allowed.Status, allowed.FirstSeen = t.id, remote.String(), http.StatusOK, first
 	p.emit(allowed)
 
-	idled := p.relay(t, conn, brw.Reader, upstream)
+	idled := p.relay(t, d, conn, brw.Reader, upstream)
 
 	closed := p.event(EventClosed, pr, http.MethodConnect, dec)
 	closed.TunnelID, closed.RemoteAddr, closed.Status = t.id, remote.String(), http.StatusOK
 	closed.BytesUp, closed.BytesDown, closed.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-	closed.Terminated = idled || t.cut.Load()
+	closed.Terminated = idled || t.cut.Load() || t.refused.Load()
 	p.emit(closed)
 }
 
@@ -638,16 +645,18 @@ func parsePort(s string) (int, bool) {
 
 func (p *Proxy) refuseRaw(conn net.Conn, pr Principal, method string, dec Decision, start time.Time) {
 	status := statusFor(dec)
-	p.recordRefusal(pr, method, dec, status, start)
+	p.recordRefusal(pr, method, dec, status, start, "")
 	writeRaw(conn, status, reasonPhrase(status, &dec), nil, p.blockResponse(pr, dec))
 }
 
-func (p *Proxy) recordRefusal(pr Principal, method string, dec Decision, status int, start time.Time) {
+// recordRefusal counts and reports a refusal; tunnelID is set when an
+// established tunnel was refused.
+func (p *Proxy) recordRefusal(pr Principal, method string, dec Decision, status int, start time.Time, tunnelID string) {
 	if dec.Category != CategoryInvalidDestination {
 		p.counter.recordBlocked(pr, dec.Host)
 	}
 	e := p.event(EventBlocked, pr, method, dec)
-	e.Status, e.Duration = status, time.Since(start)
+	e.TunnelID, e.Status, e.Duration = tunnelID, status, time.Since(start)
 	p.emit(e)
 }
 
@@ -676,9 +685,10 @@ func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, dec Decision, err err
 }
 
 // relay copies bytes both ways until both directions finish, one fails, or
-// the tunnel is idle for TunnelIdleTimeout. It reports whether the idle
-// timeout ended the tunnel.
-func (p *Proxy) relay(t *tunnel, client net.Conn, clientReader io.Reader, upstream net.Conn) bool {
+// the tunnel is idle for TunnelIdleTimeout. The client's first flight is
+// screened for its TLS server name before anything reaches the upstream. It
+// reports whether the idle timeout ended the tunnel.
+func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Reader, upstream net.Conn) bool {
 	var last atomic.Int64
 	touch := func() { last.Store(time.Now().UnixNano()) }
 	touch()
@@ -689,19 +699,29 @@ func (p *Proxy) relay(t *tunnel, client net.Conn, clientReader io.Reader, upstre
 		t.close()
 	})
 
+	up := func(n int) bool {
+		v := t.flow.addUp(int64(n), t.exempt)
+		if v.signal {
+			p.emitLargeUpload(t, v)
+		}
+		if v.cut {
+			t.cut.Store(true)
+			return false
+		}
+		return true
+	}
 	errc := make(chan error, 2)
 	go func() {
-		errc <- pipe(upstream, clientReader, touch, func(n int) bool {
-			v := t.flow.addUp(int64(n), t.exempt)
-			if v.signal {
-				p.emitLargeUpload(t, v)
-			}
-			if v.cut {
-				t.cut.Store(true)
-				return false
-			}
-			return true
-		})
+		first, err := p.screenFirstFlight(t, d, client, clientReader)
+		if err != nil {
+			errc <- err
+			return
+		}
+		src := clientReader
+		if len(first) > 0 {
+			src = io.MultiReader(bytes.NewReader(first), clientReader)
+		}
+		errc <- pipe(upstream, src, touch, up)
 	}()
 	go func() {
 		errc <- pipe(client, upstream, touch, func(n int) bool {

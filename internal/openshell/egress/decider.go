@@ -33,8 +33,11 @@ import (
 type Mode string
 
 const (
-	// ModeOpen allows by default and blocks the blocklist feed (the "open"
-	// profile).
+	// ModeOpen allows destination names by default and blocks the
+	// blocklist feed (the "open" profile). IP-literal destinations are
+	// blocked (ip_literal, unblockable) because a literal sidesteps the
+	// name-based feed: a CONNECT to a CDN address can carry any blocked
+	// site's TLS server name.
 	ModeOpen Mode = "open"
 	// ModeAllowlist blocks by default and allows the curated allowlist feed
 	// (the "balanced" profile).
@@ -113,8 +116,8 @@ type Decision struct {
 
 // Unblock lifts a block for one sandbox, or for every sandbox when
 // SandboxID is empty (a persistent "always" decision). Unblocks override the
-// blocklist feed, allowlist-mode defaults and the large-upload block, but
-// never guard or operator blocks.
+// blocklist feed, the mode defaults (allowlist mode, open-mode IP literals)
+// and the large-upload block, but never guard or operator blocks.
 type Unblock struct {
 	// Pattern is an exact host, a "*." wildcard, an IP literal or a CIDR.
 	Pattern   string
@@ -147,8 +150,9 @@ type DeciderOptions struct {
 	// Block and Allow are operator patterns (openshell.egress.block/allow,
 	// firewall deny rules): exact hosts, "*." wildcards, IP literals or
 	// CIDRs. Block wins over everything except the guard; Allow overrides
-	// the blocklist feed and allowlist-mode defaults. CIDR blocks are also
-	// enforced against the resolved address at dial time.
+	// the blocklist feed and the mode defaults (allowlist mode, open-mode IP
+	// literals). CIDR blocks are also enforced against the resolved address
+	// at dial time.
 	Block []string
 	Allow []string
 	// Unblocks supplies unblock decisions; nil means none.
@@ -323,8 +327,8 @@ func (d *Decider) Feeds() []FeedInfo {
 // Decide returns the verdict for p reaching host:port. host may be a DNS
 // name or an IP literal (bracketed or not). Layers apply in order: guard
 // (validation, SSRF policy, ports), operator block, unblock decisions,
-// operator allow, blocklist feed, then the mode default (open allows,
-// allowlist allows only allowlist feed matches).
+// operator allow, blocklist feed, then the mode default (open allows names
+// and blocks IP literals, allowlist allows only allowlist feed matches).
 //
 // Decide never resolves DNS: the SSRF policy for names is enforced against
 // every resolved address at dial time. IP literals are also refused when they
@@ -372,6 +376,11 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 		return dec
 	}
 	if mode == ModeOpen {
+		if addr.IsValid() {
+			dec = blocked(dec, CategoryIPLiteral, SourceDefault, "")
+			dec.Unblockable = true
+			return dec
+		}
 		dec.Allowed, dec.Source = true, SourceDefault
 		return dec
 	}

@@ -26,7 +26,10 @@ const (
 	// upstream response arrived (absolute-form). One per tunnel or request.
 	EventAllowed EventKind = "allowed"
 	// EventBlocked: a policy or limit refused the destination; the client
-	// got a 403 (or 429) JSON body.
+	// got a 403 (or 429) JSON body. When an established CONNECT tunnel is
+	// refused for its TLS server name, the event carries the tunnel's
+	// TunnelID and the refused name as Host, and the client got a TLS alert
+	// instead.
 	EventBlocked EventKind = "blocked"
 	// EventClosed: an allowed tunnel or request finished; carries byte
 	// counts and duration.
@@ -81,8 +84,8 @@ type Event struct {
 	// binding (allowed), or a destination that was first-seen when the
 	// large upload happened (large_upload).
 	FirstSeen bool
-	// Terminated marks a tunnel or request cut by the large-upload block or
-	// by the tunnel idle timeout.
+	// Terminated marks a tunnel or request cut by the large-upload block, by
+	// the tunnel idle timeout, or for its TLS server name.
 	Terminated bool
 	// Error is a bounded failure description for failed events.
 	Error string

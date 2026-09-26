@@ -81,15 +81,23 @@ func sandboxRef(p Principal) string {
 	return ""
 }
 
+func sandboxFlag(p Principal) string {
+	if ref := sandboxRef(p); ref != "" {
+		return " --sandbox " + ref
+	}
+	return ""
+}
+
 // DefaultUnblockHint explains how a blocked destination can be allowed. The
 // commands it names are the `defenseclaw sandbox unblock` surface.
 func DefaultUnblockHint(p Principal, d Decision) string {
 	switch {
+	case d.Category == CategoryIPLiteral:
+		return fmt.Sprintf("Retry with the site's host name instead of its IP address. If the IP address itself is needed, tell "+
+			"the user DefenseClaw blocked it; they can allow it with `defenseclaw sandbox unblock %s%s`. "+
+			"Do not try to reach it another way.", d.Host, sandboxFlag(p))
 	case d.Unblockable:
-		cmd := "defenseclaw sandbox unblock " + d.Host
-		if ref := sandboxRef(p); ref != "" {
-			cmd += " --sandbox " + ref
-		}
+		cmd := "defenseclaw sandbox unblock " + d.Host + sandboxFlag(p)
 		return fmt.Sprintf("Tell the user DefenseClaw blocked this destination. They can allow it for this sandbox with `%s`, "+
 			"for every sandbox with `defenseclaw sandbox unblock %s --always`, or from the DefenseClaw activity feed. "+
 			"Do not try to reach it another way.", cmd, d.Host)

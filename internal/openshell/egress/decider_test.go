@@ -71,6 +71,7 @@ func TestDecideOpenMode(t *testing.T) {
 	allow := decisionWant{allowed: true, source: SourceDefault}
 	private := decisionWant{category: CategoryPrivateNetwork, source: SourceGuard}
 	invalid := decisionWant{category: CategoryInvalidDestination, source: SourceGuard}
+	literal := decisionWant{category: CategoryIPLiteral, source: SourceDefault, unblockable: true}
 
 	tests := []struct {
 		host string
@@ -79,8 +80,10 @@ func TestDecideOpenMode(t *testing.T) {
 	}{
 		{"example.com", 443, allow},
 		{"EXAMPLE.com.", 80, allow},
-		{publicV4, 443, allow},
-		{"[" + publicV6 + "]", 443, allow},
+		{publicV4, 443, literal},
+		{"[" + publicV6 + "]", 443, literal},
+		{publicV6, 80, literal},
+		{"::ffff:" + publicV4, 443, literal},
 		{"webhook.site", 443, decisionWant{category: CategoryWebhookCatcher, source: SourceFeed, rule: "webhook.site", unblockable: true}},
 		{"abc.ngrok-free.app", 443, decisionWant{category: CategoryTunnel, source: SourceFeed, rule: "*.ngrok-free.app", unblockable: true}},
 		{"pastebin.com", 80, decisionWant{category: CategoryPasteSite, source: SourceFeed, unblockable: true}},
@@ -165,6 +168,51 @@ func TestDecideIgnoresDaemonPrivateAllowlist(t *testing.T) {
 	for _, host := range []string{"10.0.0.5", "100.64.0.9"} {
 		checkDecision(t, d, testPrincipal, host, 443, decisionWant{category: CategoryPrivateNetwork, source: SourceGuard})
 	}
+}
+
+// In open mode a public IP literal needs an operator allow or an unblock: a
+// literal sidesteps the name-based blocklist (CONNECT to a CDN address, then
+// any blocked site's server name).
+func TestDecideIPLiterals(t *testing.T) {
+	unblocks, err := NewMemoryUnblocks(
+		Unblock{Pattern: publicV4, SandboxID: "sb-1"},
+		Unblock{Pattern: "2001:4860::/32"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, err := ParseFeed([]byte("schema_version: 1\nkind: blocklist\nname: team\nfeed_version: \"1\"\nentries:\n" +
+		"  - {name: Drop net, category: file_drop, hosts: [\"8.8.4.0/24\"]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	builtin, err := BuiltinBlocklist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mustDecider(t, DeciderOptions{Unblocks: unblocks, Allow: []string{"1.1.1.0/24"}, Blocklists: []*Feed{builtin, team}})
+	other := Principal{BindingID: "b-2", SandboxID: "sb-2"}
+	literal := decisionWant{category: CategoryIPLiteral, source: SourceDefault, unblockable: true}
+
+	got := checkDecision(t, d, other, publicV4, 443, literal)
+	if got.Host != publicV4 || !strings.Contains(got.Reason, "blocklist") {
+		t.Errorf("ip_literal decision = %+v", got)
+	}
+	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{allowed: true, source: SourceUnblock, rule: publicV4})
+	checkDecision(t, d, other, publicV6, 443, decisionWant{allowed: true, source: SourceUnblock, rule: "2001:4860::/32"})
+	checkDecision(t, d, other, "1.1.1.1", 443, decisionWant{allowed: true, source: SourceOperator, rule: "1.1.1.0/24"})
+	// A feed's CIDR entry keeps its own category.
+	checkDecision(t, d, other, publicV4Alt, 443, decisionWant{category: CategoryFileDrop, source: SourceFeed, rule: "8.8.4.0/24", unblockable: true})
+	// Names are unaffected.
+	checkDecision(t, d, other, "example.com", 443, decisionWant{allowed: true, source: SourceDefault})
+
+	// Allowlist mode already refuses literals as not allowlisted; a
+	// principal in open mode on an allowlist decider gets ip_literal.
+	a := mustDecider(t, DeciderOptions{Mode: ModeAllowlist})
+	checkDecision(t, a, other, publicV4, 443, decisionWant{category: CategoryNotAllowlisted, source: SourceDefault, unblockable: true})
+	open := other
+	open.Mode = ModeOpen
+	checkDecision(t, a, open, publicV4, 443, literal)
 }
 
 // This machine's own public addresses are refused by the guard, which

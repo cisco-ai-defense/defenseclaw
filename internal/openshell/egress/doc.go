@@ -21,8 +21,11 @@
 // 127.0.0.1:<egress port> through a `protocol: tcp` + `tls: skip` policy
 // rule, so the proxy sees plain HTTP proxy requests arriving from loopback:
 //
-//   - CONNECT tunnels carry all HTTPS traffic as opaque bytes; the proxy
-//     never terminates or inspects TLS, so pinning clients keep working.
+//   - CONNECT tunnels carry HTTPS traffic as opaque bytes. The proxy never
+//     terminates TLS, so pinning clients keep working; it reads only the
+//     ClientHello's server name (SNI) and ends a tunnel whose SNI names a
+//     destination it would block, so an allowed name or address cannot front
+//     for a blocked site on the same CDN.
 //   - Absolute-form requests (plain http://, rarely https://) are forwarded
 //     with hop-by-hop headers and the proxy credential stripped.
 //
@@ -32,8 +35,10 @@
 // tunnel to a binding and to rate-limit per sandbox.
 //
 // A Decider allows or blocks each destination. Open mode (the "open" profile)
-// allows by default and blocks the embedded exfiltration and abuse feed;
-// allowlist mode (the "balanced" profile) allows only the curated allowlist.
+// allows destination names by default, blocks the embedded exfiltration and
+// abuse feed, and reaches IP-literal destinations only after an unblock (a
+// literal would sidestep the name-based feed); allowlist mode (the
+// "balanced" profile) allows only the curated allowlist.
 // Operator block and allow lists and per-sandbox or persistent unblock
 // decisions layer on top.
 //

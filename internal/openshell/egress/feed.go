@@ -63,6 +63,7 @@ const (
 	CategoryNotAllowlisted     Category = "not_allowlisted"
 	CategoryRateLimited        Category = "rate_limited"
 	CategoryLargeUpload        Category = "large_upload"
+	CategoryIPLiteral          Category = "ip_literal"
 )
 
 var categoryReasons = map[Category]string{
@@ -84,6 +85,7 @@ var categoryReasons = map[Category]string{
 	CategoryNotAllowlisted:     "This sandbox's network profile only allows destinations on its allowlist.",
 	CategoryRateLimited:        "This sandbox has too many connections open or is opening them too fast.",
 	CategoryLargeUpload:        "Large upload to a destination this sandbox had not contacted before.",
+	CategoryIPLiteral:          "An IP address hides which site it belongs to, so the blocklist cannot apply; the open profile reaches IP addresses only after an unblock.",
 }
 
 // Reason returns the default human-readable explanation for c.
