@@ -43,12 +43,33 @@ func testSandboxIdentity() SandboxIdentity {
 	}
 }
 
+// sandboxHarness shares one audit store across a test's cases. Opening a
+// store runs every audit migration, which dominates this suite under -race;
+// each case still binds a fresh capturing runtime and recorder, so records and
+// tracked phases never leak between cases.
+type sandboxHarness struct {
+	logger *Logger
+}
+
+func newSandboxHarness(t *testing.T) *sandboxHarness {
+	t.Helper()
+	return &sandboxHarness{logger: newTestLogger(t)}
+}
+
+func (harness *sandboxHarness) bind(t *testing.T, admission router.Admission) (*testRuntimeV8Emitter, *SandboxRecorder) {
+	t.Helper()
+	runtime := newTestRuntimeV8Emitter(t, harness.logger.store, admission)
+	harness.logger.SetRuntimeV8Emitter(runtime)
+	return runtime, NewSandboxRecorder(harness.logger)
+}
+
+// newSandboxTestRecorder binds a recorder to its own store for cases that
+// assert on event-history rows.
 func newSandboxTestRecorder(t *testing.T, admission router.Admission) (*Logger, *testRuntimeV8Emitter, *SandboxRecorder) {
 	t.Helper()
-	logger := newTestLogger(t)
-	runtime := newTestRuntimeV8Emitter(t, logger.store, admission)
-	logger.SetRuntimeV8Emitter(runtime)
-	return logger, runtime, NewSandboxRecorder(logger)
+	harness := newSandboxHarness(t)
+	runtime, recorder := harness.bind(t, admission)
+	return harness.logger, runtime, recorder
 }
 
 func onlySandboxRecord(t *testing.T, runtime *testRuntimeV8Emitter) (router.Metadata, observability.Record) {
@@ -328,6 +349,7 @@ func TestSandboxLifecycleConcurrentRecordsAreConsistent(t *testing.T) {
 }
 
 func TestSandboxEgressReusesEgressFamiliesAndMetric(t *testing.T) {
+	harness := newSandboxHarness(t)
 	for _, test := range []struct {
 		name      string
 		input     SandboxEgressEvent
@@ -372,7 +394,7 @@ func TestSandboxEgressReusesEgressFamiliesAndMetric(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 			identity := testSandboxIdentity()
 			test.input.Sandbox = identity
 			ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
@@ -452,8 +474,11 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 		}
 		assertAuditEventRowExcludesCanary(t, logger.store, rows[0].ID, canary)
 	})
+	// The remaining cases never persist a row, so they share one store; the
+	// drop case still proves it stays empty.
+	harness := newSandboxHarness(t)
 	t.Run("allowed floor has no path", func(t *testing.T) {
-		_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionFloor)
+		runtime, recorder := harness.bind(t, router.AdmissionFloor)
 		if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
 			Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.org",
 		}); err == nil {
@@ -464,13 +489,13 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 		}
 	})
 	t.Run("collection drop still counts the decision", func(t *testing.T) {
-		logger, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionDrop)
+		runtime, recorder := harness.bind(t, router.AdmissionDrop)
 		if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
 			Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.org",
 		}); err != nil {
 			t.Fatalf("RecordSandboxEgress: %v", err)
 		}
-		rows, err := logger.store.ListEvents(10)
+		rows, err := harness.logger.store.ListEvents(10)
 		if _, records := runtime.snapshot(); err != nil || len(rows) != 0 || len(records) != 0 {
 			t.Fatalf("dropped egress persisted rows=%d records=%d err=%v", len(rows), len(records), err)
 		}
@@ -482,7 +507,7 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 		}
 	})
 	t.Run("blocked drop is rejected", func(t *testing.T) {
-		_, _, recorder := newSandboxTestRecorder(t, router.AdmissionDrop)
+		_, recorder := harness.bind(t, router.AdmissionDrop)
 		if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
 			Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceOpenShell, Host: "pastebin.com", Blocked: true,
 		}); err == nil {
@@ -492,6 +517,7 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 }
 
 func TestSandboxApprovalFamilies(t *testing.T) {
+	harness := newSandboxHarness(t)
 	for _, test := range []struct {
 		name      string
 		input     SandboxApprovalEvent
@@ -538,7 +564,7 @@ func TestSandboxApprovalFamilies(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 			test.input.Sandbox = testSandboxIdentity()
 			if err := recorder.RecordSandboxApproval(context.Background(), test.input); err != nil {
 				t.Fatalf("RecordSandboxApproval: %v", err)
@@ -561,7 +587,8 @@ func TestSandboxApprovalFamilies(t *testing.T) {
 }
 
 func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
-	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	harness := newSandboxHarness(t)
+	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 	identity := testSandboxIdentity()
 	identity.PolicyVersion = 4
 	hash := strings.Repeat("0f", 32)
@@ -591,7 +618,7 @@ func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
 		}
 	}
 
-	_, runtime, recorder = newSandboxTestRecorder(t, router.AdmissionFloor)
+	runtime, recorder = harness.bind(t, router.AdmissionFloor)
 	if err := recorder.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{
 		Sandbox: identity, Operation: SandboxPolicyApply, NoChange: true,
 	}); err != nil {
@@ -603,6 +630,7 @@ func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
 }
 
 func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
+	harness := newSandboxHarness(t)
 	for _, test := range []struct {
 		state     SandboxHealthState
 		eventName string
@@ -618,7 +646,7 @@ func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
 		{SandboxHealthFailed, observability.TelemetryEventSubsystemDegraded, "failed", observability.OutcomeFailed, observability.SeverityHigh},
 	} {
 		t.Run(string(test.state), func(t *testing.T) {
-			_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 			input := SandboxHealthEvent{State: test.state, ErrorCode: "openshell_watch_lost", ErrorSummary: "stream reset"}
 			if test.state == SandboxHealthDegraded {
 				input.Sandbox = testSandboxIdentity()
@@ -648,12 +676,13 @@ func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
 }
 
 func TestSandboxFindingKinds(t *testing.T) {
+	harness := newSandboxHarness(t)
 	for _, kind := range []SandboxFindingKind{
 		SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
 		SandboxFindingHookSilence, SandboxFindingLargeUpload,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
-			_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 			if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
 				Sandbox: testSandboxIdentity(), Kind: kind, Severity: "high", Title: "sandbox observation",
 				Evidence: "uploaded 30 MiB to a first-seen host", TargetRef: "files.example", Confidence: 0.9,
@@ -674,7 +703,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 			assertSandboxCorrelation(t, body, testSandboxIdentity())
 		})
 	}
-	_, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	_, recorder := harness.bind(t, router.AdmissionOrdinary)
 	if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
 		Sandbox: testSandboxIdentity(), Kind: SandboxFindingTamperAttempt,
 	}); err == nil {
@@ -683,6 +712,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 }
 
 func TestSandboxWorkspaceOperations(t *testing.T) {
+	harness := newSandboxHarness(t)
 	count := func(value int64) *int64 { return &value }
 	for _, test := range []struct {
 		name     string
@@ -731,7 +761,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 			test.input.Sandbox = testSandboxIdentity()
 			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); err != nil {
 				t.Fatalf("RecordSandboxWorkspace: %v", err)
@@ -757,7 +787,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 		})
 	}
 	t.Run("paths are bounded", func(t *testing.T) {
-		_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
 		paths := make([]string, 0, 100)
 		for index := 0; index < 100; index++ {
 			paths = append(paths, fmt.Sprintf("secrets/%03d.env", index))
@@ -913,18 +943,46 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			logger, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
-			if err := test.record(recorder); err == nil {
+			logger := NewLogger(nil)
+			runtime := &countingRuntimeV8Emitter{}
+			logger.SetRuntimeV8Emitter(runtime)
+			if err := test.record(NewSandboxRecorder(logger)); err == nil {
 				t.Fatal("invalid sandbox input was accepted")
 			}
-			metadata, records := runtime.snapshot()
-			rows, err := logger.store.ListEvents(10)
-			if err != nil || len(metadata) != 0 || len(records) != 0 || len(rows) != 0 || len(runtime.metricSnapshot()) != 0 {
-				t.Fatalf("invalid input reached the runtime: metadata=%d records=%d rows=%d metrics=%d err=%v",
-					len(metadata), len(records), len(rows), len(runtime.metricSnapshot()), err)
+			if runtime.logs != 0 || runtime.metrics != 0 {
+				t.Fatalf("invalid input reached the runtime: logs=%d metrics=%d", runtime.logs, runtime.metrics)
 			}
 		})
 	}
+}
+
+// countingRuntimeV8Emitter admits and persists every occurrence without a
+// store and counts the calls that reached it.
+type countingRuntimeV8Emitter struct {
+	mu      sync.Mutex
+	logs    int
+	metrics int
+}
+
+func (emitter *countingRuntimeV8Emitter) EmitRuntimeV8(
+	context.Context,
+	router.Metadata,
+	RuntimeV8Builder,
+) (RuntimeV8EmitOutcome, error) {
+	emitter.mu.Lock()
+	emitter.logs++
+	emitter.mu.Unlock()
+	return RuntimeV8EmitOutcome{Admission: router.AdmissionOrdinary, LocalPersisted: true}, nil
+}
+
+func (emitter *countingRuntimeV8Emitter) RecordRuntimeV8GeneratedMetricBatch(
+	context.Context,
+	[]RuntimeV8GeneratedMetric,
+) error {
+	emitter.mu.Lock()
+	emitter.metrics++
+	emitter.mu.Unlock()
+	return nil
 }
 
 func TestSandboxRecorderFailsClosedWithoutRuntime(t *testing.T) {
@@ -935,7 +993,7 @@ func TestSandboxRecorderFailsClosedWithoutRuntime(t *testing.T) {
 	}{
 		{"nil recorder", nil},
 		{"nil logger", NewSandboxRecorder(nil)},
-		{"never bound", NewSandboxRecorder(newTestLogger(t))},
+		{"never bound", NewSandboxRecorder(NewLogger(nil))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity}); err == nil {
@@ -946,18 +1004,22 @@ func TestSandboxRecorderFailsClosedWithoutRuntime(t *testing.T) {
 			}
 		})
 	}
-	logger := newTestLogger(t)
-	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary))
+	logger := NewLogger(nil)
+	detached := &countingRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(detached)
 	logger.SetRuntimeV8Emitter(nil)
 	if err := NewSandboxRecorder(logger).RecordSandboxEgress(context.Background(), SandboxEgressEvent{
 		Sandbox: identity, Source: SandboxEgressSourceProxy, Host: "example.org",
 	}); err == nil {
 		t.Fatal("egress recorded after the runtime detached")
 	}
+	if detached.logs != 0 || detached.metrics != 0 {
+		t.Fatalf("a detached runtime was still called: logs=%d metrics=%d", detached.logs, detached.metrics)
+	}
 }
 
 func TestSandboxRecorderReportsRuntimeRejection(t *testing.T) {
-	logger := newTestLogger(t)
+	logger := NewLogger(nil)
 	rejecting := &rejectingRuntimeV8Emitter{err: fmt.Errorf("runtime closed")}
 	logger.SetRuntimeV8Emitter(rejecting)
 	err := NewSandboxRecorder(logger).RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
