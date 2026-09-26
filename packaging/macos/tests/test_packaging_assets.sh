@@ -630,20 +630,39 @@ t_uninstall_still_sweeps_legacy_cmid_log_file() {
     "uninstall MUST NOT recurse into the shared log tree (no-quote form)"
 }
 
-t_install_refuses_existing_state_before_build_or_launchd_mutation() {
+t_install_reconciles_existing_state() {
+  # Idempotent-reinstall contract (managed_enterprise): the bundle installer
+  # no longer refuses on existing markers. AVC's postinstall re-runs this
+  # script after its own preinstall has removed machine-wide state; a stray
+  # per-user file (~/.local/bin/defenseclaw) from a prior run must not
+  # abort a legitimate reinstall (AVC 5.1.21.3862 regression).
   local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
-  assert_contains "${body}" "existing DefenseClaw installation detected at" \
-    "managed bundle refuses an in-place hard-cut bypass"
-  assert_contains "${body}" "no changes were made. This installer is fresh-install-only" \
-    "managed bundle gives an explicit no-change refusal"
-  assert_contains "${body}" "remain on the current version" \
-    "managed bundle gives a fail-closed path when no staged enterprise upgrader exists"
+
+  assert_contains "${body}" "reconciling existing DefenseClaw installation in place" \
+    "managed bundle logs reconcile intent when existing markers are detected"
+  assert_contains "${body}" "fresh managed_enterprise install" \
+    "managed bundle logs fresh-install branch when no markers are detected"
+  assert_contains "${body}" "will be reconciled by hook-guardian" \
+    "managed bundle treats per-user markers as informational"
+  assert_contains "${body}" "unloading current launchd job for reinstall" \
+    "managed bundle boots out current-gen labels inline before mutation"
+
+  # Old refusal strings must NOT reappear. These are the exact strings that
+  # aborted AVC's postinstall on a stray per-user marker; regressing to them
+  # locks the fleet out of reinstall.
+  assert_not_contains "${body}" "no changes were made. This installer is fresh-install-only" \
+    "managed bundle must not carry the pre-reinstall refusal text"
+  assert_not_contains "${body}" "remain on the current version and contact the deployment owner" \
+    "managed bundle must not carry the pre-reinstall fail-closed guidance"
+  assert_not_contains "${body}" "existing DefenseClaw installation detected at" \
+    "managed bundle must not die() on any existing marker"
+  assert_not_contains "${body}" "existing DefenseClaw launchd job detected" \
+    "managed bundle must not die() on an existing launchd job"
+
+  # Marker enumeration is preserved so operators still see accurate
+  # reconcile logs.
   assert_contains "${body}" "dscl . -list /Users" \
-    "managed bundle checks every local home even when a target user is selected"
-  assert_not_contains "${body}" 'elif [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]' \
-    "all-user dscl enumeration must not be conditional on TARGET_HOME being empty"
-  assert_contains "${body}" "command -v \"\${_installed_command}\"" \
-    "managed bundle checks package-manager/custom PATH installations"
+    "managed bundle still enumerates local users for reconcile-log forensics"
   assert_contains "${body}" '"${GUARDIAN_PLIST_DST}"' \
     "managed bundle detects the current guardian plist"
   assert_contains "${body}" '"${LEGACY_GUARDIAN_PLIST_DST}"' \
@@ -653,29 +672,56 @@ t_install_refuses_existing_state_before_build_or_launchd_mutation() {
   assert_contains "${body}" '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}"' \
     "managed bundle detects the legacy guardian job"
 
-  local guard_line build_line mutation_line
-  guard_line="$(grep -n "existing DefenseClaw installation detected at" \
+  # Publication semantics: fresh path still uses no-replace ln for the
+  # concurrent-installer guard; reconcile path uses atomic mv to replace
+  # the DefenseClaw-owned file this installer wrote in a previous run.
+  assert_contains "${body}" 'ln "${temporary}" "${destination}"' \
+    "managed bundle keeps no-replace publication on the fresh-install branch"
+  assert_contains "${body}" "appeared concurrently and was preserved" \
+    "managed bundle reports concurrent-state preservation on the fresh-install branch"
+  assert_contains "${body}" '/bin/mv -f -- "${temporary}" "${destination}"' \
+    "managed bundle atomically replaces its own files on the reconcile branch"
+  assert_contains "${body}" 'could not atomically replace' \
+    "managed bundle surfaces atomic-replace failure explicitly"
+
+  # Advisory permission verdicts: any install-time ancestor permission
+  # verdict must be routable through trust_ancestor_verdict, not a direct
+  # die(). AIFW-34262 + AVC 5.1.21.3862 regression: platform-installer
+  # ancestors and every DefenseClaw ancestor are re-ACLed by other
+  # installers on their own schedule, and failing here aborts an install
+  # for a condition we do not own.
+  assert_contains "${body}" "install_time_ancestor_advisory" \
+    "managed bundle exposes a named ancestor-advisory predicate"
+  assert_contains "${body}" "managed_trust_ancestor_advisory" \
+    "managed bundle logs an advisory downgrade rather than dying"
+  assert_contains "${body}" "DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS" \
+    "managed bundle keeps a strict-ancestor override for regression testing"
+
+  # Reconcile signalling: install_file_no_replace and
+  # create_install_directory_no_replace must consult _RECONCILE_REINSTALL
+  # so a fresh install still refuses ambient state loudly.
+  assert_contains "${body}" '_RECONCILE_REINSTALL' \
+    "managed bundle publishes the reconcile-branch selector"
+  assert_contains "${body}" '"${_RECONCILE_REINSTALL}" != "true"' \
+    "managed bundle gates fresh-install refusals on _RECONCILE_REINSTALL"
+
+  local reconcile_line build_line mutation_line
+  reconcile_line="$(grep -n "reconciling existing DefenseClaw installation in place" \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
   build_line="$(grep -n 'go build -o defenseclaw-gateway' \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
   mutation_line="$(grep -n 'create_install_directory_no_replace "${INSTALL_PREFIX}"' \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
-  if [[ -z "${guard_line}" || -z "${build_line}" || -z "${mutation_line}" \
-     || "${guard_line}" -ge "${build_line}" \
-     || "${guard_line}" -ge "${mutation_line}" ]]; then
-    _fail "existing-install guard must precede build and installed-file writes"
+  if [[ -z "${reconcile_line}" || -z "${build_line}" || -z "${mutation_line}" \
+     || "${reconcile_line}" -ge "${build_line}" \
+     || "${reconcile_line}" -ge "${mutation_line}" ]]; then
+    _fail "reconcile preflight must precede build and installed-file writes"
   fi
-  assert_not_contains "${body}" 'mv -f -- "${temporary}" "${destination}"' \
-    "managed bundle publication must not force-replace a concurrent destination"
-  assert_contains "${body}" 'ln "${temporary}" "${destination}"' \
-    "managed bundle uses no-replace publication"
-  assert_contains "${body}" "appeared concurrently and was preserved" \
-    "managed bundle reports concurrent-state preservation"
 
-  # The final boundary after a potentially slow local build must repeat every
-  # current and legacy gateway/guardian job+plist pair from the initial
-  # preflight. Merely mentioning these variables in the initial marker list is
-  # insufficient: a guardian can appear while the binary is being built.
+  # The final boundary after a potentially slow local build must still
+  # repeat every current and legacy gateway/guardian job+plist pair from
+  # the initial preflight. A concurrent installer can appear while the
+  # binary is being built.
   local final_boundary
   final_boundary="$(sed -n '/# Repeat the launchd\/path boundary immediately before mutation/,/unset _lbl_plist/p' \
     "${REPO_ROOT}/packaging/macos/install.sh")"
@@ -700,7 +746,8 @@ run_case "install.log sink is set up AFTER fresh-host preflight + LOGS_DIR creat
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file
-run_case "install refuses existing state before build or launchd mutation"           t_install_refuses_existing_state_before_build_or_launchd_mutation
+run_case "install reconciles existing state and treats per-user markers as informational" \
+                                                                                     t_install_reconciles_existing_state
 run_case "plist runs as root by default (managed CMID needs it)" t_plist_runs_as_root_by_default
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax

@@ -373,6 +373,57 @@ def test_public_installer_exposes_complete_truthful_lifecycle() -> None:
     assert "errors = @($failureMessage)" in installer
 
 
+def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
+    """AVC's Windows installer runs -Action Install unconditionally after its
+    own preinstall has removed machine-wide state. Refusing on a still-present
+    active deployment aborted a legitimate reinstall on hosts where metadata
+    survived (see the AVC 5.1.21.3862 DART for the macOS twin). The psm1 must
+    reconcile in place: emit the reconcile warning and drive the same
+    downstream artifact-hash rewrites Upgrade does, without touching the
+    inactive-metadata tombstone lane (which refuses to adopt active metadata
+    and would abort the run)."""
+    body = read(MODULE)
+
+    # Old refusal must NOT reappear.
+    assert (
+        "'DefenseClaw enterprise mode is already installed; use Upgrade or Repair'"
+        not in body
+    ), "idempotent-Install regression: the pre-reconcile refusal string is back"
+    assert (
+        "throw 'DefenseClaw enterprise mode is already installed" not in body
+    ), "idempotent-Install regression: any throw of the already-installed text"
+
+    # Reconcile branch must be present.
+    assert "reconciling existing installation" in body, (
+        "psm1 must emit the reconcile warning when Install runs over active metadata"
+    )
+    assert "$reconcileInstall = $false" in body, (
+        "reconcile-Install selector must be declared before the Install/Upgrade dispatch"
+    )
+    assert "$reconcileInstall = $true" in body, (
+        "reconcile-Install selector must be flipped when metadata is installed"
+    )
+    assert "-not $reconcileInstall" in body, (
+        "inactive-metadata tombstone adoption must be gated on -not $reconcileInstall so "
+        "it never fires under reconcile-Install"
+    )
+
+    # Structural: the reconcile warning must precede the tombstone-teardown
+    # call, and the tombstone branch must be the elseif of the reconcile
+    # branch (not a separate if that fires alongside it).
+    reconcile_at = body.find("reconciling existing installation")
+    tombstone_at = body.find(
+        "Remove-DefenseClawCommittedManagedHooksTeardownJournal", reconcile_at
+    )
+    assert reconcile_at >= 0 and tombstone_at > reconcile_at, (
+        "reconcile warning must precede the tombstone-teardown branch"
+    )
+    between = body[reconcile_at:tombstone_at]
+    assert "elseif ($null -ne $metadata)" in between, (
+        "tombstone-teardown must be the elseif of the reconcile branch"
+    )
+
+
 def test_public_windows_lifecycle_cli_preserves_every_security_option() -> None:
     source = read(WINDOWS_LIFECYCLE_CLI)
 
