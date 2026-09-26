@@ -1,0 +1,100 @@
+# DefenseClaw sandbox egress allowlist feed (balanced profile).
+#
+# In allowlist mode (`--profile balanced`) the DefenseClaw egress proxy
+# (internal/openshell/egress) allows only the destinations below, plus
+# `openshell.egress.allow` and unblock decisions; everything else is blocked
+# with category not_allowlisted and can be unblocked. The blocklist feed still
+# applies on top. "open" mode does not use this file.
+#
+# The list is deliberately small: package registries, source hosting and
+# toolchain downloads that installs and builds need, and common reference
+# documentation. LLM and provider hosts are not listed because that traffic
+# goes directly through OpenShell provider rules, never through the proxy.
+#
+# CONNECT tunnels are opaque, so "fetch-only" GitHub access is not enforced
+# here; pushes need a credential that only `--github-write` provides.
+#
+# Host patterns:
+#   example.com     exactly that host
+#   *.example.com   any subdomain of example.com at any depth (not the apex)
+#
+# Categories: package_registry, source_hosting, toolchain, documentation.
+#
+# Bump feed_version (YYYY.MM.DD[.N]) whenever entries change.
+schema_version: 1
+kind: allowlist
+name: defenseclaw-allowlist
+feed_version: "2026.09.26"
+entries:
+  # --- package registries ---------------------------------------------------
+  - name: npm and Yarn registries
+    category: package_registry
+    hosts: [registry.npmjs.org, registry.yarnpkg.com, repo.yarnpkg.com]
+  - name: Python Package Index
+    category: package_registry
+    hosts: [pypi.org, files.pythonhosted.org]
+  - name: Go module mirror and checksum database
+    category: package_registry
+    hosts: [proxy.golang.org, sum.golang.org, index.golang.org]
+  - name: crates.io
+    category: package_registry
+    hosts: [crates.io, index.crates.io, static.crates.io]
+  - name: RubyGems
+    category: package_registry
+    hosts: [rubygems.org, index.rubygems.org]
+  - name: Maven Central and Gradle
+    category: package_registry
+    hosts: [repo.maven.apache.org, repo1.maven.org, plugins.gradle.org, services.gradle.org, downloads.gradle.org]
+  - name: NuGet
+    category: package_registry
+    hosts: [api.nuget.org]
+  - name: Packagist
+    category: package_registry
+    hosts: [packagist.org, repo.packagist.org]
+  - name: Hex
+    category: package_registry
+    hosts: [hex.pm, repo.hex.pm, builds.hex.pm]
+  - name: pub.dev
+    category: package_registry
+    hosts: [pub.dev]
+  - name: conda-forge
+    category: package_registry
+    hosts: [conda.anaconda.org]
+
+  # --- source hosting -------------------------------------------------------
+  - name: GitHub
+    category: source_hosting
+    hosts: [github.com, api.github.com, codeload.github.com, "*.githubusercontent.com", ghcr.io]
+  - name: GitLab
+    category: source_hosting
+    hosts: [gitlab.com]
+  - name: Bitbucket
+    category: source_hosting
+    hosts: [bitbucket.org]
+
+  # --- toolchains -----------------------------------------------------------
+  - name: Node.js
+    category: toolchain
+    hosts: [nodejs.org]
+  - name: Rust
+    category: toolchain
+    hosts: [static.rust-lang.org, sh.rustup.rs]
+  - name: Python
+    category: toolchain
+    hosts: [www.python.org, astral.sh]
+
+  # --- documentation --------------------------------------------------------
+  - name: Language and platform documentation
+    category: documentation
+    hosts:
+      - docs.python.org
+      - developer.mozilla.org
+      - go.dev
+      - pkg.go.dev
+      - docs.rs
+      - doc.rust-lang.org
+      - docs.github.com
+      - docs.npmjs.com
+      - www.typescriptlang.org
+      - learn.microsoft.com
+      - stackoverflow.com
