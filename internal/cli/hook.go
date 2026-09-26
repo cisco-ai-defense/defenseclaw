@@ -50,6 +50,7 @@ func newHookCmd() *cobra.Command {
 		event             string
 		apiAddr           string
 		failMode          string
+		hookContract      string
 		inputFile         string
 		enterpriseManaged bool
 	)
@@ -69,7 +70,7 @@ func newHookCmd() *cobra.Command {
 			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
 				return nil
 			}
-			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts := buildHookOptionsForRuntimeContract(connector, event, apiAddr, failMode, hookContract, enterpriseManaged)
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
@@ -100,10 +101,12 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (selects the request deadline; inferred when omitted)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
+	cmd.Flags().StringVar(&hookContract, "hook-contract", "", "administrator-bound managed hook contract")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
+	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.MarkFlagRequired("connector")
 
 	return cmd
@@ -166,18 +169,28 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 }
 
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
+	return buildHookOptionsForRuntimeContract(connector, event, apiAddr, failMode, "", enterpriseManaged)
+}
+
+func buildHookOptionsForRuntimeContract(connector, event, apiAddr, failMode, hookContract string, enterpriseManaged bool) hookexec.Options {
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
 		// unavailable strict runtime directly to hookexec's fail-closed boundary.
-		return hookexec.Options{
+		opts := hookexec.Options{
 			Connector:             connector,
 			Event:                 event,
+			HookContractID:        hookContract,
 			FailMode:              "closed",
 			StrictAvailability:    true,
 			ManagedEnterprise:     true,
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		if strings.EqualFold(strings.TrimSpace(connector), "copilot") && strings.TrimSpace(hookContract) == "copilot-hooks-v2" {
+			opts.FailMode = "open"
+			opts.StrictAvailability = false
+		}
+		return opts
 	}
 	home, trustedNativeState := trustedNativeHookHome()
 	if !trustedNativeState {
@@ -270,6 +283,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	opts := hookexec.Options{
 		Connector:                 connector,
 		Event:                     event,
+		HookContractID:            hookContract,
 		APIAddr:                   apiAddr,
 		FailMode:                  failMode,
 		Home:                      home,
@@ -299,8 +313,16 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
+		if strings.EqualFold(strings.TrimSpace(connector), "copilot") && strings.TrimSpace(hookContract) == "copilot-hooks-v2" {
+			// Copilot treats non-timeout command-hook errors as denials. Its
+			// reviewed enterprise transport therefore allows infrastructure
+			// failures while retaining explicit policy-deny JSON.
+			opts.FailMode = "open"
+			opts.StrictAvailability = false
+		} else {
+			opts.FailMode = "closed"
+			opts.StrictAvailability = true
+		}
 	}
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {

@@ -73,6 +73,10 @@ type Options struct {
 	// Event is the agent hook event used for deadlines and failure logs. Claude
 	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
+	// HookContractID is bound by an administrator-owned machine-policy argv.
+	// It is sent out-of-band from the vendor payload so the gateway can select
+	// the reviewed managed contract without trusting stdin JSON.
+	HookContractID string
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs invalid responses
@@ -154,6 +158,12 @@ func Run(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
+	if opts.ManagedEnterprise && strings.EqualFold(strings.TrimSpace(opts.Connector), "copilot") {
+		if !managedCopilotBindingValid(opts) {
+			fmt.Fprintln(opts.Stderr, "defenseclaw: invalid managed Copilot event/contract binding")
+			return 0
+		}
+	}
 	failMode := normalizeFailMode(opts.FailMode)
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return failUnreachable(
@@ -198,6 +208,12 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		return handleOversized(opts, sp, failMode)
+	}
+	if managedCopilotFailOpen(opts) {
+		if payloadEvent, present := copilotPayloadEvent(payload); present && payloadEvent != opts.Event {
+			fmt.Fprintln(opts.Stderr, "defenseclaw: managed Copilot payload event does not match policy binding")
+			return 0
+		}
 	}
 	opts.Event = resolveHookEvent(opts.Event, payload)
 	if opts.HTTPClient == nil {
@@ -431,6 +447,11 @@ func sendHookRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	if managedCopilotFailOpen(opts) {
+		req.Header.Set("X-DefenseClaw-Hook-Event", opts.Event)
+		req.Header.Set("X-DefenseClaw-Hook-Contract", opts.HookContractID)
+		req.Header.Set("X-DefenseClaw-Managed-Enterprise", "true")
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -538,6 +559,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
+	if managedCopilotFailOpen(opts) {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, allowing managed Copilot hook because infrastructure is unavailable\n", reason)
+		return 0
+	}
 	if opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
@@ -547,6 +572,10 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
+	if managedCopilotFailOpen(opts) {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, allowing managed Copilot hook because infrastructure is unavailable\n", reason)
+		return 0
+	}
 	if opts.StrictAvailability || opts.ManagedEnterprise {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
@@ -569,6 +598,10 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", failMode)
+	if managedCopilotFailOpen(opts) {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unavailable, allowing managed Copilot hook: %s\n", reason)
+		return 0
+	}
 	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
@@ -595,6 +628,9 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	reason = responseFailureReason(reason)
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	if managedCopilotFailOpen(opts) {
+		return 0
+	}
 	if failMode == "open" {
 		return emit(opts.Stdout, sp.openAllow)
 	}
@@ -670,6 +706,50 @@ func resolveHookEvent(explicit string, payload []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(envelope.HookEventName)
+}
+
+const managedCopilotHookContractID = "copilot-hooks-v2"
+
+var managedCopilotEvents = map[string]struct{}{
+	"sessionStart": {}, "sessionEnd": {}, "userPromptSubmitted": {},
+	"userPromptTransformed": {}, "preToolUse": {}, "postToolUse": {},
+	"postToolUseFailure": {}, "permissionRequest": {}, "agentStop": {},
+	"subagentStart": {}, "subagentStop": {}, "errorOccurred": {},
+	"preCompact": {}, "notification": {},
+}
+
+func managedCopilotBindingValid(opts Options) bool {
+	if !opts.ManagedEnterprise || !strings.EqualFold(strings.TrimSpace(opts.Connector), "copilot") {
+		return false
+	}
+	if strings.TrimSpace(opts.HookContractID) != managedCopilotHookContractID {
+		return false
+	}
+	_, ok := managedCopilotEvents[strings.TrimSpace(opts.Event)]
+	return ok
+}
+
+func managedCopilotFailOpen(opts Options) bool {
+	return managedCopilotBindingValid(opts)
+}
+
+func copilotPayloadEvent(payload []byte) (string, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return "", false
+	}
+	for _, key := range []string{"hookEventName", "hook_event_name", "eventName", "event"} {
+		raw, ok := fields[key]
+		if !ok {
+			continue
+		}
+		var event string
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return "", true
+		}
+		return strings.TrimSpace(event), true
+	}
+	return "", false
 }
 
 func hookRequestTimeout(connector, event string) time.Duration {

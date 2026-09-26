@@ -55,6 +55,8 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		result, err = installWindowsCodexManagedResult(ctx, opts)
 	case "cursor":
 		result, err = installWindowsCursorManagedResult(ctx, opts)
+	case "copilot":
+		result, err = installWindowsCopilotManagedResult(ctx, opts)
 	default:
 		result, err = installWindowsGenericManagedResult(ctx, opts)
 	}
@@ -69,6 +71,8 @@ func windowsEnterpriseHookFailMode(connectorName, configured string) string {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "codex", "claudecode", "cursor":
 		return "closed"
+	case "copilot":
+		return "open"
 	default:
 		return strings.TrimSpace(configured)
 	}
@@ -90,6 +94,8 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 		result, err = verifyWindowsCodexManagedResult(ctx, opts)
 	case "cursor":
 		result, err = verifyWindowsCursorManagedResult(ctx, opts)
+	case "copilot":
+		result, err = verifyWindowsCopilotManagedResult(ctx, opts)
 	default:
 		result, err = verifyWindowsGenericManagedResult(ctx, opts)
 	}
@@ -109,6 +115,8 @@ func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) erro
 		minimum = "2.1.152"
 	case "cursor":
 		minimum = "1.7.0"
+	case "copilot":
+		minimum = connector.CopilotEnterpriseMinVersion
 	default:
 		return nil
 	}
@@ -371,7 +379,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	// until its release matrix is certified. This enterprise-only lifecycle is
 	// separately gated by the concrete built-in registry and the protected
 	// machine-policy implementation below.
-	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	if name != "cursor" && name != "copilot" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}
@@ -1050,6 +1058,23 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 		}
 		return sortedUnique(append(userDirs, cursorPaths.Root)), true, nil
 	}
+	if name == "copilot" {
+		target, err := resolveWindowsGenericManagedTarget(opts)
+		if err != nil {
+			return nil, true, err
+		}
+		copilotPaths, err := windowsCopilotManagedPathsResolve()
+		if err != nil {
+			return nil, true, err
+		}
+		userDirs := []string{target.home, target.dataDir, filepath.Join(target.dataDir, "hooks")}
+		for _, dir := range userDirs {
+			if err := prepareWindowsGenericPath(target.home, dir, target.sid, true, false, false, "Copilot watch directory"); err != nil {
+				return nil, true, err
+			}
+		}
+		return sortedUnique(append(userDirs, copilotPaths.Root)), true, nil
+	}
 	if name != "claudecode" {
 		target, err := resolveWindowsGenericManagedTarget(opts)
 		if err != nil {
@@ -1101,12 +1126,28 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 }
 
 func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
-	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if name != "cursor" && name != "copilot" {
 		return WatchOwnership{}, false, nil
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
 	if err != nil {
 		return WatchOwnership{}, true, err
+	}
+	if name == "copilot" {
+		paths, err := windowsCopilotManagedPathsResolve()
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		hookDir := filepath.Join(target.dataDir, "hooks")
+		return WatchOwnership{ExclusiveWriter: sortedUnique([]string{
+			paths.Policy,
+			paths.State,
+			filepath.Join(hookDir, ".hookcfg.copilot"),
+			filepath.Join(hookDir, ".hook-copilot.token"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json.lock"),
+		})}, true, nil
 	}
 	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
@@ -1223,6 +1264,16 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 			return err
 		}
 		return removeWindowsCursorManagedPolicyTarget(targetSID)
+	}
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "copilot") {
+		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+			return err
+		}
+		targetSID, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return err
+		}
+		return removeWindowsCopilotManagedPolicyTarget(targetSID)
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
@@ -1343,6 +1394,7 @@ func newWindowsEnterpriseConnectorRegistry() *connector.Registry {
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
 	registry.RegisterBuiltin(connector.NewCursorConnector())
+	registry.RegisterBuiltin(connector.NewCopilotEnterpriseConnector())
 	return registry
 }
 
@@ -1361,6 +1413,10 @@ func certifyWindowsEnterpriseConnector(name string, conn connector.Connector) er
 		}
 	case "cursor":
 		if !connector.IsBuiltinCursorConnector(conn) {
+			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
+		}
+	case "copilot":
+		if _, ok := conn.(*connector.CopilotConnector); !ok {
 			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
 		}
 	default:

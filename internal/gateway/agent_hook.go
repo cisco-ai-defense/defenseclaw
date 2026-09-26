@@ -173,7 +173,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 
-		profile := a.hookProfileForConnector(connectorName)
+		profile, boundEvent, profileErr := a.hookProfileForRequest(connectorName, r)
+		if profileErr != nil {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "managed_binding", int64(len(b)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid managed hook binding"})
+			return
+		}
+		if boundEvent != "" {
+			if declaredEvent, present := hookPayloadDeclaredEvent(payload); present && declaredEvent != boundEvent {
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "event_binding_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event does not match managed policy binding"})
+				return
+			}
+			payload["hookEventName"] = boundEvent
+		}
 		runtime := hookRuntimeForProfile(profile)
 		req := normalizeAgentHookRequestWithProfile(connectorName, payload, profile)
 		if req.HookEventName == "" {
@@ -419,6 +432,21 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	}
 }
 
+func hookPayloadDeclaredEvent(payload map[string]interface{}) (string, bool) {
+	for _, key := range []string{"hookEventName", "hook_event_name", "eventName", "event"} {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		event, ok := value.(string)
+		if !ok {
+			return "", true
+		}
+		return strings.TrimSpace(event), true
+	}
+	return "", false
+}
+
 type hookFinalizationResult struct {
 	AuditPersisted       bool
 	EnforcementPersisted bool
@@ -485,6 +513,12 @@ func (a *APIServer) finalizeAgentHook(
 		env.Extra = map[string]string{"panic": "true"}
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if rewrite := copilotModelInputRewriteRequested(resp); rewrite != "" {
+		if env.Extra == nil {
+			env.Extra = map[string]string{}
+		}
+		env.Extra["model_input_rewrite_requested"] = rewrite
+	}
 	safeSection("identity", func() {
 		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
 		result.Enforced = env.Enforced
@@ -533,6 +567,19 @@ func (a *APIServer) finalizeAgentHook(
 		})
 	}
 	return result
+}
+
+func copilotModelInputRewriteRequested(resp agentHookResponse) string {
+	if resp.Mode != "action" || resp.RawAction != "block" || resp.Action == "block" || resp.HookOutput == nil {
+		return ""
+	}
+	if _, ok := resp.HookOutput["modifiedTransformedPrompt"]; ok {
+		return "prompt"
+	}
+	if _, ok := resp.HookOutput["modifiedResult"]; ok {
+		return "tool_result"
+	}
+	return ""
 }
 
 // dispatchFinalizedAgentHookNotification prevents a user-visible notification
@@ -2144,7 +2191,9 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 			Req:               hookProfileRequestFromAgentHook(req),
 			Action:            action,
 			RawAction:         rawAction,
+			Mode:              mode,
 			Reason:            safeReason,
+			Findings:          append([]string(nil), findings...),
 			AdditionalContext: additional,
 			Caps:              caps,
 		})

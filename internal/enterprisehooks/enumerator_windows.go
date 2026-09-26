@@ -61,6 +61,7 @@ var windowsHookConnectors = map[string]struct{}{
 	"claudecode": {},
 	"codex":      {},
 	"cursor":     {},
+	"copilot":    {},
 }
 
 // EnumerateOptions controls a single enumeration cycle. All fields

@@ -1329,6 +1329,119 @@
             "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
             "Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files."
           ]
+        },
+        {
+          "contract_id": "copilot-hooks-v2",
+          "agent_version": {
+            "min_inclusive": "1.0.83",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": false,
+          "hook_script_version": "native-v1",
+          "hook_script": "defenseclaw-hook.exe",
+          "hook_config_path_templates": [
+            "%ProgramData%\\GitHub\\Copilot\\policy.d\\90-defenseclaw.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "sessionStart",
+            "sessionEnd",
+            "userPromptSubmitted",
+            "userPromptTransformed",
+            "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "permissionRequest",
+            "agentStop",
+            "subagentStart",
+            "subagentStop",
+            "errorOccurred",
+            "preCompact",
+            "notification"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "authoritative_success_events": [
+              "postToolUse"
+            ],
+            "authoritative_failure_events": [
+              "postToolUseFailure"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "agentStop"
+            ],
+            "authoritative_terminal_events": [
+              "sessionEnd"
+            ],
+            "invocation_id_authority": "none",
+            "outcome_authority": "event-kind",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "preToolUse",
+                "permissionRequest"
+              ],
+              "result_content_events": [
+                "postToolUse",
+                "postToolUseFailure"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "sessionStart",
+                "sessionEnd",
+                "agentStop",
+                "subagentStart",
+                "subagentStop",
+                "errorOccurred"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://docs.github.com/en/copilot/reference/hooks-reference",
+              "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills"
+            ],
+            "limitations": [
+              "Hook payloads do not expose a per-tool invocation ID, and general-purpose subagents expose no reliable parent lineage.",
+              "CLI hook timeouts and HTTP failures fail open; cloud agents expose only repository hooks, and skills have no invocation lifecycle event."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "preToolUse",
+              "permissionRequest",
+              "agentStop",
+              "subagentStop"
+            ],
+            "supports_fail_closed": false,
+            "scope": "machine-policy,user-runtime"
+          },
+          "notes": [
+            "Windows managed-enterprise only. The machine policy launches the protected native hook executable directly and binds each event plus this contract in argv.",
+            "userPromptTransformed and postToolUse blocks are model-input rewrites, not native enforcement; preToolUse and permissionRequest are native denial surfaces.",
+            "Infrastructure failures are successful no-ops to avoid Copilot treating hook process failures as synthetic denials."
+          ]
         }
       ]
     },

@@ -64,12 +64,49 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
 	case "cursor":
 		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
+	case "copilot":
+		return resolveWindowsCopilotManagedHookRuntime(hookExecutable)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(
 			"enterprise hooks: unsupported Windows managed connector %q",
 			connectorName,
 		)
 	}
+}
+
+func resolveWindowsCopilotManagedHookRuntime(hookExecutable string) (WindowsManagedHookRuntime, error) {
+	target, err := resolveWindowsCopilotManagedPolicyTarget()
+	result := WindowsManagedHookRuntime{Connector: "copilot", DataDir: target.dataDir}
+	if err != nil {
+		return result, err
+	}
+	if !target.active {
+		return result, nil
+	}
+	result.PolicyActive = true
+	if !sameWindowsEnterprisePath(target.hookExecutable, hookExecutable) {
+		return result, fmt.Errorf("enterprise hooks: invoking hook executable does not match active Copilot policy executable")
+	}
+	if !target.registered {
+		sid := "<unknown>"
+		if target.targetSID != nil {
+			sid = target.targetSID.String()
+		}
+		return result, fmt.Errorf("%s: connector copilot current SID %s is absent from the protected target set", WindowsManagedSIDUnregisteredReason, sid)
+	}
+	generation, err := windowsManagedRuntimeGenerationResolve(WindowsManagedRuntimeGenerationResolveOptions{
+		Connector: "copilot", TargetSID: target.targetSID.String(), DataDir: target.dataDir,
+		HookExecutable: hookExecutable, MachinePolicyRegistered: true,
+	})
+	if err != nil {
+		return result, err
+	}
+	result.GatewayAddr = generation.GatewayAddr
+	result.GatewayServiceName = generation.GatewayServiceName
+	result.ScopedToken = generation.ScopedToken()
+	result.GenerationID = generation.GenerationID
+	result.Registered = true
+	return result, nil
 }
 
 func resolveWindowsCursorManagedHookRuntime(

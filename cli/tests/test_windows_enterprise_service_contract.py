@@ -60,6 +60,9 @@ WINDOWS_ENV_CONFIG = ROOT / "internal" / "config" / "env_config_windows.go"
 WINDOWS_CODEX_POLICY = ROOT / "internal" / "gateway" / "connector" / "codex_policy_windows.go"
 WINDOWS_MANAGED_RUNTIME = ROOT / "internal" / "enterprisehooks" / "managed_runtime_windows.go"
 WINDOWS_MANAGED_POLICY = ROOT / "internal" / "enterprisehooks" / "managed_policy_windows.go"
+WINDOWS_COPILOT_POLICY = ROOT / "internal" / "enterprisehooks" / "managed_copilot_windows.go"
+WINDOWS_COPILOT_RUNTIME = ROOT / "internal" / "enterprisehooks" / "install_windows_copilot_secure.go"
+COPILOT_ENTERPRISE_HOOKS = ROOT / "internal" / "gateway" / "connector" / "copilot_enterprise_hooks.go"
 WINDOWS_MANAGED_BUNDLE_BUILDER = ROOT / "packaging" / "scripts" / "build-managed-windows-bundle.sh"
 POWERSHELL = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
 
@@ -106,6 +109,7 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$home =" not in discovery.casefold()
     assert "Get-DefenseClawClaudeWinGetMetadataVersion" in discovery
     assert "Get-DefenseClawCodexWinGetMetadataVersion" in discovery
+    assert "Get-DefenseClawCopilotWinGetMetadataVersion" in discovery
     assert discovery.index("$machinePackage") < discovery.index(
         "Get-DefenseClawCodexWinGetMetadataVersion"
     )
@@ -121,6 +125,9 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         in winget_discovery
     )
     assert "OpenAI.Codex_Microsoft.Winget.Source_*" in winget_discovery
+    assert "GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe" in winget_discovery
+    assert "[string]$identity.OriginalFilename -cne 'copilot.exe'" in winget_discovery
+    assert "[string]$signer -cnotin @('GitHub, Inc.', 'GitHub Inc.')" in winget_discovery
     assert "codex-x86_64-pc-windows-msvc.exe" in winget_discovery
     assert "OpenAI OpCo, LLC" in winget_discovery
     assert "Get-DefenseClawCodexWinGetEmbeddedVersion" in winget_discovery
@@ -191,6 +198,53 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "below-minimum native Codex was replaced by fallback metadata" in smoke
     assert "WinGet Codex fallback decision did not remain fail closed" in smoke
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
+
+
+def test_windows_managed_copilot_policy_runtime_and_lifecycle_are_wired() -> None:
+    installer = read(INSTALLER)
+    module = read(MODULE)
+    policy = read(COPILOT_ENTERPRISE_HOOKS)
+    enrollment = read(WINDOWS_COPILOT_POLICY)
+    runtime = read(WINDOWS_COPILOT_RUNTIME)
+    teardown = read(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go")
+    lifecycle = read(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
+    hookexec = read(ROOT / "internal" / "gateway" / "connector" / "hookexec" / "hookexec.go")
+
+    assert "@('codex', 'cursor', 'claudecode', 'copilot', 'amp')" in installer
+    assert "@('codex', 'claudecode', 'cursor', 'copilot')" in installer
+    assert "GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe" in installer
+    assert "A present native package is authoritative" in installer
+    assert "CopilotEnterpriseHookContractID       = \"copilot-hooks-v2\"" in policy
+    assert "CopilotEnterpriseMinVersion           = \"1.0.83\"" in policy
+    assert "CopilotEnterprisePolicyFileName       = \"90-defenseclaw.json\"" in policy
+    assert "CopilotEnterprisePolicyTimeoutSeconds" not in policy
+    assert "copilotEnterprisePolicyTimeoutSeconds = 30" in policy
+    assert len(re.findall(r'^\s*\"(?:sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|preToolUse|postToolUse|postToolUseFailure|permissionRequest|agentStop|subagentStart|subagentStop|errorOccurred|preCompact|notification)\",$', policy, re.MULTILINE)) == 14
+    assert '"--hook-contract", CopilotEnterpriseHookContractID' in policy
+    assert "powershell" not in policy.casefold()
+    assert "cmd.exe" not in policy.casefold()
+    assert "windowsCopilotManagedStateFile" in enrollment
+    assert "canonicalWindowsCopilotTargets" in enrollment
+    assert "RestoreWindowsCopilotManagedPolicySnapshot" in enrollment
+    assert "prepareWindowsManagedRuntimeGenerationForInstall" in runtime
+    assert "windowsManagedRuntimeGenerationCommit" in runtime
+    assert "installWindowsCopilotManagedPolicy" in runtime
+    assert runtime.index("windowsManagedRuntimeGenerationCommit") < runtime.index(
+        "installWindowsCopilotManagedPolicy"
+    )
+    assert 'json:"copilot_targets"' in teardown
+    assert 'json:"copilot"' in teardown
+    assert 'json:"prior_copilot_targets"' in lifecycle
+    assert "RestoreWindowsCopilotManagedPolicySnapshot" in lifecycle
+    assert "managedCopilotFailOpen" in hookexec
+    assert "return 0" in hookexec[hookexec.index("func failUnreachable"):hookexec.index("func failResponse")]
+    assert "'copilot_targets'" in module
+    assert "'copilot'" in module
+    assert "copilot_target_enabled" in module
+    assert "$Layout.AgentApplicationControlAttested -and" in module[
+        module.index("external_security_prerequisites_satisfied = [bool]("):
+        module.index("updated_at =", module.index("external_security_prerequisites_satisfied = [bool]("))
+    ]
 
 
 def test_unsigned_windows_bundle_instructions_describe_optional_hardening() -> None:
@@ -4941,6 +4995,8 @@ def test_schema_six_managed_hook_teardown_retirement_is_exact_and_retryable() ->
     assert "manifest_sha256" in validator
     assert "deployment_generation_id" in validator
     assert "pending_targets" in validator
+    assert "copilot_targets" in validator
+    assert "'copilot'" in validator
     assert "deferred" in validator
     assert "invalid pending target binding" in validator
     assert "pending target changed from the manifest target" in validator

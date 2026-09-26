@@ -517,7 +517,7 @@ func validateWindowsManagedHookContractCleanupReceipt(
 	previous := ""
 	for _, claim := range receipt.Claims {
 		if claim.SchemaVersion != connector.WindowsManagedHookContractCleanupClaimSchema ||
-			(claim.Connector != "claudecode" && claim.Connector != "codex" && claim.Connector != "cursor") ||
+			(claim.Connector != "claudecode" && claim.Connector != "codex" && claim.Connector != "cursor" && claim.Connector != "copilot") ||
 			claim.SID == "" || strings.ToUpper(claim.SID) != claim.SID ||
 			!filepath.IsAbs(claim.DataDir) || filepath.Clean(claim.DataDir) != claim.DataDir ||
 			!strings.EqualFold(filepath.Base(claim.DataDir), ".defenseclaw") ||

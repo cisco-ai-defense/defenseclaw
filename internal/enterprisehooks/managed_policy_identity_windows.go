@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -111,6 +112,45 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 			state.GatewayAddr != gatewayAddr ||
 			state.GatewayServiceName != gatewayServiceName {
 			return errors.New("enterprise hooks: Cursor machine policy belongs to another protected gateway deployment")
+		}
+		return nil
+	})
+}
+
+// VerifyWindowsCopilotManagedPolicyIdentity authenticates the DefenseClaw
+// machine-policy pair and binds it to the current protected gateway identity.
+func VerifyWindowsCopilotManagedPolicyIdentity(
+	hookExecutable, gatewayAddr, gatewayServiceName string,
+) error {
+	if !filepath.IsAbs(hookExecutable) || filepath.Clean(hookExecutable) != hookExecutable {
+		return errors.New("enterprise hooks: Copilot machine-policy hook executable is noncanonical")
+	}
+	if err := windowsEnterpriseHookTrustCheck(hookExecutable); err != nil {
+		return fmt.Errorf("enterprise hooks: Copilot machine-policy hook executable is untrusted: %w", err)
+	}
+	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(gatewayAddr)
+	if err != nil {
+		return err
+	}
+	if err := connector.ValidateWindowsManagedGatewayServiceName(gatewayServiceName); err != nil {
+		return err
+	}
+	return withWindowsCopilotManagedTransaction(func() error {
+		paths, err := windowsCopilotManagedPathsResolve()
+		if err != nil {
+			return err
+		}
+		policy, _, state, err := readWindowsCopilotManagedState(paths)
+		if err != nil {
+			return err
+		}
+		if !policy.existed {
+			return errors.New("enterprise hooks: Copilot managed policy is absent")
+		}
+		if !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) ||
+			state.GatewayAddr != gatewayAddr ||
+			!strings.EqualFold(state.GatewayServiceName, gatewayServiceName) {
+			return errors.New("enterprise hooks: Copilot machine policy belongs to another protected gateway deployment")
 		}
 		return nil
 	})

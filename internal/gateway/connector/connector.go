@@ -584,7 +584,9 @@ type HookRespondInput struct {
 	Req               HookProfileRequest
 	Action            string
 	RawAction         string
+	Mode              string
 	Reason            string
+	Findings          []string
 	AdditionalContext string
 	Caps              HookCapability
 }

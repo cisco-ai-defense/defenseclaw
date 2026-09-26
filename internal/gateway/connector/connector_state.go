@@ -857,7 +857,7 @@ func newHookContractLockEntry(
 		HookScriptVersion:      contract.HookScriptVersion,
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
+		HookFailMode:           effectiveHookFailMode(opts, conn),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	if runtime.GOOS == "windows" && entry.Connector == "codex" {
@@ -1473,7 +1473,7 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 	}
 	if runtime.GOOS == "windows" && conn != nil {
 		name := normalizeConnectorName(conn.Name())
-		if name == "claudecode" || name == "codex" || name == "cursor" {
+		if name == "claudecode" || name == "codex" || name == "cursor" || name == "copilot" {
 			paths = append(paths, defenseclawHookBinary())
 		}
 	}

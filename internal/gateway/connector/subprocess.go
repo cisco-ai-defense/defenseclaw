@@ -628,7 +628,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -639,11 +639,15 @@ func ReconcileManagedNativeHookRuntime(
 	if _, err := writeHookTokenFilesUsing(hookDir, name, token, writeFile); err != nil {
 		return err
 	}
+	failMode := "closed"
+	if name == "copilot" {
+		failMode = "open"
+	}
 	return writeHookConfigSidecarUsing(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		failMode,
 		true,
 		writeFile,
 	)
@@ -655,7 +659,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -685,12 +689,16 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	wantFailMode := "closed"
+	if name == "copilot" {
+		wantFailMode = "open"
+	}
+	if state.FailModes[name] != wantFailMode {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			wantFailMode,
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -704,8 +712,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != wantFailMode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, wantFailMode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -961,7 +969,7 @@ func validateHookRuntimeStateForContract(
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return nil
 	}
-	if name != "claudecode" && name != "codex" && name != "cursor" {
+	if name != "claudecode" && name != "codex" && name != "cursor" && name != "copilot" {
 		return nil
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -1296,13 +1304,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := resolveHookFailMode(opts, c)
-	if hp, ok := c.(HookCapabilityProvider); ok {
-		caps := hp.HookCapabilities(opts)
-		if failMode == "closed" && !caps.SupportsFailClosed {
-			failMode = "open"
-		}
-	}
+	failMode := effectiveHookFailMode(opts, c)
 	hookToken := opts.HookAPIToken
 	scopedToken := opts.HookAPITokenScoped
 	if strings.TrimSpace(hookToken) == "" {
@@ -1338,6 +1340,20 @@ func resolveHookFailMode(opts SetupOpts, c Connector) string {
 		}
 	}
 	return defaultHookFailMode
+}
+
+// effectiveHookFailMode returns the mode the connector can actually enforce.
+// Some hook surfaces, including GitHub Copilot's current hook API, cannot
+// block on transport failure and therefore deliberately downgrade a requested
+// fail-closed mode to fail-open. Runtime sidecars and the authenticated hook
+// contract must record this same effective value.
+func effectiveHookFailMode(opts SetupOpts, c Connector) string {
+	failMode := resolveHookFailMode(opts, c)
+	if hp, ok := c.(HookCapabilityProvider); ok &&
+		failMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
+		return "open"
+	}
+	return failMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts
