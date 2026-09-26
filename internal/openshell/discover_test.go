@@ -81,6 +81,18 @@ func writeRegistration(t *testing.T, configDir, name string, meta map[string]any
 	return dir
 }
 
+// realTempDir is t.TempDir with its symbolic links resolved (macOS links
+// /var to /private/var), the form in which Discover and
+// GatewayConfigurator report paths.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func skipOnWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandboxes are unsupported on Windows")
@@ -150,7 +162,7 @@ func TestDiscoverSelection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := realTempDir(t)
 			tc.setup(t, dir)
 			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: t.TempDir(), Gateway: tc.pin})
 			if tc.wantErr != nil {
@@ -659,16 +671,114 @@ func TestDiscoverChecksRegistrationFiles(t *testing.T) {
 	})
 
 	t.Run("symlinked config directory is followed", func(t *testing.T) {
-		real := filepath.Join(t.TempDir(), "openshell")
+		real := filepath.Join(realTempDir(t), "openshell")
 		writeRegistration(t, real, "openshell", nil, nil)
+		writeRegistration(t, real, "dev", nil, nil)
+		writeFile(t, filepath.Join(real, "active_gateway"), "dev\n", 0o644)
 		link := filepath.Join(t.TempDir(), "openshell")
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: link, SystemDir: t.TempDir()}); err != nil {
+		reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: link, SystemDir: t.TempDir()})
+		if err != nil {
 			t.Fatalf("Discover = %v", err)
 		}
+		// The CLI's active_gateway wins through the link as it does
+		// without one, and every path names the real directory.
+		regDir := filepath.Join(real, "gateways", "dev")
+		if reg.Name != "dev" || reg.Dir != regDir || reg.ActiveGatewayFile != filepath.Join(real, "active_gateway") ||
+			reg.TLS == nil || reg.TLS.Key != filepath.Join(regDir, "mtls", "tls.key") {
+			t.Fatalf("registration = %+v", reg)
+		}
 	})
+}
+
+// TestDiscoverReportsActiveGatewayProblems: an active_gateway that cannot
+// be read must not be skipped, or DefenseClaw would drive a different
+// gateway than the operator's CLI.
+func TestDiscoverReportsActiveGatewayProblems(t *testing.T) {
+	skipOnWindows(t)
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T, active string)
+		pin     string
+		want    string
+		wantIs  error
+		wantErr string
+	}{
+		{
+			name: "symlinked active_gateway",
+			setup: func(t *testing.T, active string) {
+				target := filepath.Join(t.TempDir(), "active_gateway")
+				writeFile(t, target, "dev\n", 0o644)
+				if err := os.Symlink(target, active); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantIs:  openshell.ErrInsecureRegistration,
+			wantErr: "active_gateway: is a symbolic link",
+		},
+		{
+			name:    "oversized active_gateway",
+			setup:   func(t *testing.T, active string) { writeFile(t, active, strings.Repeat("d", 5000), 0o644) },
+			wantErr: "read limit",
+		},
+		{
+			name: "active_gateway is a directory",
+			setup: func(t *testing.T, active string) {
+				if err := os.Mkdir(active, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "not a regular file",
+		},
+		{
+			name: "unreadable active_gateway",
+			setup: func(t *testing.T, active string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads any file")
+				}
+				writeFile(t, active, "dev\n", 0o200)
+			},
+			wantErr: "permission denied",
+		},
+		{
+			name:  "empty active_gateway falls back to the package default",
+			setup: func(t *testing.T, active string) { writeFile(t, active, "\n", 0o644) },
+			want:  "openshell",
+		},
+		{
+			name: "a pinned gateway does not read active_gateway",
+			setup: func(t *testing.T, active string) {
+				if err := os.Symlink("/nonexistent", active); err != nil {
+					t.Fatal(err)
+				}
+			},
+			pin:  "dev",
+			want: "dev",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(realTempDir(t), "openshell")
+			writeRegistration(t, dir, "openshell", nil, nil)
+			writeRegistration(t, dir, "dev", nil, nil)
+			tc.setup(t, filepath.Join(dir, "active_gateway"))
+			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: t.TempDir(), Gateway: tc.pin})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || errors.Is(err, openshell.ErrNoGateway) {
+					t.Fatalf("Discover = %+v, %v; want %q", reg, err, tc.wantErr)
+				}
+				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+					t.Fatalf("Discover = %v, want %v", err, tc.wantIs)
+				}
+				return
+			}
+			if err != nil || reg.Name != tc.want || reg.ActiveGatewayFile != "" {
+				t.Fatalf("Discover = %+v, %v; want %s", reg, err, tc.want)
+			}
+		})
+	}
 }
 
 func writeFile(t *testing.T, path, content string, mode os.FileMode) {

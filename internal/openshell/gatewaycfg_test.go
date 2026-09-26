@@ -51,7 +51,7 @@ type gatewayFixture struct {
 func newGatewayFixture(t *testing.T) *gatewayFixture {
 	t.Helper()
 	skipOnWindows(t)
-	f := &gatewayFixture{dir: filepath.Join(t.TempDir(), "openshell"), runner: &openshelltest.Runner{}}
+	f := &gatewayFixture{dir: filepath.Join(realTempDir(t), "openshell"), runner: &openshelltest.Runner{}}
 	if err := os.MkdirAll(f.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -379,9 +379,56 @@ func TestGatewayConfigRefusesBindMountsWithoutPrivateGateway(t *testing.T) {
 	})
 }
 
+// TestGatewayConfigThroughSymlinkedDir covers a config directory that a
+// dotfile manager links elsewhere: reads, the plan, backups, the preflight
+// copy and the rollback all use the real directory, and the link stays.
+func TestGatewayConfigThroughSymlinkedDir(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.write(t, "gateway.toml", operatorTOML)
+	f.write(t, "gateway.env", "OPENSHELL_LOG=info\n")
+	link := filepath.Join(t.TempDir(), "openshell")
+	if err := os.Symlink(f.dir, link); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.Dir = link
+	st, err := f.cfg.Read()
+	if err != nil {
+		t.Fatalf("Read = %v", err)
+	}
+	if st.TOMLPath != filepath.Join(f.dir, "gateway.toml") || st.EnvPath != filepath.Join(f.dir, "gateway.env") || !st.TOMLExists || !st.EnvExists || f.cfg.Dir != f.dir {
+		t.Fatalf("state = %+v (dir %s)", st, f.cfg.Dir)
+	}
+	plan, err := f.cfg.Plan(openshell.GatewayChanges{EnableBindMounts: true, Env: map[string]string{openshell.EnvTelemetryEnabled: "false"}})
+	if err != nil {
+		t.Fatalf("Plan = %v", err)
+	}
+	if len(plan.Files) != 2 || plan.Files[0].Path != st.TOMLPath || plan.Files[1].Path != st.EnvPath {
+		t.Fatalf("plan = %s", plan)
+	}
+	res, err := f.cfg.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply = %v", err)
+	}
+	if got := f.backups(t); len(got) != 2 || len(f.preflighted) != 1 {
+		t.Fatalf("backups %v, preflights %d", got, len(f.preflighted))
+	}
+	if st, err := f.cfg.Read(); err != nil || !st.BindMounts.Enabled() || st.TelemetryEnabled() {
+		t.Fatalf("applied state = %+v, %v", st, err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the link was replaced: %v, %v", info, err)
+	}
+	if err := f.cfg.Rollback(context.Background(), res); err != nil {
+		t.Fatalf("Rollback = %v", err)
+	}
+	if f.read(t, "gateway.toml") != operatorTOML || f.read(t, "gateway.env") != "OPENSHELL_LOG=info\n" {
+		t.Fatal("rollback did not restore the files")
+	}
+}
+
 func TestGatewayConfigPathFromEnv(t *testing.T) {
 	f := newGatewayFixture(t)
-	alt := filepath.Join(t.TempDir(), "alt.toml")
+	alt := filepath.Join(realTempDir(t), "alt.toml")
 	if err := os.WriteFile(alt, []byte("[openshell]\nversion = 2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -392,6 +439,19 @@ func TestGatewayConfigPathFromEnv(t *testing.T) {
 	plan, err := f.cfg.Plan(openshell.GatewayChanges{EnableBindMounts: true})
 	if err != nil || len(plan.Files) != 1 || plan.Files[0].Path != alt {
 		t.Fatalf("plan = %+v, %v", plan, err)
+	}
+
+	// A linked directory in OPENSHELL_GATEWAY_CONFIG resolves too.
+	link := filepath.Join(t.TempDir(), "conf")
+	if err := os.Symlink(filepath.Dir(alt), link); err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, "gateway.env", "OPENSHELL_GATEWAY_CONFIG="+filepath.Join(link, "alt.toml")+"\n")
+	if p, err := f.cfg.TOMLPath(); err != nil || p != alt {
+		t.Fatalf("TOMLPath through a link = %q, %v", p, err)
+	}
+	if st, err := f.cfg.Read(); err != nil || !st.TOMLExists {
+		t.Fatalf("Read through a link = %+v, %v", st, err)
 	}
 }
 

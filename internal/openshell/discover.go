@@ -154,6 +154,7 @@ const (
 	mtlsSubdir        = "mtls"
 	defaultSystemDir  = "/etc/openshell"
 	maxMetadataBytes  = 64 << 10
+	maxActiveBytes    = 4 << 10
 )
 
 // UserConfigDir returns the OpenShell user config directory, following the
@@ -172,6 +173,36 @@ func UserConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "openshell"), nil
 }
 
+// resolveConfigDir returns dir, made absolute, with its symbolic links
+// resolved: a dotfile manager may link ~/.config/openshell elsewhere.
+// Every file below it is then read and written through the real
+// directory, which safefile requires (it refuses a file whose parent is a
+// link), and one resolution keeps an operation on one directory even if
+// the link changes. When dir does not exist yet, its deepest existing
+// ancestor is resolved, so the result stays the same once it is created.
+func resolveConfigDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("openshell: config directory %q: %w", dir, err)
+	}
+	missing := ""
+	for p := abs; ; {
+		real, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(real, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("openshell: resolve config directory %s: %w", abs, err)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return abs, nil
+		}
+		missing = filepath.Join(filepath.Base(p), missing)
+		p = parent
+	}
+}
+
 // CheckPlatform returns ErrUnsupportedPlatform for operating systems
 // OpenShell sandboxes do not run on.
 func CheckPlatform(goos string) error {
@@ -186,7 +217,8 @@ func CheckPlatform(goos string) error {
 // Discover resolves a gateway registration and validates it for use by
 // DefenseClaw: its files must be the caller's (CheckRegistrationFiles),
 // the gateway must be local and use mtls, and its private key must be
-// owner-only.
+// owner-only. A symlinked config directory is followed; the registration's
+// paths are built from the directory it resolves to.
 //
 // When the registration exists but is unusable, Discover returns it
 // together with the error, so doctor can report what it found.
@@ -205,6 +237,13 @@ func Discover(opts DiscoverOptions) (*Registration, error) {
 	systemDir := opts.SystemDir
 	if systemDir == "" {
 		systemDir = defaultSystemDir
+	}
+	userDir, err := resolveConfigDir(userDir)
+	if err != nil {
+		return nil, err
+	}
+	if systemDir, err = resolveConfigDir(systemDir); err != nil {
+		return nil, err
 	}
 
 	name, activeFile, err := selectGateway(userDir, systemDir, opts.Gateway)
@@ -251,13 +290,12 @@ func selectGateway(userDir, systemDir, pinned string) (string, string, error) {
 		return pinned, "", nil
 	}
 	active := filepath.Join(userDir, activeGatewayFile)
-	if data, err := safefile.ReadRegularFileBounded(active, 4096); err == nil {
-		if name := strings.TrimSpace(string(data)); name != "" {
-			if !ValidGatewayName(name) {
-				return "", "", fmt.Errorf("openshell: %s names an invalid gateway %q", active, name)
-			}
-			return name, active, nil
-		}
+	name, err := readActiveGateway(active)
+	if err != nil {
+		return "", "", err
+	}
+	if name != "" {
+		return name, active, nil
 	}
 	names := listRegistrations(userDir, systemDir)
 	for _, n := range names {
@@ -272,6 +310,32 @@ func selectGateway(userDir, systemDir, pinned string) (string, string, error) {
 		return "", "", fmt.Errorf("%w: several gateways are registered (%s) and none is active; pin one with openshell.gateway.name", ErrNoGateway, strings.Join(names, ", "))
 	}
 	return "", "", fmt.Errorf("%w under %s (is OpenShell installed?)", ErrNoGateway, userDir)
+}
+
+// readActiveGateway returns the gateway the CLI's active_gateway file
+// names, or "" when there is no such file or it is empty. Any other
+// problem is an error: ignoring an unreadable file would drive a
+// different gateway than the operator's CLI does.
+func readActiveGateway(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("openshell: %s: %w", path, err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return "", &PermissionError{Path: path, Mode: info.Mode(), Reason: "is a symbolic link", Kind: ErrInsecureRegistration}
+	}
+	data, err := safefile.ReadRegularFileBounded(path, maxActiveBytes)
+	if err != nil {
+		return "", fmt.Errorf("openshell: read %s: %w", path, err)
+	}
+	name := strings.TrimSpace(string(data))
+	if name != "" && !ValidGatewayName(name) {
+		return "", fmt.Errorf("openshell: %s names an invalid gateway %q", path, name)
+	}
+	return name, nil
 }
 
 func listRegistrations(dirs ...string) []string {

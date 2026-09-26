@@ -92,6 +92,9 @@ var bindMountSettings = []tomlSetting{
 // everything back when the restarted gateway does not come up healthy.
 type GatewayConfigurator struct {
 	// Dir is the OpenShell user config directory (default UserConfigDir).
+	// The first call replaces it with the directory it resolves to, so a
+	// symlinked config directory works and every file, backup and
+	// preflight copy lives in the real one.
 	Dir string
 	// GOOS selects the service manager (default runtime.GOOS).
 	GOOS   string
@@ -110,13 +113,18 @@ type GatewayConfigurator struct {
 }
 
 func (g *GatewayConfigurator) defaults() error {
-	if g.Dir == "" {
-		dir, err := UserConfigDir()
-		if err != nil {
+	dir := g.Dir
+	if dir == "" {
+		var err error
+		if dir, err = UserConfigDir(); err != nil {
 			return err
 		}
-		g.Dir = dir
 	}
+	dir, err := resolveConfigDir(dir)
+	if err != nil {
+		return err
+	}
+	g.Dir = dir
 	if g.Discover.ConfigDir == "" {
 		g.Discover.ConfigDir = g.Dir
 	}
@@ -150,7 +158,8 @@ func (g *GatewayConfigurator) EnvPath() (string, error) {
 }
 
 // TOMLPath is the gateway.toml the service reads: OPENSHELL_GATEWAY_CONFIG
-// from gateway.env when it names an absolute path, else Dir/gateway.toml.
+// from gateway.env when it names an absolute path (its directory
+// resolved like Dir), else Dir/gateway.toml.
 func (g *GatewayConfigurator) TOMLPath() (string, error) {
 	envPath, err := g.EnvPath()
 	if err != nil {
@@ -161,7 +170,12 @@ func (g *GatewayConfigurator) TOMLPath() (string, error) {
 		return "", err
 	}
 	if p := parseEnvFile(data)[envGatewayConfig]; p != "" && filepath.IsAbs(p) {
-		return filepath.Clean(p), nil
+		p = filepath.Clean(p)
+		dir, err := resolveConfigDir(filepath.Dir(p))
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, filepath.Base(p)), nil
 	}
 	return filepath.Join(g.Dir, GatewayTOMLFile), nil
 }

@@ -688,6 +688,37 @@ func TestDoctorGatewayConfig(t *testing.T) {
 	})
 }
 
+// TestDoctorFollowsSymlinkedConfigDir runs doctor, and its bind-mount
+// fix, on a config directory a dotfile manager links elsewhere, with
+// active_gateway choosing between two registrations.
+func TestDoctorFollowsSymlinkedConfigDir(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
+	dev := writeRegistration(t, f.dir, "dev", nil, nil)
+	for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
+		chmod(t, filepath.Join(dev, file), mode)
+	}
+	writeFile(t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o644)
+	link := filepath.Join(t.TempDir(), "openshell")
+	if err := os.Symlink(f.dir, link); err != nil {
+		t.Fatal(err)
+	}
+	f.doctor.Discover.ConfigDir = link
+	f.doctor.Gateway.Dir = link
+	r := f.run()
+	if r.Registration == nil || r.Registration.Name != "dev" {
+		t.Fatalf("registration = %+v\n%s", r.Registration, r)
+	}
+	expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "only --copy sandboxes work")
+	outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDBindMounts, nil })
+	if err != nil || len(outcomes) != 1 || !outcomes[0].Applied {
+		t.Fatalf("outcomes = %+v, %v", outcomes, err)
+	}
+	if st, err := f.doctor.Gateway.Read(); err != nil || !st.BindMounts.Enabled() {
+		t.Fatalf("state = %+v, %v", st, err)
+	}
+}
+
 func TestDoctorPorts(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.busy["127.0.0.1:18971"] = true
