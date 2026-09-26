@@ -1141,9 +1141,13 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
 	}
-	if err := validateClaudeCodeManagedFileDestination(); err != nil {
+	if err := validateClaudeCodeManagedFileDestination(opts); err != nil {
 		return nil, err
 	}
+	return renderClaudeCodeManagedHookPolicy(opts)
+}
+
+func renderClaudeCodeManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)
 	if runtime.GOOS == "windows" && (hookExecutable == "" || !filepath.IsAbs(hookExecutable)) {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires an absolute native hook executable")

@@ -109,6 +109,28 @@ Windows managed settings use:
 The legacy ProgramData managed-settings location is unsupported as of
 Claude Code v2.1.75.
 
+Claude applies the highest-ranked managed source ("first wins"), so an HKLM
+`Settings` policy outranks the DefenseClaw `managed-settings.d\90-defenseclaw.json`
+drop-in. Windows `managed_enterprise` enrollment therefore accepts an HKLM
+policy only when the DefenseClaw hooks stay effective:
+
+- the policy sets `"managedSourcesBehavior": "merge"`, which Claude Code
+  v2.1.242 and newer honor by composing every administrator source and
+  unioning their hook lists. Targets on an older client are refused with an
+  upgrade message, because they still load only the HKLM policy; or
+- the policy already carries the exact DefenseClaw hook matrix. Print it on an
+  installed endpoint with
+  `defenseclaw-gateway enterprise windows export-claude-policy` (add
+  `--agent-version <x.y.z>` to select a hook contract, `--compact` for a
+  single-line `REG_SZ` value, or `--hook-executable` for a non-default
+  install root) and add its `hooks` object to the MDM/GPO policy.
+
+An HKLM policy that sets `disableAllHooks` or `policyHelper` is still refused,
+as is any other HKLM policy, with a message naming both fixes. `enterprise
+windows status --json` reports `claude_policy_shadowed_by_hklm` and
+`claude_policy_hklm_detail`, and a shadowed policy reports
+`claude_effective_policy_verified=false`.
+
 ## Hook contract
 
 ### Configuration and invocation

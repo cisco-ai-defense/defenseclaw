@@ -90,6 +90,31 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	// Unix guardian installs harden per-user hook scripts. Only the native
 	// enterprise path pins an administrator-owned executable in managed policy.
 	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	if managedPolicy && claudeCodeOSAdminPolicyComposition &&
+		activeManaged != nil && activeManaged == managed.osAdmin &&
+		claudeCodeSourceRequestsManagedMerge(managed.osAdmin) {
+		if !claudeCodeClientHonorsManagedMerge(opts.AgentVersion) {
+			// An older client keeps first-wins precedence, so the OS-admin
+			// policy alone must carry the contract.
+			if err := claudeCodeOSAdminAdmitsManagedHooks(managed.osAdmin, opts); err != nil {
+				return false, err
+			}
+			return claudeCodeSourceHasHookContract(managed.osAdmin, opts, true)
+		}
+		// A merge-honoring client unions both administrator tiers' hooks.
+		// Either tier's gate still disables them, and the file tier is ours,
+		// so its absence is repairable rather than an administrator failure.
+		for _, source := range []*claudeCodeSettingsSource{managed.osAdmin, managed.file} {
+			if err := validateClaudeCodeManagedHookControls(source, true); err != nil {
+				return false, err
+			}
+		}
+		merged, err := claudeCodeMergedManagedSource(managed.osAdmin, managed.file)
+		if err != nil {
+			return false, err
+		}
+		return claudeCodeSourceHasHookContract(merged, opts, false)
+	}
 	if managedPolicy && activeManaged == managed.userFallback {
 		// HKCU is a user-writable convenience tier. Restoring the higher file
 		// drop-in supersedes it, so even a disabling fallback remains ordinary,
@@ -179,7 +204,7 @@ func inspectClaudeCodeManagedSources() (claudeCodeManagedSourceSet, error) {
 // from writing a perfectly valid drop-in that Claude will never load because a
 // higher managed tier wins. The installer owns only the file-based tier; remote
 // and MDM policy must carry the hook matrix through their native admin channel.
-func validateClaudeCodeManagedFileDestination() error {
+func validateClaudeCodeManagedFileDestination(opts SetupOpts) error {
 	managed, err := inspectClaudeCodeManagedSources()
 	if err != nil {
 		return err
@@ -197,10 +222,15 @@ func validateClaudeCodeManagedFileDestination() error {
 		)
 	}
 	if managed.osAdmin.active() {
-		return fmt.Errorf(
-			"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
-			managed.osAdmin.label(),
-		)
+		if !claudeCodeOSAdminPolicyComposition {
+			return fmt.Errorf(
+				"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
+				managed.osAdmin.label(),
+			)
+		}
+		if err := claudeCodeOSAdminAdmitsManagedHooks(managed.osAdmin, opts); err != nil {
+			return err
+		}
 	}
 	if err := validateClaudeCodeManagedHookControls(managed.file, true); err != nil {
 		return err

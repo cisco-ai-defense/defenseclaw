@@ -18004,6 +18004,156 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
+function ConvertTo-DefenseClawCanonicalJsonText {
+    param([AllowNull()]$Value)
+    # Key-sorted compact JSON, so two parsed documents compare by content
+    # rather than by key order or whitespace.
+    if ($null -eq $Value) {
+        return 'null'
+    }
+    if ($Value -is [string]) {
+        return (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $Value -Compress)
+    }
+    if ($Value -is [bool]) {
+        if ($Value) {
+            return 'true'
+        }
+        return 'false'
+    }
+    if ($Value -is [Management.Automation.PSCustomObject]) {
+        $names = [string[]]@($Value.PSObject.Properties | Microsoft.PowerShell.Core\ForEach-Object { $_.Name })
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $members = @(foreach ($name in $names) {
+            (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $name -Compress) + ':' +
+                (ConvertTo-DefenseClawCanonicalJsonText -Value $Value.PSObject.Properties[$name].Value)
+        })
+        return '{' + ($members -join ',') + '}'
+    }
+    if ($Value -is [Collections.IList]) {
+        $items = @(foreach ($item in $Value) {
+            ConvertTo-DefenseClawCanonicalJsonText -Value $item
+        })
+        return '[' + ($items -join ',') + ']'
+    }
+    return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-DefenseClawClaudeHKLMCarriesInstalledHooks {
+    param(
+        [Parameter(Mandatory)]$Settings,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ClaudeManagedPolicyPath `
+        -PathType Leaf)) {
+        return $false
+    }
+    $installed = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $Layout.ClaudeManagedPolicyPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $installedHooks = $installed.PSObject.Properties['hooks']
+    $policyHooks = $Settings.PSObject.Properties['hooks']
+    if ($null -eq $installedHooks -or $null -eq $policyHooks -or
+        $installedHooks.Value -isnot [Management.Automation.PSCustomObject] -or
+        $policyHooks.Value -isnot [Management.Automation.PSCustomObject]) {
+        return $false
+    }
+    foreach ($eventHooks in @($installedHooks.Value.PSObject.Properties)) {
+        $present = $policyHooks.Value.PSObject.Properties[$eventHooks.Name]
+        if ($null -eq $present) {
+            return $false
+        }
+        $presentEntries = @(foreach ($entry in @($present.Value)) {
+            ConvertTo-DefenseClawCanonicalJsonText -Value $entry
+        })
+        foreach ($entry in @($eventHooks.Value)) {
+            if ((ConvertTo-DefenseClawCanonicalJsonText -Value $entry) -cnotin $presentEntries) {
+                return $false
+            }
+        }
+    }
+    return $true
+}
+
+function Get-DefenseClawClaudeHKLMPolicyState {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # Read-only Status view of an MDM/GPO Claude policy. It outranks the
+    # DefenseClaw managed-settings.d drop-in, so the gateway enrolls Claude
+    # targets only when it merges managed sources or carries the DefenseClaw
+    # hook matrix; this reports the same state with its fix and never throws.
+    $policyName = 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings'
+    $remedy = (
+        'set "managedSourcesBehavior": "merge" in it (Claude Code 2.1.242 ' +
+        'or newer), or add the hooks printed by defenseclaw-gateway ' +
+        'enterprise windows export-claude-policy to it'
+    )
+    $state = [ordered]@{
+        shadowed = $false
+        managed_sources_merge = $false
+        detail = $null
+    }
+    $base = $null
+    $key = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $key = $base.OpenSubKey('SOFTWARE\Policies\ClaudeCode', $false)
+        $raw = if ($null -eq $key) {
+            ''
+        }
+        else {
+            [string]$key.GetValue(
+                'Settings',
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+        }
+        if (-not [string]::IsNullOrWhiteSpace($raw)) {
+            $settings = $raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ($settings -isnot [Management.Automation.PSCustomObject]) {
+                throw 'the Settings value is not a JSON object'
+            }
+            $disable = $settings.PSObject.Properties['disableAllHooks']
+            $helper = $settings.PSObject.Properties['policyHelper']
+            $behavior = $settings.PSObject.Properties['managedSourcesBehavior']
+            if ($null -ne $disable -and
+                ($disable.Value -isnot [bool] -or [bool]$disable.Value)) {
+                $state.shadowed = $true
+                $state.detail = "$policyName sets disableAllHooks, which disables the DefenseClaw hooks"
+            }
+            elseif ($null -ne $helper -and $null -ne $helper.Value) {
+                $state.shadowed = $true
+                $state.detail = "$policyName sets policyHelper, which supersedes file-based managed hooks; add the hooks printed by defenseclaw-gateway enterprise windows export-claude-policy to the helper output"
+            }
+            elseif ($null -ne $behavior -and [string]$behavior.Value -ceq 'merge') {
+                $state.managed_sources_merge = $true
+                $state.detail = "$policyName requests managedSourcesBehavior merge; Claude Code clients older than 2.1.242 ignore it and load only that policy"
+            }
+            elseif (-not (Test-DefenseClawClaudeHKLMCarriesInstalledHooks `
+                -Settings $settings `
+                -Layout $Layout)) {
+                $state.shadowed = $true
+                $state.detail = "$policyName outranks the DefenseClaw managed-settings.d policy; $remedy"
+            }
+        }
+    }
+    catch {
+        $state.shadowed = $true
+        $state.detail = "cannot evaluate $policyName ($($_.Exception.Message)); $remedy"
+    }
+    finally {
+        if ($null -ne $key) {
+            $key.Dispose()
+        }
+        if ($null -ne $base) {
+            $base.Dispose()
+        }
+    }
+    return [pscustomobject]$state
+}
+
 function ConvertTo-DefenseClawBoundedDiagnostic {
     param(
         [AllowNull()]$Value,
@@ -18210,6 +18360,21 @@ function Get-DefenseClawLifecycleStatus {
     if (-not [string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
         $claudeEffectivePolicyVerified = $false
     }
+    # An outranking MDM/GPO policy that neither merges nor carries the
+    # DefenseClaw hooks means the DefenseClaw policy is not the one Claude
+    # applies, whatever evidence was recorded.
+    $claudeHKLMPolicy = [pscustomobject]@{
+        shadowed = $false
+        managed_sources_merge = $false
+        detail = $null
+    }
+    if ($installed -and $claudeTargetEnabled -and
+        -not (Test-DefenseClawStandaloneProfile)) {
+        $claudeHKLMPolicy = Get-DefenseClawClaudeHKLMPolicyState -Layout $Layout
+        if ([bool]$claudeHKLMPolicy.shadowed) {
+            $claudeEffectivePolicyVerified = $false
+        }
+    }
     # Cursor uses the same protected Guardian/runtime readiness lane but does
     # not require Codex machine policy or application-control proof.
     $externalSecuritySatisfied = [bool](
@@ -18259,6 +18424,9 @@ function Get-DefenseClawLifecycleStatus {
                 $claudeEffectivePolicyStaleReason
             }
         )
+        claude_policy_shadowed_by_hklm = [bool]$claudeHKLMPolicy.shadowed
+        claude_policy_hklm_managed_sources_merge = [bool]$claudeHKLMPolicy.managed_sources_merge
+        claude_policy_hklm_detail = $claudeHKLMPolicy.detail
         security_complete = [bool](
             $healthy -and
             $externalSecuritySatisfied
