@@ -6,16 +6,9 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
-import defenseclaw.commands.cmd_upgrade as upgrade_module
-import defenseclaw.main as main_module
 import pytest
 import yaml
-from click.testing import CliRunner
-from defenseclaw.commands.cmd_upgrade import _detect_platform
-from defenseclaw.context import AppContext
-from defenseclaw.resolver_hint import COSIGN_BOOTSTRAP_SHA256, authenticated_resolver_instructions
 
 ROOT = Path(__file__).resolve().parents[2]
 INTEL_REFUSAL_HARNESS = ROOT / "scripts/test-upgrade-macos-intel-refusal.sh"
@@ -51,74 +44,12 @@ def _sysctl_translation_result(translated: bool) -> subprocess.CompletedProcess[
     )
 
 
-def test_python_upgrade_rejects_intel_macos(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr("platform.system", lambda: "Darwin")
-    monkeypatch.setattr("platform.machine", lambda: "x86_64")
-    monkeypatch.setattr(upgrade_module.subprocess, "run", lambda *args, **kwargs: _sysctl_translation_result(False))
-
-    with pytest.raises(SystemExit, match="1"):
-        _detect_platform()
-
-    captured = capsys.readouterr()
-    assert "Intel macOS is unsupported" in captured.out + captured.err
 
 
-def test_python_upgrade_normalizes_rosetta_to_apple_silicon() -> None:
-    translated = _sysctl_translation_result(True)
-    with (
-        patch.object(upgrade_module.platform, "system", return_value="Darwin"),
-        patch.object(upgrade_module.platform, "machine", return_value="x86_64"),
-        patch.object(upgrade_module.subprocess, "run", return_value=translated) as sysctl,
-    ):
-        assert _detect_platform() == ("darwin", "arm64")
-
-    sysctl.assert_called_once_with(
-        ["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
 
 
-def test_public_upgrade_rejects_intel_before_resolver_network_or_state() -> None:
-    with (
-        patch.object(upgrade_module.platform, "system", return_value="Darwin"),
-        patch.object(upgrade_module.platform, "machine", return_value="x86_64"),
-        patch.object(upgrade_module.subprocess, "run", return_value=_sysctl_translation_result(False)),
-        patch.object(upgrade_module, "_authenticated_release_resolver") as resolver,
-        patch.object(upgrade_module, "_fetch_latest_version") as latest,
-        patch.object(upgrade_module.tempfile, "mkdtemp") as mkdtemp,
-        patch.object(upgrade_module.tempfile, "TemporaryDirectory") as temporary_directory,
-        pytest.raises(SystemExit, match="1"),
-    ):
-        upgrade_module._maybe_delegate_public_upgrade(["upgrade", "--yes"])
-
-    resolver.assert_not_called()
-    latest.assert_not_called()
-    mkdtemp.assert_not_called()
-    temporary_directory.assert_not_called()
 
 
-def test_click_upgrade_rejects_intel_before_recovery_network_or_state() -> None:
-    app = AppContext()
-    with (
-        patch.object(upgrade_module.platform, "system", return_value="Darwin"),
-        patch.object(upgrade_module.platform, "machine", return_value="x86_64"),
-        patch.object(upgrade_module.subprocess, "run", return_value=_sysctl_translation_result(False)),
-        patch.object(main_module.os.path, "lexists") as recovery_probe,
-        patch.object(upgrade_module, "_fetch_latest_version") as latest,
-        patch.object(upgrade_module.tempfile, "mkdtemp") as mkdtemp,
-        patch.object(upgrade_module.tempfile, "TemporaryDirectory") as temporary_directory,
-    ):
-        result = CliRunner().invoke(main_module.cli, ["upgrade", "--yes"], obj=app)
-
-    assert result.exit_code == 1, result.output
-    assert "Intel macOS is unsupported" in result.output
-    recovery_probe.assert_not_called()
-    latest.assert_not_called()
-    mkdtemp.assert_not_called()
-    temporary_directory.assert_not_called()
 
 
 def test_release_build_and_package_contract_is_arm64_only() -> None:
@@ -316,73 +247,6 @@ def test_shell_entrypoints_distinguish_rosetta_from_genuine_intel(tmp_path: Path
     assert probe.stdout.strip() == "x86_64"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
-def test_authenticated_resolver_has_no_intel_macos_verifier_or_state_path(tmp_path: Path) -> None:
-    assert ("darwin", "amd64") not in COSIGN_BOOTSTRAP_SHA256
-    instructions = authenticated_resolver_instructions("9.9.9")
-    assert "cosign-darwin-amd64" not in instructions
-    assert "Intel macOS is unsupported" in instructions
-    assert "darwin/x86_64|darwin/amd64" in instructions
-    platform_probe = "  platform_os=\"$(uname -s | tr '[:upper:]' '[:lower:]')\""
-    temp_allocation = '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"'
-    assert instructions.index(platform_probe) < instructions.index(temp_allocation)
-    assert "sysctl.proc_translated" in instructions
-
-    marker = tmp_path / "mktemp-invoked"
-    fake_sysctl = tmp_path / "sysctl"
-    _write_executable(fake_sysctl, "#!/bin/sh\nprintf '%s\\n' \"${TEST_SYSCTL_TRANSLATED:?}\"\n")
-    posix = (
-        instructions.split("POSIX:\n", 1)[1]
-        .split("\nWindows PowerShell:", 1)[0]
-        .replace("/usr/sbin/sysctl", str(fake_sysctl))
-    )
-    intel = posix.replace(platform_probe, '  platform_os="darwin"\n  platform_arch="x86_64"', 1).replace(
-        '  platform_arch="$(uname -m)"\n',
-        "",
-        1,
-    ).replace(
-        temp_allocation,
-        f"  printf invoked > '{marker}'; {temp_allocation.strip()}",
-        1,
-    )
-    completed = subprocess.run(
-        ["bash"],
-        input=intel,
-        env={**os.environ, "TEST_SYSCTL_TRANSLATED": "0"},
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert completed.returncode == 1
-    assert "Intel macOS is unsupported" in completed.stderr
-    assert not marker.exists()
-
-    observed_platform = tmp_path / "rosetta-platform"
-    rosetta = posix.replace(
-        platform_probe,
-        '  platform_os="darwin"\n  platform_arch="x86_64"',
-        1,
-    ).replace(
-        '  platform_arch="$(uname -m)"\n',
-        "",
-        1,
-    ).replace(
-        temp_allocation,
-        f"  printf '%s' \"$platform\" > '{observed_platform}'; exit 0",
-        1,
-    )
-    completed = subprocess.run(
-        ["bash"],
-        input=rosetta,
-        env={**os.environ, "TEST_SYSCTL_TRANSLATED": "1"},
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert observed_platform.read_text(encoding="utf-8") == "darwin/arm64"
 
 
 def test_documented_resolver_rejects_intel_before_temp_or_network() -> None:

@@ -14,47 +14,37 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Version-specific migrations for DefenseClaw upgrades.
+"""Config and data migrations, run by ``defenseclaw migrate``.
 
-Each migration is keyed to the target version it ships with. During upgrade,
-all migrations between the old version and the new version are applied in
-order via ``run_migrations``.
+The installer runs ``defenseclaw migrate`` from the version it just installed,
+after stopping the gateway, so migrations always execute the new release's
+code. Two kinds of steps exist:
 
-Design contract for every migration:
+* ``CONFIG_MIGRATIONS`` moves ``config.yaml`` from ``config_version`` N to
+  N+1. New keys only need loader defaults; renames and removals need a step.
+* ``MIGRATIONS`` is the frozen 0.x chain. It imports installs older than the
+  0.8.5 schema-v8 hard cut and never grows.
 
-* **Idempotent** — safe to re-run on an already-migrated install.
-* **Atomic** — mutations write to a temp file and rename, never partial
-  state on a crash.
-* **Fail-safe** — a failure in one step is logged and the migration
-  continues; the upgrade itself never aborts due to a migration error,
-  because a half-upgraded install with a half-applied migration is
-  worse than an upgraded install with stale residue we can clean up
-  later via ``defenseclaw doctor --fix``.
-* **No-touch** — operators do nothing; the migration runs automatically
-  during ``defenseclaw upgrade``.
+Every step is idempotent and writes through temp-file-and-rename.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import re
 import secrets
 import shutil
 import stat
-import subprocess
-import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import click
 import yaml
 
-from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
@@ -69,8 +59,6 @@ _OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
 
-_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
-_UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
 _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES = 4 * 1024 * 1024
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x00000400
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -146,47 +134,6 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(out)
 
 
-def _ensure_legacy_openclaw_restart_shim(
-    from_version: str,
-    to_version: str,
-    data_dir: str,
-) -> None:
-    """Prevent pre-0.6.1 upgraders from crashing when ``openclaw`` is absent.
-
-    The 0.4.0-0.6.0 ``cmd_upgrade`` path installs the target wheel, imports
-    this module, runs migrations, and then calls ``subprocess.run(["openclaw",
-    "gateway", "restart"], check=False)``. If ``openclaw`` is not installed,
-    Python raises ``FileNotFoundError`` before ``check=False`` can matter,
-    aborting an otherwise successful upgrade. We cannot patch those already
-    released command modules, but we can provide a process-local PATH shim
-    before their ``finally`` block runs.
-    """
-    if os.name == "nt":
-        return
-    if _ver_tuple(to_version) < _ver_tuple("0.8.0"):
-        return
-    if _ver_tuple(from_version) >= _ver_tuple("0.6.1"):
-        return
-    if shutil.which("openclaw"):
-        return
-
-    shim_dir = os.path.join(data_dir, ".upgrade-shims")
-    shim_path = os.path.join(shim_dir, "openclaw")
-    try:
-        os.makedirs(shim_dir, mode=0o700, exist_ok=True)
-        with open(shim_path, "w", encoding="utf-8") as fh:
-            fh.write(
-                "#!/bin/sh\nprintf '%s\\n' 'openclaw CLI not found; skipping automatic gateway restart' >&2\nexit 127\n"
-            )
-        os.chmod(shim_path, 0o700)
-    except OSError as exc:
-        ux.warn(f"could not create legacy openclaw restart shim: {exc}", indent="    ")
-        return
-
-    path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
-    if shim_dir not in path_parts:
-        os.environ["PATH"] = os.pathsep.join([shim_dir, *path_parts])
-
 
 # ---------------------------------------------------------------------------
 # MigrationContext
@@ -212,7 +159,6 @@ class MigrationContext:
     from_version: str = ""
     to_version: str = ""
     config_path: str = ""
-    upgrade_handles_local_bundle: bool = False
     # changes accumulates a one-line summary per applied step. The
     # upgrade command surfaces these so an operator can audit what the
     # no-touch migration actually changed under their HOME.
@@ -245,56 +191,6 @@ class _PreparedObservabilityV8Migration:
     environment_file_sha256: str = field(repr=False)
 
 
-@dataclass(frozen=True)
-class ObservabilityV8PreflightBinding:
-    """Value-free identity of the source proven safe before mutation."""
-
-    source_sha256: str = field(repr=False)
-    candidate_sha256: str = field(repr=False)
-    environment_file_present: bool
-    environment_file_sha256: str = field(repr=False)
-    environment_dependencies_sha256: str = field(repr=False)
-    environment_edits_sha256: str = field(repr=False)
-
-    def to_payload(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "source_sha256": self.source_sha256,
-            "candidate_sha256": self.candidate_sha256,
-            "environment_file_present": self.environment_file_present,
-            "environment_file_sha256": self.environment_file_sha256,
-            "environment_dependencies_sha256": self.environment_dependencies_sha256,
-            "environment_edits_sha256": self.environment_edits_sha256,
-        }
-
-    @classmethod
-    def from_payload(cls, payload: object) -> ObservabilityV8PreflightBinding:
-        fields = {
-            "schema_version",
-            "source_sha256",
-            "candidate_sha256",
-            "environment_file_present",
-            "environment_file_sha256",
-            "environment_dependencies_sha256",
-            "environment_edits_sha256",
-        }
-        if not isinstance(payload, dict) or set(payload) != fields or payload.get("schema_version") != 1:
-            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-        present = payload.get("environment_file_present")
-        digests = {key: payload.get(key) for key in fields if key.endswith("_sha256")}
-        if not isinstance(present, bool) or any(
-            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests.values()
-        ):
-            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-        return cls(
-            source_sha256=digests["source_sha256"],
-            candidate_sha256=digests["candidate_sha256"],
-            environment_file_present=present,
-            environment_file_sha256=digests["environment_file_sha256"],
-            environment_dependencies_sha256=digests["environment_dependencies_sha256"],
-            environment_edits_sha256=digests["environment_edits_sha256"],
-        )
-
 
 def _prepare_observability_v8_migration(
     *,
@@ -313,8 +209,6 @@ def _prepare_observability_v8_migration(
     environment, environment_file_present, environment_file_sha256 = _observability_v8_upgrade_environment_snapshot(
         environment_path
     )
-    environment.pop(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV, None)
-    environment.pop(_UPGRADE_MUTATION_TOKEN_ENV, None)
     migration = convert_v7_observability_to_v8(
         source,
         environment,
@@ -461,156 +355,27 @@ def _read_stable_observability_v8_upgrade_file(
                 pass
 
 
-def preflight_observability_v8_upgrade(
-    *,
-    data_dir: str,
-    config_path: str,
-    gateway_binary: str,
-    candidate_directory: str,
-) -> ObservabilityV8PreflightBinding | None:
-    """Prove the active v7 source is migratable before stopping its gateway.
-
-    This invokes the same pure conversion implementation later used by the
-    installed migration. The returned value-free binding lets the controller
-    reject config or consulted-environment drift at the mutation boundary.
-    The generated candidate is validated by the authenticated, downloaded
-    target gateway and exists only as an owner-only staging file. No managed
-    state, backup, receipt, service, or installed artifact is changed here.
-    """
-
-    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
-    normalized_config_path = os.path.abspath(os.path.expanduser(config_path))
-    prepared = _prepare_observability_v8_migration(
-        data_dir=normalized_data_dir,
-        config_path=normalized_config_path,
-    )
-    if prepared is None:
-        return None
-
-    validation_environment = dict(prepared.environment)
-    validation_environment.update({edit.name: edit.value for edit in prepared.migration.environment_edits})
-    _validate_observability_v8_candidate(
-        prepared.migration.candidate,
-        validation_environment,
-        data_dir=normalized_data_dir,
-        candidate_directory=candidate_directory,
-        gateway_binary=gateway_binary,
-    )
-    preflight_v8_migration_activation(
-        prepared.migration,
-        data_dir=normalized_data_dir,
-        config_path=normalized_config_path,
-        environment_path=os.path.join(normalized_data_dir, ".env"),
-        tighten_legacy_backup_root=True,
-        environment=prepared.environment,
-    )
-    return _observability_v8_preflight_binding(prepared)
-
-
-def _observability_v8_preflight_binding(
-    prepared: _PreparedObservabilityV8Migration,
-) -> ObservabilityV8PreflightBinding:
-    return ObservabilityV8PreflightBinding(
-        source_sha256=prepared.migration.source_sha256,
-        candidate_sha256=prepared.migration.candidate_sha256,
-        environment_file_present=prepared.environment_file_present,
-        environment_file_sha256=prepared.environment_file_sha256,
-        environment_dependencies_sha256=_observability_v8_binding_rows_sha256(
-            (
-                dependency.name,
-                dependency.present,
-                dependency.value_sha256,
-            )
-            for dependency in prepared.migration.environment_dependencies
-        ),
-        environment_edits_sha256=_observability_v8_binding_rows_sha256(
-            (edit.name, edit.value_sha256, edit.operation) for edit in prepared.migration.environment_edits
-        ),
-    )
-
-
-def _observability_v8_binding_rows_sha256(
-    rows: Iterable[tuple[object, ...]],
-) -> str:
-    """Hash sorted value-free binding rows into one bounded transport value."""
-
-    encoded = json.dumps(
-        sorted(tuple(row) for row in rows),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _valid_upgrade_mutation_token() -> bool:
-    """Return whether the controller supplied one filename-safe capability."""
-
-    token = os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV)
-    return isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
-
-
-def _expected_observability_v8_preflight_binding() -> tuple[bool, ObservabilityV8PreflightBinding | None]:
-    if not _valid_upgrade_mutation_token():
-        return False, None
-    raw = os.environ.get(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV)
-    if raw is None:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_missing")
-    if len(raw) > 4_096:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid") from None
-    if payload is None:
-        return True, None
-    return True, ObservabilityV8PreflightBinding.from_payload(payload)
-
-
-def _controller_has_hard_cut_bundle_custody() -> bool:
-    """Return whether the child received the paired hard-cut capability."""
-
-    if not _valid_upgrade_mutation_token():
-        return False
-    try:
-        binding_present, _binding = _expected_observability_v8_preflight_binding()
-    except ObservabilityV8UpgradeMigrationError:
-        return False
-    return binding_present
-
 
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
-    """Convert, target-validate, and transactionally activate config v8.
+    """Convert, target-validate, and activate config v8 (the 0.8.5 hard cut).
 
-    ``defenseclaw upgrade`` invokes the installed migration registry only
-    after stopping the gateway and installing the target wheel and binary.
-    This callable preserves that ordering and independently rejects a live
-    gateway identified by the active data directory's PID file. The PID check
-    is the enforceable precondition available to the current architecture;
-    the activation transaction's locks and CAS checks protect participating
-    writers after that point.
-
-    The release registry entry is intentionally added only when the shipping
-    version is selected. Reusing an already-published version would cause
-    existing cursors to skip this breaking schema migration.
+    ``defenseclaw migrate`` runs this after the installer has stopped the
+    gateway and installed the new binaries, so validation compiles the
+    candidate with the new gateway. The PID check still rejects a live
+    gateway identified by the active data directory's PID file.
     """
 
     data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
-    expected_binding_present, expected_binding = _expected_observability_v8_preflight_binding()
     prepared = _prepare_observability_v8_migration(
         data_dir=data_dir,
         config_path=config_path,
     )
-    if expected_binding_present:
-        current_binding = _observability_v8_preflight_binding(prepared) if prepared is not None else None
-        if current_binding != expected_binding:
-            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed")
     if prepared is None:
         return
     environment = prepared.environment
-    migration = prepared.migration
 
     def validate_candidate(candidate: bytes, protected_overrides: Mapping[str, str]) -> None:
         validation_environment = dict(environment)
@@ -621,92 +386,26 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
             data_dir=data_dir,
         )
 
-    locked_binding = None
-    if expected_binding is not None:
-        locked_binding = (
-            expected_binding.source_sha256,
-            expected_binding.environment_file_present,
-            expected_binding.environment_file_sha256,
-        )
-    from defenseclaw.observability.v8_activation import V8ActivationError as _V8ActivationError
-
-    try:
-        activation = activate_v8_migration(
-            migration,
-            validator=validate_candidate,
-            data_dir=data_dir,
-            config_path=config_path,
-            environment_path=environment_path,
-            tighten_legacy_backup_root=True,
-            environment=environment,
-            preflight_source_binding=locked_binding,
-        )
-    except _V8ActivationError as exc:
-        # The bridge's public migration contract is intentionally independent
-        # of target-private exception classes. Preserve the value-free refusal
-        # code used by the controller when a source changed after preflight.
-        if getattr(exc, "code", None) == "preflight_source_changed":
-            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed") from None
-        raise
-    _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
+    activation = activate_v8_migration(
+        prepared.migration,
+        validator=validate_candidate,
+        data_dir=data_dir,
+        config_path=config_path,
+        environment_path=environment_path,
+        tighten_legacy_backup_root=True,
+        environment=environment,
+    )
     if activation.activated:
         ctx.changes.append("activated observability configuration schema v8")
 
 
-def preflight_required_migrations(
-    from_version: str,
-    to_version: str,
-    openclaw_home: str,
-    data_dir: str,
-    required_versions: list[str] | tuple[str, ...],
+def _preflight_observability_v8(
+    ctx: MigrationContext,
     scratch_dir: str,
-) -> int:
-    """Exercise required target migrations without mutating live state.
-
-    Native Setup calls this from the staged target interpreter while the old
-    runtime is still live.  Each supported preflight may read a bounded secure
-    snapshot, but candidate files are confined to ``scratch_dir`` and no
-    migration cursor, config, environment, service, or connector state is
-    published.
-    """
-
-    del openclaw_home  # Reserved for future required-migration preflights.
-    if not isinstance(required_versions, (list, tuple)) or any(
-        not isinstance(version, str) for version in required_versions
-    ):
-        raise ObservabilityV8UpgradeMigrationError("preflight_manifest_invalid")
-    scratch = os.path.abspath(os.path.expanduser(scratch_dir))
-    if not os.path.isabs(scratch_dir) or not os.path.isdir(scratch):
-        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
-    scratch_metadata = os.lstat(scratch)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if stat.S_ISLNK(scratch_metadata.st_mode) or (
-        getattr(scratch_metadata, "st_file_attributes", 0) & reparse_flag
-    ):
-        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
-
-    selected = [
-        version
-        for version in dict.fromkeys(required_versions)
-        if _ver_tuple(from_version) < _ver_tuple(version) <= _ver_tuple(to_version)
-    ]
-    for version in selected:
-        if version != "0.8.5":
-            raise ObservabilityV8UpgradeMigrationError("required_preflight_unsupported")
-        ctx = MigrationContext(
-            openclaw_home="",
-            data_dir=data_dir,
-            from_version=from_version,
-            to_version=to_version,
-            config_path=os.path.join(data_dir, "config.yaml"),
-            upgrade_handles_local_bundle=True,
-        )
-        _preflight_observability_v8(ctx, scratch)
-    return len(selected)
-
-
-def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None:
-    """Convert and target-validate a read-only snapshot in staged custody."""
+    *,
+    gateway_binary: str | None = None,
+) -> None:
+    """Convert and target-validate a read-only snapshot in a scratch directory."""
 
     data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
@@ -734,48 +433,9 @@ def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None
         protected,
         data_dir=data_dir,
         candidate_directory=scratch_dir,
+        gateway_binary=gateway_binary,
     )
 
-
-def _refresh_observability_v8_bundle_for_legacy_upgrader(
-    ctx: MigrationContext,
-    data_dir: str,
-    activation,
-    *,
-    restart_intent_receipt: str | None = None,
-) -> None:
-    """Bridge released upgrade clients to the target bundle transaction.
-
-    Upgrade commands released before 0.8.4 know how to invoke target-wheel
-    migrations but do not know about the later local-observability refresh
-    phase.  Run that phase from the required migration in a clean target
-    interpreter.  Current upgrade clients declare that they own the phase and
-    execute it after all required migrations, avoiding a duplicate restart.
-    """
-
-    if ctx.upgrade_handles_local_bundle:
-        return
-    destination = os.path.join(data_dir, "observability-stack")
-    if not os.path.lexists(destination):
-        return
-    backup_directory = getattr(activation, "backup_directory", None)
-    if not isinstance(backup_directory, str) or not backup_directory:
-        backup_directory = _allocate_observability_v8_bundle_backup(data_dir)
-    result = _run_observability_v8_bundle_upgrade_in_target(
-        data_dir,
-        backup_directory,
-        ctx.to_version,
-        restart_intent_receipt=restart_intent_receipt,
-    )
-    if result.get("installed") is True:
-        ctx.changes.append("refreshed local observability bundle for the target release")
-    degraded = result.get("degraded_errors")
-    if isinstance(degraded, list) and degraded:
-        ux.warn(
-            "local observability bundle refreshed but restart/readiness is degraded; "
-            "run 'defenseclaw setup local-observability status' after upgrade",
-            indent="    ",
-        )
 
 
 def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
@@ -828,111 +488,6 @@ def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
         if data_descriptor >= 0:
             os.close(data_descriptor)
 
-
-def _run_observability_v8_bundle_upgrade_in_target(
-    data_dir: str,
-    backup_directory: str,
-    target_version: str,
-    *,
-    restart_intent_receipt: str | None = None,
-) -> dict[str, object]:
-    """Refresh/restart through a clean interpreter from the installed wheel."""
-
-    fd, result_path = tempfile.mkstemp(prefix="defenseclaw-v8-bundle-", suffix=".json")
-    os.close(fd)
-    script = """
-import json
-import sys
-from pathlib import Path
-
-from defenseclaw.bundle_refresh import (
-    LocalObservabilityUpgradeError,
-    restart_upgraded_local_observability_stack,
-    upgrade_local_observability_stack,
-)
-from defenseclaw.upgrade_receipt import (
-    clear_local_bundle_restart_intent,
-    record_local_bundle_restart_intent,
-)
-
-try:
-    receipt = Path(sys.argv[4]) if sys.argv[4] else None
-    result = upgrade_local_observability_stack(
-        sys.argv[1],
-        sys.argv[2],
-        bundle_version=sys.argv[3],
-        restart_intent_recorder=(
-            None
-            if receipt is None
-            else lambda required: record_local_bundle_restart_intent(
-                receipt,
-                restart_required=required,
-            )
-        ),
-    )
-    payload = result.to_dict()
-    payload["ok"] = True
-    restart_succeeded = not result.restart_required
-    if result.restart_required:
-        try:
-            restarted = restart_upgraded_local_observability_stack(sys.argv[1])
-            payload["restarted"] = restarted.restarted
-            payload["degraded_errors"] = list(restarted.degraded_errors)
-            restart_succeeded = restarted.restarted and not restarted.degraded_errors
-        except LocalObservabilityUpgradeError as exc:
-            payload["degraded_errors"] = [f"{exc.code}:{exc.phase}"]
-    if receipt is not None and restart_succeeded:
-        try:
-            clear_local_bundle_restart_intent(receipt)
-        except Exception:
-            degraded_errors = payload.setdefault("degraded_errors", [])
-            if isinstance(degraded_errors, list):
-                degraded_errors.append("restart_intent_cleanup_failed")
-            else:
-                payload["degraded_errors"] = ["restart_intent_cleanup_failed"]
-except LocalObservabilityUpgradeError as exc:
-    payload = {"ok": False, "code": exc.code, "phase": exc.phase}
-except Exception:
-    payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
-
-with open(sys.argv[5], "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, sort_keys=True)
-sys.exit(0 if payload["ok"] else 1)
-"""
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                "-c",
-                script,
-                data_dir,
-                backup_directory,
-                target_version,
-                restart_intent_receipt or "",
-                result_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=360,
-            check=False,
-        )
-        try:
-            with open(result_path, encoding="utf-8") as result_file:
-                payload = json.load(result_file)
-        except (OSError, json.JSONDecodeError):
-            payload = None
-        if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_failed")
-        return payload
-    except subprocess.TimeoutExpired:
-        raise ObservabilityV8UpgradeMigrationError("local_bundle_refresh_timeout") from None
-    finally:
-        try:
-            os.remove(result_path)
-        except OSError:
-            pass
 
 
 def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
@@ -2015,7 +1570,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     tmp_path: str | None = None
     try:
         fd, tmp_path = tempfile.mkstemp(
-            prefix=f".tmp.{migration_state_helpers.upgrade_mutation_temp_suffix()}",
+            prefix=".tmp.",
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
@@ -3148,10 +2703,6 @@ def _line_ending(line: str) -> str:
 # Migration registry
 # ---------------------------------------------------------------------------
 
-# Target-wheel compatibility contract read by the old upgrader before it
-# replaces any installed artifact. Keep this literal so a verified wheel can
-# be inspected without importing or executing its code.
-SUPPORTED_CONFIG_VERSIONS: tuple[int, ...] = (8,)
 
 # Ordered list of (version, description, callable). Each callable
 # takes a :class:`MigrationContext` and mutates it (appending to
@@ -3210,299 +2761,214 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
 ]
 
 
-def run_migrations(
-    from_version: str,
-    to_version: str,
-    openclaw_home: str,
-    data_dir: str | None = None,
+
+
+# ---------------------------------------------------------------------------
+# defenseclaw migrate
+# ---------------------------------------------------------------------------
+
+# Steps that move config.yaml from ``config_version`` N to N+1, keyed by N.
+# Empty at 1.0.0. Adding a key only needs a loader default; renaming or
+# removing one needs a step here plus a bump of
+# ``config.CURRENT_CONFIG_VERSION`` and the Go gateway's
+# MaxSupportedConfigVersion.
+CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {}
+
+# The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
+# that the frozen ``MIGRATIONS`` chain imports.
+_FIRST_V8_CONFIG_VERSION = 8
+_LEGACY_STATE_FILE = ".migration_state.json"
+_CONFIG_VERSION_LINE = re.compile(r"^config_version[ \t]*:[^\r\n]*", re.MULTILINE)
+
+
+class MigrationError(RuntimeError):
+    """The data directory could not be brought to the current schema."""
+
+
+class ConfigTooNewError(MigrationError):
+    """config.yaml was written by a newer DefenseClaw than this one."""
+
+
+@dataclass
+class MigrateResult:
+    """What ``migrate`` found and did."""
+
+    from_config_version: int | None
+    to_config_version: int
+    applied: list[str] = field(default_factory=list)
+    changed: bool = False
+
+
+def migrate(
+    data_dir: str,
     *,
-    upgrade_handles_local_bundle: bool = False,
-    strict_required: tuple[str, ...] = (),
-    controller_owns_local_bundle_transaction: bool = False,
-) -> int:
-    """Run all applicable migrations up to ``to_version``.
+    openclaw_home: str | None = None,
+    from_version: str | None = None,
+    check: bool = False,
+    gateway_binary: str | None = None,
+) -> MigrateResult:
+    """Bring ``data_dir`` to the config schema this build reads.
 
-    Source of truth for "what has run" is the per-host migration
-    cursor at ``<data_dir>/.migration_state.json`` (see
-    ``defenseclaw.migration_state`` for the schema). The
-    ``from_version`` argument is now advisory — it only matters on
-    the very first call after a host upgrades to a build that
-    persists the cursor (the bootstrap path).
+    ``from_version`` is the DefenseClaw version that wrote the data. It only
+    matters for installs older than 0.8.5, whose chain position the config
+    alone cannot tell; without it the 0.x cursor is used, if present.
 
-    Why we moved from "version-range" to "cursor-driven":
-
-    * Version-range gates re-fired migrations whenever the author
-      forgot to bump ``__version__`` before tagging a release —
-      because ``current_version`` lagged the actual installed bits.
-    * Partial failures (one migration in a batch raised) were
-      indistinguishable from "never ran" — operators who re-ran the
-      upgrade hit the failed step, but the SUCCESSFUL earlier ones
-      ran AGAIN against state they had already mutated.
-    * Operators restoring from backup snapshots quietly drifted out
-      of sync because nothing on disk recorded which migrations had
-      observably executed.
-
-    The cursor's ``applied`` set fixes all three: each migration is
-    only run once per host, full stop, and a partial-failure batch
-    leaves successful entries marked and failed entries unmarked so
-    re-running picks up exactly where it left off.
-
-    Backward-compat preserved on purpose:
-
-    * The ``from_version`` / ``to_version`` API is unchanged.
-    * ``from_version == to_version`` (the same-version reapply
-      escape hatch used by ``defenseclaw upgrade --version <same>``)
-      still re-runs the migration at exactly ``to_version`` even
-      when the cursor says applied. That's a documented operator
-      tool for "I think this migration didn't take, please force
-      it"; without it, the only recovery would be ``defenseclaw
-      doctor migration-state --unmark X.Y.Z`` followed by upgrade,
-      which is more friction than the historical UX warrants.
-
-    ``data_dir`` defaults to ``$DEFENSECLAW_HOME`` or
-    ``~/.defenseclaw`` when not supplied. The optional argument lets
-    ``cmd_upgrade.py`` thread the loaded ``Config.data_dir`` through
-    so that operators with a non-default ``DEFENSECLAW_HOME`` get
-    their migration applied at the right path.
-
-    ``strict_required`` is reserved for authenticated upgrade controllers.
-    A listed migration retains its bounded exception instead of being reduced
-    to a later missing-cursor error, so native Setup can roll back before it
-    commits an unusable target runtime. Ordinary CLI callers preserve the
-    historical continue-and-retry behavior.
-
-    ``controller_owns_local_bundle_transaction`` is a capability handshake,
-    not a release-version check. Controllers that advertise it reconcile the
-    installed local-observability bundle after migrations. A controller that
-    only advertises the older ``upgrade_handles_local_bundle`` boolean is the
-    published v8 controller whose normal v8-to-v8 path skipped that phase; the
-    target wheel repairs the omission after the migration loop. Authenticated
-    hard-cut controllers retain exclusive rollback custody and are never
-    repaired from inside the migration runner.
-
-    Returns the number of migrations actually executed (excludes
-    cursor-skipped ones). Failures don't increment the counter and
-    don't leave a cursor entry — the next upgrade will retry them.
+    ``check`` changes nothing: it reports the pending steps and raises
+    :class:`ConfigTooNewError` for a config from a newer release. For a 0.x
+    install with ``gateway_binary`` set, it also converts a scratch copy with
+    that (staged) gateway so a conversion failure surfaces before the
+    installer swaps anything.
     """
-    from defenseclaw import migration_state
 
-    required_state_apis = (
-        "detect_schema",
-        "is_future_schema",
-        "FutureSchemaError",
-        "upgrade_mutation_temp_suffix",
+    from defenseclaw import __version__
+    from defenseclaw.config import CURRENT_CONFIG_VERSION, ConfigVersionError, source_config_version
+
+    data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    ctx = MigrationContext(
+        openclaw_home="",
+        data_dir=data_dir,
+        from_version=from_version or "",
+        to_version=__version__,
     )
-    if not all(hasattr(migration_state, attr) for attr in required_state_apis):
-        migration_state = importlib.reload(migration_state)
-    import defenseclaw as defenseclaw_pkg
-
-    if getattr(defenseclaw_pkg, "__version__", "") != to_version:
-        importlib.reload(defenseclaw_pkg)
-    cmd_version = sys.modules.get("defenseclaw.commands.cmd_version")
-    if cmd_version is not None:
-        importlib.reload(cmd_version)
-
-    if data_dir is None:
-        data_dir = os.environ.get("DEFENSECLAW_HOME") or os.path.expanduser("~/.defenseclaw")
-
-    _ensure_legacy_openclaw_restart_shim(from_version, to_version, data_dir)
-
-    from_t = _ver_tuple(from_version)
-    to_t = _ver_tuple(to_version)
-    strict = frozenset(strict_required)
-    if any(not isinstance(version, str) for version in strict_required):
-        raise ValueError("strict required migrations must be version strings")
-    same_version_reapply = from_t == to_t
-    applied_count = 0
-    migration_failed = False
-
-    # Load the cursor; treat "missing" / "unparseable" / "future
-    # schema" as "first upgrade on this host" and bootstrap from
-    # ``from_version``. Bootstrap is conservative — it pre-marks
-    # every registry entry whose version is at or below
-    # ``from_version`` so we don't replay history on a host that's
-    # already in steady state.
-    state = migration_state.load(data_dir)
-    deferred_strict_bootstrap = state is None and bool(strict)
-    if state is None:
-        # ``load`` collapses several cases to ``None``. Most of them
-        # (missing / empty / corrupt cursor) are safe to bootstrap. But a
-        # cursor written by a NEWER build — schema greater than this
-        # build understands — must NOT be treated as a fresh host:
-        # bootstrapping would overwrite it with a stale schema-N cursor
-        # and erase the newer build's migration history (F-0081). Refuse
-        # so the operator can run ``defenseclaw doctor migration-state
-        # --reset`` instead of silently downgrading their state.
-        if migration_state.is_future_schema(data_dir):
-            raise migration_state.FutureSchemaError(
-                "migration cursor at "
-                f"{migration_state.state_path(data_dir)} was written by a "
-                "newer DefenseClaw build (schema "
-                f"{migration_state.detect_schema(data_dir)} > "
-                f"{migration_state.CURRENT_SCHEMA_VERSION}); refusing to "
-                "overwrite it. Run 'defenseclaw doctor migration-state "
-                "--reset' if you intend to run this older build."
-            )
-        state = migration_state.bootstrap(
-            None,
-            from_version=from_version,
-            package_version=to_version,
-            registry_versions=[v for v, _, _ in MIGRATIONS],
+    config_path = ctx.active_config_path()
+    try:
+        version = source_config_version(path=config_path)
+    except ConfigVersionError as exc:
+        raise MigrationError(str(exc)) from exc
+    if version is None:
+        return MigrateResult(None, CURRENT_CONFIG_VERSION)
+    if version > CURRENT_CONFIG_VERSION:
+        raise ConfigTooNewError(
+            f"{config_path} has config_version {version}, but DefenseClaw {__version__} "
+            f"reads up to {CURRENT_CONFIG_VERSION}. It was written by a newer DefenseClaw; "
+            "install that version again or run 'defenseclaw rollback'."
         )
-        # Ordinary CLI upgrades persist the bootstrap snapshot eagerly so a
-        # crash mid-run leaves a usable cursor. A strict native-Setup run must
-        # not write even this metadata before its required migration succeeds:
-        # a candidate refusal must leave the old runtime's data byte-identical.
-        if not strict:
-            try:
-                migration_state.save(data_dir, state)
-            except OSError as exc:
-                ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
+    ctx.openclaw_home = os.path.expanduser(openclaw_home or _configured_openclaw_home(config_path))
 
-    for ver, desc, fn in MIGRATIONS:
-        ver_t = _ver_tuple(ver)
+    steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
+    names = [name for name, _step in steps]
+    if check:
+        if version < _FIRST_V8_CONFIG_VERSION and gateway_binary:
+            with tempfile.TemporaryDirectory(prefix=".migrate-check-", dir=data_dir) as scratch:
+                _preflight_observability_v8(ctx, scratch, gateway_binary=gateway_binary)
+        return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
-        # Never run a registry entry past the operator's target.
-        # This guards the "registry has 0.6.0 but operator is
-        # upgrading to 0.5.0" case (e.g. cherry-picked downgrade).
-        if ver_t > to_t:
-            continue
-
-        already_applied = migration_state.is_applied(state, ver)
-
-        # In the upgrade case, exclude entries strictly below
-        # ``from_version`` ONLY when the cursor already records them as
-        # applied. A lower-version migration that is MISSING from the
-        # cursor (e.g. one that failed on an earlier upgrade and was
-        # therefore never marked applied) must still be retried on a
-        # later upgrade rather than being skipped by the version
-        # comparison alone (F-0681). The cursor — not ``from_version`` —
-        # is the source of truth for what has run; migrations are
-        # idempotent, so re-attempting an unapplied lower version is safe.
-        if not same_version_reapply and ver_t < from_t and already_applied:
-            continue
-
-        # Same-version reapply intentionally bypasses the cursor for
-        # the matching version — see backward-compat note in the
-        # docstring. All OTHER versions still respect the cursor
-        # even on same-version reapply (don't accidentally re-run
-        # historical migrations).
-        if already_applied and not (same_version_reapply and ver_t == to_t):
-            continue
-
-        click.echo(f"  {ux.dim('→')} Migration {ver}: {desc}")
-        ctx = MigrationContext(
-            openclaw_home=openclaw_home,
-            data_dir=data_dir,
-            from_version=from_version,
-            to_version=to_version,
-            upgrade_handles_local_bundle=(upgrade_handles_local_bundle or controller_owns_local_bundle_transaction),
-        )
+    for name, step in steps:
+        click.echo(f"  {ux.dim('→')} {name}")
         try:
-            fn(ctx)
-            ux.ok(f"Migration {ver} applied.", indent="    ")
-        except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
-            migration_failed = True
-            ux.err(f"migration {ver} failed: {exc}", indent="    ")
-            if ver in strict:
-                raise
-            ux.subhead(
-                "upgrade will continue; run 'defenseclaw doctor --fix' afterwards",
-                indent="    ",
+            step(ctx)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the installer, which rolls back
+            raise MigrationError(f"{name} failed: {exc}") from exc
+    for change in ctx.changes:
+        ux.ok(change, indent="    ")
+    _refresh_local_observability_bundle(data_dir, __version__)
+    return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _pending_migration_steps(
+    version: int,
+    from_version: str | None,
+    data_dir: str,
+    config_path: str,
+    current: int,
+) -> list[tuple[str, Callable[[MigrationContext], None]]]:
+    steps: list[tuple[str, Callable[[MigrationContext], None]]] = []
+    if version < _FIRST_V8_CONFIG_VERSION:
+        applied = _legacy_applied_versions(data_dir)
+        if applied is None and not from_version:
+            raise MigrationError(
+                "this is a DefenseClaw 0.x install older than 0.8.5 and its version is unknown; "
+                "re-run with --from-version X.Y.Z"
             )
-            # Don't mark applied: next upgrade retries this exact
-            # migration. Continue with the rest of the batch so a
-            # single broken migration doesn't strand the host on
-            # otherwise-applicable later ones.
-            continue
+        for ver, desc, fn in MIGRATIONS:
+            if applied is not None:
+                if ver in applied:
+                    continue
+            elif _ver_tuple(ver) <= _ver_tuple(from_version or "0"):
+                continue
+            steps.append((f"0.x import {ver}: {desc}", fn))
+        version = _FIRST_V8_CONFIG_VERSION
+    for number in range(version, current):
+        step = CONFIG_MIGRATIONS.get(number)
+        if step is None:
+            raise MigrationError(f"no migration from config_version {number} to {number + 1}")
+        steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
+    return steps
 
-        migration_state.mark_applied(
-            state,
-            ver,
-            package_version=to_version,
-        )
-        applied_count += 1
 
-        # Persist after every successful migration so a crash
-        # halfway through a multi-migration batch loses at most one
-        # migration's worth of "we just ran this" knowledge. The
-        # cursor file is sub-kilobyte; the IO cost is negligible.
-        try:
-            migration_state.save(data_dir, state)
-        except OSError as exc:
-            if ver in strict:
-                raise
-            ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
+def _config_version_step(
+    step: Callable[[MigrationContext], None],
+    target: int,
+    config_path: str,
+) -> Callable[[MigrationContext], None]:
+    def run(ctx: MigrationContext) -> None:
+        step(ctx)
+        text = _read_config_text(config_path)
+        if text is None or _CONFIG_VERSION_LINE.search(text) is None:
+            raise MigrationError(f"{config_path} has no top-level config_version")
+        _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1))
 
-    if deferred_strict_bootstrap:
-        missing_required = sorted(
-            version for version in strict if not migration_state.is_applied(state, version)
-        )
-        if missing_required:
-            raise RuntimeError(
-                "required migrations are missing: " + ", ".join(missing_required)
-            )
-        # Strict native Setup must preserve refusal atomicity, including for a
-        # host with no prior cursor. Persist the bootstrap only after every
-        # required migration has either completed or been conservatively
-        # recorded by bootstrap. This also covers a same-version packaged run
-        # where no registry callable executes and therefore cannot save state.
-        migration_state.save(data_dir, state)
+    return run
 
-    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
-    local_bundle_installed = os.path.lexists(os.path.join(normalized_data_dir, "observability-stack"))
-    if (
-        upgrade_handles_local_bundle
-        and not controller_owns_local_bundle_transaction
-        and not _controller_has_hard_cut_bundle_custody()
-        and not migration_failed
-        and local_bundle_installed
-    ):
-        # Compatibility with the immutable first v8 controller. It claimed
-        # ownership of bundle refresh but only executed that phase for a
-        # hard-cut rollback plan, so ordinary v8-to-v8 upgrades left the
-        # installed bundle stamped at the source release. Reconcile from the
-        # authenticated target wheel without naming either release. The
-        # mutation token suppresses this fallback during a staged hard cut,
-        # where the bridge controller owns the recovery journal and performs
-        # the refresh after required migrations.
-        legacy_context = MigrationContext(
-            openclaw_home=openclaw_home,
-            data_dir=normalized_data_dir,
-            from_version=from_version,
-            to_version=to_version,
-        )
-        try:
-            from defenseclaw.upgrade_receipt import find_resumable_upgrade_receipt
 
-            restart_intent_receipt = find_resumable_upgrade_receipt(
-                normalized_data_dir,
-                target_version=to_version,
-            )
-        except (OSError, ValueError):
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_invalid") from None
-        if restart_intent_receipt is None:
-            # Every published controller that advertises the legacy bundle
-            # ownership flag creates this authenticated receipt before target
-            # mutation. Older pre-receipt controllers do not advertise the
-            # flag and run the migration-owned refresh path above instead.
-            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_missing")
-        _refresh_observability_v8_bundle_for_legacy_upgrader(
-            legacy_context,
-            normalized_data_dir,
-            None,
-            restart_intent_receipt=os.fspath(restart_intent_receipt),
-        )
-    elif (
-        migration_failed
-        and upgrade_handles_local_bundle
-        and not controller_owns_local_bundle_transaction
-        and not _controller_has_hard_cut_bundle_custody()
-        and local_bundle_installed
-    ):
+def _legacy_applied_versions(data_dir: str) -> set[str] | None:
+    """Return the 0.x cursor's applied versions, read-only; ``None`` if absent."""
+
+    try:
+        with open(os.path.join(data_dir, _LEGACY_STATE_FILE), encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    applied = payload.get("applied") if isinstance(payload, dict) else None
+    if isinstance(applied, dict):
+        return {str(version) for version in applied}
+    if isinstance(applied, list):
+        return {str(item.get("version") if isinstance(item, dict) else item) for item in applied}
+    return None
+
+
+def _configured_openclaw_home(config_path: str) -> str:
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raw = None
+    claw = raw.get("claw") if isinstance(raw, dict) else None
+    home = claw.get("home_dir") if isinstance(claw, dict) else None
+    return home if isinstance(home, str) and home.strip() else "~/.openclaw"
+
+
+def _refresh_local_observability_bundle(data_dir: str, bundle_version: str) -> None:
+    """Refresh an installed local observability stack to this release's files.
+
+    Best effort: a failure leaves the previous bundle running and prints how
+    to retry, because the gateway itself does not depend on the stack.
+    """
+
+    if not os.path.lexists(os.path.join(data_dir, "observability-stack")):
+        return
+    from defenseclaw.bundle_refresh import (
+        LocalObservabilityUpgradeError,
+        restart_upgraded_local_observability_stack,
+        upgrade_local_observability_stack,
+    )
+
+    try:
+        if os.name == "posix":
+            backup_dir = _allocate_observability_v8_bundle_backup(data_dir)
+        else:
+            os.makedirs(os.path.join(data_dir, "backups"), exist_ok=True)
+            backup_dir = tempfile.mkdtemp(prefix="observability-bundle-", dir=os.path.join(data_dir, "backups"))
+        result = upgrade_local_observability_stack(data_dir, backup_dir, bundle_version=bundle_version)
+        if result.restart_required:
+            restarted = restart_upgraded_local_observability_stack(data_dir)
+            if restarted.degraded_errors:
+                raise LocalObservabilityUpgradeError("restart_degraded", "restart")
+        if result.installed:
+            ux.ok("Refreshed the local observability bundle", indent="    ")
+    except (LocalObservabilityUpgradeError, ObservabilityV8UpgradeMigrationError, OSError) as exc:
         ux.warn(
-            "local observability bundle refresh was deferred because a target migration failed",
+            f"local observability bundle was not refreshed ({exc}); "
+            "run 'defenseclaw setup local-observability status' to check it",
             indent="    ",
         )
-
-    return applied_count

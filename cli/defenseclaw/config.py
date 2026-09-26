@@ -39,7 +39,6 @@ from typing import Any
 import yaml
 
 from defenseclaw import connector_paths, credential_provenance
-from defenseclaw import migration_state as migration_state_helpers
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -127,6 +126,12 @@ class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
 
+# The ``config_version`` this build reads and writes. Raise it only together
+# with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
+# gateway's MaxSupportedConfigVersion.
+CURRENT_CONFIG_VERSION = 8
+
+
 def source_config_version(*, path: str | None = None) -> int | None:
     """Read only ``config_version`` without loading either runtime schema.
 
@@ -162,16 +167,24 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
-def require_v8_config(*, path: str | None = None, allow_missing: bool = False) -> None:
-    """Fail before full config loading unless the source is exactly v8."""
+def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
+    """Fail before full config loading unless the source is the current schema."""
 
     version = source_config_version(path=path)
     if version is None and allow_missing:
         return
     if version is None:
         raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
-    if version != 8:
-        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+    if version > CURRENT_CONFIG_VERSION:
+        raise ConfigVersionError(
+            f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
+            "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
+        )
+    if version != CURRENT_CONFIG_VERSION:
+        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+
+
+require_v8_config = require_current_config
 
 
 LEGACY_DEPLOYMENT_MODE_ALIASES = {
@@ -2921,7 +2934,7 @@ class Config:
             self._source_config_version = 8
             self._loaded_v8_modeled_snapshot = _config_to_dict(default_config())
         if self._source_config_version != 8:
-            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
         dataclass_data = _config_to_dict(self)
         existing = _load_existing_config_yaml(path)
         merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
@@ -2971,11 +2984,10 @@ def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     def write_yaml(stream) -> None:
         yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
 
-    token_suffix = migration_state_helpers.upgrade_mutation_temp_suffix()
     atomic_write_text_secure(
         path,
         write_yaml,
-        prefix=f".{os.path.basename(path)}.{token_suffix}",
+        prefix=f".{os.path.basename(path)}.",
     )
     try:
         dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)

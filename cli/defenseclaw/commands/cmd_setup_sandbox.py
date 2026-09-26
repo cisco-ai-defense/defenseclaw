@@ -278,7 +278,7 @@ def setup_sandbox(
         app.cfg = load()
     elif getattr(app.cfg, "_source_config_version", None) != 8:
         raise click.ClickException(
-            "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            "Configuration schema v8 is required — run 'defenseclaw migrate' first."
         )
     if not app.store:
         from defenseclaw.db import Store

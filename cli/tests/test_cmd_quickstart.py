@@ -86,23 +86,6 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cache_hit=False,
         )
 
-    def test_codex_defaults_to_observe_profile(self):
-        result = self._invoke([
-            "--connector",
-            "codex",
-            "--skip-gateway",
-            "--json-summary",
-        ])
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        summary = json.loads(result.output)
-        self.assertEqual(summary["connector"], "codex")
-        self.assertEqual(summary["profile"], "observe")
-        from defenseclaw import migration_state
-
-        state = migration_state.load(self.tmp_dir)
-        self.assertIsNotNone(state)
-        assert state is not None
-        self.assertTrue(migration_state.is_applied(state, "0.8.5"))
 
     def test_openclaw_defaults_to_observe_profile(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):

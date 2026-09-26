@@ -543,12 +543,13 @@ _CANONICAL_INSTALL_DIR = os.path.join(os.path.expanduser("~"), ".local", "bin")
 
 
 def canonical_install_path() -> str:
-    """Return the canonical install path written by ``make gateway-install``.
+    """Return the canonical install path written by the installers.
 
-    Exposed so error messages and the upgrade command can reference the
-    exact same path instead of each hard-coding the string.
+    Exposed so error messages can reference the exact same path instead of
+    each hard-coding the string.
     """
-    return os.path.join(_CANONICAL_INSTALL_DIR, GATEWAY_BIN_NAME)
+    name = GATEWAY_BIN_NAME + (".exe" if os.name == "nt" else "")
+    return os.path.join(_CANONICAL_INSTALL_DIR, name)
 
 
 def resolve_gateway_binary() -> str | None:

@@ -120,56 +120,6 @@ def test_posix_installer_rejects_python_314_before_creating_policy_venv() -> Non
     assert 'version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"' in developer_installer
 
 
-def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in {"arm64", "aarch64"} else "amd64"
-    gateways = {
-        os_name: {
-            platform_arch: f"defenseclaw_{version}_protocol2_{os_name}_{platform_arch}.dcgateway"
-            for platform_arch in ("amd64", "arm64")
-        }
-        for os_name in ("darwin", "linux", "windows")
-    }
-    wheel_name = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
-    gateway_name = str(gateways[system][arch])
-    manifest = {
-        "schema_version": 2,
-        "release_version": version,
-        "release_artifacts": {"wheel": wheel_name, "gateways": gateways},
-    }
-    manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
-    (root / "upgrade-manifest.json").write_bytes(manifest_bytes)
-
-    envelope_magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
-    gateway_body = b"#!/bin/sh\nexit 0\n"
-    tar_info = tarfile.TarInfo("defenseclaw")
-    tar_info.mode = 0o755
-    tar_info.size = len(gateway_body)
-    gateway_payload = io.BytesIO()
-    with tarfile.open(fileobj=gateway_payload, mode="w:gz") as archive:
-        archive.addfile(tar_info, io.BytesIO(gateway_body))
-    (root / gateway_name).write_bytes(envelope_magic + bytes(value ^ 0xA5 for value in gateway_payload.getvalue()))
-
-    wheel_payload = io.BytesIO()
-    with zipfile.ZipFile(wheel_payload, "w") as archive:
-        archive.writestr(
-            f"defenseclaw-{version}.dist-info/METADATA",
-            f"Metadata-Version: 2.1\nName: defenseclaw\nVersion: {version}\n",
-        )
-        archive.writestr(
-            "defenseclaw/install_publish.py",
-            (ROOT / "cli/defenseclaw/install_publish.py").read_bytes(),
-        )
-    (root / wheel_name).write_bytes(envelope_magic + bytes(value ^ 0xA5 for value in wheel_payload.getvalue()))
-
-    names = ("upgrade-manifest.json", gateway_name, wheel_name)
-    (root / "checksums.txt").write_text(
-        "".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n" for name in names),
-        encoding="utf-8",
-    )
-    (root / "checksums.txt.sig").write_text("test signature\n", encoding="utf-8")
-    (root / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
 
 
 def test_schema2_protected_envelopes_are_not_renamed_wheels_or_archives(tmp_path: Path) -> None:
@@ -758,110 +708,6 @@ test -e "$DEFENSECLAW_HOME/extensions/defenseclaw/index.js"
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-@pytest.mark.skipif(platform.system() != "Darwin", reason="real codesign regression is macOS-only")
-def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    fake_bin = tmp_path / "fake-bin"
-    release = tmp_path / "release"
-    home.mkdir()
-    fake_bin.mkdir()
-    release.mkdir()
-
-    version = "0.8.3"
-    manifest = {"schema_version": 1, "release_version": version}
-    manifest_path = release / "upgrade-manifest.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    (release / "checksums.txt").write_text(
-        f"{hashlib.sha256(manifest_path.read_bytes()).hexdigest()}  upgrade-manifest.json\n",
-        encoding="utf-8",
-    )
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in {"arm64", "aarch64"} else "amd64"
-    gateway = release / f"defenseclaw-gateway-darwin-{arch}"
-    shutil.copyfile("/usr/bin/true", gateway)
-    gateway.chmod(0o755)
-    (release / f"defenseclaw-{version}-py3-none-any.whl").write_bytes(b"legacy wheel fixture\n")
-
-    _write_python_selector_shims(
-        fake_bin,
-        f"#!{sys.executable}\n"
-        "import os\n"
-        "import sys\n"
-        f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n",
-    )
-    _write_executable(
-        fake_bin / "uv",
-        "#!/bin/sh\n"
-        "set -eu\n"
-        'if [ "${1:-}" = "--version" ]; then echo \'uv 0.8.0\'; exit 0; fi\n'
-        'if [ "${1:-}" = "venv" ]; then\n'
-        "  venv=$2\n"
-        '  mkdir -p "$venv/bin"\n'
-        "  printf '#!/bin/sh\\nexit 0\\n' > \"$venv/bin/python\"\n"
-        '  chmod +x "$venv/bin/python"\n'
-        "  exit 0\n"
-        "fi\n"
-        'if [ "${1:-}" = "pip" ] && [ "${2:-}" = "install" ]; then\n'
-        "  python=''\n"
-        "  previous=''\n"
-        '  for argument in "$@"; do\n'
-        '    if [ "$previous" = "--python" ]; then python=$argument; break; fi\n'
-        "    previous=$argument\n"
-        "  done\n"
-        "  cli=${python%/python}/defenseclaw\n"
-        "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
-        '  chmod +x "$cli"\n'
-        "  scanner=${python%/python}/skill-scanner\n"
-        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
-        '  chmod +x "$scanner"\n'
-        "  exit 0\n"
-        "fi\n"
-        "exit 90\n",
-    )
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(home),
-            "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-        }
-    )
-    completed = subprocess.run(
-        [
-            "/bin/bash",
-            str(ROOT / "scripts/install.sh"),
-            "--local",
-            str(release),
-            "--yes",
-            "--connector",
-            "none",
-        ],
-        cwd=ROOT,
-        env=environment,
-        text=True,
-        capture_output=True,
-        timeout=45,
-        check=False,
-    )
-
-    output = completed.stdout + completed.stderr
-    assert completed.returncode == 0, output
-    installed_gateway = home / ".local/bin/defenseclaw-gateway"
-    assert installed_gateway.is_file() and not installed_gateway.is_symlink()
-    activation_residue = list((home / ".local/bin").glob(".defenseclaw-gateway.install.*"))
-    assert len(activation_residue) == 1
-    assert activation_residue[0].stat().st_ino == installed_gateway.stat().st_ino
-    assert "Legacy gateway activation residue was preserved" in output
-    verified = subprocess.run(
-        ["/usr/bin/codesign", "--verify", str(installed_gateway)],
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    assert verified.returncode == 0, verified.stdout + verified.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX installer requires /bin/bash")
@@ -1919,36 +1765,6 @@ def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback()
     assert "curl -sSfL" not in site
 
 
-def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> None:
-    from defenseclaw.resolver_hint import (
-        WINDOWS_RESOLVER_BANNER,
-        authenticated_resolver_instructions,
-    )
-
-    channel = (ROOT / "docs/RELEASE_CHANNEL.md").read_text(encoding="utf-8")
-    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
-
-    assert "defenseclaw upgrade --yes" in site
-    assert "--output ./defenseclaw-rescue.sh" in channel
-    assert "refuses stdin or pipe execution" in channel
-    assert "/bin/sh ./defenseclaw-rescue.sh --yes" in channel
-    assert "bash defenseclaw-rescue.sh" not in channel
-    assert "/bin/sh ./defenseclaw-rescue.sh --yes --recover-corrupt-audit" in channel
-    assert "mutable pointer to immutable code" in channel
-    assert "`release.yaml@main` Fulcio identity" in channel
-    latest_assets = "releases/latest/download"
-    assert channel.count(latest_assets) == 1
-    assert re.search(r"releases/download/\d+\.\d+\.\d+/", channel) is None
-    assert f"releases/download/v{CURRENT_PUBLISHED_RELEASE}/" not in channel
-    assert "URL is only a locator" in " ".join(channel.split())
-    generated = authenticated_resolver_instructions(CURRENT_RELEASE)
-    assert WINDOWS_RESOLVER_BANNER in generated
-    assert "Preflight refusal only" not in generated
-    assert "unset VERSION" in generated
-    assert "does not require a source checkout" in site
-    assert "/blob/main/docs/CLI.md#upgrade" not in site
-    assert f"/blob/{CURRENT_PUBLISHED_RELEASE}/docs/CLI.md#upgrade" not in site
-    assert "/blob/v0.8.4/docs/CLI.md#upgrade" not in site
 
 
 def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() -> None:

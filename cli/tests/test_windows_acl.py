@@ -20,8 +20,6 @@ import ctypes
 import os
 import struct
 import sys
-import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1473,68 +1471,7 @@ def test_arbitrary_service_sid_is_not_implicitly_trusted(monkeypatch: pytest.Mon
         windows_acl.assert_trusted_owner(service_owned)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handle inheritance")
-def test_phase_two_mutator_lease_wraps_and_captures_real_child(tmp_path) -> None:
-    lease = tmp_path / "phase-two-mutator.lease"
-    windows_acl.ensure_phase_two_mutator_lease(str(lease))
-
-    completed = windows_acl.run_phase_two_mutator(
-        [sys.executable, "-c", "print('lease-child-ok')"],
-        lease_path=str(lease),
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=dict(os.environ),
-    )
-
-    assert completed.args[0] == sys.executable
-    assert completed.stdout.strip() == "lease-child-ok"
-    assert lease.stat().st_size == 0
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
-def test_phase_two_mutator_waits_for_existing_exclusive_lease(tmp_path) -> None:
-    lease = tmp_path / "phase-two-mutator.lease"
-    marker = tmp_path / "child-ran"
-    windows_acl.ensure_phase_two_mutator_lease(str(lease))
-    errors: list[BaseException] = []
-
-    def run_child() -> None:
-        try:
-            windows_acl.run_phase_two_mutator(
-                [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"],
-                lease_path=str(lease),
-                check=True,
-                timeout=30,
-            )
-        except BaseException as exc:  # pragma: no cover - relayed to the test thread
-            errors.append(exc)
-
-    with windows_acl.hold_phase_two_mutator_lease(str(lease)):
-        worker = threading.Thread(target=run_child, daemon=True)
-        worker.start()
-        time.sleep(0.3)
-        assert not marker.exists()
-    worker.join(timeout=30)
-
-    assert not worker.is_alive()
-    assert errors == []
-    assert marker.is_file()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows handle inheritance")
-def test_phase_two_mutator_reuses_recovery_held_lease_without_deadlock(tmp_path) -> None:
-    lease = tmp_path / "phase-two-mutator.lease"
-    windows_acl.ensure_phase_two_mutator_lease(str(lease))
-
-    with windows_acl.hold_phase_two_mutator_lease(str(lease)) as held:
-        completed = windows_acl.run_phase_two_mutator(
-            [sys.executable, "-c", "raise SystemExit(0)"],
-            lease_path=str(lease),
-            held_lease=held,
-            check=True,
-            timeout=30,
-        )
-
-    assert completed.returncode == 0

@@ -117,7 +117,7 @@ dev = [
 ]
 
 [project.scripts]
-defenseclaw = "defenseclaw.main:main"
+defenseclaw = "defenseclaw.entry:main"
 defenseclaw-observability = "defenseclaw.observability.local_stack:main"
 
 [build-system]

@@ -41,10 +41,8 @@ Run on every ``pytest`` invocation (no ``@unittest.skip`` markers).
 from __future__ import annotations
 
 import re
-import runpy
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from defenseclaw import __version__
 from defenseclaw.migrations import MIGRATIONS, _migrate_observability_v8, _ver_tuple
@@ -156,56 +154,7 @@ class TestReleaseInvariants(unittest.TestCase):
             f"duplicate migration version in registry: {versions}",
         )
 
-    def test_upgrade_manifest_generator_requires_known_migrations(self):
-        """Future releases ship an upgrade-manifest.json so old local
-        upgrade scripts can enforce mandatory migrations. The generated
-        manifest must include every migration version at or below the
-        package version."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        manifest = generator["build_manifest"]()
-        expected = [version for version, _desc, _fn in MIGRATIONS if _ver_tuple(version) <= _ver_tuple(__version__)]
-        self.assertEqual(manifest["release_version"], __version__)
-        self.assertEqual(manifest["required_cli_migrations"], expected)
-        if _ver_tuple(__version__) >= (0, 8, 4):
-            self.assertEqual(manifest["schema_version"], 2)
-            self.assertEqual(
-                manifest["runtime_config_version"],
-                generator["expected_runtime_config_version"](__version__),
-            )
-            self.assertEqual(
-                manifest["release_artifacts"],
-                generator["protected_release_artifacts"](__version__),
-            )
 
-    def test_stamped_0_8_4_manifest_is_protocol_one_reachable_protocol_two_controller(self):
-        """Exercise the bridge release policy without stamping source files."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        baseline_policy = __import__("json").loads(
-            (_REPO_ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
-        )
-        expected_sources = [
-            version for version in baseline_policy["published_baselines"] if _ver_tuple(version) < (0, 8, 4)
-        ]
-        expected_windows = [
-            version
-            for version in baseline_policy["platform_published_baselines"]["windows"]
-            if _ver_tuple(version) < (0, 8, 4)
-        ]
-
-        self.assertEqual(
-            generator["release_upgrade_policy"]("0.8.4"),
-            {
-                "min_upgrade_protocol": 1,
-                "tested_source_versions": expected_sources,
-                "platform_tested_source_versions": {"windows": expected_windows},
-            },
-        )
-        self.assertEqual(generator["controller_upgrade_protocol"](), 2)
-        self.assertEqual(generator["runtime_config_version"]("0.8.4"), 7)
-        self.assertNotIn(
-            "required_bridge_version",
-            generator["release_upgrade_policy"]("0.8.4"),
-        )
 
     def test_observability_v8_migration_is_forward_keyed_once_at_0_8_5(self):
         """Published 0.8.0 cursors must not suppress the v8 migration."""
@@ -216,89 +165,10 @@ class TestReleaseInvariants(unittest.TestCase):
         self.assertIs(migration, _migrate_observability_v8)
         self.assertIn("observability configuration", description)
 
-    def test_unstamped_source_manifest_omits_forward_keyed_migration(self):
-        """The pinned source version must describe only released migrations."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        build_manifest = generator["build_manifest"]
-        with patch.dict(build_manifest.__globals__, {"current_version": lambda: "0.8.0"}):
-            manifest = build_manifest()
-        self.assertNotIn("0.8.5", manifest["required_cli_migrations"])
 
-    def test_stamped_0_8_4_manifest_is_reachable_bridge(self):
-        """The bridge requires protocol 1 but installs a protocol 2 controller."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        build_manifest = generator["build_manifest"]
-        with patch.dict(build_manifest.__globals__, {"current_version": lambda: "0.8.4"}):
-            manifest = build_manifest()
-        self.assertEqual(manifest["release_version"], "0.8.4")
-        self.assertEqual(manifest["min_upgrade_protocol"], 1)
-        self.assertGreaterEqual(manifest["controller_upgrade_protocol"], 2)
-        self.assertNotIn("0.8.5", manifest["required_cli_migrations"])
-        self.assertNotIn("minimum_source_version", manifest)
 
-    def test_stamped_0_8_5_manifest_requires_bridge_and_v8_migration(self):
-        """Release stamping turns the forward row into a mandatory contract."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        build_manifest = generator["build_manifest"]
-        with patch.dict(build_manifest.__globals__, {"current_version": lambda: "0.8.5"}):
-            manifest = build_manifest()
-        self.assertEqual(manifest["release_version"], "0.8.5")
-        self.assertEqual(generator["compatibility_config_version"](), 7)
-        self.assertEqual(generator["runtime_config_version"]("0.8.5"), 8)
-        self.assertEqual(manifest["runtime_config_version"], 8)
-        self.assertEqual(manifest["min_upgrade_protocol"], 2)
-        self.assertEqual(manifest["minimum_source_version"], "0.8.4")
-        self.assertEqual(manifest["required_bridge_version"], "0.8.4")
-        self.assertIn("0.8.3", manifest["auto_bridge_from"])
-        self.assertNotIn("0.8.4", manifest["auto_bridge_from"])
-        self.assertEqual(
-            manifest["platform_tested_source_versions"],
-            {"windows": []},
-        )
-        self.assertEqual(manifest["migration_failure_policy"], "fail")
-        self.assertIn("0.8.5", manifest["required_cli_migrations"])
-        self.assertNotIn("windows_installer", manifest)
 
-    def test_windows_installer_policy_starts_with_0_8_6(self):
-        """0.8.5 did not publish native Setup and must not advertise it."""
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        build_manifest = generator["build_manifest"]
-        with patch.dict(build_manifest.__globals__, {"current_version": lambda: "0.8.6"}):
-            manifest = build_manifest()
-        self.assertEqual(
-            manifest["windows_installer"],
-            {
-                "asset": "DefenseClawSetup-x64.exe",
-                "architectures": ["amd64"],
-                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
-                "authenticode": {
-                    "required": False,
-                    "publisher": "Cisco Systems, Inc.",
-                },
-                "managed_policy": "respect",
-            },
-        )
 
-    def test_reviewed_upgrade_baselines_are_single_strictly_descending_floor(self):
-        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
-        baselines = generator["published_upgrade_baselines"]()
-        baseline_policy = __import__("json").loads(
-            (_REPO_ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
-        )
-
-        self.assertEqual(baselines, baseline_policy["published_baselines"])
-        self.assertTrue(baselines)
-        self.assertEqual(baselines, sorted(set(baselines), key=_ver_tuple, reverse=True))
-        self.assertEqual(
-            set(baseline_policy["published_baseline_config_versions"]),
-            set(baselines),
-        )
-        for platform_baselines in baseline_policy["platform_published_baselines"].values():
-            self.assertTrue(set(platform_baselines).issubset(baselines))
-            self.assertEqual(
-                platform_baselines,
-                sorted(set(platform_baselines), key=_ver_tuple, reverse=True),
-            )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -621,7 +621,7 @@ def test_ordinary_command_rejects_v7_before_logger_construction() -> None:
     ):
         result = CliRunner().invoke(cli, ["status"])
     assert result.exit_code == 1
-    assert "run 'defenseclaw upgrade' first" in result.output
+    assert "run 'defenseclaw migrate' first" in result.output
     config_loader.assert_not_called()
     logger_factory.assert_not_called()
 

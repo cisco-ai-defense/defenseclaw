@@ -374,22 +374,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
-            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
+            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw migrate' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
-
-    from defenseclaw.bootstrap import (
-        FreshMigrationStateError,
-        repair_pending_first_run_config,
-    )
-
-    try:
-        repaired_migration_state = repair_pending_first_run_config(cfg)
-    except FreshMigrationStateError as exc:
-        raise click.ClickException(
-            f"could not recover pending fresh migration state: {exc}; rerun 'defenseclaw init' after repair"
-        ) from exc
-    if repaired_migration_state:
-        click.echo("  Migration:     " + ux._style("recovered pending fresh cursor", fg="green"))
 
     cfg.environment = env
     click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
@@ -529,14 +515,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     from defenseclaw.bootstrap import finalize_first_run_config
 
-    try:
-        finalize_first_run_config(cfg, was_config_absent=is_new_config)
-    except FreshMigrationStateError as exc:
-        store.close()
-        raise click.ClickException(
-            f"config was saved but its fresh migration cursor was not published: {exc}; "
-            "rerun 'defenseclaw init' to retry safely"
-        ) from exc
+    finalize_first_run_config(cfg, was_config_absent=is_new_config)
 
     # Final completion banner. We render it as a plain divider with
     # bold success text so the eye lands here when the operator
