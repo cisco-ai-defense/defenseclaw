@@ -369,6 +369,10 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
+    # 0.4.x and 0.5.0 wrote guardrail.*_enforcement_enabled, which v8 rejects.
+    # The step that strips them is keyed 0.5.0 but first shipped in 0.6.0, so
+    # the chain skips it for an install at 0.5.0. It is idempotent.
+    _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
     prepared = _prepare_observability_v8_migration(
         data_dir=data_dir,
         config_path=config_path,

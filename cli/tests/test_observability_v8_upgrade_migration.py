@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -20,7 +21,10 @@ from defenseclaw.migrations import (
     _preflight_observability_v8,
     _validate_observability_v8_candidate,
 )
+from defenseclaw.observability.schema_resources import v7_exporter_selection_bytes
 from defenseclaw.observability.v8_activation import V8ActivationError, V8CandidateValidationError
+from defenseclaw.observability.v8_compatibility import V7CompatibilitySelection
+from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8
 
 
 class TestObservabilityV8UpgradeMigration(unittest.TestCase):
@@ -54,6 +58,42 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def test_registry_runs_migration_only_at_forward_release_key(self) -> None:
         rows = [(version, fn) for version, _description, fn in MIGRATIONS if fn is _migrate_observability_v8]
         self.assertEqual(rows, [("0.8.5", _migrate_observability_v8)])
+
+    def test_0_5_0_retired_guardrail_keys_are_stripped_before_converting(self) -> None:
+        # 0.5.0 wrote these keys and the chain skips the 0.5.0 step for an
+        # install at 0.5.0; v8 rejects them as unknown guardrail fields.
+        with open(self.config_path, "w", encoding="utf-8") as config_file:
+            config_file.write(
+                "data_dir: /legacy\n"
+                "guardrail:\n"
+                "  enabled: true\n"
+                "  mode: observe\n"
+                "  codex_enforcement_enabled: false\n"
+                "  claudecode_enforcement_enabled: false\n"
+                "  hook_fail_mode: open\n"
+                "otel:\n"
+                "  enabled: false\n"
+            )
+        self.ctx.from_version = "0.5.0"
+        selection = V7CompatibilitySelection.from_mapping(json.loads(v7_exporter_selection_bytes()))
+        converted: list[bytes] = []
+
+        def convert(source, environment, **kwargs):
+            converted.append(source)
+            return convert_v7_observability_to_v8(source, environment, compatibility_selection=selection, **kwargs)
+
+        with (
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", side_effect=convert),
+            patch(
+                "defenseclaw.migrations.activate_v8_migration",
+                return_value=SimpleNamespace(activated=True, already_v8=False),
+            ),
+        ):
+            _migrate_observability_v8(self.ctx)
+
+        self.assertEqual(len(converted), 1)
+        self.assertNotIn(b"_enforcement_enabled", converted[0])
+        self.assertIn(b"hook_fail_mode: open", converted[0])
 
     def test_missing_config_is_an_unconfigured_installation_no_op(self) -> None:
         os.unlink(self.config_path)
