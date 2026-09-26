@@ -180,7 +180,6 @@ classes:
       ActionInitGateway: "init-gateway"
       ActionInitGuardrail: "init-guardrail"
       ActionInitNotificationsToggle: "init-notifications-toggle"
-      ActionInitSandbox: "init-sandbox"
       ActionInitSidecar: "init-sidecar"
       ActionPolicyCreate: "policy-create"
       ActionPolicyActivate: "policy-activate"
@@ -291,7 +290,6 @@ classes:
       "defenseclaw.judge.semaphore.depth": {type: "updowncounter", unit: "{slot}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.judge.semaphore.drops": {type: "counter", unit: "{drop}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.llm_bridge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "status"]}
-      "defenseclaw.openshell.exit": {type: "counter", unit: "{exit}", labels: ["command", "exit_code"]}
       "defenseclaw.otel.ingest.bytes": {type: "counter", unit: "By", labels: ["connector", "signal", "source"]}
       "defenseclaw.otel.ingest.last_seen_ts": {type: "gauge", unit: "s", labels: ["connector", "signal", "source"]}
       "defenseclaw.otel.ingest.malformed": {type: "counter", unit: "{request}", labels: ["connector", "signal", "source"]}

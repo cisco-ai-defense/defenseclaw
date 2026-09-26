@@ -252,9 +252,8 @@ type metricsSet struct {
 	codexNotifyTotal     metric.Int64Counter
 	codexNotifyMalformed metric.Int64Counter
 
-	// External integrations — LLM bridge, OpenShell, Cisco, webhook circuit / cooldown
+	// External integrations — LLM bridge, Cisco, webhook circuit / cooldown
 	llmBridgeLatency          metric.Float64Histogram
-	openShellExit             metric.Int64Counter
 	ciscoErrors               metric.Int64Counter
 	ciscoInspectLatency       metric.Float64Histogram
 	webhookCooldownSuppressed metric.Int64Counter
@@ -904,16 +903,10 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// External integrations — LLM bridge, OpenShell, Cisco, webhook
+	// External integrations — LLM bridge, Cisco, webhook
 	ms.llmBridgeLatency, err = m.Float64Histogram("defenseclaw.llm_bridge.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("LiteLLM bridge call latency (Python subprocess)"))
-	if err != nil {
-		return nil, err
-	}
-	ms.openShellExit, err = m.Int64Counter("defenseclaw.openshell.exit",
-		metric.WithUnit("{exit}"),
-		metric.WithDescription("OpenShell subprocess exits by command and exit code"))
 	if err != nil {
 		return nil, err
 	}

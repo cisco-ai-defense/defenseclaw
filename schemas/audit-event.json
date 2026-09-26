@@ -169,7 +169,6 @@
             "init-gateway",
             "init-guardrail",
             "init-notifications-toggle",
-            "init-sandbox",
             "init-sidecar",
             "policy-create",
             "policy-activate",

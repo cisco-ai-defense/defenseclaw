@@ -3747,22 +3747,6 @@ attributes:
       max_utf8_bytes: 256
     notes: NFC bounded metric dimension; producer cardinality gate applies
   introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.command
-  type: string
-  brief: Canonical bounded metric dimension projected as command for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
 - id: defenseclaw.metric.subsystem
   type: string
   brief: Canonical bounded metric dimension projected as subsystem for local observability
@@ -13334,26 +13318,6 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.init.notifications.toggle
-    bucket: compliance.activity
-    compatibility_only: true
-- producer: audit_action
-  key: init-sandbox
-  source: internal/audit/actions.go
-  event_name_policy: context_optional
-  allowed_context_identity_set: identity_set.compliance_activity
-  severity_policy: canonical_or_info
-  mandatory_rules:
-  - control_plane_mutation
-  - approval_resolution
-  - alert_mutation
-  - protected_boundary_auth_failure
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v1
-    legacy_event_prefix: legacy.audit.
-    disposition: translate_to_v8
-  default_identity:
-    event_name: legacy.audit.init.sandbox
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action

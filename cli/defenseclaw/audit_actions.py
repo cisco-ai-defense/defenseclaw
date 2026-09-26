@@ -235,7 +235,6 @@ ACTION_UPGRADE: Final[str] = "upgrade"
 ACTION_INIT_GATEWAY: Final[str] = "init-gateway"
 ACTION_INIT_GUARDRAIL: Final[str] = "init-guardrail"
 ACTION_INIT_NOTIFICATIONS_TOGGLE: Final[str] = "init-notifications-toggle"
-ACTION_INIT_SANDBOX: Final[str] = "init-sandbox"
 ACTION_INIT_SIDECAR: Final[str] = "init-sidecar"
 ACTION_POLICY_CREATE: Final[str] = "policy-create"
 ACTION_POLICY_ACTIVATE: Final[str] = "policy-activate"
@@ -428,7 +427,6 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INIT_GATEWAY,
     ACTION_INIT_GUARDRAIL,
     ACTION_INIT_NOTIFICATIONS_TOGGLE,
-    ACTION_INIT_SANDBOX,
     ACTION_INIT_SIDECAR,
     ACTION_POLICY_CREATE,
     ACTION_POLICY_ACTIVATE,

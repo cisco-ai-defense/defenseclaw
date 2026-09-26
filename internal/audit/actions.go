@@ -269,7 +269,6 @@ const (
 	ActionInitGateway              Action = "init-gateway"
 	ActionInitGuardrail            Action = "init-guardrail"
 	ActionInitNotificationsToggle  Action = "init-notifications-toggle"
-	ActionInitSandbox              Action = "init-sandbox"
 	ActionInitSidecar              Action = "init-sidecar"
 	ActionPolicyCreate             Action = "policy-create"
 	ActionPolicyActivate           Action = "policy-activate"
@@ -466,7 +465,6 @@ func AllActions() []Action {
 		ActionInitGateway,
 		ActionInitGuardrail,
 		ActionInitNotificationsToggle,
-		ActionInitSandbox,
 		ActionInitSidecar,
 		ActionPolicyCreate,
 		ActionPolicyActivate,
