@@ -47,6 +47,7 @@ readonly STAGING="${DEFENSECLAW_HOME}/.staging"
 readonly INSTALLER_DIR="${DEFENSECLAW_HOME}/installer"
 readonly LOCK_DIR="${DEFENSECLAW_HOME}/.install.lock"
 readonly OPENCLAW_VERSION="2026.3.24"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
 readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
@@ -69,6 +70,18 @@ err()  { printf "${RED}  ✗${NC} %s\n" "$*" >&2; }
 step() { printf "\n${BOLD}${CYAN}─── %s${NC}\n" "$*"; }
 die()  { err "$@"; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
+
+# uname reports x86_64 for a shell running under Rosetta; ask the kernel.
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 version_key() {
     local IFS=.
@@ -188,17 +201,18 @@ printf "\n${BOLD}  DefenseClaw Installer${NC}\n"
 # ── Platform ─────────────────────────────────────────────────────────────────
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-case "$(uname -m)" in
+MACHINE="$(uname -m)"
+[[ "${OS}" == darwin ]] && MACHINE="$(macos_hardware_machine "${MACHINE}")"
+case "${MACHINE}" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
-    *) die "Unsupported architecture: $(uname -m)" ;;
+    *) die "Unsupported architecture: ${MACHINE}" ;;
 esac
 case "${OS}" in
     linux) ;;
     darwin)
-        # uname reports x86_64 under Rosetta; ask the hardware.
-        if [[ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" == 1 ]]; then ARCH=arm64; fi
-        [[ "${ARCH}" == arm64 ]] || die "Intel macOS is not supported; DefenseClaw for macOS requires Apple Silicon. Nothing was changed."
+        [[ "${ARCH}" == arm64 ]] \
+            || die "Intel macOS (${MACHINE}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64); nothing was changed."
         ;;
     *) die "Unsupported OS: ${OS} (use install.ps1 on Windows)" ;;
 esac

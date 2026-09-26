@@ -891,16 +891,14 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
-	macos/DefenseClawMac/script/test_runtime_install_filesystem.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
 	macos/DefenseClawMac/script/test_update_checker_verification.sh
-	macos/DefenseClawMac/script/test_update_checker_safety.sh
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
 	$(MAKE) macos-app-build
 
-macos-app-release: macos-app-license-check extensions dist-cli
+macos-app-release: macos-app-license-check
 	scripts/build-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
 
 macos-app-release-verify:

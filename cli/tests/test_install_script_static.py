@@ -127,8 +127,8 @@ def test_installer_never_uses_retired_asset_names() -> None:
 def test_intel_macos_is_refused_before_changes() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    assert "hw.optional.arm64" in text
-    assert "Intel macOS is not supported" in text
+    assert "sysctl.proc_translated" in text
+    assert "Intel macOS (${MACHINE}) is unsupported" in text
 
 
 def test_connector_choices_track_the_cli() -> None:

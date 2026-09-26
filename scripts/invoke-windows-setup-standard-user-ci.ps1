@@ -17,14 +17,11 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('setup-acceptance', 'bootstrap-acceptance', 'wizard-smoke', 'contract', 'omnigent-native-degraded')]
+    [ValidateSet('setup-acceptance', 'wizard-smoke', 'contract', 'omnigent-native-degraded')]
     [string]$Mode,
     [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
-    [string]$TargetVersion = '',
-    [ValidateSet('immediate', 'deferred')]
-    [string]$BootstrapUninstallContract = 'deferred',
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
     [switch]$Child,
@@ -427,13 +424,6 @@ function Invoke-ChildMode {
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
                 -AllowCurrentUserSetupAcceptance
-        } elseif ($Mode -eq 'bootstrap-acceptance') {
-            & (Join-Path $PSScriptRoot 'test-fresh-install-release-windows.ps1') `
-                -ReleaseDir $artifacts `
-                -TargetVersion $TargetVersion `
-                -UninstallContract $BootstrapUninstallContract `
-                -StateRoot $state `
-                -Child
         } elseif ($Mode -eq 'contract') {
             & $nativeHarness -Operation contract -Connector $Connector `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
@@ -885,10 +875,6 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 if (-not (Test-IsAdministrator)) {
     throw 'disposable Setup acceptance account provisioning requires the hosted runner administrator'
 }
-if ($Mode -eq 'bootstrap-acceptance' -and
-    $TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-    throw 'bootstrap acceptance requires a canonical TargetVersion'
-}
 
 $stateBase = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
 $artifactSource = [IO.Path]::GetFullPath($ArtifactRoot).TrimEnd('\')
@@ -918,15 +904,11 @@ $setupSourceItem = Get-Item -LiteralPath $setupSource -Force -ErrorAction Stop
 if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
-$resourceVerifierInputs = if ($Mode -eq 'bootstrap-acceptance') {
-    @()
-} else {
-    @(
+$resourceVerifierInputs = @(
         'DefenseClawWindowsResourceVerifier-x64.exe',
         'DefenseClawWindowsResourceIcon.png',
         'DefenseClawWindowsResourceVersion.txt'
     )
-}
 foreach ($resourceInputName in $resourceVerifierInputs) {
     $resourceInput = Join-Path $artifactSource $resourceInputName
     $null = Assert-DisposableNoReparseAncestors -Path $resourceInput `
@@ -937,49 +919,6 @@ foreach ($resourceInputName in $resourceVerifierInputs) {
         continue
     }
     throw "Windows resource verifier input must be a regular file: $resourceInput"
-}
-$bootstrapCandidateAssets = @()
-$bootstrapSourceHashes = @{}
-$bootstrapCosignSource = ''
-$bootstrapCosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
-if ($Mode -eq 'bootstrap-acceptance') {
-    $bootstrapCandidateAssets = @(
-        'install.ps1',
-        'DefenseClawSetup-x64.exe.provenance.json',
-        'upgrade-manifest.json',
-        'checksums.txt',
-        'checksums.txt.sig',
-        'checksums.txt.pem',
-        'checksums.txt.bundle'
-    )
-    foreach ($assetName in $bootstrapCandidateAssets) {
-        $assetPath = Join-Path $artifactSource $assetName
-        $null = Assert-DisposableNoReparseAncestors -Path $assetPath `
-            -AllowedRoot $artifactSource -RequireExists
-        $assetItem = Get-Item -LiteralPath $assetPath -Force -ErrorAction Stop
-        if ($assetItem.PSIsContainer -or
-            ($assetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            $assetItem.Length -le 0) {
-            throw "bootstrap release input must be a non-empty regular file: $assetPath"
-        }
-        $bootstrapSourceHashes[$assetName] = (
-            Get-FileHash -LiteralPath $assetPath -Algorithm SHA256
-        ).Hash
-    }
-    $cosignCommand = Get-Command cosign.exe -CommandType Application `
-        -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $cosignCommand) {
-        throw 'bootstrap acceptance requires pinned Cosign v2.6.2 on PATH'
-    }
-    $bootstrapCosignSource = [IO.Path]::GetFullPath($cosignCommand.Source)
-    $cosignItem = Get-Item -LiteralPath $bootstrapCosignSource -Force -ErrorAction Stop
-    if ($cosignItem.PSIsContainer -or
-        ($cosignItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-        $cosignItem.Length -le 0 -or
-        (Get-FileHash -LiteralPath $bootstrapCosignSource -Algorithm SHA256).Hash -cne
-        $bootstrapCosignSha256) {
-        throw 'bootstrap acceptance Cosign does not match the reviewed v2.6.2 Windows verifier'
-    }
 }
 $expectedSetupHash = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
     $setupSource,
@@ -1128,10 +1067,6 @@ try {
         if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $optionalWindowsBlockGolden) -PathType Leaf) {
             $harnessFiles += $optionalWindowsBlockGolden
         }
-    } elseif ($Mode -eq 'bootstrap-acceptance') {
-        $harnessFiles += @(
-            'test-fresh-install-release-windows.ps1'
-        )
     } elseif ($Mode -eq 'omnigent-native-degraded') {
         $harnessFiles += 'test-omnigent-windows-native.ps1'
     }
@@ -1198,26 +1133,6 @@ try {
         if ((Get-FileHash -LiteralPath $childDevinArchive -Algorithm SHA256).Hash -cne
             $devinArchiveHash) {
             throw 'disposable-user Devin archive copy does not match the pinned input'
-        }
-    }
-    if ($Mode -eq 'bootstrap-acceptance') {
-        foreach ($assetName in $bootstrapCandidateAssets) {
-            $childAsset = Join-Path $childArtifacts $assetName
-            [IO.File]::Copy(
-                (Join-Path $artifactSource $assetName),
-                $childAsset,
-                $false
-            )
-            if ((Get-FileHash -LiteralPath $childAsset -Algorithm SHA256).Hash -cne
-                [string]$bootstrapSourceHashes[$assetName]) {
-                throw "disposable-user bootstrap copy does not match the exact input: $assetName"
-            }
-        }
-        $childCosign = Join-Path $childArtifacts 'cosign-windows-amd64.exe'
-        [IO.File]::Copy($bootstrapCosignSource, $childCosign, $false)
-        if ((Get-FileHash -LiteralPath $childCosign -Algorithm SHA256).Hash -cne
-            $bootstrapCosignSha256) {
-            throw 'disposable-user Cosign copy does not match the reviewed v2.6.2 verifier'
         }
     }
 
@@ -1306,12 +1221,6 @@ try {
     )
     if ($Mode -eq 'contract') {
         $arguments += @('-Connector', $Connector)
-    }
-    if ($Mode -eq 'bootstrap-acceptance') {
-        $arguments += @(
-            '-TargetVersion', $TargetVersion,
-            '-BootstrapUninstallContract', $BootstrapUninstallContract
-        )
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
@@ -1408,26 +1317,6 @@ try {
             (Get-FileHash -LiteralPath $childDevinArchive -Algorithm SHA256).Hash -cne
                 $devinArchiveHash) {
             throw 'exact pinned Devin contract input changed during disposable-user execution'
-        }
-    }
-    if ($Mode -eq 'bootstrap-acceptance') {
-        foreach ($assetName in $bootstrapCandidateAssets) {
-            $expectedHash = [string]$bootstrapSourceHashes[$assetName]
-            $sourcePath = Join-Path $artifactSource $assetName
-            $childPath = Join-Path $childArtifacts $assetName
-            if ((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -cne
-                $expectedHash -or
-                (Get-FileHash -LiteralPath $childPath -Algorithm SHA256).Hash -cne
-                $expectedHash) {
-                throw "exact bootstrap release input changed during acceptance: $assetName"
-            }
-        }
-        if ((Get-FileHash `
-                -LiteralPath (Join-Path $childArtifacts 'cosign-windows-amd64.exe') `
-                -Algorithm SHA256).Hash -cne $bootstrapCosignSha256 -or
-            (Get-FileHash -LiteralPath $bootstrapCosignSource -Algorithm SHA256).Hash -cne
-            $bootstrapCosignSha256) {
-            throw 'exact bootstrap Cosign verifier changed during acceptance'
         }
     }
     if ($Mode -eq 'setup-acceptance') {

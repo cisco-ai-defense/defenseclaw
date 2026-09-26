@@ -308,20 +308,11 @@ def test_third_party_license_text_and_platform_packaging_contracts():
     assert "is not placed in that runtime archive" in notice_words
     assert "not a DefenseClaw runtime artifact" in notice_words
 
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    dist_plugin = makefile[
-        makefile.index("\ndist-plugin:") : makefile.index("\ndist-sandbox:")
-    ]
-    assert "package.json openclaw.plugin.json dist/" in dist_plugin
-    assert "package-lock.json" not in dist_plugin
-
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
         assert f"include {name}" in manifest
 
     bundle_builder = (ROOT / "scripts/build-macos-bundle.sh").read_text(encoding="utf-8")
-    app_builder = (ROOT / "scripts/build-macos-app-release.sh").read_text(encoding="utf-8")
-    app_verifier = (ROOT / "scripts/verify-macos-app-release.sh").read_text(encoding="utf-8")
     windows_builder = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8-sig")
     windows_installer = (ROOT / "scripts/build-windows-installer.ps1").read_text(
         encoding="utf-8-sig"
@@ -334,7 +325,6 @@ def test_third_party_license_text_and_platform_packaging_contracts():
     }"""
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
         assert f'cp {name} ' in bundle_builder
-        assert f'cp "${{ROOT}}/{name}" ' in app_builder
     assert windows_gateway_license_staging in windows_builder
     assert (
         "foreach ($file in @('pyproject.toml', 'README.md', 'LICENSE', 'NOTICE', "
@@ -344,7 +334,6 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) "
         "-Destination $packageStage -Force"
     ) in windows_builder
-    assert 'cmp -s "${ROOT}/${relative}" "${PAYLOAD}/${relative}"' in app_verifier
     assert (
         """\
         '--source', $stage,
