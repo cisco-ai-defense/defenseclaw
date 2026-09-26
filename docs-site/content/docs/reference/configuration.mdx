@@ -379,12 +379,62 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 `gateway.api_bind` always wins. See
 [Gateway API: bind address](/docs/reference/gateway-api#bind-address).
 
-The `openshell:` block stays in the v8 schema so existing files load
-unchanged, but it no longer configures a sandbox. `mode` and `sandbox_home`
-are read only by the legacy bind rule above and by
-[`defenseclaw sandbox legacy-cleanup`](/docs/setup/sandbox); `binary`,
-`policy_dir`, `version`, `auto_pair`, and `host_networking` are accepted and
-ignored. No migration rewrites the block.
+The `openshell:` block configures the NVIDIA OpenShell 0.1 sandbox integration,
+which is being rebuilt. Its posture is layered: a **sandbox policy pack**
+supplies every default, the keys below override it, run flags override those,
+and `openshell.admin` clamps the result. Keys the pack governs (`profile`,
+`yolo`, `workdir.mode`, upload caps, egress lists, `mcp.import`) have no loader
+default, so an unset key inherits the pack.
+
+```yaml
+openshell:
+  enabled: false
+  pack: open                 # open | balanced | strict, a custom pack name, or an absolute path
+  pack_dir: ~/.defenseclaw/policies/sandbox   # custom packs live at <pack_dir>/<name>/pack.yaml
+  profile: ""                # "" inherits the pack; open | balanced | strict
+  yolo: null                 # null inherits the pack (skip-permissions mode)
+  ingress_port: 0            # 0 → gateway.api_port + 1
+  egress_port: 0             # 0 → gateway.api_port + 2
+  workdir: {mode: "", masks: [], unmask: [], max_upload_mb: 0, git_depth: 200, on_exit: ask}
+  egress: {block: [], allow: [], ports: [], large_upload_mb: 0, feed: ""}
+  harnesses: []              # also served rule packs and hook config
+  admin:                     # administrator constraints; every key is optional
+    required_pack: ""
+    min_profile: ""          # strict > balanced > open
+    allow_yolo: null         # null = no constraint; false forbids
+    allow_mount: null
+    allow_host_ports: null
+    allow_unblock: null      # also governs approve-always, user allow entries, feed off
+    allow_learn_mode: null
+    allowed_harnesses: []
+    egress_block: []         # always blocked, never unblockable
+    egress_allow_only: []    # forces an allowlist profile
+    require_copy_for: []     # project path globs that must run in copy mode
+    max_resources: {cpu: "", memory: ""}
+    locked: []               # keys run flags may not override: pack, profile, yolo,
+                             # workdir.mode, workdir.unmask, mcp.import, mcp.host_ports, resources
+```
+
+The built-in packs are `open` (the default: open web through the DefenseClaw
+egress proxy with the exfiltration blocklist, live project mount,
+skip-permissions on), `balanced` (a curated developer allowlist, triaged
+approvals), and `strict` (no web beyond the harness provider, manual approvals,
+copy mode, harness prompts kept). A custom pack is one strict YAML file with
+the same sections; unknown keys, duplicate keys, anchors, symbolic links,
+world-writable files, and built-in names are refused.
+
+Every loosening that `openshell.admin` refuses is reported as "blocked by your
+organization's DefenseClaw policy: <key>", and the same constraints gate
+runtime actions such as unblocking a destination or opening a host port. In a
+`managed_enterprise` install the administrator owns `config.yaml`, so the admin
+block is authoritative. Elsewhere it is still enforced, but it is advisory
+because you can edit the file.
+
+`mode` and `sandbox_home` remain for the legacy standalone sandbox: they are
+read only by the legacy bind rule above and by
+[`defenseclaw sandbox legacy-cleanup`](/docs/setup/sandbox). `policy_dir`,
+`version`, `auto_pair`, and `host_networking` are accepted and ignored. No
+migration rewrites the block.
 
 The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
 OpenAI-compatible Chat Completions path. Hook connectors and other provider API
