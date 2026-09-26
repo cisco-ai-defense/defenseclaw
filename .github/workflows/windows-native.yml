@@ -602,7 +602,7 @@ jobs:
           [IO.Directory]::CreateDirectory($verificationRoot) | Out-Null
           Expand-Archive -LiteralPath $archivePath -DestinationPath $verificationRoot
           foreach ($binary in @(
-            @{ File = 'defenseclaw.exe'; Name = 'defenseclaw-gateway' },
+            @{ File = 'defenseclaw-gateway.exe'; Name = 'defenseclaw-gateway' },
             @{ File = 'defenseclaw-hook.exe'; Name = 'defenseclaw-hook' }
           )) {
             $path = Join-Path $verificationRoot $binary.File

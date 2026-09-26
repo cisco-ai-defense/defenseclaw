@@ -138,7 +138,14 @@ foreach ($path in '{INSTALL_PS1}', '{LIFECYCLE_PS1}') {{
 & '{POWERSHELL}' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{INSTALL_PS1}' -Help
 exit $LASTEXITCODE
 """
-    env = {**os.environ, "USERPROFILE": str(tmp_path), "DEFENSECLAW_HOME": str(tmp_path / "home")}
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        # pwsh on Linux and macOS has no profile folders; the script computes its paths up front.
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
     completed = subprocess.run(
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
         capture_output=True,

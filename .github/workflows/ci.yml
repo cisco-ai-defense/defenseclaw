@@ -607,7 +607,7 @@ jobs:
           path: assets
       - shell: pwsh
         run: |
-          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes fresh, setup-import, files-in-use, failure-drill, policy
+          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes 'fresh setup-import files-in-use failure-drill policy'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:

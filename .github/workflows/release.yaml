@@ -279,7 +279,7 @@ jobs:
           $lanes = @('fresh', 'setup-import', 'files-in-use', 'failure-drill', 'policy')
           $extra = @{}
           if ($env:PREVIOUS) { $lanes += 'upgrade-previous', 'shim'; $extra['PreviousAssets'] = 'previous' }
-          & scripts/test-install-lifecycle.ps1 -Assets release -Lanes $lanes @extra
+          & scripts/test-install-lifecycle.ps1 -Assets release -Lanes ($lanes -join ' ') @extra
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   publish:

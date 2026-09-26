@@ -59,7 +59,8 @@ def _release_dir(tmp_path: Path, version: str, *, tamper: bool = False) -> Path:
     release = tmp_path / f"release-{version}"
     release.mkdir()
     installer = f'#!/bin/bash\nDC_VERSION="{version}"\necho installing\n'
-    (release / "install.sh").write_text(installer, encoding="utf-8")
+    # Bytes, so Windows newline translation cannot change the digest.
+    (release / "install.sh").write_bytes(installer.encode())
     digest = hashlib.sha256(installer.encode()).hexdigest()
     if tamper:
         digest = "0" * 64
@@ -212,7 +213,7 @@ def test_windows_starts_the_installer_detached(
     release = tmp_path / "release"
     release.mkdir()
     script = '$DcVersion = "1.0.1"\n'
-    (release / "install.ps1").write_text(script, encoding="utf-8")
+    (release / "install.ps1").write_bytes(script.encode())
     (release / "checksums.txt").write_text(
         f"{hashlib.sha256(script.encode()).hexdigest()}  install.ps1\n", encoding="utf-8"
     )

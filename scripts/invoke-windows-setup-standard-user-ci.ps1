@@ -905,10 +905,10 @@ if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
 $resourceVerifierInputs = @(
-        'DefenseClawWindowsResourceVerifier-x64.exe',
-        'DefenseClawWindowsResourceIcon.png',
-        'DefenseClawWindowsResourceVersion.txt'
-    )
+    'DefenseClawWindowsResourceVerifier-x64.exe',
+    'DefenseClawWindowsResourceIcon.png',
+    'DefenseClawWindowsResourceVersion.txt'
+)
 foreach ($resourceInputName in $resourceVerifierInputs) {
     $resourceInput = Join-Path $artifactSource $resourceInputName
     $null = Assert-DisposableNoReparseAncestors -Path $resourceInput `
