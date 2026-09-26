@@ -23,6 +23,7 @@ import json
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 from pathlib import Path
 
@@ -303,6 +304,36 @@ def test_notice_can_be_disabled(home: Path, monkeypatch: pytest.MonkeyPatch, set
         (home / "config.yaml").write_text("config_version: 8\nupdate_check: false\n")
 
     assert update_notice.available_message() is None
+
+
+def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    (home / ".update-check.json").write_text(json.dumps({"checked_at": time.time(), "latest": "9.0.0"}))
+    opened: list[str] = []
+
+    class FakeKey:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def open_key(_root, path, _reserved, _access):
+        opened.append(path)
+        return FakeKey()
+
+    fake_winreg = types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE=object(),
+        KEY_READ=1,
+        KEY_WOW64_64KEY=256,
+        OpenKey=open_key,
+        QueryValueEx=lambda _key, name: (1, 4) if name == "DisableSelfUpdate" else (0, 4),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+    monkeypatch.setattr(update_notice.os, "name", "nt")
+
+    assert update_notice.available_message() is None
+    assert opened == [r"SOFTWARE\Policies\Cisco\DefenseClaw"]
 
 
 def test_notice_gives_up_on_a_slow_network(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -18,7 +18,9 @@
 
 Checks the latest release at most once a day and stays silent unless both
 stdout and stderr are terminals. Disabled by ``DEFENSECLAW_NO_UPDATE_CHECK=1``,
-by ``CI``, or by ``update_check: false`` in config.yaml. Never raises.
+by ``CI``, by ``update_check: false`` in config.yaml, or on Windows by the
+``DisableSelfUpdate`` enterprise policy that also stops install.ps1. Never
+raises.
 """
 
 from __future__ import annotations
@@ -74,6 +76,8 @@ def _interactive(argv: list[str]) -> bool:
 def _disabled() -> bool:
     if os.environ.get(NO_CHECK_ENV, "").strip() not in ("", "0", "false") or os.environ.get("CI"):
         return True
+    if _self_update_disabled_by_policy():
+        return True
     try:
         import yaml
 
@@ -82,6 +86,20 @@ def _disabled() -> bool:
     except Exception:  # noqa: BLE001 - missing or unreadable config keeps the default
         return False
     return isinstance(raw, dict) and raw.get("update_check") is False
+
+
+def _self_update_disabled_by_policy() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Cisco\DefenseClaw", 0, access) as key:
+            value, _kind = winreg.QueryValueEx(key, "DisableSelfUpdate")
+        return int(value) != 0
+    except (ImportError, OSError, TypeError, ValueError):
+        return False
 
 
 def _latest_cached() -> str | None:
