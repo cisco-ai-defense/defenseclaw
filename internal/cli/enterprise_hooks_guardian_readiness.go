@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -41,7 +42,7 @@ func writeEnterpriseHookGuardianReadinessState(dataDir, state string) (string, e
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return path, fmt.Errorf("hook guardian authorization directory %s does not exist yet", dir)
+			return path, fmt.Errorf("hook guardian authorization directory %s does not exist yet: %w", dir, os.ErrNotExist)
 		}
 		return path, fmt.Errorf("inspect hook guardian authorization directory: %w", err)
 	}
@@ -69,13 +70,29 @@ func writeEnterpriseHookGuardianReadinessState(dataDir, state string) (string, e
 // newGuardianReadinessStateReader is the gateway sidecar's probe for the
 // guardian readiness literal. It resolves the path through the same helper
 // as the writer and returns StateUnknown (the safe waiting_for_targets
-// default) for a missing, unreadable, malformed, or untrusted file.
+// default) for a missing, unreadable, malformed, or untrusted file, and for
+// a `ready` the guardian has not re-published within
+// guardianstate.ReadyMaxAge (a stopped or crashed guardian cannot leave a
+// stale ready behind).
 func newGuardianReadinessStateReader(dataDir string) func() string {
 	path := guardianstate.PathForDataDir(dataDir)
 	return func() string {
 		if err := guardianReadinessStateTrustCheck(path); err != nil {
 			return guardianstate.StateUnknown
 		}
-		return guardianstate.ReadState(path)
+		return guardianstate.ReadCurrentState(path, time.Now())
 	}
+}
+
+// guardianReadinessAfterReconcile maps one watch-loop reconcile outcome onto
+// the published readiness literal. Only a reconcile that returned no error,
+// left no target failed, and published its protected state and exact
+// enrollment set (StateErr == nil) is ready; runEnterpriseHookReconcileOnce
+// returns a nil error for incomplete runs, so the run fields must be checked.
+// Pending (deferred, signed-out) targets do not withhold ready.
+func guardianReadinessAfterReconcile(run enterpriseHookReconcileRun, err error) string {
+	if err != nil || run.Failures > 0 || run.StateErr != nil {
+		return guardianstate.StateWaitingForTargets
+	}
+	return guardianstate.StateReady
 }

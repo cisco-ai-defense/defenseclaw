@@ -66,6 +66,17 @@ var enterpriseHookTargetsWaitTimeout = 24 * time.Hour
 // non-inotify filesystems (network shares) that never fire events at all.
 var enterpriseHookTargetsWaitPoll = 30 * time.Second
 
+// enterpriseHookWatchReconcileOnce is the per-cycle reconcile the watch loop
+// runs. It is a seam so tests can drive the readiness state the loop
+// publishes for each reconcile outcome.
+var enterpriseHookWatchReconcileOnce = runEnterpriseHookReconcileOnce
+
+// enterpriseHookGuardianReadinessRefresh is how often the watch loop
+// re-publishes a ready state when no reconcile has published one, so the
+// gateway's guardianstate.ReadyMaxAge check never expires a healthy guardian
+// whatever its --interval.
+var enterpriseHookGuardianReadinessRefresh = guardianstate.RefreshInterval
+
 var (
 	enterpriseHookConnector     string
 	enterpriseHookUser          string
@@ -2183,6 +2194,23 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
+	// Guardian readiness (spec 003 REQ-19, #896). The state file outlives
+	// this process (it sits in the protected authorization directory, which
+	// survives restarts and non-purge uninstall), so retract any ready a
+	// previous guardian left before the first reconcile, publish the outcome
+	// of every reconcile, keep a ready fresh for the gateway's
+	// guardianstate.ReadyMaxAge check, and retract it again on the way out.
+	// A guardian killed before the deferred retraction still ages out.
+	readinessRefresh := time.NewTicker(enterpriseHookGuardianReadinessRefresh)
+	defer readinessRefresh.Stop()
+	publishedReadiness := guardianstate.StateWaitingForTargets
+	publishReadiness := func(state string) {
+		publishedReadiness = state
+		writeGuardianStateOrLog(cmd.ErrOrStderr(), state)
+		readinessRefresh.Reset(enterpriseHookGuardianReadinessRefresh)
+	}
+	publishReadiness(guardianstate.StateWaitingForTargets)
+	defer writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateWaitingForTargets)
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
@@ -2239,9 +2267,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	repairRetryNeeded := false
 	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
-		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
+		run, err := enterpriseHookWatchReconcileOnce(cmd.Context())
 		if err != nil {
 			repairRetryNeeded = true
+			publishReadiness(guardianReadinessAfterReconcile(run, err))
 			return false, err
 		}
 		enterpriseHookAfterWatchReconcile(cmd.Context(), cmd.ErrOrStderr(), run)
@@ -2251,6 +2280,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// retry so the caller schedules a backoff attempt rather than
 			// waiting for the periodic interval to recover.
 			repairRetryNeeded = true
+			publishReadiness(guardianstate.StateWaitingForTargets)
 			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
 		}
 		// Rebuild the owned-file allowlists from this run. The
@@ -2303,6 +2333,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if !repairRetryNeeded {
 			repairRetryDelay = 0
 		}
+		// runEnterpriseHookReconcileOnce returns a nil error for a run
+		// with failed targets or an unpublished state, so readiness is
+		// derived from the run, not from err alone.
+		publishReadiness(guardianReadinessAfterReconcile(run, nil))
 		// When the row set is byte-identical to the previous run,
 		// any Write/Chmod events still leaking past the normal
 		// settle window are tail-writes from our own reconcile
@@ -2346,10 +2380,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	// Readiness was already published by reconcile(): ready only when the
+	// startup reconcile was clean. An unconditional ready here would mark
+	// the sidecar ready after a nil-error incomplete startup (Failures > 0
+	// or StateErr != nil).
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2523,6 +2557,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if debounceReason == "" {
 				debounceReason = "session sign-in"
 			}
+		case <-readinessRefresh.C:
+			if publishedReadiness == guardianstate.StateReady {
+				publishReadiness(guardianstate.StateReady)
+			}
 		case <-ticker.C:
 			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
 				return nil
@@ -2576,6 +2614,12 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 	// the two are different directories in every shipped layout (#896).
 	statePath, err := writeEnterpriseHookGuardianReadinessState(cfg.DataDir, state)
 	if err != nil {
+		if state == guardianstate.StateWaitingForTargets && errors.Is(err, os.ErrNotExist) {
+			// No authorization directory means no readiness file the
+			// gateway could read: it already reports the same
+			// waiting_for_targets default, so there is nothing to retract.
+			return
+		}
 		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file %s: %v\n", state, statePath, err)
 	}
 }
