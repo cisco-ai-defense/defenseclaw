@@ -107,14 +107,17 @@ type CopyRecord struct {
 	Head     string `json:"head,omitempty"`
 	Branch   string `json:"branch,omitempty"`
 	// Remotes are the (credential-free) remotes configured in the copy.
-	Remotes    map[string]string `json:"remotes,omitempty"`
-	HeldBack   []string          `json:"held_back,omitempty"`
-	Files      int               `json:"files"`
-	Bytes      int64             `json:"bytes"`
-	StagedAt   time.Time         `json:"staged_at"`
-	UploadedAt *time.Time        `json:"uploaded_at,omitempty"`
-	VerifiedAt *time.Time        `json:"verified_at,omitempty"`
-	Warnings   []string          `json:"warnings,omitempty"`
+	Remotes map[string]string `json:"remotes,omitempty"`
+	// LineEndings are the operator's core.autocrlf/eol/safecrlf settings,
+	// applied to the copy and to the capture Apply merges into.
+	LineEndings map[string]string `json:"line_endings,omitempty"`
+	HeldBack    []string          `json:"held_back,omitempty"`
+	Files       int               `json:"files"`
+	Bytes       int64             `json:"bytes"`
+	StagedAt    time.Time         `json:"staged_at"`
+	UploadedAt  *time.Time        `json:"uploaded_at,omitempty"`
+	VerifiedAt  *time.Time        `json:"verified_at,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
 }
 
 // Labels are the sandbox labels for a copy-mode sandbox.
@@ -331,11 +334,20 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	sg := gitCmd{dir: stage}
-	if err := sg.run(ctx, "init", "--quiet", "--template=", "."); err != nil {
+	format := "sha1"
+	if f := gitConfigValue(ctx, proj, gitConfigPath(ctx, proj), "extensions.objectFormat"); f != "" {
+		format = strings.ToLower(f)
+	}
+	if err := sg.run(ctx, "init", "--quiet", "--template=", "--object-format="+format, "."); err != nil {
 		return err
 	}
-	if f := gitConfigValue(ctx, proj, gitConfigPath(ctx, proj), "extensions.objectFormat"); f != "" && f != "sha1" {
-		return &NeedsCopyError{Path: rec.Project, Reason: "sha256 repositories are not supported by copy mode yet"}
+	// Line-ending settings shape what git stores; the copy and every later
+	// capture of the operator's tree must agree on them.
+	rec.LineEndings = lineEndingConfig(ctx, proj, opts.Home)
+	for key, value := range rec.LineEndings {
+		if err := sg.run(ctx, "config", key, value); err != nil {
+			return err
+		}
 	}
 	depth := opts.GitDepth
 	if depth <= 0 {
@@ -417,6 +429,47 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return &TooLargeError{What: "the copy (files and history)", Size: size, Limit: maxBytes}
 	}
 	return nil
+}
+
+// lineEndingKeys are the settings that change the bytes git stores for a
+// working-tree file.
+var lineEndingKeys = []string{"core.autocrlf", "core.eol", "core.safecrlf"}
+
+// lineEndingConfig returns the operator's effective line-ending settings:
+// repository config first, then the global files gitsafe hides.
+func lineEndingConfig(ctx context.Context, proj gitCmd, homeOverride string) map[string]string {
+	home, xdg := operatorConfigDirs(homeOverride)
+	files := []string{gitConfigPath(ctx, proj)}
+	if home != "" {
+		files = append(files, filepath.Join(home, ".gitconfig"))
+	}
+	if xdg != "" {
+		files = append(files, filepath.Join(xdg, "git", "config"))
+	}
+	out := map[string]string{}
+	for _, key := range lineEndingKeys {
+		for _, f := range files {
+			if f == "" || !pathExists(f) {
+				continue
+			}
+			if v := gitConfigValue(ctx, gitCmd{dir: filepath.Dir(f)}, f, key); v != "" {
+				out[key] = v
+				break
+			}
+		}
+	}
+	return out
+}
+
+// lineEndingArgs turns lineEndingConfig into -c overrides.
+func lineEndingArgs(cfg map[string]string) []string {
+	out := make([]string, 0, len(cfg))
+	for _, key := range lineEndingKeys {
+		if v, ok := cfg[key]; ok {
+			out = append(out, key+"="+v)
+		}
+	}
+	return out
 }
 
 func gitConfigPath(ctx context.Context, g gitCmd) string {

@@ -205,6 +205,35 @@ func TestCopyRoundTripApplyMerge(t *testing.T) {
 	}
 }
 
+func TestCopyKeepsLineEndingSettingsConsistent(t *testing.T) {
+	e := newEnv(t)
+	e.git(e.project, "init", "-q", "-b", "main")
+	e.git(e.project, "config", "core.autocrlf", "true")
+	writeFile(t, e.project, "a.txt", "one\r\ntwo\r\n")
+	writeFile(t, e.project, "b.txt", "three\r\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "crlf")
+	rec, fs := launchCopy(t, e, "c1", nil)
+	if rec.LineEndings["core.autocrlf"] != "true" {
+		t.Fatalf("line endings not recorded: %v", rec.LineEndings)
+	}
+	if st := fs.agent(remoteRepo, "status", "--porcelain"); st != "" {
+		t.Fatalf("copy shows spurious changes: %q", st)
+	}
+	fs.write(remoteRepo+"/a.txt", "one\r\ntwo\r\nfour\r\n")
+	pr := pull(t, e, fs, "c1")
+	if got := changePaths(pr.Changes); got != "M:a.txt" {
+		t.Fatalf("changes = %s", got)
+	}
+	res, err := apply(e, "c1", ApplyMerge, nil)
+	if err != nil || !res.Applied || len(res.Conflicts) != 0 {
+		t.Fatalf("apply: %+v %v", res, err)
+	}
+	if readFile(t, e.project, "a.txt") != "one\r\ntwo\r\nfour\r\n" || readFile(t, e.project, "b.txt") != "three\r\n" {
+		t.Fatalf("a.txt = %q", readFile(t, e.project, "a.txt"))
+	}
+}
+
 func TestCopyApplyConflictFallsBackToBranchAndPatch(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()

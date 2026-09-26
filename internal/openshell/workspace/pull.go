@@ -611,7 +611,7 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	var g gitCmd
 	var result, baseline, parent string
 	if rec.Kind == CopyGit {
-		g = gitCmd{dir: rec.Project}
+		g = gitCmd{dir: rec.Project, config: lineEndingArgs(rec.LineEndings)}
 		if result, baseline, err = importResult(ctx, rec, g); err != nil {
 			return nil, err
 		}
