@@ -423,6 +423,10 @@ copy mode, harness prompts kept). A custom pack is one strict YAML file with
 the same sections; unknown keys, duplicate keys, anchors, symbolic links,
 world-writable files, and built-in names are refused.
 
+`required_pack` replaces only the pack layer: the keys above and run flags
+still apply on top of it. To keep them from loosening the required pack, also
+set `min_profile`, the `allow_*` switches, and `locked`.
+
 Every loosening that `openshell.admin` refuses is reported as "blocked by your
 organization's DefenseClaw policy: <key>", and the same constraints gate
 runtime actions such as unblocking a destination or opening a host port. In a

@@ -243,7 +243,10 @@ type OpenShellMiddlewareConfig struct {
 // optional; an unset field imposes no constraint. The Allow* switches are
 // tri-state so an absent key never reads as "false".
 type OpenShellAdminConfig struct {
-	// RequiredPack forces a pack (name or absolute path).
+	// RequiredPack forces the pack (name or absolute path). It replaces
+	// only the pack layer: user keys and run flags still apply on top, so
+	// pair it with MinProfile, the Allow* switches and Locked to keep them
+	// from loosening it.
 	RequiredPack string `mapstructure:"required_pack" yaml:"required_pack,omitempty"`
 	// MinProfile is the loosest profile allowed (strict > balanced > open).
 	MinProfile     string `mapstructure:"min_profile"      yaml:"min_profile,omitempty"`

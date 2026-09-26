@@ -593,6 +593,25 @@ func TestResolveRequiredPack(t *testing.T) {
 		t.Fatalf("choosing the required pack: %+v", violations)
 	}
 
+	// required_pack replaces only the pack layer: run flags still apply on
+	// top until min_profile or locked stops them.
+	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
+	if len(violations) != 0 || eff.Pack.Name != "strict" || eff.Profile != "open" {
+		t.Fatalf("unconstrained --profile over a required pack: violations %+v effective %+v", violations, eff)
+	}
+	cfg.OpenShell.Admin.Locked = []string{"profile"}
+	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
+	if v := onlyViolation(t, violations); v.Key != "profile" || v.Constraint != "openshell.admin.locked" || eff.Profile != "strict" {
+		t.Fatalf("locked profile: violation %+v effective profile %q", v, eff.Profile)
+	}
+	cfg.OpenShell.Admin.Locked = nil
+	cfg.OpenShell.Admin.MinProfile = "strict"
+	eff, violations = mustResolve(t, cfg, Flags{Profile: "balanced"})
+	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.min_profile" || eff.Profile != "strict" {
+		t.Fatalf("min_profile over a required pack: violation %+v effective profile %q", v, eff.Profile)
+	}
+	cfg.OpenShell.Admin.MinProfile = ""
+
 	// The same content under another reference is not a loosening, and a
 	// required pack's own values are not the user's attempts.
 	cfg = testConfig(func(o *config.OpenShellConfig) {
