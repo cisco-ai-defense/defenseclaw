@@ -1201,6 +1201,19 @@ and `Stop`. Each command uses the fixed System32 Windows PowerShell path and
 the protected `defenseclaw-hook.exe`; user `PATH`, `COMSPEC`, user config, and
 project hooks do not select the managed command.
 
+An administrator-authored `requirements.toml` (Intune, GPO, or a
+configuration-management template) is never rewritten. Install and repair add
+only the missing DefenseClaw entries: root keys go at the top of the file and
+single keys go directly below an existing `[features]` or `[hooks]` header,
+each tagged `# managed by DefenseClaw`; new tables and the managed hook groups
+go in one block between `# BEGIN DefenseClaw managed hooks` and
+`# END DefenseClaw managed hooks` at the end of the file. Comments, ordering,
+formatting, and unrelated keys stay byte-for-byte, and uninstall deletes only
+those entries. If a needed table is written in a form that can't be extended
+without rewriting it (for example an inline `features = { ... }` table or a
+static `hooks.<event> = [...]` array), the operation fails and reports the
+table instead of reformatting the file.
+
 The hidden installed-binary commands are lifecycle internals and read-only
 operator diagnostics except for service-mediated reconcile/removal:
 
