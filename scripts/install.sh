@@ -47,12 +47,18 @@ readonly STAGING="${DEFENSECLAW_HOME}/.staging"
 readonly INSTALLER_DIR="${DEFENSECLAW_HOME}/installer"
 readonly LOCK_DIR="${DEFENSECLAW_HOME}/.install.lock"
 # A copy that the upgrade command or another installer downloaded into a
-# temporary directory removes that directory when it finishes.
+# temporary directory removes that directory when it finishes, but only when
+# the directory holds nothing else.
 SELF_TMP="$(dirname "${BASH_SOURCE[0]:-.}")"
 case "$(basename "${SELF_TMP}")" in
-    defenseclaw-upgrade-*|defenseclaw-rollback-*) trap 'rm -rf "${SELF_TMP}"' EXIT ;;
+    defenseclaw-upgrade-*|defenseclaw-rollback-*) ;;
     *) SELF_TMP="" ;;
 esac
+if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
+        ! -name install.sh ! -name checksums.txt -print -quit 2>/dev/null)" ]]; then
+    SELF_TMP=""
+fi
+[[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
 readonly OPENCLAW_VERSION="2026.3.24"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.

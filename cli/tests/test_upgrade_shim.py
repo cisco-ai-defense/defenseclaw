@@ -34,6 +34,9 @@ from defenseclaw import entry, update_notice, upgrade_shim
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "home" / ".defenseclaw"
     data.mkdir(parents=True)
+    (tmp_path / "tmp").mkdir()
+    # The shim stages installers with tempfile.mkdtemp; keep them out of TMPDIR.
+    monkeypatch.setattr(upgrade_shim.tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data))
     monkeypatch.delenv(upgrade_shim.LOCAL_DIR_ENV, raising=False)
     monkeypatch.delenv(upgrade_shim.REPO_ENV, raising=False)
@@ -46,6 +49,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def execs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: calls.append(list(argv)))
+    monkeypatch.setattr(upgrade_shim.os, "chdir", lambda path: None)
     monkeypatch.setattr(upgrade_shim.os, "name", "posix")
     return calls
 
