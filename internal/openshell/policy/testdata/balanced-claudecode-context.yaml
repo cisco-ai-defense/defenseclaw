@@ -1,0 +1,35 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /context/lib
+    - /dev/urandom
+    - /etc
+    - /lib
+    - /opt
+    - /proc
+    - /usr
+    - /var/log
+  read_write:
+    - /context/scratch
+    - /dev/null
+    - /dev/ptmx
+    - /dev/pts
+    - /dev/tty
+    - /sandbox
+    - /tmp
+    - /work/myapp
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: "1000"
+  run_as_group: "1000"
+network_policies:
+  defenseclaw_egress:
+    endpoints:
+      - host: host.openshell.internal
+        port: 18972
+        protocol: tcp
+        tls: skip
+    binaries:
+      - path: /**

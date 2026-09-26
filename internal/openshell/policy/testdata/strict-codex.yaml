@@ -1,0 +1,25 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /dev/urandom
+    - /etc
+    - /lib
+    - /opt
+    - /proc
+    - /usr
+    - /var/log
+  read_write:
+    - /dev/null
+    - /dev/ptmx
+    - /dev/pts
+    - /dev/tty
+    - /sandbox
+    - /tmp
+    - /work/myapp
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: "1000"
+  run_as_group: "1000"
+network_policies: {}
