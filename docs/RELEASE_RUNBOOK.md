@@ -10,7 +10,7 @@ between versions.
    release-shaped assets from the commit and run the real installer on Linux
    and Windows.
 2. Actions → **Release** → Run workflow on `main` with `version: X.Y.Z` (bare,
-   no `v`). Or:
+   no `v`, newer than the latest release). Or:
 
    ```bash
    gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main -f version=X.Y.Z
