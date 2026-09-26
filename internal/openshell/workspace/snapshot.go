@@ -728,7 +728,7 @@ func removeSnapshotData(ctx context.Context, lay layout, name string, keepShadow
 	if rec != nil && rec.Git != nil {
 		gs := rec.Git
 		if sh, unlock, err := reopenShadow(ctx, gs.Shadow, rec.Project, gs.GitDir); err == nil {
-			for _, ref := range []string{gs.Ref, "refs/defenseclaw/pre-index/" + name, "refs/defenseclaw/post/" + name} {
+			for _, ref := range []string{gs.Ref, "refs/defenseclaw/pre-index/" + name, "refs/defenseclaw/post/" + name, "refs/defenseclaw/post-hidden/" + name} {
 				_ = sh.bare().run(ctx, "update-ref", "-d", ref)
 			}
 			unlock()

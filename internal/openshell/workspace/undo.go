@@ -74,7 +74,11 @@ type UndoResult struct {
 	NestedRepos []string `json:"nested_repos,omitempty"`
 	// LostObjects are pre-session commits missing from the project's
 	// object store (deleted during the session); undo copies them back.
-	LostObjects   []string `json:"lost_objects,omitempty"`
+	LostObjects []string `json:"lost_objects,omitempty"`
+	// HiddenRemoved are files the session hid from git with changed
+	// ignore rules; undo removes them too (they stay recoverable from
+	// refs/defenseclaw/post-hidden/<name> in the snapshot storage).
+	HiddenRemoved []string `json:"hidden_removed,omitempty"`
 	IndexRestored bool     `json:"index_restored,omitempty"`
 	// PostCommit keeps the folder as the session left it (shadow commit,
 	// and refs/defenseclaw/post/<name> in the project when possible).
@@ -361,6 +365,28 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	}
 	if err := removeNestedRepos(ctx, st.sh, rec.Project, gs.Tree, res.NestedRepos); err != nil {
 		return err
+	}
+	// The reset put the pre-session .gitignore files back. Anything that
+	// is visible now but was not before was hidden by ignore rules the
+	// session changed: keep it in post-hidden/<name>, then remove it.
+	hidden, hiddenTree, _, err := st.sh.capture(ctx, "defenseclaw: files hidden by ignore rules during sandbox session "+rec.Name, st.post)
+	if err != nil {
+		return err
+	}
+	if hiddenTree != gs.Tree {
+		extra, err := diffTrees(ctx, st.sh.bare(), gs.Tree, hiddenTree)
+		if err != nil {
+			return err
+		}
+		if err := st.sh.updateRef(ctx, "refs/defenseclaw/post-hidden/"+rec.Name, hidden); err != nil {
+			return err
+		}
+		if err := st.sh.git().run(ctx, "read-tree", "--reset", "-u", gs.Commit); err != nil {
+			return fmt.Errorf("workspace: remove files hidden during the session: %w", err)
+		}
+		for _, c := range extra {
+			res.HiddenRemoved = append(res.HiddenRemoved, c.Path)
+		}
 	}
 	restored, warning := restoreIndex(ctx, st, gs, rec.Name)
 	res.IndexRestored = restored

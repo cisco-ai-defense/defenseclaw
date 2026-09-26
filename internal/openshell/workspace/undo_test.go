@@ -277,6 +277,31 @@ func TestUndoRestoresControlFilesAndRemovesNestedRepos(t *testing.T) {
 	}
 }
 
+func TestUndoRemovesFilesHiddenByChangedIgnoreRules(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "build/keep.o", "ignored before the session\n")
+	mustSnapshot(t, e, "s1")
+	// The agent drops a payload and hides it from git.
+	writeFileMode(t, e.project, "tools/evil.sh", "#!/bin/sh\n", 0o755)
+	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\ntools/\n")
+	writeFile(t, e.project, "out.log", "ignored output\n")
+
+	res := mustUndo(t, e, "s1", false)
+	if strings.Join(res.HiddenRemoved, ",") != "tools/evil.sh" {
+		t.Fatalf("HiddenRemoved = %v", res.HiddenRemoved)
+	}
+	if pathExists(filepath.Join(e.project, "tools")) {
+		t.Fatal("hidden payload survived undo")
+	}
+	if readFile(t, e.project, ".gitignore") != "*.log\nbuild/\n.env\n" {
+		t.Fatal(".gitignore not restored")
+	}
+	if !pathExists(filepath.Join(e.project, "out.log")) || !pathExists(filepath.Join(e.project, "build", "keep.o")) {
+		t.Fatal("files ignored under the pre-session rules must stay")
+	}
+}
+
 func TestUndoRecoversDeletedObjects(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
