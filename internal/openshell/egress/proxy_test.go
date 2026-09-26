@@ -1160,3 +1160,68 @@ func TestProxySetDeciderRetiresPooledUpstreams(t *testing.T) {
 		t.Errorf("blocked event = %+v", e)
 	}
 }
+
+// A forwarded response whose upstream stalls after the headers is cut after
+// TunnelIdleTimeout instead of holding the client, the tunnel slot and the
+// upstream connection indefinitely.
+func TestProxyForwardUpstreamIdleTimeout(t *testing.T) {
+	stall := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = io.WriteString(w, "partial")
+		_ = http.NewResponseController(w).Flush()
+		select {
+		case <-stall:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+	defer close(stall)
+	h := newHarness(t, func(c *harnessConfig) { c.opts.TunnelIdleTimeout = 200 * time.Millisecond })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+
+	conn, br := h.dialProxy()
+	fmt.Fprintf(conn, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(h.cred))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	body, err := io.ReadAll(resp.Body)
+	if err == nil || string(body) != "partial" || time.Since(start) > 3*time.Second {
+		t.Fatalf("stalled body = %q, %v after %v", body, err, time.Since(start))
+	}
+	closed := h.sink.wait(t, EventClosed, 1)[0]
+	if !closed.Terminated || closed.BytesDown != int64(len("partial")) || closed.Status != http.StatusOK {
+		t.Errorf("closed event = %+v", closed)
+	}
+	eventually(t, "the request to be untracked", func() bool { return len(h.proxy.Tunnels()) == 0 })
+}
+
+// An upstream connection is idle only when neither direction moves: a slow
+// but steady response keeps it alive past TunnelIdleTimeout.
+func TestProxyForwardSlowUpstreamIsNotIdle(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		for i := 0; i < 8; i++ {
+			_, _ = io.WriteString(w, "t")
+			_ = rc.Flush()
+			time.Sleep(60 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) { c.opts.TunnelIdleTimeout = 200 * time.Millisecond })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	resp, err := h.clientFor(h.cred, nil).Get("http://example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(body) != "tttttttt" {
+		t.Errorf("slow response = %q, %v", body, err)
+	}
+	if closed := h.sink.wait(t, EventClosed, 1)[0]; closed.Terminated {
+		t.Errorf("closed event = %+v", closed)
+	}
+}

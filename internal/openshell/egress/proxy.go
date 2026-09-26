@@ -89,8 +89,10 @@ type Options struct {
 	// IdleTimeout closes keep-alive client connections idle between
 	// requests, and idle pooled upstream connections.
 	IdleTimeout time.Duration
-	// TunnelIdleTimeout closes a tunnel, or stalls a forwarded body, after
-	// this long without bytes in either direction.
+	// TunnelIdleTimeout closes a tunnel after this long without bytes in
+	// either direction, and fails a forwarded request whose client or
+	// upstream connection moved no bytes for that long (a stalled request
+	// or response body).
 	TunnelIdleTimeout time.Duration
 	// DialTimeout bounds DNS plus connect for each upstream attempt.
 	DialTimeout time.Duration
@@ -399,6 +401,8 @@ type tunnel struct {
 	flow      *flow
 	exempt    bool
 	cut       atomic.Bool
+	// idled marks a tunnel or request ended by TunnelIdleTimeout.
+	idled atomic.Bool
 	// refused marks a CONNECT tunnel ended for its TLS server name.
 	refused atomic.Bool
 
@@ -432,6 +436,12 @@ func (t *tunnel) close() {
 	if fn != nil {
 		fn()
 	}
+}
+
+// closeIdle ends the tunnel for TunnelIdleTimeout.
+func (t *tunnel) closeIdle() {
+	t.idled.Store(true)
+	t.close()
 }
 
 func (p *Proxy) track(t *tunnel) bool {
@@ -623,12 +633,12 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	allowed.TunnelID, allowed.RemoteAddr, allowed.Status, allowed.FirstSeen = t.id, remote.String(), http.StatusOK, first
 	p.emit(allowed)
 
-	idled := p.relay(t, d, conn, brw.Reader, upstream)
+	p.relay(t, d, conn, brw.Reader, upstream)
 
 	closed := p.event(EventClosed, pr, http.MethodConnect, dec)
 	closed.TunnelID, closed.RemoteAddr, closed.Status = t.id, remote.String(), http.StatusOK
 	closed.BytesUp, closed.BytesDown, closed.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-	closed.Terminated = idled || t.cut.Load() || t.refused.Load()
+	closed.Terminated = t.idled.Load() || t.cut.Load() || t.refused.Load()
 	p.emit(closed)
 }
 
@@ -704,18 +714,13 @@ func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, dec Decision, err err
 
 // relay copies bytes both ways until both directions finish, one fails, or
 // the tunnel is idle for TunnelIdleTimeout. The client's first flight is
-// screened for its TLS server name before anything reaches the upstream. It
-// reports whether the idle timeout ended the tunnel.
-func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Reader, upstream net.Conn) bool {
+// screened for its TLS server name before anything reaches the upstream.
+func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Reader, upstream net.Conn) {
 	var last atomic.Int64
 	touch := func() { last.Store(time.Now().UnixNano()) }
 	touch()
-	var idled atomic.Bool
 	done := make(chan struct{})
-	go watchIdle(p.idle, &last, done, func() {
-		idled.Store(true)
-		t.close()
-	})
+	go watchIdle(p.idle, &last, done, t.closeIdle)
 
 	up := func(n int) bool {
 		v := t.flow.addUp(int64(n), t.exempt)
@@ -754,7 +759,6 @@ func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Re
 	}
 	close(done)
 	t.close()
-	return idled.Load()
 }
 
 var relayBuffers = sync.Pool{New: func() any {

@@ -27,6 +27,7 @@ import (
 	"net/http/httptrace"
 	"net/http/httputil"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,9 @@ type forwardState struct {
 	explicit bool // the request URL carried a port
 
 	allowed atomic.Bool
+
+	// upstream is the upstream connection the request got, if any.
+	upstream atomic.Pointer[idleConn]
 
 	mu      sync.Mutex
 	remote  string
@@ -177,9 +181,18 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			st.setRemote(info.Conn.RemoteAddr().String())
+			if ic := asIdleConn(info.Conn); ic != nil {
+				ic.owner.Store(t)
+				st.upstream.Store(ic)
+			}
 			flow.open()
 		},
 	})
+	defer func() {
+		if ic := st.upstream.Load(); ic != nil {
+			ic.owner.CompareAndSwap(t, nil)
+		}
+	}()
 	out := r.WithContext(ctx)
 	if r.Body != nil && r.Body != http.NoBody {
 		out.Body = &countingBody{ReadCloser: r.Body, st: st, rc: rc, idle: p.idle}
@@ -195,7 +208,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		e := p.event(EventClosed, pr, r.Method, dec)
 		e.TunnelID, e.RemoteAddr, e.Status = t.id, st.remoteAddr(), cw.status()
 		e.BytesUp, e.BytesDown, e.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-		e.Terminated = t.cut.Load()
+		e.Terminated = t.cut.Load() || t.idled.Load()
 		p.emit(e)
 	}()
 	p.forwarder.ServeHTTP(cw, out)
@@ -254,8 +267,64 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 		return nil, err
 	}
 	st.setRemote(remote.String())
-	return conn, nil
+	return newIdleConn(conn, p.idle), nil
 }
+
+// idleConn is a forwarded request's upstream connection. Every read or
+// write that moves bytes pushes both deadlines TunnelIdleTimeout out, so a
+// pending read or write fails once nothing has moved in either direction
+// for that long: an upstream that stalls after its response headers, or
+// stops reading a request body, cannot hold the request, its client
+// connection and its tunnel slot indefinitely.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+	// owner is the request using the connection; the idle timeout marks it.
+	owner atomic.Pointer[tunnel]
+}
+
+func newIdleConn(conn net.Conn, idle time.Duration) *idleConn {
+	c := &idleConn{Conn: conn, idle: idle}
+	c.touch()
+	return c
+}
+
+// asIdleConn finds the idleConn under a Transport connection (plain, or
+// the raw connection under https:// TLS).
+func asIdleConn(conn net.Conn) *idleConn {
+	if tc, ok := conn.(interface{ NetConn() net.Conn }); ok {
+		conn = tc.NetConn()
+	}
+	c, _ := conn.(*idleConn)
+	return c
+}
+
+func (c *idleConn) touch() { _ = c.Conn.SetDeadline(time.Now().Add(c.idle)) }
+
+func (c *idleConn) moved(n int, err error) {
+	if n > 0 {
+		c.touch()
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		if t := c.owner.Load(); t != nil {
+			t.idled.Store(true)
+		}
+	}
+}
+
+func (c *idleConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.moved(n, err)
+	return n, err
+}
+
+func (c *idleConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.moved(n, err)
+	return n, err
+}
+
+func (c *idleConn) CloseWrite() error { return closeWrite(c.Conn) }
 
 // roundTripperFunc adapts a function to http.RoundTripper.
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -349,6 +418,9 @@ func (b *countingBody) Read(buf []byte) (int, error) {
 		// The server starts its background read once the body is done;
 		// lift the idle deadline so it cannot cancel a long response.
 		_ = b.rc.SetReadDeadline(time.Time{})
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			b.st.tunnel.idled.Store(true)
+		}
 	}
 	return n, err
 }
@@ -378,6 +450,9 @@ func (w *countingWriter) Write(b []byte) (int, error) {
 	if n > 0 {
 		w.st.tunnel.flow.addDown(int64(n))
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		w.st.tunnel.idled.Store(true)
+	}
 	return n, err
 }
 
@@ -403,7 +478,7 @@ func (w *countingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	t := w.st.tunnel
 	uc := &upgradedConn{Conn: conn, tunnel: t, p: w.st.p, done: make(chan struct{})}
 	uc.touch()
-	go watchIdle(w.idle, &uc.last, uc.done, t.close)
+	go watchIdle(w.idle, &uc.last, uc.done, t.closeIdle)
 	t.setCloser(func() { _ = conn.Close() })
 	return uc, brw, nil
 }
