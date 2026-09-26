@@ -35,6 +35,9 @@ umask 077
 # The whole script is inside main() so a truncated download never runs.
 main() {
 
+# Everything the installer creates (and the gateway it starts) is private to
+# this user, whatever the login shell's umask.
+umask 077
 readonly DC_VERSION="__DEFENSECLAW_VERSION__"
 readonly DEFAULT_REPO="cisco-ai-defense/defenseclaw"
 REPO="${DEFENSECLAW_REPO:-${DEFAULT_REPO}}"
@@ -733,7 +736,8 @@ swap_app() {
     local unpacked="${STAGING}/app"
     rm -rf "${unpacked}"
     mkdir -p "${unpacked}"
-    ditto -xk "${STAGING}/${APP_ZIP}" "${unpacked}" || return 1
+    # The app is shared by every account on the Mac, unlike the private runtime.
+    (umask 022 && ditto -xk "${STAGING}/${APP_ZIP}" "${unpacked}") || return 1
     local new_app
     new_app="$(find "${unpacked}" -maxdepth 1 -name '*.app' -type d | head -1)"
     [[ -n "${new_app}" ]] || return 1
