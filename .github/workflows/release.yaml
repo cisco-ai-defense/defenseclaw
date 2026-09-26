@@ -248,19 +248,25 @@ jobs:
         if: env.PREVIOUS != ''
         shell: bash
         run: gh release download "$PREVIOUS" --repo "$GITHUB_REPOSITORY" --dir previous
+      # The fresh lane then checks the installer verifies this release's
+      # signature, and the 0.8.4 installer needs cosign to run at all.
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: runner.os != 'Windows'
+        with:
+          cosign-release: "v2.6.3"
       - name: Lifecycle (macOS / Linux)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          lanes="fresh upgrade-0.8.10 handoff"
+          lanes="fresh upgrade-0.8.10 upgrade-0.8.4 handoff"
           args=()
           if [[ -n "$PREVIOUS" ]]; then
             lanes="$lanes upgrade-previous"; args+=(--previous-assets previous)
             [[ "$RUNNER_OS" == macOS ]] && lanes="$lanes macos-app"
           fi
           lanes="$lanes drills"
-          scripts/test-install-lifecycle.sh --assets release --lanes "$lanes" "${args[@]}"
+          scripts/test-install-lifecycle.sh --assets release --lanes "$lanes" ${args[@]+"${args[@]}"}
       - name: Lifecycle (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

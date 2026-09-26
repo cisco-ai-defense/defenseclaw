@@ -17,9 +17,11 @@ between versions.
    ```
 
 3. The workflow builds every asset once, writes and signs `checksums.txt`,
-   runs the install lifecycle on Linux x64/arm64, macOS and Windows (fresh
-   install, upgrade from the previous 1.x release and from 0.8.10, rollback,
-   and the 0.8.x handoff), and publishes the release as **latest**.
+   runs the install lifecycle on Linux x64/arm64, macOS and Windows, and
+   publishes the release as **latest**. The lifecycle covers a fresh install
+   that verifies the new signature, upgrades from the previous 1.x release,
+   0.8.10 and 0.8.4, rollback, the 0.8.x handoff, and failure drills that must
+   roll back. See [Testing](TESTING.md#install-and-upgrade-tests).
 
 Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
 Intel Macs are unsupported), and Windows (`amd64`).
