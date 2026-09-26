@@ -1,0 +1,122 @@
+# DefenseClaw sandbox policy pack: balanced
+#
+# Default-deny web: the DefenseClaw egress proxy only reaches the curated
+# developer allowlist below (package registries, source hosts, common docs)
+# plus openshell.egress.allow. Anything else is triaged: known-good
+# destinations are approved automatically and the rest ask. The project
+# folder is still mounted live and the harness runs in skip-permissions mode.
+version: 1
+name: balanced
+description: Default-deny web limited to a curated developer allowlist; triaged approvals; live project mount.
+
+network:
+  mode: allowlist
+
+approvals:
+  mode: triage
+
+egress:
+  feeds: [builtin]
+  block: []
+  allow:
+    # Package registries
+    - registry.npmjs.org
+    - registry.yarnpkg.com
+    - pypi.org
+    - files.pythonhosted.org
+    - proxy.golang.org
+    - sum.golang.org
+    - index.crates.io
+    - static.crates.io
+    - crates.io
+    - rubygems.org
+    - repo.maven.apache.org
+    - repo1.maven.org
+    - plugins.gradle.org
+    - services.gradle.org
+    - api.nuget.org
+    - registry-1.docker.io
+    - auth.docker.io
+    - production.cloudflare.docker.com
+    # Source hosts (fetch)
+    - github.com
+    - codeload.github.com
+    - objects.githubusercontent.com
+    - raw.githubusercontent.com
+    - gitlab.com
+    # Documentation
+    - docs.python.org
+    - developer.mozilla.org
+    - pkg.go.dev
+    - go.dev
+    - docs.rs
+    - nodejs.org
+    - docs.npmjs.com
+  ports: [80, 443]
+  large_upload_mb: 10
+
+workspace:
+  mode: mount
+  # Secret files appear empty inside the sandbox (--unmask PATH shares one).
+  masks:
+    - .env
+    - .env.local
+    - .env.*.local
+    - .env.development
+    - .env.production
+    - .env.staging
+    - .env.test
+    - "*.pem"
+    - "*.key"
+    - "*.p12"
+    - "*.pfx"
+    - "*.jks"
+    - "*.keystore"
+    - id_rsa*
+    - id_dsa*
+    - id_ecdsa*
+    - id_ed25519*
+    - .netrc
+    - .npmrc
+    - .pypirc
+    - .git-credentials
+    - .aws/credentials
+    - credentials.json
+    - service-account*.json
+    - "*.tfvars"
+  # Changed files that can run code on your machine; the end-of-session
+  # review lists them before you run anything.
+  review:
+    - package.json
+    - Makefile
+    - GNUmakefile
+    - makefile
+    - Justfile
+    - Taskfile.yml
+    - .envrc
+    - .vscode/**
+    - .idea/**
+    - .devcontainer/**
+    - .github/workflows/**
+    - .gitlab-ci.yml
+    - .gitattributes
+    - .gitmodules
+    - .husky/**
+    - .pre-commit-config.yaml
+    - setup.py
+    - pyproject.toml
+    - docker-compose*.yml
+    - compose*.yaml
+  max_upload_mb: 500
+
+harness:
+  yolo: true
+  allowed: []
+
+mcp:
+  import: true
+  host_ports: true
+  blocked_tools: []
+
+hooks:
+  fail_mode: closed

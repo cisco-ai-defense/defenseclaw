@@ -1,0 +1,89 @@
+# DefenseClaw sandbox policy pack: strict
+#
+# No web: the DefenseClaw egress proxy is off and only the harness's provider
+# hosts are reachable through OpenShell. Every OpenShell proposal is asked,
+# the harness keeps its own permission prompts, the agent works on a copy of
+# the project (changes come back as a patch or branch), MCP servers stay
+# behind, and no host port is ever opened.
+version: 1
+name: strict
+description: No web beyond the harness provider; manual approvals; copy mode; harness prompts kept; no MCP import.
+
+network:
+  mode: deny
+
+approvals:
+  mode: manual
+
+egress:
+  feeds: [builtin]
+  block: []
+  allow: []
+  ports: [443]
+  large_upload_mb: 5
+
+workspace:
+  mode: copy
+  # Secret files appear empty inside the sandbox (--unmask PATH shares one).
+  masks:
+    - .env
+    - .env.local
+    - .env.*.local
+    - .env.development
+    - .env.production
+    - .env.staging
+    - .env.test
+    - "*.pem"
+    - "*.key"
+    - "*.p12"
+    - "*.pfx"
+    - "*.jks"
+    - "*.keystore"
+    - id_rsa*
+    - id_dsa*
+    - id_ecdsa*
+    - id_ed25519*
+    - .netrc
+    - .npmrc
+    - .pypirc
+    - .git-credentials
+    - .aws/credentials
+    - credentials.json
+    - service-account*.json
+    - "*.tfvars"
+  # Changed files that can run code on your machine; the end-of-session
+  # review lists them before you run anything.
+  review:
+    - package.json
+    - Makefile
+    - GNUmakefile
+    - makefile
+    - Justfile
+    - Taskfile.yml
+    - .envrc
+    - .vscode/**
+    - .idea/**
+    - .devcontainer/**
+    - .github/workflows/**
+    - .gitlab-ci.yml
+    - .gitattributes
+    - .gitmodules
+    - .husky/**
+    - .pre-commit-config.yaml
+    - setup.py
+    - pyproject.toml
+    - docker-compose*.yml
+    - compose*.yaml
+  max_upload_mb: 200
+
+harness:
+  yolo: false
+  allowed: []
+
+mcp:
+  import: false
+  host_ports: false
+  blocked_tools: []
+
+hooks:
+  fail_mode: closed
