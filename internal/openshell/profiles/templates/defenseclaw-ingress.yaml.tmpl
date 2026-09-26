@@ -1,0 +1,19 @@
+id: defenseclaw-ingress
+display_name: DefenseClaw hook ingress
+description: Binds the per-sandbox DefenseClaw binding token to the host-loopback hook ingress; the workload only ever sees a placeholder
+category: other
+inference_capable: false
+credentials:
+  - name: token
+    description: DefenseClaw per-sandbox binding token (hooks, notify, OTLP)
+    env_vars: [DEFENSECLAW_SANDBOX_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: host.openshell.internal
+    port: {{.Port}}
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/**"]

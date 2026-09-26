@@ -1,0 +1,19 @@
+id: defenseclaw-openai
+display_name: OpenAI API for Codex (DefenseClaw)
+description: Binds OPENAI_API_KEY to the OpenAI Responses API as a bearer; only the Codex native binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: OpenAI API key
+    env_vars: [OPENAI_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api.openai.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: [{{range $i, $b := .Binaries}}{{if $i}}, {{end}}{{quote $b}}{{end}}]

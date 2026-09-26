@@ -1,0 +1,19 @@
+id: defenseclaw-claude-bedrock-mantle
+display_name: Amazon Bedrock Mantle (Anthropic route) for Claude Code (DefenseClaw)
+description: Binds a Bedrock API key to the Mantle Anthropic Messages route as x-api-key (ANTHROPIC_BASE_URL=https://{{.Host}}/anthropic); only the Claude Code binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Amazon Bedrock API key (short-term or long-term)
+    env_vars: [ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+endpoints:
+  - host: {{quote .Host}}
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: [{{range $i, $b := .Binaries}}{{if $i}}, {{end}}{{quote $b}}{{end}}]
