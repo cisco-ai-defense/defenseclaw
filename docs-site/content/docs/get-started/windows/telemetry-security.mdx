@@ -155,7 +155,7 @@ ownership requirements this guide does not certify.
 
 `install.ps1` checks every file it downloads against the release's
 `checksums.txt`. The Release workflow signs `checksums.txt` with Sigstore;
-when `cosign` 2.x is installed, the installer also verifies that signature
+when `cosign` 2.0 or later is installed, the installer also verifies that signature
 against the release workflow's identity and stops if it fails. `defenseclaw
 upgrade` checks the installer itself against the same `checksums.txt` before
 running it.

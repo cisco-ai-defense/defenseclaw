@@ -236,7 +236,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       PREVIOUS: ${{ needs.validate.outputs.previous }}
       GH_TOKEN: ${{ github.token }}
@@ -276,9 +276,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $lanes = @('fresh', 'setup-import')
+          $lanes = @('fresh', 'setup-import', 'files-in-use', 'failure-drill', 'policy')
           $extra = @{}
-          if ($env:PREVIOUS) { $lanes += 'upgrade-previous'; $extra['PreviousAssets'] = 'previous' }
+          if ($env:PREVIOUS) { $lanes += 'upgrade-previous', 'shim'; $extra['PreviousAssets'] = 'previous' }
           & scripts/test-install-lifecycle.ps1 -Assets release -Lanes $lanes @extra
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

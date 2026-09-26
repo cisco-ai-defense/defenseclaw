@@ -24,7 +24,7 @@ window so the running command can let go of its files.
 The installer:
 
 1. Downloads the release and checks every file against `checksums.txt`. When
-   `cosign` 2.x is installed, it also verifies the release's Sigstore
+   `cosign` 2.0 or later is installed, it also verifies the release's Sigstore
    signature and stops if that fails.
 2. Builds the new version next to the running one and checks that it starts,
    and that your configuration can be migrated, before changing anything.
@@ -63,7 +63,8 @@ When a newer release exists, interactive CLI commands and the TUI show one
 line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw
 upgrade'`. The check runs at most once a day and never in scripts, JSON output,
 or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check:
-false` in `config.yaml`. Nothing is ever installed without you running
+false` in `config.yaml`; on Windows the `DisableSelfUpdate` enterprise policy
+also turns it off. Nothing is ever installed without you running
 `defenseclaw upgrade`.
 
 ## Upgrading from 0.x to 1.0

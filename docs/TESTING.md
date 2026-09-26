@@ -70,7 +70,11 @@ scripts/test-install-lifecycle.sh --assets /tmp/dc-1.0.1 --previous-assets /tmp/
 
 When `cosign` is installed and the assets carry `checksums.txt.bundle`, the
 `fresh` lane also checks that the installer verified the release signature.
-The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`.
+The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its
+lanes are `fresh`, `setup-import` (replacing a synthetic 0.8.x Setup install),
+`files-in-use`, `failure-drill`, `policy` (the `DisableSelfUpdate` refusal;
+needs an elevated shell), and `upgrade-previous` and `shim`, which need
+`-PreviousAssets`.
 
 ## CI Workflows
 

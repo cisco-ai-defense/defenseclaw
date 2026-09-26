@@ -55,7 +55,7 @@ To choose options, run the script block with parameters:
 | `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
 
 The installer checks every download against the release's `checksums.txt`
-(and its Sigstore signature when `cosign` 2.x is installed), prepares the new
+(and its Sigstore signature when `cosign` 2.0 or later is installed), prepares the new
 version before changing anything, and adds `%USERPROFILE%\.local\bin` to your
 user `PATH`. Open a new terminal afterwards so the `PATH` change applies, then
 check:
@@ -159,6 +159,11 @@ defenseclaw rollback
 ```
 
 See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
+
+When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD
+under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw`), `install.ps1`,
+`defenseclaw upgrade` and `defenseclaw rollback` refuse and change nothing, and
+the update notice is off. Update through your managed deployment instead.
 
 ### Moving from the 0.8.x Setup package
 

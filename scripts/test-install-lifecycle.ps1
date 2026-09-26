@@ -20,10 +20,12 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh setup-import files-in-use failure-drill upgrade-previous shim"] [-Root DIR] [-Keep]
+          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim"] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
-    other lanes start from it when it is given, else from -Assets.
+    other lanes start from it when it is given, else from -Assets. The policy
+    lane sets the HKLM DisableSelfUpdate policy for its duration, so it needs
+    an elevated shell.
 
     Every lane runs with its own USERPROFILE, LOCALAPPDATA, APPDATA and TEMP,
     -NoPersistPath, and the gateway on a free port, so it never touches the

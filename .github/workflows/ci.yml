@@ -595,7 +595,7 @@ jobs:
     name: Install and Upgrade Smoke (Windows)
     needs: install-smoke
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -607,7 +607,7 @@ jobs:
           path: assets
       - shell: pwsh
         run: |
-          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes fresh, setup-import
+          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes fresh, setup-import, files-in-use, failure-drill, policy
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:

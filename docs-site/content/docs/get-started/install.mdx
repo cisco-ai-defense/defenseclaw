@@ -31,7 +31,7 @@ on Windows.
 
 The installer downloads the release's gateway, CLI wheel, and a hash-pinned
 list of the CLI's Python dependencies, and checks each file against the
-release's `checksums.txt`. When `cosign` 2.x is installed it also verifies the
+release's `checksums.txt`. When `cosign` 2.0 or later is installed it also verifies the
 Sigstore signature on `checksums.txt`. It installs `uv` if you do not have it,
 and `uv` provides the Python runtime; nothing else is required.
 
