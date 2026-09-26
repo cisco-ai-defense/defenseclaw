@@ -1294,7 +1294,7 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 	}
 	err := runGuardrailFn(ctx)
 	if err != nil && ctx.Err() == nil {
-		s.health.SetGuardrail(StateError, err.Error(), nil)
+		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 	}
 	return err
 }
@@ -3438,11 +3438,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
 	}
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
+	refuseAdmission := func(err error) error {
+		return &hookContractAdmissionRefusal{connectors: []string{conn.Name()}, err: err}
+	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
+		return refuseAdmission(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
+		return refuseAdmission(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	// Compatibility checks intentionally use the filtered read below, so a
 	// fresh protected Windows Codex repair receipt can supersede the old lock.
@@ -3457,7 +3460,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// an explicit setup/restart from refreshing an existing connector.
 			// Only an upstream agent-version/contract change requires the action-mode override.
 			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-				return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+				if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
+					return refuseAdmission(err)
+				}
 			}
 		}
 	}
@@ -4095,7 +4100,13 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rather than idling on a gateway that protects nothing.
 	if len(succeeded) == 0 {
 		err := fmt.Errorf("multi-connector boot: all %d configured connectors failed setup", len(conns))
-		s.health.SetGuardrail(StateError, err.Error(), nil)
+		if refused := setupTransaction.admissionRefused; len(refused) == len(conns) {
+			err = &hookContractAdmissionRefusal{connectors: refused, err: fmt.Errorf(
+				"%w: multi-connector boot: all %d configured connectors were refused: %s (rerun discovery/setup to refresh the lock; see the gateway log for each connector)",
+				ErrHookContractAdmission, len(conns), strings.Join(refused, ", "),
+			)}
+		}
+		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 		return err
 	}
 
@@ -4584,6 +4595,9 @@ type multiConnectorSetupTransaction struct {
 	removed       []multiConnectorSetupRollbackPoint
 	activeState   *connector.ActiveConnectorStateSnapshot
 	hookLockState *connector.HookContractLockSnapshot
+	// admissionRefused lists connectors skipped cleanly at the hook-contract
+	// admission gate, before Setup touched them.
+	admissionRefused []string
 }
 
 func captureSingleConnectorRollbackAuthority(
@@ -4729,6 +4743,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction = seed[0]
 		transaction.succeeded = nil
 		transaction.applied = nil
+		transaction.admissionRefused = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -4791,6 +4806,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				transaction.admissionRefused = append(transaction.admissionRefused, registration.conn.Name())
 				continue
 			}
 			// Isolate: roll back this connector's partial state, log, leave
@@ -5221,7 +5237,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		if connector.HookContractCompatibilityDrifted(previous, current) &&
 			actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-			return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+			if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -6002,6 +6020,50 @@ var (
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// GuardrailHookContractAdmissionRefused is the guardrail health detail that
+// lists the connectors refused by the hook-contract admission gate when that
+// refusal alone stopped the guardrail. The rest of the gateway keeps running.
+const GuardrailHookContractAdmissionRefused = "hook_contract_admission_refused"
+
+// hookContractAdmissionRefusal names the connectors behind a guardrail that
+// stopped at the admission gate, so health can report them without parsing
+// error text. It matches ErrHookContractAdmission.
+type hookContractAdmissionRefusal struct {
+	connectors []string
+	err        error
+}
+
+func (e *hookContractAdmissionRefusal) Error() string { return e.err.Error() }
+
+func (e *hookContractAdmissionRefusal) Unwrap() error { return e.err }
+
+func guardrailFailureDetails(err error) map[string]interface{} {
+	var refusal *hookContractAdmissionRefusal
+	if !errors.As(err, &refusal) || len(refusal.connectors) == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		GuardrailHookContractAdmissionRefused: append([]string(nil), refusal.connectors...),
+	}
+}
+
+// hookContractDriftAdmission refuses upstream agent drift. A contract change
+// that only a different DefenseClaw release introduced for the same agent
+// version is expected after an upgrade or rollback: it is logged and admitted,
+// and the Setup that follows refreshes the lock.
+func hookContractDriftAdmission(name string, previous, current connector.HookContractLockEntry) error {
+	if connector.HookContractChangedByDefenseClawRelease(previous, current) {
+		writer := "an earlier DefenseClaw release"
+		if previous.DefenseClawVersion != "" {
+			writer = "DefenseClaw " + previous.DefenseClawVersion
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
+			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, name, previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+}
 
 func (s *Sidecar) failWindsurfReadyStatePublication(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, cause error) error {
 	fmt.Fprintf(os.Stderr, "[guardrail] connector windsurf atomic readiness publication failed: %v\n", cause)

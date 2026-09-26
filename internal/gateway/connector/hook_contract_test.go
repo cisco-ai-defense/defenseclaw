@@ -2209,6 +2209,117 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	})
 }
 
+func TestHookContractChangedByDefenseClawReleaseOnlyForContractIDChanges(t *testing.T) {
+	previous := HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.142.4",
+		NormalizedAgentVersion: "0.142.4",
+		ContractID:             "codex-hooks-v1",
+		DefenseClawVersion:     "0.8.10",
+	}
+	current := previous
+	current.ContractID = "codex-hooks-v2"
+	current.DefenseClawVersion = "1.0.0"
+	current.HookScriptDigests = map[string]string{"codex-hook.sh": "sha256:new"}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(previous, current *HookContractLockEntry)
+		want   bool
+	}{
+		{name: "new release changed only the contract", want: true},
+		{
+			name:   "legacy lock without a writer version",
+			mutate: func(previous, _ *HookContractLockEntry) { previous.DefenseClawVersion = "" },
+			want:   true,
+		},
+		{
+			name: "same release",
+			mutate: func(previous, current *HookContractLockEntry) {
+				current.DefenseClawVersion = previous.DefenseClawVersion
+			},
+		},
+		{
+			name: "raw agent version changed",
+			mutate: func(_, current *HookContractLockEntry) {
+				current.RawAgentVersion = "codex-cli 0.150.0"
+			},
+		},
+		{
+			name: "normalized agent version changed",
+			mutate: func(_, current *HookContractLockEntry) {
+				current.NormalizedAgentVersion = "0.150.0"
+			},
+		},
+		{
+			name: "no recorded agent version",
+			mutate: func(previous, current *HookContractLockEntry) {
+				previous.RawAgentVersion, current.RawAgentVersion = "", ""
+			},
+		},
+		{
+			name:   "contract unchanged",
+			mutate: func(previous, current *HookContractLockEntry) { current.ContractID = previous.ContractID },
+		},
+		{
+			name:   "current contract unresolved",
+			mutate: func(_, current *HookContractLockEntry) { current.ContractID = "" },
+		},
+		{
+			name:   "no previous lock",
+			mutate: func(previous, _ *HookContractLockEntry) { previous.Connector = "" },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previous, current := previous, current
+			if test.mutate != nil {
+				test.mutate(&previous, &current)
+			}
+			if got := HookContractChangedByDefenseClawRelease(previous, current); got != test.want {
+				t.Fatalf("HookContractChangedByDefenseClawRelease = %v, want %v", got, test.want)
+			}
+			if test.want && !HookContractCompatibilityDrifted(previous, current) {
+				t.Fatal("a release-driven contract change must still register as compatibility drift")
+			}
+		})
+	}
+
+	t.Run("Amp relative release age is not an agent change", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "amp",
+			RawAgentVersion:        "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 2h ago)",
+			NormalizedAgentVersion: "0.0.1785342457",
+			ContractID:             "amp-plugin-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 3d ago)"
+		current.ContractID = "amp-plugin-v2"
+		current.DefenseClawVersion = "1.0.0"
+		if !HookContractChangedByDefenseClawRelease(previous, current) {
+			t.Fatal("Amp presentation-only version text blocked a release-driven contract refresh")
+		}
+	})
+
+	t.Run("Cursor desktop and agent CLI flip is still drift", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "2026.08.11-e8db854",
+			NormalizedAgentVersion: "2026.8.11",
+			ContractID:             "cursor-hooks-v1",
+		}
+		current := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "3.19.13",
+			NormalizedAgentVersion: "3.19.13",
+			ContractID:             "cursor-hooks-v2",
+			DefenseClawVersion:     "1.0.0",
+		}
+		if HookContractChangedByDefenseClawRelease(previous, current) {
+			t.Fatal("a different Cursor binary with a new contract was treated as a release-only change")
+		}
+	})
+}
+
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

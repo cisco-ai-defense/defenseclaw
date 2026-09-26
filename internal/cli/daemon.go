@@ -310,6 +310,10 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
 			expectedConnectorState.OrphanHookTokenFingerprints != nil
 		requirements.verifyConnectorOTLP = true
+	} else {
+		// Upstream agent drift refused at admission is not a start failure the
+		// previous release would avoid: leave the gateway running and report it.
+		requirements.allowHookContractAdmissionRefusal = true
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -325,7 +329,13 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
 	}
 
-	printDaemonStartResult(pid, snap)
+	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	if admissionRefused {
+		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
+		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+	} else {
+		printDaemonStartResult(pid, snap)
+	}
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -334,7 +344,32 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
 	printSplunkLocalHint()
 
-	return startConfiguredWatchdog(cfg, cfgErr, rotationTransaction)
+	if err := startConfiguredWatchdog(cfg, cfgErr, rotationTransaction); err != nil {
+		return err
+	}
+	if admissionRefused {
+		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
+	}
+	return nil
+}
+
+// gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
+// refused one or more connectors at the hook-contract admission gate because
+// their agent changed underneath the recorded contract. The previous release
+// would refuse them the same way, so an installer keeps this version and
+// relays the fix instead of rolling back.
+const gatewayStartAdmissionRefusedExitCode = 3
+
+func hookContractAdmissionStartError(connectors []string, detail string) error {
+	commands := make([]string, 0, len(connectors))
+	for _, name := range connectors {
+		commands = append(commands, "defenseclaw setup guardrail --connector "+name)
+	}
+	return withExitCode(fmt.Errorf(
+		"gateway is running, but hook-contract admission refused %s: %s; "+
+			"verify the updated agent, then re-run `%s` to refresh the hook contract",
+		strings.Join(connectors, ", "), strings.TrimSpace(detail), strings.Join(commands, "` and `"),
+	), gatewayStartAdmissionRefusedExitCode)
 }
 
 func startConfiguredWatchdog(cfg *config.Config, cfgErr error, rotationTransaction bool) error {
@@ -735,6 +770,11 @@ type daemonReadinessRequirements struct {
 	listenerPort                int
 	listenerOwner               func(string, int) (int, error)
 	requireOwnership            bool
+
+	// allowHookContractAdmissionRefusal lets an ordinary start accept a
+	// guardrail that stopped only because the hook-contract admission gate
+	// refused upstream agent drift. Every other subsystem must still be ready.
+	allowHookContractAdmissionRefusal bool
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -1744,6 +1784,11 @@ func gatewaySnapshotReady(
 			)
 		}
 	}
+	// A guardrail refused at the hook-contract admission gate is a terminal
+	// state that only the operator can repair. When the caller accepts it, the
+	// start still waits for every other subsystem.
+	_, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	admissionRefused = admissionRefused && requirements.allowHookContractAdmissionRefusal
 	// The external fleet uplink retries after StateError. It is deliberately
 	// excluded from this fatal-error list; local runtime health must not depend
 	// on whether OpenClaw happens to be reachable during a start or upgrade.
@@ -1758,7 +1803,7 @@ func gatewaySnapshotReady(
 		{name: "guardrail", health: snap.Guardrail},
 		{name: "telemetry", health: snap.Telemetry},
 	} {
-		if subsystem.health.State != gateway.StateError {
+		if subsystem.health.State != gateway.StateError || (subsystem.name == "guardrail" && admissionRefused) {
 			continue
 		}
 		// The health endpoint bounds each observability snapshot read. A single
@@ -1816,11 +1861,14 @@ func gatewaySnapshotReady(
 	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
 		return false, nil
 	}
-	if requirements.guardrailEnabled {
+	switch {
+	case admissionRefused:
+		// Accepted above; runStart reports it with its own exit code.
+	case requirements.guardrailEnabled:
 		if snap.Guardrail.State != gateway.StateRunning {
 			return false, nil
 		}
-	} else {
+	default:
 		// Connector-native hooks can remain active while the local proxy is
 		// disabled. Both running hooks and a finalized disabled state are ready;
 		// the initial disabled placeholder is not.
@@ -2033,6 +2081,32 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		return ""
 	}
 	return detail
+}
+
+// guardrailHookContractAdmissionRefusal returns the connectors named by the
+// gateway's structured admission-refusal detail on a failed guardrail.
+func guardrailHookContractAdmissionRefusal(guardrail gateway.SubsystemHealth) ([]string, bool) {
+	if guardrail.State != gateway.StateError {
+		return nil, false
+	}
+	var raw []interface{}
+	switch value := guardrail.Details[gateway.GuardrailHookContractAdmissionRefused].(type) {
+	case []interface{}:
+		raw = value
+	case []string:
+		for _, name := range value {
+			raw = append(raw, name)
+		}
+	}
+	connectors := make([]string, 0, len(raw))
+	for _, value := range raw {
+		name, ok := value.(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, false
+		}
+		connectors = append(connectors, strings.TrimSpace(name))
+	}
+	return connectors, len(connectors) > 0
 }
 
 func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {

@@ -1464,6 +1464,24 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	return false
 }
 
+// HookContractChangedByDefenseClawRelease reports whether the only
+// compatibility drift is a ContractID that a different DefenseClaw release
+// resolved for the same agent version. A lock with no writer version predates
+// DefenseClawVersion and counts as a different release. Admission refreshes
+// such a lock instead of refusing it; any agent version change still drifts.
+func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
+		current.ContractID == "" || previous.ContractID == current.ContractID {
+		return false
+	}
+	if previous.DefenseClawVersion != "" && previous.DefenseClawVersion == current.DefenseClawVersion {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
+}
+
 // stableRawAgentVersionForContract removes only upstream presentation text
 // known to change without a binary change. Amp appends a relative release-age
 // annotation to `amp --version` (for example, "..., 2h ago"), so persisting the
