@@ -19,9 +19,11 @@ import (
 // The Windows Codex machine requirements document is usually authored by an
 // administrator (Intune, GPO, configuration-management templates). DefenseClaw
 // therefore never re-marshals it. Install and repair insert only the missing
-// DefenseClaw-owned keys and hook groups, and uninstall deletes only those
-// entries; every other byte, including comments, ordering, and formatting, is
-// preserved. The additions are:
+// DefenseClaw-owned keys and hook groups, and surgical uninstall deletes only
+// those entries; every other byte, including comments, ordering, and
+// formatting, is preserved. (Uninstall is surgical only when the file no longer
+// equals the recorded postimage; otherwise RemoveWindowsCodexMachineRequirements
+// restores the stored install-time preimage.) The additions are:
 //
 //   - root keys, inserted at the top of the document and tagged with
 //     windowsCodexRequirementsLineMarker (a TOML root key can only precede the

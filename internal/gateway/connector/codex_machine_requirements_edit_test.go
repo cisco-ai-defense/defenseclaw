@@ -5,6 +5,9 @@ package connector
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -206,7 +209,12 @@ func TestReconcileWindowsCodexRequirementsPreservesCommentedAdminDocument(t *tes
 		removeCodexRequirementsForTest(t, installed, admin, opts), admin)
 }
 
-func TestRemoveWindowsCodexRequirementsKeepsLaterAdminEditsByteForByte(t *testing.T) {
+// TestSurgicalRemovalKeepsLaterAdminEditsByteForByte covers the surgical
+// uninstall path only. RemoveWindowsCodexMachineRequirements takes it when the
+// file no longer equals the protected postimage. A file that still equals the
+// postimage, including one a later reconcile recorded after an administrator
+// edit, gets the stored install-time preimage back instead.
+func TestSurgicalRemovalKeepsLaterAdminEditsByteForByte(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	admin := []byte(commentedAdminCodexRequirements)
 	installed := reconcileCodexRequirementsForTest(t, admin, opts)
@@ -228,8 +236,8 @@ func TestRemoveWindowsCodexRequirementsKeepsLaterAdminEditsByteForByte(t *testin
 		[]byte("web_search_request = false\n# Added by change CHG-7781.\nundo = true   # spacing kept\n"),
 		1)
 	want = append(want, []byte("\n[profiles.audit]\nmodel = \"gpt-5\" # pinned\n")...)
-	requireCodexRequirementsBytes(t, "uninstall after admin edit",
-		removeCodexRequirementsForTest(t, repaired, admin, opts), want)
+	requireCodexRequirementsBytes(t, "surgical removal after admin edit",
+		removeCodexRequirementsForTest(t, edited, admin, opts), want)
 }
 
 func TestWindowsCodexRequirementsCRLFDocumentRoundTrips(t *testing.T) {
@@ -484,5 +492,118 @@ func TestRemoveWindowsCodexRequirementsRefusesUneditableManagedGroups(t *testing
 	if _, _, err := removeWindowsCodexRequirementsOwnedChanges(rewritten, nil, opts); err == nil ||
 		!strings.Contains(err.Error(), "cannot edit without rewriting") {
 		t.Fatalf("removal error = %v, want uneditable refusal", err)
+	}
+}
+
+// TestWindowsHardeningHarnessAcceptsRenderedCodexRequirements runs the raw
+// requirements.toml checks of Assert-CodexMachinePolicyContract in
+// scripts/test-windows-enterprise-hardening.ps1 against what the renderer
+// writes (and what earlier releases wrote), so an on-disk format change can't
+// silently break Windows certification. The harness uses .NET regexes; these
+// patterns behave the same under RE2.
+func TestWindowsHardeningHarnessAcceptsRenderedCodexRequirements(t *testing.T) {
+	harnessPath := filepath.Join("..", "..", "..", "scripts", "test-windows-enterprise-hardening.ps1")
+	harness, err := os.ReadFile(harnessPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", harnessPath, err)
+	}
+	text := string(harness)
+	function := strings.Index(text, "function Assert-CodexMachinePolicyContract(")
+	if function < 0 {
+		t.Fatal("harness no longer defines Assert-CodexMachinePolicyContract")
+	}
+	text = text[function:]
+	start := strings.Index(text, "$raw = [IO.File]::ReadAllText($script:CodexRequirementsPath)")
+	end := strings.Index(text, "return [pscustomobject]@{")
+	if start < 0 || end < start {
+		t.Fatal("harness raw requirements.toml checks moved; update this test")
+	}
+	var literals []string
+	for _, match := range regexp.MustCompile(`'((?:[^']|'')*)'`).FindAllStringSubmatch(text[start:end], -1) {
+		literals = append(literals, strings.ReplaceAll(match[1], "''", "'"))
+	}
+	literal := func(match func(string) bool, label string) string {
+		t.Helper()
+		var found []string
+		for _, candidate := range literals {
+			if match(candidate) {
+				found = append(found, candidate)
+			}
+		}
+		if len(found) != 1 {
+			t.Fatalf("harness has %d %s patterns, want 1: %q", len(found), label, found)
+		}
+		return found[0]
+	}
+	containing := func(fragment string) string {
+		t.Helper()
+		return literal(func(candidate string) bool { return strings.Contains(candidate, fragment) }, fragment)
+	}
+	// Each check mirrors the harness: [regex]::Matches counts are
+	// case-sensitive; -match and -notmatch are case-insensitive.
+	type harnessCheck struct {
+		label   string
+		pattern *regexp.Regexp
+		want    int // -1: -match must succeed
+	}
+	checks := []harnessCheck{
+		{"allow_managed_hooks_only", regexp.MustCompile(containing("allow_managed_hooks_only")), 1},
+		{"features.hooks", regexp.MustCompile(containing(`^\[features\]`)), 1},
+		{"hooks.state key", regexp.MustCompile("(?i)" + containing(`^\s*state\s*=`)), 0},
+		{"hooks.state table", regexp.MustCompile("(?i)" + containing(`\[hooks\.state\]`)), 0},
+		{"command", regexp.MustCompile(containing(`^command\s*=`)), len(codexHookGroups)},
+		{"command_windows", regexp.MustCompile(containing(`^command_windows\s*=`)), len(codexHookGroups)},
+		{"type", regexp.MustCompile(containing(`^type\s*=`)), len(codexHookGroups)},
+		{"timeout", regexp.MustCompile(containing(`^timeout\s*=`)), len(codexHookGroups)},
+		{"windows_managed_dir", regexp.MustCompile(containing(`^windows_managed_dir\s*=`)), 1},
+		{"system shell", regexp.MustCompile("(?i)" + containing("EncodedCommand")), -1},
+	}
+	eventPrefix := literal(func(candidate string) bool { return candidate == `(?m)^\[\[hooks\.` }, "event prefix")
+	eventSuffix := literal(func(candidate string) bool { return strings.HasPrefix(candidate, `\]\]`) }, "event suffix")
+	for _, group := range codexHookGroups {
+		checks = append(checks, harnessCheck{
+			"[[hooks." + group.eventType + "]]",
+			regexp.MustCompile(eventPrefix + regexp.QuoteMeta(group.eventType) + eventSuffix),
+			1,
+		})
+	}
+
+	opts := testWindowsCodexMachineOptions()
+	adminTables := "# Contoso baseline (Intune CX-12).\n[features]\n# Web search stays off.\n" +
+		"web_search_request = false\n\n[hooks]\n"
+	legacyCfg, err := parseWindowsCodexRequirements(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mergeWindowsCodexRequirementsModel(legacyCfg, opts); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := toml.Marshal(legacyCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples := map[string][]byte{
+		"created":             reconcileCodexRequirementsForTest(t, nil, opts),
+		"admin tables":        reconcileCodexRequirementsForTest(t, []byte(adminTables), opts),
+		"admin tables (CRLF)": reconcileCodexRequirementsForTest(t, []byte(strings.ReplaceAll(adminTables, "\n", "\r\n")), opts),
+		"earlier release":     legacy,
+	}
+	if !bytes.Contains(samples["admin tables"], []byte("hooks = true "+windowsCodexRequirementsLineMarker)) ||
+		!bytes.Contains(samples["admin tables"], []byte("windows_managed_dir = '"+opts.ManagedDir+"' "+windowsCodexRequirementsLineMarker)) {
+		t.Fatalf("admin tables sample no longer exercises tagged keys:\n%s", samples["admin tables"])
+	}
+	for name, raw := range samples {
+		failed := false
+		for _, check := range checks {
+			got := len(check.pattern.FindAllIndex(raw, -1))
+			if check.want < 0 && got == 0 || check.want >= 0 && got != check.want {
+				failed = true
+				t.Errorf("%s: harness %s pattern %q matched %d times, want %d",
+					name, check.label, check.pattern, got, check.want)
+			}
+		}
+		if failed {
+			t.Logf("%s requirements.toml:\n%s", name, raw)
+		}
 	}
 }
