@@ -570,6 +570,9 @@ func TestExecRetriesUnansweredIdempotentCommands(t *testing.T) {
 		return hangOnce(len(starts))
 	})
 	var stdout bytes.Buffer
+	// The attempt's deadline starts in the client, a little before the
+	// fake sees the call, so measure the retry from the Exec call.
+	begin := time.Now()
 	res, err := c.Exec(context.Background(), "box", []string{"cat", "/etc/os-release"},
 		openshell.ExecOptions{Timeout: timeout, Idempotent: true, RetryDelay: delay, Stdout: &stdout})
 	if err != nil {
@@ -581,8 +584,8 @@ func TestExecRetriesUnansweredIdempotentCommands(t *testing.T) {
 	if len(starts) != 2 {
 		t.Fatalf("ran %d times", len(starts))
 	}
-	if gap := starts[1].Sub(starts[0]); gap < timeout+grace+delay {
-		t.Fatalf("retry started %s after the hung attempt, before its deadline and backoff", gap)
+	if gap := starts[1].Sub(begin); gap < timeout+grace+delay {
+		t.Fatalf("retry started %s after Exec, before the first deadline and backoff", gap)
 	}
 }
 
