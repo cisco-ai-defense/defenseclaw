@@ -383,12 +383,15 @@ func TestProxyGuardRefusals(t *testing.T) {
 	h.resolver.set("internal.example.com", []string{"10.1.2.3"})
 	h.resolver.set("split.example.com", []string{publicV4, "192.168.0.7"})
 	h.resolver.set("rebind.example.com", []string{publicV4}, []string{"169.254.169.254"})
+	h.resolver.set("own.example.com", []string{ownV6})
 
 	targets := []string{
 		"127.0.0.1:443", "[::1]:443", "169.254.169.254:80", "10.0.0.1:443", "[fd00::1]:443",
 		"[::ffff:127.0.0.1]:443", "100.64.0.1:443", "0.0.0.0:443",
 		"localhost:443", "host.openshell.internal:443", "metadata.google.internal:80",
 		"internal.example.com:443", "split.example.com:443",
+		// This machine's own public addresses (fake interface list).
+		ownV4 + ":443", ownV4 + ":80", "[" + ownV6 + "]:443", "own.example.com:443",
 	}
 	for _, target := range targets {
 		_, _, resp := h.connect(target, basicAuth(h.cred), nil)
@@ -414,14 +417,16 @@ func TestProxyGuardRefusals(t *testing.T) {
 	}
 
 	// Absolute form goes through the same guard.
-	resp2, err := h.clientFor(h.cred, nil).Get("http://internal.example.com/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryPrivateNetwork {
-		t.Errorf("absolute-form private = %d %s", resp2.StatusCode, body)
+	for _, u := range []string{"http://internal.example.com/", "http://own.example.com/", "http://" + ownV4 + "/"} {
+		resp2, err := h.clientFor(h.cred, nil).Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryPrivateNetwork {
+			t.Errorf("absolute-form %s = %d %s", u, resp2.StatusCode, body)
+		}
 	}
 
 	for _, addr := range h.dialer.addresses() {

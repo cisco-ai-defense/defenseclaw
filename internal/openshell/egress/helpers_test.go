@@ -194,7 +194,10 @@ type harness struct {
 	resolver *fakeResolver
 	dialer   *mapDialer
 	unblocks *MemoryUnblocks
-	served   chan error
+	// local is the fake interface list (ownV4, ownV6) the decider and the
+	// dialer see instead of the test machine's.
+	local  *localAddrs
+	served chan error
 
 	clientsMu sync.Mutex
 	clients   []*http.Transport
@@ -216,6 +219,7 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 		sink:     &recordingSink{},
 		resolver: newFakeResolver(),
 		dialer:   newMapDialer(),
+		local:    fixedLocalAddrs(ownV4, ownV6),
 		served:   make(chan error, 1),
 	}
 	var err error
@@ -233,6 +237,7 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 	if err != nil {
 		t.Fatalf("NewDecider: %v", err)
 	}
+	decider.local = h.local
 	opts := cfg.opts
 	opts.Auth, opts.Decider, opts.Sink = h.creds, decider, h.sink
 	if cfg.sink != nil {
@@ -245,6 +250,7 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 	if h.proxy, err = New(opts); err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	h.proxy.dialer.local = h.local
 
 	if h.cred, err = NewCredential(); err != nil {
 		t.Fatal(err)

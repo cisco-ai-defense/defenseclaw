@@ -77,7 +77,7 @@ var categoryReasons = map[Category]string{
 	CategoryToolchain:       "Toolchain download.",
 	CategoryDocumentation:   "Reference documentation.",
 
-	CategoryPrivateNetwork:     "Sandboxes cannot reach private, loopback, link-local, carrier-grade NAT, metadata or reserved addresses, or host-internal names.",
+	CategoryPrivateNetwork:     "Sandboxes cannot reach this machine's own addresses, private, loopback, link-local, carrier-grade NAT, metadata or reserved addresses, or host-internal names.",
 	CategoryPortNotAllowed:     "The egress proxy only relays the configured web ports.",
 	CategoryInvalidDestination: "The request target is not a valid host and port.",
 	CategoryOperatorBlock:      "The operator blocked this destination in DefenseClaw configuration.",

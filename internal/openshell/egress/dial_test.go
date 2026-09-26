@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,12 +33,17 @@ func newTestGuard(t *testing.T) (*guardDialer, *fakeResolver, *mapDialer) {
 	r, d := newFakeResolver(), newMapDialer()
 	d.route(443, startEcho(t))
 	d.route(80, startEcho(t))
-	return &guardDialer{resolver: r, dialer: d, timeout: 2 * time.Second}, r, d
+	return &guardDialer{resolver: r, dialer: d, timeout: 2 * time.Second, local: fixedLocalAddrs(ownV4, ownV6)}, r, d
 }
 
+// isPrivateTarget reports addresses the dialer must never be handed: the
+// guard policy's ranges and the fake interface lists' own addresses.
 func isPrivateTarget(addr string) bool {
 	ap, err := netip.ParseAddrPort(addr)
 	if err != nil {
+		return true
+	}
+	if a := ap.Addr().Unmap().String(); a == ownV4 || a == ownV6 {
 		return true
 	}
 	return guardPolicy.ValidateIP(net.IP(ap.Addr().AsSlice())) != nil
@@ -48,27 +54,31 @@ func isPrivateTarget(addr string) bool {
 func TestGuardDialSSRFMatrix(t *testing.T) {
 	g, r, d := newTestGuard(t)
 	answers := map[string][]string{
-		"public.example":    {publicV4},
-		"public6.example":   {publicV6},
-		"dual.example":      {publicV4, publicV6},
-		"mixed.example":     {publicV4, "10.0.0.1"},
-		"mixed-rev.example": {"192.168.1.10", publicV4},
-		"mixed6.example":    {publicV6, "fd00::1"},
-		"private.example":   {"172.16.0.9"},
-		"loop.example":      {"127.0.0.1"},
-		"loop6.example":     {"::1"},
-		"meta.example":      {"169.254.169.254"},
-		"meta6.example":     {"fd00:ec2::254"},
-		"alibaba.example":   {"100.100.100.200"},
-		"cgnat.example":     {"100.64.1.1"},
-		"linklocal.example": {"fe80::1"},
-		"mapped.example":    {"::ffff:10.0.0.1"},
-		"nat64.example":     {"64:ff9b::a00:1"},
-		"sixtofour.example": {"2002:a00:1::1"},
-		"bench.example":     {"198.18.0.2"},
-		"zero.example":      {"0.0.0.0"},
-		"multicast.example": {"239.1.2.3"},
-		"empty.example":     {},
+		"public.example":     {publicV4},
+		"public6.example":    {publicV6},
+		"dual.example":       {publicV4, publicV6},
+		"mixed.example":      {publicV4, "10.0.0.1"},
+		"mixed-rev.example":  {"192.168.1.10", publicV4},
+		"mixed6.example":     {publicV6, "fd00::1"},
+		"private.example":    {"172.16.0.9"},
+		"loop.example":       {"127.0.0.1"},
+		"loop6.example":      {"::1"},
+		"meta.example":       {"169.254.169.254"},
+		"meta6.example":      {"fd00:ec2::254"},
+		"alibaba.example":    {"100.100.100.200"},
+		"cgnat.example":      {"100.64.1.1"},
+		"linklocal.example":  {"fe80::1"},
+		"mapped.example":     {"::ffff:10.0.0.1"},
+		"nat64.example":      {"64:ff9b::a00:1"},
+		"sixtofour.example":  {"2002:a00:1::1"},
+		"bench.example":      {"198.18.0.2"},
+		"zero.example":       {"0.0.0.0"},
+		"multicast.example":  {"239.1.2.3"},
+		"own.example":        {ownV4},
+		"own6.example":       {ownV6},
+		"own-mixed.example":  {publicV4, ownV6},
+		"own-mapped.example": {"::ffff:" + ownV4},
+		"empty.example":      {},
 	}
 	for host, ips := range answers {
 		r.set(host, ips)
@@ -104,6 +114,13 @@ func TestGuardDialSSRFMatrix(t *testing.T) {
 		{host: "multicast.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "10.0.0.1", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "::1", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		// This machine's own public addresses, as literals and in any answer.
+		{host: ownV4, category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: ownV6, category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "own.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "own6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "own-mixed.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "own-mapped.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "empty.example", status: http.StatusBadGateway},
 		{host: "broken.example", status: http.StatusBadGateway},
 		{host: "nxdomain.example", status: http.StatusBadGateway},
@@ -167,6 +184,53 @@ func TestGuardDialRebinding(t *testing.T) {
 		if isPrivateTarget(addr) {
 			t.Errorf("dialer was handed prohibited address %s", addr)
 		}
+	}
+}
+
+// selfDialer connects like mapDialer but reports the dialed address as the
+// local end, which is what the kernel does for a connection to one of this
+// machine's own addresses.
+type selfDialer struct {
+	*mapDialer
+	closed atomic.Int32
+}
+
+type closeCountingConn struct {
+	addrConn
+	closed *atomic.Int32
+}
+
+func (c closeCountingConn) Close() error {
+	c.closed.Add(1)
+	return c.Conn.Close()
+}
+
+func (d *selfDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	conn, err := d.mapDialer.DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	local := net.TCPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddrPort(address).Addr(), 50000))
+	return closeCountingConn{addrConn: addrConn{Conn: conn, local: local}, closed: &d.closed}, nil
+}
+
+// TestGuardDialSelfConnection: an own address the interface list does not
+// know yet is still refused once the connection shows it leads back to this
+// machine, and that connection is closed without being handed out.
+func TestGuardDialSelfConnection(t *testing.T) {
+	g, r, d := newTestGuard(t)
+	sd := &selfDialer{mapDialer: d}
+	g.dialer = sd
+	r.set("new-own.example", []string{publicV4Alt})
+	for _, host := range []string{publicV4Alt, "new-own.example"} {
+		conn, _, err := g.dial(context.Background(), host, 443, nil)
+		var de *dialError
+		if !errors.As(err, &de) || de.category != CategoryPrivateNetwork || de.status != http.StatusForbidden {
+			t.Fatalf("dial(%s) = %v, %v; want a private_network refusal", host, conn, err)
+		}
+	}
+	if n := sd.closed.Load(); n != 2 {
+		t.Errorf("%d of 2 self-connections closed", n)
 	}
 }
 

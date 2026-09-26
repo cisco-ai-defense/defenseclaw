@@ -166,6 +166,8 @@ type Decider struct {
 	block      *hostSet[struct{}]
 	allow      *hostSet[struct{}]
 	unblocks   Unblocks
+	// local is this machine's own addresses, refused as IP literals.
+	local *localAddrs
 }
 
 // DefaultPorts returns the default destination ports, 80 and 443.
@@ -201,7 +203,7 @@ var reservedNames = func() *hostSet[struct{}] {
 
 // NewDecider validates opts and builds a Decider.
 func NewDecider(opts DeciderOptions) (*Decider, error) {
-	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks}
+	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks, local: hostAddrs}
 	if opts.Mode != "" {
 		mode, err := ParseMode(string(opts.Mode))
 		if err != nil {
@@ -325,7 +327,8 @@ func (d *Decider) Feeds() []FeedInfo {
 // allowlist allows only allowlist feed matches).
 //
 // Decide never resolves DNS: the SSRF policy for names is enforced against
-// every resolved address at dial time.
+// every resolved address at dial time. IP literals are also refused when they
+// are one of this machine's own interface addresses.
 func (d *Decider) Decide(p Principal, host string, port int) Decision {
 	mode := d.mode
 	if p.Mode.valid() {
@@ -339,7 +342,7 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 	if port < 1 || port > 65535 {
 		return blocked(dec, CategoryInvalidDestination, SourceGuard, "")
 	}
-	if reason, private := guardRefusal(h, addr); private {
+	if reason, private := guardRefusal(h, addr, d.local); private {
 		dec = blocked(dec, CategoryPrivateNetwork, SourceGuard, "")
 		dec.Reason = reason
 		return dec
@@ -392,16 +395,20 @@ func blocked(dec Decision, category Category, source Source, rule string) Decisi
 }
 
 // guardRefusal applies the destination-level SSRF policy: IP literals go
-// through the netguard address policy, names are refused when they are
-// host-internal by definition. Names that resolve to private addresses are
-// caught at dial time.
-func guardRefusal(host string, addr netip.Addr) (string, bool) {
+// through the netguard address policy and are refused when they are one of
+// this machine's own addresses (a public address on one of its interfaces);
+// names are refused when they are host-internal by definition. Names that
+// resolve to private or own addresses are caught at dial time.
+func guardRefusal(host string, addr netip.Addr, local *localAddrs) (string, bool) {
 	if addr.IsValid() {
 		if addr.Zone() != "" {
 			return "Zoned IPv6 addresses are link-scoped and never public.", true
 		}
 		if err := guardPolicy.ValidateIP(net.IP(addr.AsSlice())); err != nil {
 			return "The address is private, loopback, link-local, carrier-grade NAT, metadata, reserved or otherwise not publicly routable.", true
+		}
+		if local.contains(addr) {
+			return "The address belongs to this machine; sandboxes never reach services on the host through it.", true
 		}
 		return "", false
 	}

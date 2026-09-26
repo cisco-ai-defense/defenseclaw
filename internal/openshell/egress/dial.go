@@ -55,13 +55,18 @@ type dialError struct {
 func (e *dialError) Error() string { return e.reason }
 func (e *dialError) Unwrap() error { return e.err }
 
-var errOperatorBlockedAddr = errors.New("egress: resolved address blocked by operator rule")
+var (
+	errOperatorBlockedAddr = errors.New("egress: resolved address blocked by operator rule")
+	errOwnAddr             = errors.New("egress: destination is an address of this machine")
+)
 
 // guardDialer dials upstreams through netguard's guarded dialer.
 type guardDialer struct {
 	resolver Resolver
 	dialer   Dialer
 	timeout  time.Duration
+	// local is this machine's own addresses; nil checks none.
+	local *localAddrs
 }
 
 // dialerFunc adapts a function to Dialer.
@@ -71,11 +76,21 @@ func (f dialerFunc) DialContext(ctx context.Context, network, address string) (n
 	return f(ctx, network, address)
 }
 
+// resolverFunc adapts a function to Resolver.
+type resolverFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
+
+func (f resolverFunc) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return f(ctx, host)
+}
+
 // dial connects to host:port. netguard resolves the name immediately before
 // connecting, refuses the whole destination when any answer is prohibited,
 // and hands the dialer the validated literal, so a rebinding resolver cannot
-// swap the address between check and connect. Operator CIDR blocks are
-// checked against that literal. When a name's first address fails to
+// swap the address between check and connect. A name with any answer that
+// is one of this machine's own addresses is refused like one with a private
+// answer; operator CIDR blocks are checked against the literal, and a
+// connection that turns out to lead back to this machine is closed before
+// any byte is relayed. When a name's first address fails to
 // connect, one more attempt targets the other address family (broken IPv6
 // is common); that attempt resolves and validates again.
 func (g *guardDialer) dial(ctx context.Context, host string, port int, block *hostSet[struct{}]) (net.Conn, netip.AddrPort, error) {
@@ -108,24 +123,54 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 	var (
 		selected  netip.AddrPort
 		blockedBy string
+		own       bool
 	)
+	resolve := resolverFunc(func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		ips, err := g.resolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if addr, ok := netip.AddrFromSlice(ip.IP); ok && g.local.contains(addr) {
+				own = true
+				return nil, errOwnAddr
+			}
+		}
+		return ips, nil
+	})
 	record := dialerFunc(func(ctx context.Context, network, literal string) (net.Conn, error) {
 		selected, _ = netip.ParseAddrPort(literal)
+		addr := selected.Addr().Unmap()
+		if g.local.contains(addr) {
+			own = true
+			return nil, errOwnAddr
+		}
 		if block != nil {
-			if item, ok := block.match("", selected.Addr().Unmap()); ok {
+			if item, ok := block.match("", addr); ok {
 				blockedBy = item.pattern
 				return nil, errOperatorBlockedAddr
 			}
 		}
-		return g.dialer.DialContext(ctx, network, literal)
+		conn, err := g.dialer.DialContext(ctx, network, literal)
+		if err == nil && selfConnected(conn, addr) {
+			_ = conn.Close()
+			own = true
+			return nil, errOwnAddr
+		}
+		return conn, err
 	})
 	dctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
-	conn, err := netguard.V8SafeDialContext(guardPolicy, record, g.resolver)(dctx, network, address)
+	conn, err := netguard.V8SafeDialContext(guardPolicy, record, resolve)(dctx, network, address)
 	if err == nil {
 		return &dialedConn{Conn: conn, remote: selected}, selected, nil
 	}
 	switch {
+	case own:
+		return nil, selected, &dialError{
+			category: CategoryPrivateNetwork, status: http.StatusForbidden,
+			reason: "the destination is an address of this machine", err: err,
+		}
 	case blockedBy != "":
 		return nil, selected, &dialError{
 			category: CategoryOperatorBlock, status: http.StatusForbidden, rule: blockedBy,

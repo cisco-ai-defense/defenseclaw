@@ -167,6 +167,29 @@ func TestDecideIgnoresDaemonPrivateAllowlist(t *testing.T) {
 	}
 }
 
+// This machine's own public addresses are refused by the guard, which
+// neither operator allows nor unblocks can lift.
+func TestDecideOwnAddresses(t *testing.T) {
+	unblocks, err := NewMemoryUnblocks(Unblock{Pattern: ownV4}, Unblock{Pattern: ownV6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mustDecider(t, DeciderOptions{Allow: []string{ownV4, publicV4}, Unblocks: unblocks})
+	d.local = fixedLocalAddrs(ownV4, ownV6)
+	private := decisionWant{category: CategoryPrivateNetwork, source: SourceGuard}
+	for _, host := range []string{ownV4, "::ffff:" + ownV4, ownV6, "[" + ownV6 + "]"} {
+		for _, port := range []int{80, 443} {
+			got := checkDecision(t, d, testPrincipal, host, port, private)
+			if !strings.Contains(got.Reason, "belongs to this machine") {
+				t.Errorf("Decide(%s) reason = %q", host, got.Reason)
+			}
+		}
+	}
+	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{allowed: true, source: SourceOperator})
+	// Names are checked against their answers at dial time, not here.
+	checkDecision(t, d, testPrincipal, "example.com", 443, decisionWant{allowed: true, source: SourceDefault})
+}
+
 func TestDecideAllowlistMode(t *testing.T) {
 	d := mustDecider(t, DeciderOptions{Mode: ModeAllowlist})
 	got := checkDecision(t, d, testPrincipal, "registry.npmjs.org", 443, decisionWant{allowed: true, category: CategoryPackageRegistry, source: SourceFeed})

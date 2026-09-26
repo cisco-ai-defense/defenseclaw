@@ -195,7 +195,7 @@ func New(opts Options) (*Proxy, error) {
 		auth:    opts.Auth,
 		sink:    opts.Sink,
 		counter: opts.Counter,
-		dialer:  &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout},
+		dialer:  &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
 		hint:    opts.UnblockHint,
 		idle:    opts.TunnelIdleTimeout,
 		limits:  newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
