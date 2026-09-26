@@ -7,8 +7,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -733,70 +733,42 @@ func TestCanonicalStateValidationUsesPackagedRuntimeAndManifest(t *testing.T) {
 	}
 }
 
-func TestPackagedCanonicalStateValidationFailsClosed(t *testing.T) {
-	tests := []struct {
+func TestPackagedCanonicalStateValidationRequiresCurrentConfig(t *testing.T) {
+	for _, test := range []struct {
 		name           string
-		stateSource    string
-		required       []string
+		configVersion  int
+		manifest       string
 		wantErr        bool
 		wantDiagnostic string
 	}{
+		{name: "current", configVersion: 8, manifest: "0.8.9"},
 		{
-			name: "valid",
-			stateSource: `class State:
-    applied = ("0.8.5",)
-    package_version = "0.8.9"
-
-def load(data_root):
-    return State()
-`,
-			required: []string{"0.8.5"},
+			name: "older config", configVersion: 7, manifest: "0.8.9", wantErr: true,
+			wantDiagnostic: "run 'defenseclaw migrate'",
 		},
 		{
-			name: "missing-cursor",
-			stateSource: `def load(data_root):
-    return None
-`,
-			wantErr:        true,
-			wantDiagnostic: "migration cursor is missing",
+			name: "other release manifest", configVersion: 8, manifest: "0.8.8", wantErr: true,
+			wantDiagnostic: "upgrade manifest version mismatch",
 		},
-		{
-			name: "missing-required-migration",
-			stateSource: `class State:
-    applied = ()
-    package_version = "0.8.9"
-
-def load(data_root):
-    return State()
-`,
-			required:       []string{"0.8.5"},
-			wantErr:        true,
-			wantDiagnostic: "required migrations are missing: 0.8.5",
-		},
-		{
-			name: "wrong-package-version",
-			stateSource: `class State:
-    applied = ("0.8.5",)
-    package_version = "0.8.8"
-
-def load(data_root):
-    return State()
-`,
-			required:       []string{"0.8.5"},
-			wantErr:        true,
-			wantDiagnostic: "migration cursor package version mismatch: 0.8.8 != 0.8.9",
-		},
-	}
-	for _, test := range tests {
-		test := test
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			output, err := runPackagedCanonicalStateValidationFixture(
-				t,
-				test.stateSource,
-				test.required,
-			)
+			fixture := newPackagedScriptFixture(t, test.manifest)
+			fixture.writeModule(t, "config.py", fmt.Sprintf(`class Config:
+    config_version = %d
+
+def load():
+    return Config()
+
+def require_current_config(cfg):
+    if cfg.config_version < 8:
+        raise RuntimeError("config is too old; run 'defenseclaw migrate'")
+`, test.configVersion))
+			output, err := fixture.run(packagedCanonicalStateValidationScript, fixture.dataRoot, "0.8.9", fixture.manifest)
 			if test.wantErr != (err != nil) {
 				t.Fatalf("validation error = %v, output = %s", err, strings.TrimSpace(string(output)))
+			}
+			if !test.wantErr && strings.TrimSpace(string(output)) != "ok" {
+				t.Fatalf("validation output = %q, want ok", strings.TrimSpace(string(output)))
 			}
 			if test.wantDiagnostic != "" && !strings.Contains(string(output), test.wantDiagnostic) {
 				t.Fatalf("validation output = %q, want %q", strings.TrimSpace(string(output)), test.wantDiagnostic)
@@ -805,11 +777,19 @@ def load(data_root):
 	}
 }
 
-func runPackagedCanonicalStateValidationFixture(
-	t *testing.T,
-	migrationStateSource string,
-	required []string,
-) ([]byte, error) {
+// packagedScriptFixture runs a packaged Setup script against a fake
+// defenseclaw package, isolated the same way Setup runs the staged runtime.
+// Only the modules a test writes exist, so a script that still imports a
+// retired module fails.
+type packagedScriptFixture struct {
+	python       string
+	root         string
+	dataRoot     string
+	openClawRoot string
+	manifest     string
+}
+
+func newPackagedScriptFixture(t *testing.T, releaseVersion string) packagedScriptFixture {
 	t.Helper()
 	var python string
 	for _, name := range []string{"python", "python3"} {
@@ -822,51 +802,71 @@ func runPackagedCanonicalStateValidationFixture(
 		t.Skip("python is unavailable")
 	}
 	root := t.TempDir()
-	packageRoot := filepath.Join(root, "defenseclaw")
-	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+	fixture := packagedScriptFixture{
+		python:       python,
+		root:         root,
+		dataRoot:     filepath.Join(root, "data"),
+		openClawRoot: filepath.Join(root, "openclaw"),
+		manifest:     filepath.Join(root, "upgrade-manifest.json"),
+	}
+	if err := os.MkdirAll(filepath.Join(root, "defenseclaw"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{
-		"__init__.py":        "",
-		"config.py":          "def require_v8_config():\n    return None\n\ndef load():\n    return object()\n",
-		"migration_state.py": migrationStateSource,
-	} {
-		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	manifest, err := json.Marshal(map[string]interface{}{
-		"release_version":         "0.8.9",
-		"required_cli_migrations": required,
-	})
-	if err != nil {
+	if err := os.Mkdir(fixture.dataRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manifestPath := filepath.Join(root, "upgrade-manifest.json")
-	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+	fixture.writeModule(t, "__init__.py", "")
+	manifest := `{"schema_version":2,"release_version":"` + releaseVersion + `","required_cli_migrations":[]}`
+	if err := os.WriteFile(fixture.manifest, []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dataRoot := filepath.Join(root, "data")
-	if err := os.Mkdir(dataRoot, 0o700); err != nil {
+	return fixture
+}
+
+func (f packagedScriptFixture) writeModule(t *testing.T, name, source string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.root, "defenseclaw", name), []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixtureScript := "import sys\nsys.path.insert(0, sys.argv.pop(1))\n" +
-		packagedCanonicalStateValidationScript
+}
+
+func (f packagedScriptFixture) run(script string, args ...string) ([]byte, error) {
 	cmd := exec.Command(
-		python,
-		"-I",
-		"-X",
-		"utf8",
-		"-c",
-		fixtureScript,
-		root,
-		dataRoot,
-		"0.8.9",
-		manifestPath,
+		f.python,
+		append([]string{
+			"-I", "-X", "utf8", "-c",
+			"import sys\nsys.path.insert(0, sys.argv.pop(1))\n" + script,
+			f.root,
+		}, args...)...,
 	)
-	cmd.Dir = root
+	cmd.Dir = f.root
 	cmd.Env = sanitizePythonEnv(os.Environ())
 	return cmd.CombinedOutput()
+}
+
+// fakeMigrationsModule accepts exactly one migrate() call shape. Setup's
+// scripts must not reach any other migration API.
+func fakeMigrationsModule(dataRoot, openClawRoot, fromVersion string, check bool, body string) string {
+	checkLiteral := "False"
+	if check {
+		checkLiteral = "True"
+	}
+	return fmt.Sprintf(`class MigrationError(RuntimeError):
+    pass
+
+class ConfigTooNewError(MigrationError):
+    pass
+
+class MigrateResult:
+    def __init__(self, applied):
+        self.applied = applied
+
+def migrate(data_dir, *, openclaw_home=None, from_version=None, check=False):
+    call = (data_dir, openclaw_home, from_version, check)
+    if call != (%q, %q, %q, %s):
+        raise MigrationError("unexpected migrate call: %%r" %% (call,))
+%s
+`, dataRoot, openClawRoot, fromVersion, checkLiteral, body)
 }
 
 func TestOrdinaryInstallOfNewerPackageRunsMigrations(t *testing.T) {
@@ -1374,139 +1374,85 @@ func TestPackagedMigrationCommandForcesUTF8UnderIsolation(t *testing.T) {
 	}
 }
 
-func TestCommittedRecoveryPackagedMigrationScriptSupportsInstalledRuntimeWithoutStrictRequired(t *testing.T) {
-	output, err := runPackagedMigrationScriptFixture(
-		t,
-		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
-    if not upgrade_handles_local_bundle:
-        raise RuntimeError("local bundle authority was not passed")
-    return 1
-`,
-		`class State:
-    applied = ("0.8.5",)
-
-def load(data_root):
-    return State()
-`,
-		[]string{"0.8.5"},
+func TestPackagedMigrationScriptMigratesTheDataRoot(t *testing.T) {
+	fixture := newPackagedScriptFixture(t, "0.8.6")
+	fixture.writeModule(t, "migrations.py", fakeMigrationsModule(
+		fixture.dataRoot, fixture.openClawRoot, "0.8.0", false,
+		`    return MigrateResult(["config-v9", "rename-key"])`,
+	))
+	output, err := fixture.run(
+		packagedMigrationScript, "0.8.0", "0.8.6", fixture.openClawRoot, fixture.dataRoot, fixture.manifest,
 	)
 	if err != nil {
-		t.Fatalf("legacy installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
+		t.Fatalf("packaged migration failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if got := strings.TrimSpace(string(output)); got != "2" {
+		t.Fatalf("packaged migration output = %q, want the applied count 2", got)
+	}
+}
+
+func TestPackagedMigrationScriptFailsClosedOnMigrationError(t *testing.T) {
+	fixture := newPackagedScriptFixture(t, "0.8.6")
+	fixture.writeModule(t, "migrations.py", fakeMigrationsModule(
+		fixture.dataRoot, fixture.openClawRoot, "0.8.0", false,
+		`    raise MigrationError("config transform failed")`,
+	))
+	output, err := fixture.run(
+		packagedMigrationScript, "0.8.0", "0.8.6", fixture.openClawRoot, fixture.dataRoot, fixture.manifest,
+	)
+	if err == nil || !strings.Contains(string(output), "config transform failed") {
+		t.Fatalf("failed migration error = %v, output = %s", err, strings.TrimSpace(string(output)))
+	}
+}
+
+func TestPackagedMigrationPreflightScriptOnlyChecks(t *testing.T) {
+	fixture := newPackagedScriptFixture(t, "0.8.6")
+	fixture.writeModule(t, "migrations.py", fakeMigrationsModule(
+		fixture.dataRoot, fixture.openClawRoot, "0.8.0", true,
+		`    return MigrateResult(["config-v9"])`,
+	))
+	output, err := fixture.run(
+		packagedMigrationPreflightScript, "0.8.0", "0.8.6", fixture.openClawRoot, fixture.dataRoot, fixture.manifest,
+	)
+	if err != nil {
+		t.Fatalf("packaged preflight failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	if got := strings.TrimSpace(string(output)); got != "1" {
-		t.Fatalf("legacy installed migration output = %q, want 1", got)
+		t.Fatalf("packaged preflight output = %q, want the pending count 1", got)
 	}
-}
 
-func TestPackagedMigrationScriptPassesStrictRequiredWhenSupported(t *testing.T) {
-	output, err := runPackagedMigrationScriptFixture(
-		t,
-		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False, strict_required=()):
-    if not upgrade_handles_local_bundle:
-        raise RuntimeError("local bundle authority was not passed")
-    if tuple(strict_required) != ("0.8.5",):
-        raise RuntimeError("strict required migrations were not passed")
-    return 1
-`,
-		`class State:
-    applied = ("0.8.5",)
-
-def load(data_root):
-    return State()
-`,
-		[]string{"0.8.5"},
+	fixture.writeModule(t, "migrations.py", fakeMigrationsModule(
+		fixture.dataRoot, fixture.openClawRoot, "0.8.0", true,
+		`    raise ConfigTooNewError("config_version 9 was written by a newer DefenseClaw")`,
+	))
+	output, err = fixture.run(
+		packagedMigrationPreflightScript, "0.8.0", "0.8.6", fixture.openClawRoot, fixture.dataRoot, fixture.manifest,
 	)
-	if err != nil {
-		t.Fatalf("strict installed migration API failed: %v: %s", err, strings.TrimSpace(string(output)))
-	}
-	if got := strings.TrimSpace(string(output)); got != "1" {
-		t.Fatalf("strict installed migration output = %q, want 1", got)
+	if err == nil || !strings.Contains(string(output), "written by a newer DefenseClaw") {
+		t.Fatalf("newer-config preflight error = %v, output = %s", err, strings.TrimSpace(string(output)))
 	}
 }
 
-func TestPackagedMigrationScriptLegacyAPIMissingRequiredMigrationFailsClosed(t *testing.T) {
-	output, err := runPackagedMigrationScriptFixture(
-		t,
-		`def run_migrations(from_version, to_version, openclaw_home, data_root, upgrade_handles_local_bundle=False):
-    return 0
-`,
-		`class State:
-    applied = ()
-
-def load(data_root):
-    return State()
-`,
-		[]string{"0.8.5"},
-	)
-	if err == nil {
-		t.Fatalf("legacy installed runtime accepted a missing required migration: %s", strings.TrimSpace(string(output)))
-	}
-	if !strings.Contains(string(output), "required migrations are missing: 0.8.5") {
-		t.Fatalf("missing required migration diagnostic = %q", strings.TrimSpace(string(output)))
-	}
-}
-
-func runPackagedMigrationScriptFixture(
-	t *testing.T,
-	migrationsSource, migrationStateSource string,
-	required []string,
-) ([]byte, error) {
-	t.Helper()
-	python, err := exec.LookPath("python")
-	if err != nil {
-		t.Skipf("python is unavailable: %v", err)
-	}
-	root := t.TempDir()
-	packageRoot := filepath.Join(root, "defenseclaw")
-	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range map[string]string{
-		"__init__.py":        "",
-		"migrations.py":      migrationsSource,
-		"migration_state.py": migrationStateSource,
+func TestPackagedMigrationScriptsRefuseAnotherReleaseManifest(t *testing.T) {
+	fixture := newPackagedScriptFixture(t, "0.8.5")
+	fixture.writeModule(t, "migrations.py", `def migrate(*args, **kwargs):
+    raise RuntimeError("migrate ran against another release's payload")
+`)
+	for name, script := range map[string]string{
+		"migration": packagedMigrationScript,
+		"preflight": packagedMigrationPreflightScript,
 	} {
-		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
+		output, err := fixture.run(script, "0.8.0", "0.8.6", fixture.openClawRoot, fixture.dataRoot, fixture.manifest)
+		if err == nil || !strings.Contains(string(output), "upgrade manifest version mismatch") {
+			t.Fatalf("%s with a mismatched manifest: error = %v, output = %s", name, err, strings.TrimSpace(string(output)))
 		}
 	}
-	manifest, err := json.Marshal(map[string]interface{}{
-		"release_version":         "0.8.6",
-		"required_cli_migrations": required,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestPath := filepath.Join(root, "upgrade-manifest.json")
-	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dataRoot := filepath.Join(root, "data")
-	if err := os.Mkdir(dataRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(
-		python,
-		"-X",
-		"utf8",
-		"-c",
-		packagedMigrationScript,
-		"0.8.0",
-		"0.8.6",
-		filepath.Join(root, "openclaw"),
-		dataRoot,
-		manifestPath,
-	)
-	cmd.Dir = root
-	cmd.Env = sanitizePythonEnv(os.Environ())
-	return cmd.CombinedOutput()
 }
 
 func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "DefenseClaw.staging.fixture")
 	dataRoot := filepath.Join(t.TempDir(), "profile", ".defenseclaw")
 	openClawRoot := filepath.Join(t.TempDir(), "profile", ".openclaw")
-	scratch := filepath.Join(root, "installer", ".migration-preflight")
 	cmd := newPackagedMigrationPreflightCommand(
 		context.Background(),
 		root,
@@ -1514,13 +1460,22 @@ func TestPackagedMigrationPreflightUsesStagedTargetRuntime(t *testing.T) {
 		openClawRoot,
 		"0.8.0",
 		"0.8.6",
-		scratch,
 	)
-	if got, want := cmd.Path, filepath.Join(root, "runtime", "python", "python.exe"); got != want {
-		t.Fatalf("preflight interpreter = %q, want staged target %q", got, want)
+	want := []string{
+		filepath.Join(root, "runtime", "python", "python.exe"),
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedMigrationPreflightScript,
+		"0.8.0",
+		"0.8.6",
+		openClawRoot,
+		dataRoot,
+		filepath.Join(root, "installer", "upgrade-manifest.json"),
 	}
-	if !slices.Contains(cmd.Args, packagedMigrationPreflightScript) || !slices.Contains(cmd.Args, scratch) {
-		t.Fatalf("preflight arguments do not bind the staged script and scratch root: %v", cmd.Args)
+	if cmd.Path != want[0] || !slices.Equal(cmd.Args, want) {
+		t.Fatalf("preflight command = %q %v, want the staged target runtime %v", cmd.Path, cmd.Args, want)
 	}
 	for name, want := range map[string]string{
 		"DEFENSECLAW_HOME":         dataRoot,

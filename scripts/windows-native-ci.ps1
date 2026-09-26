@@ -1882,11 +1882,13 @@ function Invoke-BuildInstaller {
         throw 'Could not resolve project version from pyproject.toml'
     }
     $version = $Matches[1]
-    $uv = Get-RequiredCommand 'uv.exe'
-    Invoke-WindowsNativeProcess $uv @(
-        'run', '--frozen', 'python', (Join-Path $WorkspaceRoot 'scripts\generate-upgrade-manifest.py'),
-        '--out', (Join-Path $artifacts 'upgrade-manifest.json')
-    ) -TimeoutSeconds 120 | Out-Null
+    # Releases no longer carry required-migration policy; keep the stub for
+    # lanes that still read the artifact manifest.
+    [IO.File]::WriteAllText(
+        (Join-Path $artifacts 'upgrade-manifest.json'),
+        '{"schema_version":2,"release_version":"' + $version + '","required_cli_migrations":[]}' + "`n",
+        [Text.UTF8Encoding]::new($false)
+    )
     & (Join-Path $WorkspaceRoot 'scripts\build-windows-installer.ps1') `
         -DistRoot $artifacts -OutRoot $artifacts -StateRoot (Join-Path $root 'installer-build') `
         -DistributionFlavor 'oss' `

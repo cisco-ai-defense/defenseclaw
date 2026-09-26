@@ -2105,94 +2105,39 @@ func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) erro
 	)
 }
 
-const packagedMigrationScript = `import inspect, json, sys
-from defenseclaw import migration_state
-from defenseclaw.migrations import run_migrations
+// The packaged scripts bind the staged wheel to this Setup release through the
+// payload's upgrade manifest, then use only the release-independent migration
+// API: migrate() applies or checks config/data migrations for the data root,
+// and require_current_config() refuses a config that still needs one.
+const packagedMigrationScript = `import json, sys
+from defenseclaw.migrations import migrate
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-required = tuple(manifest.get("required_cli_migrations", ()))
-parameters = inspect.signature(run_migrations).parameters
-accepts_kwargs = any(
-    parameter.kind == inspect.Parameter.VAR_KEYWORD
-    for parameter in parameters.values()
-)
-
-def supports_keyword(name):
-    parameter = parameters.get(name)
-    return accepts_kwargs or (
-        parameter is not None
-        and parameter.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    )
-
-kwargs = {}
-if supports_keyword("upgrade_handles_local_bundle"):
-    kwargs["upgrade_handles_local_bundle"] = True
-if supports_keyword("strict_required"):
-    kwargs["strict_required"] = required
-count = run_migrations(
-    from_version,
-    to_version,
-    openclaw_home,
-    data_root,
-    **kwargs,
-)
-state = migration_state.load(data_root)
-applied = set(state.applied if state else ())
-missing = [value for value in required if value not in applied]
-if missing:
-    raise SystemExit("required migrations are missing: " + ", ".join(missing))
-print(count)`
+result = migrate(data_root, openclaw_home=openclaw_home, from_version=from_version or None)
+print(len(result.applied))`
 
 const packagedCanonicalStateValidationScript = `import json, sys
-from defenseclaw import migration_state
-from defenseclaw.config import load, require_v8_config
-data_root, target_version, manifest_path = sys.argv[1:]
+from defenseclaw.config import load, require_current_config
+_data_root, target_version, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != target_version:
     raise SystemExit("upgrade manifest version mismatch")
-require_v8_config()
-load()
-state = migration_state.load(data_root)
-if state is None:
-    raise SystemExit("migration cursor is missing")
-if state.package_version != target_version:
-    raise SystemExit(
-        "migration cursor package version mismatch: "
-        + str(state.package_version)
-        + " != "
-        + target_version
-    )
-required = tuple(manifest.get("required_cli_migrations", ()))
-applied = set(state.applied)
-missing = [value for value in required if value not in applied]
-if missing:
-    raise SystemExit("required migrations are missing: " + ", ".join(missing))
+require_current_config(load())
 print("ok")`
 
 const packagedMigrationPreflightScript = `import json, sys
-from defenseclaw.migrations import preflight_required_migrations
-from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
+from defenseclaw.migrations import migrate
+from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-required = manifest.get("required_cli_migrations", ())
-count = preflight_required_migrations(
-    from_version,
-    to_version,
-    openclaw_home,
-    data_root,
-    required,
-    scratch_dir,
-)
-print(count)`
+result = migrate(data_root, openclaw_home=openclaw_home, from_version=from_version or None, check=True)
+print(len(result.applied))`
 
 func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
 	return runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion, managedChildEnv(dataRoot))
@@ -2259,34 +2204,16 @@ func newCanonicalStateValidationCommand(
 	return cmd
 }
 
+// runPackagedMigrationPreflightWithEnv runs the staged target runtime's
+// read-only migrate(check=True) against the live data root before any service
+// or tree mutation, so a config written by a newer release, or one the target
+// cannot migrate, aborts Setup with nothing changed.
 func runPackagedMigrationPreflightWithEnv(
 	root, dataRoot, fromVersion, toVersion string,
 	env []string,
-) (resultErr error) {
+) error {
 	openClawRoot, err := defaultOpenClawRoot()
 	if err != nil {
-		return err
-	}
-	scratch, err := safeJoin(root, "installer/.migration-preflight")
-	if err != nil {
-		return err
-	}
-	if err := rejectReparseAncestors(filepath.Dir(scratch)); err != nil {
-		return err
-	}
-	if err := os.Mkdir(scratch, 0o700); err != nil {
-		return fmt.Errorf("create migration preflight root: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, removeTransactionTree(scratch, root))
-	}()
-	if err := safefile.ProtectDirectory(scratch); err != nil {
-		return fmt.Errorf("protect migration preflight root: %w", err)
-	}
-	if err := validatePrivateTransactionPath(scratch, true); err != nil {
-		return fmt.Errorf("validate migration preflight root: %w", err)
-	}
-	if err := rejectReparseTree(scratch); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
@@ -2298,7 +2225,6 @@ func runPackagedMigrationPreflightWithEnv(
 		openClawRoot,
 		fromVersion,
 		toVersion,
-		scratch,
 	)
 	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
 	output, err := processutil.CombinedOutputTree(cmd, false)
@@ -2342,7 +2268,7 @@ func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRo
 
 func newPackagedMigrationPreflightCommand(
 	ctx context.Context,
-	root, dataRoot, openClawRoot, fromVersion, toVersion, scratch string,
+	root, dataRoot, openClawRoot, fromVersion, toVersion string,
 ) *exec.Cmd {
 	python := filepath.Join(root, "runtime", "python", "python.exe")
 	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
@@ -2359,7 +2285,6 @@ func newPackagedMigrationPreflightCommand(
 		openClawRoot,
 		dataRoot,
 		manifest,
-		scratch,
 	)
 	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
 	return cmd
