@@ -27,7 +27,9 @@ and Linux installer. The installer also upgrades, repairs, and rolls back.
 The optional Docker-backed local observability and Local Splunk bundles have a
 narrower requirement: Windows x64 Pro, Enterprise, or Education; Hyper-V;
 machine-installed Docker Desktop; Linux containers; a reachable daemon;
-Compose v2; and a real native `docker.exe`. Core DefenseClaw does not require
+Compose v2; and a real native `docker.exe`. Windows Home, per-user Docker
+Desktop, WSL2 engines, Windows containers, and command-wrapper shims are not in
+that optional feature's certified path. Core DefenseClaw does not require
 Docker.
 
 ## Install
@@ -181,5 +183,5 @@ defenseclaw uninstall --all --binaries --yes   # remove everything, including %U
 ```
 
 Enterprise deployments use the managed Setup package; see
-[Managed enterprise](/docs/get-started/windows/managed-enterprise).
+[Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
 
