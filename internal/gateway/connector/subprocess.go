@@ -628,7 +628,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -639,11 +639,15 @@ func ReconcileManagedNativeHookRuntime(
 	if _, err := writeHookTokenFilesUsing(hookDir, name, token, writeFile); err != nil {
 		return err
 	}
+	failMode := "closed"
+	if name == "copilot" {
+		failMode = "open"
+	}
 	return writeHookConfigSidecarUsing(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		failMode,
 		true,
 		writeFile,
 	)
@@ -655,7 +659,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if name != "codex" && name != "claudecode" && name != "cursor" && name != "copilot" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -685,12 +689,16 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	wantFailMode := "closed"
+	if name == "copilot" {
+		wantFailMode = "open"
+	}
+	if state.FailModes[name] != wantFailMode {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			wantFailMode,
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -704,8 +712,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != wantFailMode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, wantFailMode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -961,7 +969,7 @@ func validateHookRuntimeStateForContract(
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return nil
 	}
-	if name != "claudecode" && name != "codex" && name != "cursor" {
+	if name != "claudecode" && name != "codex" && name != "cursor" && name != "copilot" {
 		return nil
 	}
 	hookDir := filepath.Join(dataDir, "hooks")

@@ -294,7 +294,7 @@ func validateWindowsManagedHookContractCleanupTarget(
 		return claim, nil, errors.New("managed hook contract data directory is not canonical")
 	}
 	switch claim.Connector {
-	case "claudecode", "codex", "cursor":
+	case "claudecode", "codex", "cursor", "copilot":
 	default:
 		return claim, nil, fmt.Errorf("unsupported Windows managed connector %q", claim.Connector)
 	}

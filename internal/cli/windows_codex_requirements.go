@@ -247,6 +247,7 @@ func resolveWindowsCodexRequirementsLayout(
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
 		CodexTargetEnabled:              applicability.Codex,
 		CursorTargetEnabled:             applicability.Cursor,
+		CopilotTargetEnabled:            applicability.Copilot,
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")
@@ -289,6 +290,7 @@ type windowsCodexManifestApplicability struct {
 	Codex      bool
 	Claude     bool
 	Cursor     bool
+	Copilot    bool
 }
 
 func resolveWindowsCodexManifestApplicability(
@@ -318,6 +320,8 @@ func resolveWindowsCodexManifestApplicability(
 			applicability.Claude = true
 		case "cursor":
 			applicability.Cursor = true
+		case "copilot":
+			applicability.Copilot = true
 		}
 	}
 	return applicability, nil

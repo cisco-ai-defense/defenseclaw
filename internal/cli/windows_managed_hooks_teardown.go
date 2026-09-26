@@ -63,14 +63,18 @@ type windowsManagedHooksTeardownJournal struct {
 	CodexTargets           []connector.WindowsCodexManagedRuntimeTarget                  `json:"codex_targets"`
 	CursorTargets          []enterprisehooks.WindowsCursorManagedRuntimeTarget           `json:"cursor_targets"`
 	Cursor                 enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot    `json:"cursor"`
+	CopilotTargets         []enterprisehooks.WindowsCopilotManagedRuntimeTarget          `json:"copilot_targets"`
+	Copilot                enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot   `json:"copilot"`
 	SelectorTargets        []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot `json:"selector_targets"`
 }
 
 type windowsManagedHooksTeardownMachineCapture struct {
-	claudeOpts     enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
-	claudeSnapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
-	cursorOpts     enterprisehooks.WindowsCursorManagedPolicyTeardownOptions
-	cursorSnapshot enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
+	claudeOpts      enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
+	claudeSnapshot  enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
+	cursorOpts      enterprisehooks.WindowsCursorManagedPolicyTeardownOptions
+	cursorSnapshot  enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
+	copilotOpts     enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions
+	copilotSnapshot enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot
 }
 
 type windowsManagedHooksTeardownResult struct {
@@ -274,7 +278,7 @@ func runWindowsManagedHooksTeardown(
 	if err != nil {
 		return fail(err)
 	}
-	targets, claudeTargets, codexTargets, cursorTargets, err := windowsManagedHooksTeardownTargets(manifest)
+	targets, claudeTargets, codexTargets, cursorTargets, copilotTargets, err := windowsManagedHooksTeardownTargetsWithCopilot(manifest)
 	if err != nil {
 		return fail(err)
 	}
@@ -334,11 +338,13 @@ func runWindowsManagedHooksTeardown(
 	identity.ClaudeTargetSIDs,
 		identity.CodexPolicyActive,
 		identity.CodexTargets,
-		identity.CursorTargets = windowsManagedHooksTeardownExpectedEnrollment(
+		identity.CursorTargets,
+		identity.CopilotTargets = windowsManagedHooksTeardownExpectedEnrollmentWithCopilot(
 		activation.State,
 		claudeTargets,
 		codexTargets,
 		cursorTargets,
+		copilotTargets,
 	)
 	var cleanupReceiptPath string
 	if strings.TrimSpace(contractCleanupReceipt) != "" ||
@@ -391,13 +397,14 @@ func runWindowsManagedHooksTeardown(
 			}
 		}
 		report.EnrollmentTargetCount = len(identity.ClaudeTargetSIDs) +
-			len(identity.CodexTargets) + len(identity.CursorTargets)
+			len(identity.CodexTargets) + len(identity.CursorTargets) + len(identity.CopilotTargets)
 		var rollbackCompleted bool
 		var surviving int
 		rollbackCompleted, surviving, err = prepareWindowsManagedHooksTeardown(
 			opts,
 			windowsManagedHooksClaudeOptions(opts, identity.ClaudeTargetSIDs),
 			windowsManagedHooksCursorOptions(opts, identity.CursorTargets),
+			windowsManagedHooksCopilotOptions(opts, identity.CopilotTargets),
 			identity,
 			report.JournalPath,
 		)
@@ -420,7 +427,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
-				len(journal.ClaudeTargetSIDs) + len(journal.CodexTargets) + len(journal.CursorTargets)
+				len(journal.ClaudeTargetSIDs) + len(journal.CodexTargets) + len(journal.CursorTargets) + len(journal.CopilotTargets)
 		}
 		if err == nil && journal.Phase != "prepared" {
 			err = fmt.Errorf(
@@ -447,7 +454,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
-				len(journal.ClaudeTargetSIDs) + len(journal.CodexTargets) + len(journal.CursorTargets)
+				len(journal.ClaudeTargetSIDs) + len(journal.CodexTargets) + len(journal.CursorTargets) + len(journal.CopilotTargets)
 		}
 		if err == nil && journal.Phase != "captured" &&
 			journal.Phase != "prepared" && journal.Phase != "rolled_back" {
@@ -461,6 +468,7 @@ func runWindowsManagedHooksTeardown(
 				opts,
 				windowsManagedHooksClaudeOptions(opts, journal.ClaudeTargetSIDs),
 				windowsManagedHooksCursorOptions(opts, journal.CursorTargets),
+				windowsManagedHooksCopilotOptions(opts, journal.CopilotTargets),
 				journal,
 				report.JournalPath,
 			)
@@ -545,6 +553,7 @@ func prepareWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
 	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
+	copilotOpts enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
 ) (bool, int, error) {
@@ -607,6 +616,7 @@ func prepareWindowsManagedHooksTeardown(
 
 	var captured enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
 	var capturedCursor enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
+	var capturedCopilot enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot
 	persisted := false
 	captured, err = enterprisehooks.PrepareWindowsClaudeManagedPolicyTeardown(
 		claudeOpts,
@@ -615,15 +625,23 @@ func prepareWindowsManagedHooksTeardown(
 			capturedCursor, cursorErr = enterprisehooks.PrepareWindowsCursorManagedPolicyTeardown(
 				cursorOpts,
 				func(cursorSnapshot enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot) error {
-					journal := identity
-					journal.Phase = "captured"
-					journal.Claude = snapshot
-					journal.Cursor = cursorSnapshot
-					if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
-						return err
-					}
-					persisted = true
-					return nil
+					var copilotErr error
+					capturedCopilot, copilotErr = enterprisehooks.PrepareWindowsCopilotManagedPolicyTeardown(
+						copilotOpts,
+						func(copilotSnapshot enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot) error {
+							journal := identity
+							journal.Phase = "captured"
+							journal.Claude = snapshot
+							journal.Cursor = cursorSnapshot
+							journal.Copilot = copilotSnapshot
+							if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
+								return err
+							}
+							persisted = true
+							return nil
+						},
+					)
+					return copilotErr
 				},
 			)
 			return cursorErr
@@ -634,10 +652,12 @@ func prepareWindowsManagedHooksTeardown(
 		journal.Phase = "captured"
 		journal.Claude = captured
 		journal.Cursor = capturedCursor
+		journal.Copilot = capturedCopilot
 		if rollbackErr := rollbackWindowsManagedHooksTeardown(
 			opts,
 			claudeOpts,
 			cursorOpts,
+			copilotOpts,
 			journal,
 			journalPath,
 		); rollbackErr != nil {
@@ -685,6 +705,7 @@ func prepareWindowsManagedHooksTeardown(
 	journal.Phase = "prepared"
 	journal.Claude = captured
 	journal.Cursor = capturedCursor
+	journal.Copilot = capturedCopilot
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return restoreOnFailure(err, surviving)
 	}
@@ -730,6 +751,7 @@ func rollbackWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
 	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
+	copilotOpts enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions,
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
 ) error {
@@ -746,12 +768,19 @@ func rollbackWindowsManagedHooksTeardown(
 			current, err := captureWindowsManagedHooksTeardownMachineState(
 				claudeOpts,
 				cursorOpts,
+				copilotOpts,
 				journal,
 			)
 			if err != nil {
 				return err
 			}
-			return restoreWindowsManagedHooksTeardownComposite(
+			if err := enterprisehooks.RestoreWindowsCopilotManagedPolicyTeardown(
+				copilotOpts,
+				journal.Copilot,
+			); err != nil {
+				return err
+			}
+			restoreErr := restoreWindowsManagedHooksTeardownComposite(
 				func() error {
 					return enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
 						claudeOpts,
@@ -793,6 +822,17 @@ func rollbackWindowsManagedHooksTeardown(
 					)
 				},
 			)
+			if restoreErr == nil {
+				return nil
+			}
+			if compensateErr := enterprisehooks.RestoreWindowsCopilotManagedPolicySnapshot(
+				current.copilotOpts,
+				copilotOpts,
+				current.copilotSnapshot,
+			); compensateErr != nil {
+				return errors.Join(restoreErr, fmt.Errorf("restore pre-rollback Copilot policy: %w", compensateErr))
+			}
+			return restoreErr
 		},
 		func() error {
 			return verifyWindowsManagedHooksTeardownInstalled(
@@ -810,6 +850,7 @@ func rollbackWindowsManagedHooksTeardown(
 func captureWindowsManagedHooksTeardownMachineState(
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
 	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
+	copilotOpts enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions,
 	journal windowsManagedHooksTeardownJournal,
 ) (windowsManagedHooksTeardownMachineCapture, error) {
 	var result windowsManagedHooksTeardownMachineCapture
@@ -879,6 +920,24 @@ func captureWindowsManagedHooksTeardownMachineState(
 		captureCursor,
 	); err != nil {
 		return result, err
+	}
+	currentCopilot, copilotActive, err := enterprisehooks.ReadWindowsCopilotManagedPolicyTargets()
+	if err != nil {
+		return result, fmt.Errorf("capture current Copilot teardown enrollment: %w", err)
+	}
+	currentCopilot, err = windowsManagedHooksPartialCopilotTargets(
+		copilotOpts.Targets,
+		currentCopilot,
+		copilotActive,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.copilotOpts = copilotOpts
+	result.copilotOpts.Targets = append([]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, currentCopilot...)
+	result.copilotSnapshot, err = enterprisehooks.CaptureWindowsCopilotManagedPolicySnapshot(result.copilotOpts)
+	if err != nil {
+		return result, fmt.Errorf("capture current Copilot teardown policy: %w", err)
 	}
 	return result, nil
 }
@@ -1253,6 +1312,9 @@ func verifyWindowsManagedHooksTeardownClean(
 	if err := enterprisehooks.VerifyWindowsCursorManagedPolicyTeardown(); err != nil {
 		return 0, err
 	}
+	if err := enterprisehooks.VerifyWindowsCopilotManagedPolicyTeardown(); err != nil {
+		return 0, err
+	}
 	disabled := opts
 	disabled.CodexTargetEnabled = false
 	report, err := connector.VerifyWindowsCodexMachineRequirements(disabled)
@@ -1305,13 +1367,19 @@ func verifyWindowsManagedHooksTeardownInstalled(
 	if err != nil {
 		return err
 	}
-	if err := validateWindowsManagedHooksTeardownEnrollment(
+	currentCopilot, copilotActive, err := enterprisehooks.ReadWindowsCopilotManagedPolicyTargets()
+	if err != nil {
+		return err
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollmentWithCopilot(
 		identity,
 		currentClaude,
 		claudeActive,
 		registry,
 		currentCursor,
 		cursorActive,
+		currentCopilot,
+		copilotActive,
 	); err != nil {
 		return err
 	}
@@ -1357,13 +1425,15 @@ func verifyWindowsManagedHooksTeardownInstalled(
 	return nil
 }
 
-func validateWindowsManagedHooksTeardownEnrollment(
+func validateWindowsManagedHooksTeardownEnrollmentWithCopilot(
 	identity windowsManagedHooksTeardownJournal,
 	currentClaude []string,
 	claudeActive bool,
 	currentCodex connector.WindowsCodexManagedRuntimeRegistry,
 	currentCursor []enterprisehooks.WindowsCursorManagedRuntimeTarget,
 	cursorActive bool,
+	currentCopilot []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
+	copilotActive bool,
 ) error {
 	if claudeActive != (len(identity.ClaudeTargetSIDs) != 0) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs) {
@@ -1402,7 +1472,31 @@ func validateWindowsManagedHooksTeardownEnrollment(
 			return errors.New("Cursor machine enrollment does not match the authenticated activation state")
 		}
 	}
+	if copilotActive != (len(identity.CopilotTargets) != 0) ||
+		len(currentCopilot) != len(identity.CopilotTargets) {
+		return errors.New("Copilot machine enrollment does not match the authenticated activation state")
+	}
+	for index := range identity.CopilotTargets {
+		if !strings.EqualFold(currentCopilot[index].SID, identity.CopilotTargets[index].SID) ||
+			!sameWindowsEnterprisePathCLI(currentCopilot[index].DataDir, identity.CopilotTargets[index].DataDir) {
+			return errors.New("Copilot machine enrollment does not match the authenticated activation state")
+		}
+	}
 	return nil
+}
+
+func validateWindowsManagedHooksTeardownEnrollment(
+	identity windowsManagedHooksTeardownJournal,
+	currentClaude []string,
+	claudeActive bool,
+	currentCodex connector.WindowsCodexManagedRuntimeRegistry,
+	currentCursor []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	cursorActive bool,
+) error {
+	return validateWindowsManagedHooksTeardownEnrollmentWithCopilot(
+		identity, currentClaude, claudeActive, currentCodex, currentCursor, cursorActive,
+		[]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, false,
+	)
 }
 
 func validateWindowsManagedHooksTeardownActivation(
@@ -1472,22 +1566,25 @@ func validateWindowsManagedHooksTeardownDeployment(
 	)
 }
 
-func windowsManagedHooksTeardownExpectedEnrollment(
+func windowsManagedHooksTeardownExpectedEnrollmentWithCopilot(
 	activationState string,
 	claudeTargets []string,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	copilotTargets []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
 ) (
 	[]string,
 	bool,
 	[]connector.WindowsCodexManagedRuntimeTarget,
 	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	[]enterprisehooks.WindowsCopilotManagedRuntimeTarget,
 ) {
 	codexPolicyActive := len(codexTargets) != 0
 	if activationState == windowsManagedHooksNeverActivated {
 		return []string{}, codexPolicyActive,
 			[]connector.WindowsCodexManagedRuntimeTarget{},
-			[]enterprisehooks.WindowsCursorManagedRuntimeTarget{}
+			[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+			[]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}
 	}
 	// append([]T(nil), src...) returns nil when src has length zero, which
 	// then marshals as JSON `null` and used to trip the reader's presence
@@ -1504,7 +1601,28 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
 		cursorTargets...,
 	)
-	return claudeCopy, codexPolicyActive, codexCopy, cursorCopy
+	copilotCopy := append(
+		[]enterprisehooks.WindowsCopilotManagedRuntimeTarget{},
+		copilotTargets...,
+	)
+	return claudeCopy, codexPolicyActive, codexCopy, cursorCopy, copilotCopy
+}
+
+func windowsManagedHooksTeardownExpectedEnrollment(
+	activationState string,
+	claudeTargets []string,
+	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
+	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+) (
+	[]string,
+	bool,
+	[]connector.WindowsCodexManagedRuntimeTarget,
+	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
+) {
+	claude, codexActive, codex, cursor, _ := windowsManagedHooksTeardownExpectedEnrollmentWithCopilot(
+		activationState, claudeTargets, codexTargets, cursorTargets, nil,
+	)
+	return claude, codexActive, codex, cursor
 }
 
 func equalWindowsManagedHooksCodexTargets(
@@ -1537,30 +1655,47 @@ func equalWindowsManagedHooksCursorTargets(
 	return true
 }
 
-func windowsManagedHooksTeardownTargets(
+func equalWindowsManagedHooksCopilotTargets(
+	left, right []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !strings.EqualFold(left[index].SID, right[index].SID) ||
+			!sameWindowsEnterprisePathCLI(left[index].DataDir, right[index].DataDir) {
+			return false
+		}
+	}
+	return true
+}
+
+func windowsManagedHooksTeardownTargetsWithCopilot(
 	manifest enterprisehooks.Manifest,
 ) (
 	[]windowsManagedHooksTeardownTarget,
 	[]string,
 	[]connector.WindowsCodexManagedRuntimeTarget,
 	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	[]enterprisehooks.WindowsCopilotManagedRuntimeTarget,
 	error,
 ) {
 	targets := make([]windowsManagedHooksTeardownTarget, 0, len(manifest.Targets))
 	claude := make([]string, 0, len(manifest.Targets))
 	codex := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(manifest.Targets))
 	cursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(manifest.Targets))
+	copilot := make([]enterprisehooks.WindowsCopilotManagedRuntimeTarget, 0, len(manifest.Targets))
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
 		sid, err := windows.StringToSid(strings.TrimSpace(target.SID))
 		if err != nil || sid == nil {
-			return nil, nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
+			return nil, nil, nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
 		}
 		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" {
-			return nil, nil, nil, nil, fmt.Errorf(
+		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" && connectorName != "copilot" {
+			return nil, nil, nil, nil, nil, fmt.Errorf(
 				"managed-hook teardown does not support connector %q",
 				target.Connector,
 			)
@@ -1569,11 +1704,11 @@ func windowsManagedHooksTeardownTargets(
 		if configured := strings.TrimSpace(target.DataDir); configured != "" {
 			configured, err = filepath.Abs(configured)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			configured = filepath.Clean(configured)
 			if !sameWindowsEnterprisePathCLI(configured, dataDir) {
-				return nil, nil, nil, nil, fmt.Errorf(
+				return nil, nil, nil, nil, nil, fmt.Errorf(
 					"managed-hook teardown target %s data_dir does not equal canonical %s",
 					sid,
 					dataDir,
@@ -1600,6 +1735,10 @@ func windowsManagedHooksTeardownTargets(
 			cursor = append(cursor, enterprisehooks.WindowsCursorManagedRuntimeTarget{
 				SID: row.SID, DataDir: row.DataDir,
 			})
+		case "copilot":
+			copilot = append(copilot, enterprisehooks.WindowsCopilotManagedRuntimeTarget{
+				SID: row.SID, DataDir: row.DataDir,
+			})
 		}
 	}
 	sort.Slice(targets, func(i, j int) bool {
@@ -1611,7 +1750,21 @@ func windowsManagedHooksTeardownTargets(
 	sort.Strings(claude)
 	sort.Slice(codex, func(i, j int) bool { return codex[i].SID < codex[j].SID })
 	sort.Slice(cursor, func(i, j int) bool { return cursor[i].SID < cursor[j].SID })
-	return targets, claude, codex, cursor, nil
+	sort.Slice(copilot, func(i, j int) bool { return copilot[i].SID < copilot[j].SID })
+	return targets, claude, codex, cursor, copilot, nil
+}
+
+func windowsManagedHooksTeardownTargets(
+	manifest enterprisehooks.Manifest,
+) (
+	[]windowsManagedHooksTeardownTarget,
+	[]string,
+	[]connector.WindowsCodexManagedRuntimeTarget,
+	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	error,
+) {
+	targets, claude, codex, cursor, _, err := windowsManagedHooksTeardownTargetsWithCopilot(manifest)
+	return targets, claude, codex, cursor, err
 }
 
 func windowsManagedHooksTeardownFingerprint(
@@ -1642,7 +1795,8 @@ func validateWindowsManagedHooksTeardownJournal(
 		len(journal.PendingTargets) != len(identity.PendingTargets) ||
 		len(journal.ClaudeTargetSIDs) != len(identity.ClaudeTargetSIDs) ||
 		len(journal.CodexTargets) != len(identity.CodexTargets) ||
-		len(journal.CursorTargets) != len(identity.CursorTargets) {
+		len(journal.CursorTargets) != len(identity.CursorTargets) ||
+		len(journal.CopilotTargets) != len(identity.CopilotTargets) {
 		return errors.New("managed-hook teardown journal does not match the protected deployment")
 	}
 	if !validEnterpriseHookHex(journal.ManifestSHA256, sha256.Size) ||
@@ -1681,6 +1835,11 @@ func validateWindowsManagedHooksTeardownJournal(
 	for index := range identity.CursorTargets {
 		if journal.CursorTargets[index] != identity.CursorTargets[index] {
 			return errors.New("managed-hook teardown journal Cursor target set changed")
+		}
+	}
+	for index := range identity.CopilotTargets {
+		if journal.CopilotTargets[index] != identity.CopilotTargets[index] {
+			return errors.New("managed-hook teardown journal Copilot target set changed")
 		}
 	}
 	if len(journal.SelectorTargets) != len(identity.Targets) {
@@ -1774,6 +1933,27 @@ func validateWindowsManagedHooksTeardownJournal(
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
 		(cursorSnapshotActive != (len(journal.CursorTargets) != 0)) {
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
+	}
+	allowedCopilotTargets := make([]enterprisehooks.WindowsCopilotManagedRuntimeTarget, 0, len(identity.Targets))
+	for _, target := range identity.Targets {
+		if target.Connector == "copilot" {
+			allowedCopilotTargets = append(allowedCopilotTargets, enterprisehooks.WindowsCopilotManagedRuntimeTarget{
+				SID: target.SID, DataDir: target.DataDir,
+			})
+		}
+	}
+	if journal.ActivationState == windowsManagedHooksActivated &&
+		!equalWindowsManagedHooksCopilotTargets(allowedCopilotTargets, identity.CopilotTargets) {
+		return errors.New("activated teardown journal does not contain the exact Copilot manifest enrollment")
+	} else if journal.ActivationState == windowsManagedHooksNeverActivated &&
+		len(identity.CopilotTargets) != 0 {
+		return errors.New("never-activated teardown journal contains a Copilot enrollment")
+	}
+	if journal.Copilot.PolicyExisted != journal.Copilot.StateExisted ||
+		len(journal.Copilot.Policy) > windowsManagedHooksTeardownJournalMax ||
+		len(journal.Copilot.State) > windowsManagedHooksTeardownJournalMax ||
+		(journal.Copilot.PolicyExisted != (len(journal.CopilotTargets) != 0)) {
+		return errors.New("managed-hook teardown journal contains an invalid Copilot snapshot")
 	}
 	return nil
 }

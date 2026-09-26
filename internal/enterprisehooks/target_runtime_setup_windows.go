@@ -434,7 +434,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 		}
 		name := strings.ToLower(strings.TrimSpace(row.Connector))
 		switch name {
-		case "codex", "cursor", "claudecode":
+		case "codex", "cursor", "claudecode", "copilot":
 			spec.hookFiles[".hookcfg."+name] = windowsManagedRuntimeCleanupCanonicalFile
 			spec.hookFiles[".hook-"+name+".token"] = windowsManagedRuntimeCleanupCanonicalFile
 			spec.generationConnectors[name] = struct{}{}
@@ -1397,8 +1397,8 @@ func validateWindowsManagedRuntimeLeaf(value string) error {
 		"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
 		"hook_contract_lock.json", "hook_contract_lock.json.lock",
 		".token", ".hookcfg", ".hookcfg.lock",
-		".hookcfg.codex", ".hookcfg.claudecode", ".hookcfg.cursor",
-		".hook-codex.token", ".hook-claudecode.token", ".hook-cursor.token",
+		".hookcfg.codex", ".hookcfg.claudecode", ".hookcfg.cursor", ".hookcfg.copilot",
+		".hook-codex.token", ".hook-claudecode.token", ".hook-cursor.token", ".hook-copilot.token",
 		"_hardening.sh", "inspect-tool.sh", "inspect-request.sh",
 		"inspect-response.sh", "inspect-tool-response.sh", "claude-code-hook.sh",
 	} {

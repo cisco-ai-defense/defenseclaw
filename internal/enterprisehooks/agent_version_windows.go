@@ -74,6 +74,15 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 		return ""
 	}
 	cleanHome := filepath.Clean(profileHome)
+	// A native WinGet Copilot candidate is authoritative. The bootstrap
+	// installer authenticates its exact path, Authenticode signer, and PE
+	// metadata before it publishes targets.yaml. The long-running enumerator
+	// deliberately does not weaken that proof to mutable npm metadata: a new
+	// native candidate remains disabled until an administrator Repair refreshes
+	// the authenticated manifest.
+	if connectorName == "copilot" && windowsCopilotNativeCandidateObserved(cleanHome) {
+		return ""
+	}
 
 	candidates := windowsAgentVersionCandidatePaths(cleanHome, connectorName)
 	for _, candidate := range candidates {
@@ -83,6 +92,22 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 		}
 	}
 	return ""
+}
+
+func windowsCopilotNativeCandidatePaths(profileHome string) (string, string) {
+	root := filepath.Join(profileHome, "AppData", "Local", "Microsoft", "WinGet", "Packages")
+	directory := filepath.Join(root, "GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe")
+	return directory, filepath.Join(directory, "copilot.exe")
+}
+
+func windowsCopilotNativeCandidateObserved(profileHome string) bool {
+	directory, executable := windowsCopilotNativeCandidatePaths(profileHome)
+	for _, path := range []string{directory, executable} {
+		if _, err := os.Lstat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsMachineScopedCursorPackageJSON points at Cursor's per-machine
@@ -157,6 +182,12 @@ func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []stri
 		return []string{
 			filepath.Join(appDataLocal, "Programs", "cursor", "resources", "app", "package.json"),
 			windowsMachineScopedCursorPackageJSON,
+		}
+	case "copilot":
+		return []string{
+			filepath.Join(appDataRoaming, "npm", "node_modules", "@github", "copilot", "package.json"),
+			filepath.Join(bunGlobal, "@github", "copilot", "package.json"),
+			filepath.Join(yarnGlobal, "@github", "copilot", "package.json"),
 		}
 	default:
 		return nil
@@ -263,6 +294,9 @@ func windowsAgentVersionExplain(profileHome, connectorName string) (string, stri
 	}
 	if !filepath.IsAbs(profileHome) {
 		return "", "profile home is not absolute"
+	}
+	if connectorName == "copilot" && windowsCopilotNativeCandidateObserved(filepath.Clean(profileHome)) {
+		return "", "native Copilot candidate requires authenticated installer discovery"
 	}
 	candidates := windowsAgentVersionCandidatePaths(filepath.Clean(profileHome), connectorName)
 	if len(candidates) == 0 {

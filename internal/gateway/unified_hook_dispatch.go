@@ -17,10 +17,13 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // handleUnifiedConnectorHook is the single entry point that every
@@ -80,6 +83,14 @@ func sharedDefaultRegistry() *connector.Registry {
 // profile fields (Capabilities, NativeOTLP, MapVerdict, etc.) without
 // a nil-check ladder.
 func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
+	return a.hookProfileForConnectorOptions(name, connector.SetupOpts{
+		DataDir:      a.configDataDir(),
+		APIAddr:      a.apiAddrForCapabilities(),
+		WorkspaceDir: a.connectorWorkspaceDir(),
+	})
+}
+
+func (a *APIServer) hookProfileForConnectorOptions(name string, opts connector.SetupOpts) connector.HookProfile {
 	reg := a.connectorRegistry
 	if reg == nil {
 		reg = sharedDefaultRegistry()
@@ -92,17 +103,53 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	if !ok {
 		return connector.HookProfile{Name: name}
 	}
-	agentVersion := connector.LoadCachedAgentVersion(a.configDataDir(), name)
-	lock := connector.LoadHookContractLockEntry(a.configDataDir(), name)
-	contractID := lock.ContractID
-	if contractID == "" {
-		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
+	if opts.AgentVersion == "" {
+		opts.AgentVersion = connector.LoadCachedAgentVersion(a.configDataDir(), name)
 	}
-	return provider.HookProfile(connector.SetupOpts{
-		DataDir:        a.configDataDir(),
-		APIAddr:        a.apiAddrForCapabilities(),
-		WorkspaceDir:   a.connectorWorkspaceDir(),
-		AgentVersion:   agentVersion,
-		HookContractID: contractID,
+	if opts.HookContractID == "" {
+		lock := connector.LoadHookContractLockEntry(a.configDataDir(), name)
+		opts.HookContractID = lock.ContractID
+		if opts.HookContractID == "" {
+			opts.HookContractID = connector.ResolveHookContract(name, opts.AgentVersion).Contract.ContractID
+		}
+	}
+	return provider.HookProfile(opts)
+}
+
+// hookProfileForRequest selects Copilot's managed v2 profile only when both
+// the gateway's trusted deployment configuration and the policy-bound request
+// metadata agree. No JSON field can opt a request into the privileged profile.
+func (a *APIServer) hookProfileForRequest(name string, r *http.Request) (connector.HookProfile, string, error) {
+	base := a.hookProfileForConnector(name)
+	if !strings.EqualFold(strings.TrimSpace(name), "copilot") {
+		return base, "", nil
+	}
+	event := strings.TrimSpace(r.Header.Get(connector.CopilotEnterpriseHookEventHeader))
+	contractID := strings.TrimSpace(r.Header.Get(connector.CopilotEnterpriseHookContractHeader))
+	managedHeader := strings.TrimSpace(r.Header.Get(connector.CopilotEnterpriseManagedHeader))
+	if event == "" && contractID == "" && managedHeader == "" {
+		return base, "", nil
+	}
+	if a == nil || a.scannerCfg == nil || !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
+		return base, "", fmt.Errorf("managed Copilot binding is not permitted outside managed enterprise deployment")
+	}
+	if managedHeader != "true" || contractID != connector.CopilotEnterpriseHookContractID || !connector.IsCopilotEnterpriseHookEvent(event) {
+		return base, "", fmt.Errorf("managed Copilot event/contract binding is invalid")
+	}
+	profile := connector.NewCopilotEnterpriseConnector().HookProfile(connector.SetupOpts{
+		DataDir:           a.configDataDir(),
+		APIAddr:           a.apiAddrForCapabilities(),
+		WorkspaceDir:      a.connectorWorkspaceDir(),
+		ManagedEnterprise: true,
+		// Version eligibility is authenticated during target enrollment. The
+		// LocalSystem gateway intentionally has no access to the user's package
+		// metadata or contract lock, so the trusted machine-policy binding selects
+		// the already-reviewed v2 profile at its contract floor.
+		AgentVersion:   connector.CopilotEnterpriseMinVersion,
+		HookContractID: connector.CopilotEnterpriseHookContractID,
 	})
+	if profile.CompatibilityStatus != connector.HookCompatibilityKnown || profile.ContractID != connector.CopilotEnterpriseHookContractID {
+		return base, "", fmt.Errorf("managed Copilot v2 profile is unavailable")
+	}
+	return profile, event, nil
 }

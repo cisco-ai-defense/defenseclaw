@@ -92,6 +92,35 @@ func TestDiscoverWindowsAgentVersionCursor(t *testing.T) {
 	}
 }
 
+func TestDiscoverWindowsAgentVersionCopilotNPM(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@github", "copilot")
+	writeWindowsAgentPackageJSON(t, dir, "1.0.88")
+	if got := discoverWindowsAgentVersion(home, "copilot"); got != "1.0.88" {
+		t.Fatalf("Copilot npm discovery: got %q, want 1.0.88", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionCopilotNativeCandidateDoesNotFallBack(t *testing.T) {
+	home := t.TempDir()
+	npmDir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@github", "copilot")
+	writeWindowsAgentPackageJSON(t, npmDir, "1.0.88")
+	_, executable := windowsCopilotNativeCandidatePaths(home)
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("untrusted native candidate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := discoverWindowsAgentVersion(home, "copilot"); got != "" {
+		t.Fatalf("native Copilot candidate fell back to npm version %q", got)
+	}
+	if version, reason := windowsAgentVersionExplain(home, "copilot"); version != "" ||
+		!strings.Contains(reason, "authenticated installer discovery") {
+		t.Fatalf("Copilot native diagnostic=%q/%q", version, reason)
+	}
+}
+
 // TestDiscoverWindowsAgentVersionClaudeCodeBunGlobal covers the
 // `bun install -g @anthropic-ai/claude-code` install flavour — the
 // probe now walks `%USERPROFILE%\.bun\install\global\node_modules\...`

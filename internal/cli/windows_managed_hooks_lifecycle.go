@@ -40,20 +40,22 @@ const (
 )
 
 type windowsManagedHooksLifecycleJournal struct {
-	SchemaVersion         int                                                        `json:"schema_version"`
-	TransactionID         string                                                     `json:"transaction_id,omitempty"`
-	Phase                 string                                                     `json:"phase"`
-	ManifestPath          string                                                     `json:"manifest_path"`
-	ManifestFingerprint   string                                                     `json:"manifest_fingerprint"`
-	HookBinary            string                                                     `json:"hook_binary"`
-	GatewayAddr           string                                                     `json:"gateway_addr"`
-	GatewayServiceName    string                                                     `json:"gateway_service_name"`
-	Targets               []windowsManagedHooksTeardownTarget                        `json:"targets"`
-	PriorClaudeTargetSIDs []string                                                   `json:"prior_claude_target_sids"`
-	Claude                enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
-	PriorCursorTargets    []enterprisehooks.WindowsCursorManagedRuntimeTarget        `json:"prior_cursor_targets"`
-	Cursor                enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot `json:"cursor"`
-	RuntimeSelectors      []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot    `json:"runtime_selectors"`
+	SchemaVersion         int                                                         `json:"schema_version"`
+	TransactionID         string                                                      `json:"transaction_id,omitempty"`
+	Phase                 string                                                      `json:"phase"`
+	ManifestPath          string                                                      `json:"manifest_path"`
+	ManifestFingerprint   string                                                      `json:"manifest_fingerprint"`
+	HookBinary            string                                                      `json:"hook_binary"`
+	GatewayAddr           string                                                      `json:"gateway_addr"`
+	GatewayServiceName    string                                                      `json:"gateway_service_name"`
+	Targets               []windowsManagedHooksTeardownTarget                         `json:"targets"`
+	PriorClaudeTargetSIDs []string                                                    `json:"prior_claude_target_sids"`
+	Claude                enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot  `json:"claude"`
+	PriorCursorTargets    []enterprisehooks.WindowsCursorManagedRuntimeTarget         `json:"prior_cursor_targets"`
+	Cursor                enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot  `json:"cursor"`
+	PriorCopilotTargets   []enterprisehooks.WindowsCopilotManagedRuntimeTarget        `json:"prior_copilot_targets"`
+	Copilot               enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot `json:"copilot"`
+	RuntimeSelectors      []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot     `json:"runtime_selectors"`
 }
 
 type windowsManagedHooksLifecycleReport struct {
@@ -81,6 +83,7 @@ type windowsManagedHooksLifecycleContext struct {
 	targets          []windowsManagedHooksTeardownTarget
 	claudeTargets    []string
 	cursorTargets    []enterprisehooks.WindowsCursorManagedRuntimeTarget
+	copilotTargets   []enterprisehooks.WindowsCopilotManagedRuntimeTarget
 	fingerprint      string
 }
 
@@ -135,6 +138,11 @@ type windowsManagedHooksLifecycleFileRenameInfo struct {
 type windowsManagedHooksClaudeLifecycleCapture struct {
 	opts     enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
 	snapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
+}
+
+type windowsManagedHooksCopilotLifecycleCapture struct {
+	opts     enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions
+	snapshot enterprisehooks.WindowsCopilotManagedPolicyTeardownSnapshot
 }
 
 func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
@@ -316,6 +324,24 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
+		currentCopilot, copilotActive, err := enterprisehooks.ReadWindowsCopilotManagedPolicyTargets()
+		if err != nil {
+			return fail(err)
+		}
+		priorCopilot, err := windowsManagedHooksPartialCopilotTargets(
+			ctx.copilotTargets,
+			currentCopilot,
+			copilotActive,
+		)
+		if err != nil {
+			return fail(err)
+		}
+		copilotSnapshot, err := enterprisehooks.CaptureWindowsCopilotManagedPolicySnapshot(
+			windowsManagedHooksCopilotOptions(ctx.opts, priorCopilot),
+		)
+		if err != nil {
+			return fail(err)
+		}
 		runtimeSelectors, err := captureWindowsManagedHooksLifecycleSelectors()
 		if err != nil {
 			return fail(err)
@@ -326,6 +352,8 @@ func runWindowsManagedHooksLifecycle(
 		journal.Claude = snapshot
 		journal.PriorCursorTargets = priorCursor
 		journal.Cursor = cursorSnapshot
+		journal.PriorCopilotTargets = priorCopilot
+		journal.Copilot = copilotSnapshot
 		journal.RuntimeSelectors = runtimeSelectors
 		if err := writeWindowsManagedHooksLifecycleJournal(ctx.journalPath, journal); err != nil {
 			return fail(err)
@@ -364,6 +392,20 @@ func runWindowsManagedHooksLifecycle(
 			)
 			return fail(errors.Join(err, selectorErr))
 		}
+		currentCopilot, err := captureWindowsManagedHooksLifecycleCopilot(ctx, journal)
+		if err != nil {
+			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(currentSelectors, journal.RuntimeSelectors)
+			return fail(errors.Join(err, selectorErr))
+		}
+		priorCopilotOpts := windowsManagedHooksPriorCopilotOptions(journal)
+		if err := enterprisehooks.RestoreWindowsCopilotManagedPolicySnapshot(
+			priorCopilotOpts,
+			currentCopilot.opts,
+			journal.Copilot,
+		); err != nil {
+			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(currentSelectors, journal.RuntimeSelectors)
+			return fail(errors.Join(err, selectorErr))
+		}
 		if err := restoreWindowsManagedHooksLifecycleComposite(
 			func() error {
 				return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
@@ -387,11 +429,16 @@ func runWindowsManagedHooksLifecycle(
 				)
 			},
 		); err != nil {
+			copilotErr := enterprisehooks.RestoreWindowsCopilotManagedPolicySnapshot(
+				currentCopilot.opts,
+				priorCopilotOpts,
+				currentCopilot.snapshot,
+			)
 			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(
 				currentSelectors,
 				journal.RuntimeSelectors,
 			)
-			return fail(errors.Join(err, selectorErr))
+			return fail(errors.Join(err, copilotErr, selectorErr))
 		}
 		journal.Phase = "restored"
 		if err := writeWindowsManagedHooksLifecycleJournal(ctx.journalPath, journal); err != nil {
@@ -523,7 +570,7 @@ func resolveWindowsManagedHooksLifecycleContext() (
 	if err != nil {
 		return ctx, err
 	}
-	targets, claudeTargets, _, cursorTargets, err := windowsManagedHooksTeardownTargets(manifest)
+	targets, claudeTargets, _, cursorTargets, copilotTargets, err := windowsManagedHooksTeardownTargetsWithCopilot(manifest)
 	if err != nil {
 		return ctx, err
 	}
@@ -545,6 +592,7 @@ func resolveWindowsManagedHooksLifecycleContext() (
 		targets:          targets,
 		claudeTargets:    claudeTargets,
 		cursorTargets:    cursorTargets,
+		copilotTargets:   copilotTargets,
 		fingerprint:      fingerprint,
 	}
 	return ctx, nil
@@ -931,6 +979,15 @@ func classifyLegacyWindowsManagedHooksActivation(
 			"legacy deployment has no Guardian activation but Cursor enrollment is not the exact preactivation form",
 		)
 	}
+	copilotTargets, copilotActive, err := enterprisehooks.ReadWindowsCopilotManagedPolicyTargets()
+	if err != nil {
+		return "", err
+	}
+	if copilotActive || len(copilotTargets) != 0 {
+		return "", errors.New(
+			"legacy deployment has no Guardian activation but Copilot enrollment is not the exact preactivation form",
+		)
+	}
 	selectorPaths, err := windowsManagedHooksLifecycleSelectorPaths(ctx)
 	if err != nil {
 		return "", err
@@ -1005,6 +1062,13 @@ func windowsManagedHooksLifecycleSelectorPaths(
 		"cursor": filepath.Join(
 			programData,
 			"Cursor",
+			windowsManagedHooksLifecycleSelectorLeaf,
+		),
+		"copilot": filepath.Join(
+			programData,
+			"GitHub",
+			"Copilot",
+			"policy.d",
 			windowsManagedHooksLifecycleSelectorLeaf,
 		),
 	}
@@ -1729,6 +1793,7 @@ var windowsManagedHooksLifecycleSelectorConnectors = [...]string{
 	"claudecode",
 	"codex",
 	"cursor",
+	"copilot",
 }
 
 // absentWindowsManagedHooksLifecycleSelectorSnapshots returns the canonical
@@ -2040,6 +2105,66 @@ func windowsManagedHooksPriorCursorOptions(
 	}
 }
 
+func windowsManagedHooksCopilotOptions(
+	opts connector.WindowsCodexMachineRequirementsOptions,
+	targets []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
+) enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions {
+	return enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions{
+		HookExecutable:     opts.HookBinary,
+		GatewayAddr:        opts.GatewayAddr,
+		GatewayServiceName: opts.GatewayServiceName,
+		Targets:            append([]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, targets...),
+	}
+}
+
+func windowsManagedHooksPriorCopilotOptions(
+	journal windowsManagedHooksLifecycleJournal,
+) enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions {
+	return enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions{
+		HookExecutable:     journal.HookBinary,
+		GatewayAddr:        journal.GatewayAddr,
+		GatewayServiceName: journal.GatewayServiceName,
+		Targets:            append([]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, journal.PriorCopilotTargets...),
+	}
+}
+
+func captureWindowsManagedHooksLifecycleCopilot(
+	ctx windowsManagedHooksLifecycleContext,
+	journal windowsManagedHooksLifecycleJournal,
+) (windowsManagedHooksCopilotLifecycleCapture, error) {
+	var result windowsManagedHooksCopilotLifecycleCapture
+	current, active, err := enterprisehooks.ReadWindowsCopilotManagedPolicyTargets()
+	if err != nil {
+		return result, err
+	}
+	type candidate struct {
+		opts    enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions
+		allowed []enterprisehooks.WindowsCopilotManagedRuntimeTarget
+	}
+	candidates := []candidate{
+		{opts: enterprisehooks.WindowsCopilotManagedPolicyTeardownOptions{
+			HookExecutable: journal.HookBinary, GatewayAddr: journal.GatewayAddr,
+			GatewayServiceName: journal.GatewayServiceName, Targets: append([]enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, current...),
+		}, allowed: journal.PriorCopilotTargets},
+		{opts: windowsManagedHooksCopilotOptions(ctx.opts, current), allowed: ctx.copilotTargets},
+	}
+	var failures []error
+	for _, candidate := range candidates {
+		if _, err := windowsManagedHooksPartialCopilotTargets(candidate.allowed, current, active); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		snapshot, err := enterprisehooks.CaptureWindowsCopilotManagedPolicySnapshot(candidate.opts)
+		if err == nil {
+			result.opts = candidate.opts
+			result.snapshot = snapshot
+			return result, nil
+		}
+		failures = append(failures, err)
+	}
+	return result, fmt.Errorf("capture current Copilot lifecycle policy: %w", errors.Join(failures...))
+}
+
 func windowsManagedHooksPartialClaudeTargets(
 	manifestTargets []string,
 	currentTargets []string,
@@ -2109,6 +2234,40 @@ func windowsManagedHooksPartialCursorTargets(
 		prior = append(prior, target)
 	}
 	return prior, nil
+}
+
+func windowsManagedHooksPartialCopilotTargets(
+	manifestTargets []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
+	currentTargets []enterprisehooks.WindowsCopilotManagedRuntimeTarget,
+	active bool,
+) ([]enterprisehooks.WindowsCopilotManagedRuntimeTarget, error) {
+	if !active {
+		if len(currentTargets) != 0 {
+			return nil, errors.New("inactive Copilot machine enrollment reported targets")
+		}
+		return []enterprisehooks.WindowsCopilotManagedRuntimeTarget{}, nil
+	}
+	if len(currentTargets) == 0 || !sort.SliceIsSorted(currentTargets, func(i, j int) bool {
+		return strings.ToUpper(currentTargets[i].SID) < strings.ToUpper(currentTargets[j].SID)
+	}) {
+		return nil, errors.New("active Copilot machine enrollment has a noncanonical target set")
+	}
+	allowed := make(map[string]string, len(manifestTargets))
+	for _, target := range manifestTargets {
+		allowed[strings.ToUpper(target.SID)] = target.DataDir
+	}
+	result := make([]enterprisehooks.WindowsCopilotManagedRuntimeTarget, 0, len(currentTargets))
+	for index, target := range currentTargets {
+		if index > 0 && strings.EqualFold(currentTargets[index-1].SID, target.SID) {
+			return nil, errors.New("active Copilot machine enrollment contains a duplicate target SID")
+		}
+		dataDir, ok := allowed[strings.ToUpper(target.SID)]
+		if !ok || !sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+			return nil, fmt.Errorf("Copilot machine enrollment contains target %s outside the protected lifecycle manifest", target.SID)
+		}
+		result = append(result, target)
+	}
+	return result, nil
 }
 
 func validateWindowsManagedHooksLifecycleJournal(
@@ -2182,6 +2341,27 @@ func validateWindowsManagedHooksLifecycleJournal(
 		(cursorActive != (len(journal.PriorCursorTargets) != 0)) {
 		return errors.New("managed-hook lifecycle journal contains an invalid Cursor snapshot")
 	}
+	priorAllowedCopilotTargets := make([]enterprisehooks.WindowsCopilotManagedRuntimeTarget, 0, len(journal.Targets))
+	for _, target := range journal.Targets {
+		if target.Connector == "copilot" {
+			priorAllowedCopilotTargets = append(priorAllowedCopilotTargets, enterprisehooks.WindowsCopilotManagedRuntimeTarget{
+				SID: target.SID, DataDir: target.DataDir,
+			})
+		}
+	}
+	if _, err := windowsManagedHooksPartialCopilotTargets(
+		priorAllowedCopilotTargets,
+		journal.PriorCopilotTargets,
+		len(journal.PriorCopilotTargets) != 0,
+	); err != nil {
+		return err
+	}
+	if journal.Copilot.PolicyExisted != journal.Copilot.StateExisted ||
+		len(journal.Copilot.Policy) > windowsManagedHooksLifecycleJournalMax ||
+		len(journal.Copilot.State) > windowsManagedHooksLifecycleJournalMax ||
+		(journal.Copilot.PolicyExisted != (len(journal.PriorCopilotTargets) != 0)) {
+		return errors.New("managed-hook lifecycle journal contains an invalid Copilot snapshot")
+	}
 	if err := validateWindowsManagedHooksLifecycleSelectors(
 		journal.RuntimeSelectors,
 	); err != nil {
@@ -2242,6 +2422,37 @@ func readWindowsManagedHooksLifecycleJournal(
 	}
 	if err := file.Close(); err != nil {
 		return journal, err
+	}
+	// Schema 4 shipped before Copilot and therefore contains exactly the
+	// Claude/Codex/Cursor selector snapshots. A replacement helper must still
+	// be able to recover an interrupted pre-Copilot transaction after upgrade.
+	// Only synthesize the new selector when the journal has no Copilot identity
+	// or rollback material; new Copilot transactions must carry the exact
+	// fourth snapshot themselves.
+	if journal.SchemaVersion == windowsManagedHooksLifecycleSchema &&
+		len(journal.RuntimeSelectors) == len(windowsManagedHooksLifecycleSelectorConnectors)-1 &&
+		len(journal.PriorCopilotTargets) == 0 &&
+		!journal.Copilot.PolicyExisted && !journal.Copilot.StateExisted &&
+		len(journal.Copilot.Policy) == 0 && len(journal.Copilot.State) == 0 {
+		containsCopilotTarget := false
+		for _, target := range journal.Targets {
+			if target.Connector == "copilot" {
+				containsCopilotTarget = true
+				break
+			}
+		}
+		if !containsCopilotTarget {
+			journal.RuntimeSelectors = append(
+				journal.RuntimeSelectors,
+				enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+					SchemaVersion: 1,
+					Connector:     "copilot",
+					CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+						Exists: false,
+					},
+				},
+			)
+		}
 	}
 	return journal, nil
 }

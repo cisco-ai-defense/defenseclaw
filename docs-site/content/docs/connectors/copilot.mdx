@@ -19,8 +19,30 @@ defenseclaw setup copilot --workspace /path/to/repo
 
 <Callout type="warning">
 GitHub Copilot CLI setup is supported on macOS and Linux. The DefenseClaw
-connector is not certified on native Windows x64, so setup rejects it there.
+user-scoped connector is not certified on native Windows x64, so ordinary
+`defenseclaw setup copilot` still rejects it there. Windows
+`managed_enterprise` deployments have a separate administrator-owned path for
+authenticated Copilot CLI 1.0.83 or newer.
 </Callout>
+
+## Windows managed enterprise
+
+The Windows enterprise installer publishes one protected machine policy at
+`C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json`. It invokes the
+installed `defenseclaw-hook.exe` directly for the reviewed 14-event contract;
+it does not use a shell command, user-writable hook file, or embed a gateway
+token in policy.
+
+Enrollment is bound to each user's SID and immutable DefenseClaw runtime
+generation. `preToolUse` can deny before execution. In action mode,
+`userPromptTransformed` and `postToolUse` replace blocked model-facing content
+with a fixed DefenseClaw notice; the original prompt or result is never echoed.
+Those replacements are recorded as `would_block`, not as native enforcement.
+
+Managed Copilot is intentionally fail-open when its local DefenseClaw runtime,
+authentication, gateway, or response is unavailable or malformed. A valid
+security-policy verdict can still deny or rewrite, but an infrastructure fault
+must not accidentally become Copilot's own fail-closed `preToolUse` error.
 
 By default this is **global/user-scoped**: DefenseClaw writes hook entries into `~/.copilot/hooks/defenseclaw.json`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `<workspace>/.github/hooks/defenseclaw.json` wiring. **There is no proxy-enforcement path** for Copilot CLI — blocking happens hook-side via the documented `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop`, and `postToolUseFailure` events. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI for that surface.
 
