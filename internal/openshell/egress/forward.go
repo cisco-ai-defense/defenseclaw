@@ -39,8 +39,10 @@ import (
 // forwardState carries one absolute-form request's decision through the
 // ReverseProxy and Transport callbacks.
 type forwardState struct {
-	p        *Proxy
-	decider  *Decider
+	p *Proxy
+	// gen is the decider that decided the request and the transport it is
+	// sent on.
+	gen      *generation
 	tunnel   *tunnel
 	scheme   string
 	explicit bool // the request URL carried a port
@@ -114,7 +116,8 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d := p.decider.Load()
+	gen := p.gen.Load()
+	d := gen.decider
 	scheme := strings.ToLower(r.URL.Scheme)
 	port, explicit := defaultPort(scheme), r.URL.Port() != ""
 	if explicit {
@@ -158,7 +161,14 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.untrack(t)
 
-	st := &forwardState{p: p, decider: d, tunnel: t, scheme: scheme, explicit: explicit}
+	st := &forwardState{p: p, gen: gen, tunnel: t, scheme: scheme, explicit: explicit}
+	// A request that began before SetDecider hands its upstream connection
+	// back to the retired generation's pool once it is done; close it there.
+	defer func() {
+		if p.gen.Load() != gen {
+			gen.transport.CloseIdleConnections()
+		}
+	}()
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
@@ -235,7 +245,7 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 	if !ok || host != dec.Host || port != dec.Port {
 		return nil, fmt.Errorf("egress: upstream dial to %s does not match the decided destination", sanitizeHost(addr))
 	}
-	conn, remote, err := p.dialer.dial(ctx, host, port, st.decider.block)
+	conn, remote, err := p.dialer.dial(ctx, host, port, st.gen.decider.block)
 	if err != nil {
 		var de *dialError
 		if errors.As(err, &de) {
@@ -245,6 +255,22 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 	}
 	st.setRemote(remote.String())
 	return conn, nil
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// roundTrip sends a forwarded request on the transport of the generation
+// that decided it, so it only ever reuses connections dialed under the same
+// decider.
+func (p *Proxy) roundTrip(r *http.Request) (*http.Response, error) {
+	st := forwardStateOf(r.Context())
+	if st == nil {
+		return nil, errors.New("egress: upstream request without a decided destination")
+	}
+	return st.gen.transport.RoundTrip(r)
 }
 
 func (p *Proxy) forwardResponse(resp *http.Response) error {

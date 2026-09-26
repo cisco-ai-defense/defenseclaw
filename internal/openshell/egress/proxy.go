@@ -118,7 +118,8 @@ type Options struct {
 // Proxy is the sandbox egress proxy. Create it with New, run it with Serve
 // on a loopback listener, and stop it with Shutdown or Close.
 type Proxy struct {
-	decider atomic.Pointer[Decider]
+	// gen is the current decider with its upstream transport.
+	gen     atomic.Pointer[generation]
 	auth    Authenticator
 	sink    EventSink
 	counter *Counter
@@ -128,8 +129,9 @@ type Proxy struct {
 	// helloTimeout bounds reading a tunnel's ClientHello.
 	helloTimeout time.Duration
 
-	srv       *http.Server
-	transport *http.Transport
+	srv *http.Server
+	// upstream is the template each generation's transport is cloned from.
+	upstream  *http.Transport
 	forwarder *httputil.ReverseProxy
 	limits    *bindingLimits
 	sem       chan struct{}
@@ -207,10 +209,9 @@ func New(opts Options) (*Proxy, error) {
 		sem:          make(chan struct{}, opts.MaxConns),
 		tunnels:      map[*tunnel]struct{}{},
 	}
-	p.decider.Store(opts.Decider)
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
-	p.transport = &http.Transport{
+	p.upstream = &http.Transport{
 		Proxy:                  nil, // never chain to the daemon's own proxy environment
 		DialContext:            p.transportDial,
 		TLSClientConfig:        upstreamTLS,
@@ -223,9 +224,10 @@ func New(opts Options) (*Proxy, error) {
 		MaxResponseHeaderBytes: 1 << 20,
 		DisableCompression:     true, // relay bytes as sent; never add or strip encodings
 	}
+	p.gen.Store(p.newGeneration(opts.Decider))
 	p.forwarder = &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
-		Transport:      p.transport,
+		Transport:      roundTripperFunc(p.roundTrip),
 		FlushInterval:  -1,
 		ErrorLog:       opts.ErrorLog,
 		ErrorHandler:   p.forwardError,
@@ -245,16 +247,32 @@ func New(opts Options) (*Proxy, error) {
 	return p, nil
 }
 
+// generation pairs a decider with the upstream transport whose pooled
+// connections were dialed under it, so a connection that passed an older
+// decider's dial-time checks never carries a request a newer one decided.
+type generation struct {
+	decider   *Decider
+	transport *http.Transport
+}
+
+func (p *Proxy) newGeneration(d *Decider) *generation {
+	return &generation{decider: d, transport: p.upstream.Clone()}
+}
+
 // Decider returns the current decider.
-func (p *Proxy) Decider() *Decider { return p.decider.Load() }
+func (p *Proxy) Decider() *Decider { return p.gen.Load().decider }
 
 // SetDecider swaps the decider used for new tunnels and requests, for
-// example after a configuration reload. Open tunnels keep their decision.
+// example after a configuration reload. Open tunnels and in-flight requests
+// keep their decision. Upstream connections pooled under the old decider are
+// closed and never reused, so its successor's dial-time checks (CIDR blocks
+// on the resolved address) apply to every later request.
 func (p *Proxy) SetDecider(d *Decider) error {
 	if d == nil {
 		return errors.New("egress: nil decider")
 	}
-	p.decider.Store(d)
+	old := p.gen.Swap(p.newGeneration(d))
+	old.transport.CloseIdleConnections()
 	return nil
 }
 
@@ -313,7 +331,7 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 		}
 	}
 	p.cancel()
-	p.transport.CloseIdleConnections()
+	p.gen.Load().transport.CloseIdleConnections()
 	return err
 }
 
@@ -325,7 +343,7 @@ func (p *Proxy) Close() error {
 	p.cancel()
 	err := p.srv.Close()
 	p.closeTunnels()
-	p.transport.CloseIdleConnections()
+	p.gen.Load().transport.CloseIdleConnections()
 	return err
 }
 
@@ -554,7 +572,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 			http.Header{"Proxy-Authenticate": {proxyAuthenticate}}, authRequiredResponse())
 		return
 	}
-	d := p.decider.Load()
+	d := p.gen.Load().decider
 	var dec Decision
 	if host, port, err := splitAuthority(target); err != nil {
 		dec = d.Decide(pr, target, 0)

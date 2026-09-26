@@ -1103,3 +1103,60 @@ func TestProxyForwardCountsConnectedRequestsOnly(t *testing.T) {
 		return len(s) == 2 && s[0].Host == "example.com" && s[0].Tunnels == 1 && s[0].Active == 0
 	})
 }
+
+// SetDecider must not let upstream connections pooled under the old decider
+// carry requests the new one refuses at dial time (here a CIDR block on the
+// resolved address), including connections that in-flight requests hand
+// back to the pool after the swap.
+func TestProxySetDeciderRetiresPooledUpstreams(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			entered <- struct{}{}
+			<-release
+		}
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	h := newHarness(t, nil)
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	a, b := h.clientFor(h.cred, nil), h.clientFor(h.cred, nil)
+
+	if status, err := getStatus(a, "http://example.com/"); err != nil || status != http.StatusOK {
+		t.Fatalf("warm-up = %d, %v", status, err)
+	}
+	slow := make(chan error, 1)
+	go func() {
+		status, err := getStatus(b, "http://example.com/slow")
+		if err == nil && status != http.StatusOK {
+			err = fmt.Errorf("status %d", status)
+		}
+		slow <- err
+	}()
+	<-entered // the in-flight request holds the pooled connection
+	if status, err := getStatus(a, "http://example.com/"); err != nil || status != http.StatusOK {
+		t.Fatalf("second connection = %d, %v", status, err)
+	}
+
+	d := mustDecider(t, DeciderOptions{Block: []string{publicV4 + "/32"}})
+	d.local = h.local
+	if err := h.proxy.SetDecider(d); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	if err := <-slow; err != nil {
+		t.Fatalf("in-flight request across SetDecider: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if status, err := getStatus(a, "http://example.com/"); err != nil || status != http.StatusForbidden {
+			t.Fatalf("request %d after SetDecider = %d, %v; want 403 (a pooled connection skipped the new CIDR block)", i, status, err)
+		}
+	}
+	if e := h.sink.wait(t, EventBlocked, 1)[0]; e.Category != CategoryOperatorBlock || e.Rule != publicV4+"/32" {
+		t.Errorf("blocked event = %+v", e)
+	}
+}
