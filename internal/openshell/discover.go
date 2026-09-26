@@ -368,6 +368,8 @@ type PermissionError struct {
 	Reason string
 	// Fix is a shell command that repairs the problem, when one exists.
 	Fix string
+	// FixMode is the mode Fix sets (zero when there is no mode fix).
+	FixMode fs.FileMode
 }
 
 func (e *PermissionError) Error() string {
@@ -397,7 +399,7 @@ func CheckTLSFiles(files *TLSFiles) ([]string, error) {
 		return nil, &PermissionError{Path: dir, Mode: dinfo.Mode(), Reason: "is not a directory"}
 	}
 	if dinfo.Mode().Perm()&0o002 != 0 && dinfo.Mode()&fs.ModeSticky == 0 {
-		return nil, &PermissionError{Path: dir, Mode: dinfo.Mode(), Reason: "is writable by every user", Fix: "chmod 700 " + shellQuote(dir)}
+		return nil, &PermissionError{Path: dir, Mode: dinfo.Mode(), Reason: "is writable by every user", Fix: "chmod 700 " + shellQuote(dir), FixMode: 0o700}
 	}
 	if dinfo.Mode().Perm()&0o020 != 0 {
 		warnings = append(warnings, fmt.Sprintf("%s is group-writable (mode %04o); run chmod 700 %s", dir, dinfo.Mode().Perm(), shellQuote(dir)))
@@ -411,7 +413,7 @@ func CheckTLSFiles(files *TLSFiles) ([]string, error) {
 		return warnings, &PermissionError{Path: files.Key, Mode: key.Mode(), Reason: "is not a regular file"}
 	}
 	if key.Mode().Perm()&0o077 != 0 {
-		return warnings, &PermissionError{Path: files.Key, Mode: key.Mode(), Reason: "private key is accessible to other users", Fix: "chmod 600 " + shellQuote(files.Key)}
+		return warnings, &PermissionError{Path: files.Key, Mode: key.Mode(), Reason: "private key is accessible to other users", Fix: "chmod 600 " + shellQuote(files.Key), FixMode: 0o600}
 	}
 	if !ownedByCaller(key) {
 		return warnings, &PermissionError{Path: files.Key, Mode: key.Mode(), Reason: "private key is owned by another user"}
@@ -426,7 +428,7 @@ func CheckTLSFiles(files *TLSFiles) ([]string, error) {
 			return warnings, &PermissionError{Path: path, Mode: info.Mode(), Reason: "is not a regular file"}
 		}
 		if info.Mode().Perm()&0o002 != 0 {
-			return warnings, &PermissionError{Path: path, Mode: info.Mode(), Reason: "certificate is writable by every user", Fix: "chmod 644 " + shellQuote(path)}
+			return warnings, &PermissionError{Path: path, Mode: info.Mode(), Reason: "certificate is writable by every user", Fix: "chmod 644 " + shellQuote(path), FixMode: 0o644}
 		}
 		if !ownedByCaller(info) {
 			return warnings, &PermissionError{Path: path, Mode: info.Mode(), Reason: "certificate is owned by another user"}
