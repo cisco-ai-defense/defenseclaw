@@ -174,7 +174,10 @@ upgrade_lane() {
     assert_healthy
     assert_data_kept
     log "${name}: roll forward again"
-    must bash "${DC_HOME}/installer/install.sh" --rollback --yes || return 1
+    # After rolling back to 0.8.x the 1.x installer is only in previous/.
+    local forward="${DC_HOME}/installer/install.sh"
+    [[ -f "${forward}" ]] || forward="${DC_HOME}/previous/installer/install.sh"
+    must bash "${forward}" --rollback --yes || return 1
     assert_versions "${TARGET}"
     assert_healthy
     stop_lane

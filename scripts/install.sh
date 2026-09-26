@@ -52,7 +52,7 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
-readonly NOT_DATA=".venv previous previous.new .repair .staging .failed-* installer logs .install.lock backups"
+readonly NOT_DATA=".venv previous previous.new .repair .rollback-hold .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
 
 if [[ -t 1 ]] || [[ "${FORCE_COLOR:-}" == "1" ]]; then
@@ -249,7 +249,9 @@ FORWARD=()
 FORWARD+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
 
 VERSION="${DC_VERSION}"
-if [[ "${VERSION}" == "__DEFENSECLAW_VERSION__" ]]; then
+# Release builds stamp DC_VERSION. Test for a version rather than comparing
+# with the placeholder, which stamping would also rewrite.
+if ! is_version "${VERSION}"; then
     if [[ -n "${LOCAL_DIR}" ]]; then
         wheel="$(cd "${LOCAL_DIR}" && ls defenseclaw-*-py3-none-any.whl 2>/dev/null | head -1)"
         VERSION="${wheel#defenseclaw-}"; VERSION="${VERSION%-py3-none-any.whl}"
@@ -693,29 +695,30 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-swap_with_previous() {
-    # Exchange the live install and previous/ by renaming, so a second
-    # --rollback rolls forward again.
-    local hold="${DEFENSECLAW_HOME}/.rollback-hold" binary link name
-    rm -rf "${hold}"
-    mkdir -p "${hold}/bin" "${hold}/data" || return 1
+# stash_live SLOT: move the live install (binaries copied, everything else
+# renamed) into SLOT/{bin,data,venv,installer}.
+stash_live() {
+    local slot="$1" binary link name
+    mkdir -p "${slot}/bin" "${slot}/data" || return 1
     for binary in ${MANAGED_BINARIES}; do
-        [[ -f "${BIN_DIR}/${binary}" ]] && { cp -p "${BIN_DIR}/${binary}" "${hold}/bin/${binary}" || return 1; }
+        [[ -f "${BIN_DIR}/${binary}" ]] && { cp -p "${BIN_DIR}/${binary}" "${slot}/bin/${binary}" || return 1; }
     done
     for link in ${MANAGED_LINKS}; do
-        [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${hold}/bin/${link}" || return 1; }
+        [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
     while IFS= read -r name; do
-        mv "${DEFENSECLAW_HOME}/${name}" "${hold}/data/" || return 1
+        mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)
-    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${hold}/venv" || return 1; fi
-    if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${hold}/installer" || return 1; fi
-    printf '%s\n' "${current}" > "${hold}/VERSION"
-    printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
+    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${slot}/venv" || return 1; fi
+    if [[ -d "${INSTALLER_DIR}" ]]; then mv "${INSTALLER_DIR}" "${slot}/installer" || return 1; fi
+}
 
+# unstash SLOT: make SLOT the live install again (the inverse of stash_live).
+unstash() {
+    local slot="$1" binary link name
     for binary in ${MANAGED_BINARIES}; do
-        if [[ -f "${PREVIOUS}/bin/${binary}" ]]; then
-            cp -p "${PREVIOUS}/bin/${binary}" "${BIN_DIR}/.${binary}.old" \
+        if [[ -f "${slot}/bin/${binary}" ]]; then
+            cp -p "${slot}/bin/${binary}" "${BIN_DIR}/.${binary}.old" \
                 && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}" || return 1
         else
             rm -f "${BIN_DIR:?}/${binary}"
@@ -723,13 +726,32 @@ swap_with_previous() {
     done
     for link in ${MANAGED_LINKS}; do
         rm -f "${BIN_DIR:?}/${link}"
-        [[ -L "${PREVIOUS}/bin/${link}" ]] && { cp -P "${PREVIOUS}/bin/${link}" "${BIN_DIR}/${link}" || return 1; }
+        [[ -L "${slot}/bin/${link}" ]] && { cp -P "${slot}/bin/${link}" "${BIN_DIR}/${link}" || return 1; }
     done
-    for name in "${PREVIOUS}/data"/* "${PREVIOUS}/data"/.[!.]* "${PREVIOUS}/data"/..?*; do
+    for name in "${slot}/data"/* "${slot}/data"/.[!.]* "${slot}/data"/..?*; do
         [[ -e "${name}" || -L "${name}" ]] && { mv "${name}" "${DEFENSECLAW_HOME}/" || return 1; }
     done
-    if [[ -d "${PREVIOUS}/venv" ]]; then mv "${PREVIOUS}/venv" "${VENV}" || return 1; fi
-    if [[ -d "${PREVIOUS}/installer" ]]; then mv "${PREVIOUS}/installer" "${INSTALLER_DIR}" || return 1; fi
+    if [[ -d "${slot}/venv" ]]; then mv "${slot}/venv" "${VENV}" || return 1; fi
+    if [[ -d "${slot}/installer" ]]; then mv "${slot}/installer" "${INSTALLER_DIR}" || return 1; fi
+}
+
+swap_with_previous() {
+    # Exchange the live install and previous/ by renaming, so a second
+    # --rollback rolls forward again. Each half undoes itself on failure.
+    local hold="${DEFENSECLAW_HOME}/.rollback-hold"
+    rm -rf "${hold}"
+    if ! stash_live "${hold}"; then
+        unstash "${hold}"; rm -rf "${hold}"
+        err "Could not set the current install aside; nothing was changed"
+        return 1
+    fi
+    printf '%s\n' "${current}" > "${hold}/VERSION"
+    printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
+    if ! unstash "${PREVIOUS}"; then
+        stash_live "${PREVIOUS}"; unstash "${hold}"; rm -rf "${hold}"
+        err "Could not restore the previous install; the current one is back in place"
+        return 1
+    fi
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"
 }

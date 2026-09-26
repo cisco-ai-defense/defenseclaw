@@ -6,342 +6,192 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # SPDX-License-Identifier: Apache-2.0
+
+"""Contracts of scripts/install.sh and the 0.8.x handoff that must never break.
+
+``defenseclaw upgrade`` from every installed 1.x release runs the newest
+install.sh with ``--yes``/``--version``/``--local``/``--rollback``, and 0.8.8+
+clients run defenseclaw-upgrade.sh with frozen expectations. These tests pin
+those interfaces. End-to-end behaviour is covered by
+scripts/test-install-lifecycle.sh.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import os
 import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib
-
-from defenseclaw.platform_support import (
-    ACP_ONLY_CONNECTORS,
-    UNSUPPORTED,
-    WINDOWS_CONNECTOR_SUPPORT,
-)
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
-INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
-UPGRADE_SH = ROOT / "scripts" / "upgrade.sh"
+HANDOFF_SH = ROOT / "scripts" / "defenseclaw-upgrade.sh"
+BASH = shutil.which("bash")
+
+pytestmark = pytest.mark.skipif(os.name == "nt" or BASH is None, reason="POSIX installer")
 
 
-def test_posix_requires_portable_litellm_and_windows_delegates_to_native_setup() -> None:
-    install_sh = INSTALL_SH.read_text(encoding="utf-8")
-    install_ps1 = INSTALL_PS1.read_text(encoding="utf-8")
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-
-    assert install_sh.count("--only-binary litellm") == 3
-    assert "--only-binary litellm" not in install_ps1
-    assert "It does not install Python, uv, wheels" in install_ps1
-    assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in install_ps1
-    expected = SpecifierSet(">=1.84.0,<1.92.0")
-    direct = {requirement.name: requirement for requirement in map(Requirement, project["project"]["dependencies"])}
-    overrides = {
-        requirement.name: requirement
-        for requirement in map(Requirement, project["tool"]["uv"]["override-dependencies"])
-    }
-    assert direct["litellm"].specifier == expected
-    assert overrides["litellm"].specifier == expected
+def _stamped(tmp_path: Path, version: str = "1.0.0") -> Path:
+    stamped = tmp_path / "install.sh"
+    stamped.write_text(INSTALL_SH.read_text(encoding="utf-8").replace("__DEFENSECLAW_VERSION__", version))
+    return stamped
 
 
-WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
-MAKEFILE = ROOT / "Makefile"
-INSTALL_DOC = ROOT / "docs-site" / "content" / "docs" / "get-started" / "install.mdx"
+def _run(args: list[str], tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    environment = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env}
+    return subprocess.run([BASH, *args], capture_output=True, text=True, env=environment, timeout=60, check=False)
 
 
-def test_local_dist_is_never_advertised_as_authenticated_release_input() -> None:
-    posix = INSTALL_SH.read_text(encoding="utf-8")
-    windows = INSTALL_PS1.read_text(encoding="utf-8")
-    makefile = MAKEFILE.read_text(encoding="utf-8")
-    docs = INSTALL_DOC.read_text(encoding="utf-8")
-
-    assert "unsigned directory produced by `make dist` is intentionally rejected" in posix
-    assert "Authenticated Setup provenance does not declare its signing state" in windows
-    assert "Setup signing state conflicts with authenticated provenance" in windows
-    assert "Invoke-StagedChecksumVerification" in windows
-    assert "$(DIST_DIR)/ is not authenticated installer input for 0.8.4+" in makefile
-    assert "`make dist`" in docs
-    assert "unauthenticated local developer artifacts" in docs
-    assert "checksum" in docs
-    assert "provenance" in docs
-    assert "./scripts/install.sh --local dist/" not in docs
+def test_scripts_parse_under_bash() -> None:
+    for script in (INSTALL_SH, HANDOFF_SH):
+        subprocess.run([BASH, "-n", str(script)], check=True)
 
 
-def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> None:
-    posix = INSTALL_SH.read_text(encoding="utf-8")
-    windows = INSTALL_PS1.read_text(encoding="utf-8")
-
-    assert posix.count("authenticated release-owned upgrade resolver from the target release in latest mode") == 2
-    assert "bash defenseclaw-upgrade.sh --yes" in posix
-    assert "Do not pass --version" in posix
-    assert (
-        "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
-        in posix
-    )
-    assert "blob/main/docs/CLI.md#upgrade" not in posix
-
-    # Windows servicing is owned by the authenticated native Setup executable;
-    # the compatibility bootstrap must not route existing installs through the
-    # legacy PowerShell upgrade resolver.
-    assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in windows
-    assert "$arguments = New-SetupArgumentList" in windows
-    assert "return Invoke-BoundedNativeProcess -FilePath $SetupPath" in windows
-    assert "defenseclaw-upgrade.ps1" not in windows
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="system bash")
+def test_scripts_parse_under_system_bash() -> None:
+    # macOS ships bash 3.2 as /bin/bash; the installer must stay compatible.
+    for script in (INSTALL_SH, HANDOFF_SH):
+        subprocess.run(["/bin/bash", "-n", str(script)], check=True)
 
 
-def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance() -> None:
-    workflow = WINDOWS_NATIVE_WORKFLOW.read_text(encoding="utf-8")
-    package_match = re.search(r"(?ms)^  package-artifact:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow)
-    acceptance_match = re.search(r"(?ms)^  packaged-acceptance:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow)
-    assert package_match is not None
-    assert acceptance_match is not None
-    package = package_match.group(0)
-    acceptance = acceptance_match.group(0)
-
-    checkout = package.index("name: Verify exact package source checkout")
-    artifacts = package.index("-Operation build-artifacts")
-    installer = package.index("-Operation build-installer")
-    identity = package.index("name: Verify exact package source identity")
-    wizard = package.index("-Mode wizard-smoke")
-    upload = package.index("name: windows-native-package")
-    assert checkout < artifacts < installer < identity < wizard < upload
-    assert (
-        "DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}"
-        in package
-    )
-    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in package
-    assert "provenance.source_commit -cne $expected" in package
-    assert '"DefenseClaw source commit: $expected"' in package
-    assert "Packaged CLI wheel digest does not match exact-head provenance" in package
-    assert "Packaged gateway archive digest does not match exact-head provenance" in package
-    assert "@('--version-json')" in package
-    assert "[string]$report.commit -cne $expected" in package
-    assert "installer smoke stub" not in package
-    assert "needs: package-artifact" in acceptance
-    assert "name: windows-native-package" in acceptance
-    assert "-Mode setup-acceptance" in acceptance
-
-
-def test_sandbox_installer_is_authenticated_before_execution() -> None:
+def test_install_sh_runs_only_when_fully_downloaded() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
-    assert "raw.githubusercontent.com/${REPO}" not in text
-    assert 'local asset_name="install-openshell-sandbox.sh"' in text
-    assert 'version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}"' in text
-    download = text.index('fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"')
-    authenticate = text.index('verify_checksum "${sandbox_installer}" "${asset_name}"', download)
-    bind_digest = text.index('verified_sha256="${VERIFIED_CHECKSUM}"', authenticate)
-    recheck = text.index('"$(sha256_file "${sandbox_installer}")" == "${verified_sha256}"', bind_digest)
-    execute = text.index('bash "${sandbox_installer}"', recheck)
-    assert download < authenticate < bind_digest < recheck < execute
+    assert text.count('readonly DC_VERSION="__DEFENSECLAW_VERSION__"') == 1
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert lines[-2:] == ['main "$@"', "# DefenseClaw POSIX installer complete v2"]
+    assert text.index("main() {") < text.index('readonly DC_VERSION=')
 
 
-def test_unsupported_sandbox_release_fails_before_installation_work() -> None:
+def test_help_lists_the_permanent_flags(tmp_path: Path) -> None:
+    result = _run([str(INSTALL_SH), "--help"], tmp_path)
+
+    assert result.returncode == 0
+    for flag in ("--yes", "--version X.Y.Z", "--local DIR", "--rollback"):
+        assert flag in result.stdout
+
+
+def test_unknown_flags_are_ignored_not_fatal(tmp_path: Path) -> None:
+    empty = tmp_path / "assets"
+    empty.mkdir()
+
+    result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--from-the-future"], tmp_path)
+
+    assert "Ignoring unknown option: --from-the-future" in result.stdout + result.stderr
+    assert "checksums.txt" in result.stdout + result.stderr  # got past argument parsing
+
+
+def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
+    result = _run([str(_stamped(tmp_path)), "--version", "0.8.10"], tmp_path)
+
+    assert result.returncode == 1
+    assert "predates this installer" in result.stderr
+
+
+def test_malformed_version_is_refused(tmp_path: Path) -> None:
+    result = _run([str(_stamped(tmp_path)), "--version", "1.2"], tmp_path)
+
+    assert result.returncode == 1
+    assert "--version must look like 1.2.3" in result.stderr
+
+
+def test_dependencies_install_from_the_hashed_lock_only() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    release_policy = text.index("load_release_policy\n", text.index("main()"))
-    early_version_gate = text.index(
-        'version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}"',
-        release_policy,
-    )
-    first_install = text.index("install_gateway\n", release_policy)
-
-    assert release_policy < early_version_gate < first_install
+    assert "export UV_NO_CONFIG=1" in text
+    assert "--require-hashes --no-deps -r" in text
+    assert re.search(r"uv pip install [^\n]*--no-deps \"\$\{STAGING\}/\$\{WHEEL\}\"", text)
 
 
-def test_sandbox_installer_rejects_tampered_bytes_and_executes_authenticated_bytes(
-    tmp_path: Path,
-) -> None:
+def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("Bash is unavailable on this platform")
 
-    def shell_function(name: str) -> str:
-        match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
-        assert match is not None, name
-        return match.group(0)
+    for retired in (".dcwheel", ".dcgateway", "upgrade-manifest.json", "release-provenance.json", "defenseclaw_"):
+        assert retired not in text
 
-    functions = "\n".join(
-        shell_function(name)
-        for name in (
-            "version_gte",
-            "sha256_file",
-            "artifact_path",
-            "fetch_artifact",
-            "verify_checksum",
-            "install_openshell_sandbox",
-        )
+
+def test_intel_macos_is_refused_before_changes() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "hw.optional.arm64" in text
+    assert "Intel macOS is not supported" in text
+
+
+def test_connector_choices_track_the_cli() -> None:
+    match = re.search(r'readonly CONNECTOR_CHOICES="([^"]*)"', INSTALL_SH.read_text(encoding="utf-8"))
+    assert match is not None
+    assert tuple(match.group(1).split()) == (*CONNECTOR_CHOICES, "none")
+
+
+def test_openclaw_restart_requires_the_openclaw_connector() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'openclaw_connector_active && has openclaw' in text
+
+
+def _release(tmp_path: Path, script: str) -> Path:
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "install.sh").write_text(script, encoding="utf-8")
+    digest = hashlib.sha256(script.encode()).hexdigest()
+    (release / "checksums.txt").write_text(f"{digest}  install.sh\n", encoding="utf-8")
+    return release
+
+
+def test_handoff_keeps_the_frozen_0_8_x_contract() -> None:
+    text = HANDOFF_SH.read_text(encoding="utf-8")
+
+    assert text.splitlines()[-1] == "# DefenseClaw upgrade resolver complete v1"
+    assert len(text.encode()) < 4 * 1024 * 1024
+    assert "unset DEFENSECLAW_UPGRADE_FRESH_PROCESS" in text
+
+
+def test_handoff_runs_the_verified_installer_with_yes(tmp_path: Path) -> None:
+    release = _release(tmp_path, '#!/bin/bash\necho "installer args: $*"; echo "fresh=${DEFENSECLAW_UPGRADE_FRESH_PROCESS:-unset}"\n')
+
+    result = _run(
+        [str(HANDOFF_SH), "--yes", "--recover-corrupt-audit", "--version", "1.0.0"],
+        tmp_path,
+        DEFENSECLAW_UPGRADE_LOCAL_DIR=str(release),
+        DEFENSECLAW_UPGRADE_FRESH_PROCESS="1",
     )
-    asset_payload = b'#!/usr/bin/env bash\nprintf "executed\\n" > "${SANDBOX_EXECUTION_MARKER}"\n'
 
-    for authenticated in (False, True):
-        case = tmp_path / ("authenticated" if authenticated else "tampered")
-        release = case / "release"
-        policy = case / "policy"
-        release.mkdir(parents=True)
-        policy.mkdir()
-        asset = release / "install-openshell-sandbox.sh"
-        asset.write_bytes(asset_payload)
-        expected = hashlib.sha256(asset_payload).hexdigest() if authenticated else "0" * 64
-        checksums = release / "checksums.txt"
-        checksums.write_text(f"{expected}  {asset.name}\n", encoding="utf-8")
-        marker = case / "executed"
-        program = f"""set -euo pipefail
-has() {{ command -v "$1" >/dev/null 2>&1; }}
-info() {{ :; }}
-warn() {{ :; }}
-step() {{ :; }}
-die() {{ printf '%s\\n' "$*" >&2; exit 71; }}
-{functions}
-MODERN_RELEASE=true
-RELEASE_VERSION=0.8.11
-SANDBOX_INSTALLER_ASSET_START_VERSION=0.8.11
-LOCAL_DIR={shlex.quote(release.as_posix())}
-POLICY_DIR={shlex.quote(policy.as_posix())}
-CHECKSUMS_FILE={shlex.quote(checksums.as_posix())}
-VERIFIED_CHECKSUM=''
-install_openshell_sandbox
-"""
-        environment = os.environ.copy()
-        environment["SANDBOX_EXECUTION_MARKER"] = marker.as_posix()
-        completed = subprocess.run(
-            [bash, "-c", program],
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-
-        if authenticated:
-            assert completed.returncode == 0, completed.stdout + completed.stderr
-            assert marker.read_text(encoding="utf-8") == "executed\n"
-        else:
-            assert completed.returncode == 71, completed.stdout + completed.stderr
-            assert "Checksum mismatch" in completed.stderr
-            assert not marker.exists()
+    assert result.returncode == 0, result.stderr
+    assert f"installer args: --yes --local {release}" in result.stdout
+    assert "fresh=unset" in result.stdout
+    assert "ignoring unsupported option: --recover-corrupt-audit" in result.stderr
 
 
-def test_release_installers_track_known_connector_choices() -> None:
-    sh_text = INSTALL_SH.read_text(encoding="utf-8")
-    sh_match = re.search(r"readonly CONNECTOR_CHOICES=\(([^)]*)\)", sh_text)
-    assert sh_match is not None
-    shell_choices = tuple(sh_match.group(1).split())
+def test_handoff_refuses_an_installer_that_does_not_match(tmp_path: Path) -> None:
+    release = _release(tmp_path, "#!/bin/bash\necho ran\n")
+    (release / "install.sh").write_text("#!/bin/bash\necho tampered\n", encoding="utf-8")
 
-    ps_text = INSTALL_PS1.read_text(encoding="utf-8")
-    ps_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", ps_text, re.DOTALL)
-    assert ps_match is not None
-    ps_choices = tuple(re.findall(r'"([^"]+)"', ps_match.group(1)))
-    hook_literal_match = re.search(
-        r"\$HookConnectors = @\((.*?)\)",
-        ps_text,
-        re.DOTALL,
-    )
-    if hook_literal_match is not None:
-        hook_choices = tuple(re.findall(r'"([^"]+)"', hook_literal_match.group(1)))
-    else:
-        hook_filter_match = re.search(
-            r"\$HookConnectors = \$ConnectorChoices \| Where-Object "
-            r"\{ \$_ -notin @\((.*?)\) \}",
-            ps_text,
-            re.DOTALL,
-        )
-        assert hook_filter_match is not None
-        hook_exclusions = tuple(re.findall(r'"([^"]+)"', hook_filter_match.group(1)))
-        hook_choices = tuple(choice for choice in ps_choices if choice not in hook_exclusions)
+    result = _run([str(HANDOFF_SH), "--yes"], tmp_path, DEFENSECLAW_UPGRADE_LOCAL_DIR=str(release))
 
-    assert shell_choices == (*CONNECTOR_CHOICES, "none")
-
-    expected_windows_choices = {
-        name
-        for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
-        if support.status != UNSUPPORTED and name not in ACP_ONLY_CONNECTORS
-    }
-    assert ps_choices[-1] == "none"
-    assert len(ps_choices) == len(set(ps_choices))
-    assert set(ps_choices[:-1]) == expected_windows_choices
-    assert hook_choices == ()
+    assert result.returncode == 1
+    assert "tampered" not in result.stdout
+    assert "does not match checksums.txt" in result.stderr
 
 
-def test_posix_install_and_upgrade_validate_cli_and_skill_scanner_before_publication() -> None:
-    install_text = INSTALL_SH.read_text(encoding="utf-8")
-    install_cli = install_text.split("install_python_cli()", 1)[1].split("# ── Install: OpenClaw Plugin", 1)[0]
-    validation = '"${DEFENSECLAW_VENV}/bin/defenseclaw" --help'
-    scanner_validation = '"${DEFENSECLAW_VENV}/bin/skill-scanner" --version'
-    assert install_cli.index("uv pip install") < install_cli.index(validation)
-    assert install_cli.index(validation) < install_cli.index(scanner_validation)
-    assert install_cli.index(scanner_validation) < install_cli.index(
-        '"${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner"'
-    )
-    assert '"${INSTALL_DIR}/skill-scanner" --version' in install_cli
+def test_handoff_plan_changes_nothing(tmp_path: Path) -> None:
+    release = _release(tmp_path, "#!/bin/bash\necho ran\n")
 
-    upgrade_text = UPGRADE_SH.read_text(encoding="utf-8")
-    install_start = upgrade_text.index('VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"')
-    launcher = upgrade_text.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', install_start)
-    upgrade_install = upgrade_text[install_start:launcher]
-    assert upgrade_install.index("pip install") < upgrade_install.index(validation)
-    repair_call = upgrade_text.index("repair_skill_scanner_launcher\n", launcher)
-    migrations = upgrade_text.index("# ── Run migrations", launcher)
-    assert launcher < repair_call < migrations
-    repair_guard = upgrade_text[launcher:repair_call]
-    assert '[[ "${BRIDGE_PHASE1}" -ne 1 || -z "${STAGED_FINAL_VERSION}" ]]' in repair_guard
+    result = _run([str(HANDOFF_SH), "--plan"], tmp_path, DEFENSECLAW_UPGRADE_LOCAL_DIR=str(release))
 
-    repair_function = upgrade_text.split("repair_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
-    assert '"${scanner}" --version' in repair_function
-    assert "-m defenseclaw.install_publish repair-console-symlink" in repair_function
-    assert '"${INSTALL_DIR}/skill-scanner" --version' in repair_function
-    assert "--console-script skill-scanner" in repair_function
-
-    same_version = upgrade_text.split('same_version_recovery="clean"', 1)[1].split(
-        'if [[ "${CURRENT_VERSION}" != "unknown"',
-        1,
-    )[0]
-    assert "repair_skill_scanner_launcher" in same_version
-    recovery = same_version.split('if [[ "${same_version_recovery}" == "recover" ]]', 1)[1].split(
-        'section "Version Already Verified"',
-        1,
-    )[0]
-    assert recovery.index('if [[ "${recovery_status}" -eq 0 ]]') < recovery.index(
-        "repair_skill_scanner_launcher"
-    ) < recovery.index('exit "${recovery_status}"')
-
-    fresh_smoke = (ROOT / "scripts/test-fresh-install-release.sh").read_text(encoding="utf-8")
-    scanner_smoke = fresh_smoke.split("assert_managed_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
-    assert '[[ -L "${launcher}" ]]' in scanner_smoke
-    assert 'readlink "${launcher}"' in scanner_smoke
-    assert '"${launcher}" --version' in scanner_smoke
-    assert fresh_smoke.count("assert_managed_skill_scanner_launcher \"") == 2
-
-
-def test_windows_native_install_and_repair_publish_and_execute_skill_scanner_launcher() -> None:
-    setup = (ROOT / "cmd/defenseclaw-setup/main.go").read_text(encoding="utf-8")
-    acceptance = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8")
-
-    assert '"skill-scanner.exe"' in setup
-    assert "publishNativeLaunchers(staging)" in setup
-    assert "stageInstallTree(payload" in setup
-    assert "Invoke-Installed (Join-Path $installRoot 'bin\\skill-scanner.exe') @('--help')" in acceptance
-
-
-def test_posix_upgrade_binds_sigstore_to_exact_release_workflow() -> None:
-    text = UPGRADE_SH.read_text(encoding="utf-8")
-
-    identity = "https://github.com/${REPO}/.github/workflows/release.yaml@refs/heads/main"
-    assert f'--certificate-identity "{identity}"' in text
-    assert f"--certificate-identity '{identity}'" in text
-    assert "--certificate-identity-regexp" not in text
+    assert result.returncode == 0
+    assert "would upgrade" in result.stdout
+    assert "ran" not in result.stdout
