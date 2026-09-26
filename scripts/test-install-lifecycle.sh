@@ -72,6 +72,8 @@ enter_lane() {
     LANE_HOMES+=("${HOME}")
     export PATH="${HOME}/.local/bin:${TOOLS}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     export DEFENSECLAW_NO_UPDATE_CHECK=1
+    # Never touch a real /Applications/DefenseClawMac.app.
+    export DEFENSECLAW_APP_PATH=none
     export UV_CACHE_DIR="${REAL_UV_CACHE:-${ROOT}/uv-cache}"
     [[ -n "${REAL_UV_PYTHON}" ]] && export UV_PYTHON_INSTALL_DIR="${REAL_UV_PYTHON}"
     unset DEFENSECLAW_HOME DEFENSECLAW_CONFIG DEFENSECLAW_UPGRADE_FRESH_PROCESS

@@ -388,7 +388,8 @@ REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
 APP_ZIP="DefenseClawMac-${VERSION}-macos-arm64.zip"
 
 APP_PATH=""
-if [[ "${OS}" == darwin ]]; then
+# DEFENSECLAW_APP_PATH=none skips the macOS app (tests, CLI-only machines).
+if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
     for candidate in "${DEFENSECLAW_APP_PATH:-}" /Applications/DefenseClawMac.app "${HOME}/Applications/DefenseClawMac.app"; do
         [[ -n "${candidate}" && -d "${candidate}" ]] || continue
         if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${candidate}/Contents/Info.plist" 2>/dev/null)" == com.cisco.defenseclaw.macos ]]; then
@@ -497,7 +498,7 @@ else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
 fi
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
-snapshot || { restart_old; die "Could not save the current install; nothing was changed"; }
+snapshot || { undo_snapshot; restart_old; die "Could not save the current install; nothing was changed"; }
 
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
@@ -596,6 +597,13 @@ snapshot() {
     fi
     printf '%s\n' "${PREV_VERSION:-}" > "${SNAP}/VERSION"
     printf '%s\n' "${WAS_RUNNING}" > "${SNAP}/GATEWAY_WAS_RUNNING"
+}
+
+# undo_snapshot: put back what snapshot() moved before it failed.
+undo_snapshot() {
+    if [[ -d "${SNAP}/venv" && ! -e "${VENV}" ]]; then mv "${SNAP}/venv" "${VENV}"; fi
+    if [[ -d "${SNAP}/installer" && ! -e "${INSTALLER_DIR}" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}"; fi
+    rm -rf "${SNAP}"
 }
 
 swap_in() {
