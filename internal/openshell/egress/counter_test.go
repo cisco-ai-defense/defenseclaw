@@ -217,3 +217,119 @@ func TestCounterConcurrent(t *testing.T) {
 		t.Errorf("signal fired %d times, want 1", signals.Load())
 	}
 }
+
+// Refusals are not contact: they must not call KnownHost, use up the first
+// contact or count as tunnels, and their count carries over once the
+// destination is contacted.
+func TestCounterRefusalIsNotContact(t *testing.T) {
+	var calls atomic.Int32
+	c := NewCounter(CounterOptions{KnownHost: func(Principal, string) bool {
+		calls.Add(1)
+		return false
+	}})
+	c.recordBlocked(testPrincipal, "example.com")
+	c.recordBlocked(testPrincipal, "example.com")
+	if n := calls.Load(); n != 0 {
+		t.Errorf("KnownHost ran %d times for refusals", n)
+	}
+	s := c.DestinationsFor("b-1")
+	if len(s) != 1 || s[0].Blocked != 2 || s[0].Tunnels != 0 || s[0].Novel || s[0].FirstSeen.IsZero() {
+		t.Fatalf("refusal-only stats = %+v", s)
+	}
+	f, first := c.open(testPrincipal, "example.com")
+	defer f.close()
+	if !first {
+		t.Error("a refusal used up the first contact")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("KnownHost ran %d times, want once at first contact", n)
+	}
+	c.recordBlocked(testPrincipal, "example.com")
+	s = c.DestinationsFor("b-1")
+	if len(s) != 1 || s[0].Blocked != 3 || s[0].Tunnels != 1 || !s[0].Novel {
+		t.Errorf("stats after contact = %+v", s)
+	}
+	c.recordBlocked(testPrincipal, "webhook.site")
+	if n := c.Forget("b-1"); n != 2 || len(c.Destinations()) != 0 {
+		t.Errorf("Forget = %d, left %+v", n, c.Destinations())
+	}
+}
+
+// A flood of refusals, which no limit throttles, must not evict a
+// destination's upload total: that would reset its large-upload threshold.
+func TestCounterRefusalsKeepUploadState(t *testing.T) {
+	clock := &fakeClock{}
+	c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 100, BlockLargeUploads: true, Now: clock.now})
+	f, _ := c.open(testPrincipal, "drop.example")
+	if v := f.addUp(90, false); v.cut {
+		t.Fatal("cut below the threshold")
+	}
+	f.close()
+	for i := 0; i < 1000; i++ {
+		c.recordBlocked(testPrincipal, fmt.Sprintf("h%d.pastebin.com", i))
+	}
+	if n := len(c.Destinations()); n > 16 {
+		t.Errorf("%d destinations tracked; refusal-only ones are not capped", n)
+	}
+	g, first := c.open(testPrincipal, "drop.example")
+	defer g.close()
+	if first {
+		t.Error("refusals evicted drop.example")
+	}
+	if v := g.addUp(20, false); !v.cut || v.total != 90 {
+		t.Errorf("upload after the refusal flood = %+v, want a cut at 90", v)
+	}
+}
+
+// Contacting many other destinations evicts those with nothing counted
+// toward the large-upload signal before one close to the threshold.
+func TestCounterEvictionKeepsUploadTotals(t *testing.T) {
+	clock := &fakeClock{}
+	c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 100, BlockLargeUploads: true, Now: clock.now})
+	f, _ := c.open(testPrincipal, "drop.example")
+	f.addUp(90, false)
+	f.close()
+	for i := 0; i < 40; i++ {
+		g, _ := c.open(testPrincipal, fmt.Sprintf("h%d.example", i))
+		g.addDown(1 << 20)
+		g.close()
+	}
+	if n := len(c.Destinations()); n > 8 {
+		t.Errorf("%d destinations tracked, cap is 8", n)
+	}
+	g, first := c.open(testPrincipal, "drop.example")
+	defer g.close()
+	if first || !g.addUp(20, false).cut {
+		t.Error("eviction reset drop.example's upload total")
+	}
+}
+
+// Parallel flows to one destination must not together send more than the
+// threshold: the check and the add are one reservation.
+func TestCounterUploadReservationIsAtomic(t *testing.T) {
+	const threshold, chunk = 10_000, 100
+	for round := 0; round < 300; round++ {
+		c := NewCounter(CounterOptions{LargeUploadBytes: threshold, BlockLargeUploads: true})
+		var sent atomic.Int64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				f, _ := c.open(testPrincipal, "drop.example")
+				defer f.close()
+				<-start
+				for !f.addUp(chunk, false).cut {
+					sent.Add(chunk)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		s := c.DestinationsFor("b-1")[0]
+		if sent.Load() > threshold || s.BytesUp != sent.Load() || !s.LargeUpload {
+			t.Fatalf("round %d: %d bytes let through (counted %d) past a %d-byte block", round, sent.Load(), s.BytesUp, threshold)
+		}
+	}
+}

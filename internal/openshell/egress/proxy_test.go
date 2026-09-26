@@ -780,7 +780,9 @@ func TestProxyUnblockAndSetDecider(t *testing.T) {
 		t.Fatalf("after unblock = %d", resp.status)
 	}
 	_ = conn.Close()
-	if e := h.sink.wait(t, EventAllowed, 1)[0]; e.Source != SourceUnblock || e.Rule != "webhook.site" {
+	// The refusal before the unblock was not contact: the first allowed
+	// tunnel is still the first contact.
+	if e := h.sink.wait(t, EventAllowed, 1)[0]; e.Source != SourceUnblock || e.Rule != "webhook.site" || !e.FirstSeen {
 		t.Errorf("allowed event = %+v", e)
 	}
 

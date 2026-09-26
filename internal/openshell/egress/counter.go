@@ -42,11 +42,16 @@ type CounterOptions struct {
 	BlockLargeUploads bool
 	// KnownHost reports destinations that are not first-seen for a
 	// principal, for example hosts contacted in earlier sessions or trusted
-	// by the operator. It is called once per binding and destination. Nil
-	// treats every destination as first-seen at its first contact.
+	// by the operator. It is called once per binding and destination, at
+	// the first contact; refused attempts are not contact. Nil treats every
+	// destination as first-seen at its first contact.
 	KnownHost func(p Principal, host string) bool
-	// MaxDestinations caps tracked (binding, destination) pairs; the least
-	// recently used idle ones are evicted. Zero uses 8192.
+	// MaxDestinations caps tracked (binding, destination) pairs. Over the
+	// cap, idle contacted destinations are evicted, those with the least
+	// upload counted toward the large-upload signal first, then the least
+	// recently used. Destinations that were only ever refused are capped
+	// separately at the same number, so refusals never evict a contacted
+	// destination. Zero uses 8192.
 	MaxDestinations int
 	// Now overrides the clock (tests).
 	Now func() time.Time
@@ -63,6 +68,11 @@ type Counter struct {
 
 	mu    sync.Mutex
 	dests map[destKey]*destination
+	// refused holds destinations that were only ever refused. Refusals pass
+	// no rate limit, so they are kept apart: they never call KnownHost,
+	// never use up a destination's first contact, and can only evict each
+	// other.
+	refused map[destKey]*refusal
 }
 
 type destKey struct {
@@ -84,6 +94,14 @@ type destination struct {
 	flagged  atomic.Bool
 }
 
+// refusal counts the refused attempts to a destination that was never
+// contacted. Counter.mu guards it.
+type refusal struct {
+	count     int64
+	firstSeen time.Time
+	lastSeen  int64
+}
+
 // DestinationStats is a snapshot of one binding's traffic to one host.
 type DestinationStats struct {
 	BindingID string
@@ -92,15 +110,19 @@ type DestinationStats struct {
 	// tunnels and requests (bodies only for absolute-form requests).
 	BytesUp   int64
 	BytesDown int64
-	// Tunnels counts allowed tunnels and requests; Active those still open.
+	// Tunnels counts tunnels and forwarded requests that reached the
+	// destination; Active those still open.
 	Tunnels int64
 	Active  int64
 	// Blocked counts refused attempts.
-	Blocked   int64
+	Blocked int64
+	// FirstSeen is when the destination was first tracked: its first
+	// refusal or its first contact, whichever came first.
 	FirstSeen time.Time
 	LastSeen  time.Time
 	// Novel reports that the destination was not a known host at first
-	// contact, so uploads to it count toward the large-upload signal.
+	// contact, so uploads to it count toward the large-upload signal. It is
+	// false for destinations that were only ever refused.
 	Novel bool
 	// LargeUpload reports that the large-upload signal fired.
 	LargeUpload bool
@@ -115,6 +137,7 @@ func NewCounter(opts CounterOptions) *Counter {
 		max:       opts.MaxDestinations,
 		now:       opts.Now,
 		dests:     map[destKey]*destination{},
+		refused:   map[destKey]*refusal{},
 	}
 	if c.threshold == 0 {
 		c.threshold = DefaultLargeUploadBytes
@@ -131,7 +154,9 @@ func NewCounter(opts CounterOptions) *Counter {
 // LargeUploadBytes returns the effective threshold (<= 0 when disabled).
 func (c *Counter) LargeUploadBytes() int64 { return c.threshold }
 
-func (c *Counter) lookup(p Principal, host string) (*destination, bool) {
+// contact returns p's record for host, creating it at the first contact,
+// and reports whether it was created.
+func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 	key := destKey{binding: p.BindingID, host: host}
 	now := c.now()
 	c.mu.Lock()
@@ -155,35 +180,89 @@ func (c *Counter) lookup(p Principal, host string) (*destination, bool) {
 		c.evictLocked()
 	}
 	d := &destination{key: key, firstSeen: now, novel: novel}
+	if r := c.refused[key]; r != nil {
+		d.firstSeen = r.firstSeen
+		d.blocked.Store(r.count)
+		delete(c.refused, key)
+	}
 	d.lastSeen.Store(now.UnixNano())
 	c.dests[key] = d
 	return d, true
 }
 
-// evictLocked drops the least recently used idle, unflagged destinations
-// down to 7/8 of the cap. Active and flagged ones are kept so live counters
-// and the large-upload state survive.
+// armedUp is the upload counted toward the large-upload signal.
+func (c *Counter) armedUp(d *destination) int64 {
+	if c.threshold <= 0 || !d.novel {
+		return 0
+	}
+	return d.up.Load()
+}
+
+// evictLocked drops idle, unflagged destinations down to 7/8 of the cap:
+// first those with the least upload counted toward the large-upload signal,
+// so contacting many other hosts cannot reset a destination's progress
+// toward the threshold, then the least recently used. Active and flagged
+// ones are kept so live counters and the large-upload state survive.
 func (c *Counter) evictLocked() {
+	type candidate struct {
+		d               *destination
+		armed, lastSeen int64
+	}
 	target := c.max - c.max/8
-	idle := make([]*destination, 0, len(c.dests))
+	idle := make([]candidate, 0, len(c.dests))
 	for _, d := range c.dests {
 		if d.active.Load() == 0 && !d.flagged.Load() {
-			idle = append(idle, d)
+			idle = append(idle, candidate{d: d, armed: c.armedUp(d), lastSeen: d.lastSeen.Load()})
 		}
 	}
-	slices.SortFunc(idle, func(a, b *destination) int { return cmp.Compare(a.lastSeen.Load(), b.lastSeen.Load()) })
-	for _, d := range idle {
+	slices.SortFunc(idle, func(a, b candidate) int {
+		return cmp.Or(cmp.Compare(a.armed, b.armed), cmp.Compare(a.lastSeen, b.lastSeen))
+	})
+	for _, cand := range idle {
 		if len(c.dests) <= target {
 			return
 		}
-		delete(c.dests, d.key)
+		delete(c.dests, cand.d.key)
 	}
 }
 
-// recordBlocked counts a refused attempt.
+// recordBlocked counts a refused attempt. A refusal is not contact: a
+// destination that was never contacted gets a refusal-only record, which
+// costs no KnownHost call and no eviction sort.
 func (c *Counter) recordBlocked(p Principal, host string) {
-	d, _ := c.lookup(p, host)
-	d.blocked.Add(1)
+	key := destKey{binding: p.BindingID, host: host}
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d := c.dests[key]; d != nil {
+		d.blocked.Add(1)
+		d.lastSeen.Store(now.UnixNano())
+		return
+	}
+	r := c.refused[key]
+	if r == nil {
+		if len(c.refused) >= c.max {
+			c.evictRefusedLocked()
+		}
+		r = &refusal{firstSeen: now}
+		c.refused[key] = r
+	}
+	r.count++
+	r.lastSeen = now.UnixNano()
+}
+
+// evictRefusedLocked drops an arbitrary eighth of the refusal-only records.
+// They only feed statistics, and skipping the sort keeps a refusal flood
+// cheap.
+func (c *Counter) evictRefusedLocked() {
+	n := max(c.max/8, 1)
+	for k := range c.refused {
+		if n == 0 {
+			return
+		}
+		delete(c.refused, k)
+		n--
+	}
 }
 
 // uploadBlocked reports that the large-upload block already applies to
@@ -201,7 +280,7 @@ func (c *Counter) uploadBlocked(p Principal, host string) bool {
 // open starts counting one tunnel or request and reports whether this is
 // the binding's first contact with host.
 func (c *Counter) open(p Principal, host string) (*flow, bool) {
-	d, created := c.lookup(p, host)
+	d, created := c.contact(p, host)
 	d.tunnels.Add(1)
 	d.active.Add(1)
 	return &flow{counter: c, dest: d}, created
@@ -228,12 +307,24 @@ type uploadVerdict struct {
 }
 
 // addUp accounts n bytes about to be sent upstream. exempt flows (unblocked
-// or operator-allowed destinations) are signalled but never cut.
+// or operator-allowed destinations) are signalled but never cut. Under the
+// block the chunk is reserved against the threshold atomically, so parallel
+// flows cannot together send more than it.
 func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 	c, d := f.counter, f.dest
 	armed := c.threshold > 0 && d.novel
-	if armed && c.block && !exempt && (d.flagged.Load() || d.up.Load()+n > c.threshold) {
-		return uploadVerdict{signal: d.flagged.CompareAndSwap(false, true), cut: true, total: d.up.Load()}
+	if armed && c.block && !exempt {
+		for {
+			cur := d.up.Load()
+			if d.flagged.Load() || cur+n > c.threshold {
+				return uploadVerdict{signal: d.flagged.CompareAndSwap(false, true), cut: true, total: cur}
+			}
+			if d.up.CompareAndSwap(cur, cur+n) {
+				f.up.Add(n)
+				d.lastSeen.Store(c.now().UnixNano())
+				return uploadVerdict{total: cur + n}
+			}
+		}
 	}
 	f.up.Add(n)
 	total := d.up.Add(n)
@@ -288,10 +379,18 @@ func (c *Counter) DestinationsFor(bindingID string) []DestinationStats {
 
 func (c *Counter) snapshot(keep func(destKey) bool) []DestinationStats {
 	c.mu.Lock()
-	out := make([]DestinationStats, 0, len(c.dests))
+	out := make([]DestinationStats, 0, len(c.dests)+len(c.refused))
 	for k, d := range c.dests {
 		if keep(k) {
 			out = append(out, d.stats())
+		}
+	}
+	for k, r := range c.refused {
+		if keep(k) {
+			out = append(out, DestinationStats{
+				BindingID: k.binding, Host: k.host, Blocked: r.count,
+				FirstSeen: r.firstSeen, LastSeen: time.Unix(0, r.lastSeen),
+			})
 		}
 	}
 	c.mu.Unlock()
@@ -311,6 +410,12 @@ func (c *Counter) Forget(bindingID string) int {
 	for k := range c.dests {
 		if k.binding == bindingID {
 			delete(c.dests, k)
+			n++
+		}
+	}
+	for k := range c.refused {
+		if k.binding == bindingID {
+			delete(c.refused, k)
 			n++
 		}
 	}
