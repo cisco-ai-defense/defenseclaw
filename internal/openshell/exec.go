@@ -36,13 +36,17 @@ import (
 // retried attempt would therefore run alongside the first. So Exec wraps
 // every command in coreutils timeout(1) inside the sandbox, which stops it
 // at ExecOptions.Timeout, and retries only attempts whose stream never
-// opened.
+// opened, plus, for commands marked ExecOptions.Idempotent, attempts the
+// gateway never answered.
 const (
 	DefaultExecTimeout = 60 * time.Second
 	// DefaultExecAttempts is one attempt: the retry of an attempt that
 	// never started is opt-in.
-	DefaultExecAttempts   = 1
-	DefaultExecRetryDelay = time.Second
+	DefaultExecAttempts = 1
+	// DefaultIdempotentExecAttempts is the attempt count of an Idempotent
+	// command that does not set Attempts.
+	DefaultIdempotentExecAttempts = 3
+	DefaultExecRetryDelay         = time.Second
 	// DefaultExecMaxOutput caps each of stdout and stderr in ExecResult.
 	DefaultExecMaxOutput = 16 << 20
 	// DefaultExecGrace is how long past ExecOptions.Timeout the client
@@ -88,12 +92,24 @@ type ExecOptions struct {
 	// its output open the client gives up ClientOptions.ExecGrace after
 	// the timeout instead.
 	Timeout time.Duration
-	// Attempts is the total number of tries (default DefaultExecAttempts).
-	// Only an attempt whose stream could not be opened because the
-	// gateway was unavailable is retried: that command never started. A
-	// timeout, or a stream lost after it opened, is never retried, because
-	// the command may have run.
+	// Attempts is the total number of tries (default DefaultExecAttempts,
+	// or DefaultIdempotentExecAttempts for an Idempotent command). An
+	// attempt whose stream could not be opened because the gateway was
+	// unavailable is retried: that command never started. A stream lost
+	// after it opened, or a command stopped at its timeout, is never
+	// retried, because the command may have run; see Idempotent for the
+	// one exception.
 	Attempts int
+	// Idempotent marks a command that is safe to run again, such as a
+	// probe or a read-only query. Its attempts are also retried when the
+	// gateway sent neither output nor an exit status before the attempt's
+	// deadline (Timeout plus ClientOptions.ExecGrace): OpenShell 0.1.1
+	// sometimes leaves the first exec after a sandbox starts hanging that
+	// way, and a second try succeeds. By that deadline the sandbox has
+	// stopped the first run, if it started at all, so runs do not overlap,
+	// and nothing reached Stdout or Stderr. Give probes a short Timeout: a
+	// hang costs a whole deadline before the retry.
+	Idempotent bool
 	// RetryDelay is the first backoff; it doubles per retry.
 	RetryDelay time.Duration
 	// MaxOutputBytes caps each captured stream (default
@@ -111,6 +127,9 @@ func (o ExecOptions) withDefaults() ExecOptions {
 	}
 	if o.Attempts <= 0 {
 		o.Attempts = DefaultExecAttempts
+		if o.Idempotent {
+			o.Attempts = DefaultIdempotentExecAttempts
+		}
 	}
 	if o.RetryDelay <= 0 {
 		o.RetryDelay = DefaultExecRetryDelay
@@ -172,13 +191,16 @@ func (c *client) Exec(ctx context.Context, sandbox string, argv []string, opts E
 	delay := opts.RetryDelay
 	var lastErr error
 	for attempt := 1; attempt <= opts.Attempts; attempt++ {
-		res, opened, err := c.execOnce(ctx, sandbox, wrapped, opts)
+		res, state, err := c.execOnce(ctx, sandbox, wrapped, opts)
 		if err == nil {
 			res.Attempts = attempt
 			return res, nil
 		}
 		lastErr = err
-		if opened || !IsUnavailable(err) || ctx.Err() != nil || attempt == opts.Attempts {
+		if attempt > 1 {
+			lastErr = fmt.Errorf("attempt %d of %d: %w", attempt, opts.Attempts, err)
+		}
+		if !state.retryable(err, opts) || ctx.Err() != nil || attempt == opts.Attempts {
 			break
 		}
 		if err := c.sleep(ctx, delay); err != nil {
@@ -189,9 +211,36 @@ func (c *client) Exec(ctx context.Context, sandbox string, argv []string, opts E
 	return nil, fmt.Errorf("openshell: exec %q in %q: %w", argv[0], sandbox, lastErr)
 }
 
-// execOnce runs one attempt and reports whether its stream opened, after
-// which the command may be running and a retry is unsafe.
-func (c *client) execOnce(parent context.Context, sandbox string, argv []string, opts ExecOptions) (*ExecResult, bool, error) {
+// attemptState is how far a failed exec attempt got, which decides
+// whether it may be retried.
+type attemptState int
+
+const (
+	// attemptNotOpened: the stream never opened, so the command never
+	// started.
+	attemptNotOpened attemptState = iota
+	// attemptNoResponse: the attempt's deadline passed without output or
+	// an exit status. The sandbox's timeout(1) has stopped the command by
+	// then, if it ever started.
+	attemptNoResponse
+	// attemptStarted: the command may have run, and the caller may have
+	// seen its output.
+	attemptStarted
+)
+
+func (s attemptState) retryable(err error, opts ExecOptions) bool {
+	switch s {
+	case attemptNotOpened:
+		return IsUnavailable(err)
+	case attemptNoResponse:
+		return opts.Idempotent
+	default:
+		return false
+	}
+}
+
+// execOnce runs one attempt and reports how far it got.
+func (c *client) execOnce(parent context.Context, sandbox string, argv []string, opts ExecOptions) (*ExecResult, attemptState, error) {
 	wait := opts.Timeout + c.opts.ExecGrace
 	ctx, cancel := context.WithTimeout(parent, wait)
 	defer cancel()
@@ -202,22 +251,35 @@ func (c *client) execOnce(parent context.Context, sandbox string, argv []string,
 		NoLoginShell: !opts.LoginShell,
 	})
 	if err != nil {
-		return nil, false, attemptError(parent, ctx, err, wait)
+		state := attemptNotOpened
+		if attemptExpired(parent, ctx) {
+			state = attemptNoResponse
+		}
+		return nil, state, attemptError(parent, ctx, err, wait)
 	}
 	defer stream.Close()
 
 	res := &ExecResult{}
+	heard := false
+	failed := func(err error) (*ExecResult, attemptState, error) {
+		state := attemptStarted
+		if !heard && attemptExpired(parent, ctx) {
+			state = attemptNoResponse
+		}
+		return nil, state, attemptError(parent, ctx, err, wait)
+	}
 	for {
 		chunk, err := stream.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, true, attemptError(parent, ctx, err, wait)
+			return failed(err)
 		}
 		if chunk == nil || len(chunk.Data) == 0 {
 			continue
 		}
+		heard = true
 		switch chunk.Stream {
 		case v1.StreamStderr:
 			res.Stderr = appendCapped(res.Stderr, chunk.Data, opts.MaxOutputBytes, &res.Truncated)
@@ -229,16 +291,16 @@ func (c *client) execOnce(parent context.Context, sandbox string, argv []string,
 	}
 	code, err := stream.ExitCode()
 	if err != nil {
-		return nil, true, attemptError(parent, ctx, err, wait)
+		return failed(err)
 	}
 	switch {
 	case (code == exitTimedOut || code == exitKilled) && time.Since(start) >= opts.Timeout:
-		return nil, true, fmt.Errorf("%w after %s: the sandbox stopped the command (exit status %d)", ErrExecTimeout, opts.Timeout, code)
+		return nil, attemptStarted, fmt.Errorf("%w after %s: the sandbox stopped the command (exit status %d)", ErrExecTimeout, opts.Timeout, code)
 	case code == exitNotFound && missingTimeoutCommand(res.Stderr):
-		return nil, true, fmt.Errorf("%w: %s", ErrNoSandboxTimeout, bytes.TrimSpace(res.Stderr))
+		return nil, attemptStarted, fmt.Errorf("%w: %s", ErrNoSandboxTimeout, bytes.TrimSpace(res.Stderr))
 	}
 	res.ExitCode = code
-	return res, true, nil
+	return res, attemptStarted, nil
 }
 
 // missingTimeoutCommand recognizes the shell's complaint (bash, dash or
@@ -251,10 +313,16 @@ func missingTimeoutCommand(stderr []byte) bool {
 // attemptError distinguishes the attempt's own deadline (the gateway never
 // reported the command's end) from the caller's cancellation.
 func attemptError(parent, attempt context.Context, err error, wait time.Duration) error {
-	if parent.Err() == nil && errors.Is(attempt.Err(), context.DeadlineExceeded) {
+	if attemptExpired(parent, attempt) {
 		return fmt.Errorf("%w: no exit status from the gateway within %s: %w", ErrExecTimeout, wait, err)
 	}
 	return err
+}
+
+// attemptExpired reports whether the attempt's own deadline, not the
+// caller's context, ended it.
+func attemptExpired(parent, attempt context.Context) bool {
+	return parent.Err() == nil && errors.Is(attempt.Err(), context.DeadlineExceeded)
 }
 
 func appendCapped(dst, data []byte, limit int, truncated *bool) []byte {

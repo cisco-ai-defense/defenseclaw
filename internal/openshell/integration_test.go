@@ -151,7 +151,9 @@ func TestLiveGateway(t *testing.T) {
 		t.Fatalf("ListSandboxes(%v) = %d sandboxes, %v", labels, len(mine), err)
 	}
 
-	res, err := client.Exec(ctx, name, []string{"sh", "-c", "echo sdk-ok; id -u"}, openshell.ExecOptions{Timeout: 30 * time.Second})
+	// The first exec after a sandbox starts sometimes hangs in 0.1.1; the
+	// probe is idempotent, so Exec retries it.
+	res, err := client.Exec(ctx, name, []string{"sh", "-c", "echo sdk-ok; id -u"}, openshell.ExecOptions{Timeout: 10 * time.Second, Idempotent: true})
 	if err != nil || res.ExitCode != 0 || !strings.HasPrefix(string(res.Stdout), "sdk-ok\n") {
 		t.Fatalf("Exec = %+v, %v", res, err)
 	}

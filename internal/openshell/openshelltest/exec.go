@@ -54,8 +54,8 @@ type ExecResponse struct {
 	ExitCode int
 	// Err fails the stream after any output.
 	Err error
-	// Hang blocks the stream, without output, until its context ends: a
-	// gateway that never reports the command.
+	// Hang blocks the stream after any scripted Stdout and Stderr until
+	// its context ends: a gateway that never reports the command's end.
 	Hang bool
 	// Duration is how long the command runs before it exits. Like the real
 	// gateway, the fake does not stop a command whose client went away.
@@ -164,11 +164,6 @@ func (s *execStream) start() {
 	if s.handler != nil {
 		s.resp = s.handler(s.ctx, s.call)
 	}
-	if s.resp.Hang {
-		<-s.ctx.Done()
-		s.err = contextStatus(s.ctx.Err())
-		return
-	}
 	if s.resp.Duration > 0 {
 		run, stopped := s.resp.Duration, false
 		if s.call.Timeout > 0 && run > s.call.Timeout {
@@ -210,6 +205,9 @@ func (s *execStream) Next() (*types.ExecChunk, error) {
 	if s.resp.Err != nil {
 		s.err = s.resp.Err
 		return nil, s.err
+	}
+	if s.resp.Hang {
+		<-s.ctx.Done()
 	}
 	if err := s.ctx.Err(); err != nil {
 		s.err = contextStatus(err)

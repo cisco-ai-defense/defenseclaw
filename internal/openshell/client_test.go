@@ -442,6 +442,69 @@ func TestExecRetryPolicy(t *testing.T) {
 			wantErr:  openshell.IsUnavailable,
 		},
 		{
+			name:     "idempotent hang is retried",
+			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
+			respond:  hangOnce,
+			wantRuns: 2,
+			wantOpen: 2,
+		},
+		{
+			name:     "idempotent hangs use the default attempts",
+			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Hang: true} },
+			wantRuns: openshell.DefaultIdempotentExecAttempts,
+			wantOpen: openshell.DefaultIdempotentExecAttempts,
+			wantErr: func(err error) bool {
+				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "attempt 3 of 3: ") &&
+					strings.Contains(err.Error(), "no exit status from the gateway")
+			},
+		},
+		{
+			name:     "idempotent attempts are capped by Attempts",
+			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, Attempts: 1, RetryDelay: time.Millisecond},
+			respond:  hangOnce,
+			wantRuns: 1,
+			wantOpen: 1,
+			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
+		},
+		{
+			name: "idempotent hang after output is not retried",
+			opts: openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
+			respond: func(int) openshelltest.ExecResponse {
+				return openshelltest.ExecResponse{Stdout: []byte("partial"), Hang: true}
+			},
+			wantRuns: 1,
+			wantOpen: 1,
+			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
+		},
+		{
+			name:     "idempotent command stopped at its timeout is not retried",
+			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Duration: time.Second} },
+			wantRuns: 1,
+			wantOpen: 1,
+			wantErr: func(err error) bool {
+				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "the sandbox stopped the command")
+			},
+		},
+		{
+			name:     "idempotent stream lost before output is not retried",
+			opts:     openshell.ExecOptions{Idempotent: true, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Err: unavailable} },
+			wantRuns: 1,
+			wantOpen: 1,
+			wantErr:  openshell.IsUnavailable,
+		},
+		{
+			name:     "idempotent open refusal is not retried",
+			opts:     openshell.ExecOptions{Idempotent: true, RetryDelay: time.Millisecond},
+			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
+			failNext: &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"},
+			wantRuns: 0,
+			wantOpen: 1,
+			wantErr:  openshell.IsPermissionDenied,
+		},
+		{
 			name:     "open refusal is not retried",
 			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
 			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
@@ -477,19 +540,67 @@ func TestExecRetryPolicy(t *testing.T) {
 	}
 }
 
-func TestExecHonoursCallerCancellation(t *testing.T) {
+// hangOnce is the first exec after a sandbox starts in OpenShell 0.1.1:
+// the stream opens and then nothing arrives; the next try answers.
+func hangOnce(attempt int) openshelltest.ExecResponse {
+	if attempt == 1 {
+		return openshelltest.ExecResponse{Hang: true}
+	}
+	return openshelltest.ExecResponse{Stdout: []byte("ok\n")}
+}
+
+// TestExecRetriesUnansweredIdempotentCommands checks the retry after a
+// hang: it starts only after the hung attempt's deadline, once the sandbox
+// has stopped any first run, after the backoff, and the caller's writer
+// sees only the answer.
+func TestExecRetriesUnansweredIdempotentCommands(t *testing.T) {
 	f, c := newClient(t)
 	createReady(t, c, "box", nil)
-	runs := 0
-	ctx, cancel := context.WithCancel(context.Background())
-	f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
-		runs++
-		cancel()
-		return openshelltest.ExecResponse{Hang: true}
+	const (
+		timeout = 20 * time.Millisecond
+		delay   = 30 * time.Millisecond
+		grace   = 250 * time.Millisecond // openshelltest's ExecGrace
+	)
+	var starts []time.Time
+	f.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		starts = append(starts, time.Now())
+		if call.Timeout != timeout {
+			t.Errorf("attempt %d timeout = %s", len(starts), call.Timeout)
+		}
+		return hangOnce(len(starts))
 	})
-	_, err := c.Exec(ctx, "box", []string{"true"}, openshell.ExecOptions{Timeout: time.Minute, RetryDelay: time.Millisecond})
-	if err == nil || errors.Is(err, openshell.ErrExecTimeout) || runs != 1 {
-		t.Fatalf("Exec = %v after %d runs", err, runs)
+	var stdout bytes.Buffer
+	res, err := c.Exec(context.Background(), "box", []string{"cat", "/etc/os-release"},
+		openshell.ExecOptions{Timeout: timeout, Idempotent: true, RetryDelay: delay, Stdout: &stdout})
+	if err != nil {
+		t.Fatalf("Exec = %v", err)
+	}
+	if res.Attempts != 2 || string(res.Stdout) != "ok\n" || stdout.String() != "ok\n" || res.ExitCode != 0 {
+		t.Fatalf("result = %+v, tee %q", res, stdout.String())
+	}
+	if len(starts) != 2 {
+		t.Fatalf("ran %d times", len(starts))
+	}
+	if gap := starts[1].Sub(starts[0]); gap < timeout+grace+delay {
+		t.Fatalf("retry started %s after the hung attempt, before its deadline and backoff", gap)
+	}
+}
+
+func TestExecHonoursCallerCancellation(t *testing.T) {
+	for _, idempotent := range []bool{false, true} {
+		f, c := newClient(t)
+		createReady(t, c, "box", nil)
+		runs := 0
+		ctx, cancel := context.WithCancel(context.Background())
+		f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+			runs++
+			cancel()
+			return openshelltest.ExecResponse{Hang: true}
+		})
+		_, err := c.Exec(ctx, "box", []string{"true"}, openshell.ExecOptions{Timeout: time.Minute, Idempotent: idempotent, RetryDelay: time.Millisecond})
+		if err == nil || errors.Is(err, openshell.ErrExecTimeout) || runs != 1 {
+			t.Fatalf("idempotent=%v: Exec = %v after %d runs", idempotent, err, runs)
+		}
 	}
 }
 
