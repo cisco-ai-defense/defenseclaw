@@ -15,48 +15,48 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# Verify the macOS release artifacts from build-macos-app-release.sh. STATUS is
+# the verification status the build reported; when omitted it is read from the
+# app signature. Notarized artifacts must carry the Developer ID Team ID,
+# stapled tickets, and pass Gatekeeper.
+
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    echo "usage: $0 VERSION OUTPUT_DIR" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "usage: $0 VERSION OUTPUT_DIR [notarized|unverified]" >&2
     exit 64
 fi
 
 VERSION="$1"
 OUT_DIR="$2"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXPECTED_STATUS="${3:-}"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo "version must be X.Y.Z (got: ${VERSION})" >&2
     exit 64
 }
+case "${EXPECTED_STATUS}" in
+    ""|notarized|unverified) ;;
+    *)
+        echo "status must be notarized or unverified (got: ${EXPECTED_STATUS})" >&2
+        exit 64
+        ;;
+esac
 [[ "$(uname -s)" == "Darwin" ]] || {
     echo "macOS release artifacts must be verified on macOS" >&2
     exit 1
 }
 
-for command in cmp codesign ditto hdiutil python3 shasum; do
+for command in codesign ditto hdiutil spctl xcrun; do
     command -v "${command}" >/dev/null || {
         echo "required command not found: ${command}" >&2
         exit 1
     }
 done
 
-shopt -s nullglob
-dmgs=("${OUT_DIR}"/DefenseClawMac-"${VERSION}"-macos-arm64*.dmg)
-zips=("${OUT_DIR}"/DefenseClawMac-"${VERSION}"-macos-arm64*.zip)
-(( ${#dmgs[@]} == 1 )) || { echo "expected exactly one DMG for ${VERSION}" >&2; exit 1; }
-(( ${#zips[@]} == 1 )) || { echo "expected exactly one ZIP for ${VERSION}" >&2; exit 1; }
-DMG="${dmgs[0]}"
-ZIP="${zips[0]}"
-
-DMG_UNVERIFIED=0
-ZIP_UNVERIFIED=0
-[[ "${DMG}" != *-unverified.dmg ]] || DMG_UNVERIFIED=1
-[[ "${ZIP}" != *-unverified.zip ]] || ZIP_UNVERIFIED=1
-[[ "${DMG_UNVERIFIED}" == "${ZIP_UNVERIFIED}" ]] || {
-    echo "DMG and ZIP verification status mismatch" >&2
-    exit 1
-}
+DMG="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.dmg"
+ZIP="${OUT_DIR}/DefenseClawMac-${VERSION}-macos-arm64.zip"
+[[ -f "${DMG}" ]] || { echo "DMG not found: ${DMG}" >&2; exit 1; }
+[[ -f "${ZIP}" ]] || { echo "ZIP not found: ${ZIP}" >&2; exit 1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-macos-verify.XXXXXX")"
 MOUNT="${WORK}/mounted"
@@ -75,141 +75,64 @@ hdiutil attach "${DMG}" -readonly -nobrowse -mountpoint "${MOUNT}" -quiet
 MOUNTED=1
 
 DMG_APP="${MOUNT}/DefenseClawMac.app"
-PAYLOAD="${DMG_APP}/Contents/Resources/RuntimePayload"
 [[ -d "${DMG_APP}" ]] || { echo "DMG does not contain DefenseClawMac.app" >&2; exit 1; }
 [[ -L "${MOUNT}/Applications" && "$(readlink "${MOUNT}/Applications")" == "/Applications" ]] || {
     echo "DMG Applications link is missing or incorrect" >&2
     exit 1
 }
-for relative in defenseclaw-gateway defenseclaw-acp overrides.txt payload-manifest.json upgrade-manifest.json runtime-candidate-checksums.txt LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
-    [[ -f "${PAYLOAD}/${relative}" ]] || { echo "runtime payload missing ${relative}" >&2; exit 1; }
-done
-for relative in LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
-    cmp -s "${ROOT}/${relative}" "${PAYLOAD}/${relative}" || {
-        echo "runtime payload ${relative} differs from the canonical source file" >&2
+
+# install.sh unpacks the ZIP with `ditto -xk` and expects the app at its root.
+ditto -x -k "${ZIP}" "${UNZIP}"
+ZIP_APP="${UNZIP}/DefenseClawMac.app"
+[[ "$(ls -A "${UNZIP}")" == "DefenseClawMac.app" && -d "${ZIP_APP}" ]] || {
+    echo "ZIP must contain only DefenseClawMac.app at its root" >&2
+    exit 1
+}
+
+for app in "${DMG_APP}" "${ZIP_APP}"; do
+    info="${app}/Contents/Info.plist"
+    bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info}")"
+    bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${info}")"
+    [[ "${bundle_id}" == "com.cisco.defenseclaw.macos" ]] || { echo "unexpected bundle ID: ${bundle_id}" >&2; exit 1; }
+    [[ "${bundle_version}" == "${VERSION}" ]] || { echo "unexpected app version: ${bundle_version}" >&2; exit 1; }
+    [[ ! -e "${app}/Contents/Resources/RuntimePayload" ]] || {
+        echo "the app must not embed a runtime payload; install.sh installs the runtime" >&2
         exit 1
     }
+    codesign --verify --deep --strict --verbose=2 "${app}"
 done
 
-INFO="${DMG_APP}/Contents/Info.plist"
-BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO}")"
-BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO}")"
-[[ "${BUNDLE_ID}" == "com.cisco.defenseclaw.macos" ]] || { echo "unexpected bundle ID: ${BUNDLE_ID}" >&2; exit 1; }
-[[ "${BUNDLE_VERSION}" == "${VERSION}" ]] || { echo "unexpected app version: ${BUNDLE_VERSION}" >&2; exit 1; }
-codesign --verify --deep --strict --verbose=2 "${DMG_APP}"
-GATEWAY_REQUIREMENT='=identifier "com.cisco.defenseclaw.gateway"'
-if [[ "${DMG_UNVERIFIED}" == "0" ]]; then
-    EXPECTED_TEAM_ID="$(
-        codesign -d --verbose=4 "${DMG_APP}" 2>&1 \
-            | sed -n 's/^TeamIdentifier=//p'
-    )"
+DMG_SIGNATURE="$(codesign -d --verbose=4 "${DMG_APP}" 2>&1)"
+ZIP_SIGNATURE="$(codesign -d --verbose=4 "${ZIP_APP}" 2>&1)"
+[[ "$(sed -n 's/^CDHash=//p' <<<"${DMG_SIGNATURE}")" == "$(sed -n 's/^CDHash=//p' <<<"${ZIP_SIGNATURE}")" ]] || {
+    echo "DMG and ZIP contain different app builds" >&2
+    exit 1
+}
+SIGNED_STATUS="notarized"
+if grep -qx 'Signature=adhoc' <<<"${DMG_SIGNATURE}"; then
+    SIGNED_STATUS="unverified"
+fi
+[[ -z "${EXPECTED_STATUS}" || "${EXPECTED_STATUS}" == "${SIGNED_STATUS}" ]] || {
+    echo "expected ${EXPECTED_STATUS} artifacts, but the app signature is ${SIGNED_STATUS}" >&2
+    exit 1
+}
+
+if [[ "${SIGNED_STATUS}" == "notarized" ]]; then
+    EXPECTED_TEAM_ID="$(sed -n 's/^TeamIdentifier=//p' <<<"${DMG_SIGNATURE}")"
     [[ "${EXPECTED_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]] || {
         echo "verified macOS app has no valid 10-character Team ID" >&2
         exit 1
     }
     APP_REQUIREMENT="=identifier \"com.cisco.defenseclaw.macos\" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
-    codesign --verify --strict -R "${APP_REQUIREMENT}" --verbose=2 "${DMG_APP}"
-    GATEWAY_REQUIREMENT+=" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
-fi
-codesign --verify --strict -R "${GATEWAY_REQUIREMENT}" --verbose=2 \
-    "${PAYLOAD}/defenseclaw-gateway"
-unset GATEWAY_REQUIREMENT
-ACP_REQUIREMENT='=identifier "com.cisco.defenseclaw.acp"'
-if [[ "${DMG_UNVERIFIED}" == "0" ]]; then
-    ACP_REQUIREMENT+=" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
-fi
-codesign --verify --strict -R "${ACP_REQUIREMENT}" --verbose=2 \
-    "${PAYLOAD}/defenseclaw-acp"
-unset ACP_REQUIREMENT
-
-python3 - "${PAYLOAD}" "${VERSION}" <<'PY'
-import hashlib
-import io
-import json
-from pathlib import Path
-import sys
-import zipfile
-
-payload = Path(sys.argv[1])
-version = sys.argv[2]
-manifest = json.loads((payload / "payload-manifest.json").read_text(encoding="utf-8"))
-if manifest.get("runtime_version") != version or manifest.get("arch") != "arm64":
-    raise SystemExit("payload manifest version or architecture mismatch")
-for key in ("gateway", "acp_guard", "wheel", "overrides", "upgrade_manifest", "runtime_attestation"):
-    item = manifest.get(key) or {}
-    path = payload / str(item.get("file", ""))
-    if not path.is_file():
-        raise SystemExit(f"payload manifest references missing {key} file")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != item.get("sha256"):
-        raise SystemExit(f"payload manifest hash mismatch for {key}")
-
-release = json.loads((payload / "upgrade-manifest.json").read_text(encoding="utf-8"))
-expected_gateways = {}
-for os_name in ("darwin", "linux", "windows"):
-    expected_gateways[os_name] = {
-        arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
-        for arch in ("amd64", "arm64")
-    }
-expected_wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
-if (
-    release.get("schema_version") != 2
-    or release.get("release_version") != version
-    or release.get("release_artifacts")
-    != {"wheel": expected_wheel, "gateways": expected_gateways}
-):
-    raise SystemExit("embedded release manifest does not bind the protected runtime wheel")
-if manifest.get("wheel", {}).get("file") != expected_wheel:
-    raise SystemExit("RuntimePayload wheel is not the manifest-bound protected artifact")
-if (payload / f"defenseclaw-{version}-py3-none-any.whl").exists():
-    raise SystemExit("RuntimePayload contains the canonical refusal wheel")
-checksums = {}
-for raw in (payload / "runtime-candidate-checksums.txt").read_text(encoding="utf-8").splitlines():
-    parts = raw.split()
-    if len(parts) == 2:
-        checksums[parts[1].removeprefix("./")] = parts[0].lower()
-wheel_digest = hashlib.sha256((payload / expected_wheel).read_bytes()).hexdigest()
-if checksums.get(expected_wheel) != wheel_digest:
-    raise SystemExit("embedded runtime attestation does not authenticate the protected RuntimePayload wheel")
-outer = (payload / expected_wheel).read_bytes()
-magic = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
-if not outer.startswith(magic) or len(outer) == len(magic):
-    raise SystemExit("embedded protected wheel envelope is invalid")
-inner = bytes(value ^ 0xA5 for value in outer[len(magic):])
-if zipfile.is_zipfile(payload / expected_wheel):
-    raise SystemExit("embedded protected wheel is directly package-installable")
-if not zipfile.is_zipfile(io.BytesIO(inner)):
-    raise SystemExit("embedded protected wheel payload is invalid")
-PY
-
-ditto -x -k "${ZIP}" "${UNZIP}"
-ZIP_APP="${UNZIP}/DefenseClawMac.app"
-[[ -d "${ZIP_APP}" ]] || { echo "ZIP does not contain DefenseClawMac.app" >&2; exit 1; }
-[[ ! -e "${ZIP_APP}/Contents/Resources/RuntimePayload" ]] || {
-    echo "app-only ZIP unexpectedly contains RuntimePayload" >&2
-    exit 1
-}
-ZIP_INFO="${ZIP_APP}/Contents/Info.plist"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${ZIP_INFO}")" == "${BUNDLE_ID}" ]] || {
-    echo "ZIP bundle ID does not match DMG" >&2
-    exit 1
-}
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${ZIP_INFO}")" == "${VERSION}" ]] || {
-    echo "ZIP app version does not match ${VERSION}" >&2
-    exit 1
-}
-codesign --verify --deep --strict --verbose=2 "${ZIP_APP}"
-
-if [[ "${DMG_UNVERIFIED}" == "0" ]]; then
-    codesign --verify --strict -R "${APP_REQUIREMENT}" --verbose=2 "${ZIP_APP}"
+    for app in "${DMG_APP}" "${ZIP_APP}"; do
+        codesign --verify --strict -R "${APP_REQUIREMENT}" --verbose=2 "${app}"
+        xcrun stapler validate "${app}"
+        spctl --assess --type execute --verbose=2 "${app}"
+    done
     xcrun stapler validate "${DMG}"
-    xcrun stapler validate "${DMG_APP}"
-    xcrun stapler validate "${ZIP_APP}"
     spctl --assess --type open --context context:primary-signature --verbose=2 "${DMG}"
-    spctl --assess --type execute --verbose=2 "${DMG_APP}"
-    spctl --assess --type execute --verbose=2 "${ZIP_APP}"
 fi
 
-echo "macOS release artifacts verified:"
+echo "macOS release artifacts verified (${SIGNED_STATUS}):"
 echo "  DMG: ${DMG}"
 echo "  ZIP: ${ZIP}"
