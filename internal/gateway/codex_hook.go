@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -96,6 +97,10 @@ type codexHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+	// sandboxView is the binding's filesystem view for a sandbox request and
+	// nil for host traffic. Path-reading helpers go through it instead of the
+	// host filesystem (see sandbox_hook_scope.go).
+	sandboxView *sandboxauth.FSView
 }
 
 type codexHookResponse struct {
@@ -175,7 +180,7 @@ func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 }
 
 func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest) codexHookResponse {
-	return a.evaluateCodexHookForProfile(ctx, req, a.hookProfileForConnector("codex"))
+	return a.evaluateCodexHookForProfile(ctx, req, a.hookProfileForRequest(ctx, "codex"))
 }
 
 func (a *APIServer) evaluateCodexHookForProfile(
@@ -3442,14 +3447,22 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
+	var results []*scanner.ScanResult
+	if req.sandboxView != nil {
+		results = sandboxCodeGuardScan(req.sandboxView, rulesDir, targets)
+	} else {
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		for _, target := range targets {
+			result, err := cg.Scan(ctx, target)
+			if err != nil {
+				continue
+			}
+			results = append(results, result)
+		}
+	}
 	maxSeverity := scanner.SeverityInfo
 	findings := []string{}
-	for _, target := range targets {
-		result, err := cg.Scan(ctx, target)
-		if err != nil {
-			continue
-		}
+	for _, result := range results {
 		if a.logger != nil {
 			_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 		}
@@ -3479,6 +3492,13 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 }
 
 func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) []string {
+	if req.sandboxView != nil {
+		var scanPaths []string
+		if a.scannerCfg != nil {
+			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
+		}
+		return sandboxStopTargets(req.sandboxView, req.CWD, scanPaths)
+	}
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
@@ -3685,7 +3705,11 @@ func runGitList(ctx context.Context, cwd string, args ...string) ([]string, erro
 }
 
 func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookRequest) int {
-	if a.scannerCfg == nil {
+	if a.scannerCfg == nil || req.sandboxView != nil {
+		// Component targets are the host user's Codex home plus project
+		// layers found by walking up the host tree. Neither applies to a
+		// sandbox, and the skill/plugin/MCP scanners are subprocesses that
+		// must not be pointed at an agent-writable tree on the host.
 		return 0
 	}
 	if !req.ScanComponents && !a.codexComponentScanDue() {

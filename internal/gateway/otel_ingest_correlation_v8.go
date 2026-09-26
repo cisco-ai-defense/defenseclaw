@@ -76,7 +76,7 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 	if ctx == nil || receiptTime.IsZero() {
 		return result, errNativeOTLPCorrelationV8
 	}
-	spec, err := a.correlationSpecForConnectorV8(authenticatedSource)
+	spec, err := a.correlationSpecForRequestV8(ctx, authenticatedSource)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
 	}

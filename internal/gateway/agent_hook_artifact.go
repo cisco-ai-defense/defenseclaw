@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 const (
@@ -385,10 +386,17 @@ func readPromotedArtifactBounded(
 	default:
 		return nil, actionfacts.DialectNone, false
 	}
+	view, sandboxed := sandboxHookView(ctx)
 	result := make(chan promotedArtifactReadResult, 1)
 	go func() {
 		defer func() { <-promotedArtifactReadSlots }()
-		body, resolvedDialect, ok := readPromotedArtifact(path, dialect)
+		read := readPromotedArtifact
+		if sandboxed {
+			read = func(path string, dialect actionfacts.Dialect) ([]byte, actionfacts.Dialect, bool) {
+				return readPromotedArtifactFromView(view, path, dialect)
+			}
+		}
+		body, resolvedDialect, ok := read(path, dialect)
 		result <- promotedArtifactReadResult{
 			body: body, dialect: resolvedDialect, ok: ok,
 		}
@@ -444,6 +452,35 @@ func readPromotedArtifact(
 	}
 	afterRead, err := file.Stat()
 	if err != nil || !samePromotedArtifactVersion(opened, afterRead) {
+		return nil, actionfacts.DialectNone, false
+	}
+	dialect := dialectHint
+	if dialect == actionfacts.DialectNone {
+		dialect = promotedArtifactShebangDialect(body)
+	}
+	if dialect == actionfacts.DialectNone {
+		return nil, actionfacts.DialectNone, false
+	}
+	return body, dialect, true
+}
+
+// readPromotedArtifactFromView is readPromotedArtifact for a sandbox request.
+// The script path is either a sandbox path or a path under the mapped
+// working directory; the read is confined to the mounted project, so a
+// script anywhere else (including the sandbox's own /tmp, which is not the
+// host's) is never read from the host. The size, execute-bit and shebang
+// rules are unchanged.
+func readPromotedArtifactFromView(
+	view *sandboxauth.FSView,
+	path string,
+	dialectHint actionfacts.Dialect,
+) ([]byte, actionfacts.Dialect, bool) {
+	body, info, err := view.ReadFile(path, promotedArtifactMaxBytes)
+	if err != nil || len(body) == 0 {
+		return nil, actionfacts.DialectNone, false
+	}
+	if dialectHint == actionfacts.DialectNone && runtime.GOOS != "windows" &&
+		info.Mode().Perm()&0o111 == 0 {
 		return nil, actionfacts.DialectNone, false
 	}
 	dialect := dialectHint

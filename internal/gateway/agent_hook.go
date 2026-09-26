@@ -235,7 +235,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			registeredEvent = event
 		}
 
-		profile := a.hookProfileForConnector(connectorName)
+		profile := a.hookProfileForRequest(r.Context(), connectorName)
 		if connectorName == "codex" {
 			boundEvent := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Event"))
 			boundContract := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Contract"))
@@ -275,7 +275,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
 			return
 		}
-		req.CWD = sanitizeHookCWD(req.CWD)
+		req.CWD = hookCWDForContext(r.Context(), req.CWD)
 		// Kiro installs two hook configs with different veto contracts and
 		// they are indistinguishable by release version, because v3 is a flag
 		// on the 2.x binary rather than a new release. Setup marks the
@@ -288,8 +288,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// SessionStart is the last authoritative recovery signal before a
 		// Codex session proceeds; synchronously upsert a missing managed runtime
 		// registration through the Sidecar-owned guard. No other connector/event
-		// may mutate registration from hook input.
-		if connectorName == "codex" && req.HookEventName == "SessionStart" {
+		// may mutate registration from hook input. A sandboxed Codex has no host
+		// registration to repair: its hooks are baked into the sandbox image.
+		if connectorName == "codex" && req.HookEventName == "SessionStart" && !isSandboxHookRequest(r.Context()) {
 			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
@@ -350,7 +351,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
+					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if persisted {
 						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -391,7 +392,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// registered dedupe callback and every other connector
 		// through the generic profile path.
 		if !req.SuppressCorrelationEmit {
-			rawEventIDs = runtime.RememberRawEvents(a, req, b, payload)
+			rawEventIDs = runtime.RememberRawEvents(a, ctx, req, b, payload)
 		}
 
 		// Emit the LLM event (prompt/tool/response) BEFORE the
@@ -492,7 +493,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
 		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -838,7 +839,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	if strings.TrimSpace(connectorName) != "" {
 		req.ConnectorName = connectorName
 	}
-	profile := a.hookProfileForConnector(connectorName)
+	profile := a.hookProfileForRequest(ctx, connectorName)
 	correlatedCtx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, rawBody)
 	if correlationErr != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] synthetic hook correlation unavailable connector=%s event=%s: %v\n",
@@ -907,7 +908,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		EvaluationID:        resp.EvaluationID,
 		RuleIDs:             resp.RuleIDs,
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
-		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
+		Extra:               mergeHookEnvelopeExtra(extra, hookRequestAuditExtra(ctx, profile)),
 	}
 	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
@@ -1856,7 +1857,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
-	profile := a.hookProfileForConnector(req.ConnectorName)
+	profile := a.hookProfileForRequest(ctx, req.ConnectorName)
 	// Resolve Kiro's veto surface from the hook config that invoked us. The
 	// declared capability is the .kiro/hooks contract; a request from the CLI
 	// 2.x agent-hook config narrows to what 2.x honors. Replacing the slice
