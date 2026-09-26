@@ -1238,6 +1238,31 @@ func TestHookContractLockStoresSharedScriptsOnce(t *testing.T) {
 	}
 }
 
+func TestHookContractLockRecordsEffectiveCopilotFailMode(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	conn := NewCopilotConnector()
+	opts := SetupOpts{
+		DataDir:      dir,
+		APIAddr:      "127.0.0.1:18970",
+		HookFailMode: "closed",
+	}
+
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatalf("write Copilot hooks: %v", err)
+	}
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	if entry.HookFailMode != "open" {
+		t.Fatalf("Copilot contract fail mode = %q, want effective mode open", entry.HookFailMode)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatalf("save Copilot hook contract: %v", err)
+	}
+	if got := LoadHookContractLockEntry(dir, "copilot").HookFailMode; got != "open" {
+		t.Fatalf("saved Copilot contract fail mode = %q, want open", got)
+	}
+}
+
 func TestVerifyManagedSharedHookScriptDigestsRejectsManagedTamperAndIgnoresUserHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows owner/DACL enforcement is covered by the native enterprise-hooks fixture")

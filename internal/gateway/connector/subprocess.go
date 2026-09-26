@@ -1304,13 +1304,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := resolveHookFailMode(opts, c)
-	if hp, ok := c.(HookCapabilityProvider); ok {
-		caps := hp.HookCapabilities(opts)
-		if failMode == "closed" && !caps.SupportsFailClosed {
-			failMode = "open"
-		}
-	}
+	failMode := effectiveHookFailMode(opts, c)
 	hookToken := opts.HookAPIToken
 	scopedToken := opts.HookAPITokenScoped
 	if strings.TrimSpace(hookToken) == "" {
@@ -1346,6 +1340,20 @@ func resolveHookFailMode(opts SetupOpts, c Connector) string {
 		}
 	}
 	return defaultHookFailMode
+}
+
+// effectiveHookFailMode returns the mode the connector can actually enforce.
+// Some hook surfaces, including GitHub Copilot's current hook API, cannot
+// block on transport failure and therefore deliberately downgrade a requested
+// fail-closed mode to fail-open. Runtime sidecars and the authenticated hook
+// contract must record this same effective value.
+func effectiveHookFailMode(opts SetupOpts, c Connector) string {
+	failMode := resolveHookFailMode(opts, c)
+	if hp, ok := c.(HookCapabilityProvider); ok &&
+		failMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
+		return "open"
+	}
+	return failMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts

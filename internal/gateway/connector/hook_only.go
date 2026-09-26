@@ -912,10 +912,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err != nil {
 		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
-	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
-		failMode = "open"
-	}
+	failMode := effectiveHookFailMode(opts, c)
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:     opts.APIAddr,
 		TokenFileJS: javaScriptStringContent(tokenPath),

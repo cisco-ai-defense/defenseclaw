@@ -857,7 +857,7 @@ func newHookContractLockEntry(
 		HookScriptVersion:      contract.HookScriptVersion,
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
+		HookFailMode:           effectiveHookFailMode(opts, conn),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	if runtime.GOOS == "windows" && entry.Connector == "codex" {
