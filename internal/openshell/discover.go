@@ -208,9 +208,10 @@ func Discover(opts DiscoverOptions) (*Registration, error) {
 }
 
 // ValidGatewayName reports whether name is safe to use as a registration
-// directory name (ASCII letters, digits, '-' and '_').
+// directory name and as a CLI flag value: ASCII letters, digits, '-' and
+// '_', starting with a letter or digit.
 func ValidGatewayName(name string) bool {
-	if name == "" || len(name) > 128 {
+	if name == "" || len(name) > 128 || name[0] == '-' || name[0] == '_' {
 		return false
 	}
 	for _, r := range name {
