@@ -18,6 +18,89 @@ default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
 
+### Legacy OpenShell standalone sandbox removed
+
+- **Breaking:** removes the legacy standalone sandbox integration for the
+  `openshell-sandbox` 0.0.x binary. It was Linux- and OpenClaw-only: a network
+  namespace and veth pair (`10.200.0.1` host, `10.200.0.2` sandbox), iptables
+  NAT rules, root `openshell-sandbox.service` / `defenseclaw-sandbox.target`
+  units, launcher scripts under `/usr/local/lib/defenseclaw/`, a `sandbox`
+  Linux user, and ownership/ACL changes on `~/.openclaw`. The Go wrappers
+  called OpenShell CLI verbs that do not exist, and the generated
+  per-connector sandbox policy was never enforced. Support for NVIDIA
+  OpenShell 0.1 is being rebuilt for a future release.
+- **Breaking:** removed commands: `defenseclaw sandbox init`,
+  `defenseclaw sandbox setup` (including `--disable`, `--sandbox-ip`,
+  `--policy`, and its other flags),
+  `defenseclaw-gateway sandbox start|stop|restart|status|exec|shell`, and
+  `defenseclaw-gateway sandbox policy diff`.
+- Removed files: `policies/openshell/*`, `policies/rego/sandbox.rego`
+  (`policies/rego/data-sandbox.json` stays; it carries firewall data),
+  `internal/sandbox/`, `internal/cli/sandbox.go`, `internal/cli/policy_diff.go`,
+  `cli/defenseclaw/commands/cmd_init_sandbox.py`,
+  `cli/defenseclaw/commands/cmd_setup_sandbox.py`,
+  `scripts/bundle-sandbox-test.sh`, `scripts/test-e2e-sandbox*.sh`,
+  `scripts/test-e2e-tool-block-sandbox.sh`, `scripts/test-proxy-sandbox.py`,
+  and `scripts/fix-sandbox-acls.sh`. `scripts/install-openshell-sandbox.sh`,
+  which older `install.sh` versions fetch as a release asset, is now a stub
+  that prints a deprecation notice and exits 0, so cached older installers do
+  not fail.
+- `defenseclaw init --sandbox` is hidden and deprecated: it prints a notice and
+  continues a normal init. `install.sh --sandbox` prints a deprecation notice
+  and is otherwise a no-op.
+- **Breaking:** OpenClaw and ZeptoClaw subprocess policy is now `shims` on
+  every platform. Earlier docs claimed Linux installed an enforced
+  Landlock/seccomp OpenShell policy with shims as a supplement; that policy was
+  never enforced.
+- Adds
+  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`,
+  now the only `sandbox` subcommand.
+  Linux only; privileged steps run through `sudo` with binaries resolved only
+  from root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. It detects a
+  legacy install, prints every step with its exact commands, and asks for
+  confirmation unless `--yes`; `--dry-run` changes nothing. Each artifact is
+  handled idempotently and recorded in `<data_dir>/legacy-sandbox-cleanup.json`.
+  Steps: disable and remove the generated systemd units and root-owned,
+  DefenseClaw-generated launchers; delete the recorded namespace and veth
+  peers, remove the exact NAT rules (checked with `iptables -C` first), and
+  restore `net.ipv4.conf.all.route_localnet`; restore the OpenClaw home's
+  original ownership and parent-directory modes from the validated backup,
+  remove the `sandbox` user's ACLs (which the old `--disable` never did) and
+  the `/home/sandbox/.openclaw` symlink; then, as the operator and refusing
+  symlinks, restore the `openclaw.json` gateway and provider settings to
+  loopback; remove the invoking user from the
+  `sandbox` group; optionally `userdel -r sandbox` (`--remove-user`, refused
+  while that user has processes) and remove a non-package-owned 0.0.x
+  `/usr/local/bin/openshell-sandbox` (`--remove-binary`); reset
+  `openshell.mode`, `gateway.host`, `gateway.port`, `guardrail.host`,
+  `claw.home_dir`, `claw.config_file`, and `claw.openclaw_home_original`;
+  back up legacy data-dir artifacts to
+  `<data_dir>/backups/legacy-sandbox-<timestamp>/` before removing them; and
+  print next steps (restart OpenClaw on the host,
+  `defenseclaw setup guardrail`, `defenseclaw-gateway restart`).
+- Legacy bind shim: until cleanup runs on a host whose config still says
+  `openshell.mode: standalone` with a non-localhost `guardrail.host`, the
+  gateway API keeps binding to that host (an explicit `gateway.api_bind`
+  still wins) so `upgrade` health checks keep working. While
+  `openshell.mode: standalone` remains, `/health` reports the `sandbox`
+  subsystem as `degraded` with a `last_error` pointing at
+  `defenseclaw sandbox legacy-cleanup`; on every other host the subsystem is
+  absent. `defenseclaw doctor` and `defenseclaw status` point a detected
+  legacy install at the same command.
+- Config: the `openshell:` key stays in the v8 schema with no migration.
+  `mode` and `sandbox_home` are read only by the legacy shim and
+  `legacy-cleanup`; `binary`, `policy_dir`, `version`, `auto_pair`, and
+  `host_networking` are accepted and ignored.
+- **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
+  metric family (instrument `defenseclaw.openshell.exit`) and its
+  `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit
+  action.
+- Removes the seven environment variables whose only consumers were deleted:
+  the legacy installer's binary-digest, manifest-digest, and unpinned-download
+  variables; the launcher scripts' broad-regex namespace cleanup opt-in and
+  install-directory variable; the `sandbox setup` pre-pairing device-key trust
+  override; and the sandbox proxy test harness's bearer token.
+
 ### Observability v8
 
 - Defaults an omitted `observability.local.retention_days` to a rolling seven-day
