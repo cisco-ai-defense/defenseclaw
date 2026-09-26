@@ -400,7 +400,13 @@ function Test-UpgradeLegacy([string]$From) {
         Invoke-WebRequest -UseBasicParsing -OutFile $legacy `
             -Uri "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$From/scripts/install.ps1"
         Write-Log "install $From with its own install.ps1"
-        Check ((Invoke-Installer $legacy @("-Version", $From, "-Yes", "-NoOpenclaw")) -eq 0) "install of $From failed"
+        # Under Windows PowerShell 5.1 the 0.x installers stop on the progress
+        # uv now writes to stderr, so they run under PowerShell 7 when present.
+        $shell = [string](Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+        if (-not $shell) { $shell = $PowerShell }
+        $code = Invoke-Exe $shell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $legacy, "-Version", $From, "-Yes", "-NoOpenclaw")
+        Check ($code -eq 0) "install of $From failed ($code)"
+        if ($code -ne 0) { return }
         if (-not (Initialize-Gateway)) { return }
         Assert-Versions $From
         Write-Log "upgrade $From -> $Target"
