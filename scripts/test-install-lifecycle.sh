@@ -20,6 +20,9 @@
 #   scripts/test-install-lifecycle.sh --assets DIR [--previous-assets DIR]
 #       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills macos-app"] [--keep]
 #
+# upgrade-0.X.Y upgrades from any published 0.x release (upgrade-0.8.4 imports
+# a pre-v8 configuration).
+#
 # Every lane runs in its own throwaway HOME with the gateway on a free port,
 # so it never touches the real install. DIR holds release-shaped assets
 # (scripts/build-release-assets.sh or a downloaded release).
@@ -52,6 +55,12 @@ mkdir -p "${TOOLS}"
 ln -s "$(command -v uv)" "${TOOLS}/uv"
 REAL_UV_CACHE="$(uv cache dir 2>/dev/null || true)"
 REAL_UV_PYTHON="$(uv python dir 2>/dev/null || true)"
+# cosign stays off the lane PATH, so installers only see it through with_cosign.
+COSIGN_BIN="${ROOT}/cosign-bin"
+if command -v cosign >/dev/null 2>&1; then
+    mkdir -p "${COSIGN_BIN}"
+    ln -s "$(command -v cosign)" "${COSIGN_BIN}/cosign"
+fi
 LANE_HOMES=()
 FAILURES=0
 
@@ -84,23 +93,37 @@ free_port() {
     python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'
 }
 
+# with_cosign CMD...: run CMD with cosign on PATH, when this host has it.
+with_cosign() { PATH="${COSIGN_BIN}:${PATH}" "$@"; }
+
 install_candidate() { bash "$1/install.sh" --local "$1" --yes; }
 # The documented one-liner pipes install.sh into bash; the script arrives on stdin.
 install_candidate_piped() { cat "$1/install.sh" | bash -s -- --local "$1" --yes; }
 
+# install_legacy: install LEGACY_VERSION with its own installer. Releases before
+# 0.8.5 published it only in the source tree.
 install_legacy() {
     local installer="${ROOT}/install-${LEGACY_VERSION}.sh"
     [[ -f "${installer}" ]] || curl -fsSL -o "${installer}" \
-        "https://github.com/cisco-ai-defense/defenseclaw/releases/download/${LEGACY_VERSION}/install.sh"
-    VERSION="${LEGACY_VERSION}" bash "${installer}" --yes --no-openclaw
+        "https://github.com/cisco-ai-defense/defenseclaw/releases/download/${LEGACY_VERSION}/install.sh" \
+        || curl -fsSL -o "${installer}" \
+        "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${LEGACY_VERSION}/scripts/install.sh"
+    # 0.8.4 through 0.8.7 refuse to install without cosign.
+    VERSION="${LEGACY_VERSION}" with_cosign bash "${installer}" --yes --no-openclaw
 }
 
 # init_and_start: create a config, move the gateway to a free port, start it.
+# Callers run it under "must", where errexit is off, so every step returns.
 init_and_start() {
-    "${HOME}/.local/bin/defenseclaw" init --non-interactive --connector none --no-start-gateway --no-verify \
-        --skip-install >/dev/null
+    local init=(init --non-interactive --no-start-gateway --no-verify --skip-install) help
+    # Releases before 0.8.5 have no "--connector none"; their init defaults to codex.
+    help="$("${HOME}/.local/bin/defenseclaw" init --help 2>/dev/null || true)"
+    if [[ "${help}" == *"|none]"* ]]; then
+        init+=(--connector none)
+    fi
+    "${HOME}/.local/bin/defenseclaw" "${init[@]}" >/dev/null || return 1
     PORT="$(free_port)"
-    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" "${PORT}" <<'PY'
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" "${PORT}" <<'PY' || return 1
 import sys, yaml
 path, port = sys.argv[1], int(sys.argv[2])
 with open(path, encoding="utf-8") as stream:
@@ -109,13 +132,15 @@ config.setdefault("gateway", {})["api_port"] = port
 with open(path, "w", encoding="utf-8") as stream:
     yaml.safe_dump(config, stream, sort_keys=False)
 PY
-    echo "lifecycle-marker" > "${DC_HOME}/lifecycle-marker.txt"
+    echo "lifecycle-marker" > "${DC_HOME}/lifecycle-marker.txt" || return 1
     "${HOME}/.local/bin/defenseclaw-gateway" start >/dev/null
 }
 
-# rechecksum DIR: rewrite checksums.txt after a drill edited assets.
+# rechecksum DIR: rewrite checksums.txt after a drill edited assets; the release
+# signature no longer applies.
 rechecksum() {
-    (cd "$1" && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
+    (cd "$1" && rm -f checksums.txt.bundle checksums.txt.sig checksums.txt.pem \
+        && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
 }
 
 # break_migration WHEEL: after the swap, migrate writes to config.yaml and then
@@ -180,8 +205,12 @@ stop_lane() {
 lane_fresh() {
     enter_lane fresh
     log "fresh install of ${TARGET} (piped, as the one-liner runs it)"
-    must install_candidate_piped "${ASSETS}" || return 1
+    must with_cosign install_candidate_piped "${ASSETS}" || return 1
     assert_versions "${TARGET}"
+    if [[ -x "${COSIGN_BIN}/cosign" && -f "${ASSETS}/checksums.txt.bundle" ]]; then
+        grep -q "Release signature verified" "$(ls -t "${DC_HOME}"/logs/install-*.log | head -1)" \
+            || fail "cosign is installed but the installer did not verify the release signature"
+    fi
     [[ ! -e "${DC_HOME}/previous" ]] || fail "a fresh install must not leave a rollback slot"
     [[ -f "${DC_HOME}/installer/install.sh" ]] || fail "installer copy was not saved"
     must init_and_start || return 1
@@ -397,7 +426,10 @@ for lane in ${LANES}; do
             [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "upgrade-previous needs --previous-assets" >&2; exit 2; }
             prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
             upgrade_lane upgrade-previous "${prev}" install_previous || true ;;
-        upgrade-0.8.10) upgrade_lane upgrade-legacy "${LEGACY_VERSION}" install_legacy || true ;;
+        upgrade-0.*)
+            LEGACY_VERSION="${lane#upgrade-}"
+            upgrade_lane "${lane}" "${LEGACY_VERSION}" install_legacy || true
+            LEGACY_VERSION="0.8.10" ;;
         handoff) lane_handoff || true ;;
         drills) lane_drills || true ;;
         macos-app)

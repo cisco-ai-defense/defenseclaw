@@ -519,6 +519,11 @@ if ! swap_in; then
     die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
 fi
 START_RC=0
+if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # 0.x gateways ran on defaults without a config; 1.x needs one.
+    WAS_RUNNING=false
+    warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
+fi
 if [[ "${WAS_RUNNING}" == true ]]; then
     set +e
     start_gateway
