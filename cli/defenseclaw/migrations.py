@@ -405,17 +405,15 @@ def _preflight_observability_v8(
     *,
     gateway_binary: str | None = None,
 ) -> None:
-    """Convert and target-validate a read-only snapshot in a scratch directory."""
+    """Convert and target-validate a read-only snapshot in a scratch directory.
+
+    The source config is only read, so a ``DEFENSECLAW_CONFIG`` outside the data
+    directory is checked the same way the real migration later activates it.
+    """
 
     data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
-    try:
-        common = os.path.commonpath((os.path.normcase(data_dir), os.path.normcase(config_path)))
-    except ValueError:
-        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
-    if common != os.path.normcase(data_dir):
-        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
     source = _read_observability_v8_upgrade_source(config_path)
     if source is None:
         return

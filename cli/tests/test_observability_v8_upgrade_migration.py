@@ -216,7 +216,9 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
         self.assertFalse(os.path.exists(candidate_paths[0]))
 
 
-    def test_staged_preflight_rejects_config_path_escape_before_read(self) -> None:
+    def test_staged_preflight_checks_an_external_config_read_only(self) -> None:
+        # DEFENSECLAW_CONFIG may live outside the data directory; the real
+        # migration activates it there, so the preflight must check it too.
         outside = os.path.join(self.root.name, "outside-config.yaml")
         with open(outside, "wb") as config_file:
             config_file.write(b"config_version: 7\n")
@@ -229,14 +231,19 @@ class TestObservabilityV8UpgradeMigration(unittest.TestCase):
             to_version="0.8.6",
             config_path=outside,
         )
+        validated: list[dict[str, object]] = []
 
-        with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
-            _preflight_observability_v8(ctx, scratch)
+        def validate(candidate, protected, **kwargs):
+            validated.append(kwargs)
 
-        self.assertEqual(raised.exception.code, "preflight_path_escape")
+        with patch("defenseclaw.migrations._validate_observability_v8_candidate", side_effect=validate):
+            _preflight_observability_v8(ctx, scratch, gateway_binary="/staged/defenseclaw-gateway")
+
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["candidate_directory"], scratch)
+        self.assertEqual(validated[0]["gateway_binary"], "/staged/defenseclaw-gateway")
         with open(outside, "rb") as config_file:
             self.assertEqual(config_file.read(), b"config_version: 7\n")
-        self.assertEqual(os.listdir(scratch), [])
 
     def test_activation_failure_propagates_without_claiming_change(self) -> None:
         with (
