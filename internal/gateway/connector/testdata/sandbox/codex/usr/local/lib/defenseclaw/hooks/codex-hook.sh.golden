@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # defenseclaw-managed-hook v6
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
@@ -41,17 +41,12 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
-  exit 0
-fi
-{{end}}
+
 
 # Plan B4 / S0.4: shell-side hook hardening, sourced BEFORE the
 # missing-token branch so the helper is available to log + branch on
@@ -68,10 +63,10 @@ defenseclaw_harden_env
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
-{{if .Sandbox}}# OpenShell sandbox images bake the fail mode; no environment override.
+# OpenShell sandbox images bake the fail mode; no environment override.
 . "${HOOK_DIR}/_sandbox.sh"
-FAIL_MODE="{{.FailMode}}"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="closed"
+readonly FAIL_MODE
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains
@@ -128,9 +123,7 @@ DEFENSECLAW_HOOK_CONNECTOR="codex"
 DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-{{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token codex codex-hook "codex tool"
-fi{{end}}
+defenseclaw_sandbox_require_token codex codex-hook "codex tool"
 
 # Drop inherited export attributes before these names receive private values.
 # A plain Bash assignment preserves the exported bit of an inherited variable,
@@ -155,24 +148,11 @@ if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
   fail_binding "Codex hook stdin event does not match the registered event"
 fi
 
-API_ADDR="{{.APIAddr}}"
+API_ADDR="host.openshell.internal:18971"
 
-{{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the
+# The per-sandbox binding token is an OpenShell provider placeholder; the
 # supervisor substitutes the real credential only on the ingress endpoint.
-API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}# Source the token file written by defenseclaw setup (0o600, never baked
-# into this script). Connector-scoped sidecars override an inherited generic
-# gateway token; legacy .token files retain the explicit env override.
-if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
-  DEFENSECLAW_GATEWAY_TOKEN=
-  if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
-    IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
-  fi
-  export DEFENSECLAW_GATEWAY_TOKEN
-elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
-fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 # The hook needs only its private shell-local copy from this point forward.
 # Drop the exported source before trace extraction or descriptor writers can
 # spawn child processes.
@@ -228,7 +208,7 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-{{if .Sandbox}}HOOK_MAX_TIME="$DEFENSECLAW_SANDBOX_MAX_TIME"
+HOOK_MAX_TIME="$DEFENSECLAW_SANDBOX_MAX_TIME"
 HOOK_RETRY_MAX_TIME="$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME"
 if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   # Codex caps SessionEnd at three seconds: both attempts must fit.
@@ -256,64 +236,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/codex/hook" "$PAYLOAD" \
 }
 API_TOKEN=
 PAYLOAD=
-unset API_TOKEN PAYLOAD{{else}}HOOK_MAX_TIME=10
-if [ "$BOUND_EVENT" = "SessionEnd" ]; then
-  # Codex's host maximum is three seconds. Leave one second for response
-  # parsing and process teardown, matching the native launcher budget.
-  HOOK_MAX_TIME=2
-fi
-
-# Keep authentication and the hook event off the curl command line. Process
-# inspection is available to other same-user processes on supported hosts, so
-# passing either value as a literal argv entry discloses the gateway credential
-# and the potentially sensitive tool payload. curl reads both through inherited
-# descriptors instead; argv contains only the descriptor paths. The
-# descriptor-backed --config form works on curl releases older than 7.55.0,
-# unlike --header @file.
-AUTH_HEADER_ARGS=()
-AUTH_HEADER_FD_OPEN=0
-if [ -n "${API_TOKEN}" ]; then
-  # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
-  # before formatting curl configuration, then escape the two metacharacters
-  # recognized inside a quoted curl config value.
-  case "${API_TOKEN}" in
-    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
-  esac
-  CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
-  CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"
-  exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${CURL_CONFIG_TOKEN}\"")
-  AUTH_HEADER_FD_OPEN=1
-  AUTH_HEADER_ARGS=(--config "/dev/fd/8")
-fi
-
-# curl does not need the shell-local values once the private descriptors are
-# open. Clear them before spawning curl so no credential or payload is
-# inherited as process environment.
-exec 9< <(printf '%s' "${PAYLOAD}")
-API_TOKEN=
-PAYLOAD=
-CURL_CONFIG_TOKEN=
-unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
-
-CURL_STATUS=0
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
-  -H "Content-Type: application/json" \
-  -H "X-DefenseClaw-Client: codex-hook/1.0" \
-  -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
-  -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time "$HOOK_MAX_TIME" \
-  --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?
-exec 9<&-
-if [ "$AUTH_HEADER_FD_OPEN" = "1" ]; then
-  exec 8<&-
-fi
-if [ "$CURL_STATUS" -ne 0 ]; then
-  fail_unreachable "gateway unreachable"
-fi{{end}}
+unset API_TOKEN PAYLOAD
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

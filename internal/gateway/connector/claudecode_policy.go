@@ -449,6 +449,16 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readClaudeCodeManagedFileSettingsAt(root)
+}
+
+// readClaudeCodeManagedFileSettingsAt loads the file-based managed tier under
+// an explicit root exactly as Claude does: managed-settings.json, then every
+// non-hidden managed-settings.d/*.json drop-in in case-insensitive order,
+// deep-merged. It is the root-parameterized core of
+// readClaudeCodeManagedFileSettings, so rendered image artifacts can be laid
+// out under a scratch root and checked with the same reader.
+func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource, error) {
 	paths := []string{filepath.Join(root, "managed-settings.json")}
 	dropin := filepath.Join(root, "managed-settings.d")
 	entries, err := os.ReadDir(dropin)

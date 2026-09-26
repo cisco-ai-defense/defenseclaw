@@ -1,0 +1,80 @@
+{
+  "connector": "claudecode",
+  "hook_contract": "claudecode-hooks-v1",
+  "tamper_tier": "managed",
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "binaries": [
+    {
+      "Name": "bash",
+      "Role": "runtime"
+    },
+    {
+      "Name": "claude",
+      "Role": "harness"
+    },
+    {
+      "Name": "curl",
+      "Role": "runtime"
+    },
+    {
+      "Name": "jq",
+      "Role": "runtime"
+    }
+  ],
+  "files": {
+    "/etc/claude-code/managed-settings.d/50-defenseclaw.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "43acf6daac6bbc08b4268c696391cb7fe65405403140a0ced380a38a06ad61a7"
+    },
+    "/sandbox/.claude.json": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "sha256": "d51797498ade9543b5e40810495d871afd9e89fd6cbce714c4c66a6603c99198"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "3346a7857c39cdceb09992e71d7fe8674fdca385e933067003e459ff3fb0900e"
+    },
+    "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "17d3bd4b85dcbe8146ef2cbe853c820fd7acfd4cd5b4bb2ca9b6ff1f53c82560"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "102340922b12a93e0183fb314c696ef0992561ebba4bae1ab8bdf1c778c81d2e"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "23991fd2c2ed149f9a750291d162f81a9b91bef85225d0bda7a14d59e9a68a0b"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "a2b5dc9f6d6ca460f451aa0b2dc232c44cdeb7f0adf13427bf479ecb69577553"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "7be4034c02ba209ce3a48367c5cda1e7c75ba74bea6aefc104fb242dbf61087a"
+    },
+    "/usr/local/lib/defenseclaw/otel-headers.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "11eb3b200712620c8908410f4ed36d54ad911c470d2d4df60b441cc0e8849ace"
+    }
+  }
+}

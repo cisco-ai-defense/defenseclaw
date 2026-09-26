@@ -1,0 +1,14 @@
+#!/bin/sh
+# defenseclaw-managed-hook v1
+# DefenseClaw Claude Code otelHeadersHelper (OpenShell sandbox images).
+# Prints the OTLP exporter headers for the DefenseClaw hook ingress. The
+# bearer is the per-sandbox binding token placeholder; the OpenShell
+# supervisor substitutes the real value only on the ingress endpoint.
+token="${DEFENSECLAW_SANDBOX_TOKEN:-}"
+case "$token" in
+  ''|*[!A-Za-z0-9:._-]*)
+    printf '{"x-defenseclaw-source":"claudecode","x-defenseclaw-client":"claudecode-otel/1.0"}\n'
+    exit 0
+    ;;
+esac
+printf '{"Authorization":"Bearer %s","x-defenseclaw-source":"claudecode","x-defenseclaw-client":"claudecode-otel/1.0"}\n' "$token"

@@ -1,0 +1,247 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+)
+
+// In-image Claude Code system policy (Linux managed tier).
+const (
+	claudeCodeSandboxManagedRoot    = "/etc/claude-code"
+	claudeCodeSandboxDropInName     = "50-defenseclaw.json"
+	claudeCodeSandboxOtelHelperPath = SandboxLibDir + "/otel-headers.sh"
+)
+
+// ClaudeCodeSandboxDropInPath is where the managed hook drop-in lands.
+const ClaudeCodeSandboxDropInPath = claudeCodeSandboxManagedRoot + "/managed-settings.d/" + claudeCodeSandboxDropInName
+
+// claudeCodeSandboxStartupEnv must be real process environment: Claude
+// applies managed-settings env too late for startup traffic (autoupdater,
+// marketplace clone, feature-flag fetches), and OpenShell does not propagate
+// image ENV, so these travel through sandbox create --env as well.
+var claudeCodeSandboxStartupEnv = map[string]string{
+	"DISABLE_AUTOUPDATER":                                  "1",
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":             "1",
+	"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
+}
+
+// claudeCodeSandboxPinnedEnv are managed-env values that project or user
+// settings cannot override. CLAUDE_CODE_SIMPLE=0 keeps hooks active when the
+// agent requests Claude's simple/bare mode; the loader and shell-startup
+// pins stop a settings env block from injecting code into hook processes.
+var claudeCodeSandboxPinnedEnv = map[string]string{
+	"CLAUDE_CODE_SIMPLE": "0",
+	"LD_PRELOAD":         "",
+	"LD_LIBRARY_PATH":    "",
+	"LD_AUDIT":           "",
+	"BASH_ENV":           "",
+	"ENV":                "",
+}
+
+// SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
+// the managed-settings.d drop-in (hooks, allowManagedHooksOnly, OTLP to the
+// ingress through otelHeadersHelper, pinned env), the helper itself and the
+// pre-seeded ~/.claude.json that skips first-run prompts.
+func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
+	rt, err := resolveSandboxTarget(c.Name(), target)
+	if err != nil {
+		return SandboxArtifacts{}, err
+	}
+	hookFiles, err := renderSandboxHookFiles(c.Name(), rt)
+	if err != nil {
+		return SandboxArtifacts{}, err
+	}
+	dropIn, err := renderClaudeCodeSandboxDropIn(rt)
+	if err != nil {
+		return SandboxArtifacts{}, err
+	}
+	if err := verifyClaudeCodeSandboxDropIn(dropIn, rt); err != nil {
+		return SandboxArtifacts{}, err
+	}
+	preseed, err := renderClaudeCodeSandboxPreseed()
+	if err != nil {
+		return SandboxArtifacts{}, err
+	}
+
+	files := append(hookFiles,
+		SandboxFile{Path: ClaudeCodeSandboxDropInPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: dropIn},
+		SandboxFile{Path: claudeCodeSandboxOtelHelperPath, Mode: 0o755, Owner: SandboxOwnerRoot, Data: []byte(claudeCodeSandboxOtelHelper)},
+		SandboxFile{Path: path.Join(SandboxHomeDir, ".claude.json"), Mode: 0o600, Owner: SandboxOwnerUser, Data: preseed},
+	)
+	env := make(map[string]string, len(claudeCodeSandboxStartupEnv))
+	for key, value := range claudeCodeSandboxStartupEnv {
+		env[key] = value
+	}
+	binaries := append(sandboxHookRuntimeBinaries(), SandboxBinary{Name: "claude", Role: SandboxBinaryHarness})
+	return finalizeSandboxArtifacts(SandboxArtifacts{
+		Connector:    c.Name(),
+		HookContract: rt.contract.ContractID,
+		TamperTier:   SandboxTamperTierManaged,
+		Files:        files,
+		Env:          env,
+		Binaries:     binaries,
+	})
+}
+
+// renderClaudeCodeSandboxDropIn renders the managed-settings.d drop-in.
+// Claude silently drops a whole drop-in that carries one schema-invalid
+// field, so the document holds only keys verified against Claude Code 2.1.x
+// and the image build's hook-fire probe proves the hooks actually run.
+func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
+	hookCommand := path.Join(SandboxHookDir, "claude-code-hook.sh")
+	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, nil, rt.opts)
+	if err != nil {
+		return nil, err
+	}
+	env, err := claudeCodeSandboxManagedEnv(rt)
+	if err != nil {
+		return nil, err
+	}
+	policy := map[string]interface{}{
+		"allowManagedHooksOnly":             true,
+		"skipDangerousModePermissionPrompt": true,
+		"otelHeadersHelper":                 claudeCodeSandboxOtelHelperPath,
+		"hooks":                             hooks,
+		"env":                               env,
+	}
+	body, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal Claude Code sandbox managed settings: %w", err)
+	}
+	return append(body, '\n'), nil
+}
+
+// claudeCodeSandboxManagedEnv reuses the connector's native OTLP spec with the
+// ingress as endpoint. Its Authorization header cannot be static (the token
+// placeholder is revision-scoped), so the spec carries no headers and the
+// otelHeadersHelper supplies them per export. Content-capture gates stay
+// pinned off exactly as on the host.
+func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, error) {
+	spec := (&ClaudeCodeConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr}).NativeOTLP
+	if spec == nil {
+		return nil, fmt.Errorf("claudecode: nil NativeOTLPSpec")
+	}
+	sandboxSpec := *spec
+	sandboxSpec.Headers = nil
+	extra := make(map[string]string, len(spec.ExtraEnv))
+	for key, value := range spec.ExtraEnv {
+		// The sandbox hooks bake their fail mode and never read this.
+		if key == "DEFENSECLAW_FAIL_MODE" {
+			continue
+		}
+		extra[key] = value
+	}
+	sandboxSpec.ExtraEnv = extra
+	env, err := sandboxSpec.EnvBlock()
+	if err != nil {
+		return nil, fmt.Errorf("render Claude Code sandbox OTLP env: %w", err)
+	}
+	for key, value := range claudeCodeSandboxStartupEnv {
+		env[key] = value
+	}
+	for key, value := range claudeCodeSandboxPinnedEnv {
+		env[key] = value
+	}
+	return env, nil
+}
+
+// verifyClaudeCodeSandboxDropIn lays the drop-in out under a scratch managed
+// root and runs Claude's file-tier reader and DefenseClaw's managed-hook
+// verifiers against it, so the image never ships a policy the guardian would
+// reject.
+func verifyClaudeCodeSandboxDropIn(dropIn []byte, rt resolvedSandboxTarget) error {
+	root, err := os.MkdirTemp("", "defenseclaw-claude-managed-")
+	if err != nil {
+		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+	}
+	defer os.RemoveAll(root)
+	dir := filepath.Join(root, "managed-settings.d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, claudeCodeSandboxDropInName), dropIn, 0o600); err != nil {
+		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+	}
+	source, err := readClaudeCodeManagedFileSettingsAt(root)
+	if err != nil {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
+	}
+	if source == nil {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: drop-in was not loaded")
+	}
+	if err := validateClaudeCodeManagedHookControls(source, true); err != nil {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
+	}
+	if only, _ := source.settings["allowManagedHooksOnly"].(bool); !only {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: allowManagedHooksOnly is not true")
+	}
+	ok, err := claudeCodeSourceHasHookContract(source, rt.opts, true)
+	if err != nil {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: hook contract %s is incomplete", rt.contract.ContractID)
+	}
+	return nil
+}
+
+// renderClaudeCodeSandboxPreseed pre-accepts onboarding and the workspace
+// trust dialog. Trust on /work is inherited by every project mounted below
+// it, which keeps the image independent of the repository name.
+func renderClaudeCodeSandboxPreseed() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	err := enc.Encode(map[string]interface{}{
+		"hasCompletedOnboarding": true,
+		"theme":                  "dark",
+		"projects": map[string]interface{}{
+			"/work":        map[string]interface{}{"hasTrustDialogAccepted": true},
+			SandboxHomeDir: map[string]interface{}{"hasTrustDialogAccepted": true},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal Claude Code preseed: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// claudeCodeSandboxOtelHelper is Claude's otelHeadersHelper: it prints the
+// OTLP exporter headers as JSON on every export. The bearer is the OpenShell
+// placeholder read at runtime; a value outside the placeholder alphabet is
+// never interpolated into JSON.
+const claudeCodeSandboxOtelHelper = `#!/bin/sh
+# defenseclaw-managed-hook v1
+# DefenseClaw Claude Code otelHeadersHelper (OpenShell sandbox images).
+# Prints the OTLP exporter headers for the DefenseClaw hook ingress. The
+# bearer is the per-sandbox binding token placeholder; the OpenShell
+# supervisor substitutes the real value only on the ingress endpoint.
+token="${DEFENSECLAW_SANDBOX_TOKEN:-}"
+case "$token" in
+  ''|*[!A-Za-z0-9:._-]*)
+    printf '{"x-defenseclaw-source":"claudecode","x-defenseclaw-client":"claudecode-otel/1.0"}\n'
+    exit 0
+    ;;
+esac
+printf '{"Authorization":"Bearer %s","x-defenseclaw-source":"claudecode","x-defenseclaw-client":"claudecode-otel/1.0"}\n' "$token"
+`

@@ -1,7 +1,8 @@
-#!/bin/bash
+#!/bin/bash -p
 # defenseclaw-managed-hook v6
-# DefenseClaw PostResponse hook — inspects LLM response content after it is returned.
-# Reads the LLM response from stdin (JSON with "content" field).
+# DefenseClaw PreToolUse hook — calls DefenseClaw inspect API before tool execution.
+# Used by Claude Code (PreToolUse) and OpenCode (hook command).
+# The agent sets CLAUDE_TOOL_NAME (Claude Code) or TOOL_NAME and pipes input to stdin.
 set -euo pipefail
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
@@ -31,65 +32,51 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
-  exit 0
-fi
-{{end}}
 
-# Plan B4 / S0.4: shell-side hook hardening.
+
+# Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
+# touching any agent-supplied data so resource caps + env sanitization
+# apply to every subprocess this hook spawns.
 . "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
-DEFENSECLAW_HOOK_NAME="inspect-response"
+DEFENSECLAW_HOOK_NAME="inspect-tool"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
-{{if .Sandbox}}# OpenShell sandbox images run exactly one harness: the connector identity
+# OpenShell sandbox images run exactly one harness: the connector identity
 # and fail mode are baked at image build, never read from the environment.
 . "${HOOK_DIR}/_sandbox.sh"
-RUNTIME_CONNECTOR="{{.ConnectorName}}"
-FAIL_MODE="{{.FailMode}}"
-readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}
+RUNTIME_CONNECTOR="claudecode"
+FAIL_MODE="closed"
+readonly RUNTIME_CONNECTOR FAIL_MODE
 
-# Avarice F-2025 / chain F-3397: authenticate inspection calls. See
-# inspect-request.sh for the full rationale.
-{{if .Sandbox}}defenseclaw_sandbox_require_token inspect inspect-response "response"
+# Avarice F-2025 / chain F-3397: load the gateway bearer token before
+# any agent-controlled input is touched. See inspect-request.sh for
+# the full rationale (hook now authenticates and treats 401/403 as a
+# fail-closed event regardless of FAIL_MODE).
+defenseclaw_sandbox_require_token inspect inspect-tool "tool"
 unset DEFENSECLAW_GATEWAY_TOKEN
-API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
-if [ ! -f "$TOKEN_FILE" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token inspect inspect-response "response"
-fi
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
-  if [ -n "$RUNTIME_CONNECTOR" ]; then
-    DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
-  else
-    # shellcheck source=/dev/null
-    . "$TOKEN_FILE"
-  fi
-  export DEFENSECLAW_GATEWAY_TOKEN
-fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
-CONTENT="$(defenseclaw_read_stdin_capped)" || {
-  echo "defenseclaw: inspect response refusing oversized payload" >&2
+TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
+TOOL_INPUT="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: inspect tool refusing oversized payload" >&2
   exit 2
 }
 
-API_ADDR="{{.APIAddr}}"
+API_ADDR="host.openshell.internal:18971"
 
 # Transport and response failures respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "response" "$1"
+  defenseclaw_log_hook_failure inspect inspect-tool "$1" transport "$FAIL_MODE"
+  defenseclaw_emit_unreachable_stderr "tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
@@ -97,18 +84,20 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" response "$FAIL_MODE"
-  echo "defenseclaw: inspect-response hook error: $1" >&2
+  defenseclaw_log_hook_failure inspect inspect-tool "$1" response "$FAIL_MODE"
+  echo "defenseclaw: inspect-tool hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
   exit 2
 }
 
-# Avarice F-2025 / chain F-3397: 401/403 always fail closed.
+# Avarice F-2025 / chain F-3397: 401/403 means the gateway is
+# reachable but rejecting the hook's auth — a misconfiguration that
+# an attacker can rely on. Always fail closed (override FAIL_MODE).
 fail_unauthorized() {
-  defenseclaw_log_hook_failure inspect inspect-response "$1" response "closed"
-  echo "defenseclaw: inspect-response hook auth rejected: $1 (fail-closed override)" >&2
+  defenseclaw_log_hook_failure inspect inspect-tool "$1" response "closed"
+  echo "defenseclaw: inspect-tool hook auth rejected: $1 (fail-closed override)" >&2
   exit 2
 }
 
@@ -121,23 +110,16 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-{{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/response" "$CONTENT" \
+INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
+  '{tool: $tool, args: $args}')"
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DEFENSECLAW_SANDBOX_MAX_TIME" "$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "sandbox ingress unreachable"
-}{{else}}RESPONSE=$(printf '%s' "$CONTENT" | curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/response" \
-  -H "Content-Type: application/json" \
-  -H "X-DefenseClaw-Client: inspect-hook/1.0" \
-  "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
-}{{end}}
+}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

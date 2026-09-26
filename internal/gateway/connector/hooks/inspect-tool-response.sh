@@ -51,12 +51,19 @@ defenseclaw_harden_env
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-tool-response"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
-RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+{{if .Sandbox}}# OpenShell sandbox images run exactly one harness: the connector identity
+# and fail mode are baked at image build, never read from the environment.
+. "${HOOK_DIR}/_sandbox.sh"
+RUNTIME_CONNECTOR="{{.ConnectorName}}"
+FAIL_MODE="{{.FailMode}}"
+readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}
 
 # Avarice F-2025 / chain F-3397: authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
-TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+{{if .Sandbox}}defenseclaw_sandbox_require_token inspect inspect-tool-response "tool-response"
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
 if [ ! -f "$TOKEN_FILE" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-tool-response "tool-response"
 fi
@@ -69,7 +76,7 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
   fi
   export DEFENSECLAW_GATEWAY_TOKEN
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT="$(defenseclaw_read_stdin_capped)" || {
@@ -115,7 +122,16 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
+{{if .Sandbox}}INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
+  '{tool: $tool, output: $output}')"
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool-response" "$INSPECT_BODY" \
+  "$DEFENSECLAW_SANDBOX_MAX_TIME" "$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
   '{tool: $tool, output: $output}' | \
   curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool-response" \
   -H "Content-Type: application/json" \
@@ -126,7 +142,7 @@ RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
   --max-time 5 \
   --data-binary @- 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

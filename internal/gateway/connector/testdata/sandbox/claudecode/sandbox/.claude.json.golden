@@ -1,0 +1,12 @@
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/sandbox": {
+      "hasTrustDialogAccepted": true
+    },
+    "/work": {
+      "hasTrustDialogAccepted": true
+    }
+  },
+  "theme": "dark"
+}

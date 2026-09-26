@@ -1,0 +1,76 @@
+{
+  "connector": "codex",
+  "hook_contract": "codex-hooks-v4",
+  "tamper_tier": "managed",
+  "env": {},
+  "binaries": [
+    {
+      "Name": "bash",
+      "Role": "runtime"
+    },
+    {
+      "Name": "codex",
+      "Role": "harness"
+    },
+    {
+      "Name": "curl",
+      "Role": "runtime"
+    },
+    {
+      "Name": "jq",
+      "Role": "runtime"
+    }
+  ],
+  "files": {
+    "/etc/codex/managed_config.toml": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "708a5827ad431ef0243a441b5d2d7c0e1d93853eee3f10f8ac922387ece1c955"
+    },
+    "/etc/codex/requirements.toml": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "60703dd71a61e3470a643c4cddd4c65d801126bddf5df9f0606ff5c329310289"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "3346a7857c39cdceb09992e71d7fe8674fdca385e933067003e459ff3fb0900e"
+    },
+    "/usr/local/lib/defenseclaw/hooks/codex-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "4401f0094a9209cfb469b6ba437fad784c857b3401669667303da62c19e9f99e"
+    },
+    "/usr/local/lib/defenseclaw/hooks/codex-notify.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "ffe252715d0006c8f0096684648f35edd60927a7a6ad2815f80f0a7c846e7f1a"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "d6411ed21fe657d08c3884c23703a9c1a017f0f012205cf0d2c46fccdfd692aa"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "180b4a1a9959293450d65a12eed712174026942564a664fc9f1679cb1fcd20ea"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "2447cd901e35b2e59dfdb001dbdec5c701334a36c0fb3bcf8cc52adb9f7398d9"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "f939caeb1a3dad629051e0d911cbe8bad067c1be3dfbc46d2576fdd80ae68332"
+    }
+  }
+}

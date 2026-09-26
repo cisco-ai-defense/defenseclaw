@@ -1,0 +1,47 @@
+# DefenseClaw managed Codex config (OpenShell sandbox image, root-owned).
+# Highest-precedence layer for the keys it sets; the OTLP Authorization header
+# is added per session by the DefenseClaw launcher.
+check_for_update_on_startup = false
+notify = ['/usr/local/lib/defenseclaw/hooks/codex-notify.sh']
+
+[analytics]
+enabled = false
+
+[features]
+apps = false
+in_app_updates = false
+plugin_sharing = false
+plugins = false
+remote_plugin = false
+tool_suggest = false
+
+[otel]
+environment = 'openshell'
+log_user_prompt = true
+
+[otel.exporter]
+[otel.exporter.otlp-http]
+endpoint = 'http://host.openshell.internal:18971/v1/logs'
+protocol = 'json'
+
+[otel.exporter.otlp-http.headers]
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.metrics_exporter]
+[otel.metrics_exporter.otlp-http]
+endpoint = 'http://host.openshell.internal:18971/v1/metrics'
+protocol = 'json'
+
+[otel.metrics_exporter.otlp-http.headers]
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'
+
+[otel.trace_exporter]
+[otel.trace_exporter.otlp-http]
+endpoint = 'http://host.openshell.internal:18971/v1/traces'
+protocol = 'json'
+
+[otel.trace_exporter.otlp-http.headers]
+x-defenseclaw-client = 'codex-otel/1.0'
+x-defenseclaw-source = 'codex'

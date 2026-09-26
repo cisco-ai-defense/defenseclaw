@@ -61,6 +61,18 @@ type templateData struct {
 	// Copilot has the same 30-second command-hook envelope and needs an
 	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
 	CopilotHookTimeoutMS int
+
+	// Sandbox selects the OpenShell in-image variant (sandbox_hooks.go):
+	// APIAddr is the baked hook ingress, FailMode is baked rather than
+	// env-overridable, and the token comes only from DEFENSECLAW_SANDBOX_TOKEN.
+	// Host renders leave it false and every Sandbox* field zero.
+	Sandbox bool
+	// Sandbox ingress budgets in whole seconds (curl --connect-timeout and
+	// --max-time for the first attempt, the retry and Codex SessionEnd).
+	SandboxConnectTimeout    int
+	SandboxMaxTime           int
+	SandboxRetryMaxTime      int
+	SandboxSessionEndMaxTime int
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -433,18 +445,13 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
-		content, err := hookFS.ReadFile("hooks/" + name)
+		rendered, err := renderHookTemplate(name, data)
 		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-
-		rendered, err := renderTemplate(string(content), data)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
+			return err
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, rendered, 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -515,30 +522,13 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
 	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
-	renderAndWrite := func(name string, renderData templateData) error {
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), renderData)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
-		}
-		hookPath := filepath.Join(hookDir, name)
-		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", name, err)
-		}
-		return nil
+	scripts, err := renderHookScriptSet(connectorData, sharedData, extras)
+	if err != nil {
+		return err
 	}
-	for _, name := range genericHookScripts {
-		if err := renderAndWrite(name, sharedData); err != nil {
-			return err
-		}
-	}
-	scripts := hookScriptNamesFromExtras(extras)
-	for _, name := range scripts[len(genericHookScripts):] {
-		if err := renderAndWrite(name, connectorData); err != nil {
-			return err
+	for _, script := range scripts {
+		if err := writeFile(filepath.Join(hookDir, script.Name), script.Data, 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", script.Name, err)
 		}
 	}
 	if err := writeHookConfigSidecarUsing(
