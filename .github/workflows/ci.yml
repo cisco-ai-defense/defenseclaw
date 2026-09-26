@@ -565,8 +565,8 @@ jobs:
 
   install-smoke:
     # Builds release-shaped assets from this commit and runs the real
-    # installer through a fresh install, a 0.8.10 upgrade with rollback, and
-    # the 0.8.x handoff, each in a throwaway HOME.
+    # installer through a fresh install, a 0.8.10 upgrade with rollback, the
+    # 0.8.x handoff, and the failure drills, each in a throwaway HOME.
     name: Install and Upgrade Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -589,7 +589,7 @@ jobs:
           name: install-smoke-assets
           path: ${{ runner.temp }}/assets/
           retention-days: 3
-      - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh upgrade-0.8.10 handoff"
+      - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh upgrade-0.8.10 handoff drills"
 
   install-smoke-windows:
     name: Install and Upgrade Smoke (Windows)
