@@ -1,0 +1,131 @@
+{
+  "scenarios": [
+    {
+      "name": "dc-block-ssh-key",
+      "match": "DCBLOCK",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "cat ~/.ssh/id_rsa",
+              "description": "Read an SSH private key"
+            }
+          }
+        },
+        {
+          "text": "The read was blocked by DefenseClaw."
+        }
+      ]
+    },
+    {
+      "name": "egress-allowed",
+      "match": "EGRESSOK",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "curl -s -o /dev/null -w '%{http_code}' https://example.org > /tmp/egress.txt; cat /tmp/egress.txt",
+              "description": "Fetch a public page"
+            }
+          }
+        },
+        {
+          "text": "Fetched."
+        }
+      ]
+    },
+    {
+      "name": "egress-blocked",
+      "match": "EGRESSBLOCK",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "curl -s -m 10 -o /tmp/exfil.txt -w '%{http_code}' https://webhook.site/defenseclaw-e2e > /tmp/egress-block.txt; cat /tmp/egress-block.txt",
+              "description": "Post to a webhook catcher"
+            }
+          }
+        },
+        {
+          "text": "The destination was blocked."
+        }
+      ]
+    },
+    {
+      "name": "blockme",
+      "match": "BLOCKME",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo BLOCKME > /tmp/blocked.txt",
+              "description": "Should be blocked"
+            }
+          }
+        },
+        {
+          "text": "The command was blocked by policy."
+        }
+      ]
+    },
+    {
+      "name": "blockexit2",
+      "match": "EXITTWO",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo BLOCKME-EXIT2 > /tmp/blocked2.txt",
+              "description": "Should be blocked via exit 2"
+            }
+          }
+        },
+        {
+          "text": "The command was blocked (exit 2)."
+        }
+      ]
+    },
+    {
+      "name": "projedit",
+      "match": "PROJEDIT",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "cd /work/proj && echo edited-by-claude >> README.md && id -u > /work/proj/whoami.txt && git status --short",
+              "description": "Edit project file"
+            }
+          }
+        },
+        {
+          "text": "Edited the project."
+        }
+      ]
+    },
+    {
+      "name": "default",
+      "match": "",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo hello-from-tool > /tmp/tool.txt && cat /tmp/tool.txt",
+              "description": "Write a marker file"
+            }
+          }
+        },
+        {
+          "text": "Done: the marker file was written."
+        }
+      ]
+    }
+  ],
+  "aux_text": "Mock session"
+}

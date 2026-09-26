@@ -1,0 +1,120 @@
+{
+  "scenarios": [
+    {
+      "name": "dc-block-ssh-key",
+      "match": "DCBLOCK",
+      "turns": [
+        {
+          "shell": "cat ~/.ssh/id_rsa"
+        },
+        {
+          "text": "The read was blocked by DefenseClaw."
+        }
+      ]
+    },
+    {
+      "name": "egress-allowed",
+      "match": "EGRESSOK",
+      "turns": [
+        {
+          "shell": "curl -s -o /dev/null -w '%{http_code}' https://example.org > /tmp/egress.txt; cat /tmp/egress.txt"
+        },
+        {
+          "text": "Fetched."
+        }
+      ]
+    },
+    {
+      "name": "egress-blocked",
+      "match": "EGRESSBLOCK",
+      "turns": [
+        {
+          "shell": "curl -s -m 10 -o /tmp/exfil.txt -w '%{http_code}' https://webhook.site/defenseclaw-e2e > /tmp/egress-block.txt; cat /tmp/egress-block.txt"
+        },
+        {
+          "text": "The destination was blocked."
+        }
+      ]
+    },
+    {
+      "name": "blockexit2",
+      "match": "EXITTWO",
+      "turns": [
+        {
+          "shell": "echo BLOCKME-EXIT2 > /tmp/blocked2.txt"
+        },
+        {
+          "text": "The command was blocked (exit 2)."
+        }
+      ]
+    },
+    {
+      "name": "ttyprobe",
+      "match": "TTYPROBE",
+      "turns": [
+        {
+          "function_call": {
+            "name": "exec_command",
+            "arguments": {
+              "cmd": "tty; echo TTYOK",
+              "tty": true,
+              "yield_time_ms": 5000
+            }
+          }
+        },
+        {
+          "text": "tty probe done"
+        }
+      ]
+    },
+    {
+      "name": "blockme",
+      "match": "BLOCKME",
+      "turns": [
+        {
+          "shell": "echo BLOCKME > /tmp/blocked.txt"
+        },
+        {
+          "text": "The command was blocked by policy."
+        }
+      ]
+    },
+    {
+      "name": "projedit",
+      "match": "PROJEDIT",
+      "turns": [
+        {
+          "shell": "cd /work/proj && echo edited-by-codex >> README.md && id -u > /work/proj/codex-whoami.txt && git status --short"
+        },
+        {
+          "text": "Edited the project."
+        }
+      ]
+    },
+    {
+      "name": "sandboxprobe",
+      "match": "SBPROBE",
+      "turns": [
+        {
+          "shell": "id -u; touch /work/proj/sbprobe.txt && echo wrote-proj; touch /tmp/sbprobe.txt && echo wrote-tmp; curl -s -m 3 -o /dev/null -w http=%{http_code} http://host.openshell.internal:18920/probe; echo"
+        },
+        {
+          "text": "Probe done."
+        }
+      ]
+    },
+    {
+      "name": "default",
+      "match": "",
+      "turns": [
+        {
+          "shell": "echo hello-from-tool > /tmp/tool.txt && cat /tmp/tool.txt"
+        },
+        {
+          "text": "Done: the marker file was written."
+        }
+      ]
+    }
+  ],
+  "aux_text": "ok"
+}
