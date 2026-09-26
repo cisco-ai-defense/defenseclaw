@@ -15,6 +15,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// repairEnterpriseHookManagedRuntimePlatform is a no-op off Windows. Managed
+// runtime drift there is an ownership/mode question the POSIX validators already
+// answer, and there is no ACL template for the guardian to reapply.
+func repairEnterpriseHookManagedRuntimePlatform(string, string) error { return nil }
+
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
 	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
 		return err

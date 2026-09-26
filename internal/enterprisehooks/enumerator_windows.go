@@ -259,7 +259,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate protected hook guardian manifest parent: %w", err)
 	}
 
@@ -328,7 +328,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate protected hook guardian manifest parent: %w", err)
 	}
 	// A destination can appear between the initial absence check and staging.
@@ -347,6 +347,37 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 		return true, fmt.Errorf("enterprise hooks: validate published hook guardian manifest %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
+// not stamp-on-every-tick. AVC may replace the DefenseClaw-owned parent ACL
+// after installation; the LocalSystem enumerator can restore the exact
+// AdminDirectory contract after first proving the ancestry and object shape.
+// The no-op manifest path therefore remains a true no-write operation.
+func ensureWindowsTargetsManifestParentProtected(path string) error {
+	driftErr := validateWindowsTargetsManifestObject(path, true)
+	if driftErr == nil {
+		return nil
+	}
+
+	if err := windowsTargetsManifestProtect(path, true); err != nil {
+		return fmt.Errorf(
+			"repair protected hook guardian manifest parent: %w",
+			errors.Join(driftErr, err),
+		)
+	}
+
+	// Repair is never taken on trust: the caller previously reached staging only
+	// behind a passing validation, so reconfirm the contract and surface the
+	// original drift when the object still does not satisfy it.
+	if err := validateWindowsTargetsManifestObject(path, true); err != nil {
+		return fmt.Errorf(
+			"repaired hook guardian manifest parent is still unprotected: %w",
+			errors.Join(err, driftErr),
+		)
+	}
+
+	return nil
 }
 
 // marshalTargetsManifest serialises the manifest to YAML with

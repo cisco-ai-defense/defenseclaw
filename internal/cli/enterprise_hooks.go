@@ -2485,9 +2485,38 @@ func sortedEnterpriseHookStrings(values []string) []string {
 	return out
 }
 
+// validateEnterpriseHookManagedRuntime gates the hook guardian on a trusted
+// managed runtime. It first gives the platform a chance to repair ACL drift
+// that another product may have introduced, then requires the ordinary trust
+// verdict to pass; a failed repair never substitutes for a passing validation.
 func validateEnterpriseHookManagedRuntime() error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
+	}
+	if err := repairEnterpriseHookManagedRuntimePlatform(
+		cfg.DataDir,
+		os.Getenv(managed.WindowsServiceAccountEnv),
+	); err != nil {
+		// Preserve the ordinary trust verdict when repair cannot run. This keeps
+		// the diagnostic actionable and, importantly, never turns a failed
+		// repair into a successful validation. Report the repair cause alongside
+		// the verdict: repair runs a validation fast path, so a repair failure
+		// almost always means validation fails too, and only the repair error
+		// says why the drift could not be corrected.
+		if validationErr := managed.ValidateTrustedServiceRuntimeDir(
+			cfg.DataDir,
+			"hook guardian state data_dir",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); validationErr != nil {
+			return fmt.Errorf(
+				"enterprise hooks: data_dir trust check failed: %w",
+				errors.Join(
+					validationErr,
+					fmt.Errorf("managed runtime ACL repair failed: %w", err),
+				),
+			)
+		}
+		return fmt.Errorf("enterprise hooks: managed runtime ACL repair failed: %w", err)
 	}
 	if err := managed.ValidateTrustedServiceRuntimeDir(
 		cfg.DataDir,
