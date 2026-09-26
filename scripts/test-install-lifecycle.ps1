@@ -501,7 +501,9 @@ function Test-FilesInUse {
     # A hook waiting for its payload, as an agent runs it.
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
-    Check (-not $hook.HasExited) "defenseclaw-hook.exe did not stay running"
+    if ($hook.HasExited) {
+        Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
+    }
     Write-Log "install $Target while defenseclaw-hook.exe runs"
     Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
     Assert-Versions $Target
