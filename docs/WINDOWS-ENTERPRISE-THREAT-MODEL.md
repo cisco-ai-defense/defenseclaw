@@ -372,7 +372,11 @@ authority.
    the enumerator preserves the protected `enabled`, `deferred`, and
    `agent_version` state. A new row is enabled automatically only when the
    profile has a discoverable supported CLI/version; otherwise it is omitted
-   and the reason is logged.
+   and the reason is logged. Because the walk also finds signed-out and
+   disconnected users, an automatically enabled new row is written with
+   `deferred: true` (the same posture the `-Mode`/`-Connector` renderer uses
+   for sessionless profiles), so Guardian reports it pending rather than
+   failing the whole reconcile while no exact active session exists.
 3. Before publication, the enumerator authenticates the committed manifest's
    ancestry, exact administrator-file descriptor, regular-file/link identity,
    and schema. It stages the new manifest under the same contract and replaces

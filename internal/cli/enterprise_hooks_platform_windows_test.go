@@ -95,6 +95,48 @@ func TestDeferredPendingRaceRechecksSessionAndSelectorState(t *testing.T) {
 	}
 }
 
+// TestSignedOutEnumeratorRowIsPendingOnlyWhenDeferred pins the reconcile
+// classification issue #894 depends on: a never-protected target whose user
+// has no active session is pending (not a failure that withholds the
+// enrollment publication for every SID) only when the manifest row carries the
+// deferred bit, which the enumerator now writes on every new row.
+func TestSignedOutEnumeratorRowIsPendingOnlyWhenDeferred(t *testing.T) {
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousPending := enterpriseHookWindowsDeferredPendingCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsDeferredPendingCheck = previousPending
+	})
+	enabled := true
+	target := enterprisehooks.ManifestTarget{
+		SID:          "S-1-5-21-1-2-3-1001",
+		UserHome:     `C:\Users\alice`,
+		Connector:    "claudecode",
+		AgentVersion: "2.1.152",
+		Enabled:      &enabled,
+		Deferred:     true,
+	}
+	absent := &enterprisehooks.WindowsTargetSessionUnavailableError{SID: target.SID}
+	enterpriseHookWindowsTargetSessionCheck = func(string, string) error { return absent }
+	enterpriseHookWindowsDeferredPendingCheck = func(enterprisehooks.ManifestTarget) error { return nil }
+
+	available, err := enterpriseHookDeferredTargetSessionAvailable(target)
+	if err != nil || available {
+		t.Fatalf("deferred signed-out row pre-check = available %t err %v, want false/nil (pending)", available, err)
+	}
+	pending, err := enterpriseHookDeferredPendingAfterSessionError(target, false, absent)
+	if err != nil || !pending {
+		t.Fatalf("deferred signed-out row = pending %t err %v, want true/nil", pending, err)
+	}
+
+	legacy := target
+	legacy.Deferred = false
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(legacy, false, absent)
+	if pending || !errors.Is(err, absent) {
+		t.Fatalf("non-deferred signed-out row = pending %t err %v, want hard session error", pending, err)
+	}
+}
+
 func TestExpandEnterpriseHookProfileImagePathUsesTrustedSystemDrive(t *testing.T) {
 	previous := enterpriseHookWindowsSystemDirectory
 	t.Cleanup(func() { enterpriseHookWindowsSystemDirectory = previous })
