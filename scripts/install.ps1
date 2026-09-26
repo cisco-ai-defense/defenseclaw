@@ -21,11 +21,12 @@
 .DESCRIPTION
       irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 
-    The same command installs, upgrades, repairs, and imports a 0.x install;
-    `defenseclaw upgrade` runs it for you. Each release's copy installs exactly
-    that release, so the upgrade logic always comes from the version being
-    installed. Config and data in %USERPROFILE%\.defenseclaw are kept; the
-    replaced install is kept in %USERPROFILE%\.defenseclaw\previous for -Rollback.
+    The same command installs, upgrades, repairs, and imports a 0.x install
+    (including a DefenseClaw Setup install); `defenseclaw upgrade` runs it for
+    you. Each release's copy installs exactly that release, so the upgrade
+    logic always comes from the version being installed. Config and data in
+    %USERPROFILE%\.defenseclaw are kept; the replaced install is kept in
+    %USERPROFILE%\.defenseclaw\previous for -Rollback.
 
     Permanent interface (never remove or change these; unknown arguments are
     ignored with a warning): -Yes, -Version X.Y.Z, -Local DIR, -Rollback.
@@ -72,6 +73,12 @@ $Previous = Join-Path $DataDir "previous"
 $Staging = Join-Path $DataDir ".staging"
 $InstallerDir = Join-Path $DataDir "installer"
 $LockDir = Join-Path $DataDir ".install.lock"
+$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+# The per-user DefenseClaw Setup of 0.8.7-0.8.10, which an upgrade replaces.
+$SetupRoot = Join-Path $env:LOCALAPPDATA "Programs\DefenseClaw"
+$SetupUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
+$SetupCache = Join-Path $env:LOCALAPPDATA "DefenseClaw\InstallerCache"
+$SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runtime-state.json"
 # Real files in BinDir. Connector hooks record these paths, so they never move.
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
@@ -405,6 +412,18 @@ function Get-ProcessesUnder([string[]]$Prefixes) {
     })
 }
 
+function Stop-ProcessesUnder([string]$Root) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $running = @(Get-ProcessesUnder @("$Root\"))
+        if (-not $running.Count) { return }
+        foreach ($process in $running) {
+            if ($attempt -eq 0) { Write-Info "Stopping $($process.Name) (pid $($process.ProcessId))" }
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 1
+    }
+}
+
 function Wait-VenvFree {
     # A program running from the venv (the TUI, or the CLI that started this
     # installer and is still exiting) keeps its files from being deleted, and
@@ -424,6 +443,94 @@ function Wait-VenvFree {
         ForEach-Object { "$($_.Name) (pid $($_.ProcessId))" })
     $list = if ($users.Count) { $users -join ", " } else { "another program" }
     Die "DefenseClaw is in use by $list. Close it (for example the DefenseClaw TUI) and run the installer again; nothing was changed"
+}
+
+# -- DefenseClaw Setup (0.8.7-0.8.10) -----------------------------------------
+# Setup refuses to run elevated, over SSH, or unattended, so the installer
+# removes it itself. It shares the data dir, so config and audit data carry
+# over; its files are kept in previous\legacy-setup (no automatic rollback).
+
+function Find-SetupInstall {
+    $roots = @($SetupRoot)
+    $location = [string](Get-Field (Get-ItemProperty -LiteralPath $SetupUninstallKey -ErrorAction SilentlyContinue) "InstallLocation")
+    if ($location) { $roots = @($location) + $roots }
+    foreach ($root in $roots) {
+        $state = Read-Json (Join-Path $root "installer\install-state.json")
+        if ((Get-Field $state "install_kind") -ne "native-windows-exe" -or -not (Test-Version ([string](Get-Field $state "version")))) {
+            continue
+        }
+        $dataRoot = [string](Get-Field $state "data_root")
+        if ($dataRoot -and -not (Test-SamePath $dataRoot $DataDir)) {
+            Write-Warn "DefenseClaw Setup at $root uses $dataRoot, not $DataDir; leaving it alone"
+            return $null
+        }
+        return [pscustomobject]@{
+            Root = $root.TrimEnd("\")
+            Version = [string](Get-Field $state "version")
+            CodexHome = [string](Get-Field $state "codex_home")
+            ClaudeConfigDir = [string](Get-Field $state "claude_config_dir")
+        }
+    }
+    return $null
+}
+
+function Disable-SetupHooks {
+    # Setup's hook launcher runs Setup's hook and restarts Setup's gateway on
+    # demand; without its state file it does nothing.
+    if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
+}
+
+function Restore-SetupInstall {
+    $state = Join-Path $Staging "hook-runtime-state.json"
+    if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
+    if (-not $WasRunning) { return }
+    $startup = Join-Path $Setup.Root "bin\defenseclaw-startup.exe"
+    if (Test-Path -LiteralPath $startup) {
+        [void][Diagnostics.Process]::Start($startup).WaitForExit(120000)
+    } else {
+        Invoke-Native (Join-Path $Setup.Root "bin\defenseclaw-gateway.exe") @("start") -Quiet | Out-Null
+    }
+}
+
+function Remove-SetupInstall {
+    Write-Info "Removing DefenseClaw Setup $($Setup.Version); its files are kept in $Previous\legacy-setup"
+    $keep = Join-Path $Previous "legacy-setup"
+    New-Item -ItemType Directory -Path $keep -Force | Out-Null
+    Invoke-Quietly {
+        Stop-ProcessesUnder $Setup.Root
+        Move-Path $Setup.Root (Join-Path $keep "DefenseClaw") 30
+    }
+    Invoke-Quietly {
+        $state = Join-Path $Staging "hook-runtime-state.json"
+        if (Test-Path -LiteralPath $state) { Move-Path $state (Join-Path $keep "hook-runtime-state.json") }
+    }
+    Invoke-Quietly {
+        # Its logon autostart and its post-uninstall cleanup both start from its tree or its cache.
+        $run = Get-Item -LiteralPath $RunKey
+        foreach ($name in $run.GetValueNames()) {
+            $command = [Environment]::ExpandEnvironmentVariables(
+                [string]$run.GetValue($name, "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
+            if ($command.IndexOf("$($Setup.Root)\", [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $command.IndexOf("$SetupCache\", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                Remove-ItemProperty -LiteralPath $RunKey -Name $name
+            }
+        }
+    }
+    Invoke-Quietly {
+        $location = [string](Get-Field (Get-ItemProperty -LiteralPath $SetupUninstallKey -ErrorAction SilentlyContinue) "InstallLocation")
+        if ($location -and (Test-SamePath $location $Setup.Root)) { Remove-Item -LiteralPath $SetupUninstallKey -Recurse -Force }
+    }
+    Invoke-Quietly { Remove-Tree $SetupCache }
+    foreach ($setting in @(@("CODEX_HOME", $Setup.CodexHome), @("CLAUDE_CONFIG_DIR", $Setup.ClaudeConfigDir))) {
+        if ($setting[1]) {
+            Write-Warn "DefenseClaw Setup set $($setting[0])=$($setting[1]) for DefenseClaw; set it for your user account to keep that location guarded"
+        }
+    }
+}
+
+function Test-ConnectorConfigured {
+    $state = Read-Json (Join-Path $DataDir "active_connector.json")
+    return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" }).Count -gt 0
 }
 
 # -- Snapshot, swap, restore --------------------------------------------------
@@ -558,6 +665,7 @@ function Install-New {
 }
 
 function Restart-Old {
+    if ($Setup) { Restore-SetupInstall; return }
     if ($WasRunning -and (Start-Gateway) -notin @(0, 3)) {
         Write-Warn "The gateway did not restart; run 'defenseclaw-gateway start'"
     }
@@ -656,6 +764,8 @@ function Resume-InterruptedRun {
             Write-Warn "An earlier install was interrupted; restoring the install it replaced"
             [void](Stop-Gateway)
             $wasRunning = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
+            $state = Join-Path $Staging "hook-runtime-state.json"
+            if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
             if ($wasRunning) { [void](Start-Gateway) }
             Write-Warn "The interrupted install was kept in $failed"
@@ -703,6 +813,7 @@ function Complete-Swap {
             Remove-Tree $Snap
         }
     }
+    if ($Setup) { Remove-SetupInstall }
     Save-Installer
     foreach ($leftover in @($Staging, (Join-Path $DataDir ".upgrade-recovery"), (Join-Path $DataDir ".upgrade-receipts"),
             (Join-Path $env:USERPROFILE ".defenseclaw-install-custody"),
@@ -816,6 +927,10 @@ function Invoke-Rollback {
     Write-Step "Rolling back"
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Die "No previous install to roll back to ($Previous is missing)" }
+    if (Test-Path -LiteralPath (Join-Path $Previous "legacy-setup")) {
+        Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. Its files and " +
+            "your data from before the upgrade are in $Previous; nothing was changed")
+    }
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }
     if (-not (Confirm-Step "Replace DefenseClaw $currentLabel with the previous install ($backTo)?")) {
@@ -960,8 +1075,12 @@ function Invoke-Install {
     # Stage: nothing live changes until the swap.
     Write-Step "Preparing DefenseClaw $Ver (windows/amd64)"
     $PrevVersion = Get-InstalledVersion
+    $Setup = Find-SetupInstall
     if ($PrevVersion) {
         Write-Info "Installed: $PrevVersion"
+    } elseif ($Setup) {
+        $PrevVersion = $Setup.Version
+        Write-Info "Installed: DefenseClaw Setup $PrevVersion ($($Setup.Root))"
     } elseif (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw.cmd")) {
         Write-Warn "Found a broken DefenseClaw install ($BinDir\defenseclaw.cmd without its venv); repairing it"
     }
@@ -1037,11 +1156,20 @@ function Invoke-Install {
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
     Wait-VenvFree
+    if ($Setup) {
+        Disable-SetupHooks
+        if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
+        if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
+    }
     $WasRunning = [bool](Get-GatewayProcess)
     if ($WasRunning) {
         Write-Info "Stopping the gateway"
-        if (-not (Stop-Gateway)) { Die "The running gateway did not stop; nothing was changed" }
+        if (-not (Stop-Gateway)) {
+            if ($Setup) { Restore-SetupInstall }
+            Die "The running gateway did not stop; nothing was changed"
+        }
     }
+    if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
@@ -1060,7 +1188,7 @@ function Invoke-Install {
         Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
     }
     $startRc = 0
-    $startNew = $WasRunning
+    $startNew = $WasRunning -or ($Setup -and (Test-ConnectorConfigured))
     if ($startNew -and -not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) {
         # 0.x gateways ran on defaults without a config; 1.x needs one.
         $startNew = $false
@@ -1080,10 +1208,13 @@ function Invoke-Install {
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
     if (-not $PrevVersion) { Invoke-FirstInstallExtras }
-    $pathChanged = Update-UserPath -Add $BinDir
+    $setupBin = if ($Setup) { Join-Path $Setup.Root "bin" } else { "" }
+    $pathChanged = Update-UserPath -Add $BinDir -Remove $setupBin
     Write-Host ""
     Write-Host "  DefenseClaw $Ver is installed." -ForegroundColor Green
-    if ($PrevVersion -and $PrevVersion -ne $Ver) {
+    if ($Setup) {
+        Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
+    } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
         Write-Host "  Upgraded from $PrevVersion. Undo with: defenseclaw rollback"
     }
     if ($NoPersistPath) {
@@ -1097,7 +1228,7 @@ function Invoke-Install {
 
 $savedEnv = @{}
 foreach ($name in @("UV_NO_CONFIG", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH", "DEFENSECLAW_GATEWAY_BIN",
-        "DEFENSECLAW_UPGRADE_FRESH_PROCESS")) {
+        "DEFENSECLAW_UPGRADE_FRESH_PROCESS", "CODEX_HOME", "CLAUDE_CONFIG_DIR")) {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 $code = 1
