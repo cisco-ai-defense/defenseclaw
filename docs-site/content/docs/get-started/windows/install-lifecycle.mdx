@@ -17,7 +17,7 @@ and Linux installer. The installer also upgrades, repairs, and rolls back.
 | Requirement | Native Windows contract |
 | --- | --- |
 | Operating system | Native Windows 10-family or newer, including Windows Server 2019+. |
-| Architecture | amd64/x64 only. ARM64 and x86 are unsupported. |
+| Architecture | amd64/x64 only. ARM64 is not certified: releases publish no ARM64 build, so the installer refuses it. x86 is unsupported. |
 | Shell | Windows PowerShell 5.1 (built in) or PowerShell 7. |
 | Install scope | Current user only. Running elevated works but is not needed. |
 | Agent | A [supported connector](/docs/connectors#platform-support) installed natively for the same Windows user. Do not substitute WSL or mix native and WSL connector homes. |

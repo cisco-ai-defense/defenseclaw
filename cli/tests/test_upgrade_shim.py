@@ -254,6 +254,16 @@ def test_a_local_build_without_a_bundle_skips_the_signature(
     assert "verify-blob" not in log.read_text()
 
 
+def test_a_failed_fetch_leaves_no_temporary_directory(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.1", tamper=True)))
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 1
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
 def test_explicit_version_may_reinstall_or_go_back(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

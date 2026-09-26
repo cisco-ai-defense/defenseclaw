@@ -134,7 +134,11 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
-    installer = _fetch_installer(repo, version, local_dir, workdir)
+    try:
+        installer = _fetch_installer(repo, version, local_dir, workdir)
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     extra = ["--local", local_dir] if local_dir else []
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
 
@@ -150,7 +154,11 @@ def _rollback(*, yes: bool) -> int:
         )
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
-    shutil.copyfile(installer, copy)
+    try:
+        shutil.copyfile(installer, copy)
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
 
