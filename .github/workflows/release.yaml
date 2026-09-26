@@ -207,7 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          find . -maxdepth 1 -type f | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
+          find . -maxdepth 1 -type f ! -name '.*' | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
           grep -Eq '  install\.sh$' checksums.txt && grep -Eq '  install\.ps1$' checksums.txt \
             && grep -Eq '  defenseclaw-upgrade\.sh$' checksums.txt
           cosign sign-blob --yes --bundle checksums.txt.bundle \

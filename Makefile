@@ -1273,7 +1273,7 @@ dist-test: _checkout-write-preflight
 
 dist-checksums: _checkout-write-preflight
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
-	cd $(DIST_DIR) && find . -maxdepth 1 -type f ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
+	cd $(DIST_DIR) && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
 dist-clean: _checkout-write-preflight

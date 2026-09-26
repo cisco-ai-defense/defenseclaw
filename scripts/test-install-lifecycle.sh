@@ -18,7 +18,7 @@
 # End-to-end install/upgrade/rollback test for scripts/install.sh.
 #
 #   scripts/test-install-lifecycle.sh --assets DIR [--previous-assets DIR]
-#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff"] [--keep]
+#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills"] [--keep]
 #
 # Every lane runs in its own throwaway HOME with the gateway on a free port,
 # so it never touches the real install. DIR holds release-shaped assets
@@ -198,6 +198,57 @@ lane_handoff() {
     stop_lane
 }
 
+# Failure drills: each must leave a working install behind.
+lane_drills() {
+    enter_lane drills
+    log "drills: install ${TARGET}"
+    must install_candidate "${ASSETS}" || return 1
+    must init_and_start || return 1
+
+    log "drills: a release whose gateway never becomes healthy rolls back"
+    local broken="${ROOT}/broken-assets" archive stage
+    rm -rf "${broken}"
+    cp -R "${ASSETS}" "${broken}"
+    archive="$(cd "${broken}" && ls defenseclaw-*-"$(uname -s | tr '[:upper:]' '[:lower:]')"-*.tar.gz | head -1)"
+    stage="${ROOT}/broken-stage"
+    rm -rf "${stage}"; mkdir -p "${stage}"
+    tar -xzf "${broken}/${archive}" -C "${stage}"
+    printf '#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version %s" ;; *) exit 1 ;; esac\n' "${TARGET}" \
+        > "${stage}/defenseclaw-gateway"
+    chmod 755 "${stage}/defenseclaw-gateway"
+    COPYFILE_DISABLE=1 tar -czf "${broken}/${archive}" -C "${stage}" .
+    (cd "${broken}" && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
+    if bash "${broken}/install.sh" --local "${broken}" --yes; then
+        fail "a release whose gateway cannot start was reported as installed"
+    fi
+    assert_versions "${TARGET}"
+    assert_healthy
+    assert_data_kept
+    grep -q "exit 1 ;;" "${HOME}/.local/bin/defenseclaw-gateway" && fail "the broken gateway was left installed"
+
+    log "drills: a configuration from a newer release is refused before any change"
+    cp "${DC_HOME}/config.yaml" "${ROOT}/config.yaml.orig"
+    sed -i.bak 's/^config_version: .*/config_version: 99/' "${DC_HOME}/config.yaml" && rm -f "${DC_HOME}/config.yaml.bak"
+    if bash "${ASSETS}/install.sh" --local "${ASSETS}" --yes; then
+        fail "an installer accepted a configuration from a newer release"
+    fi
+    cp "${ROOT}/config.yaml.orig" "${DC_HOME}/config.yaml"
+    assert_versions "${TARGET}"
+
+    log "drills: a CLI broken at import can still upgrade itself"
+    local main_py
+    main_py="$(ls "${DC_HOME}"/.venv/lib/python*/site-packages/defenseclaw/main.py | head -1)"
+    printf 'raise ImportError("drill: broken release")\n' | cat - "${main_py}" > "${main_py}.new" && mv "${main_py}.new" "${main_py}"
+    if "${HOME}/.local/bin/defenseclaw" status >/dev/null 2>&1; then
+        fail "the drill did not break the CLI"
+    fi
+    must env DEFENSECLAW_UPGRADE_LOCAL_DIR="${ASSETS}" "${HOME}/.local/bin/defenseclaw" upgrade --version "${TARGET}" --yes || return 1
+    assert_versions "${TARGET}"
+    assert_healthy
+    "${HOME}/.local/bin/defenseclaw" status >/dev/null 2>&1 || fail "the upgrade did not repair the broken CLI"
+    stop_lane
+}
+
 cleanup() {
     local home
     for home in ${LANE_HOMES[@]+"${LANE_HOMES[@]}"}; do
@@ -220,6 +271,7 @@ for lane in ${LANES}; do
             upgrade_lane upgrade-previous "${prev}" install_previous || true ;;
         upgrade-0.8.10) upgrade_lane upgrade-legacy "${LEGACY_VERSION}" install_legacy || true ;;
         handoff) lane_handoff || true ;;
+        drills) lane_drills || true ;;
         *) echo "unknown lane: ${lane}" >&2; exit 2 ;;
     esac
 done
