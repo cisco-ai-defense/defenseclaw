@@ -215,7 +215,10 @@ func (c CLI) Upload(sandbox, localPath, dest string, gitIgnore bool) (Invocation
 	return Invocation{Argv: append(argv, "--", sandbox, local, remote), Timeout: DefaultTransferTimeout}, nil
 }
 
-// Download copies a sandbox path to a local destination.
+// Download copies a sandbox path to a local destination. OpenShell 0.1.1
+// only downloads from inside the sandbox workspace (the container's
+// working directory, /sandbox by default); anything else fails with
+// "outside the sandbox workspace".
 func (c CLI) Download(sandbox, remotePath, localDest string) (Invocation, error) {
 	if err := checkSandboxName(sandbox); err != nil {
 		return Invocation{}, err
