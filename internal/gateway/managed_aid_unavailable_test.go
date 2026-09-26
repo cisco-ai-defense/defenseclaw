@@ -385,12 +385,19 @@ func TestManagedGuardrailSingleConnectorHealthReportsInspectionPosture(t *testin
 
 func TestAddManagedInspectionHealthDescribesTheUnavailablePosture(t *testing.T) {
 	for _, tc := range []struct {
-		action string
-		hint   string
+		action    string
+		supported bool
+		hint      string
 	}{
-		{action: "", hint: "tool calls are not being inspected"},
-		{action: config.AIDUnavailableActionBlock, hint: "tool calls that need inspection are being blocked"},
+		{action: "", supported: true, hint: "tool calls are not being inspected"},
+		{action: config.AIDUnavailableActionBlock, supported: true, hint: "tool calls that need inspection are being blocked"},
+		// A build with no managed-cloud support blocks whatever the action.
+		{action: "", hint: "tool calls that need inspection are being blocked"},
 	} {
+		cloudreg.Register(nil)
+		if tc.supported {
+			registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
+		}
 		s := managedInspectionSidecar(t)
 		s.cfg.CiscoAIDefense.UnavailableAction = tc.action
 		s.setInspectionAvailability(errors.New("managed cloud token unavailable"))

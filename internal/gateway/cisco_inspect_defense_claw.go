@@ -210,9 +210,9 @@ func (c *CiscoDefenseClawInspectClient) warnTokenUnavailable(err error) {
 		detail = err.Error()
 	}
 	fmt.Fprintf(defaultLogWriter,
-		"  [cisco-ai-defense] WARNING: managed cloud token unavailable — AID inspection SKIPPED for this call (fail-open).\n"+
+		"  [cisco-ai-defense] WARNING: managed cloud token unavailable — AI Defense did not inspect this call.\n"+
 			"  [cisco-ai-defense]          Cause: %s\n"+
-			"  [cisco-ai-defense]          Enforcement is currently NOT running end-to-end for managed_enterprise.\n"+
+			"  [cisco-ai-defense]          Uninspected calls are allowed or blocked per cisco_ai_defense.unavailable_action.\n"+
 			"  [cisco-ai-defense]          Confirm the Cisco Cloud Management identity library (libcmidapi.dylib on\n"+
 			"  [cisco-ai-defense]          macOS, cmidapi.dll on Windows) is installed and readable by this daemon.\n"+
 			"  [cisco-ai-defense]          The lane self-heals on the next inspect once the library becomes loadable;\n"+
@@ -276,11 +276,6 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		c.notifyAvailability(err)
 		return nil
 	}
-	// Token available — publish healthy on the availability channel so a
-	// recovered lane (e.g. after a transient CMID Refresh failure) is
-	// reflected in /health without waiting for reload.
-	c.notifyAvailability(nil)
-
 	// Body: messages[].content is the DefenseClaw MessageContent shape
 	// ({"text": ...}), matching the proto and the sample curl in the
 	// task description. No device_id, no dc_metadata — cloud derives
@@ -335,11 +330,19 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		// not produce an enforceable decision (marshal error, request
 		// build error, transport error, non-2xx, body read error, or
 		// JSON parse error — each of these already emit their own
-		// [cisco-ai-defense] line inside doInspectHTTP, but this
-		// consolidated skip warning ensures the fail-open contract
-		// itself is visible even when the underlying cause is only
-		// captured in the structured event stream).
-		logManagedAIDSkip("aid-http-no-verdict", "doInspectHTTP returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
+		// [cisco-ai-defense] line inside doInspectHTTP). A minted token
+		// does not make inspection available: /health and the Secure
+		// Client availability report the failed inspection until AI
+		// Defense returns a verdict again. Whether the request is then
+		// allowed or blocked is decided and logged by the caller, per
+		// cisco_ai_defense.unavailable_action.
+		logManagedAIDNoVerdict("aid-http-no-verdict", "see the prior [cisco-ai-defense] error / structured event for the cause")
+		c.notifyAvailability(errManagedAIDNoVerdict)
+		return nil
 	}
+	// A real verdict: publish healthy so a recovered lane (after a
+	// transient token or endpoint failure) is reflected in /health
+	// without waiting for reload.
+	c.notifyAvailability(nil)
 	return verdict
 }

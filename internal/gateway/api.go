@@ -278,6 +278,9 @@ type APIServer struct {
 	// same nil-guard semantics: only assign non-nil concrete values to
 	// this field (see inspector.go for the nil-interface trap).
 	ciscoInspector Inspector
+	// managedSupport records a managed_enterprise build that can never
+	// reach Cisco AI Defense; see SetManagedInspectionUnsupported.
+	managedSupport managedInspectionSupport
 
 	// hookJudge forwards hook-lane message content (prompts + tool
 	// results delivered by hook connectors) to the LLM judge — the

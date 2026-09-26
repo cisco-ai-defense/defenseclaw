@@ -12,10 +12,13 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 )
 
@@ -25,16 +28,68 @@ import (
 // request but could not: "allow" (the default) keeps the historical
 // fail-open posture, "block" returns a block verdict instead. The helpers
 // below are the single place both lanes (hook and proxy) consult.
+//
+// unavailable_action covers outages. A build with no managed-cloud
+// credential factory can never inspect anything, so on such a build the hook
+// lane blocks requests that need inspection whatever unavailable_action says.
 
 const (
 	// managedAIDUnavailableReason is the verdict reason for a request blocked
 	// because AI Defense could not inspect it. It names the setting so an
 	// operator reading the audit log knows how to change the posture.
 	managedAIDUnavailableReason = "Cisco AI Defense could not inspect this request; blocked by cisco_ai_defense.unavailable_action=block"
+	// managedAIDUnsupportedReason is the verdict reason for a request
+	// blocked because the running build has no managed-cloud support.
+	managedAIDUnsupportedReason = "Cisco AI Defense cannot inspect requests on this build (no managed-cloud support); managed_enterprise blocks requests that need inspection"
 	// managedAIDUnavailableFinding tags the block in findings so dashboards
 	// can separate it from a policy match returned by AI Defense.
 	managedAIDUnavailableFinding = "ai-defense:unavailable"
+
+	managedAIDBlockCauseAction      = "cisco_ai_defense.unavailable_action=block"
+	managedAIDBlockCauseUnsupported = "this build has no managed-cloud support"
 )
+
+// errManagedAIDNoVerdict is the availability error the managed inspect
+// client reports when a call with a valid token got no verdict from AI
+// Defense (transport failure, timeout, non-2xx, or an unusable response).
+// Only a later real verdict clears it; a token-only probe does not.
+var errManagedAIDNoVerdict = errors.New("Cisco AI Defense returned no verdict for the last inspection (transport, HTTP status or response error)")
+
+// managedInspectionSupport is the hook lane's record that the running
+// build has no managed-cloud credential factory. The sidecar sets it when it
+// wires the API server; an API server built without a sidecar keeps the
+// zero value (supported).
+type managedInspectionSupport struct {
+	unsupported atomic.Bool
+}
+
+// SetManagedInspectionUnsupported marks the hook lane as running
+// managed_enterprise on a build that can never reach Cisco AI Defense.
+func (a *APIServer) SetManagedInspectionUnsupported(unsupported bool) {
+	if a == nil {
+		return
+	}
+	a.managedSupport.unsupported.Store(unsupported)
+}
+
+// managedInspectionUnsupported reports whether cfg runs managed_enterprise
+// on a build with no managed-cloud credential factory.
+func managedInspectionUnsupported(cfg *config.Config) bool {
+	return cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) && !cloudreg.Registered()
+}
+
+// managedAIDEffectiveUnavailableAction is what happens to a request AI
+// Defense could not inspect: the configured action, or block on a build
+// that can never inspect.
+func managedAIDEffectiveUnavailableAction(cfg *config.Config) string {
+	if cfg == nil {
+		return config.AIDUnavailableActionAllow
+	}
+	if managedInspectionUnsupported(cfg) {
+		return config.AIDUnavailableActionBlock
+	}
+	return cfg.CiscoAIDefense.EffectiveUnavailableAction()
+}
 
 // managedAIDUnavailableReasonBlockable reports whether a managed fail-open
 // reason is an availability failure. A request with nothing to inspect is a
@@ -71,11 +126,20 @@ func (a *APIServer) managedAIDUnavailableHookVerdict(reason string) *ToolInspect
 	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
+	if a.managedSupport.unsupported.Load() {
+		logManagedAIDUnavailableBlock("hook", reason, managedAIDBlockCauseUnsupported)
+		return &ToolInspectVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   managedAIDUnsupportedReason,
+			Findings: []string{managedAIDUnavailableFinding},
+		}
+	}
 	cfg := a.managedAIDPolicyConfig()
 	if cfg == nil || !cfg.CiscoAIDefense.BlocksWhenUnavailable() {
 		return nil
 	}
-	logManagedAIDUnavailableBlock("hook", reason)
+	logManagedAIDUnavailableBlock("hook", reason, managedAIDBlockCauseAction)
 	return &ToolInspectVerdict{
 		Action:   "block",
 		Severity: "HIGH",
@@ -101,7 +165,7 @@ func (g *GuardrailInspector) managedAIDUnavailableVerdict(reason, direction stri
 	if g == nil || !g.managedUnavailableBlock.Load() || !managedAIDUnavailableReasonBlockable(reason) {
 		return nil
 	}
-	logManagedAIDUnavailableBlock("proxy/"+normalizeManagedAIDFailOpenDirection(direction), reason)
+	logManagedAIDUnavailableBlock("proxy/"+normalizeManagedAIDFailOpenDirection(direction), reason, managedAIDBlockCauseAction)
 	return &ScanVerdict{
 		Action:         "block",
 		Severity:       "HIGH",
@@ -126,21 +190,43 @@ func (p *GuardrailProxy) SetManagedUnavailableAction(action string) {
 
 // logManagedAIDUnavailableBlock is the fail-closed counterpart of
 // logManagedAIDSkip: a rate-limited operator line stating that a request was
-// blocked because AI Defense could not inspect it. It shares the skip log's
-// cooldown clock under a distinct key.
-func logManagedAIDUnavailableBlock(lane, reason string) {
-	key := "unavailable-block:" + lane + ":" + reason
-	now := time.Now()
-	managedAIDSkipState.mu.Lock()
-	if now.Sub(managedAIDSkipState.last[key]) < managedAIDSkipCooldown {
-		managedAIDSkipState.mu.Unlock()
+// blocked because AI Defense could not inspect it, and why it was blocked
+// rather than allowed. It shares the skip log's cooldown clock under a
+// distinct key.
+func logManagedAIDUnavailableBlock(lane, reason, cause string) {
+	key := "unavailable-block:" + lane + ":" + reason + ":" + cause
+	if !managedAIDLogDue(key) {
 		return
 	}
-	managedAIDSkipState.last[key] = now
-	managedAIDSkipState.mu.Unlock()
 	fmt.Fprintf(defaultLogWriter,
-		"  [cisco-ai-defense] WARNING: managed_enterprise AID inspection unavailable (lane=%s reason=%s) — request BLOCKED by cisco_ai_defense.unavailable_action=block\n",
-		lane, normalizeManagedAIDFailOpenReason(reason))
+		"  [cisco-ai-defense] WARNING: managed_enterprise AID inspection unavailable (lane=%s reason=%s) — request BLOCKED: %s\n",
+		lane, normalizeManagedAIDFailOpenReason(reason), cause)
+}
+
+// logManagedAIDNoVerdict is the managed inspect client's rate-limited line
+// for a call that produced no AI Defense verdict. It names the cause only:
+// whether the request is then allowed or blocked is decided and logged by
+// the caller (logManagedAIDSkip or logManagedAIDUnavailableBlock), per
+// cisco_ai_defense.unavailable_action.
+func logManagedAIDNoVerdict(reason, detail string) {
+	if !managedAIDLogDue("no-verdict:" + reason) {
+		return
+	}
+	fmt.Fprintf(defaultLogWriter,
+		"  [cisco-ai-defense] WARNING: managed_enterprise AID inspection returned no verdict (reason=%s: %s)\n",
+		reason, detail)
+}
+
+// managedAIDLogDue applies the shared managed AID log cooldown to key.
+func managedAIDLogDue(key string) bool {
+	now := time.Now()
+	managedAIDSkipState.mu.Lock()
+	defer managedAIDSkipState.mu.Unlock()
+	if now.Sub(managedAIDSkipState.last[key]) < managedAIDSkipCooldown {
+		return false
+	}
+	managedAIDSkipState.last[key] = now
+	return true
 }
 
 // requireManagedInspectionSupport is the provider gate shared by the single-
@@ -174,10 +260,7 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	s.probeManagedInspection(ctx)
 	s.publishManagedInspectionHealth()
 	available, cause := s.managedInspectionState()
-	action := config.AIDUnavailableActionAllow
-	if cfg := s.currentConfig(); cfg != nil {
-		action = cfg.CiscoAIDefense.EffectiveUnavailableAction()
-	}
+	action := managedAIDEffectiveUnavailableAction(s.currentConfig())
 	detail["inspection_available"] = available
 	detail["inspection_unavailable_action"] = action
 	if available {

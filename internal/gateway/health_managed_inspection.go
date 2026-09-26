@@ -20,9 +20,9 @@ import (
 // ManagedInspectionHealth is the managed_enterprise inspection state shown in
 // /health and mapped onto the Secure Client availability. Available is false
 // while Cisco AI Defense cannot be reached (no credential provider, no token,
-// no inspector); UnavailableAction is the configured
-// cisco_ai_defense.unavailable_action, which says whether those requests are
-// currently being allowed or blocked.
+// no inspector); UnavailableAction says whether those requests are currently
+// being allowed or blocked: the configured cisco_ai_defense.unavailable_action,
+// or block on a build with no managed-cloud support.
 type ManagedInspectionHealth struct {
 	Available         bool      `json:"available"`
 	Error             string    `json:"error,omitempty"`
@@ -142,7 +142,7 @@ func (s *Sidecar) publishManagedInspectionHealth() {
 		return
 	}
 	available, detail := s.managedInspectionState()
-	s.health.SetManagedInspection(available, detail, cfg.CiscoAIDefense.EffectiveUnavailableAction())
+	s.health.SetManagedInspection(available, detail, managedAIDEffectiveUnavailableAction(cfg))
 }
 
 // refreshManagedInspectionHealth applies a reload: republish in
@@ -164,14 +164,18 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 // probeManagedInspection re-checks an unavailable managed provider by
 // minting a token, at most once per managedInspectionProbeInterval. Only a
 // provider that was already built is probed; a provider that failed to
-// build is left to the next reload, which also rebuilds the inspector.
+// build is left to the next reload, which also rebuilds the inspector. A
+// failure reported by an inspection that had a token (AI Defense returned
+// no verdict) is not probed: a token says nothing about whether AI Defense
+// answers, so only the next real verdict clears it.
 func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	if s == nil {
 		return
 	}
 	now := time.Now()
 	s.inspectionMu.Lock()
-	if s.inspectionAvailable || now.Sub(s.inspectionLastProbe) < managedInspectionProbeInterval {
+	if s.inspectionAvailable || s.inspectionVerdictFailure ||
+		now.Sub(s.inspectionLastProbe) < managedInspectionProbeInterval {
 		s.inspectionMu.Unlock()
 		return
 	}

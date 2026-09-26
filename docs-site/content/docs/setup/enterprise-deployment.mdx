@@ -431,7 +431,11 @@ service does not answer, requests that need inspection are allowed by default.
 GUI reports `DEGRADED`. Set `cisco_ai_defense.unavailable_action: block` in the
 administrator-owned `config.yaml` to deny those requests in action mode;
 observe mode records a would-block result. Requests with nothing to inspect
-remain allowed. A guardrail startup error also reports `DEGRADED`.
+remain allowed. Inspection counts as available only while AI Defense returns
+verdicts: a valid token does not clear a failed inspection, but the next
+inspection with a verdict does. A guardrail startup error also reports
+`DEGRADED`; a build without managed-cloud support blocks hook requests that
+need inspection regardless of `unavailable_action`.
 
 The Secure Client UI socket check identifies the executable a connecting
 process was started from, at the time it connects. The kernel's image name for

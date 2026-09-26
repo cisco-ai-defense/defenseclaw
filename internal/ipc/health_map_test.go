@@ -143,6 +143,16 @@ func TestMapHealth(t *testing.T) {
 			want: pb.ServiceAvailability_SERVICE_AVAILABILITY_READY,
 		},
 		{
+			name: "disabled guardrail does not downgrade on an unavailable inspection",
+			in: gateway.HealthSnapshot{
+				Gateway:           sub(gateway.StateRunning),
+				API:               sub(gateway.StateRunning),
+				Guardrail:         sub(gateway.StateDisabled),
+				ManagedInspection: &gateway.ManagedInspectionHealth{Available: false, UnavailableAction: "allow"},
+			},
+			want: pb.ServiceAvailability_SERVICE_AVAILABILITY_READY,
+		},
+		{
 			name: "core error still dominates an unavailable inspection",
 			in: gateway.HealthSnapshot{
 				Gateway:           sub(gateway.StateRunning),
