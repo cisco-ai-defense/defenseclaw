@@ -80,6 +80,11 @@ jobs:
             if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>&1; then
               echo "::error::Tag $VERSION already exists; releases are immutable, use the next patch version"; exit 1
             fi
+            [[ "$VERSION" != 0.* ]] || { echo "::error::Releases start at 1.0.0; 0.x is retired"; exit 1; }
+            # Publishing marks the release latest, so it must not move latest backwards.
+            if [[ -n "$latest" && "$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]]; then
+              echo "::error::$VERSION is older than the latest release $latest"; exit 1
+            fi
           fi
           # The previous 1.x release is the upgrade-test baseline.
           if [[ "$latest" =~ ^[1-9][0-9]*\. ]]; then echo "previous=$latest" >> "$GITHUB_OUTPUT"; fi
