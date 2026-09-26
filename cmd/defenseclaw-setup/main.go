@@ -3064,6 +3064,9 @@ func managedChildEnv(dataRoot string) []string {
 	return filtered
 }
 
+// managedRecoveryChildEnv lets a restored pre-1.0 gateway delegate its
+// readiness wait during rollback recovery, as that release expects. 1.0+
+// gateways ignore the marker and always wait for readiness.
 func managedRecoveryChildEnv(dataRoot string) []string {
 	return append(managedChildEnv(dataRoot), upgradeFreshProcessEnv+"=1")
 }
