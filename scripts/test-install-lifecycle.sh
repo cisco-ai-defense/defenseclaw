@@ -113,6 +113,47 @@ PY
     "${HOME}/.local/bin/defenseclaw-gateway" start >/dev/null
 }
 
+# rechecksum DIR: rewrite checksums.txt after a drill edited assets.
+rechecksum() {
+    (cd "$1" && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
+}
+
+# break_migration WHEEL: after the swap, migrate writes to config.yaml and then
+# fails; migrate --check still passes.
+break_migration() {
+    python3 - "$1" <<'PY'
+import base64, hashlib, os, sys, zipfile
+
+path, target = sys.argv[1], "defenseclaw/migrations.py"
+drill = b"""
+
+_drill_real_migrate = migrate
+
+
+def migrate(data_dir, **kwargs):
+    if not kwargs.get("check"):
+        with open(os.path.join(data_dir, "config.yaml"), "a", encoding="utf-8") as stream:
+            stream.write("\\ndrill_partial_migration: true\\n")
+        raise MigrationError("drill: this release's migration fails halfway")
+    return _drill_real_migrate(data_dir, **kwargs)
+"""
+with zipfile.ZipFile(path) as wheel:
+    infos = wheel.infolist()
+    files = {info.filename: wheel.read(info.filename) for info in infos}
+files[target] += drill
+record = next(name for name in files if name.endswith(".dist-info/RECORD"))
+digest = base64.urlsafe_b64encode(hashlib.sha256(files[target]).digest()).rstrip(b"=").decode()
+files[record] = "".join(
+    f"{target},sha256={digest},{len(files[target])}\n" if line.split(",")[0] == target else line + "\n"
+    for line in files[record].decode().splitlines()
+).encode()
+with zipfile.ZipFile(path + ".new", "w", zipfile.ZIP_DEFLATED) as wheel:
+    for info in infos:
+        wheel.writestr(info, files[info.filename])
+os.replace(path + ".new", path)
+PY
+}
+
 assert_versions() {
     local want="$1" cli gateway
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
@@ -262,7 +303,7 @@ lane_drills() {
         > "${stage}/defenseclaw-gateway"
     chmod 755 "${stage}/defenseclaw-gateway"
     COPYFILE_DISABLE=1 tar -czf "${broken}/${archive}" -C "${stage}" .
-    (cd "${broken}" && find . -maxdepth 1 -type f ! -name '.*' ! -name 'checksums.txt*' | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
+    rechecksum "${broken}"
     if bash "${broken}/install.sh" --local "${broken}" --yes; then
         fail "a release whose gateway cannot start was reported as installed"
     fi
@@ -270,6 +311,21 @@ lane_drills() {
     assert_healthy
     assert_data_kept
     grep -q "exit 1 ;;" "${HOME}/.local/bin/defenseclaw-gateway" && fail "the broken gateway was left installed"
+
+    log "drills: a release whose migration fails halfway rolls back, data included"
+    rm -rf "${broken}"
+    cp -R "${ASSETS}" "${broken}"
+    must break_migration "$(ls "${broken}"/defenseclaw-*-py3-none-any.whl | head -1)" || return 1
+    rechecksum "${broken}"
+    if bash "${broken}/install.sh" --local "${broken}" --yes; then
+        fail "a release whose migration fails was reported as installed"
+    fi
+    assert_versions "${TARGET}"
+    assert_healthy
+    assert_data_kept
+    grep -q drill_partial_migration "${DC_HOME}/config.yaml" && fail "the half-applied migration was left in config.yaml"
+    grep -q "drill: this release" "${DC_HOME}"/.venv/lib/python*/site-packages/defenseclaw/migrations.py \
+        && fail "the broken release's Python environment was left installed"
 
     log "drills: a configuration from a newer release is refused before any change"
     cp "${DC_HOME}/config.yaml" "${ROOT}/config.yaml.orig"
