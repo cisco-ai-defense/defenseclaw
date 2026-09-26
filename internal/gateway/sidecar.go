@@ -4756,6 +4756,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.succeeded = nil
 		transaction.applied = nil
 		transaction.admissionRefused = nil
+		transaction.releaseRefused = false
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {

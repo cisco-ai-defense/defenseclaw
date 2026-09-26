@@ -182,7 +182,18 @@ jobs:
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_REQUIRE_NOTARIZATION: "false"
-        run: scripts/build-macos-app-release.sh "$VERSION" macos-out
+        run: |
+          set -euo pipefail
+          # All five Apple secrets, or none: a partial set is a misconfiguration.
+          count=0
+          for value in "${MACOS_DEVELOPER_ID_P12_BASE64:-}" "${MACOS_DEVELOPER_ID_P12_PASSWORD:-}" \
+              "${MACOS_NOTARY_KEY_BASE64:-}" "${MACOS_NOTARY_KEY_ID:-}" "${MACOS_NOTARY_ISSUER_ID:-}"; do
+            [[ -z "$value" ]] || count=$((count + 1))
+          done
+          if (( count != 0 && count != 5 )); then
+            echo "::error::Only $count of the 5 macOS signing and notarization secrets are set; set all or none"; exit 1
+          fi
+          scripts/build-macos-app-release.sh "$VERSION" macos-out
       - name: Verify the app bundle
         env:
           VERIFICATION_STATUS: ${{ steps.app.outputs.verification_status }}

@@ -20,7 +20,7 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim"] [-Root DIR] [-Keep]
+          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
     other lanes start from it when it is given, else from -Assets. The policy
@@ -156,8 +156,12 @@ function Invoke-Python([string]$Code, [string[]]$Arguments = @()) {
 
 # Initialize-Gateway: create a config, move the gateway to a free port, start it.
 function Initialize-Gateway {
-    $code = Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("init", "--non-interactive", "--connector", "none",
-        "--no-start-gateway", "--no-verify", "--skip-install") -Quiet
+    $init = @("init", "--non-interactive", "--no-start-gateway", "--no-verify", "--skip-install")
+    # 0.x releases before 0.8.5 have no "--connector none"; their init defaults to codex.
+    if ((Get-ExeOutput (Join-Path $Bin "defenseclaw.cmd") @("init", "--help")).Contains("|none]")) {
+        $init += @("--connector", "none")
+    }
+    $code = Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") $init -Quiet
     if ($code -ne 0) { Fail "defenseclaw init failed ($code)"; return $false }
     $port = Get-FreePort
     Invoke-Python @'
@@ -236,7 +240,6 @@ function Get-LaunchDirCount {
         Where-Object { $_.Name -match '^defenseclaw-(upgrade|rollback)-' }).Count
 }
 
-# Start-Held FILE ARGS...: a process that keeps running (stdin open) until Stop-Held.
 # New-DrillAssets NAME EDIT: a copy of -Assets whose Windows zip EDIT changed
 # (EDIT gets the expanded zip directory), with checksums.txt rewritten.
 function New-DrillAssets([string]$Name, [scriptblock]$Edit) {
@@ -258,6 +261,7 @@ function New-DrillAssets([string]$Name, [scriptblock]$Edit) {
     return $drill
 }
 
+# Start-Held FILE ARGS...: a process that keeps running (stdin open) until Stop-Held.
 function Start-Held([string]$File, [string[]]$Arguments = @()) {
     $info = New-Object Diagnostics.ProcessStartInfo $File
     $info.Arguments = ($Arguments | ForEach-Object { '"' + $_ + '"' }) -join " "
@@ -381,6 +385,48 @@ function Test-UpgradePrevious {
     Assert-Versions $Target
     Assert-Healthy
     Assert-DataKept
+}
+
+# upgrade-0.X.Y: a native install made by that 0.x release's own install.ps1
+# (0.8.0-0.8.3 published Windows builds), upgraded, rolled back and rolled
+# forward. That installer adds the lane's bin dir to the real user PATH, which
+# is put back afterwards.
+function Test-UpgradeLegacy([string]$From) {
+    Enter-Lane "upgrade-$From"
+    $pathRaw = Get-UserPathRaw
+    $pathKind = Get-UserPathKind
+    try {
+        $legacy = Join-Path $Lane "install-$From.ps1"
+        Invoke-WebRequest -UseBasicParsing -OutFile $legacy `
+            -Uri "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$From/scripts/install.ps1"
+        Write-Log "install $From with its own install.ps1"
+        Check ((Invoke-Installer $legacy @("-Version", $From, "-Yes", "-NoOpenclaw")) -eq 0) "install of $From failed"
+        if (-not (Initialize-Gateway)) { return }
+        Assert-Versions $From
+        Write-Log "upgrade $From -> $Target"
+        Check ((Install-Candidate $Assets) -eq 0) "upgrade failed"
+        Assert-Versions $Target
+        Assert-Healthy
+        Assert-DataKept
+        Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $From) "previous\VERSION is not $From"
+
+        Write-Log "defenseclaw rollback --yes (detached installer)"
+        $code = Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("rollback", "--yes")
+        Check ($code -eq 0) "defenseclaw rollback exited $code"
+        $log = Wait-Detached
+        Check ($log.Contains("Now running DefenseClaw $From")) "the rollback log does not report success"
+        Assert-Versions $From
+        Assert-Healthy
+        Assert-DataKept
+
+        Write-Log "roll forward with the 1.x installer kept in previous\installer"
+        Check ((Invoke-Installer (Join-Path $DcHome "previous\installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "roll forward failed"
+        Assert-Versions $Target
+        Assert-Healthy
+        Assert-DataKept
+    } finally {
+        Set-UserPath $pathRaw $pathKind
+    }
 }
 
 # `defenseclaw upgrade --yes` starts the installer in a new console and exits.
@@ -643,6 +689,7 @@ try {
             "setup-import" { Invoke-Lane $lane { Test-SetupImport } }
             "failure-drill" { Invoke-Lane $lane { Test-FailureDrill } }
             "policy" { Invoke-Lane $lane { Test-Policy } }
+            { $_ -like "upgrade-0.*" } { Invoke-Lane $lane { Test-UpgradeLegacy $lane.Substring(8) } }
             default { throw "unknown lane: $lane" }
         }
     }

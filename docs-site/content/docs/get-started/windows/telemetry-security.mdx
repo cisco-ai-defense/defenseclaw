@@ -154,11 +154,12 @@ ownership requirements this guide does not certify.
 ## Release and installer trust
 
 `install.ps1` checks every file it downloads against the release's
-`checksums.txt`. The Release workflow signs `checksums.txt` with Sigstore;
-when `cosign` 2.0 or later is installed, the installer also verifies that signature
-against the release workflow's identity and stops if it fails. `defenseclaw
-upgrade` checks the installer itself against the same `checksums.txt` before
-running it.
+`checksums.txt`. That catches a corrupted or mismatched download, but on its
+own it does not prove who published the release. The Release workflow signs
+`checksums.txt` with Sigstore; when `cosign` 2.0 or later is installed, the
+installer and `defenseclaw upgrade` verify that signature against the release
+workflow's identity before trusting any file, and stop if it fails. Install
+cosign first if you want that publisher check.
 
 Windows release executables are not Authenticode-signed, so Windows reports
 them as `NotSigned`. Their integrity comes from the checksum set, not from a

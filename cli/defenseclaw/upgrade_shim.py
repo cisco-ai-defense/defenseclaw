@@ -30,6 +30,7 @@ working when anything else in the installed version is broken.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -156,8 +157,10 @@ def _rollback(*, yes: bool) -> int:
     copy = os.path.join(workdir, name)
     try:
         shutil.copyfile(installer, copy)
-    except BaseException:
+    except BaseException as exc:
         shutil.rmtree(workdir, ignore_errors=True)
+        if isinstance(exc, OSError):
+            raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
         raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
@@ -307,7 +310,7 @@ def _download(url: str, destination: str) -> None:
             destination, "wb"
         ) as out:
             shutil.copyfileobj(response, out)
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         raise ShimError(f"could not download {url}: {exc}") from None
 
 

@@ -27,9 +27,18 @@ Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
 Intel Macs are unsupported), and Windows (`amd64`).
 
 To try a release on real machines before users see it, run the workflow with
-`draft: true`, download the draft's assets (`gh release download X.Y.Z`),
-install them with `install.sh --local DIR` or `install.ps1 -Local DIR`, then
-publish:
+`draft: true` and download the draft's assets (`gh release download X.Y.Z`).
+Check them against the signed checksum list before running anything:
+
+```bash
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+```
+
+Then install them with `install.sh --local DIR` or `install.ps1 -Local DIR`,
+and publish:
 
 ```bash
 gh release edit X.Y.Z --draft=false --latest
