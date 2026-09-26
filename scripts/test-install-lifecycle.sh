@@ -53,8 +53,10 @@ chmod 700 "${ROOT}"
 TOOLS="${ROOT}/tools"
 mkdir -p "${TOOLS}"
 ln -s "$(command -v uv)" "${TOOLS}/uv"
-REAL_UV_CACHE="$(uv cache dir 2>/dev/null || true)"
-REAL_UV_PYTHON="$(uv python dir 2>/dev/null || true)"
+# --color never: FORCE_COLOR would otherwise wrap the paths in escape codes,
+# which then read as relative paths under the installer's working directory.
+REAL_UV_CACHE="$(uv --color never cache dir 2>/dev/null || true)"
+REAL_UV_PYTHON="$(uv --color never python dir 2>/dev/null || true)"
 # cosign stays off the lane PATH, so installers only see it through with_cosign.
 COSIGN_BIN="${ROOT}/cosign-bin"
 if command -v cosign >/dev/null 2>&1; then
