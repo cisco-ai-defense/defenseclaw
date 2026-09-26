@@ -249,6 +249,8 @@ function New-DrillAssets([string]$Name, [scriptblock]$Edit) {
     & $Edit $zip
     Remove-Item -LiteralPath (Join-Path $drill $archive)
     Compress-Archive -Path (Join-Path $zip "*") -DestinationPath (Join-Path $drill $archive)
+    # The release signature no longer matches the rewritten checksums.txt.
+    Remove-Item -Path (Join-Path $drill "checksums.txt.*") -Force -ErrorAction SilentlyContinue
     $sums = foreach ($file in Get-ChildItem -LiteralPath $drill -File | Where-Object { $_.Name -notlike "checksums.txt*" } | Sort-Object Name) {
         "$((Get-Sha256 $file.FullName).ToLowerInvariant())  $($file.Name)"
     }

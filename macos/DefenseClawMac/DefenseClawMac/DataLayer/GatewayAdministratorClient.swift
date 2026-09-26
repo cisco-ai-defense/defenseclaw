@@ -202,6 +202,9 @@ enum GatewayAdministratorClient {
                           configPath: context.configURL.path, authorization: authorization) { code, output in
                 completion.finish(resultForHelperReply(exitCode: code, output: output))
             }
+            // The administrator prompt is answered before this point, so the
+            // budget covers only the helper: a restart is its 90 s stop plus
+            // 180 s start deadline, with a minute to spare.
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 330) {
                 completion.finish(CLIResult(exitCode: 124, output: "Administrator gateway control timed out. The gateway may still be changing state; check its status before retrying.\n"))
             }

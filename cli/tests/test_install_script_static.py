@@ -195,3 +195,13 @@ def test_handoff_plan_changes_nothing(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert "would upgrade" in result.stdout
     assert "ran" not in result.stdout
+
+
+def test_downloads_under_a_staging_name_are_checked_by_their_release_name() -> None:
+    # checksums.txt lists release asset names; a file saved under another name
+    # must pass the asset name to verify, or the lookup finds nothing.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    for call in re.findall(r"^\s*verify (.+)$", text, flags=re.MULTILINE):
+        args = call.split()
+        if not args[0].startswith('"${STAGING}/'):
+            assert len(args) == 2, f"verify {call} needs the release asset name"

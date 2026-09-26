@@ -945,7 +945,7 @@ first_install_extras() {
             warn "--sandbox applies to the OpenClaw connector on Linux only; skipped"
         else
             fetch install-openshell-sandbox.sh "${STAGING}.sandbox.sh" || die "This release has no install-openshell-sandbox.sh"
-            verify "${STAGING}.sandbox.sh"
+            verify "${STAGING}.sandbox.sh" install-openshell-sandbox.sh
             bash "${STAGING}.sandbox.sh" || warn "openshell-sandbox installation failed"
             rm -f "${STAGING}.sandbox.sh"
         fi
