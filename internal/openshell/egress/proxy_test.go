@@ -1051,3 +1051,55 @@ func TestProxyConcurrentTunnels(t *testing.T) {
 		t.Errorf("stats = %+v", s)
 	}
 }
+
+// getStatus sends a GET through client and returns the status.
+func getStatus(client *http.Client, u string) (int, error) {
+	resp, err := client.Get(u)
+	if err != nil {
+		return 0, err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// A forwarded request counts toward its destination only once it has an
+// upstream connection, like a CONNECT tunnel: a request whose dial fails or
+// is refused is neither a tunnel nor the first contact.
+func TestProxyForwardCountsConnectedRequestsOnly(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer upstream.Close()
+	h := newHarness(t, nil)
+	h.resolver.set("internal.example.com", []string{"10.1.2.3"})
+	client := h.clientFor(h.cred, nil)
+
+	// Nothing listens for port 80 yet, so the dial fails; the second name
+	// resolves to a private address and is refused at dial time.
+	for u, want := range map[string]int{"http://example.com/": http.StatusBadGateway, "http://internal.example.com/": http.StatusForbidden} {
+		if status, err := getStatus(client, u); err != nil || status != want {
+			t.Fatalf("GET %s = %d, %v; want %d", u, status, err, want)
+		}
+	}
+	stats := map[string]DestinationStats{}
+	for _, s := range h.proxy.Counter().DestinationsFor("binding-one") {
+		stats[s.Host] = s
+	}
+	if s, ok := stats["example.com"]; ok && (s.Tunnels != 0 || s.Active != 0) {
+		t.Errorf("failed request counted as a tunnel: %+v", s)
+	}
+	if s := stats["internal.example.com"]; s.Tunnels != 0 || s.Blocked != 1 {
+		t.Errorf("dial-time refusal stats = %+v", s)
+	}
+
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	if status, err := getStatus(client, "http://example.com/"); err != nil || status != http.StatusOK {
+		t.Fatalf("GET after the route = %d, %v", status, err)
+	}
+	if e := h.sink.wait(t, EventAllowed, 1)[0]; !e.FirstSeen {
+		t.Errorf("the first connected request is not the first contact: %+v", e)
+	}
+	eventually(t, "the request to be counted and closed", func() bool {
+		s := h.proxy.Counter().DestinationsFor("binding-one")
+		return len(s) == 2 && s[0].Host == "example.com" && s[0].Tunnels == 1 && s[0].Active == 0
+	})
+}

@@ -218,6 +218,47 @@ func TestCounterConcurrent(t *testing.T) {
 	}
 }
 
+// A pending flow (a forwarded request still waiting for its upstream
+// connection) counts nothing until it opens, opens once, and never opens
+// after it closed.
+func TestCounterPendingFlow(t *testing.T) {
+	c := NewCounter(CounterOptions{LargeUploadBytes: 100, BlockLargeUploads: true})
+	f := c.pending(testPrincipal, "example.com")
+	f.addDown(50) // the proxy's own error body, with no upstream
+	if s := c.Destinations(); len(s) != 0 || f.down.Load() != 0 {
+		t.Fatalf("pending flow counted: %+v, down %d", s, f.down.Load())
+	}
+	if !f.open() || !f.open() {
+		t.Error("the first open is not reported as first contact")
+	}
+	f.addDown(7)
+	if v := f.addUp(10, false); v.cut || v.total != 10 {
+		t.Errorf("upload = %+v", v)
+	}
+	f.close()
+	f.close()
+	if s := c.DestinationsFor("b-1"); len(s) != 1 || s[0].Tunnels != 1 || s[0].Active != 0 || s[0].BytesUp != 10 || s[0].BytesDown != 7 {
+		t.Errorf("stats = %+v", s)
+	}
+
+	// Closed before it opened: nothing is counted, and uploads stop.
+	g := c.pending(testPrincipal, "other.example")
+	g.close()
+	if g.open() || len(c.DestinationsFor("b-1")) != 1 {
+		t.Error("a closed flow opened")
+	}
+	if v := g.addUp(1, false); !v.cut {
+		t.Errorf("upload on a closed, never-opened flow = %+v", v)
+	}
+
+	// An upload opens a pending flow, so the threshold always applies.
+	u := c.pending(testPrincipal, "drop.example")
+	defer u.close()
+	if v := u.addUp(101, false); !v.cut || !v.signal {
+		t.Errorf("upload on a pending flow = %+v", v)
+	}
+}
+
 // Refusals are not contact: they must not call KnownHost, use up the first
 // contact or count as tunnels, and their count carries over once the
 // destination is contacted.

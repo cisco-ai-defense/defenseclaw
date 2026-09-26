@@ -832,7 +832,10 @@ func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e := p.event(EventLargeUpload, t.principal, t.method, t.dec)
 	e.TunnelID = t.id
 	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason()
-	e.BytesUp, e.BytesDown = v.total, t.flow.dest.down.Load()
+	e.BytesUp = v.total
+	if d := t.flow.dest.Load(); d != nil {
+		e.BytesDown = d.down.Load()
+	}
 	e.FirstSeen, e.Terminated = true, v.cut
 	e.Duration = time.Since(t.started)
 	p.emit(e)

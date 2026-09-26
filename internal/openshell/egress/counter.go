@@ -280,19 +280,44 @@ func (c *Counter) uploadBlocked(p Principal, host string) bool {
 // open starts counting one tunnel or request and reports whether this is
 // the binding's first contact with host.
 func (c *Counter) open(p Principal, host string) (*flow, bool) {
-	d, created := c.contact(p, host)
-	d.tunnels.Add(1)
-	d.active.Add(1)
-	return &flow{counter: c, dest: d}, created
+	f := c.pending(p, host)
+	return f, f.open()
+}
+
+// pending returns a flow that counts toward host only once it opens: a
+// forwarded request becomes contact when it gets an upstream connection.
+func (c *Counter) pending(p Principal, host string) *flow {
+	return &flow{counter: c, principal: p, host: host}
 }
 
 // flow counts one tunnel or forwarded request.
 type flow struct {
-	counter *Counter
-	dest    *destination
+	counter   *Counter
+	principal Principal
+	host      string
+
+	opening sync.Once
+	dest    atomic.Pointer[destination]
+	first   atomic.Bool
+	closed  atomic.Bool
 	up      atomic.Int64
 	down    atomic.Int64
-	closed  atomic.Bool
+}
+
+// open counts the flow toward its destination, once, and reports whether
+// that was the binding's first contact. A closed flow no longer opens.
+func (f *flow) open() bool {
+	f.opening.Do(func() {
+		if f.closed.Load() {
+			return
+		}
+		d, created := f.counter.contact(f.principal, f.host)
+		d.tunnels.Add(1)
+		d.active.Add(1)
+		f.first.Store(created)
+		f.dest.Store(d)
+	})
+	return f.first.Load()
 }
 
 // uploadVerdict is the large-upload outcome of one upload chunk.
@@ -306,12 +331,17 @@ type uploadVerdict struct {
 	total int64
 }
 
-// addUp accounts n bytes about to be sent upstream. exempt flows (unblocked
-// or operator-allowed destinations) are signalled but never cut. Under the
-// block the chunk is reserved against the threshold atomically, so parallel
-// flows cannot together send more than it.
+// addUp accounts n bytes about to be sent upstream, opening the flow if it
+// is not open yet. exempt flows (unblocked or operator-allowed
+// destinations) are signalled but never cut. Under the block the chunk is
+// reserved against the threshold atomically, so parallel flows cannot
+// together send more than it.
 func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
-	c, d := f.counter, f.dest
+	f.open()
+	c, d := f.counter, f.dest.Load()
+	if d == nil {
+		return uploadVerdict{cut: true} // closed before it opened: nothing more is relayed
+	}
 	armed := c.threshold > 0 && d.novel
 	if armed && c.block && !exempt {
 		for {
@@ -336,17 +366,26 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 	return v
 }
 
-// addDown accounts n bytes received from upstream.
+// addDown accounts n bytes received from upstream. A flow that never
+// opened has had no upstream, so it counts nothing.
 func (f *flow) addDown(n int64) {
+	d := f.dest.Load()
+	if d == nil {
+		return
+	}
 	f.down.Add(n)
-	f.dest.down.Add(n)
-	f.dest.lastSeen.Store(f.counter.now().UnixNano())
+	d.down.Add(n)
+	d.lastSeen.Store(f.counter.now().UnixNano())
 }
 
 func (f *flow) close() {
-	if f.closed.CompareAndSwap(false, true) {
-		f.dest.active.Add(-1)
-		f.dest.lastSeen.Store(f.counter.now().UnixNano())
+	if !f.closed.CompareAndSwap(false, true) {
+		return
+	}
+	f.opening.Do(func() {}) // wait out an open in progress; later ones are no-ops
+	if d := f.dest.Load(); d != nil {
+		d.active.Add(-1)
+		d.lastSeen.Store(f.counter.now().UnixNano())
 	}
 }
 

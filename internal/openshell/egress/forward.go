@@ -44,7 +44,6 @@ type forwardState struct {
 	tunnel   *tunnel
 	scheme   string
 	explicit bool // the request URL carried a port
-	first    bool // first contact with the destination by this binding
 
 	allowed atomic.Bool
 
@@ -143,7 +142,10 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	flow, first := p.counter.open(pr, dec.Host)
+	// The request counts toward its destination once it has an upstream
+	// connection, as a CONNECT tunnel does once it is dialed: a request
+	// whose dial fails or is refused is not contact.
+	flow := p.counter.pending(pr, dec.Host)
 	defer flow.close()
 	t := &tunnel{
 		id: newTunnelID(), principal: pr, method: r.Method, dec: dec, started: start,
@@ -156,14 +158,17 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.untrack(t)
 
-	st := &forwardState{p: p, decider: d, tunnel: t, scheme: scheme, explicit: explicit, first: first}
+	st := &forwardState{p: p, decider: d, tunnel: t, scheme: scheme, explicit: explicit}
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 
 	ctx := context.WithValue(r.Context(), forwardKey{}, st)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) { st.setRemote(info.Conn.RemoteAddr().String()) },
+		GotConn: func(info httptrace.GotConnInfo) {
+			st.setRemote(info.Conn.RemoteAddr().String())
+			flow.open()
+		},
 	})
 	out := r.WithContext(ctx)
 	if r.Body != nil && r.Body != http.NoBody {
@@ -249,7 +254,7 @@ func (p *Proxy) forwardResponse(resp *http.Response) error {
 	}
 	t := st.tunnel
 	e := p.event(EventAllowed, t.principal, t.method, t.dec)
-	e.TunnelID, e.RemoteAddr, e.Status, e.FirstSeen = t.id, st.remoteAddr(), resp.StatusCode, st.first
+	e.TunnelID, e.RemoteAddr, e.Status, e.FirstSeen = t.id, st.remoteAddr(), resp.StatusCode, t.flow.open()
 	p.emit(e)
 	return nil
 }
