@@ -1,0 +1,304 @@
+[
+  {
+    "class": "CONFIG",
+    "activity": "CONFIGURED",
+    "severity": "info",
+    "message": "OPA runtime binary identity mode configured",
+    "context": {
+      "require_binary_identity": "true",
+      "source": "proto"
+    },
+    "raw": "CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "ENABLED",
+    "severity": "info",
+    "message": "TLS termination enabled: ephemeral CA generated",
+    "raw": "CONFIG:ENABLED [INFO] TLS termination enabled: ephemeral CA generated"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "READY",
+    "severity": "info",
+    "message": "Policy DNS connected to isolation boundary",
+    "raw": "CONFIG:READY [INFO] Policy DNS connected to isolation boundary"
+  },
+  {
+    "class": "NET",
+    "activity": "LISTEN",
+    "severity": "info",
+    "host": "127.0.0.1",
+    "port": 3128,
+    "raw": "NET:LISTEN [INFO] 127.0.0.1:3128"
+  },
+  {
+    "class": "SSH",
+    "activity": "LISTEN",
+    "severity": "info",
+    "raw": "SSH:LISTEN [INFO]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "LOADED",
+    "severity": "info",
+    "message": "Acknowledged initial policy revision as loaded",
+    "context": {
+      "hash": "681a4acc3e5154f96734a0cc97cdca94494d236a8b63b9e7b3a367f6d6ce513f",
+      "version": "3"
+    },
+    "raw": "CONFIG:LOADED [INFO] Acknowledged initial policy revision as loaded [version:3] [hash:681a4acc3e5154f96734a0cc97cdca94494d236a8b63b9e7b3a367f6d6ce513f]"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "info",
+    "host": "127.0.0.1",
+    "port": 17670,
+    "raw": "NET:OPEN [INFO] 127.0.0.1:17670"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "DETECTED",
+    "severity": "info",
+    "message": "Settings poll: config change detected",
+    "context": {
+      "new_revision": "13168037331530273167",
+      "old_revision": "13168037331530273167",
+      "policy_changed": "false",
+      "provider_env_changed": "true"
+    },
+    "raw": "CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:13168037331530273167 new_revision:13168037331530273167 policy_changed:false provider_env_changed:true]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "CONFIGURED",
+    "severity": "info",
+    "message": "OPA runtime binary identity mode configured",
+    "context": {
+      "require_binary_identity": "true",
+      "source": "proto"
+    },
+    "raw": "CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]"
+  },
+  {
+    "class": "EVENT",
+    "severity": "info",
+    "message": "ssh relay open (channel_id=c600ab39-5488-43bc-af0d-80a13ae2e646, target=unix:/run/openshell/ssh.sock)",
+    "raw": "EVENT [INFO] ssh relay open (channel_id=c600ab39-5488-43bc-af0d-80a13ae2e646, target=unix:/run/openshell/ssh.sock)"
+  },
+  {
+    "class": "SSH",
+    "activity": "OPEN",
+    "severity": "info",
+    "action": "ALLOWED",
+    "raw": "SSH:OPEN [INFO] ALLOWED"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "PUBLISHED",
+    "severity": "info",
+    "message": "Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998,18999 mapping_id=d6529bd0-9ef0-4331-9fbb-31060476c101",
+    "raw": "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998,18999 mapping_id=d6529bd0-9ef0-4331-9fbb-31060476c101"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "info",
+    "action": "ALLOWED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "host.openshell.internal",
+    "port": 18999,
+    "policy": "_provider_spike_hooks_1",
+    "engine": "opa",
+    "context": {
+      "engine": "opa",
+      "policy": "_provider_spike_hooks_1"
+    },
+    "raw": "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -\u003e host.openshell.internal:18999 [policy:_provider_spike_hooks_1 engine:opa]"
+  },
+  {
+    "class": "HTTP",
+    "activity": "GET",
+    "severity": "info",
+    "action": "ALLOWED",
+    "host": "host.openshell.internal",
+    "port": 18999,
+    "method": "GET",
+    "url": "http://host.openshell.internal:18999/ok",
+    "path": "/ok",
+    "policy": "_provider_spike_hooks_1",
+    "engine": "l7",
+    "context": {
+      "engine": "l7",
+      "policy": "_provider_spike_hooks_1"
+    },
+    "raw": "HTTP:GET [INFO] ALLOWED GET http://host.openshell.internal:18999/ok [policy:_provider_spike_hooks_1 engine:l7]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "PUBLISHED",
+    "severity": "info",
+    "message": "Policy DNS mapped api.github.com resolved=140.82.112.5 synthetic=198.18.0.3 ports=443 mapping_id=a3bcdbd2-0244-4e1d-a897-9c7f461cff22",
+    "raw": "CONFIG:PUBLISHED [INFO] Policy DNS mapped api.github.com resolved=140.82.112.5 synthetic=198.18.0.3 ports=443 mapping_id=a3bcdbd2-0244-4e1d-a897-9c7f461cff22"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "info",
+    "action": "ALLOWED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "api.github.com",
+    "port": 443,
+    "policy": "spike_extra",
+    "engine": "opa",
+    "context": {
+      "engine": "opa",
+      "policy": "spike_extra"
+    },
+    "raw": "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -\u003e api.github.com:443 [policy:spike_extra engine:opa]"
+  },
+  {
+    "class": "HTTP",
+    "activity": "GET",
+    "severity": "info",
+    "action": "ALLOWED",
+    "host": "api.github.com",
+    "port": 443,
+    "method": "GET",
+    "url": "http://api.github.com:443/zen",
+    "path": "/zen",
+    "policy": "spike_extra",
+    "engine": "l7",
+    "context": {
+      "engine": "l7",
+      "policy": "spike_extra"
+    },
+    "raw": "HTTP:GET [INFO] ALLOWED GET http://api.github.com:443/zen [policy:spike_extra engine:l7]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "PUBLISHED",
+    "severity": "info",
+    "message": "Policy DNS mapped api.github.com resolved=140.82.112.5 synthetic=198.18.0.3 ports=443 mapping_id=58463951-c3bc-4762-80ec-c4945ed0c0cd",
+    "raw": "CONFIG:PUBLISHED [INFO] Policy DNS mapped api.github.com resolved=140.82.112.5 synthetic=198.18.0.3 ports=443 mapping_id=58463951-c3bc-4762-80ec-c4945ed0c0cd"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "info",
+    "action": "ALLOWED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "api.github.com",
+    "port": 443,
+    "policy": "spike_extra",
+    "engine": "opa",
+    "context": {
+      "engine": "opa",
+      "policy": "spike_extra"
+    },
+    "raw": "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -\u003e api.github.com:443 [policy:spike_extra engine:opa]"
+  },
+  {
+    "class": "HTTP",
+    "activity": "POST",
+    "severity": "medium",
+    "action": "DENIED",
+    "host": "api.github.com",
+    "port": 443,
+    "method": "POST",
+    "url": "http://api.github.com:443/zen",
+    "path": "/zen",
+    "policy": "spike_extra",
+    "engine": "l7",
+    "reason": "L7_REQUEST deny POST api.github.com:443/zen reason=POST /zen not permitted by policy",
+    "context": {
+      "engine": "l7",
+      "policy": "spike_extra",
+      "reason": "L7_REQUEST deny POST api.github.com:443/zen reason=POST /zen not permitted by policy"
+    },
+    "raw": "HTTP:POST [MED] DENIED POST http://api.github.com:443/zen [policy:spike_extra engine:l7] [reason:L7_REQUEST deny POST api.github.com:443/zen reason=POST /zen not permitted by policy]"
+  },
+  {
+    "class": "NET",
+    "activity": "REFUSE",
+    "severity": "medium",
+    "action": "DENIED",
+    "host": "evil.example.net",
+    "reason": "policy_dns_ineligible",
+    "context": {
+      "reason": "policy_dns_ineligible"
+    },
+    "raw": "NET:REFUSE [MED] DENIED evil.example.net [reason:policy_dns_ineligible]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "OBSERVATION",
+    "severity": "info",
+    "message": "Policy DNS staged unapproved name evil.example.net synthetic=198.18.0.4 for TCP policy review",
+    "raw": "CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name evil.example.net synthetic=198.18.0.4 for TCP policy review"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "medium",
+    "action": "DENIED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "evil.example.net",
+    "port": 443,
+    "reason": "transparent_tcp_policy_denied",
+    "context": {
+      "reason": "transparent_tcp_policy_denied"
+    },
+    "raw": "NET:OPEN [MED] DENIED /usr/bin/curl(0) -\u003e evil.example.net:443 [reason:transparent_tcp_policy_denied]"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "medium",
+    "action": "DENIED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "169.254.169.254",
+    "port": 80,
+    "reason": "transparent_tcp_policy_denied",
+    "context": {
+      "reason": "transparent_tcp_policy_denied"
+    },
+    "raw": "NET:OPEN [MED] DENIED /usr/bin/curl(0) -\u003e 169.254.169.254:80 [reason:transparent_tcp_policy_denied]"
+  },
+  {
+    "class": "CONFIG",
+    "activity": "PUBLISHED",
+    "severity": "info",
+    "message": "Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998,18999 mapping_id=30aa2c1b-7dcd-423b-9f27-114fcd43a9c8",
+    "raw": "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998,18999 mapping_id=30aa2c1b-7dcd-423b-9f27-114fcd43a9c8"
+  },
+  {
+    "class": "NET",
+    "activity": "OPEN",
+    "severity": "info",
+    "action": "ALLOWED",
+    "binary": "/usr/bin/curl",
+    "has_pid": true,
+    "host": "host.openshell.internal",
+    "port": 18998,
+    "policy": "egress_proxy",
+    "engine": "opa",
+    "context": {
+      "engine": "opa",
+      "policy": "egress_proxy"
+    },
+    "raw": "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -\u003e host.openshell.internal:18998 [policy:egress_proxy engine:opa]"
+  },
+  {
+    "class": "EVENT",
+    "severity": "info",
+    "message": "ssh relay closed (channel_id=c600ab39-5488-43bc-af0d-80a13ae2e646, target=unix:/run/openshell/ssh.sock)",
+    "raw": "EVENT [INFO] ssh relay closed (channel_id=c600ab39-5488-43bc-af0d-80a13ae2e646, target=unix:/run/openshell/ssh.sock)"
+  }
+]
