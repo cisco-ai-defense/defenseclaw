@@ -993,6 +993,41 @@ class OpenShellConfig:
         return True
 
 
+def legacy_standalone_configured(cfg: Any) -> bool:
+    """Whether *cfg* still records the removed openshell-sandbox standalone mode.
+
+    Mirrors ``IsLegacyStandalone`` in internal/config/legacy_openshell.go.
+
+    LEGACY(openshell-0.0.x): delete one release after cleanup.
+    """
+    openshell = getattr(cfg, "openshell", None)
+    is_standalone = getattr(openshell, "is_standalone", None)
+    if callable(is_standalone):
+        return bool(is_standalone())
+    return getattr(openshell, "mode", "") == "standalone"
+
+
+def legacy_standalone_api_host(cfg: Any) -> str | None:
+    """Return the API bind host of a legacy standalone install, or ``None``.
+
+    A host that still runs the removed openshell-sandbox mode keeps
+    ``openshell.mode: standalone`` and points ``guardrail.host`` at the host
+    end of the sandbox veth link. Until ``defenseclaw sandbox legacy-cleanup``
+    resets that, the gateway keeps its API on that host, so every CLI client
+    and health probe must dial it too. An explicit ``gateway.api_bind`` still
+    wins at each call site. Mirrors ``LegacyStandaloneAPIHost`` in
+    internal/config/legacy_openshell.go.
+
+    LEGACY(openshell-0.0.x): delete one release after cleanup.
+    """
+    if not legacy_standalone_configured(cfg):
+        return None
+    host = str(getattr(getattr(cfg, "guardrail", None), "host", "") or "").strip()
+    if not host or host == "localhost":
+        return None
+    return host
+
+
 @dataclass
 class WatchConfig:
     debounce_ms: int = 500

@@ -836,6 +836,32 @@ def _http_probe_once(
 # ---------------------------------------------------------------------------
 
 
+def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
+    """Point a host that still carries the removed openshell-sandbox mode at cleanup.
+
+    Silent when nothing is found. The legacy mode keeps the gateway API on
+    the sandbox veth host until ``defenseclaw sandbox legacy-cleanup`` resets
+    the config, and its root units, ACLs, and ownership changes stay behind.
+    """
+    from defenseclaw import sandbox_legacy
+
+    try:
+        evidence = sandbox_legacy.quick_evidence(cfg)
+    except Exception:  # noqa: BLE001 - a diagnostic must never abort doctor
+        return
+    if not evidence:
+        return
+    _emit(
+        "warn",
+        "Legacy sandbox",
+        "legacy openshell-sandbox standalone install detected (" + ", ".join(evidence) + ")",
+        r=r,
+        check_id="doctor.sandbox.legacy-install",
+        reason_code="legacy-standalone-sandbox",
+        remediation="run 'defenseclaw sandbox legacy-cleanup --dry-run', then 'defenseclaw sandbox legacy-cleanup'",
+    )
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
@@ -1782,6 +1808,8 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
                 return any(enabled_states)
         return True
     if sub == "sandbox":
+        # The gateway only reports the sandbox subsystem for a legacy
+        # standalone install (degraded until legacy-cleanup runs).
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
@@ -1891,6 +1919,12 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                                 summary = raw.strip()
                         detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
+                elif normalized_state == "degraded":
+                    # Up but needs operator action (today: the legacy
+                    # standalone sandbox shim), so warn rather than fail.
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
             return health
@@ -7455,6 +7489,7 @@ def doctor(
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_device_identity(cfg, r)
+    _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -11046,6 +11081,10 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             invalid_reasons.append(f"{subsystem} has malformed health state")
             continue
         state = raw_state.strip().lower()
+        if subsystem == "sandbox" and state == "degraded":
+            # The legacy sandbox shim: a gateway restart cannot fix it, and it
+            # must not block repairs of real drift. The legacy check reports it.
+            continue
 
         if expected is True and state in inactive_states:
             repair_reasons.append(f"{subsystem} is enabled in config but reports {state}")

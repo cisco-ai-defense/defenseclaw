@@ -2787,5 +2787,91 @@ class DoctorFixHelpTextTests(unittest.TestCase):
         self.assertNotIn("doctor --fix", warn["detail"])
 
 
+class TestLegacySandboxDoctor(unittest.TestCase):
+    """The removed openshell-sandbox mode is reported with its cleanup command."""
+
+    def _cfg(self, data_dir: str, *, legacy: bool) -> Config:
+        cfg = Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            gateway=GatewayConfig(host="127.0.0.1"),
+            openshell=OpenShellConfig(mode="standalone" if legacy else ""),
+        )
+        cfg._source_config_version = 8
+        return cfg
+
+    def test_legacy_install_warns_with_cleanup_remediation(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=True), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        row = result.checks[0]
+        self.assertEqual(row["check_id"], "doctor.sandbox.legacy-install")
+        self.assertIn("openshell.mode=standalone", row["detail"])
+        self.assertIn("defenseclaw sandbox legacy-cleanup", row["remediation"])
+
+    def test_leftover_data_dir_artifacts_are_evidence_too(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "openclaw-ownership-backup.json"), "w") as fh:
+                fh.write("{}")
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("openclaw-ownership-backup.json", result.checks[0]["detail"])
+
+    def test_host_mode_install_emits_nothing(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.checks, [])
+
+    def test_degraded_legacy_sandbox_health_warns_instead_of_failing(self):
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {
+                "state": "degraded",
+                "last_error": "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`",
+            },
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(cfg, result)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "warn")
+        self.assertIn("legacy-cleanup", sandbox["detail"])
+
+    def test_degraded_legacy_sandbox_does_not_block_gateway_repairs(self):
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            health = {
+                "api": {"state": "running"},
+                "gateway": {"state": "disabled"},
+                "watcher": {"state": "disabled"},
+                "telemetry": {"state": "running"},
+                "guardrail": {"state": "disabled"},
+                "sandbox": {"state": "degraded"},
+            }
+            status, detail = _gateway_service_health_assessment(cfg, health)
+        self.assertNotEqual(status, "operational", detail)
+        self.assertNotIn("sandbox", detail)
+
+
 if __name__ == "__main__":
     unittest.main()
