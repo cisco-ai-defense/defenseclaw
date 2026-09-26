@@ -21,7 +21,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -139,6 +141,17 @@ func TestCLIArgv(t *testing.T) {
 	if v := cli.Version(); strings.Join(v.Argv, " ") != "openshell --version" || v.Interactive {
 		t.Fatalf("version = %+v", v)
 	}
+	// Only the background forward leaves a process behind.
+	for name, inv := range map[string]func() (openshell.Invocation, error){
+		"forward start": func() (openshell.Invocation, error) { return cli.ForwardStart("box", 18789, "") },
+		"forward stop":  func() (openshell.Invocation, error) { return cli.ForwardStop("box", 18789) },
+		"download":      func() (openshell.Invocation, error) { return cli.Download("box", "/sandbox/x", "/tmp/x") },
+	} {
+		got, err := inv()
+		if err != nil || got.Detaches != (name == "forward start") {
+			t.Fatalf("%s: detaches = %v, %v", name, got.Detaches, err)
+		}
+	}
 }
 
 func TestCLIRefusesUnsafeArguments(t *testing.T) {
@@ -242,5 +255,99 @@ func TestInvocationCommandTimeout(t *testing.T) {
 	}
 	if _, _, err := (openshell.Invocation{}).Command(context.Background()); err == nil {
 		t.Fatal("empty invocation accepted")
+	}
+}
+
+func TestInvocationOutput(t *testing.T) {
+	bin := fakeCLI(t, "echo out; echo err >&2; exit 3\n")
+	out, err := openshell.Invocation{Argv: []string{bin, "sandbox", "upload"}, Timeout: 10 * time.Second}.Output(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "sandbox upload") {
+		t.Fatalf("Output error = %v", err)
+	}
+	if string(out) != "out\nerr\n" {
+		t.Fatalf("Output = %q", out)
+	}
+	if _, err := (openshell.Invocation{Argv: []string{bin}, Interactive: true}).Output(context.Background()); err == nil {
+		t.Fatal("interactive invocation captured")
+	}
+}
+
+// daemonCLI writes a stand-in for `openshell forward start --background`:
+// it leaves a process holding the inherited stderr, as ssh -f does, and
+// that process writes to it after the command exits. The daemon's PID is
+// written to pidFile and it is killed when the test ends.
+func daemonCLI(t *testing.T) (bin, pidFile string) {
+	t.Helper()
+	pidFile = filepath.Join(t.TempDir(), "daemon.pid")
+	bin = fakeCLI(t, `sh -c 'echo $$ > "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.3; echo late >&2; exec sleep 30' daemon "`+pidFile+`" </dev/null >/dev/null &
+echo "Forwarding port 18789 to sandbox box in the background" >&2
+`)
+	t.Cleanup(func() {
+		if p := daemonPID(t, pidFile); p != nil {
+			_ = p.Kill()
+		}
+	})
+	return bin, pidFile
+}
+
+func daemonPID(t *testing.T, pidFile string) *os.Process {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Fatalf("pid file %q", data)
+		}
+		p, _ := os.FindProcess(pid)
+		return p
+	}
+	return nil
+}
+
+func TestInvocationOutputDetached(t *testing.T) {
+	bin, pidFile := daemonCLI(t)
+	inv := openshell.Invocation{Argv: []string{bin}, Detaches: true, Timeout: 20 * time.Second}
+	start := time.Now()
+	out, err := inv.Output(context.Background())
+	if err != nil {
+		t.Fatalf("Output = %v (%q)", err, out)
+	}
+	// A pipe would have held Wait until WaitDelay (5s) and then failed
+	// with exec.ErrWaitDelay.
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Output waited %s for the background process", elapsed)
+	}
+	if !strings.Contains(string(out), "Forwarding port 18789") {
+		t.Fatalf("Output = %q", out)
+	}
+	daemon := daemonPID(t, pidFile)
+	if daemon == nil {
+		t.Fatal("the background process did not start")
+	}
+	// The background process writes again after the command has exited
+	// and is still running afterwards: its stderr was never closed under
+	// it.
+	time.Sleep(600 * time.Millisecond)
+	if err := daemon.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("background process died after its late write: %v", err)
+	}
+}
+
+func TestInvocationCommandDetached(t *testing.T) {
+	bin, _ := daemonCLI(t)
+	cmd, cancel, err := openshell.Invocation{Argv: []string{bin}, Detaches: true, Timeout: 20 * time.Second}.Command(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if cmd.Stdout != nil || cmd.Stderr != nil {
+		t.Fatalf("detached command has writers %v, %v", cmd.Stdout, cmd.Stderr)
+	}
+	start := time.Now()
+	if err := cmd.Run(); err != nil || time.Since(start) > 3*time.Second {
+		t.Fatalf("Run = %v after %s", err, time.Since(start))
 	}
 }

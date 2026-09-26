@@ -17,9 +17,11 @@
 package openshell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -60,6 +62,12 @@ type Invocation struct {
 	// stdin from /dev/null: 0.1.1 `sandbox exec` and `upload` hang on an
 	// open non-terminal stdin.
 	Interactive bool
+	// Detaches marks a command that leaves a background process holding
+	// the stdout and stderr it inherited: `forward start --background`,
+	// whose ssh -f forwarder keeps stderr. A pipe given to such a command
+	// never reaches EOF while the forward runs, so the command must write
+	// to files; Output handles that.
+	Detaches bool
 	// Timeout bounds non-interactive commands (0: none).
 	Timeout time.Duration
 }
@@ -263,7 +271,7 @@ func (c CLI) ForwardStart(sandbox string, port int, bind string) (Invocation, er
 		return Invocation{}, err
 	}
 	spec := net.JoinHostPort(ip.String(), strconv.Itoa(port))
-	return Invocation{Argv: append(argv, "--color", "never", "--background", "--", spec, sandbox), Timeout: DefaultForwardTimeout}, nil
+	return Invocation{Argv: append(argv, "--color", "never", "--background", "--", spec, sandbox), Detaches: true, Timeout: DefaultForwardTimeout}, nil
 }
 
 // ForwardStop stops a background forward.
@@ -324,8 +332,13 @@ func Environ(env []string) []string {
 
 // Command prepares the invocation. Non-interactive commands get stdin from
 // /dev/null, a timeout and a bounded wait for inherited pipes; the caller
-// attaches Stdout/Stderr. Interactive commands inherit the terminal. The
-// returned cancel must be called once the command is done.
+// attaches Stdout/Stderr, or runs the invocation with Output instead.
+// Detaches invocations must only be given *os.File writers (they default
+// to the null device): with a pipe, Wait would outlast the command until
+// WaitDelay and then fail with exec.ErrWaitDelay although it succeeded,
+// and closing the pipe under the background process can break it.
+// Interactive commands inherit the terminal. The returned cancel must be
+// called once the command is done.
 func (inv Invocation) Command(ctx context.Context) (*exec.Cmd, context.CancelFunc, error) {
 	if len(inv.Argv) == 0 {
 		return nil, nil, errors.New("openshell: empty invocation")
@@ -346,3 +359,67 @@ func (inv Invocation) Command(ctx context.Context) (*exec.Cmd, context.CancelFun
 	cmd.Env = Environ(os.Environ())
 	return cmd, cancel, nil
 }
+
+// maxInvocationOutput bounds what Output returns.
+const maxInvocationOutput = 1 << 20
+
+// Output runs a non-interactive invocation and returns what it printed,
+// stdout and stderr interleaved, up to 1 MiB. A Detaches command writes to
+// a private temporary file rather than a pipe, so Output returns as soon
+// as the command exits; the file is removed, and what the background
+// process writes later lands in the unlinked file until it exits.
+func (inv Invocation) Output(ctx context.Context) ([]byte, error) {
+	if inv.Interactive {
+		return nil, errors.New("openshell: interactive invocations attach to the terminal; use Command")
+	}
+	cmd, cancel, err := inv.Command(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	if !inv.Detaches {
+		out := &cappedBuffer{limit: maxInvocationOutput}
+		cmd.Stdout, cmd.Stderr = out, out
+		err := cmd.Run()
+		return out.Bytes(), inv.runError(err)
+	}
+	f, err := os.CreateTemp("", "defenseclaw-openshell-*.out")
+	if err != nil {
+		return nil, fmt.Errorf("openshell: capture output: %w", err)
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+	cmd.Stdout, cmd.Stderr = f, f
+	runErr := cmd.Run()
+	// ReadAt leaves the file offset, shared with the background process,
+	// alone.
+	out, readErr := io.ReadAll(io.NewSectionReader(f, 0, maxInvocationOutput))
+	if runErr == nil && readErr != nil {
+		return out, fmt.Errorf("openshell: read output: %w", readErr)
+	}
+	return out, inv.runError(runErr)
+}
+
+func (inv Invocation) runError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("openshell: %s: %w", strings.Join(inv.Argv, " "), err)
+}
+
+// cappedBuffer keeps the first limit bytes written and drops the rest.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); room > 0 {
+		b.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) Bytes() []byte { return b.buf.Bytes() }

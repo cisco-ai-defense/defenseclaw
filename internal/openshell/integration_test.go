@@ -36,6 +36,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,39 @@ func TestLiveGateway(t *testing.T) {
 		t.Fatalf("CLI exec output %q", out)
 	}
 
+	// A background forward returns at once although its forwarder keeps
+	// the inherited stderr, and the port accepts connections.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	fwd, err := cli.ForwardStart(name, port, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if stop, err := cli.ForwardStop(name, port); err == nil {
+			_, _ = stop.Output(context.Background())
+		}
+	})
+	fwdStart := time.Now()
+	t.Logf("forward start: %s (%s)", strings.TrimSpace(runInvocation(t, ctx, fwd)), time.Since(fwdStart).Round(time.Millisecond))
+	if time.Since(fwdStart) > 5*time.Second {
+		t.Fatalf("forward start took %s", time.Since(fwdStart))
+	}
+	fconn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+	if err != nil {
+		t.Fatalf("forwarded port: %v", err)
+	}
+	_ = fconn.Close()
+	stop, err := cli.ForwardStop(name, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runInvocation(t, ctx, stop)
+
 	local := t.TempDir()
 	payload := filepath.Join(local, "payload")
 	if err := os.MkdirAll(payload, 0o700); err != nil {
@@ -255,17 +289,11 @@ func TestLiveGateway(t *testing.T) {
 
 func runInvocation(t *testing.T, ctx context.Context, inv openshell.Invocation) string {
 	t.Helper()
-	cmd, cancel, err := inv.Command(ctx)
+	out, err := inv.Output(ctx)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v\n%s", err, out)
 	}
-	defer cancel()
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("%s: %v\n%s", strings.Join(inv.Argv, " "), err, out.String())
-	}
-	return out.String()
+	return string(out)
 }
 
 func TestLiveDoctor(t *testing.T) {
