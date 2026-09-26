@@ -1,73 +1,64 @@
 ---
 title: Install
-description: Install the latest DefenseClaw release on macOS or Linux, use native Windows Setup, or build the current checkout from source.
+description: Install DefenseClaw on macOS, Linux, or Windows with one command, or build the current checkout from source.
 keywords:
   - install DefenseClaw
   - defenseclaw curl install
-  - defenseclaw setup exe
+  - defenseclaw install.ps1
   - defenseclaw source build
   - defenseclaw make all
 ---
 
-## Install the latest release on macOS or Linux
+## Install
+
+macOS and Linux:
 
 ```bash
 curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
 ```
 
-The release-owned installer resolves and authenticates the latest published
-release automatically. When it finishes, run
-[`defenseclaw init`](/docs/get-started/quickstart) to configure DefenseClaw.
+Windows (PowerShell):
 
-DefenseClaw ships pre-built release binaries for macOS and Linux, plus an
-authenticated native x64 Windows Setup in the current `0.8.10` release. The macOS/Linux installer drops the
-`defenseclaw` CLI, standalone `skill-scanner`, and `defenseclaw-gateway`
-sidecar into `~/.local/bin/`, creates `~/.defenseclaw/`, and sets up a
-virtualenv under `~/.defenseclaw/.venv/`. The `skill-scanner` launcher is a
-symlink to the entry point in that managed virtualenv; it never selects an
-interpreter from ambient `PATH`.
+```powershell
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
+```
 
-<Callout title="Supported macOS architecture">
-DefenseClaw supports Apple Silicon (`arm64`) macOS only. Intel (`x86_64` /
-`amd64`) Macs are unsupported; the release installer, upgrade resolver, rescue
-bootstrap, source installer, and managed package all stop before changing the
-host. Rosetta does not make an Intel Mac a supported target.
-</Callout>
+When it finishes, run [`defenseclaw init`](/docs/get-started/quickstart) to
+configure DefenseClaw. To pick an agent during the install, pass options: with
+`bash -s -- --connector codex --quickstart` on macOS/Linux, or
+`& ([scriptblock]::Create((irm <install.ps1 URL>))) -Connector codex -Quickstart`
+on Windows.
 
-<Callout title="Windows release history">
-Releases `0.8.5` and `0.8.6` published no native Windows Setup artifact.
-Release `0.8.7` was the first release to publish
-`DefenseClawSetup-x64.exe`. Do not copy POSIX artifacts onto Windows, and do
-not treat a release without a Windows Setup artifact as a Windows baseline.
-</Callout>
+The installer downloads the release's gateway, CLI wheel, and a hash-pinned
+list of the CLI's Python dependencies, and checks each file against the
+release's `checksums.txt`. When `cosign` 2.x is installed it also verifies the
+Sigstore signature on `checksums.txt`. It installs `uv` if you do not have it,
+and `uv` provides the Python runtime; nothing else is required.
 
-<Callout title="Current native Windows Setup (introduced in 0.8.7)">
-`DefenseClawSetup-x64.exe` provides a graphical wizard and a quiet,
-wizard-suppressed mode for the CLI/TUI, native gateway, no-console hook
-launcher, and an embedded managed Python runtime. Application files live under
-`%LOCALAPPDATA%\Programs\DefenseClaw`; user state remains under
-`%USERPROFILE%\.defenseclaw`.
+The same command upgrades or repairs an existing install and keeps your
+configuration and data. Day to day, use [`defenseclaw upgrade`](/docs/get-started/upgrade),
+which runs the latest release's installer for you.
 
-The `0.8.10` Setup is authenticated by the release's Sigstore-signed checksum
-set and provenance, but the executable itself is explicitly
-**not Authenticode-signed**. Verify the published checksum/provenance; do not
-expect a Windows Digital Signatures publisher entry.
-</Callout>
+| Option (`install.sh` / `install.ps1`) | What it does |
+| --- | --- |
+| `--yes` / `-Yes` | Do not prompt |
+| `--version X.Y.Z` / `-Version X.Y.Z` | Install a specific release |
+| `--local DIR` / `-Local DIR` | Take every release file from a directory instead of GitHub |
+| `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
+| `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
+| `--quickstart` / `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
 
-<Callout title="POSIX install scripts are for fresh hosts only">
-The macOS/Linux release scripts stop without changing the host when they detect
-an existing DefenseClaw CLI, gateway, or managed virtual environment. Use the
-release-owned [upgrade path](/docs/get-started/upgrade) for an existing POSIX
-installation; it enforces the signed manifest, any required bridge release,
-rollback preparation, migrations, and post-upgrade health checks. Native
-Windows Setup separately supports repair and same-version servicing.
+<Callout title="Supported platforms">
+macOS on Apple Silicon (`arm64`), Linux on `x86_64` and `arm64`, and Windows on
+`x64`. Intel Macs are unsupported; the installer stops before changing
+anything. Rosetta does not make an Intel Mac a supported target.
 </Callout>
 
 <Callout>
 Installing as `root` is supported but discouraged — DefenseClaw is per-user by design so each operator's audit DB and connector state stays isolated.
 </Callout>
 
-## Prerequisites
+## Prerequisites for source builds
 
 | Requirement | Version |
 | --- | --- |
@@ -79,15 +70,6 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 | Node.js and npm | Required only when a source build selects the OpenClaw plugin; use the runtime version required by that OpenClaw release |
 | Docker | Optional, for local observability and Splunk bundles |
 
-Cosign is not a macOS/Linux prerequisite for the `0.8.4+` release installer.
-If no compatible `cosign` exists on `PATH`, the installer downloads pinned
-Cosign `2.6.3` into its owner-only staging directory, validates a hard-coded
-platform SHA-256 before executing it, verifies the DefenseClaw release, and
-retires the temporary verifier. Nothing is installed globally.
-
-The current native Windows Setup bundles its managed runtime. A packaged Windows
-install does not require Python, `uv`, Go, Node.js, Git, or a PowerShell
-installation command after the authenticated Setup artifact is downloaded.
 Agent-specific dependencies and quirks live on the
 [connector pages](/docs/connectors#platform-support).
 
@@ -103,63 +85,12 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 | Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
 | Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-internal-self-hosted-endpoints). |
 
-## Windows or source install
-
-<Tabs items={['Windows Setup', 'From source']}>
-
-<Tab value="Windows Setup">
-
-<Callout title="0.8.10 release artifact">
-Download `DefenseClawSetup-x64.exe` from the `0.8.10` GitHub release. Release
-`0.8.5` had no Windows Setup artifact and remains outside the Windows
-upgrade-baseline matrix; source builds are developer tooling, not a substitute
-for a release upgrade or rollback contract.
-</Callout>
-
-```powershell
-.\DefenseClawSetup-x64.exe
-```
-
-Starting with release `0.8.7`, double-click the authenticated artifact for the
-graphical setup wizard. It installs the CLI/TUI, gateway,
-hook launcher, and managed runtime for the current Windows user. The finish
-screen will point to `defenseclaw init` and `defenseclaw tui`; Setup does not
-install a separate native DefenseClaw GUI application.
-
-For a quiet install in the signed-in, non-elevated user's interactive desktop
-session, pass properties directly:
-
-```powershell
-.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
-```
-
-Set `CONNECTOR` to a supported native Windows setup name from the
-[connector platform table](/docs/connectors#platform-support), or use
-`CONNECTOR=none` to configure later. The setup executable contains the offline
-payload required for install;
-after download it does not require Python, `uv`, Go, Node.js, Git, or a
-PowerShell installation command.
-
-Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
-background/batch installation. Every configured connector requires gateway
-startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported stopped CLI-only
-install.
-
-Native Windows uses connector-native hook, plugin, or awaited-policy lanes
-rather than the OpenClaw/ZeptoClaw proxy path. See
-[Native Windows](/docs/get-started/windows) for repair, servicing, uninstall,
-file locations, and troubleshooting.
-
-</Tab>
-
-<Tab value="From source">
+## Install from source
 
 <Callout title="Release version versus source metadata">
-The published artifacts and checked-in source metadata on this page are release
-`0.8.10`. The protected release workflow revalidates and stamps an isolated
-build checkout before producing artifacts. A source build reports the exact
-checked-in source version but must not be represented as a signed published
-artifact.
+A source build reports the checked-in source version. The Release workflow
+stamps the release version into its own build checkout, so a source build must
+not be represented as a published artifact.
 </Callout>
 
 | Goal | Command |
@@ -167,7 +98,7 @@ artifact.
 | Normal same-checkout development | `make all` |
 | Build artifacts without installing | `make build` |
 | Show developer workflow help | `make help` |
-| Upgrade a packaged release | `defenseclaw upgrade` |
+| Upgrade a release install | `defenseclaw upgrade` |
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
@@ -194,18 +125,10 @@ raw `pip`, `uv`, or editable install at a release-managed virtual environment.
 The lower-level install targets are for fresh or isolated development homes,
 not the normal repeated-development path.
 
-<Callout type="warning" title="Local dist output is not release input">
-`make dist` creates unauthenticated local developer artifacts. Do not pass
-those files to the release installer or present them as published binaries.
-The authenticated installer path requires the published checksum set verified
-against its Sigstore certificate and protected release-workflow identity; a
-local hash, generic certificate, or locally generated archive is not equivalent
-release provenance.
+<Callout type="warning" title="Local dist output is not a release">
+`make dist` builds release-shaped files for testing the installer with
+`--local dist`. They are unsigned; do not present them as published binaries.
 </Callout>
-
-</Tab>
-
-</Tabs>
 
 ## What the install creates
 
@@ -237,17 +160,16 @@ release provenance.
   </Folder>
 </Files>
 
-Release `0.8.5` has no release-managed Windows tree. Developer/source installs
-use `%USERPROFILE%\.defenseclaw\` for config, audit state, hooks, and the
-virtualenv, and `%USERPROFILE%\.local\bin\` for `defenseclaw.cmd` and
-`defenseclaw-gateway.exe`.
+The installer also keeps `~/.defenseclaw/installer/` (the installer that
+performed the current install, used by `defenseclaw rollback`),
+`~/.defenseclaw/previous/` (the install the last upgrade replaced), and
+`~/.defenseclaw/logs/`.
 
-With native Setup (introduced in `0.8.7`), application files live
-under `%LOCALAPPDATA%\Programs\DefenseClaw`: `bin\defenseclaw.exe` launches the
-embedded Python CLI/TUI, `bin\defenseclaw-gateway.exe` is the native gateway,
-`bin\defenseclaw-hook.exe` is the no-console hook launcher, and
-`runtime\python\` contains the managed Python runtime. User configuration,
-audit state, hooks, and backups remain under `%USERPROFILE%\.defenseclaw\`.
+On Windows the same layout lives under `%USERPROFILE%`:
+`%USERPROFILE%\.defenseclaw\` holds configuration, data, and the Python
+environment, and `%USERPROFILE%\.local\bin\` holds `defenseclaw.cmd`,
+`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`.
+The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
 
 ## Verify
 
@@ -319,23 +241,11 @@ removes the managed `skill-scanner`, `skill-scanner-api`,
 `skill-scanner-pre-commit`, `mcp-scanner`, `mcp-scanner-api`, and `litellm`
 launchers from `~/.local/bin`. `--dry-run` previews the plan.
 
-With the current native package, use the setup executable for product uninstall:
-
-```powershell
-.\DefenseClawSetup-x64.exe /uninstall /quiet
-.\DefenseClawSetup-x64.exe /uninstall /quiet DELETEUSERDATA=1
-```
-
-The first command preserves `%USERPROFILE%\.defenseclaw`; the second requests
-user-data removal after connector cleanup succeeds. If teardown or recovery is
-unresolved, Setup retains the data root and retry evidence. See
-[Install and maintain](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
-
 ## Next
 
 <Cards>
-  <Card title="Native Windows" href="/docs/get-started/windows" description="Authenticated Setup wizard, silent install, native hook connectors, verification, and troubleshooting." />
+  <Card title="Native Windows" href="/docs/get-started/windows" description="Native hook connectors, verification, and troubleshooting on Windows." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt setup that gets you a guardrail in two minutes." />
-  <Card title="Upgrade safely" href="/docs/get-started/upgrade" description="Verified artifacts, automatic migrations, backups, health checks, and observability schema compatibility." />
+  <Card title="Upgrade" href="/docs/get-started/upgrade" description="One command, automatic migrations, and rollback." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />
 </Cards>

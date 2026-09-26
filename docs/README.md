@@ -20,9 +20,9 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
 | Private upstream security | [`reference/PRIVATE_UPSTREAMS.md`](reference/PRIVATE_UPSTREAMS.md) | `internal/netguard/`, `internal/gateway/provider.go` |
 | Testing | [`TESTING.md`](TESTING.md), [`E2E.md`](E2E.md) | `Makefile`, `.github/workflows/`, component tests |
-| Release engineering | [`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md), [`RELEASE_VALIDATION.md`](RELEASE_VALIDATION.md), [`RELEASE_CHANNEL.md`](RELEASE_CHANNEL.md) | `.github/workflows/release.yaml`, release scripts |
+| Release engineering | [`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md) | `.github/workflows/release.yaml`, `scripts/install.sh`, `scripts/install.ps1` |
 | Schemas | [`../schemas/README.md`](../schemas/README.md) | `schemas/config/v8/`, `schemas/telemetry/v8/`, generators |
-| Native Windows | [`WINDOWS-NATIVE-INSTALLER.md`](WINDOWS-NATIVE-INSTALLER.md), [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md), [`WINDOWS_RESCUE.md`](WINDOWS_RESCUE.md) | `packaging/windows/`, Windows scripts and workflows |
+| Native Windows | [`WINDOWS-NATIVE-INSTALLER.md`](WINDOWS-NATIVE-INSTALLER.md), [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md) | `packaging/windows/`, Windows scripts and workflows |
 
 Package-local READMEs stay beside the bundle, package, example, or fixture they
 describe.

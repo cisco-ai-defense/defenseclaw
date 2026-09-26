@@ -355,7 +355,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     if [[ "${was_running}" == true ]] || [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]]; then
         start_gateway || warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     fi
-    ok "Rolled back to DefenseClaw ${back_to}. Run the installer with --rollback again to return to ${current:-the newer install}."
+    ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     exit 0
 fi
 

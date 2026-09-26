@@ -21,11 +21,9 @@ Contributor build targets are defined in [`../Makefile`](../Makefile); run
 `make help` for the current contract. `make build` builds artifacts without
 installing them. Source activation targets are development tooling, do not
 claim an upgrade, and are not an alternate upgrade mechanism for an existing
-release-managed installation. Release-owned `scripts/upgrade.sh` and
-`scripts/upgrade.ps1` remain the implementation entry points for the
-authenticated workflow documented on the website.
+release-managed installation. `scripts/install.sh` and `scripts/install.ps1`
+are the installers and upgraders for release installs; `defenseclaw upgrade`
+runs the latest release's copy.
 
 Release construction and validation belong in
-[`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md) and
-[`RELEASE_VALIDATION.md`](RELEASE_VALIDATION.md), not in the operator install
-guide.
+[`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md), not in the operator install guide.

@@ -309,16 +309,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes] [--recover-corrupt-audit]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. On macOS/Linux, `--recover-corrupt-audit` delegates to the authenticated resolver, which requires an explicit post-stop SQLite corruption result before preserving the exact database/WAL set in private same-filesystem custody and activating a fresh store. Native Windows rejects that option before mutation. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
-| `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
-| `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
-| `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
-
-A source listed for its platform in the published-baseline matrix can upgrade to
-latest through the authenticated current release-owned resolver, which selects
-and health-checks `0.8.4` before starting a fresh bridge controller. Sources
-outside that matrix fail closed with the exact supported path. Never force a
-hard-cut version or rerun a fresh installer over an old installation.
+| `defenseclaw upgrade [--version X] [--yes]` | Download the latest (or the given) release's installer, check it against that release's `checksums.txt`, and run it. The installer keeps your configuration and data, migrates them, restarts the gateway, and restores the previous install if anything fails. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw rollback [--yes]` | Swap the live install with the one the last upgrade replaced. Run it again to roll forward. |
+| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. |
 
 ## Uninstall / disable
 
