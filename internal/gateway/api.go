@@ -276,6 +276,11 @@ type APIServer struct {
 	// rather than queued — a queued hook would stall the agent past
 	// the hook scripts' curl --max-time budget.
 	hookJudgeSem chan struct{}
+
+	// sandboxIngress is the OpenShell sandbox hook listener configured by
+	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
+	sandboxIngressMu sync.RWMutex
+	sandboxIngress   *sandboxIngressState
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
@@ -3267,6 +3272,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
+		// Sandbox binding credentials are valid only on the sandbox ingress
+		// listener. Refuse them before any other comparison so that no
+		// loopback carve-out below (hook, OTLP, inspect, ACP) can ever be
+		// reached with one, whatever header or path carries it.
+		if requestCarriesSandboxCredential(r) {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
