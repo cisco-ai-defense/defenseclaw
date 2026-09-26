@@ -132,7 +132,7 @@ fi
 {{if .Sandbox}}INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
   '{tool: $tool, args: $args}')"
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
-  "$DEFENSECLAW_SANDBOX_MAX_TIME" "$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \

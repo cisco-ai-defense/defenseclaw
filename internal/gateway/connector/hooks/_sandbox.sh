@@ -23,11 +23,11 @@ unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CURL_HOME \
       http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy \
       NO_PROXY no_proxy DEFENSECLAW_HOOK_MAX_BODY
 
-readonly DEFENSECLAW_SANDBOX_INGRESS="{{.APIAddr}}"
-readonly DEFENSECLAW_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}
-readonly DEFENSECLAW_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
-readonly DEFENSECLAW_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
-readonly DEFENSECLAW_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
+readonly DC_SANDBOX_INGRESS="{{.APIAddr}}"
+readonly DC_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}
+readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
+readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
+readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
 #
@@ -105,10 +105,10 @@ defenseclaw_sandbox_post() {
   while :; do
     status=0
     out="$(printf '%s' "$body" | curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST \
-      "http://${DEFENSECLAW_SANDBOX_INGRESS}${path}" \
+      "http://${DC_SANDBOX_INGRESS}${path}" \
       "${key_args[@]+"${key_args[@]}"}" \
       "$@" \
-      --connect-timeout "$DEFENSECLAW_SANDBOX_CONNECT_TIMEOUT" \
+      --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
       --max-time "$max_time" \
       --data-binary @- 2>/dev/null)" || status=$?
     if [ "$status" -eq 0 ]; then

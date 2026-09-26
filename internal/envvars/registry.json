@@ -3548,6 +3548,10 @@
         {
           "location": "internal/openshell/sandbox_env.go",
           "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env passes it to the sandbox so nested DefenseClaw invocations can detect the sandbox"
         }
       ],
       "since": "0.9.0"
@@ -3567,6 +3571,10 @@
         {
           "location": "internal/openshell/sandbox_env.go",
           "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env passes it to the sandbox for attribution"
         }
       ],
       "since": "0.9.0"
@@ -3581,16 +3589,166 @@
         "binding token (token_delivery: env)",
         "unset"
       ],
-      "security_impact": "medium",
+      "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
           "description": "Go constant naming the provider credential and sandbox env var"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/_sandbox.sh",
+          "description": "defenseclaw_sandbox_require_token fails every sandbox hook closed when it is missing or malformed"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/claude-code-hook.sh",
+          "description": "Sandbox variant sends it as the ingress Authorization bearer"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/codex-hook.sh",
+          "description": "Sandbox variant sends it as the ingress Authorization bearer"
+        },
+        {
+          "location": "internal/gateway/connector/claudecode_sandbox.go",
+          "description": "Rendered otelHeadersHelper prints it as the OTLP Authorization header"
+        },
+        {
+          "location": "internal/gateway/connector/codex_sandbox.go",
+          "description": "Rendered Codex notify bridge authenticates with it"
+        },
+        {
+          "location": "internal/openshell/harness/codex.go",
+          "description": "Codex launcher adds it as the OTLP exporter Authorization with -c flags"
         }
       ],
       "since": "0.9.0",
       "security_note": "Never log or persist the value. Sandbox hooks must read it from the environment at request time; a placeholder baked into static config does not resolve."
+    },
+    {
+      "name": "DEFENSECLAW_UPDATE_GOLDEN",
+      "category": "test_fixture",
+      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files instead of comparing against them.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_render_golden_test.go",
+          "description": "Rewrites the host hook byte manifest"
+        },
+        {
+          "location": "internal/gateway/connector/sandbox_artifacts_test.go",
+          "description": "Rewrites the sandbox artifact goldens"
+        },
+        {
+          "location": "internal/openshell/policy/policy_test.go",
+          "description": "Rewrites the policy YAML goldens"
+        },
+        {
+          "location": "internal/openshell/profiles/profiles_test.go",
+          "description": "Rewrites the provider profile goldens"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Opts into the live OpenShell overlay build test and names the data directory whose sandboxes/images.json it writes.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live docker build, probe, hook-fire and prune test (openshell_integration build tag)"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_IMAGE_REPO",
+      "category": "test_fixture",
+      "purpose": "Image repository the live overlay build test tags and prunes.",
+      "default": "unset",
+      "accepted_values": [
+        "docker repository name",
+        "unset (e-defenseclaw-sandbox)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live overlay build test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_INGRESS_PORT",
+      "category": "test_fixture",
+      "purpose": "Ingress port the live overlay build test bakes into the images and binds the stand-in ingress on.",
+      "default": "unset",
+      "accepted_values": [
+        "TCP port",
+        "unset (18971)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live overlay build test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_ANTHROPIC_URL",
+      "category": "test_fixture",
+      "purpose": "Base URL of the mock Anthropic Messages server the live hook-fire probe points Claude Code at.",
+      "default": "unset",
+      "accepted_values": [
+        "http URL",
+        "unset (hook-fire skipped)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live Claude Code hook-fire probe"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_OPENAI_URL",
+      "category": "test_fixture",
+      "purpose": "Base URL of the mock OpenAI Responses server the live hook-fire probe points Codex at.",
+      "default": "unset",
+      "accepted_values": [
+        "http URL",
+        "unset (hook-fire skipped)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live Codex hook-fire probe"
+        }
+      ],
+      "since": "0.9.0"
     },
     {
       "name": "DEFENSECLAW_SCRUB_BIN",

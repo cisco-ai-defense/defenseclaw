@@ -228,12 +228,12 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-{{if .Sandbox}}HOOK_MAX_TIME="$DEFENSECLAW_SANDBOX_MAX_TIME"
-HOOK_RETRY_MAX_TIME="$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME"
+{{if .Sandbox}}HOOK_MAX_TIME="$DC_SANDBOX_MAX_TIME"
+HOOK_RETRY_MAX_TIME="$DC_SANDBOX_RETRY_MAX_TIME"
 if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   # Codex caps SessionEnd at three seconds: both attempts must fit.
-  HOOK_MAX_TIME="$DEFENSECLAW_SANDBOX_SESSION_END_MAX_TIME"
-  HOOK_RETRY_MAX_TIME="$DEFENSECLAW_SANDBOX_SESSION_END_MAX_TIME"
+  HOOK_MAX_TIME="$DC_SANDBOX_SESSION_END_MAX_TIME"
+  HOOK_RETRY_MAX_TIME="$DC_SANDBOX_SESSION_END_MAX_TIME"
 fi
 
 # The bearer is a revision-scoped OpenShell placeholder rather than a

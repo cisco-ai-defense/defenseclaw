@@ -103,7 +103,7 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
 fi
 
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/response" "$CONTENT" \
-  "$DEFENSECLAW_SANDBOX_MAX_TIME" "$DEFENSECLAW_SANDBOX_RETRY_MAX_TIME" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \

@@ -78,7 +78,8 @@ type EnvOptions struct {
 	// Artifacts are the connector's rendered overlay artifacts; their Env is
 	// always included.
 	Artifacts connector.SandboxArtifacts
-	// SandboxID and SandboxName populate DEFENSECLAW_SANDBOX_{ID,NAME}.
+	// SandboxID and SandboxName populate DEFENSECLAW_SANDBOX_ID and
+	// DEFENSECLAW_SANDBOX_NAME.
 	SandboxID   string
 	SandboxName string
 	// EgressProxyURL is http://<binding>:<secret>@host.openshell.internal:<egress>
