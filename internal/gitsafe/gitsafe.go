@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // safeGitFlags are prepended to every command-line. They disable
@@ -177,26 +178,23 @@ func scrubbedEnv() []string {
 // cleaned by normal OS housekeeping; we keep one per process to
 // avoid creating one per command.
 var (
+	cachedHomeOnce sync.Once
 	cachedHome     string
 	cachedHomeErr  error
-	cachedHomeDone bool
 )
 
 func safeHomeDir() (string, error) {
-	if cachedHomeDone {
-		return cachedHome, cachedHomeErr
-	}
-	dir, err := os.MkdirTemp("", "defenseclaw-gitsafe-home-")
-	if err != nil {
-		cachedHomeDone = true
-		cachedHomeErr = err
-		return "", err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		// Best-effort; mkdir already created with the umask.
-		_ = err
-	}
-	cachedHome = filepath.Clean(dir)
-	cachedHomeDone = true
-	return cachedHome, nil
+	cachedHomeOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "defenseclaw-gitsafe-home-")
+		if err != nil {
+			cachedHomeErr = err
+			return
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			// Best-effort; mkdir already created with the umask.
+			_ = err
+		}
+		cachedHome = filepath.Clean(dir)
+	})
+	return cachedHome, cachedHomeErr
 }
