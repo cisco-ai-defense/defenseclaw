@@ -281,6 +281,7 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 		"missing-ingress":        mutate(func(in *Input) { in.IngressPort = 0 }),
 		"mount-over-etc":         mutate(func(in *Input) { in.Mounts = []Mount{{Target: "/etc/ssh", ReadOnly: true}} }),
 		"mount-parent-of-system": mutate(func(in *Input) { in.Mounts = []Mount{{Target: "/", ReadOnly: true}} }),
+		"mount-parent-of-work":   mutate(func(in *Input) { in.Mounts = []Mount{{Target: "/work", ReadOnly: false}} }),
 		"harness-root-slash":     mutate(func(in *Input) { in.HarnessReadOnly = []string{"/"} }),
 		"reserved-rule": mutate(func(in *Input) {
 			in.ExtraRules = map[string]v1.NetworkPolicyRule{"defenseclaw_x": anyRule("example.org", 443)}

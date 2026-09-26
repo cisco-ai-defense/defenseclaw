@@ -225,6 +225,10 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 		if within(m.Target, in.Workdir) {
 			continue
 		}
+		if within(in.Workdir, m.Target) {
+			// A mount above the project would widen the grant to its parent.
+			return nil, fmt.Errorf("openshell policy: mount target %q contains the workdir %q", m.Target, in.Workdir)
+		}
 		if m.ReadOnly {
 			readOnly = append(readOnly, m.Target)
 		} else {
