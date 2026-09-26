@@ -29,3 +29,10 @@ func ownedByCaller(info fs.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == os.Geteuid()
 }
+
+// ownedByCallerOrRoot reports whether info belongs to the caller or to
+// root, the only users trusted to write gateway registrations.
+func ownedByCallerOrRoot(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && (int(st.Uid) == os.Geteuid() || st.Uid == 0)
+}

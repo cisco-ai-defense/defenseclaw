@@ -55,6 +55,8 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 	if err := os.MkdirAll(f.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Bind mounts are enabled only for a usable mTLS registration.
+	writeRegistration(t, f.dir, "openshell", nil, nil)
 	f.runner.OnFunc("openshell-gateway config preflight", func(_ context.Context, c openshell.Command) ([]byte, error) {
 		data, err := os.ReadFile(c.Args[3])
 		if err != nil {
@@ -322,6 +324,57 @@ func TestGatewayConfigRollback(t *testing.T) {
 		}
 		if f.read(t, "gateway.toml") != operatorTOML || f.restarts() != 2 {
 			t.Fatal("rollback did not restore and restart")
+		}
+	})
+}
+
+func TestGatewayConfigRefusesBindMountsWithoutPrivateGateway(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, f *gatewayFixture)
+		want  error
+	}{
+		{name: "plaintext registration", want: openshell.ErrUnauthenticatedGateway, setup: func(t *testing.T, f *gatewayFixture) {
+			writeRegistration(t, f.dir, "openshell", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "plaintext"}, nil)
+		}},
+		{name: "no registration", want: openshell.ErrNoGateway, setup: func(t *testing.T, f *gatewayFixture) {
+			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "world-writable metadata", want: openshell.ErrInsecureRegistration, setup: func(t *testing.T, f *gatewayFixture) {
+			chmod(t, filepath.Join(f.dir, "gateways", "openshell", "metadata.json"), 0o666)
+		}},
+		{name: "readable key", want: openshell.ErrInsecureCredentials, setup: func(t *testing.T, f *gatewayFixture) {
+			chmod(t, filepath.Join(f.dir, "gateways", "openshell", "mtls", "tls.key"), 0o644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGatewayFixture(t)
+			tc.setup(t, f)
+			if _, err := f.cfg.Plan(openshell.GatewayChanges{EnableBindMounts: true}); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, tc.want) {
+				t.Fatalf("Plan = %v, want %v", err, tc.want)
+			}
+			// Changes that grant nothing still go through.
+			if _, err := f.cfg.Plan(openshell.GatewayChanges{Env: map[string]string{openshell.EnvTelemetryEnabled: "false"}}); err != nil {
+				t.Fatalf("telemetry Plan = %v", err)
+			}
+		})
+	}
+
+	t.Run("registration downgraded between plan and apply", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		plan, err := f.cfg.Plan(openshell.GatewayChanges{EnableBindMounts: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeRegistration(t, f.dir, "openshell", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "none"}, nil)
+		if _, err := f.cfg.Apply(context.Background(), plan); !errors.Is(err, openshell.ErrBindMountsRefused) {
+			t.Fatalf("Apply = %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(f.dir, "gateway.toml")); !errors.Is(err, os.ErrNotExist) || f.restarts() != 0 {
+			t.Fatalf("Apply wrote or restarted after refusing (stat %v, restarts %d)", err, f.restarts())
 		}
 	})
 }

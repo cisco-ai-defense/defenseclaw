@@ -275,9 +275,12 @@ func LabelSelector(labels map[string]string) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-// Dial connects to a discovered local gateway: mTLS registrations use the
-// CLI's TLS files with no per-call credentials (the SDK's gateway helper
-// refuses mtls), plaintext registrations dial loopback http.
+// Dial connects to a discovered local mTLS gateway with the CLI's TLS
+// files and no per-call credentials (the SDK's gateway helper refuses
+// mtls). The file checks run again, so a key loosened after discovery is
+// refused. Registrations without client certificates are refused with
+// ErrUnauthenticatedGateway: no client, and so no provider credential,
+// ever reaches such a gateway.
 func Dial(reg *Registration, opts ClientOptions) (Client, error) {
 	if reg == nil {
 		return nil, errors.New("openshell: nil registration")
@@ -288,14 +291,12 @@ func Dial(reg *Registration, opts ClientOptions) (Client, error) {
 	cfg := v1.Config{Address: reg.Endpoint, Auth: v1.NoAuth()}
 	switch reg.AuthMode {
 	case AuthModeMTLS:
-		if reg.TLS == nil {
-			return nil, fmt.Errorf("%w: mtls registration has no credential files", ErrInsecureCredentials)
+		if _, err := CheckTLSFiles(reg.TLS); err != nil {
+			return nil, err
 		}
 		cfg.TLS = &v1.TLSConfig{CAFile: reg.TLS.CA, CertFile: reg.TLS.Cert, KeyFile: reg.TLS.Key}
 	case AuthModePlaintext, AuthModeNone:
-		if !strings.HasPrefix(reg.Endpoint, "http://") {
-			return nil, fmt.Errorf("%w: %s over %s", ErrUnsupportedAuthMode, reg.AuthMode, reg.Endpoint)
-		}
+		return nil, unauthenticatedError(reg)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAuthMode, reg.AuthMode)
 	}

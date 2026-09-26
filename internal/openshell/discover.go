@@ -44,11 +44,22 @@ var (
 	// which DefenseClaw does not drive.
 	ErrRemoteGateway = errors.New("openshell: remote gateways are not supported")
 	// ErrUnsupportedAuthMode means the registration uses an auth mode other
-	// than local mTLS or loopback plaintext.
+	// than mTLS (OIDC, Cloudflare JWT, or one this release does not know).
 	ErrUnsupportedAuthMode = errors.New("openshell: unsupported gateway auth mode")
+	// ErrUnauthenticatedGateway means the registration reaches the gateway
+	// without a client certificate (auth mode plaintext or none). Anyone
+	// who can reach such a gateway's port can create sandboxes with host
+	// bind mounts through its root Docker daemon, so DefenseClaw drives
+	// only mTLS gateways.
+	ErrUnauthenticatedGateway = errors.New("openshell: gateway accepts unauthenticated calls")
 	// ErrInsecureCredentials means the mTLS material is readable or
 	// writable by other users, or is not a plain file owned by the caller.
 	ErrInsecureCredentials = errors.New("openshell: gateway mTLS credentials are not private")
+	// ErrInsecureRegistration means another user could change the
+	// registration itself (the config directory, gateways/<name>,
+	// metadata.json or active_gateway) and so choose the endpoint that
+	// DefenseClaw sends provider credentials to.
+	ErrInsecureRegistration = errors.New("openshell: gateway registration is not private")
 	// ErrUnsupportedPlatform means OpenShell sandboxes are not available on
 	// this operating system.
 	ErrUnsupportedPlatform = errors.New("openshell: sandboxes are supported on Linux and macOS only")
@@ -57,8 +68,8 @@ var (
 // AuthMode is the gateway auth mode recorded in metadata.json.
 type AuthMode string
 
-// Auth modes the upstream CLI writes. DefenseClaw drives mtls (the
-// package-managed local gateway) and loopback plaintext.
+// Auth modes the upstream CLI writes. DefenseClaw drives only mtls, the
+// package-managed local gateway's mode.
 const (
 	AuthModeMTLS          AuthMode = "mtls"
 	AuthModePlaintext     AuthMode = "plaintext"
@@ -94,8 +105,11 @@ type Registration struct {
 	Source   RegistrationSource `json:"source"`
 	// TLS is set for mtls registrations.
 	TLS *TLSFiles `json:"tls,omitempty"`
-	// Warnings are non-fatal findings (e.g. group-writable certificates)
-	// that doctor surfaces.
+	// ActiveGatewayFile is the active_gateway file that selected this
+	// registration (empty when the name was pinned or defaulted).
+	ActiveGatewayFile string `json:"active_gateway_file,omitempty"`
+	// Warnings are non-fatal findings (e.g. group-writable certificates or
+	// metadata) that doctor surfaces.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -170,8 +184,9 @@ func CheckPlatform(goos string) error {
 }
 
 // Discover resolves a gateway registration and validates it for use by
-// DefenseClaw: the gateway must be local, use mtls or loopback plaintext,
-// and keep its private key owner-only.
+// DefenseClaw: its files must be the caller's (CheckRegistrationFiles),
+// the gateway must be local and use mtls, and its private key must be
+// owner-only.
 //
 // When the registration exists but is unusable, Discover returns it
 // together with the error, so doctor can report what it found.
@@ -192,7 +207,7 @@ func Discover(opts DiscoverOptions) (*Registration, error) {
 		systemDir = defaultSystemDir
 	}
 
-	name, err := selectGateway(userDir, systemDir, opts.Gateway)
+	name, activeFile, err := selectGateway(userDir, systemDir, opts.Gateway)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +216,9 @@ func Discover(opts DiscoverOptions) (*Registration, error) {
 		return nil, err
 	}
 	reg, err := loadRegistration(dir, name, source)
+	if reg != nil {
+		reg.ActiveGatewayFile = activeFile
+	}
 	if err != nil {
 		return reg, err
 	}
@@ -223,34 +241,37 @@ func ValidGatewayName(name string) bool {
 	return true
 }
 
-func selectGateway(userDir, systemDir, pinned string) (string, error) {
+// selectGateway returns the registration name and, when active_gateway
+// chose it, that file's path.
+func selectGateway(userDir, systemDir, pinned string) (string, string, error) {
 	if pinned != "" {
 		if !ValidGatewayName(pinned) {
-			return "", fmt.Errorf("openshell: invalid gateway name %q", pinned)
+			return "", "", fmt.Errorf("openshell: invalid gateway name %q", pinned)
 		}
-		return pinned, nil
+		return pinned, "", nil
 	}
-	if data, err := safefile.ReadRegularFileBounded(filepath.Join(userDir, activeGatewayFile), 4096); err == nil {
+	active := filepath.Join(userDir, activeGatewayFile)
+	if data, err := safefile.ReadRegularFileBounded(active, 4096); err == nil {
 		if name := strings.TrimSpace(string(data)); name != "" {
 			if !ValidGatewayName(name) {
-				return "", fmt.Errorf("openshell: %s names an invalid gateway %q", filepath.Join(userDir, activeGatewayFile), name)
+				return "", "", fmt.Errorf("openshell: %s names an invalid gateway %q", active, name)
 			}
-			return name, nil
+			return name, active, nil
 		}
 	}
 	names := listRegistrations(userDir, systemDir)
 	for _, n := range names {
 		if n == DefaultGatewayName {
-			return n, nil
+			return n, "", nil
 		}
 	}
 	if len(names) == 1 {
-		return names[0], nil
+		return names[0], "", nil
 	}
 	if len(names) > 1 {
-		return "", fmt.Errorf("%w: several gateways are registered (%s) and none is active; pin one with openshell.gateway.name", ErrNoGateway, strings.Join(names, ", "))
+		return "", "", fmt.Errorf("%w: several gateways are registered (%s) and none is active; pin one with openshell.gateway.name", ErrNoGateway, strings.Join(names, ", "))
 	}
-	return "", fmt.Errorf("%w under %s (is OpenShell installed?)", ErrNoGateway, userDir)
+	return "", "", fmt.Errorf("%w under %s (is OpenShell installed?)", ErrNoGateway, userDir)
 }
 
 func listRegistrations(dirs ...string) []string {
@@ -329,6 +350,11 @@ func loadRegistration(dir, name string, source RegistrationSource) (*Registratio
 }
 
 func validateRegistration(reg *Registration) error {
+	warnings, err := CheckRegistrationFiles(reg)
+	reg.Warnings = append(reg.Warnings, warnings...)
+	if err != nil {
+		return err
+	}
 	if reg.Remote {
 		return fmt.Errorf("%w: %s points at %s; DefenseClaw drives only the local gateway", ErrRemoteGateway, reg.Name, reg.Endpoint)
 	}
@@ -342,14 +368,15 @@ func validateRegistration(reg *Registration) error {
 		reg.Warnings = append(reg.Warnings, warnings...)
 		return err
 	case AuthModePlaintext, AuthModeNone:
-		if u.Scheme != "http" {
-			return fmt.Errorf("%w: %s registration %s over %s", ErrUnsupportedAuthMode, reg.AuthMode, reg.Name, u.Scheme)
-		}
-		reg.Warnings = append(reg.Warnings, fmt.Sprintf("gateway %s accepts unauthenticated plaintext calls on %s; any local user can drive it", reg.Name, reg.Endpoint))
-		return nil
+		return unauthenticatedError(reg)
 	default:
 		return fmt.Errorf("%w: %s uses %q", ErrUnsupportedAuthMode, reg.Name, reg.AuthMode)
 	}
+}
+
+func unauthenticatedError(reg *Registration) error {
+	return fmt.Errorf("%w: registration %s reaches %s with auth mode %s, so any local user could create sandboxes with host bind mounts through it; DefenseClaw drives only mTLS gateways",
+		ErrUnauthenticatedGateway, reg.Name, reg.Endpoint, reg.AuthMode)
 }
 
 func isLoopbackHost(host string) bool {
@@ -360,8 +387,8 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// PermissionError reports mTLS material that other users could read or
-// replace.
+// PermissionError reports gateway credentials or registration files that
+// other users could read or replace.
 type PermissionError struct {
 	Path   string
 	Mode   fs.FileMode
@@ -370,14 +397,139 @@ type PermissionError struct {
 	Fix string
 	// FixMode is the mode Fix sets (zero when there is no mode fix).
 	FixMode fs.FileMode
+	// Kind is ErrInsecureCredentials (the default) or
+	// ErrInsecureRegistration.
+	Kind error
 }
 
 func (e *PermissionError) Error() string {
 	return fmt.Sprintf("openshell: %s: %s (mode %04o)", e.Path, e.Reason, e.Mode.Perm())
 }
 
-// Unwrap lets errors.Is(err, ErrInsecureCredentials) match.
-func (e *PermissionError) Unwrap() error { return ErrInsecureCredentials }
+// Unwrap lets errors.Is(err, ErrInsecureCredentials) or
+// errors.Is(err, ErrInsecureRegistration) match.
+func (e *PermissionError) Unwrap() error {
+	if e.Kind != nil {
+		return e.Kind
+	}
+	return ErrInsecureCredentials
+}
+
+// modeWarning is a group-writable registration entry.
+type modeWarning struct {
+	path string
+	mode fs.FileMode
+	// fixMode drops group and other write access; zero when the entry
+	// belongs to root and the caller cannot change it.
+	fixMode fs.FileMode
+}
+
+func (w modeWarning) String() string {
+	fix := "chmod go-w " + shellQuote(w.path)
+	if w.fixMode == 0 {
+		fix = "sudo " + fix
+	}
+	return fmt.Sprintf("%s is group-writable (mode %04o); run %s", w.path, w.mode.Perm(), fix)
+}
+
+// CheckRegistrationFiles validates the entries a registration is read
+// from: the OpenShell config directory, gateways/, gateways/<name>/,
+// metadata.json and, when it chose the gateway, active_gateway (and its
+// directory). Whoever can change them picks the endpoint and trust anchor
+// DefenseClaw uses, so each must belong to the caller (or root, for the
+// system directory), must not be writable by every user, and, below the
+// config directory, must not be a symlink. A group-writable entry (the
+// 0.1.1 CLI writes its files 0664 under umask 002) only warns, and only
+// when group members can reach it: inside the CLI's own 0700 directories
+// they cannot.
+func CheckRegistrationFiles(reg *Registration) ([]string, error) {
+	warnings, err := registrationIssues(reg)
+	out := make([]string, len(warnings))
+	for i, w := range warnings {
+		out[i] = w.String()
+	}
+	return out, err
+}
+
+func registrationIssues(reg *Registration) ([]modeWarning, error) {
+	if reg == nil || reg.Dir == "" {
+		return nil, fmt.Errorf("%w: registration has no directory", ErrInsecureRegistration)
+	}
+	type entry struct {
+		path string
+		dir  bool
+		// follow permits a symlinked config directory (dotfile managers).
+		follow bool
+	}
+	// Each chain runs from a config directory down to a file, so a
+	// directory without group search access shields what lies below it.
+	gateways := filepath.Dir(reg.Dir)
+	chains := [][]entry{{
+		{filepath.Dir(gateways), true, true},
+		{gateways, true, false},
+		{reg.Dir, true, false},
+		{filepath.Join(reg.Dir, metadataFile), false, false},
+	}}
+	if reg.ActiveGatewayFile != "" {
+		// A user's active_gateway can name a system registration.
+		chains = append(chains, []entry{{filepath.Dir(reg.ActiveGatewayFile), true, true}, {reg.ActiveGatewayFile, false, false}})
+	}
+	var warnings []modeWarning
+	checked := map[string]fs.FileMode{}
+	for _, chain := range chains {
+		groupReach := true
+		for _, e := range chain {
+			mode, seen := checked[e.path]
+			if !seen {
+				var err error
+				if mode, err = checkRegistrationEntry(e.path, e.dir, e.follow, groupReach, &warnings); err != nil {
+					return warnings, err
+				}
+				checked[e.path] = mode
+			}
+			if e.dir && mode.Perm()&0o010 == 0 {
+				groupReach = false
+			}
+		}
+	}
+	return warnings, nil
+}
+
+// checkRegistrationEntry refuses an entry another user could replace and
+// records a warning for a group-writable one that group members reach.
+func checkRegistrationEntry(path string, dir, follow, groupReach bool, warnings *[]modeWarning) (fs.FileMode, error) {
+	stat := os.Lstat
+	if follow {
+		stat = os.Stat
+	}
+	info, err := stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("openshell: gateway registration: %w", err)
+	}
+	mode := info.Mode()
+	refuse := func(reason, fix string, fixMode fs.FileMode) error {
+		return &PermissionError{Path: path, Mode: mode, Reason: reason, Fix: fix, FixMode: fixMode, Kind: ErrInsecureRegistration}
+	}
+	fixMode, fix := mode.Perm()&^0o022, "chmod go-w "+shellQuote(path)
+	if !ownedByCaller(info) {
+		fixMode, fix = 0, "sudo "+fix
+	}
+	switch {
+	case mode&fs.ModeSymlink != 0:
+		return mode, refuse("is a symbolic link", "", 0)
+	case dir && !mode.IsDir():
+		return mode, refuse("is not a directory", "", 0)
+	case !dir && !mode.IsRegular():
+		return mode, refuse("is not a regular file", "", 0)
+	case !ownedByCallerOrRoot(info):
+		return mode, refuse("is owned by another user", "", 0)
+	case mode.Perm()&0o002 != 0:
+		return mode, refuse("is writable by every user", fix, fixMode)
+	case mode.Perm()&0o020 != 0 && groupReach:
+		*warnings = append(*warnings, modeWarning{path: path, mode: mode, fixMode: fixMode})
+	}
+	return mode, nil
+}
 
 // CheckTLSFiles validates mTLS material. The private key must be a regular
 // file owned by the caller with no group or other access. The CA and

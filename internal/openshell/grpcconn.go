@@ -21,12 +21,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -71,10 +69,11 @@ func (r *Registration) TLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
-// DialGRPC opens a raw gRPC connection to the registration's gateway, for
-// the streaming RPCs the SDK does not expose in full (WatchSandbox with
-// logs, events and resume cursors). The connection keeps HTTP/2 pings
-// going so a silently dropped long-lived stream is noticed.
+// DialGRPC opens a raw gRPC connection to the registration's mTLS
+// gateway, for the streaming RPCs the SDK does not expose in full
+// (WatchSandbox with logs, events and resume cursors). Like Dial it
+// refuses registrations without client certificates. The connection keeps
+// HTTP/2 pings going so a silently dropped long-lived stream is noticed.
 func (r *Registration) DialGRPC(extra ...grpc.DialOption) (*grpc.ClientConn, error) {
 	if r == nil {
 		return nil, errors.New("openshell: nil registration")
@@ -91,10 +90,7 @@ func (r *Registration) DialGRPC(extra ...grpc.DialOption) (*grpc.ClientConn, err
 		}
 		creds = credentials.NewTLS(cfg)
 	case AuthModePlaintext, AuthModeNone:
-		if !strings.HasPrefix(r.Endpoint, "http://") {
-			return nil, fmt.Errorf("%w: %s over %s", ErrUnsupportedAuthMode, r.AuthMode, r.Endpoint)
-		}
-		creds = insecure.NewCredentials()
+		return nil, unauthenticatedError(r)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAuthMode, r.AuthMode)
 	}

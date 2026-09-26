@@ -536,6 +536,92 @@ func TestDoctorRegistrationAndMTLS(t *testing.T) {
 			t.Fatalf("still failing after the fix:\n%s", again)
 		}
 	})
+	t.Run("plaintext gateway fails and gets no bind mounts", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "plaintext"}, nil)
+		f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
+		dialed := false
+		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+			dialed = true
+			return f.fake.Client(openshell.ClientOptions{}), nil
+		}
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "accepts unauthenticated calls")
+		if c.Fix == nil || c.Fix.Automatic || !strings.Contains(c.Fix.Summary, "mTLS") {
+			t.Fatalf("registration fix = %+v", c.Fix)
+		}
+		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
+		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
+		mounts := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
+		if mounts.Fix == nil || mounts.Fix.Automatic || mounts.Fix.Apply != nil {
+			t.Fatalf("bind mounts offered an automatic fix on a plaintext gateway: %+v", mounts.Fix)
+		}
+		if dialed {
+			t.Fatal("doctor dialed a plaintext gateway")
+		}
+		// The bind-mount edit itself refuses too.
+		if _, err := f.doctor.Gateway.Plan(openshell.GatewayChanges{EnableBindMounts: true}); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrUnauthenticatedGateway) {
+			t.Fatalf("Plan = %v", err)
+		}
+	})
+	t.Run("bind mounts already on a plaintext gateway fail", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "none"}, nil)
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "any local user can mount host paths")
+	})
+	t.Run("stock registration files inside private directories pass", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		writeFile(t, filepath.Join(f.dir, "active_gateway"), "openshell\n", 0o664)
+		expectCheck(t, f.run(), openshell.CheckIDRegistration, openshell.StatusPass, "openshell at")
+	})
+	t.Run("group-writable registration warns and is fixed", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		meta := filepath.Join(f.regDir, "metadata.json")
+		chmod(t, meta, 0o664)
+		for _, d := range []string{f.dir, filepath.Join(f.dir, "gateways"), f.regDir} {
+			chmod(t, d, 0o750)
+		}
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusWarn, "metadata.json is group-writable")
+		if !c.Fix.Automatic || !strings.HasPrefix(c.Fix.Command, "chmod go-w ") {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusPass, "owner-only")
+		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDRegistration, nil }); err != nil {
+			t.Fatal(err)
+		}
+		if info, _ := os.Stat(meta); info.Mode().Perm() != 0o644 {
+			t.Fatalf("metadata mode %v after fix", info.Mode())
+		}
+		// The first run closed the fake gateway client; only the
+		// registration matters here.
+		if again := f.run(); again.Get(openshell.CheckIDRegistration).Status != openshell.StatusPass {
+			t.Fatalf("still warning after the fix:\n%s", again)
+		}
+	})
+	t.Run("world-writable registration fails and is fixed", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		chmod(t, f.regDir, 0o777)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "is writable by every user")
+		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
+		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
+		if c.Fix == nil || !c.Fix.Automatic {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+		if mounts := r.Get(openshell.CheckIDBindMounts); mounts.Status != openshell.StatusPass {
+			t.Fatalf("bind mounts = %+v", mounts)
+		}
+		if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil }); err != nil {
+			t.Fatal(err)
+		}
+		if info, _ := os.Stat(f.regDir); info.Mode().Perm() != 0o755 {
+			t.Fatalf("registration mode %v after fix", info.Mode())
+		}
+		if again := f.run(); !again.OK() {
+			t.Fatalf("still failing after the fix:\n%s", again)
+		}
+	})
 	t.Run("group-writable certificates warn and are fixed", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		ca := filepath.Join(f.regDir, "mtls", "ca.crt")

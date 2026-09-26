@@ -410,8 +410,8 @@ func WaitForGateway(ctx context.Context, opts DiscoverOptions, wait time.Duratio
 		if last == nil {
 			return nil
 		}
-		if errors.Is(last, ErrRemoteGateway) || errors.Is(last, ErrInsecureCredentials) ||
-			errors.Is(last, ErrUnsupportedAuthMode) || errors.Is(last, ErrUnsupportedPlatform) {
+		if errors.Is(last, ErrRemoteGateway) || errors.Is(last, ErrInsecureCredentials) || errors.Is(last, ErrInsecureRegistration) ||
+			errors.Is(last, ErrUnsupportedAuthMode) || errors.Is(last, ErrUnauthenticatedGateway) || errors.Is(last, ErrUnsupportedPlatform) {
 			return last
 		}
 		var unsupported *ErrUnsupportedVersion

@@ -357,7 +357,14 @@ func TestLivePreflight(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "gateway.toml"), []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	g := &openshell.GatewayConfigurator{Dir: dir, Runner: noRestart{}, VerifyGateway: func(context.Context) error { return nil }}
+	// Bind mounts need the real (mTLS) registration; the edited files are
+	// scratch copies.
+	real, err := openshell.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &openshell.GatewayConfigurator{Dir: dir, Runner: noRestart{}, VerifyGateway: func(context.Context) error { return nil },
+		Discover: openshell.DiscoverOptions{ConfigDir: real, Gateway: os.Getenv("DC_OPENSHELL_GATEWAY")}}
 	plan, err := g.Plan(openshell.GatewayChanges{EnableBindMounts: true, Env: map[string]string{openshell.EnvTelemetryEnabled: "false"}})
 	if err != nil {
 		t.Fatal(err)

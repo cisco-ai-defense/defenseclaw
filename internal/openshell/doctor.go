@@ -724,9 +724,29 @@ func (r *doctorRun) checkRegistration() {
 	reg, err := Discover(r.Discover)
 	r.reg, r.regErr, r.report.Registration = reg, err, reg
 	var perm *PermissionError
+	errors.As(err, &perm)
 	switch {
-	case err == nil || errors.As(err, &perm) || (errors.Is(err, ErrInsecureCredentials) && reg != nil):
+	case err == nil || (errors.Is(err, ErrInsecureCredentials) && reg != nil):
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s (%s)", reg.Name, reg.Endpoint, reg.AuthMode)
+		if warnings, _ := registrationIssues(reg); len(warnings) > 0 {
+			c.Status = StatusWarn
+			c.Detail += "; " + joinWarnings(warnings)
+			c.Fix = registrationModeFix(warnings)
+		}
+	case errors.Is(err, ErrInsecureRegistration):
+		c.Status, c.Detail = StatusFail, err.Error()
+		if perm != nil {
+			c.Fix = &Fix{Summary: "make the gateway registration yours and writable only by you, or register the gateway again",
+				Command: perm.Fix, Sudo: strings.HasPrefix(perm.Fix, "sudo ")}
+			if perm.FixMode != 0 {
+				path, mode := perm.Path, perm.FixMode
+				c.Fix.Automatic, c.Fix.Apply = true, func(context.Context) error { return chmodOwned(path, mode) }
+			}
+		}
+	case errors.Is(err, ErrUnauthenticatedGateway):
+		c.Status, c.Detail = StatusFail, err.Error()
+		c.Fix = &Fix{Summary: "serve the local gateway over mTLS (the OpenShell package default; remove OPENSHELL_DISABLE_TLS from gateway.env) and register it with its client certificate",
+			Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "register the local gateway", Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
@@ -736,13 +756,12 @@ func (r *doctorRun) checkRegistration() {
 	default:
 		c.Status, c.Detail = StatusFail, err.Error()
 	}
-	if c.Status != StatusPass {
+	if c.Status == StatusFail {
 		m.Status, m.Detail = StatusSkip, "no usable registration"
 		return
 	}
+	tlsWarnings, _ := CheckTLSFiles(reg.TLS)
 	switch {
-	case reg.AuthMode != AuthModeMTLS:
-		m.Status, m.Detail = StatusWarn, strings.Join(reg.Warnings, "; ")
 	case perm != nil:
 		m.Status, m.Detail = StatusFail, perm.Error()
 		m.Fix = &Fix{Summary: "make the gateway credentials private to you", Command: perm.Fix}
@@ -752,8 +771,8 @@ func (r *doctorRun) checkRegistration() {
 		}
 	case err != nil:
 		m.Status, m.Detail = StatusFail, err.Error()
-	case len(reg.Warnings) > 0:
-		m.Status, m.Detail = StatusWarn, strings.Join(reg.Warnings, "; ")
+	case len(tlsWarnings) > 0:
+		m.Status, m.Detail = StatusWarn, strings.Join(tlsWarnings, "; ")
 		files := *reg.TLS
 		m.Fix = &Fix{Summary: "drop group write access from the gateway credentials", Automatic: true,
 			Command: "chmod 700 " + shellQuote(filepath.Dir(files.Key)) + " && chmod 644 " + shellQuote(files.CA) + " " + shellQuote(files.Cert),
@@ -763,6 +782,39 @@ func (r *doctorRun) checkRegistration() {
 	default:
 		m.Status, m.Detail = StatusPass, "private key is owner-only"
 	}
+}
+
+func joinWarnings(warnings []modeWarning) string {
+	parts := make([]string, len(warnings))
+	for i, w := range warnings {
+		parts[i] = w.String()
+	}
+	return strings.Join(parts, "; ")
+}
+
+// registrationModeFix drops group write access from the registration
+// entries that warned; it is automatic when the caller owns all of them.
+func registrationModeFix(warnings []modeWarning) *Fix {
+	paths := make([]string, len(warnings))
+	automatic := true
+	for i, w := range warnings {
+		paths[i] = shellQuote(w.path)
+		automatic = automatic && w.fixMode != 0
+	}
+	fix := &Fix{Summary: "drop group write access from the gateway registration", Command: "chmod go-w " + strings.Join(paths, " ")}
+	if !automatic {
+		fix.Command, fix.Sudo = "sudo "+fix.Command, true
+		return fix
+	}
+	fix.Automatic = true
+	fix.Apply = func(context.Context) error {
+		var errs []error
+		for _, w := range warnings {
+			errs = append(errs, chmodOwned(w.path, w.fixMode))
+		}
+		return errors.Join(errs...)
+	}
+	return fix
 }
 
 // chmodOwned changes the mode of a caller-owned file or directory, never
@@ -875,15 +927,26 @@ func (r *doctorRun) checkGatewayConfig() {
 	restartPending := r.service != nil && !r.service.StartedAt.IsZero() &&
 		(st.TOMLModTime.After(r.service.StartedAt) || st.EnvModTime.After(r.service.StartedAt))
 	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+	// Bind mounts reach any host path through the gateway's root Docker
+	// daemon: they are only for a gateway nobody else can drive.
+	private := r.reg != nil && r.regErr == nil
 	switch {
+	case st.BindMounts.Enabled() && errors.Is(r.regErr, ErrUnauthenticatedGateway):
+		mounts.Status = StatusFail
+		mounts.Detail = fmt.Sprintf("enabled in %s on a gateway that accepts unauthenticated calls: any local user can mount host paths into a sandbox", st.TOMLPath)
+		mounts.Fix = &Fix{Summary: "serve the gateway over mTLS, or set enable_bind_mounts = false in " + st.TOMLPath + " and restart it"}
 	case !st.BindMounts.Enabled():
 		mounts.Status = StatusFail
 		if r.BindMountsOptional {
 			mounts.Status = StatusWarn
 		}
 		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
-		mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
-			Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
+		if private {
+			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
+				Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
+		} else {
+			mounts.Fix = &Fix{Summary: "fix the gateway registration first: DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS"}
+		}
 	case restartPending:
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
 	default:

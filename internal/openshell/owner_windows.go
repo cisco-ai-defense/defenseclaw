@@ -23,3 +23,5 @@ import "io/fs"
 // ownedByCaller always refuses on Windows, where OpenShell sandboxes are
 // unsupported and POSIX ownership does not describe the file's ACL.
 func ownedByCaller(fs.FileInfo) bool { return false }
+
+func ownedByCallerOrRoot(fs.FileInfo) bool { return false }

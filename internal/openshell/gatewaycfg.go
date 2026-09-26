@@ -98,7 +98,9 @@ type GatewayConfigurator struct {
 	Runner Runner
 	// Gateway is the openshell-gateway binary (default GatewayBinary).
 	Gateway string
-	// Discover selects the registration VerifyGateway checks.
+	// Discover selects the registration that must be usable before bind
+	// mounts are enabled and that VerifyGateway checks. Its ConfigDir
+	// defaults to Dir.
 	Discover DiscoverOptions
 	// VerifyGateway waits for the restarted gateway (default
 	// WaitForGateway with RestartWait).
@@ -114,6 +116,9 @@ func (g *GatewayConfigurator) defaults() error {
 			return err
 		}
 		g.Dir = dir
+	}
+	if g.Discover.ConfigDir == "" {
+		g.Discover.ConfigDir = g.Dir
 	}
 	if g.GOOS == "" {
 		g.GOOS = runtime.GOOS
@@ -251,7 +256,10 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 
 // GatewayChanges are the configuration changes setup asks for.
 type GatewayChanges struct {
-	// EnableBindMounts turns on docker-driver bind mounts.
+	// EnableBindMounts turns on docker-driver bind mounts. They let a
+	// sandbox mount any host path through the gateway's root Docker
+	// daemon, so Plan and Apply refuse them unless the registration passes
+	// Discover: only the caller, over mTLS, can reach the gateway.
 	EnableBindMounts bool
 	// Env sets gateway.env entries (e.g. EnvTelemetryEnabled=false). The
 	// plan summary prints the values, so they must not be secrets.
@@ -318,6 +326,9 @@ func (g *GatewayConfigurator) Plan(ch GatewayChanges) (*GatewayPlan, error) {
 	}
 	plan := &GatewayPlan{Restart: strings.Join(g.restartCommand().argv(), " ")}
 	if ch.EnableBindMounts {
+		if err := g.requirePrivateGateway(); err != nil {
+			return nil, err
+		}
 		path, err := g.TOMLPath()
 		if err != nil {
 			return nil, err
@@ -396,6 +407,12 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 		return res, nil
 	}
 	for _, f := range plan.Files {
+		if f.TOML {
+			// gateway.toml changes only enable bind mounts.
+			if err := g.requirePrivateGateway(); err != nil {
+				return nil, err
+			}
+		}
 		current, info, err := readGatewayFile(f.Path)
 		if err != nil {
 			return nil, err
@@ -431,6 +448,18 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	}
 	res.Restarted = true
 	return res, nil
+}
+
+// ErrBindMountsRefused means bind mounts were not enabled because the
+// gateway's registration is unusable (for instance a plaintext gateway or
+// files other users can change).
+var ErrBindMountsRefused = errors.New("openshell: refusing to enable bind mounts")
+
+func (g *GatewayConfigurator) requirePrivateGateway() error {
+	if _, err := Discover(g.Discover); err != nil {
+		return fmt.Errorf("%w: the gateway must be reachable only by you over mTLS: %w", ErrBindMountsRefused, err)
+	}
+	return nil
 }
 
 // rollbackAfter restores what Apply wrote after cause, restarting the
