@@ -395,7 +395,7 @@ func TestAddManagedInspectionHealthDescribesTheUnavailablePosture(t *testing.T) 
 		s.cfg.CiscoAIDefense.UnavailableAction = tc.action
 		s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
 		detail := map[string]interface{}{"hint": "configured"}
-		s.addManagedInspectionHealth(detail)
+		s.addManagedInspectionHealth(context.Background(), detail)
 		if detail["inspection_available"] != false {
 			t.Fatalf("inspection_available = %v, want false", detail["inspection_available"])
 		}

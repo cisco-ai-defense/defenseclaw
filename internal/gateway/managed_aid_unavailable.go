@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -163,12 +164,16 @@ func (s *Sidecar) requireManagedInspectionSupport() error {
 // addManagedInspectionHealth adds the managed inspection state to a
 // guardrail health detail map: whether AI Defense can currently be reached,
 // the configured unavailable action, and, while it cannot, the cause and a
-// hint that says what happens to tool calls.
-func (s *Sidecar) addManagedInspectionHealth(detail map[string]interface{}) {
+// hint that says what happens to tool calls. It runs on the guardrail
+// health ticker, so it also re-probes an unavailable provider and refreshes
+// the Secure Client availability.
+func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[string]interface{}) {
 	if s == nil || detail == nil {
 		return
 	}
-	available, cause := s.inspectionAvailability()
+	s.probeManagedInspection(ctx)
+	s.publishManagedInspectionHealth()
+	available, cause := s.managedInspectionState()
 	action := config.AIDUnavailableActionAllow
 	if cfg := s.currentConfig(); cfg != nil {
 		action = cfg.CiscoAIDefense.EffectiveUnavailableAction()

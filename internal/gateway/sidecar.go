@@ -201,6 +201,13 @@ type Sidecar struct {
 	// observer bound to a replaced inspector stops publishing (see
 	// inspectionAvailabilityObserver).
 	inspectionEpoch uint64
+	// inspectionLastProbe rate-limits probeManagedInspection; guarded by
+	// inspectionMu.
+	inspectionLastProbe time.Time
+	// managedHookInspector records whether the API server's hook lane has
+	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
+	// until the API server has picked one.
+	managedHookInspector atomic.Int32
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -1936,6 +1943,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if inspector := s.pickInspector(ctx); inspector != nil {
 			if api := s.apiSnapshot(); api != nil {
 				api.SetCiscoInspector(inspector)
+				s.setManagedHookInspectorWired(true)
 			}
 		} else if api := s.apiSnapshot(); api != nil {
 			// Reload rejected the inspector (managed provider now
@@ -1943,6 +1951,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			// binding so the hook lane fails open cleanly instead of
 			// keeping stale state that points at the old endpoint.
 			api.SetCiscoInspector(nil)
+			s.setManagedHookInspectorWired(false)
 		}
 		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
@@ -1951,6 +1960,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			}
 		}
 	}
+	// Keep the Secure Client availability in step with the reloaded
+	// posture (unavailable_action, or leaving managed_enterprise).
+	s.refreshManagedInspectionHealth(nextManagedEnterprise)
 
 	// managed_enterprise: refresh the connector / MCP endpoint inventory
 	// on every reload — MCP servers and connectors can change via config
@@ -2594,21 +2606,22 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 
 // setInspectionAvailability records whether managed inspection can reach
 // a credential provider. A failure here is what makes pickInspector
-// return nil, so /health reports it alongside enforcement mode.
+// return nil, so /health reports it alongside enforcement mode, and the
+// state is mirrored into SidecarHealth for the Secure Client availability.
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
-	defer s.inspectionMu.Unlock()
 	s.inspectionEpoch++
 	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionMu.Unlock()
+	s.publishManagedInspectionHealth()
 }
 
 func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
 	s.inspectionAvailable = err == nil
+	s.inspectionDetail = ""
 	if err != nil {
 		s.inspectionDetail = err.Error()
-		return
 	}
-	s.inspectionDetail = ""
 }
 
 // inspectionAvailabilityObserver returns a callback for an inspector's
@@ -2621,11 +2634,13 @@ func (s *Sidecar) inspectionAvailabilityObserver() func(error) {
 	s.inspectionMu.RUnlock()
 	return func(err error) {
 		s.inspectionMu.Lock()
-		defer s.inspectionMu.Unlock()
 		if s.inspectionEpoch != epoch {
+			s.inspectionMu.Unlock()
 			return
 		}
 		s.recordInspectionAvailabilityLocked(err)
+		s.inspectionMu.Unlock()
+		s.publishManagedInspectionHealth()
 	}
 }
 
@@ -3859,7 +3874,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				if s.currentConfig().StandaloneEnterprise() {
 					s.addStandaloneAIDefenseHealth(detail)
 				} else {
-					s.addManagedInspectionHealth(detail)
+					s.addManagedInspectionHealth(ctx, detail)
 				}
 				s.health.SetGuardrail(state, status, detail)
 			}
@@ -4426,7 +4441,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		if s.currentConfig().StandaloneEnterprise() {
 			s.addStandaloneAIDefenseHealth(detail)
 		} else {
-			s.addManagedInspectionHealth(detail)
+			s.addManagedInspectionHealth(ctx, detail)
 		}
 		s.health.SetGuardrail(state, status, detail)
 	}
@@ -6636,9 +6651,11 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Callers must nil-check the concrete pointer BEFORE assigning to
 	// Inspector (interface): a typed-nil wrapper is a non-nil
 	// interface and defeats every downstream `!= nil` guard.
-	if inspector := s.pickInspector(ctx); inspector != nil {
+	inspector := s.pickInspector(ctx)
+	if inspector != nil {
 		api.SetCiscoInspector(inspector)
 	}
+	s.setManagedHookInspectorWired(inspector != nil)
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication
 	// on the hook lane (inspectMessageContent). Same instance as the
