@@ -1035,17 +1035,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}()
 	}
 
-	// The updater cannot instantiate the target release's logger. It leaves a
-	// private, terminal receipt after health verification; this worker waits for
-	// API/config/telemetry readiness and admits that receipt through the one
-	// canonical mandatory compliance pipeline. Pending receipts are never
-	// interpreted as success.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.runUpgradeReceiptConsumer(runCtx)
-	}()
-
 	// Process and mandatory-SQLite capacity metrics are generated lazily under
 	// the active v8 graph. If every corresponding family is disabled, neither
 	// runtime.ReadMemStats nor SQLite PRAGMA work occurs.

@@ -2321,43 +2321,6 @@ func (s *Store) LogEvent(e Event) error {
 	return nil
 }
 
-// UpgradeReceiptEventRecorded reports whether receiptID already owns the
-// canonical upgrade compliance row. A row with the same ID but a different
-// identity is an integrity conflict, not an idempotent replay.
-func (s *Store) UpgradeReceiptEventRecorded(receiptID string) (bool, error) {
-	if s == nil {
-		return false, fmt.Errorf("audit: store is unavailable")
-	}
-	if parsed, err := uuid.Parse(receiptID); err != nil || parsed.String() != receiptID {
-		return false, fmt.Errorf("audit: invalid upgrade receipt ID")
-	}
-	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT action, bucket, signal, event_name
-		FROM audit_events WHERE id = ?`, receiptID)
-	if err != nil {
-		return false, fmt.Errorf("audit: query upgrade receipt: %w", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return false, rows.Err()
-	}
-	var action, bucket, signal, eventName string
-	if err := rows.Scan(&action, &bucket, &signal, &eventName); err != nil {
-		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
-	}
-	if rows.Next() {
-		return false, fmt.Errorf("audit: duplicate upgrade receipt identity")
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("audit: read upgrade receipt: %w", err)
-	}
-	if action != string(ActionUpgrade) || bucket != "compliance.activity" ||
-		signal != "logs" || eventName != "legacy.audit.upgrade" {
-		return false, fmt.Errorf("audit: upgrade receipt identity conflict")
-	}
-	return true, nil
-}
-
 // ActivityEventRow is the SQLite shape for migration #8 activity_events.
 type ActivityEventRow struct {
 	ID                string    `json:"id"`
