@@ -355,11 +355,10 @@ func WindowsCursorEnterpriseHooksEmpty(data []byte) bool {
 	return ok && len(hooks) == 0
 }
 
-func windowsCursorEnterpriseHookCommand(adapterPath string) (string, error) {
-	command, _, err := windowsCursorEnterpriseHookCommands(adapterPath)
-	return command, err
-}
-
+// windowsCursorEnterpriseHookCommands returns the shell-neutral command this
+// build writes plus the legacy PowerShell-only command that earlier builds
+// wrote. Merge, verify, and remove all need both so a protected installation
+// can be migrated without disturbing unrelated Cursor hooks.
 func windowsCursorEnterpriseHookCommands(adapterPath string) (string, string, error) {
 	if err := validateAbsoluteLocalWindowsPath("Cursor enterprise adapter", adapterPath); err != nil {
 		return "", "", err
@@ -595,6 +594,9 @@ func windowsCursorEnterpriseHookEntry(command string) map[string]interface{} {
 	}
 }
 
+// removeCursorHookCommands drops the hook entries whose command exactly matches
+// one of the DefenseClaw-owned commands. Matching is exact so an operator's own
+// entry that merely mentions the adapter path is preserved.
 func removeCursorHookCommands(entries []interface{}, commands ...string) []interface{} {
 	owned := make(map[string]struct{}, len(commands))
 	for _, command := range commands {

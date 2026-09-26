@@ -355,14 +355,25 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 // AdminDirectory contract after first proving the ancestry and object shape.
 // The no-op manifest path therefore remains a true no-write operation.
 func ensureWindowsTargetsManifestParentProtected(path string) error {
-	if err := validateWindowsTargetsManifestObject(path, true); err == nil {
+	driftErr := validateWindowsTargetsManifestObject(path, true)
+	if driftErr == nil {
 		return nil
 	}
 
 	if err := windowsTargetsManifestProtect(path, true); err != nil {
 		return fmt.Errorf(
 			"repair protected hook guardian manifest parent: %w",
-			err,
+			errors.Join(driftErr, err),
+		)
+	}
+
+	// Repair is never taken on trust: the caller previously reached staging only
+	// behind a passing validation, so reconfirm the contract and surface the
+	// original drift when the object still does not satisfy it.
+	if err := validateWindowsTargetsManifestObject(path, true); err != nil {
+		return fmt.Errorf(
+			"repaired hook guardian manifest parent is still unprotected: %w",
+			errors.Join(err, driftErr),
 		)
 	}
 

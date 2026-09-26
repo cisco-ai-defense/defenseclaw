@@ -81,22 +81,23 @@ func repairEnterpriseHookManagedRuntimePlatform(path, serviceAccount string) err
 		return fmt.Errorf("managed data_dir owner is not trusted: %s", ownerSID)
 	}
 
-	if err := enterpriseWindowsProtectionWriter(
-		path,
-		owner,
-		serviceSID,
-		windows.GENERIC_READ|
-			windows.GENERIC_WRITE|
-			windows.GENERIC_EXECUTE|
-			windows.DELETE,
-		true,
-	); err != nil {
-		return err
+	// Go through the shared runtime-protection helper so the owner/restore
+	// privilege is held for the write. A directory owned by TrustedInstaller or
+	// by the gateway service SID cannot have its owner and primary group reset
+	// without it, and ACL drift that stripped WRITE_OWNER would otherwise fail
+	// the open itself.
+	if err := setEnterpriseWindowsRuntimeProtection(path, owner, serviceSID, true); err != nil {
+		return fmt.Errorf("repair managed data_dir ACL: %w", err)
 	}
 
 	return nil
 }
 
+// enterpriseWindowsRuntimeRepairOwnerTrusted reports whether a drifted managed
+// runtime directory may be repaired in place. Only installer-owned objects
+// (LocalSystem, Administrators, TrustedInstaller) and the gateway's own service
+// SID qualify; a user-owned directory is never adopted, because repairing it
+// would hand a protected ACL to whoever won the race to create it.
 func enterpriseWindowsRuntimeRepairOwnerTrusted(
 	owner, serviceSID *windows.SID,
 ) bool {

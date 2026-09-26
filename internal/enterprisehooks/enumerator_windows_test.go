@@ -691,3 +691,75 @@ func TestEnumerateWindowsHonoursCancelledContext(t *testing.T) {
 		t.Fatalf("cancelled ctx: err = %v, want context.Canceled", err)
 	}
 }
+
+// TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift pins the
+// repair-on-drift contract: a healthy parent is never rewritten, a drifted
+// parent is restored to the AdminDirectory contract, and the caller only
+// proceeds once the repaired object actually validates.
+func TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift(t *testing.T) {
+	t.Run("healthy parent is not rewritten", func(t *testing.T) {
+		dir := prepareWindowsTargetsManifestTestDirectory(t)
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			t.Fatal("healthy parent triggered an ACL write")
+			return nil
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("healthy parent: %v", err)
+		}
+	})
+
+	t.Run("drifted parent is restored", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("repair drifted parent: %v", err)
+		}
+		if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+			t.Fatalf("repaired parent still invalid: %v", err)
+		}
+	})
+
+	t.Run("repair failure reports the drift cause", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			return errors.New("injected parent ACL failure")
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("repair failure: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "injected parent ACL failure") {
+			t.Fatalf("repair failure lost the write error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "noncanonical") &&
+			!strings.Contains(err.Error(), "not protected") {
+			t.Fatalf("repair failure lost the drift cause: %v", err)
+		}
+	})
+
+	t.Run("silent no-op repair still fails validation", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error { return nil }
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("no-op repair: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "still unprotected") {
+			t.Fatalf("no-op repair: err = %v, want a still-unprotected verdict", err)
+		}
+	})
+}
