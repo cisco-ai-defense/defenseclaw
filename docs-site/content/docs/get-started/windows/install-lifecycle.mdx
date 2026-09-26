@@ -1,159 +1,67 @@
 ---
 title: Install and maintain
-description: Install, configure, repair, upgrade, recover, and uninstall the native per-user Windows x64 package.
+description: Install, configure, upgrade, roll back, and uninstall DefenseClaw for the signed-in Windows x64 user with install.ps1.
 keywords:
-  - DefenseClaw Windows installer
-  - DefenseClawSetup-x64.exe
+  - DefenseClaw Windows install
+  - DefenseClaw install.ps1
   - DefenseClaw Windows upgrade
-  - DefenseClaw Windows repair
+  - DefenseClaw Windows rollback
   - DefenseClaw Windows uninstall
 ---
 
-The supported package is `DefenseClawSetup-x64.exe`, a self-contained native
-installer for the signed-in Windows user. It installs the product, embedded
-runtime, and maintenance copy as one transaction.
+DefenseClaw installs per user with `install.ps1`, the same flow as the macOS
+and Linux installer. The installer also upgrades, repairs, and rolls back.
 
 ## System requirements
 
 | Requirement | Native Windows contract |
 | --- | --- |
-| Operating system | Native Windows using the Windows 10-family application compatibility contract. The repository does not publish an exact edition, client/server build, or patch-level minimum; do not infer blanket edition parity. |
-| Architecture | amd64/x64 only. x86 is unsupported. ARM64, including x64 emulation, is not certified and Setup refuses it. |
-| User context | A signed-in, **non-elevated interactive user**. Setup rejects Run as administrator, service identities, session zero, and background/batch launch for every state-changing action, including `/quiet`. |
-| Install scope | Current user only. There is no machine-scope Setup or MSI. |
-| Terminal | The installed commands run from PowerShell or cmd. Windows Terminal and PowerShell 7 are optional hosts, not prerequisites. |
-| Agent | A [supported connector](/docs/connectors#platform-support) installed natively for the same Windows user. The connector page is canonical for its admitted version, executable path, provider login, reload requirements, upstream dependencies, and degraded or unsupported surfaces. Do not substitute WSL or mix native and WSL connector homes. |
-| Included runtime | Setup includes the CLI/TUI runtime, gateway, hook launcher, scanners, and pinned packages. No separate Python, `uv`, Go, Node.js, or global scanner install is required. |
-| Networking | Release download needs network unless staged offline. At runtime, the certified DefenseClaw path is authenticated loopback, normally `127.0.0.1:18970`; each agent still reaches its own upstream normally. |
-| Disk and memory | No exact minimum is published. Setup checks and stages the packaged transaction; an allocation or publication failure is reported and recovered rather than converted into an invented requirement. |
+| Operating system | Native Windows 10-family or newer, including Windows Server 2019+. |
+| Architecture | amd64/x64 only. ARM64 and x86 are unsupported. |
+| Shell | Windows PowerShell 5.1 (built in) or PowerShell 7. |
+| Install scope | Current user only. Running elevated works but is not needed. |
+| Agent | A [supported connector](/docs/connectors#platform-support) installed natively for the same Windows user. Do not substitute WSL or mix native and WSL connector homes. |
+| Python | Provided by `uv`, which the installer installs if you do not have it. |
+| Networking | The installer downloads the release from GitHub. At runtime DefenseClaw listens on authenticated loopback, normally `127.0.0.1:18970`. |
 
 The optional Docker-backed local observability and Local Splunk bundles have a
 narrower requirement: Windows x64 Pro, Enterprise, or Education; Hyper-V;
 machine-installed Docker Desktop; Linux containers; a reachable daemon;
-Compose v2; and a real native `docker.exe`. Windows Home, per-user Docker
-Desktop, WSL2 engines, Windows containers, and command-wrapper shims are not in
-that optional feature's certified path. Core DefenseClaw does not require
+Compose v2; and a real native `docker.exe`. Core DefenseClaw does not require
 Docker.
 
-## Fresh install
-
-<Steps>
-
-<Step>
-
-### Obtain the release Setup
-
-Download `DefenseClawSetup-x64.exe` and its published verification material
-from [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases).
-The release EXE already contains the installation payload; there is no product
-ZIP to unpack.
-
-Local and pull-request artifacts are test builds without authenticated
-production release provenance. Do not use an Actions artifact as production
-release evidence. The published `0.8.10` Setup is also not
-Authenticode-signed, but its exact bytes are authenticated by the release's
-Sigstore-signed checksum set and provenance.
-
-</Step>
-
-<Step>
-
-### Verify before installing
-
-Authenticate the published checksum set and release-workflow Sigstore
-provenance, then compare the file's SHA-256 with its authenticated checksum.
-PowerShell can display the digest and observed Authenticode state without
-reading any DefenseClaw state:
+## Install
 
 ```powershell
-Get-AuthenticodeSignature -LiteralPath ".\DefenseClawSetup-x64.exe" |
-  Select-Object Status, StatusMessage, SignerCertificate
-Get-FileHash -Algorithm SHA256 -LiteralPath ".\DefenseClawSetup-x64.exe"
-& ".\DefenseClawSetup-x64.exe" /verify
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-For `0.8.10`, the authenticated provenance records `unsigned: true` and
-Windows reports `NotSigned`; there is no expected publisher certificate.
-`/verify` is read-only. A wrong digest, failed Sigstore/provenance validation,
-recorded-versus-observed signing-state mismatch, or failed Setup verification
-is a stop condition; do not bypass it.
-
-</Step>
-
-<Step>
-
-### Run Setup as the signed-in user
-
-Double-click the EXE without **Run as administrator**. Choose a supported
-native Windows connector from the [connector platform table](/docs/connectors#platform-support),
-or choose **Configure later** for a CLI-only installation with no agent
-changes. The connector page is canonical for provider login, admitted client
-version and path, hook or plugin topology, reload steps, HITL, and degraded
-surfaces.
-
-Start in **Observe** mode. Choose **Action** only after reviewing observed
-events and the connector's documented [platform and enforcement boundary](/docs/connectors#platform-support).
-When a connector is selected, Setup must start the gateway and install its
-current-user logon registration; this is required for the hook to function.
-
-</Step>
-
-<Step>
-
-### Open a new terminal and verify
-
-Setup adds the product `bin` directory to the current user's `PATH`. Open a new
-PowerShell or cmd window, then follow the
-[post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist).
-
-</Step>
-
-</Steps>
-
-## Quiet install
-
-Quiet mode suppresses the wizard while still running from the signed-in user's
-interactive desktop session. It is **not** a service, SYSTEM, elevated
-Intune/SCCM agent, scheduled task, background/batch, or session-zero installer
-surface.
-
-<Tabs items={['PowerShell', 'cmd']}>
-  <Tab value="PowerShell">
+To choose options, run the script block with parameters:
 
 ```powershell
-& ".\DefenseClawSetup-x64.exe" /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
+& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
 ```
 
-  </Tab>
-  <Tab value="cmd">
-
-```cmd
-DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
-```
-
-  </Tab>
-</Tabs>
-
-Set `CONNECTOR` to a supported setup name from the
-[connector platform table](/docs/connectors#platform-support). To install
-without configuring an agent or starting the gateway, use
-`CONNECTOR=none STARTGATEWAY=0`. Every configured connector requires gateway
-startup and current-user logon integration.
-
-Public Setup properties are:
-
-| Property | Values |
+| Parameter | What it does |
 | --- | --- |
-| Action | fresh install, `/repair`, `/upgrade`, or `/uninstall` |
-| UI | interactive or `/quiet` (`/qn` alias); `/norestart` is accepted |
-| Scope | `INSTALLSCOPE=user` only |
-| Connector | `CONNECTOR=amp`, `antigravity`, `codex`, `claudecode`, `copilot`, `cursor`, `devin`, `hermes`, `omnigent`, `opencode`, or `none` |
-| Policy mode | `MODE=observe` or `action` |
-| Gateway | `STARTGATEWAY=1` or `0`, subject to the connector rule above |
-| User data on uninstall | `DELETEUSERDATA=0` (default) or `1` |
+| `-Yes` | Do not prompt |
+| `-Version X.Y.Z` | Install a specific release |
+| `-Local DIR` | Take every release file from a directory instead of GitHub |
+| `-Rollback` | Restore the install that the last upgrade replaced |
+| `-Connector NAME` | First install only: the agent to guard |
+| `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
+| `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
 
-Do not use internal handoff properties shown in diagnostic process listings as
-operator controls.
+The installer checks every download against the release's `checksums.txt`
+(and its Sigstore signature when `cosign` 2.x is installed), prepares the new
+version before changing anything, and adds `%USERPROFILE%\.local\bin` to your
+user `PATH`. Open a new terminal afterwards so the `PATH` change applies, then
+check:
+
+```powershell
+defenseclaw --version
+defenseclaw-gateway --version
+```
 
 ## Configure after installation
 
@@ -224,153 +132,54 @@ so the policy plugin is ready before the turn begins.
 
 ## Startup behavior
 
-With a configured connector, Setup owns one current-user HKCU Run value named
-`DefenseClawGateway`. It launches the product's no-console startup helper,
-which starts the adjacent gateway with the installed data root. This is not a
-Windows service or Scheduled Task.
+The gateway runs as a background process for the signed-in user. It starts
+when you run `defenseclaw quickstart`, `defenseclaw setup`, or
+`defenseclaw-gateway start`, and a hook starts it when an agent calls it while
+it is stopped. There is no Windows service, Scheduled Task, or sign-in entry.
 
-The optional watchdog is a separate config-enabled background process. It is
-not the logon registration. A hook can also make one bounded cold-start attempt
-after an exact connection-refused result, using the protected installed
-gateway identity. These recovery paths never make a remote or proxy connector
-supported.
+## Upgrade
+
+```powershell
+defenseclaw upgrade
+```
+
+The installer continues in a new PowerShell window so the running command can
+release its files. It stops the gateway, keeps the current install in
+`%USERPROFILE%\.defenseclaw\previous`, swaps in the new version, migrates your
+configuration, and restarts the gateway. If any step fails it restores the
+previous install. Close the TUI and other DefenseClaw commands first; the
+installer waits up to a minute for them and changes nothing if they stay open.
+
+To undo the last upgrade:
+
+```powershell
+defenseclaw rollback
+```
+
+See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
+
+### Moving from the 0.8.x Setup package
+
+Run the install command above. The installer imports a
+`DefenseClawSetup-x64.exe` installation: it stops its gateway, removes its
+program folder, sign-in entry, Add/Remove Programs entry, and `PATH` entry,
+keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
+old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
+Connector hooks are rewritten to the new paths when the gateway starts.
 
 ## Repair
 
-Use **Settings > Apps > Installed apps > DefenseClaw > Modify**, or call the
-trusted maintenance copy:
-
-<Tabs items={['PowerShell', 'cmd']}>
-  <Tab value="PowerShell">
-
-```powershell
-& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /repair /quiet /norestart INSTALLSCOPE=user
-```
-
-  </Tab>
-  <Tab value="cmd">
-
-```cmd
-"%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /repair /quiet /norestart INSTALLSCOPE=user
-```
-
-  </Tab>
-</Tabs>
-
-Repair republishes the packaged files and reconciles connector wiring while
-preserving user configuration, audit history, the connector roster and modes,
-recorded connector homes (including `HERMES_HOME`), current/previous connector
-backup custody, and the prior gateway/watchdog running state.
-
-Do not replace files in the install tree by hand. If a foreground DefenseClaw
-client has a runtime file locked, Setup leaves committed state unchanged and
-asks you to close the client and retry; it does not kill arbitrary foreground
-processes.
-
-## Upgrade and release eligibility
-
-Releases `0.8.5` and `0.8.6` published no native Windows Setup. Release `0.8.7`
-was the first to publish one. Every published upgrade manifest from `0.8.5`
-through `0.8.10` declares an empty Windows tested-source list, so no currently
-published target authorizes an automatic cross-release native Windows upgrade.
-The documented current lifecycle is fresh install, repair, same-version
-servicing, and uninstall.
-
-A future release can authorize an automatic native Windows upgrade only when
-its authenticated manifest lists the exact installed source as a tested
-Windows baseline. Only then would this command be eligible:
-
-```powershell
-defenseclaw upgrade --yes
-```
-
-The command authenticates the signed checksum set, manifest, provenance,
-payload digest, and matching observed Authenticode state before stopping the
-gateway. Signed releases require the recorded publisher; an explicitly
-unsigned release must instead match authenticated `unsigned` provenance. It
-creates a private managed-state backup, starts the cached Setup, then exits so
-its embedded runtime can be replaced. The Setup payload itself is
-self-contained, but this CLI command needs network access to retrieve release
-metadata and the target EXE.
-
-If the authenticated manifest does not authorize the installed source, the command
-must refuse before mutation. Do not copy release files over the installation,
-use the unsafe verification-bypass option, or treat a downgrade as rollback.
-Downgrade is rejected and there is no public manual rollback command. See the
-cross-platform [upgrade contract](/docs/get-started/upgrade).
-
-## Transaction recovery
-
-Setup stages and validates a complete target before live replacement. It
-records a durable transaction, stops only the owned gateway/watchdog, publishes
-the new tree atomically, verifies the exact installed executable inventory,
-applies required migrations, and restores only the services that should run.
-
-- A pre-commit failure restores the owned application, cache, connector, PATH,
-  startup, and service state it changed.
-- An ambiguous durable-write boundary is reported as recovery required; it is
-  not reported as success.
-- After configuration activation commits, recovery converges the matching
-  target runtime rather than pairing new configuration with an old binary.
-- Re-running the authenticated Setup resumes a valid interrupted journal.
-- A foreign process, registry value, directory, reparse point, or changed
-  installer state is refused rather than claimed as DefenseClaw-owned.
-
-This is automatic transaction recovery, not permission to delete journals,
-restore arbitrary backup files, or force a downgrade manually.
-
-## Offline and packaged operation
-
-After an authenticated `DefenseClawSetup-x64.exe` reaches the target host, its
-fresh install, repair, and eligible Setup-driven servicing do not download
-Python or product components. For a fully authenticated offline bootstrap,
-stage the complete release bundle—Setup, provenance, signed checksums and
-certificate/bundle, upgrade manifest, and the pinned Windows Cosign executable—then
-use the release's `install.ps1 -Local` flow. A partial local bundle fails closed.
-
-Scanning, TUI, policy, local audit, and supported hook enforcement can run
-without an outbound observability destination. Connector agents may still need
-network access for their own normal operation. CodeGuard asset installation,
-remote registries, provider APIs, and remote observability destinations are
-optional network operations, not offline guarantees.
+Run the install command again. Reinstalling the same version rebuilds the
+program files and keeps your configuration, data, and the rollback copy.
 
 ## Uninstall and preserved state
 
-Normal uninstall removes product-owned application files, the maintenance
-cache, Installed Apps registration, the owned user `PATH` entry, the owned Run
-value, and supported connector wiring. Gemini teardown removes only
-DefenseClaw-owned groups and telemetry fields from its recorded `settings.json`
-and never touches Antigravity's nested `config\hooks.json`. For Hermes, teardown removes only the
-owned handlers and marker or restores the pre-Setup `config.yaml` bytes exactly;
-an unresolved current or previous home is retained for deferred cleanup rather
-than declared clean. It preserves
-`%USERPROFILE%\.defenseclaw` by default, including configuration, local audit,
-and recovery evidence.
-
-<Tabs items={['PowerShell', 'cmd']}>
-  <Tab value="PowerShell">
-
 ```powershell
-& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /uninstall /quiet
+defenseclaw uninstall              # remove connector integrations; keep data and programs
+defenseclaw uninstall --binaries   # also remove the programs in %USERPROFILE%\.local\bin
+defenseclaw uninstall --all --binaries --yes   # remove everything, including %USERPROFILE%\.defenseclaw
 ```
 
-  </Tab>
-  <Tab value="cmd">
+Enterprise deployments use the managed Setup package; see
+[Managed enterprise](/docs/get-started/windows/managed-enterprise).
 
-```cmd
-"%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /uninstall /quiet
-```
-
-  </Tab>
-</Tabs>
-
-<Callout type="warning" title="User-data removal is destructive">
-Add `DELETEUSERDATA=1` only when you intentionally want to remove the packaged
-data root after connector cleanup succeeds. If connector teardown leaves
-residue or recovery is still required, Setup preserves the data root and retry
-metadata instead of claiming a complete wipe.
-</Callout>
-
-The uninstaller removes only state whose exact ownership it can prove. A
-foreign or operator-modified PATH entry, Run value, process, connector file, or
-install tree is preserved and reported for manual review.

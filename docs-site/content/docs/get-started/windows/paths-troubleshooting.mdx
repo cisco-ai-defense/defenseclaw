@@ -17,19 +17,14 @@ intact when diagnosing a problem.
 
 | Default location | Purpose | Manual editing |
 | --- | --- | --- |
-| `%LOCALAPPDATA%\Programs\DefenseClaw\` | Current-user product root resolved through the Windows User Programs Known Folder. | **Do not edit.** Use Setup repair/upgrade/uninstall. |
-| `...\bin\defenseclaw.exe` | Stable CLI/TUI launcher for the embedded managed runtime. | Do not replace or wrap. |
-| `...\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
-| `...\bin\defenseclaw-hook.exe` | No-console native connector hook runner. | Do not invoke with fabricated credentials or replace. |
-| `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` | Stable protected copy used by native connector registrations that require the shared hook runtime. | Do not replace or invoke directly; Setup and connector reconciliation manage it. |
-| `...\bin\defenseclaw-startup.exe` | HKCU logon helper that starts the adjacent gateway. | Do not relocate independently. |
-| `...\bin\skill-scanner.exe`, `mcp-scanner.exe` | Packaged local scanners. | Do not replace. |
-| `...\runtime\python\` | Embedded Python and installed DefenseClaw packages. | Do not use as a general Python environment or modify packages. |
-| `...\runtime\tools\cosign.exe` | Pinned verifier used by the packaged upgrade path. | Do not replace or add to global `PATH`. |
-| `...\installer\install-state.json` | Installer-owned product identity and lifecycle metadata. | **Never edit or copy as a repair technique.** |
-| `%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe` | Trusted maintenance copy for repair, upgrade handoff, and uninstall. | Run through documented actions only; do not replace by hand. |
-| `%LOCALAPPDATA%\DefenseClaw\InstallerState\` | Private durable transaction/recovery state and `setup.log`. | Do not delete journals. Read the log locally when troubleshooting. |
-| `%LOCALAPPDATA%\DefenseClaw\InstallerTemp\` | Bounded transient payload staging. | Do not reuse as an install source or recovery backup. |
+| `%USERPROFILE%\.local\bin\defenseclaw.cmd` | CLI/TUI launcher for the installed Python environment. | Do not replace or wrap; re-run the installer to repair it. |
+| `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
+| `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console hook runner that connector registrations record. | Do not invoke with fabricated credentials or replace. |
+| `%USERPROFILE%\.local\bin\defenseclaw-acp.exe` | ACP guard. | Do not replace. |
+| `%USERPROFILE%\.defenseclaw\.venv\` | Python environment with DefenseClaw and its scanners, managed by the installer. | Do not install other packages into it. |
+| `%USERPROFILE%\.defenseclaw\previous\` | The install the last upgrade replaced, used by `defenseclaw rollback`. | Do not edit; `defenseclaw rollback` swaps it back. |
+| `%USERPROFILE%\.defenseclaw\installer\install.ps1` | The installer that performed the current install. | Do not edit; `defenseclaw rollback` runs it. |
+| `%USERPROFILE%\.defenseclaw\logs\install-*.log` | One log per install, upgrade, or rollback. | Read locally when troubleshooting. |
 | `%USERPROFILE%\.defenseclaw\config.yaml` | Primary operator configuration. | Prefer setup/config commands; if edited, run `defenseclaw config validate` before restart. |
 | `%USERPROFILE%\.defenseclaw\.env` | Protected gateway/provider/destination environment values. | **Never print or edit for routine diagnosis.** Use `keys` and setup commands. |
 | `%USERPROFILE%\.defenseclaw\audit.db` | Mandatory local SQLite audit and policy state. | Do not open with a second writer or attach to a support ticket. |
@@ -115,29 +110,28 @@ Changing an environment value after installation does not authorize lifecycle
 commands to abandon the recorded home. Re-run supported connector setup or
 repair deliberately; do not move the directory and edit installer state.
 
-The Devin connector has no public configuration-home or executable override in
-packaged Windows Setup. Setup resolves `%APPDATA%\devin` and the fixed
+The Devin connector has no public configuration-home or executable override on
+Windows. Connector setup resolves `%APPDATA%\devin` and the fixed
 `%LOCALAPPDATA%\devin\cli\bin\devin.exe` path from the signed-in user's Known
 Folders, validates both, and persists them. Repair, upgrade, reconciliation,
 and uninstall use only that custody; they do not follow ambient profile drift
 or scan another user's configuration.
 
-The generic runtime recognizes `DEFENSECLAW_HOME`, but the native packaged
-Setup, launchers, logon helper, repair, and upgrade lifecycle deliberately pin
-the data root to the current profile's `.defenseclaw`. Relocating a packaged
-installation with `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, or an executable
-override is not supported.
+The installer and runtime honour `DEFENSECLAW_HOME`; the default data root is
+the current profile's `.defenseclaw`. Use the same value for every command,
+including `defenseclaw upgrade`, or DefenseClaw will look for a different
+install.
 
 `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY` are runtime
 behavior overrides, not path controls. Prefer the persisted
 `defenseclaw guardrail fail-mode` command for normal operation. OpenCode does
-not consume those ambient process overrides: Setup bakes its persisted fail
+not consume those ambient process overrides: connector setup bakes its persisted fail
 mode into the managed plugin, and status/Doctor report drift.
 
 Private Windows DACLs restrict connector assets to the current user,
 Administrators, and SYSTEM. They reduce access by other standard users but are
 not tamper-proof against the owning user or administrators. Doctor's digest
-check and Setup reconciliation are the supported drift/recovery controls.
+check and connector reconciliation are the supported drift/recovery controls.
 
 ## Quoting, long paths, and case
 
@@ -145,13 +139,13 @@ Quote every path that can contain spaces. In PowerShell, use the call operator
 for an executable path:
 
 ```powershell
-& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /verify
+& "$env:USERPROFILE\.local\bin\defenseclaw-gateway.exe" status
 ```
 
 In cmd, quote the executable itself:
 
 ```cmd
-"%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /verify
+"%USERPROFILE%\.local\bin\defenseclaw-gateway.exe" status
 ```
 
 Those examples are interactive shell syntax. The command stored in Hermes
@@ -227,22 +221,16 @@ residue automatically.
   <Accordion title="The command is not recognized or the wrong version runs">
     Open a new terminal so the updated user `PATH` is loaded. Use `Get-Command
     defenseclaw -All` in PowerShell or `where defenseclaw` in cmd, then run
-    `defenseclaw version`. Repair Setup if the product-owned launcher is missing.
+    `defenseclaw version`. Run the install command again if the launcher is missing.
     Do not prepend an unpacked source checkout or embedded runtime directory as
     a permanent workaround.
   </Accordion>
-  <Accordion title="Setup refuses the launch context">
-    Close the elevated terminal and run Setup normally from the signed-in
-    user's interactive desktop. `/quiet` does not permit elevation, SYSTEM,
-    service, session-zero, or background/batch installation. `/help` and
-    `/verify` are the only read-only exceptions.
-  </Accordion>
-  <Accordion title="Setup or repair fails">
-    Close foreground DefenseClaw CLI/TUI processes, then inspect
-    `%LOCALAPPDATA%\DefenseClaw\InstallerState\setup.log` locally. Re-run the
-    authenticated maintenance EXE so it can resume a valid journal. Do not
-    delete `InstallerState`, `InstallerTemp`, the cached Setup, or a locked
-    application tree to force progress.
+  <Accordion title="An install, upgrade, or rollback fails">
+    Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed
+    upgrade restores the previous install automatically and keeps the failed
+    attempt in `%USERPROFILE%\.defenseclaw\.failed-<time>`. Close the TUI and
+    other DefenseClaw commands if the installer reports files in use, then run
+    the install command again.
   </Accordion>
   <Accordion title="The gateway is stopped, stale, or owned by another process">
     Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or
@@ -250,11 +238,12 @@ residue automatically.
     identity; investigate that process instead of deleting the PID file. Check
     `%USERPROFILE%\.defenseclaw\gateway.log` locally for the startup error.
   </Accordion>
-  <Accordion title="Logon startup or watchdog is not active">
-    First run `defenseclaw-gateway status` and `defenseclaw-gateway watchdog
-    status`. A configured connector should have the installer-owned HKCU Run
-    registration; repair Setup if it is missing. The watchdog runs only when
-    `gateway.watchdog.enabled` is configured and is not a Windows service.
+  <Accordion title="The gateway or watchdog is not running">
+    Run `defenseclaw-gateway status` and `defenseclaw-gateway watchdog
+    status`, then `defenseclaw-gateway start`. There is no sign-in startup
+    entry; a hook also starts a stopped gateway on its first call. The watchdog
+    runs only when `gateway.watchdog.enabled` is configured and is not a
+    Windows service.
   </Accordion>
   <Accordion title="Connector hooks, policy plugin, or enforcement do not appear">
     Confirm the agent runs natively as the same Windows user. Run
@@ -302,13 +291,11 @@ residue automatically.
     the plugin with `defenseclaw setup amp --mode observe`, then fully exit and
     relaunch Amp.
   </Accordion>
-  <Accordion title="Upgrade is refused or interrupted">
-    A source not listed in the target release's authenticated Windows baseline matrix
-    must be refused before mutation. An interrupted eligible upgrade retains
-    private receipts/journals for automatic retry. Inspect only filenames and
-    timestamps under `.upgrade-receipts`; do not edit JSON or restore backup
-    files manually. Re-run the authenticated upgrade or Setup after closing
-    locked DefenseClaw clients.
+  <Accordion title="An upgrade is interrupted">
+    Run `defenseclaw upgrade` (or the install command) again after closing the
+    TUI and other DefenseClaw commands. The installer is safe to re-run; a
+    failed attempt has already restored the previous install. To go back a
+    version, run `defenseclaw rollback`.
   </Accordion>
   <Accordion title="The TUI renders poorly or cannot redraw">
     Prefer a current native Windows console host and resize to at least 80×24.
@@ -361,7 +348,7 @@ Complete this without real secrets or destructive tools:
   exact upgraded generation.
 - Compare `defenseclaw guardrail status` with the pre-upgrade connector roster,
   modes, fail modes, enabled state, and optional watchdog state.
-- Confirm the command path still resolves to the installed product directory,
+- Confirm the command path still resolves to `%USERPROFILE%\\.local\\bin`,
   not a stale checkout or copied binary.
 - Confirm each configured connector has loaded its configuration, restarting
   the official client where documented, then repeat the harmless per-connector
