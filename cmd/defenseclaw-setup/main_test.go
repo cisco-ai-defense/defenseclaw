@@ -753,14 +753,16 @@ func TestPackagedCanonicalStateValidationRequiresCurrentConfig(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPackagedScriptFixture(t, test.manifest)
-			fixture.writeModule(t, "config.py", fmt.Sprintf(`class Config:
-    config_version = %d
+			fixture.writeModule(t, "config.py", fmt.Sprintf(`CONFIG_VERSION = %d
 
-def load():
+class Config:
+    config_version = CONFIG_VERSION
+
+def load(*, data_dir=None):
     return Config()
 
-def require_current_config(cfg):
-    if cfg.config_version < 8:
+def require_current_config(*, path=None, allow_missing=False):
+    if CONFIG_VERSION < 8:
         raise RuntimeError("config is too old; run 'defenseclaw migrate'")
 `, test.configVersion))
 			output, err := fixture.run(packagedCanonicalStateValidationScript, fixture.dataRoot, "0.8.9", fixture.manifest)
@@ -861,7 +863,7 @@ class MigrateResult:
     def __init__(self, applied):
         self.applied = applied
 
-def migrate(data_dir, *, openclaw_home=None, from_version=None, check=False):
+def migrate(data_dir, *, openclaw_home=None, from_version=None, check=False, gateway_binary=None):
     call = (data_dir, openclaw_home, from_version, check)
     if call != (%q, %q, %q, %s):
         raise MigrationError("unexpected migrate call: %%r" %% (call,))

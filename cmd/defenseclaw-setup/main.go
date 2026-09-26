@@ -2108,7 +2108,10 @@ func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) erro
 // The packaged scripts bind the staged wheel to this Setup release through the
 // payload's upgrade manifest, then use only the release-independent migration
 // API: migrate() applies or checks config/data migrations for the data root,
-// and require_current_config() refuses a config that still needs one.
+// and require_current_config() refuses a config that still needs one. The
+// preflight hands migrate() the staged gateway (DEFENSECLAW_GATEWAY_BIN) so a
+// 0.x configuration is converted and validated before anything is swapped.
+// cli/tests/test_setup_packaged_scripts.py runs these against the real package.
 const packagedMigrationScript = `import json, sys
 from defenseclaw.migrations import migrate
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
@@ -2126,17 +2129,24 @@ with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != target_version:
     raise SystemExit("upgrade manifest version mismatch")
-require_current_config(load())
+require_current_config()
+load()
 print("ok")`
 
-const packagedMigrationPreflightScript = `import json, sys
+const packagedMigrationPreflightScript = `import json, os, sys
 from defenseclaw.migrations import migrate
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-result = migrate(data_root, openclaw_home=openclaw_home, from_version=from_version or None, check=True)
+result = migrate(
+    data_root,
+    openclaw_home=openclaw_home,
+    from_version=from_version or None,
+    check=True,
+    gateway_binary=os.environ.get("DEFENSECLAW_GATEWAY_BIN") or None,
+)
 print(len(result.applied))`
 
 func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
