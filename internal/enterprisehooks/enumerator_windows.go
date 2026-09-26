@@ -538,12 +538,16 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 //     disconnected users: exactly like the installer's -Mode/-Connector
 //     renderer does for sessionless profiles, `deferred: true` lets the
 //     guardian report the row as pending while no exact WTSActive token
-//     exists for its SID instead of counting it as a reconcile failure
-//     (which would withhold the exact protected enrollment publication
-//     for every other SID). A deferred row whose user is signed in is
-//     installed immediately, and once the guardian has protected it the
-//     row is verified like any other target, so no later promotion is
-//     required.
+//     exists for its SID, provided the deferred pending proof passes
+//     (it requires the installer-created canonical data root, so rows
+//     present at Install qualify). A row first discovered after install
+//     for a user who has not signed in since stays a guardian failure,
+//     but the guardian no longer lets such a never-protected, unselected,
+//     signed-out target withhold the exact protected enrollment
+//     publication for every other SID. A deferred row whose user is
+//     signed in is installed immediately, and once the guardian has
+//     protected it the row is verified like any other target, so no
+//     later promotion is required.
 //   - If no version is discoverable: return false. The caller
 //     drops the row entirely — parity with macOS, which never
 //     emits a row for a user whose CLI is not installed.

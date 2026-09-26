@@ -30,6 +30,7 @@ var enterpriseHookWindowsSystemDirectory = windows.GetSystemDirectory
 
 var enterpriseHookWindowsTargetSessionCheck = enterprisehooks.RequireWindowsEnterpriseTargetSession
 var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
+var enterpriseHookWindowsTargetUnselectedCheck = enterprisehooks.RequireWindowsEnterpriseTargetUnselected
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
 
@@ -132,6 +133,21 @@ func enterpriseHookInstallMachinePolicyContract(connectorName string) (string, e
 		return "", fmt.Errorf("enterprise hooks install: load the guardian manifest for the machine-wide Claude contract: %w", err)
 	}
 	return enterpriseHookMachinePolicyContract(manifest), nil
+}
+
+// enterpriseHookTargetAwaitingFirstSignIn reports whether a failed,
+// never-protected target is failing only because its user is not signed in:
+// the exact target SID has no active WTS session (the typed absence, never an
+// ordinary WTS/token error) and no managed runtime is selected for it. Such a
+// target cannot be protected until its user signs in, and DefenseClaw holds
+// nothing for it, so it must not withhold deferred-policy staging or the exact
+// enrollment publication for every other target (#894). It remains a failure.
+func enterpriseHookTargetAwaitingFirstSignIn(target enterprisehooks.ManifestTarget) bool {
+	available, err := enterpriseHookTargetSessionAvailable(target)
+	if err != nil || available {
+		return false
+	}
+	return enterpriseHookWindowsTargetUnselectedCheck(target) == nil
 }
 
 func stageEnterpriseHookDeferredManagedPolicies(

@@ -11,3 +11,7 @@ import "errors"
 func requireWindowsEnterpriseDeferredTargetPendingPlatform(ManifestTarget) error {
 	return errors.New("enterprise hooks: deferred pending proof requires Windows")
 }
+
+func requireWindowsEnterpriseTargetUnselectedPlatform(ManifestTarget) error {
+	return errors.New("enterprise hooks: managed runtime selection proof requires Windows")
+}

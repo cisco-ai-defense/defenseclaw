@@ -538,6 +538,10 @@ var (
 	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+	// Reconcile-level seams for the enrollment publication gate (#894).
+	enterpriseHookReconcileAwaitingFirstSignIn = enterpriseHookTargetAwaitingFirstSignIn
+	enterpriseHookReconcileStageDeferred       = stageEnterpriseHookDeferredManagedPolicies
+	enterpriseHookReconcileSyncEnrollments     = syncEnterpriseHookManagedEnrollments
 )
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
@@ -1904,7 +1908,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
-	if err := syncEnterpriseHookManagedEnrollments(manifest, apiAddr, false); err != nil {
+	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
 		return run, fmt.Errorf(
 			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
 			err,
@@ -1927,11 +1931,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	pending := 0
 	repairs := 0
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
+	// awaitingSignIn holds the manifest indexes of failed targets that were
+	// never protected, have no managed runtime selected, and fail only
+	// because their user has no active session (see
+	// enterpriseHookTargetAwaitingFirstSignIn). They stay failures, but do
+	// not withhold the enrollment publication for every other target.
+	awaitingSignIn := map[int]struct{}{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
-	for _, target := range manifest.Targets {
+	for targetIndex, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
@@ -1944,6 +1954,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		token := ""
 		otlpToken := ""
 		var previousProtection enterpriseHookPreviousProtection
+		protectionKnown := false
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
@@ -1958,6 +1969,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			)
 			if authorizationErr != nil {
 				err = authorizationErr
+			} else {
+				protectionKnown = true
 			}
 		}
 		if err == nil && target.IsDeferred() &&
@@ -2053,19 +2066,36 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			failures++
 			row.OK = false
 			row.Error = err.Error()
+			if protectionKnown && !previousProtection.PreviouslyProtected &&
+				enterpriseHookReconcileAwaitingFirstSignIn(target) {
+				awaitingSignIn[targetIndex] = struct{}{}
+			}
 		}
 		rows = append(rows, row)
 	}
 
+	// Stage deferred machine policy and publish the exact protected
+	// enrollment set only when every failure is a never-protected target
+	// that is merely waiting for its user's first sign-in. Those targets
+	// are left out of the publication, which is then exactly the
+	// publication for a manifest that does not list them yet: nothing is
+	// staged or enrolled for them, and nothing they hold is revoked
+	// because they hold no protected authorization and no selected
+	// runtime. The run still reports them as failures (#894). The exact
+	// publication is skipped (as before) when leaving them out would
+	// empty a connector's set, because an empty exact set tears down that
+	// connector's machine-wide hook policy.
 	var enrollmentErr error
-	if failures == 0 {
-		enrollmentErr = stageEnterpriseHookDeferredManagedPolicies(
-			manifest,
+	if failures == len(awaitingSignIn) {
+		publication := enterpriseHookManifestWithoutTargets(manifest, awaitingSignIn)
+		enrollmentErr = enterpriseHookReconcileStageDeferred(
+			publication,
 			pendingTargets,
 			apiAddr,
 		)
-		if enrollmentErr == nil {
-			enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+		if enrollmentErr == nil &&
+			!enterpriseHookPublicationDropsConnector(manifest, publication) {
+			enrollmentErr = enterpriseHookReconcileSyncEnrollments(publication, apiAddr, true)
 		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
@@ -2098,6 +2128,46 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 // the long-running guardian, never the one-shot reconcile command. The
 // standalone Unix guardian starts its per-user AI discovery scans here.
 var enterpriseHookAfterWatchReconcile = func(context.Context, io.Writer, enterpriseHookReconcileRun) {}
+
+// enterpriseHookManifestWithoutTargets returns a copy of manifest whose
+// Targets omit the given indexes. The input manifest is not modified.
+func enterpriseHookManifestWithoutTargets(
+	manifest enterprisehooks.Manifest,
+	omit map[int]struct{},
+) enterprisehooks.Manifest {
+	if len(omit) == 0 {
+		return manifest
+	}
+	filtered := manifest
+	filtered.Targets = make([]enterprisehooks.ManifestTarget, 0, len(manifest.Targets))
+	for index, target := range manifest.Targets {
+		if _, skip := omit[index]; skip {
+			continue
+		}
+		filtered.Targets = append(filtered.Targets, target)
+	}
+	return filtered
+}
+
+// enterpriseHookPublicationDropsConnector reports whether publication has no
+// enabled target for a connector that manifest still has enabled targets for.
+func enterpriseHookPublicationDropsConnector(
+	manifest, publication enterprisehooks.Manifest,
+) bool {
+	remaining := map[string]int{}
+	for _, target := range publication.Targets {
+		if target.IsEnabled() {
+			remaining[strings.ToLower(strings.TrimSpace(target.Connector))]++
+		}
+	}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() &&
+			remaining[strings.ToLower(strings.TrimSpace(target.Connector))] == 0 {
+			return true
+		}
+	}
+	return false
+}
 
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {

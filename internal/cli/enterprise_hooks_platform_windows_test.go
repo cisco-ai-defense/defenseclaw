@@ -137,6 +137,105 @@ func TestSignedOutEnumeratorRowIsPendingOnlyWhenDeferred(t *testing.T) {
 	}
 }
 
+// TestTargetAwaitingFirstSignInRequiresTypedAbsenceAndNoSelection pins the
+// #894 classifier: only the typed WTS absence for the exact SID, with no
+// managed runtime selected for the target, lets a failed never-protected
+// target stop withholding everyone else's enrollment publication.
+func TestTargetAwaitingFirstSignInRequiresTypedAbsenceAndNoSelection(t *testing.T) {
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousUnselected := enterpriseHookWindowsTargetUnselectedCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsTargetUnselectedCheck = previousUnselected
+	})
+	enabled := true
+	target := enterprisehooks.ManifestTarget{
+		SID:          "S-1-5-21-1-2-3-1105",
+		UserHome:     `C:\Users\bob`,
+		Connector:    "claudecode",
+		AgentVersion: "2.1.152",
+		Enabled:      &enabled,
+		Deferred:     true,
+	}
+	absent := &enterprisehooks.WindowsTargetSessionUnavailableError{SID: target.SID}
+	selected := errors.New("enterprise hooks: target already has a selected managed runtime")
+	for _, tc := range []struct {
+		name       string
+		session    error
+		unselected error
+		want       bool
+	}{
+		{"signed_out_and_unselected", absent, nil, true},
+		{"signed_in", nil, nil, false},
+		{"wts_query_failed", errors.New("WTS token query denied"), nil, false},
+		{"signed_out_but_runtime_selected", absent, selected, false},
+	} {
+		enterpriseHookWindowsTargetSessionCheck = func(string, string) error { return tc.session }
+		enterpriseHookWindowsTargetUnselectedCheck = func(enterprisehooks.ManifestTarget) error { return tc.unselected }
+		if got := enterpriseHookTargetAwaitingFirstSignIn(target); got != tc.want {
+			t.Errorf("%s: awaiting first sign-in = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestReconcileSignedOutEnumeratorRowWithoutRootDoesNotBlockOthers is the
+// reviewer's #894 scenario on the real deferred pending proof: an enumerator
+// row discovered after install (deferred, never protected) whose user is
+// signed out and whose canonical <home>\.defenseclaw root was never created.
+// The pending proof rejects the absent root, so the row is a failure, but it
+// no longer withholds the exact enrollment publication for the other SIDs.
+func TestReconcileSignedOutEnumeratorRowWithoutRootDoesNotBlockOthers(t *testing.T) {
+	stubSignInIsolationReconcile(t)
+	previousSession := enterpriseHookWindowsTargetSessionCheck
+	previousPending := enterpriseHookWindowsDeferredPendingCheck
+	previousUnselected := enterpriseHookWindowsTargetUnselectedCheck
+	t.Cleanup(func() {
+		enterpriseHookWindowsTargetSessionCheck = previousSession
+		enterpriseHookWindowsDeferredPendingCheck = previousPending
+		enterpriseHookWindowsTargetUnselectedCheck = previousUnselected
+	})
+	const signedOutSID = "S-1-5-21-1000-2000-3000-1105"
+	enterpriseHookWindowsTargetSessionCheck = func(sid, _ string) error {
+		if strings.EqualFold(sid, signedOutSID) {
+			return &enterprisehooks.WindowsTargetSessionUnavailableError{SID: sid}
+		}
+		return nil
+	}
+	// Keep the production pending proof; only the machine selector read is
+	// isolated from this host (enterprisehooks tests cover it directly).
+	enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
+	enterpriseHookWindowsTargetUnselectedCheck = func(enterprisehooks.ManifestTarget) error { return nil }
+
+	fixture, run := runSignInIsolationReconcileWithOptions(t, []signInIsolationTarget{
+		{name: "alice", sid: "S-1-5-21-1000-2000-3000-1101", connector: "claudecode"},
+		{name: "newuser", sid: signedOutSID, connector: "claudecode", deferred: true},
+	}, signInIsolationOptions{realClassifier: true})
+	if run.Failures != 1 || run.Pending != 0 {
+		t.Fatalf("run failures=%d pending=%d, want the rootless signed-out row as the only failure", run.Failures, run.Pending)
+	}
+	for _, row := range run.Rows {
+		if row.UserHome != fixture.homes["newuser"] {
+			continue
+		}
+		// An elevated test token owns the fixture home as Administrators, so
+		// the proof reaches the absent data root; a non-elevated token is
+		// refused one step earlier at the profile anchor. Both are the
+		// pending proof failing for a never-installed profile.
+		if row.OK || row.Pending ||
+			!(strings.Contains(row.Error, "deferred target data directory is untrusted") ||
+				strings.Contains(row.Error, "user home anchor owner")) {
+			t.Fatalf("rootless signed-out row = %+v, want the pending proof's refusal", row)
+		}
+		t.Logf("rootless signed-out row error: %s", row.Error)
+	}
+	if got := exactPublications(fixture); len(got) != 1 || strings.Join(got[0], ",") != "alice" {
+		t.Fatalf("exact enrollment publications = %v, want one publication of alice", got)
+	}
+	if strings.Join(fixture.classified, ",") != "newuser" {
+		t.Fatalf("sign-in classifier consulted for %v, want only newuser", fixture.classified)
+	}
+}
+
 func TestExpandEnterpriseHookProfileImagePathUsesTrustedSystemDrive(t *testing.T) {
 	previous := enterpriseHookWindowsSystemDirectory
 	t.Cleanup(func() { enterpriseHookWindowsSystemDirectory = previous })
