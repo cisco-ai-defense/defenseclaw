@@ -30,9 +30,11 @@ working when anything else in the installed version is broken.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -203,10 +205,25 @@ def _expected_sha256(checksums: str, name: str) -> str:
     raise ShimError(f"checksums.txt has no entry for {name}")
 
 
+def _tls_context() -> ssl.SSLContext:
+    """System trust (and SSL_CERT_FILE), plus certifi's bundle when installed."""
+
+    context = ssl.create_default_context()
+    try:
+        import certifi
+
+        context.load_verify_locations(certifi.where())
+    except Exception:  # noqa: BLE001 - certifi is optional
+        pass
+    return context
+
+
 def _download(url: str, destination: str) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "defenseclaw-upgrade"})
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response, open(destination, "wb") as out:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=_TIMEOUT, context=_tls_context()) as response, open(  # noqa: S310
+            destination, "wb"
+        ) as out:
             shutil.copyfileobj(response, out)
     except (urllib.error.URLError, OSError) as exc:
         raise ShimError(f"could not download {url}: {exc}") from None
@@ -218,13 +235,30 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str:
-    """Return the tag GitHub marks as the latest release, without the API."""
+    """Return the tag GitHub marks as the latest release.
+
+    Reads the ``releases/latest`` redirect (no API rate limit), falling back
+    to a GET of the same page and then to the REST API.
+    """
 
     repo = repo or os.environ.get(REPO_ENV) or DEFAULT_REPO
-    opener = urllib.request.build_opener(_NoRedirect)
+    for method in ("HEAD", "GET"):
+        tag = _latest_from_redirect(repo, method, timeout)
+        if tag:
+            return tag
+    tag = _latest_from_api(repo, timeout)
+    if tag:
+        return tag
+    raise ShimError(f"could not look up the latest release of {repo}")
+
+
+def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
+    opener = urllib.request.build_opener(
+        _NoRedirect, urllib.request.HTTPSHandler(context=_tls_context())
+    )
     request = urllib.request.Request(
         f"https://github.com/{repo}/releases/latest",
-        method="HEAD",
+        method=method,
         headers={"User-Agent": "defenseclaw-upgrade"},
     )
     location = ""
@@ -232,16 +266,26 @@ def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str
         with opener.open(request, timeout=timeout) as response:
             location = response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
-        location = exc.headers.get("Location", "") if exc.code in (301, 302, 303, 307, 308) else ""
-        if not location:
-            raise ShimError(f"could not look up the latest release of {repo}: HTTP {exc.code}") from None
-    except (urllib.error.URLError, OSError) as exc:
-        raise ShimError(f"could not look up the latest release of {repo}: {exc}") from None
+        if exc.code in (301, 302, 303, 307, 308):
+            location = exc.headers.get("Location", "")
+    except (urllib.error.URLError, OSError):
+        return None
     tag = location.rstrip("/").rsplit("/tag/", 1)[-1] if "/tag/" in location else ""
     tag = tag.removeprefix("v")
-    if not _VERSION.match(tag):
-        raise ShimError(f"could not determine the latest release of {repo}")
-    return tag
+    return tag if _VERSION.match(tag) else None
+
+
+def _latest_from_api(repo: str, timeout: float) -> str | None:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/releases/latest",
+        headers={"User-Agent": "defenseclaw-upgrade", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=_tls_context()) as response:  # noqa: S310
+            tag = str(json.load(response).get("tag_name", "")).removeprefix("v")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return None
+    return tag if _VERSION.match(tag) else None
 
 
 def _latest_version(repo: str) -> str:

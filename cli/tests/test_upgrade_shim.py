@@ -118,9 +118,33 @@ def test_latest_version_rejects_a_non_release_location(monkeypatch: pytest.Monke
             return _Response("https://github.com/o/r/releases")
 
     monkeypatch.setattr(upgrade_shim.urllib.request, "build_opener", lambda *_handlers: Opener())
+    monkeypatch.setattr(upgrade_shim, "_latest_from_api", lambda repo, timeout: None)
 
     with pytest.raises(upgrade_shim.ShimError):
         upgrade_shim.latest_version("o/r")
+
+
+def test_latest_version_retries_with_get_when_head_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    methods: list[str] = []
+
+    class Opener:
+        def open(self, request, timeout):
+            methods.append(request.get_method())
+            if request.get_method() == "HEAD":
+                raise urllib.error.HTTPError(request.full_url, 405, "Method Not Allowed", {}, None)
+            return _Response("https://github.com/o/r/releases/tag/v2.0.1")
+
+    monkeypatch.setattr(upgrade_shim.urllib.request, "build_opener", lambda *_handlers: Opener())
+
+    assert upgrade_shim.latest_version("o/r") == "2.0.1"
+    assert methods == ["HEAD", "GET"]
+
+
+def test_latest_version_falls_back_to_the_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upgrade_shim, "_latest_from_redirect", lambda repo, method, timeout: None)
+    monkeypatch.setattr(upgrade_shim, "_latest_from_api", lambda repo, timeout: "3.1.4")
+
+    assert upgrade_shim.latest_version("o/r") == "3.1.4"
 
 
 def test_upgrade_is_a_no_op_when_current(
