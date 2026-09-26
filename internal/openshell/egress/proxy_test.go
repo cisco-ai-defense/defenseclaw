@@ -152,16 +152,18 @@ func TestProxyConnectHTTP2(t *testing.T) {
 }
 
 // TestProxyConnectEarlyData: bytes a client pipelines right after the
-// CONNECT head (before the 200) must reach the upstream.
+// CONNECT head (before the 200), a ClientHello and whatever follows it, must
+// reach the upstream.
 func TestProxyConnectEarlyData(t *testing.T) {
 	h := newHarness(t, nil)
 	h.dialer.route(443, startEcho(t))
-	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), []byte("early-bytes"))
+	early := append(helloFor("example.com"), "early-bytes"...)
+	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), early)
 	if resp.status != http.StatusOK {
 		t.Fatalf("CONNECT = %d %s", resp.status, resp.body)
 	}
-	got := make([]byte, len("early-bytes"))
-	if _, err := io.ReadFull(br, got); err != nil || string(got) != "early-bytes" {
+	got := make([]byte, len(early))
+	if _, err := io.ReadFull(br, got); err != nil || !bytes.Equal(got, early) {
 		t.Fatalf("echo = %q, %v", got, err)
 	}
 	if _, err := conn.Write([]byte("more")); err != nil {
@@ -684,7 +686,7 @@ func TestProxyLargeUploadAlert(t *testing.T) {
 	if resp.status != http.StatusOK {
 		t.Fatal(resp.status)
 	}
-	payload := bytes.Repeat([]byte("z"), 4096)
+	payload := append(helloFor("example.com"), bytes.Repeat([]byte("z"), 4096)...)
 	go func() { _, _ = conn.Write(payload) }()
 	echo := make([]byte, len(payload))
 	if _, err := io.ReadFull(br, echo); err != nil {
@@ -704,7 +706,7 @@ func TestProxyLargeUploadBlock(t *testing.T) {
 	})
 	sinkAddr, received := startSink(t)
 	h.dialer.route(443, sinkAddr)
-	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), nil)
+	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), helloFor("example.com"))
 	if resp.status != http.StatusOK {
 		t.Fatal(resp.status)
 	}
@@ -851,12 +853,12 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 func TestProxySinkPanicIsContained(t *testing.T) {
 	h := newHarness(t, func(c *harnessConfig) { c.sink = EventSinkFunc(func(Event) { panic("sink bug") }) })
 	h.dialer.route(443, startEcho(t))
-	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), nil)
+	hello := helloFor("example.com")
+	_, br, resp := h.connect("example.com:443", basicAuth(h.cred), hello)
 	if resp.status != http.StatusOK {
 		t.Fatal(resp.status)
 	}
-	fmt.Fprint(conn, "ok")
-	got := make([]byte, 2)
+	got := make([]byte, len(hello))
 	if _, err := io.ReadFull(br, got); err != nil {
 		t.Fatalf("tunnel broken by a panicking sink: %v", err)
 	}
@@ -865,9 +867,13 @@ func TestProxySinkPanicIsContained(t *testing.T) {
 func TestProxyShutdown(t *testing.T) {
 	h := newHarness(t, nil)
 	h.dialer.route(443, startEcho(t))
-	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), nil)
+	hello := helloFor("example.com")
+	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), hello)
 	if resp.status != http.StatusOK {
 		t.Fatal(resp.status)
+	}
+	if _, err := io.ReadFull(br, make([]byte, len(hello))); err != nil {
+		t.Fatalf("hello echo: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)

@@ -403,7 +403,8 @@ type tunnel struct {
 	cut       atomic.Bool
 	// idled marks a tunnel or request ended by TunnelIdleTimeout.
 	idled atomic.Bool
-	// refused marks a CONNECT tunnel ended for its TLS server name.
+	// refused marks a CONNECT tunnel ended for its TLS server name or for
+	// not starting with TLS.
 	refused atomic.Bool
 
 	closeMu sync.Mutex

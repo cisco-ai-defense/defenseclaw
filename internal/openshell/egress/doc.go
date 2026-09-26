@@ -25,9 +25,14 @@
 //     terminates TLS, so pinning clients keep working; it reads only the
 //     ClientHello's server name (SNI) and ends a tunnel whose SNI names a
 //     destination it would block, so an allowed name or address cannot front
-//     for a blocked site on the same CDN.
+//     for a blocked site on the same CDN. A tunnel that does not start with
+//     a TLS ClientHello is refused with a 400 inside the tunnel, because
+//     plain HTTP there could do the same through its Host header.
 //   - Absolute-form requests (plain http://, rarely https://) are forwarded
-//     with hop-by-hop headers and the proxy credential stripped.
+//     with hop-by-hop headers and the proxy credential stripped. Plain HTTP
+//     must use this form, where every request is decided; clients that
+//     tunnel http:// URLs through CONNECT (undici's ProxyAgent, and so
+//     Node's fetch with NODE_USE_ENV_PROXY, does by default) get that 400.
 //
 // Every request carries its sandbox's own proxy credential (the userinfo of
 // HTTPS_PROXY, sent as Proxy-Authorization: Basic). The credential only

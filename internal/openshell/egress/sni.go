@@ -54,6 +54,7 @@ const (
 var (
 	errMalformedClientHello = errors.New("egress: malformed TLS ClientHello")
 	errServerNameRefused    = errors.New("egress: tunnel refused for its TLS server name")
+	errNotTLS               = errors.New("egress: tunnel refused: it did not start with TLS")
 )
 
 // screenFirstFlight reads the client's first bytes in an established CONNECT
@@ -63,7 +64,9 @@ var (
 // an allowed name or address followed by SNI pastebin.com would reach any
 // blocked site served from the same CDN addresses, in open and allowlist mode
 // alike. A refused tunnel gets a fatal TLS alert and errServerNameRefused.
-// Bytes that do not start a TLS handshake are relayed untouched.
+// A tunnel whose first bytes are not a TLS handshake is refused as well
+// (refuseNonTLS): plain HTTP inside it could name any such site in its Host
+// header.
 //
 // Only the visible server name is checked: an Encrypted Client Hello's outer
 // name and a Host header inside the TLS session are out of reach without
@@ -78,7 +81,8 @@ func (p *Proxy) screenFirstFlight(t *tunnel, d *Decider, client net.Conn, r io.R
 		return nil, err
 	}
 	if buf[0] != tlsRecordHandshake {
-		return buf[:n], nil
+		p.refuseNonTLS(t, client)
+		return nil, errNotTLS
 	}
 	// A TLS client sends its whole ClientHello at once; one that stalls
 	// halfway is holding the tunnel open without a checkable name.
@@ -141,6 +145,23 @@ func (p *Proxy) refuseInTunnel(t *tunnel, client net.Conn, dec Decision, alert b
 		_ = client.SetReadDeadline(time.Now().Add(lingerTimeout))
 		_, _ = io.Copy(io.Discard, io.LimitReader(client, lingerDiscardLimit))
 	}
+}
+
+// refuseNonTLS ends an established tunnel whose first bytes are not a TLS
+// ClientHello. CONNECT tunnels carry TLS only: plain HTTP in a tunnel could
+// reach any site served from the tunnel's address through its Host header,
+// unseen, so plain HTTP must arrive in absolute form, where every request
+// is decided. The client already has its 200, so the refusal is written into
+// the tunnel as an HTTP response (what an HTTP client there reads, and a
+// readable first line for anything else), and the tunnel closes.
+func (p *Proxy) refuseNonTLS(t *tunnel, client net.Conn) {
+	dec := blocked(Decision{Host: t.dec.Host, Port: t.dec.Port, Mode: t.dec.Mode}, CategoryInvalidDestination, SourceGuard, "")
+	dec.Reason = "The tunnel did not start with a TLS ClientHello. CONNECT tunnels carry TLS only; send plain HTTP " +
+		"to the proxy as absolute-form requests (GET http://host/path), which are checked one by one."
+	t.refused.Store(true)
+	status := statusFor(dec)
+	p.recordRefusal(t.principal, t.method, dec, status, t.started, t.id)
+	writeRaw(client, status, reasonPhrase(status, &dec), nil, p.blockResponse(t.principal, dec))
 }
 
 // readClientHello reads the rest of a TLS ClientHello whose first bytes are
