@@ -85,6 +85,8 @@ free_port() {
 }
 
 install_candidate() { bash "$1/install.sh" --local "$1" --yes; }
+# The documented one-liner pipes install.sh into bash; the script arrives on stdin.
+install_candidate_piped() { cat "$1/install.sh" | bash -s -- --local "$1" --yes; }
 
 install_legacy() {
     local installer="${ROOT}/install-${LEGACY_VERSION}.sh"
@@ -136,8 +138,8 @@ stop_lane() {
 
 lane_fresh() {
     enter_lane fresh
-    log "fresh install of ${TARGET}"
-    must install_candidate "${ASSETS}" || return 1
+    log "fresh install of ${TARGET} (piped, as the one-liner runs it)"
+    must install_candidate_piped "${ASSETS}" || return 1
     assert_versions "${TARGET}"
     [[ ! -e "${DC_HOME}/previous" ]] || fail "a fresh install must not leave a rollback slot"
     [[ -f "${DC_HOME}/installer/install.sh" ]] || fail "installer copy was not saved"
