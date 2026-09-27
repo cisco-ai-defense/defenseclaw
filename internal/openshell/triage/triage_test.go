@@ -112,8 +112,8 @@ func TestClassify(t *testing.T) {
 		kind    string
 		risky   bool
 	}{
-		{"open network approves a public name", open, proposal("registry.example.org", 443), Approve, ReasonOpenNetwork, KindNetworkRule, false},
-		{"open network approves port 80", open, proposal("docs.example.org", 80), Approve, ReasonOpenNetwork, KindNetworkRule, false},
+		{"open network approves a public name", open, proposal("registry.example.org", 443), Approve, ReasonAutoMode, KindNetworkRule, false},
+		{"open network approves port 80", open, proposal("docs.example.org", 80), Approve, ReasonAutoMode, KindNetworkRule, false},
 		{"blocklisted host is rejected", open, proposal("webhook.site", 443), Reject, ReasonBlocklisted, KindNetworkRule, false},
 		{"feed subdomain is rejected", open, proposal("x.pastebin.com", 443), Reject, ReasonBlocklisted, KindNetworkRule, false},
 		{"admin blocklist is rejected", adminBlock, proposal("a.corp-blocked.example", 443), Reject, ReasonAdmin, KindNetworkRule, false},
@@ -213,8 +213,8 @@ func TestClassifyAllowedIPs(t *testing.T) {
 		{"::ffff:192.168.0.0/112", open, Ask, ReasonPrivateNetwork},
 		// Without allow_unblock the administrator refuses private ranges.
 		{"10.0.0.0/8", noUnblock, Reject, ReasonAdmin},
-		{"93.184.216.0/24", open, Approve, ReasonOpenNetwork},
-		{"93.184.216.0/24", noUnblock, Approve, ReasonOpenNetwork},
+		{"93.184.216.0/24", open, Approve, ReasonAutoMode},
+		{"93.184.216.0/24", noUnblock, Approve, ReasonAutoMode},
 	} {
 		t.Run(tc.entry, func(t *testing.T) {
 			p := proposal("my-cdn.attacker.example", 443)
@@ -237,8 +237,8 @@ func TestClassifyAllowedIPs(t *testing.T) {
 func TestClassifyRuleShape(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
 	pol := Policy{Effective: open, Feed: testFeed, AgentProposals: true}
-	if got := Classify(FromChunk("box", liveChunk("www.example.net", 443)), pol); got.Verdict != Approve || got.Reason != ReasonOpenNetwork {
-		t.Fatalf("OpenShell's own proposal = %+v, want an automatic approval", got)
+	if got := Classify(FromChunk("box", liveChunk("www.example.net", 443)), pol); got.Verdict != Approve || got.Reason != ReasonAutoMode {
+		t.Fatalf("OpenShell's own proposal = %+v, want an automatic approval (the open pack uses approvals: auto)", got)
 	}
 	for name, edit := range map[string]func(c *openshell.PolicyChunk){
 		"defenseclaw rule": func(c *openshell.PolicyChunk) { c.RuleName = "defenseclaw_egress" },
