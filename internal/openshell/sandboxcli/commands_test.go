@@ -426,7 +426,7 @@ func TestUndoCopyModeRevertsTheLastApply(t *testing.T) {
 	if err := ta.Undo(context.Background(), UndoOptions{Name: "copybox"}); err != nil {
 		t.Fatal(err)
 	}
-	if out := ta.output(); !strings.Contains(out, "nothing to undo: copybox works on a copy, and `pull --apply` has not brought its work into your folder") {
+	if out := ta.output(); !strings.Contains(out, "nothing to undo: copybox works on a copy, and no `pull --apply` of its work is left to revert") {
 		t.Fatalf("output:\n%s", out)
 	}
 	if undoCalls(ta) != 0 {

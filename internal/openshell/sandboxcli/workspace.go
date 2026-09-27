@@ -171,7 +171,7 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 		if stdout != nil {
 			return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: &workspace.UndoApplyResult{Name: sb.Name, Project: sb.Project, Preview: true}})
 		}
-		a.ok("nothing to undo: " + sb.Name + " works on a copy, and `pull --apply` has not brought its work into your folder")
+		a.ok("nothing to undo: " + sb.Name + " works on a copy, and no `pull --apply` of its work is left to revert")
 		a.note("a branch or patch file its work went to is yours to delete")
 		return nil
 	}
