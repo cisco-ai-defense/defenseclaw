@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -215,6 +216,9 @@ const (
 	// sandboxGapComponentScanSkipped: a requested or scheduled component
 	// scan (skills, plugins, MCP) does not run for a sandbox.
 	sandboxGapComponentScanSkipped = "component_scan_skipped"
+	// sandboxGapStopScanDirectoryPath: a Stop scan path was a directory;
+	// directory walking is not yet implemented through FSView.
+	sandboxGapStopScanDirectoryPath = "stop_scan_directory_path"
 )
 
 type sandboxCoverage struct {
@@ -375,8 +379,8 @@ const sandboxHookFileMaxBytes = 8 << 20
 // sandboxCodeGuardScan scans the files named by paths through view, reading
 // each one inside the mounted project only, and returns one ScanResult per
 // readable file. Masked, escaping, missing and non-regular paths are
-// skipped.
-func sandboxCodeGuardScan(view *sandboxauth.FSView, rulesDir string, paths []string) []*scanner.ScanResult {
+// skipped. Directory paths are recorded as a coverage gap.
+func sandboxCodeGuardScan(ctx context.Context, view *sandboxauth.FSView, rulesDir string, paths []string) []*scanner.ScanResult {
 	if view == nil || !view.HostAccess() || len(paths) == 0 {
 		return nil
 	}
@@ -392,6 +396,10 @@ func sandboxCodeGuardScan(view *sandboxauth.FSView, rulesDir string, paths []str
 		started := time.Now()
 		data, _, err := view.ReadFile(p, sandboxHookFileMaxBytes)
 		if err != nil {
+			if errors.Is(err, sandboxauth.ErrNotRegular) {
+				// Directory path: FSView walking is not yet implemented.
+				noteSandboxCoverageGap(ctx, sandboxGapStopScanDirectoryPath)
+			}
 			continue
 		}
 		target := p

@@ -635,14 +635,14 @@ func TestSandboxCodeGuardScanGoesThroughTheView(t *testing.T) {
 	p.write(t, "src/creds.go", "var k = \"AKIA"+"ABCDEFGHIJKLMNOP\"\n", 0o644)
 	fsys := &countingFS{}
 	view := sandboxauth.NewFSView(p.mount, fsys)
-	results := sandboxCodeGuardScan(view, "", []string{"/work/app/src/creds.go", "/work/app/src/creds.go", "", "/etc/passwd"})
+	results := sandboxCodeGuardScan(context.Background(), view, "", []string{"/work/app/src/creds.go", "/work/app/src/creds.go", "", "/etc/passwd"})
 	if len(results) != 1 || results[0].Target != "/work/app/src/creds.go" || len(results[0].Findings) == 0 {
 		t.Fatalf("results = %+v", results)
 	}
 	if fsys.calls == 0 {
 		t.Fatal("scan bypassed the view")
 	}
-	if got := sandboxCodeGuardScan(sandboxauth.NewFSView(p.copy, fsys), "", []string{"/work/app/src/creds.go"}); got != nil {
+	if got := sandboxCodeGuardScan(context.Background(), sandboxauth.NewFSView(p.copy, fsys), "", []string{"/work/app/src/creds.go"}); got != nil {
 		t.Fatalf("copy-mode scan = %+v", got)
 	}
 }

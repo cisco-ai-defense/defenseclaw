@@ -761,7 +761,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if req.sandboxView != nil {
 		// The payload names a sandbox path (or a path under the mapped
 		// working directory); read it only inside the mounted project.
-		results := sandboxCodeGuardScan(req.sandboxView, rulesDir, []string{target})
+		results := sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, []string{target})
 		if len(results) == 0 {
 			noteSandboxCoverageGap(ctx, sandboxGapEventFileUnreadable)
 			return nil
@@ -821,7 +821,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
-		results = sandboxCodeGuardScan(req.sandboxView, rulesDir, targets)
+		results = sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, targets)
 	} else {
 		cg := scanner.NewCodeGuardScanner(rulesDir)
 		for _, target := range targets {

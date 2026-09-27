@@ -3458,7 +3458,7 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
-		results = sandboxCodeGuardScan(req.sandboxView, rulesDir, targets)
+		results = sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, targets)
 	} else {
 		cg := scanner.NewCodeGuardScanner(rulesDir)
 		for _, target := range targets {
