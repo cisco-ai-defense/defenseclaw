@@ -32,7 +32,9 @@ import (
 
 // The test-only marker rules: the E2E marker rule of
 // test/e2e/openshell/testdata/guardrail-e2e-marker.yaml, a rule whose title
-// quotes what it matches, and a secret rule with a harmless pattern.
+// quotes what it matches, a secret rule with a harmless pattern, and a rule
+// whose title matches a built-in command rule pattern to test cross-category
+// title validation.
 func installSandboxMarkerRules(t *testing.T) {
 	t.Helper()
 	resetConnectorRuleCategories(t)
@@ -45,6 +47,7 @@ func installSandboxMarkerRules(t *testing.T) {
 			},
 			{ID: "E2E-QUOTING-TITLE", Pattern: "dce2e-quoted-[0-9]+", Title: "Blocks dce2e-quoted-42", Severity: "HIGH", Confidence: 0.9},
 			{ID: "E2E-SECRET-TITLE", Pattern: "dce2e-other", Title: "Mentions dce2e_secret_7", Severity: "MEDIUM", Confidence: 0.9},
+			{ID: "E2E-CMD-TITLE", Pattern: "dce2e-harmless", Title: "systemctl enable backdoor.service", Severity: "MEDIUM", Confidence: 0.9},
 		}},
 		{Version: 1, Category: "secret", Rules: []guardrail.RuleDefYAML{
 			{ID: "E2E-SECRET", Pattern: "dce2e_secret_[0-9]+", Title: "E2E secret marker", Severity: "HIGH", Confidence: 0.9},
@@ -103,12 +106,14 @@ func TestSandboxVerdictReason(t *testing.T) {
 		{"several rules", "block", []string{"E2E-QUOTING-TITLE", "E2E-SANDBOX-MARKER", "E2E-SANDBOX-MARKER"}, nil,
 			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command (also E2E-QUOTING-TITLE). " +
 				sandboxDefaultRemediation},
-		// A title that quotes what its rule, or a secret rule, matches is
-		// left out.
+		// A title that quotes what its rule, a secret rule, or any other
+		// guardrail rule matches is left out.
 		{"title quoting its own match", "block", []string{"E2E-QUOTING-TITLE"}, nil,
 			"Blocked by DefenseClaw rule E2E-QUOTING-TITLE. " + sandboxDefaultRemediation},
 		{"title matching a secret rule", "block", []string{"E2E-SECRET-TITLE"}, nil,
 			"Blocked by DefenseClaw rule E2E-SECRET-TITLE. " + sandboxDefaultRemediation},
+		{"title matching a command rule", "block", []string{"E2E-CMD-TITLE"}, nil,
+			"Blocked by DefenseClaw rule E2E-CMD-TITLE. " + sandboxDefaultRemediation},
 		{"secret category remediation", "block", []string{"E2E-SECRET"}, nil,
 			"Blocked by DefenseClaw rule E2E-SECRET: E2E secret marker. " + sandboxCategoryRemediation["secret"]},
 		// IDs no catalog knows cannot be told apart from content.

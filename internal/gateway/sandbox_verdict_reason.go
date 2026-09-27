@@ -189,7 +189,7 @@ func lookupSandboxCodeGuardRule(key string) (sandboxRule, bool) {
 
 // sandboxTitleSafe vets a rule-pack title the compiled-in catalog does not
 // vouch for. A pack author can put a literal in a title; a title that the
-// rule itself, or any secret rule, would match is left out.
+// rule itself, or any other rule in the catalog, would match is left out.
 func sandboxTitleSafe(title string, rule PatternRule, gen *compiledRulePackCategories) bool {
 	if title == "" || len(title) > sandboxReasonMaxTitle || !utf8.ValidString(title) {
 		return false
@@ -203,11 +203,8 @@ func sandboxTitleSafe(title string, rule PatternRule, gen *compiledRulePackCateg
 		return false
 	}
 	for _, category := range gen.categories {
-		if category.Name != "secret" {
-			continue
-		}
-		for _, secret := range category.Rules {
-			if secret.Pattern != nil && secret.Pattern.MatchString(title) {
+		for _, otherRule := range category.Rules {
+			if otherRule.Pattern != nil && otherRule.Pattern.MatchString(title) {
 				return false
 			}
 		}
