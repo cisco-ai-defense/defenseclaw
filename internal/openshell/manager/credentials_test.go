@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -81,7 +82,7 @@ func TestPlanCredentials(t *testing.T) {
 	for name, list := range map[string][]sandboxapi.CredentialBinding{
 		"duplicate":        {{Name: "A", Value: "1", Host: "a.example"}, {Name: "A", Value: "2", Host: "b.example"}},
 		"reserved":         {{Name: "ANTHROPIC_API_KEY", Value: "1", Host: "a.example"}},
-		"defenseclaw":      {{Name: "DEFENSECLAW_X", Value: "1", Host: "a.example"}},
+		"defenseclaw":      {{Name: openshell.EnvSandboxToken, Value: "1", Host: "a.example"}},
 		"bad host":         {{Name: "A", Value: "1", Host: "https://a.example"}},
 		"wildcard":         {{Name: "A", Value: "1", Host: "*.example.com"}},
 		"blocklisted":      {{Name: "A", Value: "1", Host: "webhook.site"}},
