@@ -224,6 +224,11 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   comes back to you as a pending ask. The proposal is not rejected.
 - Every reconcile, about every 5 minutes, removes approved rules whose
   names now resolve to this machine.
+- Every configuration change and every reconcile removes approved rules
+  the policy now refuses: destinations the administrator blocked or left off
+  an allow-only list, and destinations a block list (yours or the pack's) or
+  the blocklist feed now refuses with no unblock lifting it. Rules to host
+  ports and private networks you approved stay.
 - A proposal's `allowed_ips` are judged as whole ranges against the same
   guard (`packs.Effective.AllowedIPReach`), because with `allowed_ips` set
   OpenShell skips its own private-address check for the rule and the name

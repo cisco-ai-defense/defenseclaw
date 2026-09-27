@@ -254,8 +254,11 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 // enforceApprovedRules removes the approved OpenShell rules the current
 // policy would refuse to approve now: destinations the administrator
 // blocked or left off an allow-only list, host ports and private networks
-// the administrator closed, what DefenseClaw never opens, and names that
-// now resolve to this machine (the proxy's dial-time guard, re-applied on
+// the administrator closed, what DefenseClaw never opens, destinations the
+// sandbox's egress decider now refuses by a block list or the blocklist
+// feed with no unblock lifting it (the user's or the pack's block list, a
+// new feed entry, an "always" unblock taken back), and names that now
+// resolve to this machine (the proxy's dial-time guard, re-applied on
 // every reconcile). Approved rules bypass the egress proxy, so an
 // administrator change or a changed DNS answer must reach them too. Only
 // triaged rules (allow_*) are judged; DefenseClaw renders its own and the
@@ -273,10 +276,14 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		return
 	}
 	var ops []openshell.PolicyMergeOperation
-	var removed, rebound, unbound []string
+	var removed, blocked, rebound, unbound []string
 	var pol triage.Policy
+	var decider *egress.Decider
 	if eff != nil {
 		pol = m.triagePolicy(b, eff)
+		if decider = pol.Decider; decider == nil {
+			decider, _ = eff.EgressDecider(nil)
+		}
 	}
 	// The DNS re-check runs on the reconcile path: a slow resolver skips
 	// the rest of it (keeping the rules) rather than stalling the loop.
@@ -292,6 +299,8 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			unbound = append(unbound, ruleName)
 		case orgRefusal(triage.CheckProposal(eff, p, false)):
 			removed = append(removed, ruleName)
+		case blocklisted(decider, pol.Principal, p):
+			blocked = append(blocked, ruleName)
 		case triage.ResolvesToHost(dnsCtx, p, pol):
 			rebound = append(rebound, ruleName)
 		default:
@@ -303,12 +312,15 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		return
 	}
 	sort.Strings(removed)
+	sort.Strings(blocked)
 	sort.Strings(rebound)
 	sort.Strings(unbound)
-	all := append(append(append([]string{}, removed...), rebound...), unbound...)
+	all := append(append(append(append([]string{}, removed...), blocked...), rebound...), unbound...)
 	reason, code := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation)
 	switch {
 	case len(removed) > 0:
+	case len(blocked) > 0:
+		reason, code = "blocklist", "SANDBOX_RULE_BLOCKLISTED"
 	case len(rebound) > 0:
 		reason, code = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST"
 	default:
@@ -334,7 +346,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	for _, list := range []struct {
 		rules  []string
 		reason string
-	}{{removed, policyReasonAdmin}, {rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
+	}{{removed, policyReasonAdmin}, {blocked, policyReasonBlocklist}, {rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
 		for _, rule := range list.rules {
 			ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
 				Target: rule, Reason: list.reason, ChangeCount: 1, Timestamp: m.now()}
@@ -350,6 +362,11 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: "admin_policy", Message: fmt.Sprintf("removed %d approved rule(s) %s", len(removed), sandboxapi.AdminMessage)})
 	}
+	if len(blocked) > 0 {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Reason: string(triage.ReasonBlocklisted), Message: fmt.Sprintf(
+				"removed %d approved rule(s) to destinations now on the egress block list: %s", len(blocked), strings.Join(blocked, ", "))})
+	}
 	if len(rebound) > 0 {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: string(triage.ReasonResolvesToHost), Message: fmt.Sprintf(
@@ -360,6 +377,29 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			Reason: policyUnresolvedReason, Message: fmt.Sprintf(
 				"removed %d approved rule(s): neither the sandbox's nor your organization's policy can be resolved", len(unbound))})
 	}
+}
+
+// blocklisted reports a proposal with a destination the sandbox's decider
+// refuses by a block list (the administrator's, the user's, the pack's)
+// or the blocklist feed, with no unblock lifting it: triage rejects such a
+// proposal, so a rule approved before the block must go too. Refusals of
+// the proxy's guard (this machine, private networks) are not judged here:
+// the user may have approved those doors on purpose.
+func blocklisted(d *egress.Decider, pr egress.Principal, p triage.Proposal) bool {
+	if d == nil {
+		return false
+	}
+	for _, ep := range p.Endpoints {
+		host := triage.NormalizeHost(ep.Host)
+		if host == "" || triage.IsHostLocal(host) {
+			continue
+		}
+		dec := d.DecideHost(pr, host)
+		if !dec.Allowed && (dec.Source == egress.SourceAdmin || dec.Source == egress.SourceOperator || dec.Source == egress.SourceFeed) {
+			return true
+		}
+	}
+	return false
 }
 
 // enforceDNSBudget bounds the DNS re-check of one sandbox's approved rules.

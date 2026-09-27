@@ -17,9 +17,11 @@
 package manager
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -53,6 +55,36 @@ func hasRule(e *harnessEnv, sandbox, rule string) bool {
 	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sandbox)
 	_, ok := policy.NetworkPolicies[rule]
 	return ok
+}
+
+// TestBlockListRemovesApprovedRules pins that a destination the user adds
+// to the block list loses the approved direct rules it already has: they
+// bypass the proxy that now blocks it. Rules to other destinations stay.
+func TestBlockListRemovesApprovedRules(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	drop := approvedRule(t, e, "blkbox", "drop.example.org")
+	id := addChunk(e, "blkbox", chunk("allow_keep_example_org_443", "keep.example.org", 443))
+	e.watch.push(t, "blkbox", stream.Event{Kind: stream.KindDraft})
+	eventually(t, "second approval applied", func() bool { return chunkStatus(e, "blkbox", id) == "approved" })
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"drop.example.org"} })
+	e.m.enforceAll(context.Background())
+	if hasRule(e, "blkbox", drop) {
+		t.Fatal("the rule to the blocked destination is still in the policy")
+	}
+	if !hasRule(e, "blkbox", "allow_keep_example_org_443") {
+		t.Fatal("a rule to another destination was removed")
+	}
+	var recorded bool
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		recorded = recorded || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == drop && p.Reason == policyReasonBlocklist)
+	}
+	e.tel.mu.Unlock()
+	if !recorded {
+		t.Fatal("no rule_remove record for the blocked destination")
+	}
 }
 
 // TestConfigChangeIsEnforcedAfterAnEgressRefresh pins that an

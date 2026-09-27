@@ -512,6 +512,9 @@ const (
 	// policyReasonAdmin: an approved rule the organization's policy now
 	// refuses was removed.
 	policyReasonAdmin = "admin_policy"
+	// policyReasonBlocklist: an approved rule to a destination a block list
+	// or the blocklist feed now refuses was removed.
+	policyReasonBlocklist = "egress_blocklist"
 	// policyReasonResolvesToHost: an approved rule whose destination now
 	// resolves to this machine was removed.
 	policyReasonResolvesToHost = "rule_resolves_to_host"
