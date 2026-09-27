@@ -8,7 +8,7 @@ pre-use scanning, block/allow policy, and an operator alert surface layered over
 OpenClaw and OpenShell. The implemented product has since expanded and changed
 its connector, configuration, observability, packaging, and release contracts.
 The legacy standalone OpenShell sandbox integration was removed; see
-[`../SANDBOX.md`](../SANDBOX.md).
+[`../SANDBOX.md`](../SANDBOX.md#hosts-that-still-have-the-legacy-install).
 
 Use current authorities instead:
 

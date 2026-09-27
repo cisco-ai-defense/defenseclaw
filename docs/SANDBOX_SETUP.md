@@ -1,10 +1,14 @@
 # Sandbox setup
 
-There is no sandbox setup procedure in this release. The legacy standalone
-sandbox (`openshell-sandbox` 0.0.x) was removed. To remove it from a Linux host
-that still has it, follow the
+There is no sandbox setup procedure yet. NVIDIA OpenShell 0.1 sandbox support
+is being rebuilt and is not available to operators. Its architecture and
+supported platforms are in [SANDBOX.md](SANDBOX.md), and the telemetry it will
+emit is described in [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
+
+The legacy standalone sandbox (`openshell-sandbox` 0.0.x) was removed. To
+remove it from a Linux host that still has it, see
+[hosts that still have the legacy install](SANDBOX.md#hosts-that-still-have-the-legacy-install)
+and the
 [published legacy sandbox cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/).
-See [SANDBOX.md](SANDBOX.md) for a summary. Support for NVIDIA OpenShell 0.1 is
-coming in a future release.
 
 This compatibility file remains so existing repository links do not break.
