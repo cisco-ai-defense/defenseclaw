@@ -64,12 +64,12 @@ func wantPackError(t *testing.T, err error, code, field string) *Error {
 
 func TestBuiltinPacksLoad(t *testing.T) {
 	want := map[string]struct {
-		profile, approvals, workspace string
-		yolo, mcpImport, hostPorts    bool
+		profile, approvals, workspace, onTamper string
+		yolo, mcpImport, hostPorts              bool
 	}{
-		"open":     {"open", ApprovalsAuto, "mount", true, true, true},
-		"balanced": {"balanced", ApprovalsTriage, "mount", true, true, true},
-		"strict":   {"strict", ApprovalsManual, "copy", false, false, false},
+		"open":     {"open", ApprovalsAuto, "mount", OnTamperAlert, true, true, true},
+		"balanced": {"balanced", ApprovalsTriage, "mount", OnTamperStop, true, true, true},
+		"strict":   {"strict", ApprovalsManual, "copy", OnTamperStop, false, false, false},
 	}
 	if got := BuiltinNames(); !reflect.DeepEqual(got, []string{"open", "balanced", "strict"}) {
 		t.Fatalf("BuiltinNames() = %v", got)
@@ -91,8 +91,11 @@ func TestBuiltinPacksLoad(t *testing.T) {
 			if pack.Harness.Yolo != w.yolo || pack.MCP.Import != w.mcpImport || pack.MCP.HostPorts != w.hostPorts {
 				t.Fatalf("switches = yolo %v import %v host_ports %v", pack.Harness.Yolo, pack.MCP.Import, pack.MCP.HostPorts)
 			}
-			if pack.Hooks.FailMode != FailModeClosed || !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
-				t.Fatalf("hooks %q feeds %v", pack.Hooks.FailMode, pack.Egress.Feeds)
+			if pack.Hooks.FailMode != FailModeClosed || pack.Hooks.OnTamper != w.onTamper {
+				t.Fatalf("hooks fail_mode=%q on_tamper=%q, want on_tamper=%q", pack.Hooks.FailMode, pack.Hooks.OnTamper, w.onTamper)
+			}
+			if !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
+				t.Fatalf("feeds %v", pack.Egress.Feeds)
 			}
 			for _, file := range []string{
 				".env", ".env.local", ".env.prod", ".env.dev", ".env.production.local", "server.pem",
