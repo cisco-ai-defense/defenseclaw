@@ -452,6 +452,15 @@ func TestDoctorLingerAndService(t *testing.T) {
 		f.runner.On("systemctl --user show openshell-gateway", "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\n", nil)
 		expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusWarn, "does not start at login")
 	})
+	t.Run("service only linked", func(t *testing.T) {
+		// `systemctl --user link` without enable: nothing starts it at login.
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("active", "linked"), nil)
+		c := expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusWarn, "does not start at login")
+		if c.Fix.Command != "systemctl --user enable --now openshell-gateway" || !c.Fix.Automatic {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+	})
 	t.Run("no user bus", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.runner.On("systemctl --user show openshell-gateway", "Failed to connect to bus: No medium found", errors.New("exit status 1"))

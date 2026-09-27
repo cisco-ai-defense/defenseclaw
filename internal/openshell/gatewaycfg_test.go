@@ -782,6 +782,16 @@ func TestGatewayServiceState(t *testing.T) {
 			t.Fatalf("environment = %v, want %v", st.Environment, want)
 		}
 	})
+	t.Run("systemd unit only linked or enabled until reboot", func(t *testing.T) {
+		for _, state := range []string{"linked", "linked-runtime", "enabled-runtime", "disabled", "static"} {
+			f := newGatewayFixture(t)
+			f.unit = systemdUnit("active", state, time.Time{}, "")
+			st, err := f.cfg.ServiceState(context.Background())
+			if err != nil || st.Enabled || !st.Active {
+				t.Fatalf("UnitFileState=%s: state = %+v, %v", state, st, err)
+			}
+		}
+	})
 	t.Run("systemd unit missing", func(t *testing.T) {
 		f := newGatewayFixture(t)
 		f.runner.On("systemctl --user show openshell-gateway", "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nActiveEnterTimestamp=\n", nil)

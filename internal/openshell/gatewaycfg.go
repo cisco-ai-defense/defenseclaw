@@ -803,10 +803,12 @@ type ServiceState struct {
 	Manager string `json:"manager"`
 	Unit    string `json:"unit"`
 	// Installed is false when the manager does not know the service.
-	Installed bool   `json:"installed"`
-	Active    bool   `json:"active"`
-	Enabled   bool   `json:"enabled"`
-	Status    string `json:"status"`
+	Installed bool `json:"installed"`
+	Active    bool `json:"active"`
+	// Enabled reports whether the service starts at login. A unit that is
+	// only linked, or enabled until the next reboot, does not.
+	Enabled bool   `json:"enabled"`
+	Status  string `json:"status"`
 	// StartedAt is when the service last became active, to the
 	// microsecond (zero: unknown, as under Homebrew).
 	StartedAt time.Time `json:"started_at"`
@@ -855,7 +857,9 @@ func (g *GatewayConfigurator) ServiceState(ctx context.Context) (*ServiceState, 
 	}
 	st.Installed = props["LoadState"] == "loaded"
 	st.Active = props["ActiveState"] == "active"
-	st.Enabled = props["UnitFileState"] == "enabled" || props["UnitFileState"] == "linked"
+	// Only "enabled" survives a reboot: "linked" units have no Wants
+	// symlink, and "enabled-runtime" ones lose theirs with /run.
+	st.Enabled = props["UnitFileState"] == "enabled"
 	st.Status = strings.TrimSpace(props["ActiveState"] + " (" + props["SubState"] + ")")
 	if t, err := time.Parse(systemdTimestamp, props["ActiveEnterTimestamp"]); err == nil {
 		st.StartedAt = t
