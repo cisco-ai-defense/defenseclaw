@@ -260,6 +260,9 @@ func TestExecAndLogs(t *testing.T) {
 	ta.IO.TTY = false
 	ta.stream.answer = func(argv []string) (int, string) {
 		cmd := sandboxCommand(argv)
+		if cmd[0] == harness.SandboxEnvPath {
+			cmd = cmd[1:]
+		}
 		switch {
 		case cmd[0] == "tail":
 			return 0, "log line\n"
@@ -282,7 +285,7 @@ func TestExecAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmds := ta.stream.commands()
-	if !slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "tail -n 50 "+RunDir+"/latest.log") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+	if !slices.Contains(cmds, harness.SandboxEnvPath+" ls -la") || slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "tail -n 50 "+RunDir+"/latest.log") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
 		return isRunStatus(sandboxCommand(argv))
 	}) {
 		t.Fatalf("commands = %q", cmds)

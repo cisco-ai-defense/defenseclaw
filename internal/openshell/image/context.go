@@ -127,7 +127,8 @@ type Context struct {
 	HarnessVersion string
 	Contract       string
 	Artifacts      connector.SandboxArtifacts
-	// ImageFiles are the connector artifacts plus the harness launcher.
+	// ImageFiles are the connector artifacts plus the harness launcher and
+	// its shell environment files (harness.Spec.ShellFiles).
 	ImageFiles []ImageFile
 	// Dirs are the DefenseClaw-owned directories that must be root 0755.
 	Dirs []string
@@ -153,7 +154,7 @@ var (
 
 // systemDirs are never re-owned or re-moded by the overlay.
 var systemDirs = map[string]bool{
-	"/": true, "/etc": true, "/usr": true, "/usr/local": true, "/usr/local/lib": true, "/opt": true,
+	"/": true, "/etc": true, "/etc/profile.d": true, "/usr": true, "/usr/local": true, "/usr/local/lib": true, "/opt": true,
 	connector.SandboxHomeDir: true,
 }
 
@@ -213,6 +214,7 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	c := &Context{Spec: spec, HarnessVersion: version, Contract: artifacts.HookContract, Artifacts: artifacts}
 	sources := append([]connector.SandboxFile(nil), artifacts.Files...)
 	sources = append(sources, spec.Harness.Launcher())
+	sources = append(sources, spec.Harness.ShellFiles()...)
 	dirSet := map[string]bool{}
 	userDirSet := map[string]bool{}
 	for _, f := range sources {

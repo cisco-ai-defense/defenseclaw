@@ -349,7 +349,8 @@ type ExecOptions struct {
 	Command []string
 }
 
-// Exec runs a command in a sandbox.
+// Exec runs a command in a sandbox, through the image's sandbox-env
+// wrapper (harness.SandboxEnvPath).
 func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	a.defaults()
 	if len(o.Command) == 0 {
@@ -372,7 +373,11 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	}
 	cli := a.cli(gateway)
 	tty := (a.IO.TTY || o.TTY) && !o.NoTTY
-	inv, err := cli.Exec(sb.Name, o.Command, openshell.CLIExecOptions{TTY: tty, WorkDir: firstNonEmpty(o.Workdir, sb.Workdir)})
+	// OpenShell starts the command without a login shell; the image's
+	// wrapper gives it the egress proxy and the harness shim the connect
+	// shell gets from /etc/profile.d.
+	command := append([]string{harness.SandboxEnvPath}, o.Command...)
+	inv, err := cli.Exec(sb.Name, command, openshell.CLIExecOptions{TTY: tty, WorkDir: firstNonEmpty(o.Workdir, sb.Workdir)})
 	if err != nil {
 		return err
 	}

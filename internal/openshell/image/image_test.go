@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -233,9 +234,36 @@ func TestDockerfileShape(t *testing.T) {
 	if !strings.HasSuffix(df, "USER sandbox\n") {
 		t.Error("Dockerfile must end as the unprivileged image user")
 	}
-	wantDirs := []string{"/etc/claude-code", "/etc/claude-code/managed-settings.d", "/usr/local/lib/defenseclaw", "/usr/local/lib/defenseclaw/bin", "/usr/local/lib/defenseclaw/hooks"}
+	wantDirs := []string{"/etc/claude-code", "/etc/claude-code/managed-settings.d", "/usr/local/lib/defenseclaw", "/usr/local/lib/defenseclaw/bin", "/usr/local/lib/defenseclaw/hooks", "/usr/local/lib/defenseclaw/shims"}
 	if strings.Join(c.Dirs, " ") != strings.Join(wantDirs, " ") {
 		t.Fatalf("dirs = %v", c.Dirs)
+	}
+}
+
+// TestContextCarriesShellEnvironment: every image carries the login-shell
+// profile, the sandbox exec wrapper and the harness shim, root-owned, and
+// leaves the system /etc/profile.d directory alone.
+func TestContextCarriesShellEnvironment(t *testing.T) {
+	for _, name := range harness.Names() {
+		spec, _ := harness.Get(name)
+		c := mustContext(t, testSpec(spec))
+		want := map[string]os.FileMode{harness.SandboxProfilePath: 0o644, harness.SandboxEnvPath: 0o755, spec.ShimPath(): 0o755}
+		for _, f := range c.ImageFiles {
+			mode, ok := want[f.Path]
+			if !ok {
+				continue
+			}
+			if f.Owner != connector.SandboxOwnerRoot || f.UID != 0 || f.Mode != mode {
+				t.Errorf("%s: %s owner %s uid %d mode %v", name, f.Path, f.Owner, f.UID, f.Mode)
+			}
+			delete(want, f.Path)
+		}
+		if len(want) > 0 {
+			t.Errorf("%s image lacks %v", name, want)
+		}
+		if slices.Contains(c.Dirs, "/etc/profile.d") {
+			t.Errorf("%s image re-owns /etc/profile.d", name)
+		}
 	}
 }
 

@@ -1,0 +1,205 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package harness
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+)
+
+const testEgressProxy = "http://dcx-0123456789abcdef:0123abcd@host.openshell.internal:18972"
+
+// shellEnvRecord is a shell fragment that prints the proxy variables and
+// PATH, one NAME=value per line ("<unset>" when absent).
+const shellEnvRecord = `for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy PATH BASH_ENV NODE_OPTIONS; do
+  eval "printf '%s=%s\n' \"\$v\" \"\${$v-<unset>}\""
+done
+`
+
+func shellEnvLines(out string) map[string]string {
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			got[key] = value
+		}
+	}
+	return got
+}
+
+func shellFile(t *testing.T, spec *Spec, path string) connector.SandboxFile {
+	t.Helper()
+	for _, f := range spec.ShellFiles() {
+		if f.Path == path {
+			return f
+		}
+	}
+	t.Fatalf("%s shell files lack %s", spec.Name, path)
+	return connector.SandboxFile{}
+}
+
+// TestShellFilesParse keeps every shell file valid for the shell that runs
+// it: the profile fragment for POSIX sh (a login shell may be dash), the
+// wrapper and the shims for their shebang.
+func TestShellFilesParse(t *testing.T) {
+	for _, name := range Names() {
+		spec, _ := Get(name)
+		for _, f := range spec.ShellFiles() {
+			if f.Owner != connector.SandboxOwnerRoot {
+				t.Errorf("%s %s is not root-owned", name, f.Path)
+			}
+			shells := []string{"/bin/sh"}
+			if strings.HasPrefix(string(f.Data), "#!/bin/bash") {
+				shells = []string{"/bin/bash"}
+				if !strings.HasPrefix(string(f.Data), "#!/bin/bash -p\n") {
+					t.Errorf("%s %s must run under bash -p", name, f.Path)
+				}
+			}
+			for _, sh := range shells {
+				if _, err := os.Stat(sh); err != nil {
+					continue
+				}
+				cmd := exec.Command(sh, "-n")
+				cmd.Stdin = strings.NewReader(string(f.Data))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Errorf("%s %s under %s: %v\n%s", name, f.Path, sh, err, out)
+				}
+			}
+		}
+		shim := shellFile(t, spec, spec.ShimPath())
+		if spec.ShimPath() != ShimDir+"/"+spec.Command || !strings.Contains(string(shim.Data), "\nexec "+spec.LauncherPath()+" \"$@\"\n") {
+			t.Errorf("%s shim does not start %s:\n%s", name, spec.LauncherPath(), shim.Data)
+		}
+	}
+}
+
+// TestSandboxProfileExportsTheProxy sources the login-shell profile the
+// way /etc/profile does: the DefenseClaw proxy replaces the caller's, a
+// malformed one and a strict sandbox (no proxy) leave the caller's
+// environment alone, and the shim directory leads PATH once.
+func TestSandboxProfileExportsTheProxy(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is required")
+	}
+	profile := filepath.Join(t.TempDir(), "defenseclaw-sandbox.sh")
+	if err := os.WriteFile(profile, shellFile(t, ClaudeCode, SandboxProfilePath).Data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(env ...string) map[string]string {
+		t.Helper()
+		cmd := exec.Command("/bin/sh", "-c", ". "+profile+"\n. "+profile+"\n"+shellEnvRecord)
+		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, env...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("profile: %v\n%s", err, out)
+		}
+		return shellEnvLines(string(out))
+	}
+	bypass := "api.anthropic.com,host.openshell.internal"
+	got := run("HTTPS_PROXY=http://elsewhere:1", openshell.EnvEgressURL+"="+testEgressProxy, openshell.EnvEgressBypass+"="+bypass)
+	for key, want := range map[string]string{
+		"HTTPS_PROXY": testEgressProxy, "HTTP_PROXY": testEgressProxy, "https_proxy": testEgressProxy, "http_proxy": testEgressProxy,
+		"NODE_USE_ENV_PROXY": "1", "NO_PROXY": bypass, "no_proxy": bypass, "PATH": ShimDir + ":/usr/bin:/bin",
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != connector.SandboxIngressHost {
+		t.Errorf("NO_PROXY without a bypass list = %q", got["NO_PROXY"])
+	}
+	for _, env := range [][]string{
+		{"HTTPS_PROXY=http://elsewhere:1", openshell.EnvEgressURL + "=http://x y@host:1"},
+		{"HTTPS_PROXY=http://elsewhere:1"},
+	} {
+		got := run(env...)
+		if got["HTTPS_PROXY"] != "http://elsewhere:1" || got["https_proxy"] != "<unset>" || got["NODE_USE_ENV_PROXY"] != "<unset>" {
+			t.Errorf("%v: the caller's proxy settings changed: %v", env, got)
+		}
+	}
+}
+
+// TestSandboxEnvRunsTheCommand starts a command through the sandbox exec
+// wrapper: it gets the launchers' environment (shim directory, then the
+// system directories, first on PATH; the DefenseClaw proxy; no shell
+// start-up or Node loader variables) and its own arguments, and the wrapper
+// refuses to run without a command.
+func TestSandboxEnvRunsTheCommand(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	dir := t.TempDir()
+	wrapper := filepath.Join(dir, "sandbox-env")
+	if err := os.WriteFile(wrapper, shellFile(t, Codex, SandboxEnvPath).Data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startup := filepath.Join(dir, "startup")
+	if err := os.WriteFile(startup, []byte("echo sourced-startup-file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(wrapper, "/bin/sh", "-c", shellEnvRecord+`printf 'ARGS=%s\n' "$*"`, "sh", "one", "two words")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "BASH_ENV=" + startup, "NODE_OPTIONS=--require=/tmp/x.js",
+		openshell.EnvEgressURL + "=" + testEgressProxy, openshell.EnvEgressBypass + "=host.openshell.internal"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox-env: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "sourced-startup-file") {
+		t.Errorf("a start-up file ran:\n%s", out)
+	}
+	got := shellEnvLines(string(out))
+	for key, want := range map[string]string{
+		"HTTPS_PROXY": testEgressProxy, "http_proxy": testEgressProxy, "NODE_USE_ENV_PROXY": "1", "NO_PROXY": "host.openshell.internal",
+		"PATH": ShimDir + ":" + LauncherSystemPATH + ":/usr/bin:/bin", "BASH_ENV": "<unset>", "NODE_OPTIONS": "<unset>", "ARGS": "one two words",
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+	bare := exec.Command(wrapper)
+	bare.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := bare.CombinedOutput(); err == nil || !strings.Contains(string(out), "usage: sandbox-env") {
+		t.Errorf("sandbox-env without a command: %v\n%s", err, out)
+	}
+}
+
+// TestShimStartsTheLauncher runs a harness shim with its launcher replaced
+// by a stub that records its arguments.
+func TestShimStartsTheLauncher(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is required")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "launch")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s|' \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(dir, "opencode")
+	body := strings.ReplaceAll(string(shellFile(t, OpenCode, OpenCode.ShimPath()).Data), OpenCode.LauncherPath(), stub)
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(shim, "run", "--auto", "a b").CombinedOutput()
+	if err != nil || string(out) != "run|--auto|a b|" {
+		t.Fatalf("shim: %v %q", err, out)
+	}
+}

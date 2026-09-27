@@ -147,17 +147,44 @@ never reaches the main listener.
 The harness spec builds the environment passed to `openshell sandbox create
 --env` (`harness.Spec.Env`):
 
-- `HTTPS_PROXY`, `HTTP_PROXY` and their lowercase forms point at
+- `DEFENSECLAW_EGRESS_URL` is
   `http://<user>:<secret>@host.openshell.internal:<egress_port>`, and
-  `NODE_USE_ENV_PROXY=1` makes Node's `fetch` honour them. The strict profile
-  sets no proxy.
-- `NO_PROXY` and `no_proxy` list `host.openshell.internal` plus the provider
-  hosts of the harness's credential profile, so hooks reach the ingress
-  directly and LLM calls stay on OpenShell's provider rules.
+  `DEFENSECLAW_EGRESS_BYPASS` lists `host.openshell.internal` plus the
+  provider hosts of the harness's credential profile, so hooks reach the
+  ingress directly and LLM calls stay on OpenShell's provider rules. The
+  strict profile sets no proxy. `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
+  (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
+  OpenShell 0.1.1 drops them at create, so the workload gets them from the
+  shell fragment below.
 - `DEFENSECLAW_SANDBOX_ID` and `DEFENSECLAW_SANDBOX_NAME` identify the
   sandbox. The ID is also meant to tell a nested DefenseClaw launch that it
   already runs sandboxed.
 - The connector's startup variables (see [overlay images](#overlay-images)).
+
+One shell fragment (`egressEnvScript` in
+`internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and
+`NODE_USE_ENV_PROXY=1` from those two variables, only for a well-formed
+`http://` URL and in place of any proxy settings the caller's environment
+carries. It runs wherever a process starts in a DefenseClaw image:
+
+| Start | How it gets the proxy |
+| --- | --- |
+| The harness (`sandbox run`, `sandbox connect`, a vendor login) | Its root-owned launcher, `/usr/local/lib/defenseclaw/bin/<connector>-launch`, runs the fragment first. Every tool the harness runs inherits it. |
+| A `sandbox connect --shell` shell, or `openshell sandbox exec` with its default login shell | `/etc/profile` sources the root-owned `/etc/profile.d/defenseclaw-sandbox.sh`. |
+| `defenseclaw-gateway sandbox exec` | OpenShell starts it without a login shell, so the CLI runs the command through the root-owned `/usr/local/lib/defenseclaw/bin/sandbox-env`, which also drops the shell start-up and Node loader variables the launchers drop. |
+
+The profile fragment and `sandbox-env` also put
+`/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
+after the harness command (`claude`, `codex`, `opencode`, `copilot`, …) that
+starts the launcher, so typing the harness name in a connect or exec shell
+gets the launcher's protections too. What none of them covers: a program
+started by its absolute path (`/usr/local/bin/<command>`), a child started
+with an emptied environment (`env -i`), `openshell sandbox exec
+--no-login-shell` used directly, and a harness run nested inside a tool
+call, which inherits the proxy but skips the launcher's per-start checks.
+The daemon's own `sandbox exec` probes run without the fragment and need no
+proxy.
 
 A client that ignores `HTTPS_PROXY` and connects directly is denied by
 OpenShell, which then files a draft policy proposal. `internal/openshell/triage`
@@ -1186,14 +1213,18 @@ repository can switch the hooks off:
 Every sandbox invocation starts the harness through a root-owned launcher
 (`/usr/local/lib/defenseclaw/bin/<connector>-launch`). The launcher refuses
 the switches that would run the harness without its hooks, puts the system
-directories first on `PATH`, exports the egress proxy settings, and drops
-`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH` and `GLOBIGNORE` from the
-harness environment. Harnesses run hooks and tool commands through bash, which
-reads the file `BASH_ENV` names before the command, so one `export` in a shell
-start-up file the agent can edit would otherwise run inside every hook, or end
-it with exit 0 (allow). Starting the pinned binary directly, for example from
-a connect shell or as a nested run inside a tool call, skips the launcher and
-everything it does.
+directories first on `PATH`, switches Node's compile cache off, exports the
+egress proxy settings (see [paths out of the workload](#paths-out-of-the-workload)),
+and drops `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`,
+`NODE_OPTIONS` and `NODE_PATH` from the harness environment. Harnesses run
+hooks and tool commands through bash, which reads the file `BASH_ENV` names
+before the command, so one `export` in a shell start-up file the agent can
+edit would otherwise run inside every hook, or end it with exit 0 (allow).
+Typing the harness command in a connect or exec shell starts the launcher
+through the shim on `PATH`. Starting the pinned binary by its absolute path,
+or as a nested run inside a tool call (where the system directories lead
+`PATH`), skips the launcher and everything it does, apart from the
+environment the nested run inherits.
 
 A connector is **verified** when its image passes the hook-fire probe (the
 harness runs headless against the built-in mock LLM, its hooks reach a
@@ -1588,7 +1619,8 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |
 | A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted but covers only hosts with three or more labels. | The egress rule allows every binary; there is no catch-all host rule. |
 | curl, Node `fetch` (with `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS and Python urllib all honour `HTTPS_PROXY` through the relay. | The proxy environment covers the common tools. |
-| `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | DefenseClaw also passes the proxy URL and bypass list as `DEFENSECLAW_EGRESS_URL` and `DEFENSECLAW_EGRESS_BYPASS`, which do arrive, and every harness launcher exports the standard variables from them. The harness and every tool it runs then use the proxy: a plain `curl` in a tool call reaches example.org through it. A shell that did not start through a launcher (`sandbox exec`, a connect shell) still has no proxy settings. |
+| `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | DefenseClaw also passes the proxy URL and bypass list as `DEFENSECLAW_EGRESS_URL` and `DEFENSECLAW_EGRESS_BYPASS`, which do arrive, and one shell fragment exports the standard variables from them in every launcher, the login-shell profile and the `sandbox exec` wrapper (see [paths out of the workload](#paths-out-of-the-workload)). |
+| `openshell sandbox exec` sources the login and profile files by default; `--no-login-shell` skips them. `sandbox connect` opens a login shell. | DefenseClaw's own execs pass `--no-login-shell`; the proxy for interactive shells comes from `/etc/profile.d`, and `defenseclaw-gateway sandbox exec` wraps its command instead. |
 | A direct connection to an unknown host is refused (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`) and a draft proposal is filed. The metadata address is denied. | Non-proxy-aware clients surface as proposals for triage. |
 
 ### Credentials

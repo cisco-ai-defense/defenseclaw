@@ -68,14 +68,8 @@ var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "
 
 // launcherPreamble is the environment set-up every launcher runs first:
 // system directories lead PATH, Node's compile cache is off, and the egress
-// proxy settings are exported from openshell.EnvEgressURL and
-// openshell.EnvEgressBypass, the names that survive sandbox creation
-// (OpenShell 0.1.1 drops every *_PROXY variable and NODE_USE_ENV_PROXY passed
-// at create). A well-formed http:// proxy URL replaces any proxy settings the
-// caller's environment carries, so the harness and every tool it runs go
-// through the DefenseClaw proxy; without one the caller's environment is left
-// alone. The proxy is a convenience path, not the boundary: OpenShell refuses
-// direct egress the policy does not allow either way.
+// proxy is exported (egressEnvScript, which the sandbox's login shells and
+// `sandbox exec` commands run too; see shellenv.go).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
 // own module.enableCompileCache) says, which for the Cursor Agent wrapper is
@@ -89,19 +83,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-# OpenShell drops the standard proxy variables passed at sandbox creation;
-# DefenseClaw passes them under its own names.
-case "${` + openshell.EnvEgressURL + `:-}" in
-  http://*[!A-Za-z0-9:@._/-]*) ;;
-  http://?*)
-    HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
-    https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
-    NODE_USE_ENV_PROXY=1
-    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
-    export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy
-    ;;
-esac
-`
+` + egressEnvScript
 
 // launcherExec is the launcher's last line: exec command (the pinned binary
 // and its arguments, in shell syntax) without the shell start-up variables.
