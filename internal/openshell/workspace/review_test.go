@@ -209,6 +209,26 @@ func TestReviewPlainFolder(t *testing.T) {
 	}
 }
 
+func TestReviewPlainFolderTopLevelGit(t *testing.T) {
+	// p1a-20: a top-level .git planted by the agent in a non-git folder must
+	// be detected and flagged as critical.
+	e := newEnv(t)
+	writeFile(t, e.project, "README.md", "plain folder\n")
+	mustSnapshot(t, e, "p2")
+	// Agent creates a .git directory at the top level
+	e.git(e.project, "init", "-q", e.project)
+	writeFile(t, e.project, ".git/config", "[core]\n\tfsmonitor = /tmp/evil\n")
+
+	rep := review(t, e, "p2", nil)
+	f, ok := flagByLabel(rep, ".git")
+	if !ok || f.Severity != SeverityCritical || f.Kind != RiskNestedRepo {
+		t.Fatalf("top-level .git flag: %+v", rep.Flags)
+	}
+	if !strings.Contains(f.Detail, "non-git folder") {
+		t.Errorf("detail missing non-git context: %s", f.Detail)
+	}
+}
+
 func TestClassifyChangesUnits(t *testing.T) {
 	noContent := func(TreeChange, bool) ([]byte, bool) { return nil, false }
 	flags := classifyChanges([]TreeChange{

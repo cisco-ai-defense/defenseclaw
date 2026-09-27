@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -82,8 +83,11 @@ type UndoResult struct {
 	IndexRestored bool     `json:"index_restored,omitempty"`
 	// PostCommit keeps the folder as the session left it (shadow commit,
 	// and refs/defenseclaw/post/<name> in the project when possible).
-	PostCommit string   `json:"post_commit,omitempty"`
-	Warnings   []string `json:"warnings,omitempty"`
+	PostCommit string `json:"post_commit,omitempty"`
+	// SavedRefs are the post-session ref tips saved under refs/defenseclaw/post-refs/<name>/
+	// before restoring the pre-session state, so the session's branch work is recoverable.
+	SavedRefs []string `json:"saved_refs,omitempty"`
+	Warnings  []string `json:"warnings,omitempty"`
 }
 
 // Empty reports whether the folder already matches the snapshot.
@@ -316,7 +320,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	// the session removed their ignore rule. These files existed before and
 	// should not be reported as "A" (added) or removed by undo.
 	for _, c := range allChanges {
-		if c.Status == "A" && matchesIgnore(c.Path, gs.Ignored) {
+		if c.Status == "A" && wasIgnored(c.Path, gs.Ignored) {
 			// This file existed as an ignored file before the session.
 			continue
 		}
@@ -367,22 +371,54 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		}
 	}
 	if !opts.KeepRefs {
-		warnings, err := restoreRefs(ctx, st, gs, rec.Name, res.RefChanges)
+		warnings, savedRefs, err := restoreRefs(ctx, st, gs, rec.Name, res.RefChanges)
 		if err != nil {
 			return err
 		}
 		res.Warnings = append(res.Warnings, warnings...)
+		res.SavedRefs = savedRefs
+		if len(savedRefs) > 0 {
+			refList := strings.Join(savedRefs, ", ")
+			msg := fmt.Sprintf("Your session's branch and tag changes have been saved under refs/defenseclaw/post-refs/%s/. To recover a branch, run: git branch <new-name> refs/defenseclaw/post-refs/%s/<branch-name>. Changed/deleted: %s", rec.Name, rec.Name, refList)
+			res.Warnings = append(res.Warnings, msg)
+		}
 	}
 	// Before resetting the tree, identify files that existed as ignored files
 	// before the session but are now visible because the agent removed their
 	// ignore rule. These must be preserved.
-	preserveIgnored := make(map[string][]byte)
+	const maxPreserveBytes = 128 << 20 // 128 MB cap
+	type preservedFile struct {
+		data []byte
+		mode fs.FileMode
+	}
+	preserveIgnored := make(map[string]preservedFile)
+	totalBytes := int64(0)
+	var overCapWarned bool
 	for _, c := range allChanges {
-		if c.Status == "A" && matchesIgnore(c.Path, gs.Ignored) {
+		if c.Status == "A" && wasIgnored(c.Path, gs.Ignored) {
 			absPath := filepath.Join(rec.Project, filepath.FromSlash(c.Path))
-			if data, err := os.ReadFile(absPath); err == nil {
-				preserveIgnored[c.Path] = data
+			info, err := os.Lstat(absPath)
+			if err != nil {
+				continue
 			}
+			// Only preserve regular files.
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			// Check the byte cap before reading.
+			if totalBytes+info.Size() > maxPreserveBytes {
+				if !overCapWarned {
+					res.Warnings = append(res.Warnings, fmt.Sprintf("pre-existing ignored files exceed %d MB; some will not be removed to avoid data loss", maxPreserveBytes>>20))
+					overCapWarned = true
+				}
+				continue
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				continue
+			}
+			preserveIgnored[c.Path] = preservedFile{data: data, mode: info.Mode()}
+			totalBytes += int64(len(data))
 		}
 	}
 
@@ -393,13 +429,20 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	}
 
 	// Restore pre-existing ignored files that the reset removed.
-	for relPath, data := range preserveIgnored {
-		absPath := filepath.Join(rec.Project, filepath.FromSlash(relPath))
-		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+	r, err := openRootFS(rec.Project)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for relPath, pf := range preserveIgnored {
+		slashPath := path.Clean(relPath)
+		// Create parent directories with restrictive permissions.
+		if err := r.ensureDirMode(path.Dir(slashPath), 0o700); err != nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("could not restore pre-existing ignored file %s: %v", relPath, err))
 			continue
 		}
-		if err := os.WriteFile(absPath, data, 0o644); err != nil {
+		// Write the file atomically with O_EXCL to prevent following symlinks.
+		if err := r.writeFileNoFollow(slashPath, bytes.NewReader(pf.data), pf.mode, time.Time{}); err != nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("could not restore pre-existing ignored file %s: %v", relPath, err))
 		}
 	}
@@ -424,7 +467,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		// Filter out files that existed before and matched the pre-session ignore rules.
 		var toRemove []TreeChange
 		for _, c := range extra {
-			if c.Status == "A" && matchesIgnore(c.Path, gs.Ignored) {
+			if c.Status == "A" && wasIgnored(c.Path, gs.Ignored) {
 				// This file existed before the session as an ignored file.
 				// The agent removed its ignore rule, making it visible.
 				// Keep it.
@@ -578,8 +621,9 @@ func restoreObjectFiles(sh *shadow) error {
 // restoreRefs resets branches, tags and HEAD in one update-ref transaction.
 // Before any ref is deleted or rewound, its post-session tip is saved under
 // refs/defenseclaw/post-refs/<name>/ so the session's work is recoverable.
-func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name string, changes []RefChange) ([]string, error) {
+func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name string, changes []RefChange) ([]string, []string, error) {
 	var warnings []string
+	var savedRefs []string
 	// First, save all post-session ref tips under refs/defenseclaw/post-refs/<name>/.
 	var saveStdin bytes.Buffer
 	for _, c := range changes {
@@ -587,6 +631,7 @@ func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name st
 			// Save the post-session tip, whether it's being moved or deleted.
 			savedRef := "refs/defenseclaw/post-refs/" + name + "/" + c.Ref
 			fmt.Fprintf(&saveStdin, "create %s %s\n", savedRef, c.After)
+			savedRefs = append(savedRefs, c.Ref)
 		}
 	}
 	if saveStdin.Len() > 0 {
@@ -594,6 +639,7 @@ func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name st
 		g.stdin = &saveStdin
 		if err := g.run(ctx, "update-ref", "-m", "defenseclaw: save post-session refs before undo", "--stdin"); err != nil {
 			warnings = append(warnings, "could not save post-session ref tips: "+err.Error())
+			savedRefs = nil // Clear savedRefs if the save failed
 		}
 	}
 
@@ -613,20 +659,20 @@ func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name st
 		g := st.proj
 		g.stdin = &stdin
 		if err := g.run(ctx, "update-ref", "-m", "defenseclaw: undo sandbox session", "--stdin"); err != nil {
-			return warnings, fmt.Errorf("workspace: restore branches and tags: %w", err)
+			return warnings, savedRefs, fmt.Errorf("workspace: restore branches and tags: %w", err)
 		}
 	}
 	switch {
 	case gs.Branch != "" && st.branch != gs.Branch:
 		if err := st.proj.run(ctx, "symbolic-ref", "-m", "defenseclaw: undo sandbox session", "HEAD", gs.Branch); err != nil {
-			return warnings, fmt.Errorf("workspace: restore HEAD: %w", err)
+			return warnings, savedRefs, fmt.Errorf("workspace: restore HEAD: %w", err)
 		}
 	case gs.Branch == "" && gs.Head != "" && (st.branch != "" || st.head != gs.Head):
 		if err := st.proj.run(ctx, "update-ref", "--no-deref", "-m", "defenseclaw: undo sandbox session", "HEAD", gs.Head); err != nil {
-			return warnings, fmt.Errorf("workspace: restore HEAD: %w", err)
+			return warnings, savedRefs, fmt.Errorf("workspace: restore HEAD: %w", err)
 		}
 	}
-	return warnings, nil
+	return warnings, savedRefs, nil
 }
 
 // missingObjects returns the oids g's object store cannot find, with one
@@ -749,117 +795,18 @@ func currentIndexTree(ctx context.Context, sh *shadow) (string, error) {
 	return g.line(ctx, "write-tree")
 }
 
-// matchesIgnore reports whether p matches any pattern in the ignore list.
-// This implements basic gitignore pattern matching: exact names, wildcards,
-// directory patterns (ending in /), and negations (! prefix).
-func matchesIgnore(p string, patterns []string) bool {
-	matched := false
-	for _, pat := range patterns {
-		if pat == "" || strings.HasPrefix(pat, "#") {
-			continue
-		}
-		negated := false
-		if strings.HasPrefix(pat, "!") {
-			negated = true
-			pat = strings.TrimPrefix(pat, "!")
-		}
-		if gitignoreMatches(p, pat) {
-			matched = !negated
-		}
-	}
-	return matched
-}
-
-// gitignoreMatches checks if path p matches pattern pat using basic gitignore rules.
-func gitignoreMatches(p, pat string) bool {
-	pat = strings.TrimSpace(pat)
-	if pat == "" {
-		return false
-	}
-	// Directory-only pattern (ends with /)
-	dirOnly := strings.HasSuffix(pat, "/")
-	if dirOnly {
-		pat = strings.TrimSuffix(pat, "/")
-	}
-	// Anchored pattern (contains / or starts with /)
-	anchored := strings.Contains(pat, "/")
-	if anchored {
-		pat = strings.TrimPrefix(pat, "/")
-		return matchPattern(p, pat, dirOnly)
-	}
-	// Unanchored: match basename or any path component
-	if matchPattern(path.Base(p), pat, false) {
-		return true
-	}
-	// Also check the full path for patterns with wildcards
-	return matchPattern(p, pat, dirOnly)
-}
-
-// matchPattern implements basic glob matching for gitignore patterns.
-func matchPattern(p, pat string, dirOnly bool) bool {
-	if dirOnly {
-		// For directory patterns, match if p or any prefix matches
-		parts := strings.Split(p, "/")
-		for i := range parts {
-			prefix := strings.Join(parts[:i+1], "/")
-			if simpleGlob(prefix, pat) {
-				return true
-			}
-		}
-		return false
-	}
-	return simpleGlob(p, pat)
-}
-
-// simpleGlob performs basic glob matching with * and **.
-func simpleGlob(s, pattern string) bool {
-	if pattern == "*" {
-		return true
-	}
-	if !strings.Contains(pattern, "*") {
-		return s == pattern
-	}
-	// Handle ** (match any path components)
-	if strings.Contains(pattern, "**") {
-		parts := strings.Split(pattern, "**")
-		if len(parts) == 2 {
-			prefix, suffix := parts[0], parts[1]
-			if prefix == "" && suffix == "" {
-				return true
-			}
-			if prefix != "" && !strings.HasPrefix(s, strings.TrimSuffix(prefix, "/")) {
-				return false
-			}
-			if suffix != "" && !strings.HasSuffix(s, strings.TrimPrefix(suffix, "/")) {
-				return false
-			}
+// wasIgnored reports whether path p was ignored in the pre-session snapshot.
+// The snapshot's Ignored field contains the actual file paths git reported as
+// ignored (via git ls-files --others --ignored --exclude-standard), so this
+// is a simple membership check. Git's own matching handles nested .gitignore
+// files, negation, directory patterns, anchored patterns, etc.
+func wasIgnored(p string, ignoredPaths []string) bool {
+	for _, ignored := range ignoredPaths {
+		if ignored == p {
 			return true
 		}
 	}
-	// Simple * matching (does not cross /)
-	pattern = strings.ReplaceAll(pattern, "*", "[^/]*")
-	// Basic regex-like matching
-	i, j := 0, 0
-	for i < len(s) && j < len(pattern) {
-		if pattern[j] == '[' {
-			// Handle [^/]* pattern
-			end := strings.Index(pattern[j:], "]")
-			if end > 0 && strings.HasPrefix(pattern[j:], "[^/]*") {
-				// Match zero or more non-slash characters
-				j += 5 // len("[^/]*")
-				for i < len(s) && s[i] != '/' {
-					i++
-				}
-				continue
-			}
-		}
-		if s[i] != pattern[j] {
-			return false
-		}
-		i++
-		j++
-	}
-	return i == len(s) && j == len(pattern)
+	return false
 }
 
 func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {

@@ -359,8 +359,13 @@ func reviewSentinels(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport)
 		if _, ok := before[n]; ok {
 			continue
 		}
-		rep.Flags = append(rep.Flags, Flag{Path: n, Label: n + "/.git", Kind: RiskNestedRepo, Severity: SeverityCritical,
-			Detail: "a git repository was created inside the folder; its config can run code whenever git runs there, including from a git-aware shell prompt (undo removes it)"})
+		label := n + "/.git"
+		detail := "a git repository was created inside the folder; its config can run code whenever git runs there, including from a git-aware shell prompt (undo removes it)"
+		if n == "." && rec.Kind == SnapshotCopy {
+			label = ".git"
+			detail = "a .git directory was created in this non-git folder; its config can run code the next time git (or a git-aware shell prompt) runs here (undo removes it)"
+		}
+		rep.Flags = append(rep.Flags, Flag{Path: n, Label: label, Kind: RiskNestedRepo, Severity: SeverityCritical, Detail: detail})
 	}
 	for dir, fp := range now.deps {
 		if old, ok := rec.DependencyDirs[dir]; ok && old == fp {

@@ -40,6 +40,7 @@ func mustSnapshot(t *testing.T, e *env, name string) *SnapshotRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.lastSnapshot = rec
 	return rec
 }
 
@@ -274,6 +275,33 @@ func TestUndoRestoresControlFilesAndRemovesNestedRepos(t *testing.T) {
 	}
 	if pathExists(filepath.Join(e.root, "PWNED")) {
 		t.Fatal("DefenseClaw's own git commands ran the planted fsmonitor")
+	}
+}
+
+func TestUndoRemovesTopLevelGitInPlainFolder(t *testing.T) {
+	// p1a-20: a top-level .git planted in a non-git folder must be removed by undo.
+	e := newEnv(t)
+	writeFile(t, e.project, "README.md", "plain folder\n")
+	writeFile(t, e.project, "data.txt", "user data\n")
+	mustSnapshot(t, e, "p3")
+
+	// Agent creates a top-level .git directory with hostile config
+	e.git(e.project, "init", "-q", e.project)
+	writeFile(t, e.project, ".git/config", "[core]\n\tfsmonitor = /tmp/evil\n")
+	e.git(e.project, "add", "*.txt", "*.md")
+	e.git(e.project, "commit", "-q", "-m", "initial")
+
+	preview := mustUndo(t, e, "p3", true)
+	if len(preview.NestedRepos) != 1 || preview.NestedRepos[0] != "." {
+		t.Fatalf("nested repos = %v, want [.]", preview.NestedRepos)
+	}
+
+	mustUndo(t, e, "p3", false)
+	if pathExists(filepath.Join(e.project, ".git")) {
+		t.Fatal("top-level .git created during the session survived undo")
+	}
+	if !pathExists(filepath.Join(e.project, "README.md")) || !pathExists(filepath.Join(e.project, "data.txt")) {
+		t.Fatal("user files were removed by undo")
 	}
 }
 
@@ -686,5 +714,213 @@ func TestUndoSavesPostSessionRefTips(t *testing.T) {
 	// The pre-session feature branch must also be saved (it existed but was not changed).
 	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/feature"); got != agentFeatureTip {
 		t.Fatalf("pre-session feature tip not saved")
+	}
+}
+
+// TestUndoIgnoredFilesComplexPatterns tests git's ignore matching with nested
+// .gitignore files, negation, directory patterns, and anchored patterns.
+func TestUndoIgnoredFilesComplexPatterns(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+
+	// Pre-session: Set up complex .gitignore hierarchy.
+	// Root .gitignore with directory pattern, negation, and anchored pattern.
+	writeFile(t, e.project, ".gitignore", "*.log\n!important.log\n/secret.txt\ntmp/\n")
+	// Nested .gitignore in src/ subdirectory.
+	writeFile(t, e.project, "src/.gitignore", "*.bak\n!keep.bak\n/local-config.json\n")
+
+	// Create ignored files according to these rules.
+	writeFile(t, e.project, "debug.log", "operator marker log\n")                 // ignored by *.log
+	writeFile(t, e.project, "important.log", "operator marker important\n")       // NOT ignored (negation)
+	writeFile(t, e.project, "secret.txt", "operator marker secret\n")             // ignored by /secret.txt (anchored)
+	writeFile(t, e.project, "data/secret.txt", "operator marker data\n")          // NOT ignored (anchored pattern)
+	writeFile(t, e.project, "tmp/cache.dat", "operator marker cache\n")           // ignored by tmp/ (directory pattern)
+	writeFile(t, e.project, "src/old.bak", "operator marker old\n")               // ignored by src/.gitignore *.bak
+	writeFile(t, e.project, "src/keep.bak", "operator marker keep\n")             // NOT ignored (nested negation)
+	writeFile(t, e.project, "src/local-config.json", "operator marker config\n")  // ignored by anchored in nested
+	writeFile(t, e.project, "src/sub/local-config.json", "operator marker sub\n") // NOT ignored (anchored in src/)
+
+	// Commit the tracked files.
+	e.git(e.project, "add", ".")
+	e.git(e.project, "commit", "-q", "-m", "initial")
+
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent clears all .gitignore rules, making previously ignored files visible.
+	writeFile(t, e.project, ".gitignore", "")
+	writeFile(t, e.project, "src/.gitignore", "")
+
+	preview := mustUndo(t, e, "s1", true)
+
+	// The files that were ignored pre-session should not appear as "A" (added).
+	ignoredPreSession := []string{"debug.log", "secret.txt", "tmp/cache.dat", "src/old.bak", "src/local-config.json"}
+	for _, c := range preview.Changes {
+		for _, ignored := range ignoredPreSession {
+			if c.Path == ignored && c.Status == "A" {
+				t.Errorf("pre-session ignored file %s incorrectly reported as %s", c.Path, c.Status)
+			}
+		}
+	}
+
+	// Files that were NOT ignored should not be in the snapshot's Ignored list.
+	notIgnored := []string{"important.log", "data/secret.txt", "src/keep.bak", "src/sub/local-config.json"}
+	for _, path := range notIgnored {
+		if wasIgnored(path, e.lastSnapshot.Git.Ignored) {
+			t.Errorf("file %s was not ignored pre-session but appears in snapshot.Ignored", path)
+		}
+	}
+
+	mustUndo(t, e, "s1", false)
+
+	// Verify that pre-session ignored files survive undo.
+	for _, path := range ignoredPreSession {
+		if !fileExists(filepath.Join(e.project, filepath.FromSlash(path))) {
+			t.Errorf("pre-session ignored file %s was removed by undo", path)
+		}
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// TestUndoPreservesIgnoredFileMode tests that undo preserves the original file
+// mode of pre-existing ignored files.
+func TestUndoPreservesIgnoredFileMode(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+
+	// Pre-session: create ignored files with specific modes.
+	writeFile(t, e.project, ".gitignore", "secret.txt\nexecutable.sh\n")
+	writeFile(t, e.project, "secret.txt", "operator marker secret\n")
+	writeFileMode(t, e.project, "executable.sh", "#!/bin/sh\necho marker\n", 0o755)
+
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent clears .gitignore, making files visible.
+	writeFile(t, e.project, ".gitignore", "")
+
+	mustUndo(t, e, "s1", false)
+
+	// Verify modes are preserved.
+	secretInfo, err := os.Stat(filepath.Join(e.project, "secret.txt"))
+	if err != nil {
+		t.Fatal("secret.txt was not restored")
+	}
+	if secretInfo.Mode().Perm() != 0o644 {
+		t.Errorf("secret.txt mode = %o, want 0644", secretInfo.Mode().Perm())
+	}
+
+	execInfo, err := os.Stat(filepath.Join(e.project, "executable.sh"))
+	if err != nil {
+		t.Fatal("executable.sh was not restored")
+	}
+	if execInfo.Mode().Perm() != 0o755 {
+		t.Errorf("executable.sh mode = %o, want 0755", execInfo.Mode().Perm())
+	}
+}
+
+// TestUndoRefusesSymlinkedParent tests that undo refuses to restore ignored
+// files if a parent directory is replaced with a symlink pointing outside.
+func TestUndoRefusesSymlinkedParent(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+
+	// Pre-session: ignored file in subdirectory.
+	writeFile(t, e.project, ".gitignore", "data/secret.txt\n")
+	writeFile(t, e.project, "data/secret.txt", "operator marker\n")
+
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent replaces data/ with a symlink to outside the project.
+	outsideDir := filepath.Join(e.root, "outside")
+	mustMkdir(t, outsideDir)
+	if err := os.RemoveAll(filepath.Join(e.project, "data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(e.project, "data")); err != nil {
+		t.Fatal(err)
+	}
+	// Clear .gitignore to make the file visible.
+	writeFile(t, e.project, ".gitignore", "")
+
+	res := mustUndo(t, e, "s1", false)
+
+	// Undo should warn about the symlink and refuse to write.
+	foundWarning := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "symlink") || strings.Contains(w, "secret.txt") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Error("expected warning about symlink parent, got none")
+	}
+
+	// Verify nothing was written outside the project.
+	entries, err := os.ReadDir(outsideDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 0 {
+		t.Errorf("undo wrote %d entries outside the project through symlink", len(entries))
+	}
+}
+
+// TestUndoIgnoredFilesByteCap tests that undo caps the total bytes preserved
+// and warns when the cap is exceeded.
+func TestUndoIgnoredFilesByteCap(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+
+	// Pre-session: create ignored files that together exceed the cap.
+	// The cap is 128 MB; create files totaling > 128 MB.
+	writeFile(t, e.project, ".gitignore", "large*.dat\n")
+	// Create multiple 50 MB files (total 150 MB).
+	largeData := make([]byte, 50<<20)
+	for i := range largeData {
+		largeData[i] = byte(i % 256)
+	}
+	for i := 1; i <= 3; i++ {
+		path := filepath.Join(e.project, fmt.Sprintf("large%d.dat", i))
+		if err := os.WriteFile(path, largeData, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent clears .gitignore.
+	writeFile(t, e.project, ".gitignore", "")
+
+	res := mustUndo(t, e, "s1", false)
+
+	// Undo should warn about the cap.
+	foundCapWarning := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "128 MB") || strings.Contains(w, "exceed") {
+			foundCapWarning = true
+			break
+		}
+	}
+	if !foundCapWarning {
+		t.Error("expected warning about byte cap, got none")
+	}
+
+	// At least one file should survive (within the cap), but not all.
+	survivedCount := 0
+	for i := 1; i <= 3; i++ {
+		path := filepath.Join(e.project, fmt.Sprintf("large%d.dat", i))
+		if _, err := os.Stat(path); err == nil {
+			survivedCount++
+		}
+	}
+	if survivedCount == 0 {
+		t.Error("no files survived despite being under the cap initially")
+	}
+	if survivedCount == 3 {
+		t.Error("all files survived despite exceeding the cap")
 	}
 }

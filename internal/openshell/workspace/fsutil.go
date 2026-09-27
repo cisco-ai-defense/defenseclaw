@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -372,4 +373,91 @@ func (r *rootFS) symlink(rel, target string) error {
 		return err
 	}
 	return r.root.Symlink(target, rel)
+}
+
+// ensureDirMode makes every component of rel a real directory with the given mode.
+func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
+	rel = path.Clean(rel)
+	if rel == "." || rel == "" {
+		return nil
+	}
+	cur := ""
+	for _, part := range strings.Split(rel, "/") {
+		if cur == "" {
+			cur = part
+		} else {
+			cur = cur + "/" + part
+		}
+		info, err := r.root.Lstat(cur)
+		switch {
+		case err == nil && info.IsDir():
+			continue
+		case err == nil:
+			if err := r.root.Remove(cur); err != nil {
+				return err
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		}
+		if err := r.root.Mkdir(cur, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFileNoFollow writes a file atomically with O_NOFOLLOW to prevent
+// following symlinks and O_EXCL to ensure atomicity. It refuses to write if
+// any parent path component is a symlink.
+func (r *rootFS) writeFileNoFollow(rel string, src io.Reader, mode fs.FileMode, mtime time.Time) error {
+	// Verify no parent component is a symlink.
+	parts := strings.Split(path.Clean(rel), "/")
+	for i := 1; i < len(parts); i++ {
+		parentPath := strings.Join(parts[:i], "/")
+		if info, err := r.root.Lstat(parentPath); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write through symlink at %s", parentPath)
+		}
+	}
+
+	if err := r.ensureDirMode(path.Dir(rel), 0o700); err != nil {
+		return err
+	}
+	tmp := path.Join(path.Dir(rel), ".dc-restore-"+randomSuffix())
+	// Use O_NOFOLLOW to refuse writing through symlinks.
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	// Note: os.O_NOFOLLOW is platform-specific but available on Linux and macOS
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		flags |= 0x20000 // O_NOFOLLOW value
+	}
+	f, err := r.root.OpenFile(tmp, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		_ = f.Close()
+		_ = r.root.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = r.root.Remove(tmp)
+		return err
+	}
+	if err := r.root.Chmod(tmp, mode.Perm()); err != nil {
+		_ = r.root.Remove(tmp)
+		return err
+	}
+	if info, err := r.root.Lstat(rel); err == nil && info.IsDir() {
+		if err := r.root.RemoveAll(rel); err != nil {
+			_ = r.root.Remove(tmp)
+			return err
+		}
+	}
+	if err := r.root.Rename(tmp, rel); err != nil {
+		_ = r.root.Remove(tmp)
+		return err
+	}
+	if !mtime.IsZero() {
+		_ = r.root.Chtimes(rel, mtime, mtime)
+	}
+	return nil
 }

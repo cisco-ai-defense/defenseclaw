@@ -28,11 +28,12 @@ import (
 // env is a throwaway operator: a home directory with a project and a
 // DefenseClaw data dir inside it, all symlink-free.
 type env struct {
-	t       *testing.T
-	root    string
-	home    string
-	data    string
-	project string
+	t            *testing.T
+	root         string
+	home         string
+	data         string
+	project      string
+	lastSnapshot *SnapshotRecord
 }
 
 func newEnv(t *testing.T) *env {
