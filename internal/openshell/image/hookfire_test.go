@@ -537,6 +537,30 @@ func TestHookSinkVerdicts(t *testing.T) {
 	}
 }
 
+// TestHookSinkCodexOTLPNeedsTheToken pins that the Codex probe fails when an
+// OTLP export arrives without the sandbox token (the launcher hands Codex
+// the header in OTEL_EXPORTER_OTLP_*_HEADERS), while an authorized one is
+// only counted.
+func TestHookSinkCodexOTLPNeedsTheToken(t *testing.T) {
+	sink := &hookSink{token: "tok", adapter: hookSinkAdapters["codex"]}
+	sink.begin(nil)
+	for _, token := range []string{"tok", "missing"} {
+		req, _ := http.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader("{}"))
+		if token != "missing" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		sink.ServeHTTP(&responseRecorder{header: http.Header{}}, req)
+	}
+	events, otlp := sink.end()
+	if otlp != 1 || len(events) != 1 || events[0].Authorized || events[0].Path != "/v1/logs" {
+		t.Fatalf("events = %+v otlp=%d", events, otlp)
+	}
+	problems := requiredHookProblems(HookFireRun{Events: events}, nil)
+	if len(problems) != 1 || !strings.Contains(problems[0], "/v1/logs OTLP export arrived without the sandbox token") {
+		t.Fatalf("problems = %q", problems)
+	}
+}
+
 // TestHookSinkHookOnlyContracts drives the stand-in ingress the way the
 // OpenCode and Amp plugins and the Copilot hook do: the event comes from the
 // body or Copilot's event header, the marker is found in the pre-tool

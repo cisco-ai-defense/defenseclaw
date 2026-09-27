@@ -318,10 +318,17 @@ type hookSinkAdapter struct {
 	wholePayload bool
 	// hookOutput renders the connector's hook_output block directive.
 	hookOutput func(reason string) interface{}
+	// otlpAuth records an OTLP export that arrives without the sandbox
+	// token as an unauthorized event, which fails the probe: the harness
+	// exports OTLP to the ingress with the token its launcher hands it.
+	otlpAuth bool
 }
 
 var hookSinkAdapters = map[string]hookSinkAdapter{
 	"amp": {preTool: "tool.call", wholePayload: true},
+	// The Codex launcher passes the OTLP Authorization header in
+	// OTEL_EXPORTER_OTLP_*_HEADERS.
+	"codex": {otlpAuth: true},
 	"copilot": {preTool: "preToolUse", wholePayload: true, hookOutput: func(reason string) interface{} {
 		return map[string]string{"permissionDecision": "deny", "permissionDecisionReason": reason}
 	}},
@@ -1035,6 +1042,8 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/v1/") {
 		if authorized {
 			s.otlp++
+		} else if s.adapter.otlpAuth {
+			s.events = append(s.events, HookEvent{Path: r.URL.Path, Event: "OTLP export"})
 		}
 		s.mu.Unlock()
 		if !authorized {
