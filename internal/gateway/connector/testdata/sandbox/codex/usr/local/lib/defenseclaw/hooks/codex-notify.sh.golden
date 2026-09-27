@@ -2,22 +2,25 @@
 # defenseclaw-managed-hook v1
 # DefenseClaw Codex notify bridge (OpenShell sandbox images, root-owned).
 # Forwards Codex's agent-turn-complete JSON to the DefenseClaw hook ingress
-# with the per-sandbox binding token placeholder. Best-effort: never blocks
-# or prints.
+# with the per-sandbox binding token. Best-effort: never blocks or prints.
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CURL_HOME
 JSON="${1:-}"
 TOKEN="${DEFENSECLAW_SANDBOX_TOKEN:-}"
+unset DEFENSECLAW_SANDBOX_TOKEN
 [ -n "$JSON" ] && [ -n "$TOKEN" ] || exit 0
-case "$TOKEN" in *$'\n'*|*$'\r'*) exit 0 ;; esac
+case "$TOKEN" in *[!A-Za-z0-9:._-]*) exit 0 ;; esac
+# The bearer (with token_delivery: env the token itself) reaches curl as
+# configuration on a descriptor, never on its command line, which every
+# process in the sandbox can read.
 printf '%s' "$JSON" | curl -q -s --noproxy '*' -o /dev/null \
   --connect-timeout 2 --max-time 5 \
   -X POST "http://host.openshell.internal:18971/api/v1/codex/notify" \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: codex-notify/1.0' \
   -H 'x-defenseclaw-source: codex-notify' \
-  -H "Authorization: Bearer ${TOKEN}" \
-  --data-binary @- >/dev/null 2>&1 || true
+  --config /dev/fd/7 \
+  --data-binary @- >/dev/null 2>&1 7< <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") || true
 exit 0

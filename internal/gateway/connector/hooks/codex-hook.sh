@@ -243,9 +243,10 @@ if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   HOOK_RETRY_MAX_TIME="$DC_SANDBOX_SESSION_END_MAX_TIME"
 fi
 
-# The bearer is a revision-scoped OpenShell placeholder rather than a
-# credential, so it travels as an ordinary header. One short attempt plus one
-# retry carries the same idempotency key; the ingress dedupes by key.
+# defenseclaw_sandbox_post keeps the bearer (a revision-scoped OpenShell
+# placeholder, or with token_delivery: env the token itself) off curl's
+# command line. One short attempt plus one retry carries the same
+# idempotency key; the ingress dedupes by key.
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")

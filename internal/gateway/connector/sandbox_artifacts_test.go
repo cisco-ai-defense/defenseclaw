@@ -474,6 +474,16 @@ func TestVerifyCodexSandboxPolicyRejectsTampering(t *testing.T) {
 		})},
 		{"foreign-notify", requirements, edit(managed, func(c map[string]interface{}) { c["notify"] = []interface{}{"/tmp/n.sh"} })},
 	}
+	// The commands Codex runs must not inherit what the launcher set for
+	// Codex alone: the OTLP header variables carry the binding token.
+	for _, key := range codexSandboxLauncherOnlyEnv {
+		cases = append(cases, struct {
+			name                  string
+			requirements, managed []byte
+		}{"shell-env-" + key, requirements, edit(managed, func(c map[string]interface{}) {
+			delete(c["shell_environment_policy"].(map[string]interface{})["set"].(map[string]interface{}), key)
+		})})
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := verifyCodexSandboxPolicy(tc.requirements, tc.managed, rt, "openshell"); err == nil {

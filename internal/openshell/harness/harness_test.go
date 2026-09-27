@@ -704,11 +704,7 @@ func TestCodexLauncherAddsRuntimeSettings(t *testing.T) {
 	}
 	token := "openshell:resolve:env:v7_DEFENSECLAW_SANDBOX_TOKEN"
 	got := run([]string{"DEFENSECLAW_SANDBOX_TOKEN=" + token, "OPENAI_API_KEY=sk-placeholder"}, "exec", "--skip-git-repo-check", "prompt")
-	want := "ARG exec\n" +
-		"ARG -c\nARG otel.exporter.otlp-http.headers.authorization=\"Bearer " + token + "\"\n" +
-		"ARG -c\nARG otel.trace_exporter.otlp-http.headers.authorization=\"Bearer " + token + "\"\n" +
-		"ARG -c\nARG otel.metrics_exporter.otlp-http.headers.authorization=\"Bearer " + token + "\"\n" +
-		"ARG --skip-git-repo-check\nARG prompt\nENV CODEX_API_KEY=sk-placeholder\n"
+	want := "ARG exec\nARG --skip-git-repo-check\nARG prompt\nENV CODEX_API_KEY=sk-placeholder\n"
 	if got != want {
 		t.Fatalf("exec argv:\n%s\nwant:\n%s", got, want)
 	}
@@ -717,14 +713,51 @@ func TestCodexLauncherAddsRuntimeSettings(t *testing.T) {
 	if !strings.Contains(got, "ARG login\nARG --with-api-key\n") || !strings.Contains(got, "STDIN sk-placeholder\n") {
 		t.Fatalf("interactive launch did not refresh the stored login: %s", got)
 	}
-	if strings.Contains(got, "otel.") {
-		t.Fatalf("a malformed token must not reach the argv: %s", got)
-	}
 	if runtime.GOOS == "linux" {
 		// Trust entries are written only under /work or /sandbox.
 		if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); err == nil {
 			t.Fatal("trusted a directory outside /work and /sandbox")
 		}
+	}
+}
+
+// TestCodexLauncherKeepsTheTokenOffTheCommandLine pins that the Codex
+// launcher hands the OTLP Authorization header to Codex's exporters in
+// OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_HEADERS (URL-encoded, as the
+// OTLP exporter decodes them) and never in argv: with token_delivery: env
+// the binding token is the credential itself, and every process in the
+// sandbox can read another's command line. A malformed token, and header
+// variables the caller set, reach Codex not at all; NODE_OPTIONS carries
+// only the launcher's --disable-warning for the Node proxy agent warning.
+func TestCodexLauncherKeepsTheTokenOffTheCommandLine(t *testing.T) {
+	vars := []string{"OTEL_EXPORTER_OTLP_LOGS_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_HEADERS", "NODE_OPTIONS"}
+	for _, tc := range []struct {
+		name, token, header string
+	}{
+		{"placeholder", "openshell:resolve:env:v7_DEFENSECLAW_SANDBOX_TOKEN", "authorization=Bearer%20openshell:resolve:env:v7_DEFENSECLAW_SANDBOX_TOKEN"},
+		{"env delivery", "dcsb_0123456789abcdefABCDEF-_", "authorization=Bearer%20dcsb_0123456789abcdefABCDEF-_"},
+		{"malformed", `bad"token`, "<unset>"},
+		{"missing", "", "<unset>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"OTEL_EXPORTER_OTLP_HEADERS=x-caller=1", "OTEL_EXPORTER_OTLP_LOGS_HEADERS=authorization=Bearer%20caller",
+				"NODE_OPTIONS=--require=/tmp/planted.js"}
+			if tc.token != "" {
+				env = append(env, "DEFENSECLAW_SANDBOX_TOKEN="+tc.token)
+			}
+			code, got := runLauncher(t, Codex, "/usr/local/bin/codex", vars, env, "exec", "--skip-git-repo-check", "prompt")
+			want := "ARG exec\nARG --skip-git-repo-check\nARG prompt\n" +
+				"ENV OTEL_EXPORTER_OTLP_LOGS_HEADERS=" + tc.header + "\n" +
+				"ENV OTEL_EXPORTER_OTLP_TRACES_HEADERS=" + tc.header + "\n" +
+				"ENV OTEL_EXPORTER_OTLP_METRICS_HEADERS=" + tc.header + "\n" +
+				"ENV OTEL_EXPORTER_OTLP_HEADERS=<unset>\n" +
+				"ENV NODE_OPTIONS=--disable-warning=UNDICI-EHPA\n"
+			// The exact record also proves no argument carries the token.
+			if code != 0 || got != want {
+				t.Fatalf("exit %d\n%s\nwant\n%s", code, got, want)
+			}
+		})
 	}
 }
 

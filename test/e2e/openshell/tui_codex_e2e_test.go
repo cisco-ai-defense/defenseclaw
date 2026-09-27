@@ -39,10 +39,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -97,8 +97,9 @@ func TestSandboxTUICodex(t *testing.T) {
 	}
 	e := &env{
 		t: t, root: t, prefix: envOr("DEFENSECLAW_E2E_PREFIX", "dc-e2e") + "-tui",
-		apiPort: envInt(t, "DEFENSECLAW_E2E_API_PORT", 28970) + 300,
-		mock:    envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921) + 300,
+		apiPort:       envInt(t, "DEFENSECLAW_E2E_API_PORT", 28970) + 300,
+		mock:          envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921) + 300,
+		tokenDelivery: e2eTokenDelivery(t),
 	}
 	if !openshell.ValidSandboxName(e.prefix + "-y") {
 		t.Fatalf("DEFENSECLAW_E2E_PREFIX %q does not make valid sandbox names", e.prefix)
@@ -175,15 +176,10 @@ func (x *tuiCodex) setup() {
 		t.Fatal(err)
 	}
 	cfg := strings.Replace(string(raw), "harnesses: [claudecode]", "harnesses: [codex]", 1)
-	// OpenShell has one defenseclaw-ingress profile per gateway, bound to one
-	// ingress port. On a shared host it belongs to another DefenseClaw
-	// daemon: moving it to this daemon's port would cut that daemon's hooks
-	// off, so this run delivers its token in the environment instead.
-	if port := x.ingressProfilePort(); port != 0 && port != x.apiPort+1 {
-		t.Logf("the defenseclaw-ingress profile is bound to port %d; this run uses token_delivery: env", port)
-		cfg += "  token_delivery: env\n"
-		x.tokenEnv = true
-	}
+	// DEFENSECLAW_E2E_TOKEN_DELIVERY=env delivers the binding token itself
+	// in the environment (every daemon has an ingress profile of its own
+	// port, so the default provider delivery needs no fallback).
+	x.tokenEnv = x.tokenDelivery == config.OpenShellTokenDeliveryEnv
 	writeFile(t, cfgPath, []byte(cfg), 0o600)
 
 	px := x.spawn("mock-openai", "python3", filepath.Join(x.repo, "test", "e2e", "openshell", "mock_openai.py"),
@@ -220,21 +216,6 @@ func (x *tuiCodex) setup() {
 			m.close()
 		}
 	})
-}
-
-// ingressProfilePort is the port of the gateway's defenseclaw-ingress
-// profile, or 0 when there is none.
-func (x *tuiCodex) ingressProfilePort() int {
-	p, err := x.gw.GetProfile(x.ctx(time.Minute), profiles.IngressID)
-	switch {
-	case openshell.IsNotFound(err):
-		return 0
-	case err != nil:
-		x.t.Fatalf("get the ingress profile: %v", err)
-	case len(p.Endpoints) == 0:
-		return 0
-	}
-	return int(p.Endpoints[0].Port)
 }
 
 // ---- the skip-permissions TUI session -------------------------------------------

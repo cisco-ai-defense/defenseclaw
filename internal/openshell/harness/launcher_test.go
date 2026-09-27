@@ -150,6 +150,10 @@ func TestLaunchersScrubShellStartupEnv(t *testing.T) {
 	}
 }
 
+// launcherNodeOptions are the fixed NODE_OPTIONS launchers pass their
+// harness.
+var launcherNodeOptions = map[string]string{"codex": "--disable-warning=UNDICI-EHPA"}
+
 // TestLaunchersKeepNodeOffWorkloadCode starts every launcher with the Node
 // variables an agent could export from ~/.bashrc: a NODE_OPTIONS preload, a
 // NODE_PATH module directory and a compile cache in a directory it owns. The
@@ -170,10 +174,17 @@ func TestLaunchersKeepNodeOffWorkloadCode(t *testing.T) {
 			if code != 0 || !strings.Contains(got, "\nPATH=") {
 				t.Fatalf("the stub never ran: exit %d\n%s", code, out)
 			}
-			for _, v := range []string{"NODE_OPTIONS", "NODE_PATH"} {
-				if strings.Contains(got, "\n"+v+"=") {
-					t.Errorf("%s reached the harness:\n%s", v, got)
+			if strings.Contains(got, "\nNODE_PATH=") {
+				t.Errorf("NODE_PATH reached the harness:\n%s", got)
+			}
+			// A launcher may set a fixed NODE_OPTIONS of its own (the Codex
+			// one silences the proxy agent's warning), never the caller's.
+			if want, ok := launcherNodeOptions[name]; ok {
+				if !strings.Contains(got, "\nNODE_OPTIONS="+want+"\n") {
+					t.Errorf("NODE_OPTIONS is not the launcher's %q:\n%s", want, got)
 				}
+			} else if strings.Contains(got, "\nNODE_OPTIONS=") {
+				t.Errorf("NODE_OPTIONS reached the harness:\n%s", got)
 			}
 			if !strings.Contains(got, "\nNODE_DISABLE_COMPILE_CACHE=1\n") {
 				t.Errorf("Node's compile cache is not switched off:\n%s", got)

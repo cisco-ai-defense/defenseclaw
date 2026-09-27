@@ -34,8 +34,8 @@ import (
 )
 
 // sandboxCurlStub stands in for curl on the baked hook PATH. It records the
-// argv, environment and stdin of every call and replays one scripted
-// response per call:
+// argv, environment, stdin and --config files of every call and replays one
+// scripted response per call:
 // "exit:<code>" makes curl fail, "<status>|<body>" prints body and status the
 // way `curl -w '\n%{http_code}'` does.
 //
@@ -50,6 +50,12 @@ n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$dir/count"
 mv "$dir/env.now" "$dir/env.$n"
 printf '%s\n' "$@" > "$dir/args.$n"
+: > "$dir/config.$n"
+prev=""
+for arg in "$@"; do
+  case "$prev" in --config|-K) cat "$arg" >> "$dir/config.$n" ;; esac
+  prev="$arg"
+done
 cat > "$dir/body.$n"
 line="$(sed -n "${n}p" "$dir/responses")"
 case "$line" in
@@ -60,10 +66,14 @@ esac
 `
 
 type sandboxCurlCall struct {
-	argv    []string
+	argv []string
+	// headers are the -H arguments and the header lines of the --config
+	// files, by lower-case name.
 	headers map[string]string
 	env     map[string]string
 	body    string
+	// config is what the call's --config files held.
+	config string
 }
 
 func (c sandboxCurlCall) url() string {
@@ -155,7 +165,7 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 	for _, name := range []string{"count", "responses"} {
 		_ = os.Remove(filepath.Join(h.stubDir, name))
 	}
-	for _, pattern := range []string{"args.*", "body.*", "env.*"} {
+	for _, pattern := range []string{"args.*", "body.*", "env.*", "config.*"} {
 		stale, _ := filepath.Glob(filepath.Join(h.stubDir, pattern))
 		for _, file := range stale {
 			_ = os.Remove(file)
@@ -207,6 +217,21 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 				name, value, _ := strings.Cut(call.argv[j+1], ": ")
 				call.headers[strings.ToLower(name)] = value
 			}
+		}
+		config, _ := os.ReadFile(filepath.Join(h.stubDir, "config."+strconv.Itoa(i)))
+		call.config = string(config)
+		for _, line := range strings.Split(call.config, "\n") {
+			quoted, ok := strings.CutPrefix(strings.TrimSpace(line), "header = ")
+			if !ok {
+				continue
+			}
+			// curl unescapes \" and \\ in a quoted value, as Go does.
+			header, err := strconv.Unquote(quoted)
+			if err != nil {
+				t.Fatalf("curl config line %q: %v", line, err)
+			}
+			name, value, _ := strings.Cut(header, ": ")
+			call.headers[strings.ToLower(name)] = value
 		}
 		result.calls = append(result.calls, call)
 	}
@@ -827,13 +852,61 @@ func TestSandboxCodexNotifyBridge(t *testing.T) {
 		run.calls[0].headers["authorization"] != "Bearer tok" || run.calls[0].body != payload {
 		t.Fatalf("unexpected notify request: %v body=%q", run.calls[0].argv, run.calls[0].body)
 	}
+	if argv := strings.Join(run.calls[0].argv, "\n"); strings.Contains(argv, "tok\n") || strings.Contains(argv, "Authorization") ||
+		run.calls[0].env[SandboxTokenEnv] != "" {
+		t.Fatalf("the bearer reached curl's command line or environment: %v", run.calls[0].argv)
+	}
 	run = h.run(t, notify, []string{payload}, "", nil, []string{`200|{}`})
 	if run.exitCode != 0 || len(run.calls) != 0 {
 		t.Fatalf("notify without token exit %d calls %d", run.exitCode, len(run.calls))
 	}
+	// A token curl configuration could not quote is never sent.
+	run = h.run(t, notify, []string{payload}, "", map[string]string{SandboxTokenEnv: `bad"tok`}, []string{`200|{}`})
+	if run.exitCode != 0 || len(run.calls) != 0 {
+		t.Fatalf("notify with a malformed token exit %d calls %d", run.exitCode, len(run.calls))
+	}
 	run = h.run(t, notify, []string{payload}, "", map[string]string{SandboxTokenEnv: "tok"}, []string{"exit:7"})
 	if run.exitCode != 0 || run.stdout != "" || run.stderr != "" {
 		t.Fatalf("notify outage must be silent: exit %d out=%q err=%q", run.exitCode, run.stdout, run.stderr)
+	}
+}
+
+// TestSandboxHooksKeepBearerOffCurlArgv pins that no sandbox hook puts the
+// binding token on curl's command line, which every process in the sandbox
+// can read: with openshell.token_delivery: env it is the credential itself.
+// defenseclaw_sandbox_post moves the hook's Authorization header into curl
+// configuration on a descriptor (quoted, so a token with a quote or a
+// backslash still arrives intact), for the first attempt and the retry.
+func TestSandboxHooksKeepBearerOffCurlArgv(t *testing.T) {
+	const token = `dcsb_env-delivered"token\x`
+	for _, tc := range []struct {
+		name     string
+		provider SandboxArtifactProvider
+		version  string
+		script   string
+		args     []string
+		payload  string
+	}{
+		{"codex", &CodexConnector{}, "0.146.0", SandboxHookDir + "/codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse},
+		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", SandboxHookDir + "/claude-code-hook.sh", nil, claudePreToolUse},
+		{"inspect", &ClaudeCodeConnector{}, "2.1.156", SandboxHookDir + "/inspect-tool.sh", nil, claudePreToolUse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSandboxHookHarness(t, tc.provider, tc.version)
+			run := h.run(t, tc.script, tc.args, tc.payload, map[string]string{SandboxTokenEnv: token}, []string{"exit:7", allowResponse})
+			if len(run.calls) == 0 {
+				t.Fatalf("no request: exit %d stderr %q", run.exitCode, run.stderr)
+			}
+			for i, call := range run.calls {
+				argv := strings.Join(call.argv, "\n")
+				if strings.Contains(argv, "dcsb_env-delivered") || strings.Contains(strings.ToLower(argv), "authorization") {
+					t.Fatalf("call %d put the bearer on curl's command line:\n%s", i, argv)
+				}
+				if call.flagValue("--config") != "/dev/fd/7" || call.headers["authorization"] != "Bearer "+token {
+					t.Fatalf("call %d: config %q, authorization %q", i, call.config, call.headers["authorization"])
+				}
+			}
+		})
 	}
 }
 

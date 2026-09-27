@@ -62,12 +62,33 @@ var codexSandboxDisabledFeatures = []string{
 // config.
 var codexSandboxPinnedShellEnv = []string{"BASH_ENV", "ENV", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD"}
 
+// codexSandboxLauncherOnlyEnv are variables the DefenseClaw launcher sets
+// for Codex itself that the commands Codex runs must not inherit, pinned to
+// "" in shell_environment_policy.set as well: the OTLP header variables
+// carry the binding token (an OpenTelemetry SDK in a command would send it
+// to its own collector), and NODE_OPTIONS carries the launcher's
+// --disable-warning for Codex's Node wrapper, which a Node release before
+// 20.11 in a project would refuse to start with. The launcher drops a
+// caller's NODE_OPTIONS either way.
+var codexSandboxLauncherOnlyEnv = []string{
+	"NODE_OPTIONS",
+	"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+	"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+	"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+}
+
+// codexSandboxShellPins are every variable the managed config pins to "" in
+// shell_environment_policy.set.
+func codexSandboxShellPins() []string {
+	return append(append([]string{}, codexSandboxPinnedShellEnv...), codexSandboxLauncherOnlyEnv...)
+}
+
 // SandboxArtifacts renders the Codex overlay: sandbox hook scripts, the
 // notify bridge, /etc/codex/requirements.toml (allow_managed_hooks_only,
 // features.hooks pinned true and the contract-selected hook matrix) and
 // /etc/codex/managed_config.toml (update check, analytics and network-syncing
 // features off, notify, OTLP exporters to the ingress, the shell variables in
-// codexSandboxPinnedShellEnv pinned).
+// codexSandboxShellPins pinned).
 func (c *CodexConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
 	rt, err := resolveSandboxTarget(c.Name(), target)
 	if err != nil {
@@ -158,8 +179,9 @@ func renderCodexSandboxRequirements(rt resolvedSandboxTarget) ([]byte, error) {
 func renderCodexSandboxManagedConfig(rt resolvedSandboxTarget, environment string) ([]byte, error) {
 	// Reuse the connector's native OTLP spec with the ingress as endpoint and
 	// no Authorization header: the placeholder is revision-scoped, so the
-	// launcher adds it per session with -c (a key this file does not define,
-	// which is the only way a flag can merge into a managed exporter).
+	// launcher adds it per session in OTEL_EXPORTER_OTLP_{LOGS,TRACES,
+	// METRICS}_HEADERS, which Codex's exporters merge over the headers set
+	// here (never on a command line every process could read).
 	spec := (&CodexConnector{}).HookProfile(SetupOpts{APIAddr: rt.ingressAddr}).NativeOTLP
 	if spec == nil {
 		return nil, fmt.Errorf("codex: nil NativeOTLPSpec")
@@ -183,8 +205,9 @@ func renderCodexSandboxManagedConfig(rt resolvedSandboxTarget, environment strin
 	for _, feature := range codexSandboxDisabledFeatures {
 		features[feature] = false
 	}
-	pinnedShellEnv := make(map[string]interface{}, len(codexSandboxPinnedShellEnv))
-	for _, key := range codexSandboxPinnedShellEnv {
+	pins := codexSandboxShellPins()
+	pinnedShellEnv := make(map[string]interface{}, len(pins))
+	for _, key := range pins {
 		pinnedShellEnv[key] = ""
 	}
 	cfg := map[string]interface{}{
@@ -271,7 +294,7 @@ func verifyCodexSandboxPolicy(requirements, managedConfig []byte, rt resolvedSan
 	}
 	shellPolicy, _ := managed["shell_environment_policy"].(map[string]interface{})
 	shellSet, _ := shellPolicy["set"].(map[string]interface{})
-	for _, key := range codexSandboxPinnedShellEnv {
+	for _, key := range codexSandboxShellPins() {
 		if got, ok := shellSet[key].(string); !ok || got != "" {
 			return fmt.Errorf("verify Codex sandbox managed config: shell_environment_policy.set.%s is not pinned to \"\"", key)
 		}
@@ -297,30 +320,34 @@ func verifyCodexSandboxPolicy(requirements, managedConfig []byte, rt resolvedSan
 
 // renderCodexSandboxNotifyBridge renders the notify program Codex runs on
 // agent-turn-complete with one JSON argument. Telemetry is best-effort: an
-// unreachable ingress or a missing token exits 0 without output.
+// unreachable ingress or a missing or malformed token exits 0 without
+// output.
 func renderCodexSandboxNotifyBridge(ingressAddr string) []byte {
 	return []byte(`#!/bin/bash -p
 # defenseclaw-managed-hook v1
 # DefenseClaw Codex notify bridge (OpenShell sandbox images, root-owned).
 # Forwards Codex's agent-turn-complete JSON to the DefenseClaw hook ingress
-# with the per-sandbox binding token placeholder. Best-effort: never blocks
-# or prints.
+# with the per-sandbox binding token. Best-effort: never blocks or prints.
 set -u
 PATH=` + SandboxHookPATH + `
 export PATH
 unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CURL_HOME
 JSON="${1:-}"
 TOKEN="${` + SandboxTokenEnv + `:-}"
+unset ` + SandboxTokenEnv + `
 [ -n "$JSON" ] && [ -n "$TOKEN" ] || exit 0
-case "$TOKEN" in *$'\n'*|*$'\r'*) exit 0 ;; esac
+case "$TOKEN" in *[!A-Za-z0-9:._-]*) exit 0 ;; esac
+# The bearer (with token_delivery: env the token itself) reaches curl as
+# configuration on a descriptor, never on its command line, which every
+# process in the sandbox can read.
 printf '%s' "$JSON" | curl -q -s --noproxy '*' -o /dev/null \
   --connect-timeout 2 --max-time 5 \
   -X POST "http://` + ingressAddr + `/api/v1/codex/notify" \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: codex-notify/1.0' \
   -H 'x-defenseclaw-source: codex-notify' \
-  -H "Authorization: Bearer ${TOKEN}" \
-  --data-binary @- >/dev/null 2>&1 || true
+  --config /dev/fd/7 \
+  --data-binary @- >/dev/null 2>&1 7< <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") || true
 exit 0
 `)
 }

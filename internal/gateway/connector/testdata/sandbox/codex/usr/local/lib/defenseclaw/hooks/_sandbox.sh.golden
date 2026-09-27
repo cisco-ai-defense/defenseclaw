@@ -10,9 +10,10 @@
 # Everything a hook needs to reach DefenseClaw is baked here at image build:
 # the ingress address (host.openshell.internal, relayed by the OpenShell
 # supervisor to the host-loopback hook ingress) and the request budgets. The
-# only runtime input is the per-sandbox binding token, which OpenShell
-# delivers as a provider placeholder in DEFENSECLAW_SANDBOX_TOKEN and swaps
-# for the real credential only on the ingress endpoint.
+# only runtime input is the per-sandbox binding token in
+# DEFENSECLAW_SANDBOX_TOKEN: by default a provider placeholder OpenShell
+# swaps for the real credential only on the ingress endpoint, with
+# openshell.token_delivery: env the token itself.
 
 # The workload shapes the environment every hook inherits: Claude Code
 # applies the env block of user and project settings to hook processes, and
@@ -134,14 +135,36 @@ defenseclaw_sandbox_idempotency_key() {
 # occasionally drops a request, possibly after the ingress acted on it, and the
 # ingress dedupes retries by key. Without a random key the request is sent
 # once. The body travels on stdin so large payloads never hit the argv limit.
+# An Authorization header among CURL_ARGS (-H "Authorization: ...") reaches
+# curl as configuration on a descriptor instead of its command line, which
+# every process in the sandbox can read: with token_delivery: env the bearer
+# is the binding token itself.
 defenseclaw_sandbox_post() {
   local path="$1"
   local body="$2"
   local max_time="$3"
   local retry_max_time="$4"
   shift 4
-  local key attempts=1 attempt=1 status out code
-  local key_args=()
+  local key attempts=1 attempt=1 status out code auth=""
+  local key_args=() curl_args=() auth_args=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-H" ] && [ "$#" -ge 2 ]; then
+      case "$2" in
+        [Aa]uthorization:*) auth="$2"; shift 2; continue ;;
+      esac
+    fi
+    curl_args+=("$1")
+    shift
+  done
+  case "$auth" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  if [ -n "$auth" ]; then
+    # The two characters a quoted curl configuration value escapes.
+    auth="${auth//\\/\\\\}"
+    auth="${auth//\"/\\\"}"
+    auth_args=(--config /dev/fd/7)
+  fi
   key="$(defenseclaw_sandbox_idempotency_key)"
   if [ -n "$key" ]; then
     key_args=(-H "X-DefenseClaw-Hook-Idempotency-Key: ${key}")
@@ -152,10 +175,11 @@ defenseclaw_sandbox_post() {
     out="$(printf '%s' "$body" | curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST \
       "http://${DC_SANDBOX_INGRESS}${path}" \
       "${key_args[@]+"${key_args[@]}"}" \
-      "$@" \
+      "${curl_args[@]+"${curl_args[@]}"}" \
+      "${auth_args[@]+"${auth_args[@]}"}" \
       --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
       --max-time "$max_time" \
-      --data-binary @- 2>/dev/null)" || status=$?
+      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth"))" || status=$?
     if [ "$status" -eq 0 ]; then
       code="${out##*$'\n'}"
       case "$code" in

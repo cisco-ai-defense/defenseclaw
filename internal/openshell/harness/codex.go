@@ -114,7 +114,7 @@ var Codex = register(&Spec{
 		"export CODEX_API_KEY from the OPENAI_API_KEY placeholder (codex exec ignores OPENAI_API_KEY)",
 		"trust the exact working directory under /work or /sandbox in ~/.codex/config.toml (the TUI trusts exact paths only)",
 		"store the OPENAI_API_KEY placeholder with `codex login --with-api-key` before interactive runs",
-		"add the OTLP Authorization header from DEFENSECLAW_SANDBOX_TOKEN with -c flags after the subcommand (managed_config.toml cannot carry a revision-scoped value)",
+		"export the OTLP Authorization header from DEFENSECLAW_SANDBOX_TOKEN as OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_HEADERS (managed_config.toml cannot carry a revision-scoped value, and a command-line flag would show the token to every process in the sandbox)",
 	},
 })
 
@@ -186,17 +186,26 @@ if [ "${#sub[@]}" -eq 0 ] && [ -n "${OPENAI_API_KEY:-}" ]; then
   printf '%s' "$OPENAI_API_KEY" | /usr/local/bin/codex login --with-api-key >/dev/null 2>&1 || true
 fi
 
-# OTLP Authorization from the revision-scoped binding token placeholder.
-# managed_config.toml does not define the key, so the session flags merge
-# into its exporters; they must follow the subcommand.
-otel=()
+# OTLP Authorization from the binding token (a revision-scoped placeholder,
+# or with token_delivery: env the token itself). Codex's OTLP exporters add
+# the headers these variables name to the managed exporters' own, so the
+# token never reaches a command line, which every process in the sandbox
+# can read; the managed config blanks them for the commands Codex runs.
+unset OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS OTEL_EXPORTER_OTLP_TRACES_HEADERS OTEL_EXPORTER_OTLP_METRICS_HEADERS
 token="${DEFENSECLAW_SANDBOX_TOKEN:-}"
 case "$token" in
   ''|*[!A-Za-z0-9:._-]*) ;;
   *)
-    for exporter in exporter trace_exporter metrics_exporter; do
-      otel+=(-c "otel.${exporter}.otlp-http.headers.authorization=\"Bearer ${token}\"")
-    done
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS="authorization=Bearer%20${token}"
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS="$OTEL_EXPORTER_OTLP_LOGS_HEADERS"
+    OTEL_EXPORTER_OTLP_METRICS_HEADERS="$OTEL_EXPORTER_OTLP_LOGS_HEADERS"
+    export OTEL_EXPORTER_OTLP_LOGS_HEADERS OTEL_EXPORTER_OTLP_TRACES_HEADERS OTEL_EXPORTER_OTLP_METRICS_HEADERS
     ;;
 esac
-` + launcherExec(`/usr/local/bin/codex "${sub[@]+"${sub[@]}"}" "${otel[@]+"${otel[@]}"}" "$@"`)
+unset token
+
+# Node warns at every start that the EnvHttpProxyAgent behind
+# NODE_USE_ENV_PROXY is experimental. This fixed NODE_OPTIONS silences only
+# that warning; the caller's NODE_OPTIONS is dropped with the other start-up
+# variables.
+` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/codex "${sub[@]+"${sub[@]}"}" "$@"`)
