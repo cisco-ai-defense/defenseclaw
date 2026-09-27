@@ -187,6 +187,8 @@ type Sandbox struct {
 	PendingApprovals int `json:"pending_approvals"`
 	// Workspace is the mount-mode banner view.
 	Workspace *WorkspaceSummary `json:"workspace,omitempty"`
+	// MCP is the banner view of the sandbox's MCP servers.
+	MCP *MCPSummary `json:"mcp,omitempty"`
 	// Snapshot says whether undo is available.
 	Snapshot *SnapshotInfo `json:"snapshot,omitempty"`
 	// Violations are the non-fatal policy clamps applied at create.
@@ -269,6 +271,26 @@ type WorkspaceSummary struct {
 	Protected []string `json:"protected,omitempty"`
 	Context   []string `json:"context,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
+}
+
+// MCPSummary is the launch-banner view of a sandbox's MCP servers.
+type MCPSummary struct {
+	// Imported are the user's servers the run brought along.
+	Imported []string `json:"imported,omitempty"`
+	// LeftBehind are the user's servers that stayed out, with the reason.
+	LeftBehind []MCPLeftBehind `json:"left_behind,omitempty"`
+	// ProjectServers is the pack's mcp.project_servers: "block" (the
+	// repository's own servers do not start) or "allow".
+	ProjectServers string `json:"project_servers"`
+	// Project are the servers the repository defines (.mcp.json,
+	// .codex/config.toml).
+	Project []string `json:"project,omitempty"`
+}
+
+// MCPLeftBehind is a server a run did not bring along.
+type MCPLeftBehind struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
 }
 
 // SnapshotInfo describes the pre-session snapshot.

@@ -209,9 +209,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			"the %s sandbox image %s was built for uid %d:%d, not the sandbox run-as identity %d:%d; rebuild it",
 			spec.DisplayName, img.Tag, img.UID, img.GID, uid, gid)
 	}
-	arts, err := spec.Provider.SandboxArtifacts(connector.SandboxRenderTarget{
+	target := connector.SandboxRenderTarget{
 		IngressPort: m.opts.IngressPort, AgentVersion: img.HarnessVersion, HookContractID: img.HookContract,
-	})
+	}
+	arts, err := spec.Provider.SandboxArtifacts(target)
 	if err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "render %s sandbox artifacts: %v", spec.Name, err)
 	}
@@ -367,6 +368,29 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		envOut[k] = v
 	}
 
+	// Per-run managed harness configuration: the model provider pins, safe
+	// mode and the MCP servers the run brings along, mounted read-only.
+	var modelProvider *connector.SandboxModelProvider
+	if llm != nil {
+		modelProvider = llm.cp.ModelProvider
+	}
+	rc, err := m.planRunConfig(ctx, runConfigInput{
+		spec: spec, target: target, eff: eff, env: envOut, credentials: credentialNames(llm, creds),
+		provider: modelProvider, workdir: rec.Workdir, project: in.project,
+	})
+	if err != nil {
+		return nil, err
+	}
+	rb.add("remove run configuration", func(context.Context) error { return m.removeRunConfig(name) })
+	runMounts, err := m.writeRunConfig(name, rc)
+	if err != nil {
+		return nil, err
+	}
+	if rc != nil {
+		rec.MCP = rc.mcp
+		rec.Warnings = append(rec.Warnings, rc.notices...)
+	}
+
 	// Policy: the workload runs as the identity the image was built for.
 	pin := policy.Input{
 		Profile: policy.Profile(eff.Profile), Harness: spec.Name, Workdir: rec.Workdir,
@@ -402,6 +426,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if plan != nil {
 		tmpl.DriverConfig = plan.DriverConfig()
 	}
+	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, runMounts)
 	if res := templateResources(eff.Resources); res != nil {
 		tmpl.Resources = res
 	}
@@ -583,6 +608,22 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 // carries, which create checks against it, so the two cannot drift apart.
 func (m *Manager) runAs() (uid, gid int) {
 	return m.host.UID, m.host.GID
+}
+
+// credentialNames lists the environment variables OpenShell delivers to the
+// sandbox as provider placeholders.
+func credentialNames(llm *llmPlan, creds []credentialPlan) []string {
+	var names []string
+	if llm != nil {
+		for name := range llm.credentials {
+			names = append(names, name)
+		}
+	}
+	for _, c := range creds {
+		names = append(names, c.binding.Name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // mintBinding mints the sandbox's ingress binding, replacing a stale one

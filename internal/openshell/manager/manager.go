@@ -102,6 +102,9 @@ type Options struct {
 	// Profiles imports missing provider profiles; nil refuses to create a
 	// sandbox whose profiles are not imported yet.
 	Profiles ProfileImporter
+	// MCP lists the user's MCP servers a run may bring along; nil brings
+	// none (every sandbox still gets the per-run MCP lockdown).
+	MCP MCPInventory
 	// Telemetry receives the v8 sandbox records; nil drops them.
 	Telemetry audit.SandboxTelemetry
 	// Persist keeps "always" decisions in config.yaml; nil refuses them.

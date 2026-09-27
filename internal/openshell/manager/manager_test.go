@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -117,9 +118,17 @@ func TestCreateMountMode(t *testing.T) {
 	if tmpl == nil || tmpl.Image != "defenseclaw/sandbox-claudecode:test" {
 		t.Fatalf("template = %+v", tmpl)
 	}
+	// The project and its protected paths, then the per-run managed
+	// configuration, read-only.
 	mounts := tmpl.DriverConfig["docker"].(map[string]any)["mounts"].([]any)
-	if len(mounts) != 2 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
+	if len(mounts) != 4 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
 		t.Fatalf("mounts = %v", mounts)
+	}
+	for i, want := range []string{connector.ClaudeCodeSandboxRunDropInPath, connector.ClaudeCodeSandboxManagedMCPPath} {
+		mt := mounts[2+i].(map[string]any)
+		if mt["target"] != want || mt["read_only"] != true || mt["type"] != "bind" {
+			t.Fatalf("run config mount %d = %v", i, mt)
+		}
 	}
 	pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
 	if pol == nil || pol.NetworkPolicies[policy.EgressRuleName].Name == "" {
@@ -237,8 +246,16 @@ func TestCreateCopyModeAndStrict(t *testing.T) {
 		t.Fatalf("sandbox = %+v", sb)
 	}
 	got, _ := e.client.GetSandbox(context.Background(), "copybox")
-	if got.Spec.Template.DriverConfig != nil {
-		t.Fatal("copy mode mounted something")
+	// Copy mode mounts only the per-run managed configuration.
+	mounts := got.Spec.Template.DriverConfig["docker"].(map[string]any)["mounts"].([]any)
+	if len(mounts) != 2 {
+		t.Fatalf("copy mode mounts = %v", mounts)
+	}
+	for _, raw := range mounts {
+		mt := raw.(map[string]any)
+		if target, _ := mt["target"].(string); !strings.HasPrefix(target, "/etc/claude-code/") || mt["read_only"] != true {
+			t.Fatalf("copy mode mounted %v", mt)
+		}
 	}
 	if _, ok := got.Spec.Environment["HTTPS_PROXY"]; ok {
 		t.Fatal("strict profile got a proxy")

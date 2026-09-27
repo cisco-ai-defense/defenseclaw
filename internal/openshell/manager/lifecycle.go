@@ -433,6 +433,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	} else if err := m.ws.DeleteCopy(m.opts.DataDir, rec.Name); err != nil && !errors.Is(err, workspace.ErrCopyNotFound) {
 		warn(err)
 	}
+	warn(m.removeRunConfig(rec.Name))
 	warn(m.records.remove(rec.Name))
 	return providers, warnings
 }

@@ -117,6 +117,7 @@ type record struct {
 	Unblocks []string `json:"unblocks,omitempty"`
 
 	Workspace  *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
+	MCP        *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
 	Violations []sandboxapi.Violation       `json:"violations,omitempty"`
 	Warnings   []string                     `json:"warnings,omitempty"`
 
