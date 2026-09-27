@@ -105,8 +105,10 @@ type Options struct {
 	// 400 inside a tunnel carrying HTTP).
 	MaxHeaderBytes int
 	// MaxConns bounds concurrent client connections across all listeners.
-	// With all of them taken, the connection idle longest between
-	// keep-alive requests is closed to admit a new one.
+	// With all of them taken, a new connection displaces the oldest one no
+	// request was admitted on yet (silent, slow or unauthenticated), else
+	// the one idle longest between keep-alive requests; it waits only while
+	// every connection carries a request or tunnel.
 	MaxConns int
 	// MaxConnsPerBinding bounds one binding's client connections, counted
 	// once a request on them is admitted: open tunnels plus idle keep-alive
@@ -114,7 +116,8 @@ type Options struct {
 	// closed; a request that would exceed it with none idle gets a 429.
 	// Negative disables the limit. A connection no request was admitted on
 	// (unauthenticated or refused) is closed after its response, so before
-	// authenticating it holds a slot for at most HeaderTimeout.
+	// authenticating it holds a slot for at most HeaderTimeout, and only
+	// until a new connection needs the slot.
 	MaxConnsPerBinding int
 	// MaxTunnelsPerBinding bounds concurrent tunnels and requests per
 	// binding; negative disables the limit.

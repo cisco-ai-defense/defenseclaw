@@ -35,8 +35,13 @@ type connKey struct{}
 
 // limitListener bounds concurrent client connections and drops non-loopback
 // peers, which can only appear if someone bypasses Listen. With every slot
-// taken it closes the connection that has been idle longest to admit the
-// next one, so idle keep-alive connections cannot keep new clients out.
+// taken it closes a connection to admit the next one: the oldest one no
+// request was admitted on yet, else the one idle longest. Every sandbox
+// arrives from loopback through the OpenShell relay, so nothing can be
+// attributed before a request authenticates; silent or unauthenticated
+// connections therefore give way first, and they can neither hold every
+// slot nor stall the accept loop while another sandbox's request waits,
+// nor make it close authenticated keep-alive connections.
 type limitListener struct {
 	net.Listener
 	sem   chan struct{}
@@ -64,13 +69,15 @@ func (l *limitListener) Accept() (net.Conn, error) {
 			_ = c.Close()
 			return nil, net.ErrClosed
 		}
-		return &limitConn{Conn: c, tracker: l.conns, release: func() { <-l.sem }}, nil
+		lc := &limitConn{Conn: c, tracker: l.conns, release: func() { <-l.sem }, accepted: time.Now()}
+		l.conns.addPending(lc)
+		return lc, nil
 	}
 }
 
-// acquire takes a connection slot. While none is free it closes the
-// longest-idle connection, looking again as connections go idle, and
-// otherwise waits for one to close.
+// acquire takes a connection slot. While none is free it closes a
+// connection no request was admitted on, else the longest-idle one, looking
+// again as connections go idle, and otherwise waits for one to close.
 func (l *limitListener) acquire() bool {
 	select {
 	case l.sem <- struct{}{}:
@@ -80,7 +87,7 @@ func (l *limitListener) acquire() bool {
 	ticker := time.NewTicker(reclaimInterval)
 	defer ticker.Stop()
 	for {
-		l.conns.reclaimIdle()
+		l.conns.reclaim()
 		select {
 		case l.sem <- struct{}{}:
 			return true
@@ -100,9 +107,10 @@ func (l *limitListener) Close() error {
 // until it is closed.
 type limitConn struct {
 	net.Conn
-	tracker *connTracker
-	once    sync.Once
-	release func()
+	tracker  *connTracker
+	once     sync.Once
+	release  func()
+	accepted time.Time
 
 	// Guarded by tracker.mu.
 	binding   string    // binding of the requests admitted on it
@@ -123,14 +131,18 @@ func (c *limitConn) CloseWrite() error { return closeWrite(c.Conn) }
 
 // connTracker attributes client connections to bindings once a request on
 // them is admitted, and records which ones are idle between keep-alive
-// requests. It enforces the per-binding connection cap and picks the idle
-// connections to close when a binding or the whole proxy is over its limit.
+// requests and which ones no request was admitted on yet. It enforces the
+// per-binding connection cap and picks the connections to close when a
+// binding or the whole proxy is over its limit.
 type connTracker struct {
 	max int // per binding; <= 0 disables the cap
 
 	mu        sync.Mutex
 	idle      map[*limitConn]struct{}
 	byBinding map[string]map[*limitConn]struct{}
+	// pending are accepted connections no request was admitted on yet:
+	// silent, still sending their first request head, or unauthenticated.
+	pending map[*limitConn]struct{}
 }
 
 func newConnTracker(maxPerBinding int) *connTracker {
@@ -138,7 +150,17 @@ func newConnTracker(maxPerBinding int) *connTracker {
 		max:       maxPerBinding,
 		idle:      map[*limitConn]struct{}{},
 		byBinding: map[string]map[*limitConn]struct{}{},
+		pending:   map[*limitConn]struct{}{},
 	}
+}
+
+// addPending records a newly accepted connection.
+func (t *connTracker) addPending(c *limitConn) {
+	t.mu.Lock()
+	if !c.closed {
+		t.pending[c] = struct{}{}
+	}
+	t.mu.Unlock()
 }
 
 // claim attributes c to binding. Over the binding's cap its longest-idle
@@ -146,6 +168,9 @@ func newConnTracker(maxPerBinding int) *connTracker {
 // unattributed. It returns the binding's connection count.
 func (t *connTracker) claim(c *limitConn, binding string) (int, bool) {
 	t.mu.Lock()
+	// A request was admitted on c (or refused for the cap, which closes c
+	// after the answer): either way it no longer waits for one.
+	delete(t.pending, c)
 	if c.closed || c.binding == binding {
 		n := len(t.byBinding[binding])
 		t.mu.Unlock()
@@ -210,24 +235,33 @@ func (t *connTracker) setIdle(c *limitConn, idle bool) bool {
 	return false
 }
 
-// reclaimIdle closes the connection that has been idle longest and reports
-// whether there was one.
-func (t *connTracker) reclaimIdle() bool {
+// reclaim closes one connection to make room for a new one and reports
+// whether there was one to close: the oldest connection no request was
+// admitted on yet, else the one idle longest between keep-alive requests.
+// Connections carrying a request or tunnel are never closed.
+func (t *connTracker) reclaim() bool {
 	t.mu.Lock()
-	var oldest *limitConn
-	for c := range t.idle {
-		if oldest == nil || c.idleSince.Before(oldest.idleSince) {
-			oldest = c
+	var victim *limitConn
+	for c := range t.pending {
+		if victim == nil || c.accepted.Before(victim.accepted) {
+			victim = c
 		}
 	}
-	if oldest != nil {
-		t.detachLocked(oldest)
+	if victim == nil {
+		for c := range t.idle {
+			if victim == nil || c.idleSince.Before(victim.idleSince) {
+				victim = c
+			}
+		}
+	}
+	if victim != nil {
+		t.detachLocked(victim)
 	}
 	t.mu.Unlock()
-	if oldest == nil {
+	if victim == nil {
 		return false
 	}
-	_ = oldest.Close()
+	_ = victim.Close()
 	return true
 }
 
@@ -238,7 +272,7 @@ func (t *connTracker) forget(c *limitConn) {
 	t.mu.Unlock()
 }
 
-// detachLocked drops c from its binding and from the idle set.
+// detachLocked drops c from its binding and from the idle and pending sets.
 func (t *connTracker) detachLocked(c *limitConn) {
 	if set := t.byBinding[c.binding]; set != nil {
 		delete(set, c)
@@ -249,6 +283,7 @@ func (t *connTracker) detachLocked(c *limitConn) {
 	c.binding = ""
 	c.idleSince = time.Time{}
 	delete(t.idle, c)
+	delete(t.pending, c)
 }
 
 // connState follows the HTTP server's view of each client connection.

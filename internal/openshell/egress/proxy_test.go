@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -625,10 +626,13 @@ func TestProxySlowloris(t *testing.T) {
 
 // TestProxyMaxConns: connections beyond MaxConns wait in the backlog
 // instead of being served, and are served once a slot frees.
+// With every slot carrying a tunnel, a new connection waits until one
+// closes.
 func TestProxyMaxConns(t *testing.T) {
 	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxConns = 2 })
-	first, _ := h.dialProxy()
-	second, _ := h.dialProxy()
+	h.dialer.route(443, startEcho(t))
+	first, _ := h.tunnel("example.com:443", nil)
+	second, _ := h.tunnel("example.com:443", nil)
 	third, br := h.dialProxy()
 	fmt.Fprintf(third, "CONNECT example.com:22 HTTP/1.1\r\nHost: example.com:22\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(h.cred))
 	_ = third.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
@@ -641,6 +645,79 @@ func TestProxyMaxConns(t *testing.T) {
 		t.Errorf("queued connection = %d once a slot freed", resp.status)
 	}
 	_ = second.Close()
+}
+
+// Nothing can be attributed before a request authenticates (every sandbox
+// arrives from loopback), so connections that send nothing, or never finish
+// their first request, give way to new ones: they cannot hold every slot,
+// stall the accept loop while another sandbox waits, or make the proxy
+// close other sandboxes' idle keep-alive connections.
+func TestProxyPreAuthConnectionsCannotStarve(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxConns = 4 })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.dialer.route(443, startEcho(t))
+	other := h.addPrincipal(Principal{BindingID: "binding-two", SandboxID: "sb-2"})
+	keep, keepBR := h.keepAliveGet(other)
+	h.waitIdle("binding-two", 1)
+
+	type silent struct {
+		conn net.Conn
+		br   *bufio.Reader
+	}
+	pendingConns := func() int {
+		h.proxy.conns.mu.Lock()
+		defer h.proxy.conns.mu.Unlock()
+		return len(h.proxy.conns.pending)
+	}
+	var quiet []silent
+	for i := 0; i < 3; i++ {
+		conn, br := h.dialProxy()
+		if i == 2 {
+			fmt.Fprint(conn, "CONNECT example.com:443 HTTP/1.1\r\n") // a head that never ends
+		}
+		quiet = append(quiet, silent{conn, br})
+		eventually(t, "the connection to be accepted", func() bool { return pendingConns() == i+1 })
+	}
+
+	// Every slot is taken. A sandbox's CONNECT is served at once, in place
+	// of the oldest silent connection.
+	start := time.Now()
+	conn, _, resp := h.connect("example.com:443", basicAuth(h.cred), nil)
+	if resp.status != http.StatusOK || time.Since(start) > 2*time.Second {
+		t.Fatalf("CONNECT with every slot held by silent connections = %d after %v", resp.status, time.Since(start))
+	}
+	_ = conn.Close()
+	if !closedByProxy(quiet[0].conn, quiet[0].br, 5*time.Second) {
+		t.Error("the oldest silent connection was not closed to make room")
+	}
+	if closedByProxy(quiet[1].conn, quiet[1].br, 100*time.Millisecond) {
+		t.Error("more silent connections were closed than needed")
+	}
+
+	// A flood of new silent connections displaces older silent ones, never
+	// the other sandbox's idle keep-alive connection: the free slot takes
+	// the first, the next five replace the two silent connections left and
+	// the first three of the flood.
+	var flood []silent
+	for i := 0; i < 6; i++ {
+		conn, br := h.dialProxy()
+		flood = append(flood, silent{conn, br})
+	}
+	if !closedByProxy(flood[2].conn, flood[2].br, 5*time.Second) {
+		t.Fatal("the flood did not displace older silent connections")
+	}
+	if closedByProxy(keep, keepBR, 100*time.Millisecond) {
+		t.Fatal("an authenticated idle keep-alive connection was closed for unauthenticated ones")
+	}
+	fmt.Fprintf(keep, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(other))
+	_ = keep.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp2, err := http.ReadResponse(keepBR, nil)
+	if err != nil || resp2.StatusCode != http.StatusOK {
+		t.Fatalf("keep-alive request after the flood = %v, %v", resp2, err)
+	}
+	resp2.Body.Close()
 }
 
 func TestProxyTunnelIdleTimeout(t *testing.T) {
@@ -1456,7 +1533,46 @@ func TestConnTracker(t *testing.T) {
 		t.Errorf("refused claim left state behind: %+v", tr.byBinding)
 	}
 	_ = c.Close()
-	if len(tr.byBinding) != 0 || len(tr.idle) != 0 || tr.reclaimIdle() {
+	if len(tr.byBinding) != 0 || len(tr.idle) != 0 || tr.reclaim() {
 		t.Errorf("closed connection still tracked: %v %v", tr.byBinding, tr.idle)
+	}
+}
+
+// reclaim closes connections no request was admitted on first, oldest
+// first, then the longest-idle one, and never one carrying a request.
+func TestConnTrackerReclaimOrder(t *testing.T) {
+	tr := newConnTracker(0)
+	base := time.Unix(1_700_000_000, 0)
+	var closed []string
+	newConn := func(name string, accepted time.Time) *limitConn {
+		a, b := net.Pipe()
+		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+		c := &limitConn{Conn: a, tracker: tr, accepted: accepted}
+		c.release = func() { closed = append(closed, name) }
+		tr.addPending(c)
+		return c
+	}
+	idleOld := newConn("idle-old", base)
+	idleNew := newConn("idle-new", base.Add(time.Second))
+	busy := newConn("busy", base.Add(2*time.Second))
+	for _, c := range []*limitConn{idleOld, idleNew, busy} {
+		if _, ok := tr.claim(c, "b-1"); !ok {
+			t.Fatal("claim failed")
+		}
+	}
+	tr.setIdle(idleOld, true)
+	time.Sleep(time.Millisecond)
+	tr.setIdle(idleNew, true)
+	newConn("pending-new", base.Add(4*time.Second))
+	newConn("pending-old", base.Add(3*time.Second))
+
+	for tr.reclaim() {
+	}
+	want := []string{"pending-old", "pending-new", "idle-old", "idle-new"}
+	if !slices.Equal(closed, want) {
+		t.Errorf("reclaim order = %v, want %v", closed, want)
+	}
+	if busy.closed {
+		t.Error("a connection carrying a request was reclaimed")
 	}
 }
