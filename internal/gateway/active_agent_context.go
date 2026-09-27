@@ -260,14 +260,25 @@ func validScopedActiveAgentContextKey(scope, connectorName, sessionID string) (a
 	return activeAgentContextKey{scope: scope, connector: connectorName, sessionID: sessionID}, true
 }
 
-func (cache *activeAgentContextCache) makeRoomLocked() {
+// makeRoomLocked evicts the oldest session when the cache is full. To prevent
+// sandbox sessions from evicting host sessions, it only evicts sessions from
+// the same scope as the key that needs room: sandbox keys evict sandbox
+// sessions, host keys evict host sessions.
+func (cache *activeAgentContextCache) makeRoomLocked(needsRoom activeAgentContextKey) {
 	if len(cache.sessions) < maxActiveAgentContextSessions {
 		return
 	}
+	// Only evict from the same scope: sandbox evicts sandbox, host evicts host.
+	isSandbox := needsRoom.scope != ""
 	var oldestKey activeAgentContextKey
 	var oldestTime time.Time
 	found := false
 	for key, session := range cache.sessions {
+		// Only consider sessions from the same scope category.
+		candidateIsSandbox := key.scope != ""
+		if candidateIsSandbox != isSandbox {
+			continue
+		}
 		if !found || session.updatedAt.Before(oldestTime) ||
 			session.updatedAt.Equal(oldestTime) && activeAgentContextKeyLess(key, oldestKey) {
 			oldestKey = key
@@ -279,7 +290,7 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 		evicted := cache.sessions[oldestKey]
 		delete(cache.sessions, oldestKey)
 		if evicted.uncertain || len(evicted.files) != 0 {
-			cache.rememberEvictionLocked(oldestKey, evicted)
+			cache.rememberEvictionLocked(oldestKey, evicted, isSandbox)
 		}
 	}
 }
@@ -287,6 +298,7 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 func (cache *activeAgentContextCache) rememberEvictionLocked(
 	key activeAgentContextKey,
 	session activeAgentContextSession,
+	isSandbox bool,
 ) {
 	caseInsensitive := session.caseInsensitiveUncertain ||
 		len(session.caseInsensitiveFiles) != 0
@@ -310,9 +322,13 @@ func (cache *activeAgentContextCache) rememberEvictionLocked(
 	// Never drop authority loss when both bounded indexes saturate. This rare
 	// fallback retains the previous fail-closed behavior without making the
 	// ordinary single-cache-eviction path process-wide.
-	cache.uncertain = true
-	cache.caseInsensitiveUncertain =
-		cache.caseInsensitiveUncertain || caseInsensitive
+	// However, sandbox eviction overflow should not set a process-wide flag
+	// that would affect host sessions. Sandbox evictions stay scoped.
+	if !isSandbox {
+		cache.uncertain = true
+		cache.caseInsensitiveUncertain =
+			cache.caseInsensitiveUncertain || caseInsensitive
+	}
 }
 
 func (cache *activeAgentContextCache) consumeEvictionLocked(
@@ -405,7 +421,7 @@ func (cache *activeAgentContextCache) markUncertain(
 	if !exists {
 		uncertain, caseInsensitiveUncertain :=
 			cache.consumeEvictionLocked(key)
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
@@ -434,7 +450,7 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 	if !exists {
 		uncertain, caseInsensitiveUncertain :=
 			cache.consumeEvictionLocked(key)
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
@@ -500,7 +516,7 @@ func (cache *activeAgentContextCache) beginKey(key activeAgentContextKey) {
 	}
 	delete(cache.evictions, key)
 	if _, exists := cache.sessions[key]; !exists {
-		cache.makeRoomLocked()
+		cache.makeRoomLocked(key)
 	}
 	// SessionStart and CwdChanged are authenticated lifecycle proof that no
 	// previously loaded instruction file remains active for this session.

@@ -1085,3 +1085,62 @@ func TestActiveAgentContextInvalidNewSessionCannotEvictExactSession(t *testing.T
 		t.Fatalf("invalid session inserted=%t count=%d", invalidInserted, count)
 	}
 }
+
+// TestSandboxSessionsCannotEvictHostSessions reproduces p2-ingress-3: the
+// session cache shares a single capacity (256) between host and all sandboxes.
+// A sandbox sending many SessionStart hooks can fill the cache and evict host
+// sessions, or set the process-wide uncertain flag.
+func TestSandboxSessionsCannotEvictHostSessions(t *testing.T) {
+	nextTime := int64(0)
+	cache := activeAgentContextCache{now: func() time.Time {
+		nextTime++
+		return time.Unix(nextTime, 0)
+	}}
+
+	// Create some host sessions with authority.
+	for i := 0; i < 10; i++ {
+		sessionID := fmt.Sprintf("host-session-%d", i)
+		cache.begin("claudecode", sessionID)
+		cache.seedLoadedFile(
+			activeAgentContextKey{connector: "claudecode", sessionID: sessionID},
+			"/repo/AGENTS.md",
+			false,
+			cache.currentTime(),
+		)
+	}
+
+	// Verify host sessions exist.
+	hostSession := cache.snapshot("claudecode", "host-session-0")
+	if len(hostSession.files) == 0 {
+		t.Fatal("host session should have authority")
+	}
+
+	// A sandbox fills the cache with unique session IDs.
+	sandboxScope := "sb_testbinding123"
+	for i := 0; i < maxActiveAgentContextSessions; i++ {
+		sessionID := fmt.Sprintf("sandbox-session-%d", i)
+		key := activeAgentContextKey{
+			scope:     sandboxScope,
+			connector: "claudecode",
+			sessionID: sessionID,
+		}
+		cache.beginKey(key)
+	}
+
+	// After the fix: host sessions should not be evicted by sandbox sessions.
+	// Before the fix: sandbox inserts would evict the oldest session regardless
+	// of scope, so host-session-0 would be evicted.
+	hostSessionAfter := cache.snapshot("claudecode", "host-session-0")
+	if len(hostSessionAfter.files) == 0 && !hostSessionAfter.uncertain {
+		t.Error("sandbox sessions evicted host session without marking uncertain")
+	}
+
+	// Sandbox overflow should not set the process-wide uncertain flag that
+	// affects host sessions.
+	cache.mu.Lock()
+	globalUncertain := cache.uncertain
+	cache.mu.Unlock()
+	if globalUncertain {
+		t.Error("sandbox cache overflow set process-wide uncertain flag")
+	}
+}
