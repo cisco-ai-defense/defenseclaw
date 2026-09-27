@@ -81,6 +81,7 @@ from defenseclaw.tui.panels.overview import (
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
+from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
     WIZARD_DESCRIPTIONS,
     WIZARD_HOW_TO,
@@ -97,6 +98,7 @@ from defenseclaw.tui.panels.setup import (
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.registry import CmdEntry, build_registry
+from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
 from defenseclaw.tui.screens.consequence import (
@@ -292,6 +294,7 @@ PANELS = (
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
     ("inventory", "6", "Inventory"),
+    ("sandboxes", "7", "Sandboxes"),
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
@@ -388,7 +391,7 @@ class _BodyStatic(Static):
             event.stop()
 
 
-class DefenseClawTUI(App[None]):
+class DefenseClawTUI(SandboxPanelMixin, App[None]):
     """Textual TUI foundation.
 
     This first slice intentionally implements shell, routing, command
@@ -877,6 +880,7 @@ class DefenseClawTUI(App[None]):
         inventory_model: InventoryPanelModel | None = None,
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
         runtime_model: RuntimePanelModel | None = None,
+        sandbox_model: SandboxesPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -953,6 +957,7 @@ class DefenseClawTUI(App[None]):
         self.runtime_model = runtime_model or RuntimePanelModel()
         if runtime_model is not None:
             self.overview_model.set_runtime_overview(self.runtime_model.overview())
+        self._sandbox_init(sandbox_model)
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -1398,6 +1403,24 @@ class DefenseClawTUI(App[None]):
                         compact=True,
                         tooltip="Open the highlighted finding (Enter)",
                     )
+                with Horizontal(id="sandboxes-controls", classes="panel-controls hidden"):
+                    for button_id, label, tip in (
+                        ("sandboxes-view", "View", "Switch Sandboxes / Activity / Asks (t)"),
+                        ("sandboxes-new", "New run", "Start a harness in a new sandbox; it gets this terminal (n)"),
+                        ("sandboxes-connect", "Connect", "Resume the sandbox and attach the harness (c)"),
+                        ("sandboxes-stop", "Stop", "Stop the sandbox; it is kept for connect (s)"),
+                        ("sandboxes-undo", "Undo", "Put the project folder back to its snapshot (U)"),
+                        ("sandboxes-review", "Review", "Review changed files that can run code here (R)"),
+                        ("sandboxes-delete", "Delete", "Delete the sandbox (d)"),
+                        ("sandboxes-unblock", "Unblock", "Unblock the blocked destination (u)"),
+                        ("sandboxes-approve", "Approve", "Approve the selected ask (a)"),
+                        ("sandboxes-always", "Always", "Approve the selected ask for every sandbox (A)"),
+                        ("sandboxes-reject", "Reject", "Reject the selected ask (r)"),
+                        ("sandboxes-detail", "Details", "Open the highlighted row (Enter)"),
+                        ("sandboxes-wrappers", "Sandboxed on/off", "Make claude/codex run sandboxed by default (w)"),
+                        ("sandboxes-refresh", "Refresh", "Re-read the sandboxes now"),
+                    ):
+                        yield Button(label, id=button_id, compact=True, tooltip=tip)
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
                 # All four panels share ``CatalogListModel`` semantics, so the
                 # bars below all map button-id → key → ``handle_key()`` and
@@ -1708,6 +1731,7 @@ class DefenseClawTUI(App[None]):
                 worker.cancel()
             except Exception:  # noqa: BLE001 - teardown is best-effort.
                 pass
+        self._sandbox_unmount()
         await self.executor.cancel()
         # Textual cancels workers during shutdown, but Windows' Proactor loop
         # must also be given time to run each worker's cancellation cleanup.
@@ -1800,6 +1824,9 @@ class DefenseClawTUI(App[None]):
         # sudo-start. Poll it independently of the Runtime tab visit.
         self.set_interval(15.0, self._schedule_runtime_poll)
         self._schedule_runtime_poll()
+        # Sandboxes: REST refresh plus, once sandboxes are on, the live
+        # activity stream that raises blocked-destination and ask toasts.
+        self._sandbox_mount()
         # Native delivery evidence changes while the TUI is open; refresh the
         # same bounded snapshot periodically without coupling it to 3s health.
         self.set_interval(30.0, self._schedule_observability_status_load)
@@ -2073,6 +2100,8 @@ class DefenseClawTUI(App[None]):
             return len(getattr(self.audit_model, "items", ()) or ())
         if panel == "activity":
             return getattr(self.activity_model, "count", 0)
+        if panel == "sandboxes":
+            return self.sandbox_model.total_count()
         if panel == "logs":
             lines = getattr(self.logs_model, "lines", {}) or {}
             if snapshot is not None:
@@ -2182,6 +2211,8 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+        if panel == "sandboxes":
+            self._schedule_sandbox_poll()
         if (
             panel == "runtime"
             and not self._runtime_model_injected
@@ -3085,6 +3116,10 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_runtime_control(button_id)
             return
+        if button_id.startswith("sandboxes-"):
+            event.stop()
+            self._handle_sandbox_control(button_id)
+            return
         # All four catalog panels share ``CatalogListModel`` and the
         # ``_apply_catalog_action`` dispatcher, so the button-id →
         # handle_key mapping is uniform. Routing each prefix into its
@@ -3449,6 +3484,9 @@ class DefenseClawTUI(App[None]):
         elif self.active_panel == "runtime":
             self.runtime_model.cursor = event.cursor_row
             self._sync_runtime_controls()
+        elif self.active_panel == "sandboxes":
+            self.sandbox_model.cursor = event.cursor_row
+            self._sync_sandbox_controls()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -3933,7 +3971,7 @@ class DefenseClawTUI(App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 / 0 / V R A", "Switch panel by hotkey"),
+            ("1-9 / 0 / V N R A", "Switch panel by hotkey (7 Sandboxes)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
@@ -4013,6 +4051,18 @@ class DefenseClawTUI(App[None]):
                 ("a", "Show all / recommended models"),
                 ("r", "Refresh discovery"),
                 ("e", "Export snapshot"),
+            ],
+            "sandboxes": [
+                ("j/k or Up/Down", "Navigate the selected view"),
+                ("t", "Switch Sandboxes / Activity / Asks"),
+                ("Enter", "Open the highlighted row"),
+                ("u", "Unblock a blocked destination (this sandbox or always)"),
+                ("a / A / r", "Approve / always approve / reject an ask"),
+                ("c / n", "Connect / new run (the harness gets the terminal)"),
+                ("s / d", "Stop / delete the sandbox"),
+                ("U / R", "Undo the session / review its changes"),
+                ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
+                ("r", "Refresh (in Asks: reject)"),
             ],
             "registries": [
                 ("j/k or Up/Down", "Navigate registries"),
@@ -4153,6 +4203,12 @@ class DefenseClawTUI(App[None]):
             self._table_columns = self.runtime_model.data_table_columns()
             self._table_rows = self.runtime_model.data_table_rows()
             self.body_text = self._runtime_body_text()
+            return self.body_text
+        if self.active_panel == "sandboxes":
+            if self._sandbox_supported():
+                self._table_columns = self.sandbox_model.data_table_columns()
+                self._table_rows = self.sandbox_model.data_table_rows()
+            self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
@@ -4396,6 +4452,7 @@ class DefenseClawTUI(App[None]):
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
         runtime = self.query_one("#runtime-controls", Horizontal)
+        sandboxes = self.query_one("#sandboxes-controls", Horizontal)
         # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
         # ``Horizontal`` containers (rather than one shared bar keyed on
         # active_panel) so each panel can advertise the action keys it
@@ -4433,6 +4490,7 @@ class DefenseClawTUI(App[None]):
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
+        sandboxes.set_class(self.active_panel != "sandboxes" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -4469,6 +4527,8 @@ class DefenseClawTUI(App[None]):
             self._sync_ai_controls()
         if self.active_panel == "runtime" and not self.help_open:
             self._sync_runtime_controls()
+        if self.active_panel == "sandboxes" and not self.help_open:
+            self._sync_sandbox_controls()
         if self.active_panel in self.catalog_models and not self.help_open:
             self._sync_catalog_controls(self.active_panel)
 
@@ -9730,6 +9790,8 @@ class DefenseClawTUI(App[None]):
             return self.inventory_model.cursor
         if self.active_panel == "ai":
             return self.ai_discovery_model.cursor
+        if self.active_panel == "sandboxes":
+            return self.sandbox_model.cursor
         if self.active_panel == "setup":
             return self._setup_cursor()
         return 0
@@ -9751,6 +9813,11 @@ class DefenseClawTUI(App[None]):
             return True
         if self.active_panel == "runtime":
             return self._apply_runtime_action(self.runtime_model.handle_key(key))
+        if self.active_panel == "sandboxes":
+            # ``U`` (undo) differs from ``u`` (unblock); _panel_key folds it.
+            if event.character == "U":
+                key = "U"
+            return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
         if self.active_panel == "alerts":
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
@@ -11015,6 +11082,7 @@ class DefenseClawTUI(App[None]):
         self.data_dir = new_data_dir
         self.overview_model.set_cfg(new_overview_cfg)
         self.setup_model.set_config(new_cfg, external=external)
+        self.sandbox_model.set_config(new_cfg)
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
         if (
@@ -11526,6 +11594,9 @@ class DefenseClawTUI(App[None]):
         # ``_confirm_and_run_parsed`` directly, not through here).
         if getattr(intent, "risk", "read-only") == "destructive":
             await self._confirm_and_run_destructive_intent(intent)
+            return
+        if getattr(intent, "terminal", False):
+            await self._confirm_and_run_terminal_intent(intent)
             return
         parsed = ParsedCommand(
             binary=intent.binary,

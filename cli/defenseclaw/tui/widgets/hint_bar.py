@@ -80,6 +80,11 @@ class HintEngine:
             return self._ai_discovery_hint(state)
         if panel in {"registry", "registries"}:
             return self._registries_hint(state)
+        if panel == "sandboxes":
+            return (
+                "KEYS  t view | u unblock | a/A/r asks | c connect | n new run | "
+                "U undo | R review | s stop | d delete | w sandboxed on/off."
+            )
         if panel == "setup":
             return self._setup_hint(state, status)
         if panel in {"first-run", "firstrun"}:
