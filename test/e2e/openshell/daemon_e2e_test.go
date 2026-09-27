@@ -148,6 +148,15 @@ type env struct {
 	daemon *exec.Cmd
 	mockPx *exec.Cmd
 
+	// spec is the harness under test (Claude Code when nil) and launchArgs
+	// its extra launch arguments; mockModel and mockScript name the mock
+	// model server and its scenario script under test/e2e/openshell
+	// (mock_anthropic.py and scenarios/daemon-claude.json when empty).
+	spec       *harness.Spec
+	launchArgs []string
+	mockModel  string
+	mockScript string
+
 	profilesBefore map[string]bool
 	// usedProfiles are the provider profiles this run's providers were
 	// created from; cleanup considers no others (a concurrent run's stay).
@@ -324,11 +333,11 @@ gateway:
   api_port: %d
 openshell:
   enabled: true
-  harnesses: [claudecode]
+  harnesses: [%s]
   token_delivery: %s
   approvals:
     debounce_ms: 500
-`, dc, e.apiPort+10, e.apiPort, e.tokenDelivery)
+`, dc, e.apiPort+10, e.apiPort, e.harnessSpec().Name, e.tokenDelivery)
 	writeFile(t, filepath.Join(dc, "config.yaml"), []byte(cfg), 0o600)
 
 	var raw [24]byte
@@ -339,10 +348,14 @@ openshell:
 	e.api = sandboxapi.NewClient("http://127.0.0.1:"+strconv.Itoa(e.apiPort), e.token)
 
 	// The mock model.
+	mockModel, mockScript := e.mockModel, e.mockScript
+	if mockModel == "" {
+		mockModel, mockScript = "mock_anthropic.py", "daemon-claude.json"
+	}
 	mockLog := filepath.Join(e.work, "logs", "mock.jsonl")
-	e.mockPx = e.spawn("mock", "python3", filepath.Join(e.repo, "test", "e2e", "openshell", "mock_anthropic.py"),
+	e.mockPx = e.spawn("mock", "python3", filepath.Join(e.repo, "test", "e2e", "openshell", mockModel),
 		"--host", "127.0.0.1", "--port", strconv.Itoa(e.mock), "--quiet", "--log", mockLog,
-		"--script", filepath.Join(e.repo, "test", "e2e", "openshell", "scenarios", "daemon-claude.json"))
+		"--script", filepath.Join(e.repo, "test", "e2e", "openshell", "scenarios", mockScript))
 	e.root.Cleanup(func() { stop(e.mockPx) })
 	waitFor(t, 20*time.Second, "the mock model", func() error {
 		resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(e.mock) + "/v1/models")
@@ -956,12 +969,21 @@ func (e *env) exec(sb *sandboxapi.Sandbox, timeout time.Duration, idempotent boo
 	return execOut{stdout: string(res.Stdout), code: res.ExitCode}
 }
 
-// harness runs one headless Claude Code prompt through the in-image
-// launcher, as `defenseclaw sandbox run -p` would.
+// harnessSpec is the harness under test (Claude Code unless set).
+func (e *env) harnessSpec() *harness.Spec {
+	if e.spec != nil {
+		return e.spec
+	}
+	return harness.ClaudeCode
+}
+
+// harness runs one headless prompt of the harness under test through the
+// in-image launcher, as `defenseclaw sandbox run -p` would.
 func (e *env) harness(sb *sandboxapi.Sandbox, prompt string) string {
 	e.t.Helper()
-	argv, err := harness.ClaudeCode.LaunchArgv(harness.LaunchOptions{
+	argv, err := e.harnessSpec().LaunchArgv(harness.LaunchOptions{
 		Mode: harness.Headless, Yolo: sb.Launch.Yolo, Prompt: prompt, CredentialProfile: sb.Launch.CredentialProfile,
+		Args: e.launchArgs,
 	})
 	if err != nil {
 		e.t.Fatal(err)
