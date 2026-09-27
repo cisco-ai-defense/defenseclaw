@@ -48,6 +48,9 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	notice := "MCP: blocked the repository's servers repo-tool (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)"
+	ta.daemon.createMCP = &sandboxapi.MCPSummary{Imported: []string{"github", "linear"}, ProjectServers: "block", Project: []string{"repo-tool"}}
+	ta.daemon.createWarnings = []string{notice}
 	ta.term.during = func() {
 		ta.daemon.mu.Lock()
 		sb := ta.daemon.sandboxes["dc-claude-proj-1a2b"]
@@ -78,6 +81,8 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     ANTHROPIC_API_KEY → api.anthropic.com only",
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
+		"MCP       github ✓ · linear ✓",
+		notice,
 		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 sites contacted (1 blocked) · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b",

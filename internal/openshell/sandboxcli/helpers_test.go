@@ -67,6 +67,9 @@ type fakeDaemon struct {
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// createMCP and createWarnings are what create reports.
+	createMCP      *sandboxapi.MCPSummary
+	createWarnings []string
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -224,6 +227,10 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			sb.Workspace = &sandboxapi.WorkspaceSummary{Project: "~/proj → " + workdir + " (live)", Hidden: []string{".env"}, Protected: []string{".git/hooks", ".git/config"}}
 			sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git"}
 		}
+		if d.createMCP != nil {
+			sb.MCP = d.createMCP
+		}
+		sb.Warnings = append(sb.Warnings, d.createWarnings...)
 		d.sandboxes[name] = sb
 		reply(sb)
 	case strings.HasPrefix(path, sandboxapi.PathSandboxes+"/"):

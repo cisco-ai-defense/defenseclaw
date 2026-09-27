@@ -421,6 +421,11 @@ func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
 		}
 		row("Host", strings.Join(ports, " ")+" reachable from the sandbox")
 	}
+	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
+		// Servers left behind and a repository's blocked servers arrive as
+		// warnings below, one line each.
+		row("MCP", strings.Join(sb.MCP.Imported, " ✓ · ")+" ✓")
+	}
 	if sb.TamperTier != "" && sb.TamperTier != "managed" {
 		row("Hooks", sb.TamperTier+" tier: the agent could edit its own hook settings (hook silence is detected)")
 	}
