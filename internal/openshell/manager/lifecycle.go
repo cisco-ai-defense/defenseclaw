@@ -256,7 +256,8 @@ func (m *Manager) stopFailed(ctx context.Context, gw *Gateway, b *box) {
 
 // Start starts a stopped sandbox. The ingress token is rotated first, so a
 // credential from an earlier session is useless, and a mounted project gets
-// a fresh snapshot for the new session.
+// a fresh snapshot for the new session unless the folder still holds an
+// earlier session's changes (keepSnapshot).
 func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -350,7 +351,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: rec.Name, Reason: "snapshot_kept",
-				Message: "kept the pre-session snapshot: " + why + "; undo still reverts them (`sandbox start --new-snapshot` accepts them)"})
+				Message: "kept the pre-session snapshot: " + why + "; undo still reverts them (`defenseclaw sandbox start --new-snapshot` accepts them)"})
 		} else {
 			if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
@@ -423,7 +424,10 @@ func (m *Manager) keepSnapshot(ctx context.Context, name string, newSnapshot boo
 	if rep.FilesChanged == 0 && len(rep.Changes) == 0 && len(rep.Flags) == 0 {
 		return false, ""
 	}
-	return true, fmt.Sprintf("the folder still holds %d changed file(s) from an earlier session", max(rep.FilesChanged, len(rep.Changes)))
+	if n := max(rep.FilesChanged, len(rep.Changes)); n > 0 {
+		return true, fmt.Sprintf("the folder still holds %d changed file(s) from an earlier session", n)
+	}
+	return true, "the folder still holds changes from an earlier session"
 }
 
 // stoppedPhase reports an OpenShell phase in which the workload no longer
