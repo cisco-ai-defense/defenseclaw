@@ -26,8 +26,10 @@ come:
 - **Surfaces.** The Python `defenseclaw sandbox` stubs that hand off to the
   Go commands (today the Python group has only `legacy-cleanup`), the TUI
   Sandboxes panel and the macOS menu-bar item.
-- **MCP import.** The harness's MCP servers are not brought into the sandbox
-  yet (`--no-mcp` is accepted and recorded).
+- **MCP import and per-run configuration for the other harnesses.** Only
+  Claude Code and Codex bring the user's MCP servers along and get per-run
+  managed configuration (see
+  [per-sandbox managed configuration](#per-sandbox-managed-configuration)).
 - **Harnesses.** `claudecode`, `codex`, `opencode`, `copilot`, `amp`,
   `cursor`, `kiro` and `devin` have harness specs and sandbox artifacts. The
   Amp, Cursor Agent and Devin images stay unverified until a probe runs with a
@@ -1174,6 +1176,13 @@ an allowlisted server by command only and merges a project table of the same
 name key by key, so the repository could otherwise add environment
 variables to it. The repository's own servers are listed in the create
 response's one-line notice and in `Sandbox.MCP`.
+
+Only Claude Code and Codex have per-run managed configuration
+(`connector.SandboxRunConfigProvider`). For the other harnesses the run's
+model provider comes from the credential profile's environment and launch
+flags, a safe run relies on dropping the harness's bypass flags from the
+launch (`harness.Spec.BypassArgs`; nothing managed refuses a bypass the
+workload asks for later), and no MCP servers are brought along.
 
 The run-as identity has one source, `Manager.runAs`: the image is built for
 it, create refuses an image record with another uid/gid, and the policy runs
