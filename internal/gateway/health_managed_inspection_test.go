@@ -84,6 +84,7 @@ func TestSetInspectionAvailabilityPublishesOnlyInManagedMode(t *testing.T) {
 		t.Fatalf("managed snapshot = %+v", got)
 	}
 
+	s.cfg.Guardrail.Mode = "action"
 	s.cfg.CiscoAIDefense.UnavailableAction = config.AIDUnavailableActionBlock
 	s.refreshManagedInspectionHealth(true)
 	if got := s.health.Snapshot().ManagedInspection; got.UnavailableAction != config.AIDUnavailableActionBlock {

@@ -429,9 +429,11 @@ Cloud Management is offline, the identity library is unavailable, or the
 service does not answer, requests that need inspection are allowed by default.
 `/health` reports `managed_inspection.available: false`, and the Secure Client
 GUI reports `DEGRADED`. Set `cisco_ai_defense.unavailable_action: block` in the
-administrator-owned `config.yaml` to deny those requests in action mode;
-observe mode records a would-block result. Requests with nothing to inspect
-remain allowed. Inspection counts as available only while AI Defense returns
+administrator-owned `config.yaml` to deny those requests for active connectors
+in action mode. Observe mode records a would-block result and lets the request
+run uninspected; if no active connector is in action mode, the GUI reports
+`inspection_unavailable_allowing`. Requests with nothing to inspect remain
+allowed. Inspection counts as available only while AI Defense returns
 verdicts: a valid token does not clear a failed inspection, but the next
 inspection with a verdict does. A guardrail startup error also reports
 `DEGRADED`; a build without managed-cloud support blocks hook requests that

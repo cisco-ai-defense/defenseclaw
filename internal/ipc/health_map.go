@@ -56,7 +56,9 @@ func mapHealth(s gateway.HealthSnapshot) pb.ServiceAvailability {
 //  7. Managed inspection unavailable → DEGRADED: Cisco AI Defense, the
 //     only decision-maker in managed_enterprise, cannot be reached, so
 //     tool calls are either allowed uninspected or blocked, per
-//     cisco_ai_defense.unavailable_action. Skipped while the guardrail is
+//     cisco_ai_defense.unavailable_action as enforced by the connectors'
+//     mode (the gateway reports allow while no connector is in action
+//     mode). Skipped while the guardrail is
 //     Disabled: nothing is being inspected, so there is nothing to allow
 //     or block.
 //  8. Otherwise → READY.

@@ -387,18 +387,23 @@ func TestAddManagedInspectionHealthDescribesTheUnavailablePosture(t *testing.T) 
 	for _, tc := range []struct {
 		action    string
 		supported bool
+		mode      string
 		hint      string
 	}{
-		{action: "", supported: true, hint: "tool calls are not being inspected"},
-		{action: config.AIDUnavailableActionBlock, supported: true, hint: "tool calls that need inspection are being blocked"},
+		{action: "", supported: true, mode: "action", hint: "tool calls are not being inspected"},
+		{action: config.AIDUnavailableActionBlock, supported: true, mode: "action", hint: "tool calls that need inspection are being blocked"},
+		// Observe mode records the block as would-block and lets it run.
+		{action: config.AIDUnavailableActionBlock, supported: true, mode: "observe", hint: "only records them as would-block"},
 		// A build with no managed-cloud support blocks whatever the action.
-		{action: "", hint: "tool calls that need inspection are being blocked"},
+		{action: "", mode: "action", hint: "tool calls that need inspection are being blocked"},
+		{action: "", mode: "observe", hint: "only records them as would-block"},
 	} {
 		cloudreg.Register(nil)
 		if tc.supported {
 			registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 		}
 		s := managedInspectionSidecar(t)
+		s.cfg.Guardrail.Mode = tc.mode
 		s.cfg.CiscoAIDefense.UnavailableAction = tc.action
 		s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
 		detail := map[string]interface{}{"hint": "configured"}
@@ -412,5 +417,63 @@ func TestAddManagedInspectionHealthDescribesTheUnavailablePosture(t *testing.T) 
 		if hint, _ := detail["hint"].(string); !strings.Contains(hint, tc.hint) {
 			t.Fatalf("hint = %q, want %q", hint, tc.hint)
 		}
+	}
+}
+
+// Only a connector in action mode enforces unavailable_action=block;
+// observe mode records the block as would-block and lets the call run
+// uninspected. /health and the Secure Client availability report the
+// posture actually enforced.
+func TestManagedInspectionPostureFollowsTheConnectorMode(t *testing.T) {
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
+	disabled := false
+	for _, tc := range []struct {
+		name   string
+		action string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{name: "observe", action: config.AIDUnavailableActionBlock, want: config.AIDUnavailableActionAllow},
+		{name: "action", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) { c.Guardrail.Mode = "action" }, want: config.AIDUnavailableActionBlock},
+		{name: "allow in action mode", action: config.AIDUnavailableActionAllow, mutate: func(c *config.Config) { c.Guardrail.Mode = "action" }, want: config.AIDUnavailableActionAllow},
+		{name: "connector override to observe", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Mode = "action"
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Mode: "observe"}}
+		}, want: config.AIDUnavailableActionAllow},
+		{name: "one of two connectors in action mode", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Mode: "action"}, "claudecode": {Mode: "observe"}}
+		}, want: config.AIDUnavailableActionBlock},
+		{name: "the action-mode connector is disabled", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Mode: "action", Enabled: &disabled}, "claudecode": {}}
+		}, want: config.AIDUnavailableActionAllow},
+		{name: "connector hook mode action", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.ConnectorHooks = map[string]config.AgentHookConfig{"codex": {Mode: "action"}}
+		}, want: config.AIDUnavailableActionBlock},
+		{name: "no connector selected, guardrail.mode action", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connector = ""
+			c.Guardrail.Mode = "action"
+		}, want: config.AIDUnavailableActionBlock},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := managedInspectionSidecar(t)
+			s.cfg.Guardrail.Connector = "codex"
+			s.cfg.CiscoAIDefense.UnavailableAction = tc.action
+			if tc.mutate != nil {
+				tc.mutate(s.cfg)
+			}
+			s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
+			if got := s.health.Snapshot().ManagedInspection; got == nil || got.UnavailableAction != tc.want {
+				t.Fatalf("managed_inspection = %+v, want unavailable_action %s", got, tc.want)
+			}
+			detail := map[string]interface{}{}
+			s.addManagedInspectionHealth(context.Background(), detail)
+			if got := detail["inspection_unavailable_action"]; got != tc.want {
+				t.Fatalf("inspection_unavailable_action = %v, want %s", got, tc.want)
+			}
+			hint, _ := detail["hint"].(string)
+			if blocking := strings.Contains(hint, "being blocked"); blocking != (tc.want == config.AIDUnavailableActionBlock) {
+				t.Fatalf("hint = %q for posture %s", hint, tc.want)
+			}
+		})
 	}
 }

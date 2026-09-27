@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +90,47 @@ func managedAIDEffectiveUnavailableAction(cfg *config.Config) string {
 		return config.AIDUnavailableActionBlock
 	}
 	return cfg.CiscoAIDefense.EffectiveUnavailableAction()
+}
+
+// managedAIDUnavailablePosture is what currently happens to a request AI
+// Defense could not inspect, as /health and the Secure Client availability
+// report it. Only a connector in action mode enforces the block; observe
+// mode records it as would-block and lets the call run uninspected. So
+// while no active connector is in action mode the posture is allow,
+// whatever managedAIDEffectiveUnavailableAction says.
+func managedAIDUnavailablePosture(cfg *config.Config) string {
+	action := managedAIDEffectiveUnavailableAction(cfg)
+	if action == config.AIDUnavailableActionBlock && !managedAIDHookLaneEnforces(cfg) {
+		return config.AIDUnavailableActionAllow
+	}
+	return action
+}
+
+// managedAIDHookLaneEnforces reports whether any enabled active connector
+// runs its hooks in action mode, resolved the way the hook handlers do
+// (connector_hooks.<name>.mode, then the connector's guardrail mode). With
+// no connector selected, the generic inspect routes follow guardrail.mode.
+func managedAIDHookLaneEnforces(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	names := cfg.ActiveConnectors()
+	if len(names) == 0 {
+		return inspectMode(cfg) == "action"
+	}
+	for _, name := range names {
+		if !cfg.Guardrail.EffectiveEnabled(name) {
+			continue
+		}
+		mode := strings.TrimSpace(cfg.ConnectorHookConfig(name).Mode)
+		if mode == "" || strings.EqualFold(mode, "inherit") {
+			mode = cfg.EffectiveGuardrailModeForConnector(name)
+		}
+		if normalizeAgentHookMode(mode) == "action" {
+			return true
+		}
+	}
+	return false
 }
 
 // managedAIDUnavailableReasonBlockable reports whether a managed fail-open
@@ -249,10 +291,10 @@ func (s *Sidecar) requireManagedInspectionSupport() error {
 
 // addManagedInspectionHealth adds the managed inspection state to a
 // guardrail health detail map: whether AI Defense can currently be reached,
-// the configured unavailable action, and, while it cannot, the cause and a
-// hint that says what happens to tool calls. It runs on the guardrail
-// health ticker, so it also re-probes an unavailable provider and refreshes
-// the Secure Client availability.
+// what happens to requests it cannot inspect (managedAIDUnavailablePosture),
+// and, while it cannot, the cause and a hint that says what happens to tool
+// calls. It runs on the guardrail health ticker, so it also re-probes an
+// unavailable provider and refreshes the Secure Client availability.
 func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[string]interface{}) {
 	if s == nil || detail == nil {
 		return
@@ -260,7 +302,8 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	s.probeManagedInspection(ctx)
 	s.publishManagedInspectionHealth()
 	available, cause := s.managedInspectionState()
-	action := managedAIDEffectiveUnavailableAction(s.currentConfig())
+	cfg := s.currentConfig()
+	action := managedAIDUnavailablePosture(cfg)
 	detail["inspection_available"] = available
 	detail["inspection_unavailable_action"] = action
 	if available {
@@ -271,6 +314,10 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	// plainly what is happening behind it.
 	if action == config.AIDUnavailableActionBlock {
 		detail["hint"] = "remote inspection is unreachable; tool calls that need inspection are being blocked (cisco_ai_defense.unavailable_action=block)"
+		return
+	}
+	if managedAIDEffectiveUnavailableAction(cfg) == config.AIDUnavailableActionBlock {
+		detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected (no connector is in action mode, so cisco_ai_defense.unavailable_action=block only records them as would-block)"
 		return
 	}
 	detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
