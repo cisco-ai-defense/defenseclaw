@@ -4208,8 +4208,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "sandboxes":
             if self._sandbox_supported():
-                self._table_columns = self.sandbox_model.data_table_columns()
-                self._table_rows = self.sandbox_model.data_table_rows()
+                # Under 100 columns the table leaves out what Enter's detail shows.
+                compact = 0 < self.size.width < 100
+                self._table_columns = self.sandbox_model.data_table_columns(compact)
+                self._table_rows = self.sandbox_model.data_table_rows(compact)
             self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "setup":
@@ -9269,6 +9271,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             command_elapsed_secs=elapsed_secs,
             logs_paused=bool(self.logs_model.paused),
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
+            panel_view=self.sandbox_model.view if active_panel == "sandboxes" else "",
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))

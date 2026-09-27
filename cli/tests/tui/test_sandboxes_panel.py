@@ -1044,6 +1044,7 @@ def test_blocks_of_deleted_sandboxes_are_history() -> None:
     model = _model()
     model.add_events([{**BLOCKED, "sandbox": "gone"}])
     assert model.current_blocks() == () and model.total_count() == 1
+    assert model.block_notice() == ("", "", "")
 
 
 def test_u_never_reaches_into_another_sandbox() -> None:
@@ -1057,6 +1058,13 @@ def test_u_never_reaches_into_another_sandbox() -> None:
         "No blocked destination in fix-tests. webhook.site was blocked in myapp-claude-7f3a: "
         "select that sandbox, or press t for Activity."
     )
+    assert model.block_notice() == (
+        "✗ webhook.site (exfil destination)",
+        " in myapp-claude-7f3a",
+        "select it, then u",
+    )
+    model.cursor = 1
+    assert model.block_notice()[2] == "u unblocks"
     # Asks use the ask's sandbox.
     model.view = "asks"
     assert model.handle_key("u") == SandboxPanelAction("unblock", sandbox="myapp-claude-7f3a", host="webhook.site")
@@ -1073,6 +1081,42 @@ def test_u_names_the_organization_policy_when_unblocking_is_refused() -> None:
     model.view = "activity"
     assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
     assert dict(model.detail_pairs()[1])["Unblock"] == ADMIN_MESSAGE
+    assert ADMIN_MESSAGE in model.block_notice()[2]
+
+
+def test_hint_bar_keys_fit_one_line_at_80_columns() -> None:
+    from defenseclaw.tui.models import HintState
+    from defenseclaw.tui.widgets.hint_bar import HintEngine
+
+    engine = HintEngine()
+    for view, must in (("sandboxes", "U undo"), ("activity", "u unblock"), ("asks", "x reject")):
+        line = engine.hint_for(HintState(active_panel="sandboxes", panel_view=view))
+        assert must in line and len(line) <= 78, (view, len(line))
+        assert "r reject" not in line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "view"), [((80, 24), "sandboxes"), ((80, 24), "asks"), ((100, 30), "sandboxes")])
+async def test_the_list_and_the_asks_stay_on_screen(fetch, size, view) -> None:
+    fetch.sandboxes = [RUNNING, STOPPED, COPY]
+    app = DefenseClawTUI(config=_config())
+    async with app.run_test(size=size) as pilot:
+        await pilot.press("7")
+        await app._refresh_sandbox_snapshot(render=True)  # noqa: SLF001
+        # Blocks in two sandboxes and alerts on two of them.
+        app.sandbox_model.add_events([BLOCKED, {**BLOCKED, "seq": 7, "host": "paste.example"}, PRIVATE])
+        app.sandbox_model.view = view
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        table = app.query_one("#panel-table")
+        body = app._sandbox_body_text()  # noqa: SLF001
+        assert body.count("\n") + 1 <= 5, body
+        rows = len(app.sandbox_model.data_table_rows(compact=size[0] < 100))
+        # The header row plus every row fits between the controls and the bottom chrome.
+        assert table.region.y + 1 + rows <= size[1] - 4, (table.region, rows)
+        assert table.region.height >= 1 + rows
+        if size[0] < 100 and view == "sandboxes":
+            assert "Pack/Profile" not in app.sandbox_model.data_table_columns(compact=True)
 
 
 # --- review fixes: detail keys, review scrolling, confirmations -----------------

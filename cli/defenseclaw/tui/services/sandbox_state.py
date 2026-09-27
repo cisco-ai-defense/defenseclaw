@@ -40,6 +40,17 @@ ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
 HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
 
 _RUNNING_PHASES = frozenset({"ready", "running"})
+# Harness command names, for narrow tables.
+_HARNESS_COMMANDS = {"claudecode": "claude", "codex": "codex"}
+
+
+def sandbox_keys_hint(view: str) -> str:
+    """The hint bar's keys for a Sandboxes view (one line at 80 columns)."""
+    if view == "asks":
+        return "KEYS  t view | Enter detail | a approve | A always | x reject | r refresh"
+    if view == "activity":
+        return "KEYS  t view | Enter detail | u unblock | n new run | w sandboxed | r refresh"
+    return "KEYS  t view | c connect | s stop | d delete | U undo | R review | u unblock"
 
 
 def _text(value: Any) -> str:
@@ -905,7 +916,8 @@ class SandboxesPanelModel:
             return "unavailable"
         return "ready"
 
-    def headline(self) -> str:
+    def headline(self, max_width: int = 0) -> str:
+        """The status line; ``max_width`` drops the gateway name first when short of room."""
         state = self.state()
         if state == "waiting":
             return "Loading sandboxes from the DefenseClaw daemon..."
@@ -919,9 +931,12 @@ class SandboxesPanelModel:
         parts = [f"{self.status.running} running", f"{self.status.sandboxes} total"]
         if self.asks:
             parts.append(f"{len(self.asks)} ask(s) waiting")
+        line = " · ".join(parts)
         if self.status.gateway:
-            parts.append(self.status.gateway)
-        return " · ".join(parts)
+            full = f"{line} · {self.status.gateway}"
+            if not max_width or len(full) <= max_width:
+                return full
+        return line
 
     def stale_note(self, now: datetime | None = None) -> str:
         if not self.error or not self.status.loaded:
@@ -938,21 +953,19 @@ class SandboxesPanelModel:
         return f"Organization policy: {self.status.admin_detail or self.status.admin_authority}"
 
     def keys_line(self) -> str:
-        common = "t view  Enter detail  n new run  w sandboxed on/off"
-        if self.view == "asks":
-            return "Keys: a approve  A always  r reject  " + common
-        if self.view == "activity":
-            return "Keys: u unblock  r refresh  " + common
-        return "Keys: c connect  s stop  d delete  U undo  R review  u unblock  r refresh  " + common
+        return sandbox_keys_hint(self.view)
 
-    def data_table_columns(self) -> tuple[str, ...]:
+    def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
+        """``compact`` (a narrow terminal) leaves out what the Enter detail shows."""
         if self.view == "activity":
             return ("Time", "Sandbox", "", "Event")
         if self.view == "asks":
             return ("Sandbox", "Kind", "Destination", "Binary", "Risk", "Reason")
+        if compact:
+            return ("Name", "Phase", "Harness", "Sites", "Blocked", "Tools", "Alerts")
         return ("Name", "Phase", "Harness", "Pack/Profile", "Mode", "Up", "Sites", "Blocked", "Tools", "Alerts")
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
         if self.view == "activity":
             return tuple(
                 (
@@ -974,6 +987,19 @@ class SandboxesPanelModel:
                     ask.reason or "-",
                 )
                 for ask in self.asks
+            )
+        if compact:
+            return tuple(
+                (
+                    row.name,
+                    row.phase or "-",
+                    _HARNESS_COMMANDS.get(row.harness, row.harness_label),
+                    str(row.destinations),
+                    str(row.blocked),
+                    f"{row.tool_blocked}/{row.tool_calls}" if row.tool_calls else "0",
+                    row.alert_badge,
+                )
+                for row in self.rows
             )
         return tuple(
             (
@@ -1001,8 +1027,44 @@ class SandboxesPanelModel:
         return ""
 
     def recent_blocks(self, limit: int = 3) -> tuple[ActivityRow, ...]:
-        out = [row for row in reversed(self.feed) if row.blocked_destination]
-        return tuple(out[:limit])
+        return self.current_blocks()[:limit]
+
+    def block_notice(self) -> tuple[str, str, str]:
+        """(block, where, note) for the header's one blocked-destination line.
+
+        The newest block still in force, the sandbox it happened in, and
+        whether ``u`` lifts it from here and how many more there are. The
+        panel shortens ``block`` first when the line is too long.
+        """
+        blocks = self.current_blocks()
+        if not blocks:
+            return "", "", ""
+        row = blocks[0]
+        where = f" in {row.sandbox}" if row.sandbox else ""
+        notes: list[str] = []
+        target = self.unblock_target()
+        if self.admin.unblock_refused:
+            notes.append(f"unblocking is {ADMIN_MESSAGE}")
+        elif target is row:
+            notes.append("u unblocks")
+        elif row.unblockable and row.sandbox:
+            notes.append("select it, then u")
+        distinct = {(block.sandbox, block.host) for block in blocks} - {(row.sandbox, row.host)}
+        if distinct:
+            notes.append(f"{len(distinct)} more in Activity (t)")
+        return f"✗ {row.summary}", where, " · ".join(notes)
+
+    def alert_notice(self) -> tuple[str, str]:
+        """(alert, note) for the header's one alert line; the rest are in Enter's detail."""
+        pairs = [(row, alert) for row in self.rows for alert in row.alerts]
+        if not pairs:
+            return "", ""
+        # Hooks that cannot reach DefenseClaw block every tool call: say that first.
+        urgent = next((pair for pair in pairs if HOOKS_UNREACHABLE_WARNING in pair[1]), None)
+        row, alert = urgent or pairs[0]
+        more = len(pairs) - 1
+        note = f"+{more} more · Enter" if more else "Enter for details"
+        return f"⚠ {row.name}: {alert}", note
 
     def detail_pairs(self) -> tuple[str, tuple[tuple[str, str], ...]]:
         """Title and label/value pairs for the detail modal."""

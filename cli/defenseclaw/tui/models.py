@@ -196,3 +196,6 @@ class HintState:
     command_elapsed_secs: int = 0
     logs_paused: bool = False
     new_lines_since_pause: int = 0
+    # The active panel's sub-view, for panels whose keys differ by view
+    # (Sandboxes: sandboxes, activity, asks).
+    panel_view: str = ""

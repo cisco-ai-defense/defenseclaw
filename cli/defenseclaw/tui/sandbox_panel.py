@@ -47,6 +47,7 @@ from defenseclaw.tui.services.sandbox_state import (
     VIEW_TITLES,
     SandboxesPanelModel,
     SandboxPanelAction,
+    fit,
     review_pairs,
     undo_is_empty,
     undo_preview_text,
@@ -368,16 +369,21 @@ class SandboxPanelMixin:
             "unavailable": TOKENS.accent_amber,
             "unreachable": TOKENS.accent_red,
         }[state]
+        # A fixed few lines above the table: every per-sandbox detail lives
+        # in the table's columns and the Enter detail, so the list and the
+        # asks stay on screen at 80x24. The hint bar carries the keys.
+        width = self._sandbox_body_width()
+        title = f"Sandboxes  ● {state.upper()}  "
         lines = [
             f"[bold {TOKENS.accent_cyan}]Sandboxes[/]  [bold {color}]● {state.upper()}[/]  "
-            f"[{TOKENS.text_secondary}]{rich_escape(model.headline())}[/]",
+            f"[{TOKENS.text_secondary}]{rich_escape(model.headline(max_width=width - len(title)))}[/]",
         ]
         stale = model.stale_note()
         if stale:
-            lines.append(f"[{TOKENS.accent_amber}]{rich_escape(stale)}[/]")
+            lines.append(f"[{TOKENS.accent_amber}]{rich_escape(fit(stale, width))}[/]")
         admin = model.admin_line()
         if admin:
-            lines.append(f"[{TOKENS.text_secondary}]{rich_escape(admin)}[/]")
+            lines.append(f"[{TOKENS.text_secondary}]{rich_escape(fit(admin, width))}[/]")
         views = "  ".join(
             f"[bold reverse] {VIEW_TITLES[view]} [/]"
             if view == model.view
@@ -387,36 +393,43 @@ class SandboxPanelMixin:
         feed = {"live": "live", "reconnecting": "reconnecting…", "off": "off", "idle": "not connected"}.get(
             model.stream_state, model.stream_state
         )
-        lines.append(f"View: {views}   [{TOKENS.text_muted}]feed {feed}[/]")
-        lines.append(f"[{TOKENS.text_muted}]{rich_escape(model.keys_line())}[/]")
+        plain = f"View:  {'  '.join(f' {VIEW_TITLES[view]} ' for view in VIEW_TITLES)}   feed {feed}"
+        view_line = f"View: {views}   [{TOKENS.text_muted}]feed {feed}"
         if model.wrappers or model.harnesses:
-            wrapped = [
+            wrapped = " · ".join(
                 f"{_harness_command(name)} {'on' if name in model.wrappers else 'off'}"
                 for name in (model.harnesses or tuple(name for name, _label in SANDBOX_HARNESSES))
-            ]
-            lines.append(f"[{TOKENS.text_muted}]Sandboxed by default: {rich_escape(' · '.join(wrapped))} (w)[/]")
-        if model.view != "activity":
-            blocks = model.recent_blocks()
-            if blocks:
-                lines.append("")
-                lines.append(f"[bold {TOKENS.text_primary}]Recently blocked[/]")
-                for row in blocks:
-                    hint = "  (u unblocks)" if row.unblockable else ""
-                    where = f"  {row.sandbox}" if row.sandbox else ""
-                    lines.append(
-                        f"  [{TOKENS.accent_red}]✗[/] {rich_escape(row.summary)}"
-                        f"[{TOKENS.text_muted}]{rich_escape(where)}{rich_escape(hint)}[/]"
-                    )
+            )
+            extra = f"   sandboxed by default: {wrapped} (w)"
+            if len(plain) + len(extra) <= width:
+                view_line += rich_escape(extra)
+        lines.append(view_line + "[/]")
         if model.view == "sandboxes":
-            for row in model.rows:
-                for alert in row.alerts:
-                    lines.append(f"  [{TOKENS.accent_amber}]⚠ {rich_escape(row.name)}: {rich_escape(alert)}[/]")
+            block, where, block_note = model.block_notice()
+            alert, alert_note = model.alert_notice()
+            for color_notice, text, tail, note in (
+                (TOKENS.accent_red, block, where, block_note),
+                (TOKENS.accent_amber, alert, "", alert_note),
+            ):
+                if not text:
+                    continue
+                suffix = f"  ({note})" if note else ""
+                lines.append(
+                    f"[{color_notice}]{rich_escape(fit(text, width - len(tail) - len(suffix)))}"
+                    f"{rich_escape(tail)}[/][{TOKENS.text_muted}]{rich_escape(suffix)}[/]"
+                )
         if not model.data_table_rows():
             empty = model.empty_state()
             if empty:
                 lines.append("")
                 lines.append(f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]")
         return "\n".join(lines)
+
+    def _sandbox_body_width(self) -> int:
+        """Columns for one header line (the body panel's margin, padding and a scrollbar)."""
+        size = getattr(self, "size", None)
+        width = int(getattr(size, "width", 0) or 0)
+        return max(40, (width or 120) - 8)
 
     def _sync_sandbox_controls(self) -> None:
         model = self.sandbox_model
