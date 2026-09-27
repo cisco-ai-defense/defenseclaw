@@ -286,3 +286,18 @@ def test_openshell_validation(key: str, kind: str, value: str, ok: bool) -> None
 
     result = validate_config_field(ConfigField(label=key, key=key, kind=kind, value=value, original=""))
     assert (result.severity != "error") is ok, result
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected"),
+    [("\x12", "ctrl+r"), ("\x14", "ctrl+t"), ("\x15", "ctrl+u"), ("\t", "tab"), ("\x7f", "backspace"), ("A", "A")],
+)
+def test_terminal_control_keys_reach_the_setup_form_by_name(sequence: str, expected: str) -> None:
+    """A real terminal sends Ctrl+R as "\\x12"; the wizard form's Ctrl+R run
+    (and Ctrl+T reveal, Ctrl+U clear) match the key name."""
+    from defenseclaw.tui.app import _panel_key
+    from textual._xterm_parser import XTermParser
+
+    events = list(XTermParser(lambda: False).feed(sequence))
+    assert len(events) == 1
+    assert _panel_key(events[0]) == expected

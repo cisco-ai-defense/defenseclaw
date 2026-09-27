@@ -266,8 +266,8 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
     "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
-    "Runs: defenseclaw sandbox setup --non-interactive in this terminal (sudo prompts and image builds show). "
-    "Needs Docker; installs OpenShell only when you tick it.",
+    "Runs: defenseclaw sandbox setup --non-interactive in this terminal (sudo prompts and image builds show), "
+    "or defenseclaw sandbox doctor. Needs Docker; installs OpenShell only when you tick it.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",

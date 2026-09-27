@@ -13460,6 +13460,11 @@ def _panel_key(event: events.Key) -> str:
     # the logical key name "backspace".
     if event.key in {"backspace", "delete"} or event.character in {"\x7f", "\x08"}:
         return "backspace"
+    # A terminal delivers Ctrl+<letter> with its control character (Ctrl+R
+    # is "\x12"); panels match the key name ("ctrl+r"), as tests' synthetic
+    # keys spell it.
+    if event.key.startswith("ctrl+") and event.character and not event.character.isprintable():
+        return event.key
     if event.character:
         # Capital-letter keys that panels distinguish from their
         # lowercase form (e.g. ``M`` materialize bundled vs ``m`` no-op,
