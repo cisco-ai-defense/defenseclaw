@@ -104,11 +104,12 @@ One record per decision, from the DefenseClaw egress proxy
 network boundary (`openshell`). It carries the destination as
 `defenseclaw.network.target_ref`, `server.address` and `server.port`, the
 dialed address (`defenseclaw.network.resolved_ip`), `url.scheme` when known,
-the origin-form path of a plain-HTTP request
-(`defenseclaw.network.target_path`), `defenseclaw.network.decision` (`allow`
-or `block`) with `.blocked`, a stable `.decision_code`, a bounded `.reason`,
-and the source policy summary (`.policy_outcome`). Blocked decisions default
-to MEDIUM, allowed ones to INFO. Each record also increments
+`defenseclaw.network.decision` (`allow` or `block`) with `.blocked`, a stable
+`.decision_code`, a bounded `.reason`, and the source policy summary
+(`.policy_outcome`). Only OpenShell's HTTP events can add the origin-form
+path of a plain-HTTP request (`defenseclaw.network.target_path`); the
+DefenseClaw proxy never records URL paths. Blocked decisions default to
+MEDIUM, allowed ones to INFO. Each record also increments
 `defenseclaw.egress.events`.
 
 ### Approvals
