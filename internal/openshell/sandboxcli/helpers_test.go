@@ -523,6 +523,10 @@ func newTestApp(t *testing.T, input string) *testApp {
 			t.Fatal(err)
 		}
 	}
+	// A test that drops Cfg (or its DataDir) falls back to
+	// config.DefaultDataPath: keep that in the fixture too, never the
+	// developer's ~/.defenseclaw.
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(root, "data"))
 	cfg := &config.Config{DataDir: filepath.Join(root, "data")}
 	cfg.Gateway.APIPort = 18970
 	cfg.OpenShell.Enabled = true

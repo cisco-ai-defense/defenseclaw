@@ -331,6 +331,12 @@ func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
 	ta.Cfg = nil
+	// Without a config the data dir is the default one, the fixture's
+	// here: a teardown that reads (and rewrites) the setup receipt must
+	// not reach the developer's.
+	if got, want := ta.dataDir(), filepath.Dir(ta.ConfigPath); got != want {
+		t.Fatalf("data dir without a config = %s, want the fixture's %s", got, want)
+	}
 	if err := ta.Teardown(context.Background(), TeardownOptions{Yes: true}); err != nil {
 		t.Fatalf("Teardown: %v\n%s", err, ta.output())
 	}
