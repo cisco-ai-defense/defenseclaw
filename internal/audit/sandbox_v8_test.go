@@ -1604,6 +1604,7 @@ func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
 	t.Run("egress hosts", func(t *testing.T) { testSandboxEgressHostileHostsAreStillRecorded(t, harness) })
 	t.Run("approval hosts", func(t *testing.T) { testSandboxApprovalHostileHostIsOmitted(t, harness) })
 	t.Run("workspace paths", func(t *testing.T) { testSandboxWorkspacePathsAreSanitizedNotRejected(t, harness) })
+	t.Run("workspace path encoding", func(t *testing.T) { testSandboxWorkspacePathsFitTheirEncodedBound(t, harness) })
 	t.Run("finding target ref", func(t *testing.T) { testSandboxFindingTargetRefIsBoundedNotDropped(t, harness) })
 	t.Run("free text", func(t *testing.T) { testSandboxFreeTextIsBoundedNotRejected(t, harness) })
 }
@@ -1844,6 +1845,71 @@ func testSandboxWorkspacePathsAreSanitizedNotRejected(t *testing.T, harness *san
 				if kept[index] != want {
 					t.Fatalf("paths[%d]=%q want %q", index, kept[index], want)
 				}
+			}
+		})
+	}
+}
+
+// testSandboxWorkspacePathsFitTheirEncodedBound pins the path list to the
+// registered 16 KiB bound on its JSON encoding. Sixteen 1024-byte paths are
+// exactly 16 KiB raw but not once quoted and comma-separated, and quotes,
+// backslashes, and control bytes in agent-chosen names grow when escaped. A
+// list cut by raw length alone fails the builder and costs the flagged,
+// mandatory record.
+func testSandboxWorkspacePathsFitTheirEncodedBound(t *testing.T, harness *sandboxHarness) {
+	count := func(value int64) *int64 { return &value }
+	repeated := func(n int, format, body string, repeat int) []string {
+		paths := make([]string, n)
+		for index := range paths {
+			paths[index] = fmt.Sprintf(format, index) + strings.Repeat(body, repeat)
+		}
+		return paths
+	}
+	for _, test := range []struct {
+		name  string
+		paths []string
+		want  int
+	}{
+		// Each item encodes to 1026 bytes: 2+15*1026+14 fits, a 16th does not.
+		{"full-length paths", repeated(16, "big/%02d/", "a", maxSandboxWorkspacePathBytes-len("big/00/")), 15},
+		// Each 204-byte name encodes to 806 bytes: 2+20*806+19 fits, 21 do not.
+		{"quotes and control bytes", repeated(64, "q%02d/", "\"\x01\x1f\\", 50), 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, candidate := range test.paths {
+				if len(candidate) > maxSandboxWorkspacePathBytes {
+					t.Fatalf("fixture path is %d bytes, over the item bound", len(candidate))
+				}
+			}
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+				Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview,
+				FileCount: count(int64(len(test.paths))), FlaggedCount: count(1), Paths: test.paths,
+			}); err != nil {
+				t.Fatalf("the path list cost the flagged review its record: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeContract(t, record)
+			if !record.Mandatory() {
+				t.Fatal("a flagged review must be mandatory")
+			}
+			kept, _ := sandboxBody(t, record)["defenseclaw.sandbox.workspace.paths"].([]any)
+			if len(kept) != test.want {
+				t.Fatalf("paths kept=%d want %d", len(kept), test.want)
+			}
+			for index, value := range kept {
+				if value != test.paths[index] {
+					t.Fatalf("paths[%d]=%q want %q", index, value, test.paths[index])
+				}
+			}
+			var encoded bytes.Buffer
+			encoder := json.NewEncoder(&encoded)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(kept); err != nil {
+				t.Fatal(err)
+			}
+			if size := encoded.Len() - 1; size > maxSandboxWorkspacePathTotal {
+				t.Fatalf("encoded paths are %d bytes, over %d", size, maxSandboxWorkspacePathTotal)
 			}
 		})
 	}

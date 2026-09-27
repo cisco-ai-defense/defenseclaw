@@ -17,7 +17,9 @@
 package audit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net"
@@ -504,7 +506,7 @@ const (
 	maxSandboxPathBytes          = 4096
 	maxSandboxWorkspacePaths     = 64
 	maxSandboxWorkspacePathBytes = 1024
-	maxSandboxWorkspacePathTotal = 16384
+	maxSandboxWorkspacePathTotal = 16384 // of the JSON-encoded path array
 	maxSandboxFindingTextBytes   = 4096
 	maxSandboxFindingEvidence    = 8192
 	maxSandboxFindingTargetBytes = 256
@@ -1697,9 +1699,13 @@ func sandboxEgressPath(value string) observability.Optional[string] {
 // registered bounds. The sandboxed agent names these files and Linux names
 // are arbitrary bytes, so a path is sanitized or skipped, never allowed to
 // fail the record: see sandboxWorkspacePath.
+//
+// The registered total bounds the array's JSON encoding, not the raw path
+// bytes. Brackets, quotes, commas, and escapes all count, and a name made of
+// quotes or control bytes grows up to sixfold when encoded.
 func sandboxWorkspacePaths(paths []string) observability.Optional[[]string] {
 	kept := make([]string, 0, min(len(paths), maxSandboxWorkspacePaths))
-	total := 0
+	total := len("[]")
 	for _, candidate := range paths {
 		if len(kept) == maxSandboxWorkspacePaths {
 			break
@@ -1708,16 +1714,34 @@ func sandboxWorkspacePaths(paths []string) observability.Optional[[]string] {
 		if !ok {
 			continue
 		}
-		if total+len(relative) > maxSandboxWorkspacePathTotal {
+		size := sandboxJSONStringBytes(relative)
+		if len(kept) > 0 {
+			size++ // the separating comma
+		}
+		if total+size > maxSandboxWorkspacePathTotal {
 			break
 		}
-		total += len(relative)
+		total += size
 		kept = append(kept, relative)
 	}
 	if len(kept) == 0 {
 		return observability.Absent[[]string]()
 	}
 	return observability.Present(kept)
+}
+
+// sandboxJSONStringBytes is the size of value encoded as a JSON string with
+// HTML escaping off, as the family builder measures a string array. It never
+// undercounts: the builder writes U+2028 and U+2029 literally, which this
+// counts as their six-byte escapes.
+func sandboxJSONStringBytes(value string) int {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return maxSandboxWorkspacePathTotal + 1 // never fits
+	}
+	return len(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}))
 }
 
 // sandboxWorkspacePath replaces invalid UTF-8, drops NUL bytes, and cleans

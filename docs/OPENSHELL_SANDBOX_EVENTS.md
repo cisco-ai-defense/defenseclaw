@@ -221,8 +221,10 @@ of these values can make the producer drop the record:
   dropped.
 - Workspace paths: invalid UTF-8 is replaced and NUL bytes are dropped.
   Absolute paths, drive-qualified paths, and paths that leave the workspace
-  are skipped. At most 64 paths are kept, each cut to 1,024 bytes, 16 KiB in
-  total. The counts still describe every file.
+  are skipped. Each path is cut to 1024 bytes. The list keeps at most the
+  first 64 paths, and stops earlier once the JSON-encoded array (quotes,
+  commas, and escapes included) would pass 16 KiB. The counts still describe
+  every file.
 - A finding `target_ref` is cut to its registered 256 bytes; one that is not
   an identifier is omitted.
 
