@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -611,6 +612,16 @@ func (c *cliEnv) approvalsPolicy() {
 	if !strings.Contains(explain, "SETTING") || !strings.Contains(explain, "profile") {
 		t.Fatalf("policy explain:\n%s", explain)
 	}
+	for _, line := range strings.Split(explain, "\n") {
+		if len([]rune(line)) > 220 {
+			t.Fatalf("policy explain line of %d characters:\n%s", len([]rune(line)), truncate(line, 300))
+		}
+	}
+	// Keys longer than the old 14-character column no longer run into
+	// their values.
+	if show := c.ok(time.Minute, "policy", "show", "--harness", "claude"); !regexp.MustCompile(`(?m)^  hooks\.fail_mode +\S`).MatchString(show) {
+		t.Fatalf("policy show:\n%s", show)
+	}
 	packs := c.ok(time.Minute, "pack", "list")
 	if !strings.Contains(packs, "sha256:") {
 		t.Fatalf("pack list:\n%s", packs)
@@ -653,6 +664,8 @@ func (c *cliEnv) delete(name string) {
 // detachedLifecycle starts a detached Claude Code run without --name (the
 // name the run picks fits OpenShell's 19 characters) that works for a few
 // minutes, and while it is going:
+//   - a run with an --host-port DefenseClaw never opens fails before a
+//     sandbox exists;
 //   - a copy-mode run under the same name is refused before anything is
 //     staged, with the way to resume it;
 //   - a headless `connect --prompt` session in the sandbox leaves the
@@ -687,7 +700,31 @@ func (c *cliEnv) detachedLifecycle() {
 		return nil
 	})
 
-	_, errOut, code := c.cliIn(dir, 5*time.Minute, append(append([]string{"run", "claude", "--copy", "--name", name, "--detach"}, mock...), "--", "-p", "x")...)
+	// A --host-port DefenseClaw never opens (its own hook ingress) fails
+	// before anything is created, like the same port in a --credential.
+	var st sandboxapi.Status
+	if err := json.Unmarshal([]byte(c.ok(time.Minute, "status", "--output", "json")), &st); err != nil {
+		t.Fatalf("status json: %v", err)
+	}
+	_, ingressPort, err := net.SplitHostPort(st.IngressAddr)
+	if err != nil {
+		t.Fatalf("ingress address %q: %v", st.IngressAddr, err)
+	}
+	_, errOut, code := c.cliIn(dir, 5*time.Minute, append(append([]string{"run", "claude", "--new", "--detach", "--host-port", ingressPort}, mock...), "--", "-p", "x")...)
+	if code == 0 || !strings.Contains(errOut, "--host-port "+ingressPort+": DefenseClaw never opens DefenseClaw's sandbox hook ingress") {
+		t.Fatalf("run --host-port %s exited %d:\n%s", ingressPort, code, truncate(errOut, 1000))
+	}
+	var listed struct{ Sandboxes []sandboxapi.Sandbox }
+	if err := json.Unmarshal([]byte(c.ok(time.Minute, "list", "--output", "json")), &listed); err != nil {
+		t.Fatalf("list json: %v", err)
+	}
+	for _, sb := range listed.Sandboxes {
+		if sb.Name != name && sb.Project == dir {
+			t.Fatalf("the refused --host-port run created %s", sb.Name)
+		}
+	}
+
+	_, errOut, code = c.cliIn(dir, 5*time.Minute, append(append([]string{"run", "claude", "--copy", "--name", name, "--detach"}, mock...), "--", "-p", "x")...)
 	if code == 0 || !strings.Contains(errOut, "a sandbox named "+name+" already exists") || !strings.Contains(errOut, "connect "+name+" --prompt TEXT") {
 		t.Fatalf("run --copy --name %s exited %d:\n%s", name, code, truncate(errOut, 1000))
 	}
