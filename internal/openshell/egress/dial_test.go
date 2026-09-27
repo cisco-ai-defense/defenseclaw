@@ -37,13 +37,14 @@ func newTestGuard(t *testing.T) (*guardDialer, *fakeResolver, *mapDialer) {
 }
 
 // isPrivateTarget reports addresses the dialer must never be handed: the
-// guard policy's ranges and the fake interface lists' own addresses.
+// guard policy's ranges and the fake interface lists' own addresses and
+// on-link subnets.
 func isPrivateTarget(addr string) bool {
 	ap, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return true
 	}
-	if a := ap.Addr().Unmap().String(); a == ownV4 || a == ownV6 {
+	if own, subnet := fixedLocalAddrs(ownV4, ownV6).lookup(ap.Addr()); own || subnet.IsValid() {
 		return true
 	}
 	return guardPolicy.ValidateIP(net.IP(ap.Addr().AsSlice())) != nil
@@ -78,6 +79,11 @@ func TestGuardDialSSRFMatrix(t *testing.T) {
 		"own6.example":       {ownV6},
 		"own-mixed.example":  {publicV4, ownV6},
 		"own-mapped.example": {"::ffff:" + ownV4},
+		// Other hosts on this machine's public subnets (2620:fe::/64 and
+		// 9.9.0.0/16 in the fake interface list).
+		"lan-device.example": {"2620:fe::1"},
+		"lan4.example":       {"9.9.200.1"},
+		"lan-mixed.example":  {publicV6, "2620:fe::abcd"},
 		"empty.example":      {},
 	}
 	for host, ips := range answers {
@@ -121,6 +127,10 @@ func TestGuardDialSSRFMatrix(t *testing.T) {
 		{host: "own6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "own-mixed.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "own-mapped.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "lan-device.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "lan4.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "lan-mixed.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "2620:fe::1", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "empty.example", status: http.StatusBadGateway},
 		{host: "broken.example", status: http.StatusBadGateway},
 		{host: "nxdomain.example", status: http.StatusBadGateway},

@@ -53,9 +53,10 @@
 // through the host's DNS search domains. Every DNS answer is checked by
 // the netguard SSRF policy immediately before the connection and the dial
 // targets the checked address literal, so private, loopback, link-local,
-// CGNAT, ULA, metadata, reserved and translated addresses, and this machine's
-// own interface addresses, are unreachable and DNS rebinding between check
-// and dial has nothing to exploit.
+// CGNAT, ULA, metadata, reserved and translated addresses, this machine's
+// own interface addresses and the other hosts on its public subnets (at
+// least the /64 of a global IPv6 address) are unreachable, and DNS rebinding
+// between check and dial has nothing to exploit.
 //
 // Blocked requests get a JSON 403 body that explains the reason and how to
 // ask for an unblock. Every decision, tunnel close and large upload to a

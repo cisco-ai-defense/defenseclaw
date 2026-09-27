@@ -59,6 +59,7 @@ func (e *dialError) Unwrap() error { return e.err }
 var (
 	errOperatorBlockedAddr = errors.New("egress: resolved address blocked by operator rule")
 	errOwnAddr             = errors.New("egress: destination is an address of this machine")
+	errOnLinkAddr          = errors.New("egress: destination is on one of this machine's own subnets")
 )
 
 // guardDialer dials upstreams through netguard's guarded dialer.
@@ -88,8 +89,9 @@ func (f resolverFunc) LookupIPAddr(ctx context.Context, host string) ([]net.IPAd
 // connecting, refuses the whole destination when any answer is prohibited,
 // and hands the dialer the validated literal, so a rebinding resolver cannot
 // swap the address between check and connect. A name with any answer that
-// is one of this machine's own addresses is refused like one with a private
-// answer; operator CIDR blocks are checked against the literal, and a
+// is one of this machine's own addresses, or another host on one of its
+// public subnets, is refused like one with a private answer; operator CIDR
+// blocks are checked against the literal, and a
 // connection that turns out to lead back to this machine is closed before
 // any byte is relayed. When a name's first address fails to
 // connect, one more attempt targets the other address family (broken IPv6
@@ -125,16 +127,31 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 		selected  netip.AddrPort
 		blockedBy string
 		own       bool
+		onLink    bool
 	)
+	// local refuses this machine's own addresses and the other hosts on its
+	// public subnets, which the address policy cannot know about.
+	local := func(addr netip.Addr) error {
+		switch isOwn, subnet := g.local.lookup(addr); {
+		case isOwn:
+			own = true
+			return errOwnAddr
+		case subnet.IsValid():
+			onLink = true
+			return errOnLinkAddr
+		}
+		return nil
+	}
 	resolve := resolverFunc(func(ctx context.Context, host string) ([]net.IPAddr, error) {
 		ips, err := g.resolver.LookupIPAddr(ctx, rootedName(host))
 		if err != nil {
 			return nil, err
 		}
 		for _, ip := range ips {
-			if addr, ok := netip.AddrFromSlice(ip.IP); ok && g.local.contains(addr) {
-				own = true
-				return nil, errOwnAddr
+			if addr, ok := netip.AddrFromSlice(ip.IP); ok {
+				if err := local(addr); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return ips, nil
@@ -142,9 +159,8 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 	record := dialerFunc(func(ctx context.Context, network, literal string) (net.Conn, error) {
 		selected, _ = netip.ParseAddrPort(literal)
 		addr := selected.Addr().Unmap()
-		if g.local.contains(addr) {
-			own = true
-			return nil, errOwnAddr
+		if err := local(addr); err != nil {
+			return nil, err
 		}
 		if block != nil {
 			if item, ok := block.match("", addr); ok {
@@ -171,6 +187,11 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 		return nil, selected, &dialError{
 			category: CategoryPrivateNetwork, status: http.StatusForbidden,
 			reason: "the destination is an address of this machine", err: err,
+		}
+	case onLink:
+		return nil, selected, &dialError{
+			category: CategoryPrivateNetwork, status: http.StatusForbidden,
+			reason: "the destination resolves to another host on one of this machine's own subnets", err: err,
 		}
 	case blockedBy != "":
 		return nil, selected, &dialError{

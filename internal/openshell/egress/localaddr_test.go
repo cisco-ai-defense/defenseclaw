@@ -95,12 +95,15 @@ func TestLocalAddrsRefresh(t *testing.T) {
 	f.set(nil, ipNet("127.0.0.1"), ipNet(ownV4), &net.IPAddr{IP: net.ParseIP(ownV6), Zone: "eth0"}, &net.UnixAddr{Name: "x"})
 	l := newLocalAddrs(f.list)
 	l.now = f.clock
-	own := func(s string) bool { return l.contains(netip.MustParseAddr(s)) }
+	own := func(s string) bool {
+		isOwn, _ := l.lookup(netip.MustParseAddr(s))
+		return isOwn
+	}
 
 	if !own(ownV4) || !own(ownV6) || !own("::ffff:"+ownV4) || !own(ownV6+"%eth0") || !own("127.0.0.1") {
 		t.Fatal("interface addresses not recognized")
 	}
-	if own(publicV4) || l.contains(netip.Addr{}) {
+	if isOwn, subnet := l.lookup(netip.Addr{}); own(publicV4) || isOwn || subnet.IsValid() {
 		t.Fatal("a foreign address was recognized")
 	}
 	if n := f.callCount(); n != 1 {
@@ -143,8 +146,73 @@ func TestLocalAddrsRefresh(t *testing.T) {
 	}
 
 	var none *localAddrs
-	if none.contains(netip.MustParseAddr(ownV4)) {
+	if isOwn, subnet := none.lookup(netip.MustParseAddr(ownV4)); isOwn || subnet.IsValid() {
 		t.Error("nil localAddrs matched")
+	}
+}
+
+// The public subnets of the interface addresses are this machine's local
+// network: at least the /64 of a global IPv6 address, whatever its interface
+// prefix says, and the interface prefix of a public IPv4 address. Private,
+// loopback and link-local interfaces add nothing (their ranges are refused
+// anyway), and neither do single addresses.
+func TestLocalAddrsSubnets(t *testing.T) {
+	cidr := func(s string) net.Addr {
+		ip, n, err := net.ParseCIDR(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.IP = ip
+		return n
+	}
+	// An IPv4 address with a 16-byte /24 mask, as some platforms report.
+	v4mask16 := &net.IPNet{IP: net.ParseIP("198.51.99.7"), Mask: net.CIDRMask(120, 128)}
+	l := newLocalAddrs(func() ([]net.Addr, error) {
+		return []net.Addr{
+			cidr("127.0.0.1/8"), cidr("::1/128"), cidr("fe80::1/64"), cidr("192.168.1.5/24"), cidr("fd00:1::5/64"),
+			cidr("2620:fe::fe/64"),          // SLAAC
+			cidr("2600:1f18:aa:bb::10/128"), // DHCPv6, as on EC2: the link is still the /64
+			cidr("2a01:4f8:1:2::3/48"),      // an interface prefix wider than the /64
+			cidr("203.0.114.9/24"),          // a public IPv4 LAN
+			cidr("45.1.2.3/32"),             // a point-to-point address: no neighbours
+			cidr("11.0.0.1/4"),              // not a link
+			v4mask16,
+			&net.IPAddr{IP: net.ParseIP("2001:470:1:2::5")}, // no mask: the /64
+		}, nil
+	})
+	tests := []struct {
+		addr   string
+		own    bool
+		subnet string
+	}{
+		{"2620:fe::fe", true, ""},
+		{"2620:fe::1", false, "2620:fe::/64"},
+		{"2620:fe::ffff:1", false, "2620:fe::/64"},
+		{"2620:fe:0:1::1", false, ""},
+		{"2600:1f18:aa:bb::1", false, "2600:1f18:aa:bb::/64"},
+		{"2a01:4f8:1:9::1", false, "2a01:4f8:1::/48"},
+		{"203.0.114.1", false, "203.0.114.0/24"},
+		{"::ffff:203.0.114.200", false, "203.0.114.0/24"},
+		{"203.0.115.1", false, ""},
+		{"45.1.2.3", true, ""},
+		{"45.1.2.4", false, ""},
+		{"11.0.0.2", false, ""},
+		{"198.51.99.1", false, "198.51.99.0/24"},
+		{"2001:470:1:2::1", false, "2001:470:1:2::/64"},
+		{"192.168.1.7", false, ""},
+		{"fd00:1::7", false, ""},
+		{publicV4, false, ""},
+		{publicV6, false, ""},
+	}
+	for _, tt := range tests {
+		own, subnet := l.lookup(netip.MustParseAddr(tt.addr))
+		got := ""
+		if subnet.IsValid() {
+			got = subnet.String()
+		}
+		if own != tt.own || got != tt.subnet {
+			t.Errorf("lookup(%s) = %v, %q; want %v, %q", tt.addr, own, got, tt.own, tt.subnet)
+		}
 	}
 }
 
@@ -189,7 +257,8 @@ func TestSelfConnectedKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 	var target netip.Addr
-	for addr := range interfaceAddrSet(list) {
+	addrs, _ := interfaceAddrSet(list)
+	for addr := range addrs {
 		if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() && addr.Is4() {
 			target = addr
 			break
@@ -198,7 +267,7 @@ func TestSelfConnectedKernel(t *testing.T) {
 	if !target.IsValid() {
 		t.Skip("no non-loopback IPv4 interface address")
 	}
-	if !hostAddrs.contains(target) {
+	if own, _ := hostAddrs.lookup(target); !own {
 		t.Fatalf("hostAddrs does not list interface address %s", target)
 	}
 	ln, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(netip.AddrPortFrom(target, 0)))

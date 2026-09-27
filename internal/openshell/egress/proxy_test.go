@@ -389,6 +389,7 @@ func TestProxyGuardRefusals(t *testing.T) {
 	h.resolver.set("split.example.com", []string{publicV4, "192.168.0.7"})
 	h.resolver.set("rebind.example.com", []string{publicV4}, []string{"169.254.169.254"})
 	h.resolver.set("own.example.com", []string{ownV6})
+	h.resolver.set("lan-device.example.net", []string{"2620:fe::1"})
 
 	targets := []string{
 		"127.0.0.1:443", "[::1]:443", "169.254.169.254:80", "10.0.0.1:443", "[fd00::1]:443",
@@ -397,6 +398,9 @@ func TestProxyGuardRefusals(t *testing.T) {
 		"internal.example.com:443", "split.example.com:443",
 		// This machine's own public addresses (fake interface list).
 		ownV4 + ":443", ownV4 + ":80", "[" + ownV6 + "]:443", "own.example.com:443",
+		// Other hosts on its public subnets: the router, a NAS, other
+		// instances in the VPC.
+		"lan-device.example.net:443", "lan-device.example.net:80", "[2620:fe::1]:443", "9.9.40.2:443",
 	}
 	for _, target := range targets {
 		_, _, resp := h.connect(target, basicAuth(h.cred), nil)

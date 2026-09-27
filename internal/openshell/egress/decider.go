@@ -405,9 +405,10 @@ func blocked(dec Decision, category Category, source Source, rule string) Decisi
 
 // guardRefusal applies the destination-level SSRF policy: IP literals go
 // through the netguard address policy and are refused when they are one of
-// this machine's own addresses (a public address on one of its interfaces);
-// names are refused when they are host-internal by definition. Names that
-// resolve to private or own addresses are caught at dial time.
+// this machine's own addresses (a public address on one of its interfaces)
+// or another host on one of its public subnets; names are refused when they
+// are host-internal by definition. Names that resolve to private, own or
+// on-link addresses are caught at dial time.
 func guardRefusal(host string, addr netip.Addr, local *localAddrs) (string, bool) {
 	if addr.IsValid() {
 		if addr.Zone() != "" {
@@ -416,8 +417,12 @@ func guardRefusal(host string, addr netip.Addr, local *localAddrs) (string, bool
 		if err := guardPolicy.ValidateIP(net.IP(addr.AsSlice())); err != nil {
 			return "The address is private, loopback, link-local, carrier-grade NAT, metadata, reserved or otherwise not publicly routable.", true
 		}
-		if local.contains(addr) {
+		own, subnet := local.lookup(addr)
+		if own {
 			return "The address belongs to this machine; sandboxes never reach services on the host through it.", true
+		}
+		if subnet.IsValid() {
+			return "The address is another host on one of this machine's own subnets (" + subnet.String() + "), part of its local network.", true
 		}
 		return "", false
 	}

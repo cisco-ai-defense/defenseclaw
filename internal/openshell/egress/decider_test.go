@@ -236,6 +236,16 @@ func TestDecideOwnAddresses(t *testing.T) {
 	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{allowed: true, source: SourceOperator})
 	// Names are checked against their answers at dial time, not here.
 	checkDecision(t, d, testPrincipal, "example.com", 443, decisionWant{allowed: true, source: SourceDefault})
+
+	// Other hosts on this machine's public subnets are its local network:
+	// the /64 of a global IPv6 address and the prefix of a public IPv4 one.
+	for _, host := range []string{"2620:fe::1", "[2620:fe::ffff:2]", "9.9.200.1", "::ffff:9.9.0.1"} {
+		got := checkDecision(t, d, testPrincipal, host, 443, private)
+		if !strings.Contains(got.Reason, "own subnets") {
+			t.Errorf("Decide(%s) reason = %q", host, got.Reason)
+		}
+	}
+	checkDecision(t, d, testPrincipal, "2620:fe:0:1::1", 443, decisionWant{category: CategoryIPLiteral, source: SourceDefault, unblockable: true})
 }
 
 func TestDecideAllowlistMode(t *testing.T) {
