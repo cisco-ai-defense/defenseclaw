@@ -381,23 +381,49 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 
 The `openshell:` block configures the NVIDIA OpenShell 0.1 sandbox integration,
 which is being rebuilt. Its posture is layered: a **sandbox policy pack**
-supplies every default, the keys below override it, run flags override those,
-and `openshell.admin` clamps the result. Keys the pack governs (`profile`,
-`yolo`, `workdir.mode`, upload caps, egress lists, `mcp.import`) have no loader
-default, so an unset key inherits the pack.
+supplies every default, the keys below override it, the inputs of the planned
+sandbox run command override those, and `openshell.admin` clamps the result.
+Keys the pack governs (`profile`, `yolo`, `workdir.mode`, upload caps, egress
+lists, `mcp.import`) have no loader default, so an unset key inherits the pack.
+
+<Callout title="Sandbox commands are not available yet">
+`defenseclaw sandbox legacy-cleanup` is the only `sandbox` command today.
+Nothing creates or runs a sandbox yet, and the sidecar does not start the
+sandbox hook ingress or the egress proxy. Setting `openshell.enabled: true`
+only makes config validation check the two sandbox ports, and turning it on or
+off (or moving a port while it is on) restarts the API server. The sandbox CLI
+guide will live on the [sandbox setup page](/docs/setup/sandbox), which today
+covers only the legacy cleanup.
+</Callout>
 
 ```yaml
 openshell:
-  enabled: false
+  enabled: false             # today only validates the two sandbox ports (see the note above)
+  binary: openshell          # upstream CLI for attach, file transfer, port forwarding, registration
+  gateway: {name: "", workspace: ""}   # "" = the active registration and the "default" workspace
   pack: open                 # open | balanced | strict, a custom pack name, or an absolute path
-  pack_dir: ~/.defenseclaw/policies/sandbox   # custom packs live at <pack_dir>/<name>/pack.yaml
+  pack_dir: ~/.defenseclaw/policies/sandbox   # <data_dir>/policies/sandbox; packs at <pack_dir>/<name>/pack.yaml
   profile: ""                # "" inherits the pack; open | balanced | strict
   yolo: null                 # null inherits the pack (skip-permissions mode)
   ingress_port: 0            # 0 → gateway.api_port + 1; must differ from egress_port,
   egress_port: 0             # 0 → gateway.api_port + 2; api_port and guardrail.port
   workdir: {mode: "", masks: [], unmask: [], max_upload_mb: 0, git_depth: 200, on_exit: ask}
   egress: {block: [], allow: [], ports: [], large_upload_mb: 0, feed: ""}
-  harnesses: []              # also served rule packs and hook config
+  image:
+    base: ""                 # "" = the digest-pinned NVIDIA base image; an override must be digest-pinned
+    harness_versions: {}     # harness → version; only versions with a known hook contract build
+  approvals:
+    debounce_ms: 3000        # hold OpenShell policy updates until hooks are quiet this long
+    agent_proposals: null    # null = true: the agent may file its own policy proposals for triage
+  resources: {cpu: "", memory: ""}   # request, e.g. cpu "2" or "500m", memory "4Gi"; "" = unlimited
+  harnesses: []              # harnesses enabled for sandboxes; DefenseClaw also serves their rule packs and hook config
+  wrappers: []               # reserved for the planned shell wrapper; nothing reads it yet
+  mcp:
+    import: null             # null inherits the pack: bring the harness's MCP servers along
+    host_ports: []           # host localhost ports you consented to open for host-side MCP servers
+  upstream_telemetry: false  # whether OpenShell's own usage telemetry should be on (for the planned sandbox doctor)
+  token_delivery: provider   # provider: the agent sees only a placeholder | env: a plain variable it can read
+  middleware: {enabled: false}   # experimental supervisor-middleware switch; nothing reads it yet
   admin:                     # administrator constraints; every key is optional
     required_pack: ""        # its profile, yolo, workdir mode, MCP import, feeds and ports are floors
     required_pack_digest: "" # sha256:<hex> pins the required pack's content
@@ -408,11 +434,11 @@ openshell:
     allow_unblock: null      # also governs approve-always, user allow entries, feed off
     allow_learn_mode: null
     allowed_harnesses: []
-    egress_block: []         # always blocked, never unblockable
+    egress_block: []         # always blocked; cannot be unblocked
     egress_allow_only: []    # forces an allowlist profile
     require_copy_for: []     # project path globs that must run in copy mode (parents too)
     max_resources: {cpu: "", memory: ""}
-    locked: []               # keys run flags may not loosen: pack, profile, yolo,
+    locked: []               # keys run inputs may not loosen: pack, profile, yolo,
                              # workdir.mode, workdir.unmask, mcp.import, mcp.host_ports, resources
 ```
 
@@ -433,17 +459,17 @@ names are refused. The pack file and its directory must belong to you or to
 root; a pack in a directory every user can write to (such as `/tmp`, even with
 the sticky bit) loads only when root owns it.
 
-`workdir.masks`, `workdir.unmask`, and `sandbox run --unmask` take
+`workdir.masks`, `workdir.unmask`, and the unmask entries of a run take
 project-relative globs with forward slashes, like a pack's masks: absolute
 paths, `~`, drive letters, backslashes, and `..` segments are refused.
 
-Raising the profile above a pack's own network mode (for example
-`--profile balanced` on the `open` pack) brings in the `balanced` pack's
+Raising the profile above a pack's own network mode (for example the
+`balanced` profile on the `open` pack) brings in the `balanced` pack's
 curated allowlist. Allow entries that cover every host or a whole top-level
 domain (`*`, `*.com`) are ignored, and custom packs may not contain them.
 
 `required_pack` pins the pack and makes its posture a floor: the keys above
-and run flags may tighten its profile, skip-permissions default, workspace
+and run inputs may tighten its profile, skip-permissions default, workspace
 mode, MCP import, blocklist feeds and proxy ports, but every attempt to loosen
 them is refused. `required_pack_digest` pins the pack's content: it is
 `sha256:` followed by the SHA-256 of the pack file's bytes, and a pack with any
@@ -453,12 +479,12 @@ modify, together with every directory above it (for example an absolute path
 under an administrator-owned directory; the default `pack_dir` in the data
 directory usually does not qualify).
 
-`locked` keeps the configured value of each listed key against run flags that
-would loosen it, while flags that only tighten it still apply: `--safe`,
-`--copy`, `--no-mcp`, a `--profile` at least as strict as the configured one, a
-`--pack` at least as strict as the configured pack in every setting, a smaller
-`--cpu` or `--memory`, and `--unmask` or `--host-port` entries the
-configuration already lists.
+`locked` keeps the configured value of each listed key against run inputs
+that would loosen it, while inputs that only tighten it still apply: keeping
+the harness permission prompts, copy mode, turning MCP import off, a profile
+at least as strict as the configured one, a pack at least as strict as the
+configured pack in every setting, a smaller CPU or memory request, and unmask
+or host-port entries the configuration already lists.
 
 `require_copy_for` also covers mounting a folder above a listed project, a
 missing project folder, and differently cased spellings of the path. With
