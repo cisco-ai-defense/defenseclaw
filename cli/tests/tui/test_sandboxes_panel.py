@@ -1123,6 +1123,78 @@ async def test_the_list_and_the_asks_stay_on_screen(fetch, size, view) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("view", "key", "expected"),
+    [
+        ("asks", "a", SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")),
+        ("asks", "x", SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-1")),
+        ("activity", "u", SandboxPanelAction("unblock", sandbox="myapp-claude-7f3a", host="webhook.site")),
+        ("sandboxes", "U", SandboxPanelAction("undo", sandbox="myapp-claude-7f3a")),
+    ],
+)
+async def test_detail_keys_close_the_window_and_act_on_its_row(fetch, monkeypatch, view, key, expected) -> None:
+    app = DefenseClawTUI(config=_config())
+    seen: list[SandboxPanelAction] = []
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        app.sandbox_model.add_events([BLOCKED])
+        app.sandbox_model.view = view
+        app.sandbox_model.cursor = 0
+        app.sandbox_model.detail_open = True
+        monkeypatch.setattr(app, "push_screen_wait", _screen_answers(key))
+        monkeypatch.setattr(app, "_apply_sandbox_action", lambda action: seen.append(action) or True)
+        await app._open_sandbox_detail()  # noqa: SLF001
+    assert seen == [expected]
+    assert app.sandbox_model.detail_open is False
+
+
+@pytest.mark.asyncio
+async def test_the_detail_window_returns_its_keys_and_scrolls() -> None:
+    from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
+    from textual.app import App
+    from textual.containers import VerticalScroll
+
+    results: list[Any] = []
+    pairs = [("Warning", "the secret scan skipped 2 large files")] + [("  M", f"src/f{i}.ts") for i in range(40)]
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(SandboxDetailScreen("Review x", pairs, keys=("a", "U")), results.append)
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        scroll = app.screen.query_one("#sandbox-detail-scroll", VerticalScroll)
+        close = app.screen.query_one("#sandbox-detail-close")
+        assert scroll.max_scroll_y > 0
+        assert close.region.bottom <= 24, "the Close button stays on screen"
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert scroll.scroll_y > 0
+        await pilot.press("U")
+        await pilot.pause()
+    assert results == ["U"]
+
+
+def test_review_puts_warnings_and_findings_before_the_files() -> None:
+    review = {
+        "summary": "30 files changed",
+        "report": {
+            "files_changed": 30,
+            "flags": [{"label": ".envrc", "severity": "high"}],
+            "findings": [{"title": "AWS key", "path": "config.js"}],
+            "changes": [{"status": "M", "path": f"src/f{i}.ts"} for i in range(30)],
+            "warnings": ["the secret scan skipped 2 large files"],
+        },
+    }
+    labels = [label for label, _value in review_pairs(review)]
+    first_file = labels.index("  M")
+    assert labels.index("Warning") < first_file
+    assert labels.index("⚠ HIGH") < first_file and labels.index("Finding") < first_file
+    assert review_pairs(review)[-1] == ("", "… and 5 more (defenseclaw sandbox review --diff)")
+
+
+@pytest.mark.asyncio
 async def test_stop_asks_first(fetch, monkeypatch) -> None:
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
@@ -1149,3 +1221,25 @@ async def test_always_unblock_confirms_and_a_done_unblock_is_no_longer_offered(f
         await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
         assert app.sandbox_model.current_blocks() == ()
     assert calls.calls == [("unblock_sandbox_egress", ("webhook.site",), {"sandbox": "myapp-claude-7f3a", "always": False})]
+
+
+@pytest.mark.asyncio
+async def test_the_unblock_menu_shows_what_each_scope_does() -> None:
+    from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
+    from textual.app import App
+    from textual.widgets import Button
+
+    actions = (
+        MenuAction("sandbox", "Only in x", "Lifts the block for this sandbox until it is deleted."),
+        MenuAction("always", "In every sandbox (always)…", "Adds the host to openshell.egress.unblocked (asks first)."),
+    )
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(ActionMenuScreen("Unblock h", actions, show_descriptions=True))
+
+    app = Host()
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        rows = list(app.screen.query(Button))
+        assert all(row.region.height >= 4 for row in rows), [row.region for row in rows]

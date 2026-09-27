@@ -1168,7 +1168,11 @@ class SandboxesPanelModel:
 
 
 def review_pairs(response: Any) -> tuple[tuple[str, str], ...]:
-    """Label/value pairs for a ``POST /sandboxes/{name}/review`` answer."""
+    """Label/value pairs for a ``POST /sandboxes/{name}/review`` answer.
+
+    Scan warnings, flags and findings come before the file list: a skipped
+    secret scan is a safety signal and must not sit below 25 file rows.
+    """
     data = _dict(response)
     report = _dict(data.get("report"))
     pairs: list[tuple[str, str]] = []
@@ -1184,22 +1188,25 @@ def review_pairs(response: Any) -> tuple[tuple[str, str], ...]:
                 f"−{_int(report.get('deletions'))})",
             )
         )
+        for warning in _list(report.get("warnings")):
+            pairs.append(("Warning", _text(warning)))
         for flag in (_dict(f) for f in _list(report.get("flags"))):
             label = _text(flag.get("label") or flag.get("path"))
             severity = _text(flag.get("severity")).upper()
             detail = _text(flag.get("detail"))
             pairs.append((f"⚠ {severity}".strip(), f"{label}: {detail}" if detail else label))
-        for finding in (_dict(f) for f in _list(report.get("findings"))[:10]):
+        findings = _list(report.get("findings"))
+        for finding in (_dict(f) for f in findings[:10]):
             title = _text(finding.get("title") or finding.get("rule_id") or finding.get("scanner"))
             location = _text(finding.get("location") or finding.get("path"))
             pairs.append(("Finding", f"{title} ({location})" if location else title))
+        if len(findings) > 10:
+            pairs.append(("", f"… and {len(findings) - 10} more finding(s) (defenseclaw sandbox review)"))
         changes = _list(report.get("changes"))
         for change in (_dict(c) for c in changes[:25]):
             pairs.append((f"  {_text(change.get('status'))}", _text(change.get("path"))))
         if len(changes) > 25:
             pairs.append(("", f"… and {len(changes) - 25} more (defenseclaw sandbox review --diff)"))
-        for warning in _list(report.get("warnings")):
-            pairs.append(("Warning", _text(warning)))
     if not pairs:
         pairs.append(("Summary", "No changes since the session started."))
     return tuple(pairs)

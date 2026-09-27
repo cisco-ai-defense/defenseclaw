@@ -35,7 +35,7 @@ from rich.markup import escape as rich_escape
 
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
-from defenseclaw.tui.screens.detail import DetailScreen
+from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
     SANDBOX_HARNESSES,
     SandboxLaunch,
@@ -80,6 +80,16 @@ SANDBOX_BUTTON_KEYS: dict[str, str] = {
     "sandboxes-wrappers": "w",
     "sandboxes-refresh": "r",
     "sandboxes-detail": "enter",
+}
+
+# The keys each view's detail window takes (they close it and act on its row).
+_DETAIL_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
+    "sandboxes": (
+        ("c", "s", "d", "U", "R", "u"),
+        "Keys: c connect · s stop · d delete · U undo · R review · u unblock · Esc close",
+    ),
+    "activity": (("u",), "Keys: u unblock · Esc close"),
+    "asks": (("a", "A", "x"), "Keys: a approve · A always approve · x reject · Esc close"),
 }
 
 
@@ -557,13 +567,21 @@ class SandboxPanelMixin:
         return choice == yes.action_id
 
     async def _open_sandbox_detail(self) -> None:
-        title, pairs = self.sandbox_model.detail_pairs()
+        model = self.sandbox_model
+        title, pairs = model.detail_pairs()
+        keys, keys_hint = _DETAIL_KEYS.get(model.view, ((), ""))
+        key: str | None = None
         try:
             if pairs:
-                await self.push_screen_wait(DetailScreen(title, pairs))  # type: ignore[attr-defined]
+                key = await self.push_screen_wait(  # type: ignore[attr-defined]
+                    SandboxDetailScreen(title, pairs, keys=keys, keys_hint=keys_hint)
+                )
         finally:
-            self.sandbox_model.detail_open = False
+            model.detail_open = False
             self._render_chrome()  # type: ignore[attr-defined]
+        if key:
+            # The detail's row is still the selection, so the key acts on it.
+            self._apply_sandbox_action(model.handle_key(key))
 
     async def _sandbox_unblock(self, sandbox: str, host: str) -> None:
         actions = []
@@ -580,7 +598,12 @@ class SandboxPanelMixin:
         )
         actions.append(MenuAction("cancel", "Cancel"))
         choice = await self.push_screen_wait(  # type: ignore[attr-defined]
-            ActionMenuScreen(f"Unblock {host}", tuple(actions), subtitle="DefenseClaw blocked this destination.")
+            ActionMenuScreen(
+                f"Unblock {host}",
+                tuple(actions),
+                subtitle="DefenseClaw blocked this destination.",
+                show_descriptions=True,
+            )
         )
         if choice not in {"sandbox", "always"}:
             self._set_status("Unblock cancelled.")  # type: ignore[attr-defined]
@@ -657,7 +680,13 @@ class SandboxPanelMixin:
     async def _sandbox_review(self, name: str) -> None:
         self._set_status(f"Reviewing {name}...")  # type: ignore[attr-defined]
         result = await self._sandbox_call("review_sandbox", name)
-        await self.push_screen_wait(DetailScreen(f"Review {name}", review_pairs(result)))  # type: ignore[attr-defined]
+        await self.push_screen_wait(  # type: ignore[attr-defined]
+            SandboxDetailScreen(
+                f"Review {name}",
+                review_pairs(result),
+                keys_hint="Up/Down and PageUp/PageDown scroll · Esc close",
+            )
+        )
 
     async def _sandbox_stop(self, name: str) -> None:
         confirmed = await self._confirm(
@@ -713,6 +742,7 @@ class SandboxPanelMixin:
                 tuple(actions),
                 subtitle="A marked block in your shell rc makes the command run sandboxed "
                 "(DEFENSECLAW_NO_SANDBOX=1 bypasses once).",
+                show_descriptions=True,
             )
         )
         if choice in (None, "cancel"):
