@@ -19,6 +19,10 @@ defenseclaw sandbox legacy-cleanup --dry-run
 defenseclaw sandbox legacy-cleanup
 ```
 
+Cleanup stops the systemd units itself but changes nothing else while any part
+of the legacy sandbox still runs. Stop the non-systemd launcher first with
+`sudo <data_dir>/scripts/run-sandbox.sh stop`.
+
 The [published legacy sandbox cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
 lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
 and the follow-up commands.

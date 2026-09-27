@@ -21,8 +21,10 @@ receipt so a partial or repeated cleanup only does what is still left.
 
 Privileged commands run through ``sudo`` with every executable resolved only
 from root-owned system directories, and nothing ever writes into a tree the
-sandbox user controls: ownership is restored before ``openclaw.json`` is
-rewritten, and that rewrite runs as the operator with symlinks refused.
+sandbox user controls: nothing after the units step runs while any part of
+the legacy sandbox is still running, ownership is restored before
+``openclaw.json`` is rewritten, and that rewrite runs as the operator with
+symlinks refused.
 
 LEGACY(openshell-0.0.x): delete one release after cleanup.
 """
@@ -119,14 +121,30 @@ DATA_DIR_ARTIFACTS = (
 )
 # Directories that only ever held legacy artifacts; removed once empty.
 DATA_DIR_ARTIFACT_DIRS = ("systemd", "scripts")
+# The previous release's ordinary connector setup wrote this policy on every
+# Linux OpenClaw/ZeptoClaw host, sandboxed or not. It is cleaned up along with
+# a legacy install but never counts as proof of one.
+NON_EVIDENCE_ARTIFACTS = frozenset({"policies/defenseclaw-policy.yaml"})
+# PID files the legacy launchers wrote, with the program each PID must still
+# be: run-sandbox.sh wrote "<pid> <program>" lines, and the removed gateway
+# `sandbox` subcommand wrote a bare openshell-sandbox PID.
+PID_FILES = {"sandbox.pids": "", "openshell.pid": "openshell-sandbox"}
+# What the sandboxed agent could have changed in the OpenClaw home, for the
+# review the operator does before OpenClaw runs on the host again.
+REVIEW_PATHS = ("openclaw.json", "extensions", "skills", "workspace/skills", "hooks")
 
 _NETNS_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _IFNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$")
+_PROGRAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PID = re.compile(r"^[0-9]{1,7}$")
+_PID_MAX = 4194304  # PID_MAX_LIMIT on 64-bit Linux
+_ACL_USER_ENTRY = re.compile(r"^(?:default:)?user:([0-9]+):")
 _LEGACY_VERSION = re.compile(r"^0\.0\.\d+$")
 _MAX_MARKED_FILE_BYTES = 1024 * 1024
 
 STEP_ORDER = (
     "units",
+    "stopped",
     "network",
     "ownership",
     "openclaw_json",
@@ -205,6 +223,41 @@ def _group_members(name: str) -> list[str] | None:
         return None
 
 
+def _uid_exists(uid: int) -> bool:
+    try:
+        import pwd
+
+        pwd.getpwuid(uid)
+    except (ImportError, KeyError):
+        return False
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether *pid* names a process, including one owned by another user."""
+    if os.name == "nt" or pid <= 1:
+        # os.kill on Windows terminates the process; pid 0/-1 signal groups.
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM: it exists but belongs to someone else (root, usually).
+        return True
+    return True
+
+
+def _pid_cmdline(pid: int) -> str | None:
+    """The process's command line, or None when it cannot be read."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read(4096)
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+
+
 def _host_os() -> str:
     from defenseclaw.platform_support import host_os
 
@@ -231,7 +284,10 @@ class System:
     host_os: Callable[[], str] = _host_os
     invoking_user: Callable[[], str] = _invoking_user
     lookup_user: Callable[[str], Any | None] = _lookup_user
+    uid_exists: Callable[[int], bool] = _uid_exists
     group_members: Callable[[str], list[str] | None] = _group_members
+    pid_alive: Callable[[int], bool] = _pid_alive
+    pid_cmdline: Callable[[int], str | None] = _pid_cmdline
     home: Callable[[], str] = lambda: os.path.expanduser("~")
     now: Callable[[], _dt.datetime] = lambda: _dt.datetime.now(_dt.timezone.utc)
     authenticate: Callable[[System], bool] | None = None
@@ -386,6 +442,7 @@ class Ownership:
     uid: int
     gid: int
     parent_modes: list[tuple[str, int]] = field(default_factory=list)
+    parent_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -404,18 +461,26 @@ class LegacyState:
     config_changes: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     sandbox_home: str = DEFAULT_SANDBOX_HOME
     sandbox_uid: int | None = None
+    sandbox_uid_note: str = ""
+    sandbox_pw_dir: str = ""
     invoking_user: str = ""
     user_in_sandbox_group: bool = False
     units: list[MarkedFile] = field(default_factory=list)
     launchers: list[MarkedFile] = field(default_factory=list)
+    recorded_pids: list[tuple[int, str, str]] = field(default_factory=list)  # (pid, program, pid file)
     netns: str = ""
     netns_note: str = ""
     veths: list[str] = field(default_factory=list)
+    veth_notes: list[str] = field(default_factory=list)
     iptables_rules: list[tuple[str, ...]] = field(default_factory=list)
     legacy_gateway: dict[str, Any] = field(default_factory=dict)
     route_localnet_saved: str = ""
     route_localnet_current: str = ""
     openclaw_home: str = ""
+    # pin | receipt | backup: validated legacy anchors. fallback: the host
+    # OpenClaw home of an install whose old `--disable` erased every anchor;
+    # only the sandbox ACLs are removed from it.
+    openclaw_home_source: str = ""
     openclaw_home_exists: bool = False
     openclaw_home_error: str = ""
     ownership: Ownership | None = None
@@ -423,6 +488,7 @@ class LegacyState:
     acl_ancestors: list[str] = field(default_factory=list)
     openclaw_config: str = ""
     openclaw_config_error: str = ""
+    claw_paths_in_sandbox_home: bool = False
     sandbox_link: str = ""
     sandbox_link_state: str = "absent"  # absent | link | not-a-link | unknown
     binary: BinaryState | None = None
@@ -439,6 +505,10 @@ class LegacyState:
         return isinstance(steps, dict) and (steps.get(step_id) or {}).get("status") == "done"
 
     @property
+    def validated_home(self) -> bool:
+        return bool(self.openclaw_home) and self.openclaw_home_source in ("pin", "receipt", "backup")
+
+    @property
     def has_system_evidence(self) -> bool:
         """Whether anything proves this host ran the legacy sandbox.
 
@@ -451,8 +521,9 @@ class LegacyState:
             or self.launchers
             or self.netns
             or self.veths
-            or self.artifacts
-            or self.openclaw_home
+            or any(rel not in NON_EVIDENCE_ARTIFACTS for rel in self.artifacts)
+            or self.openclaw_home_source in ("pin", "backup")
+            or (self.openclaw_home_source == "receipt" and not self.receipt.get("completed"))
         )
 
 
@@ -554,27 +625,78 @@ def iptables_rules(sandbox_ip: str, port: int) -> list[tuple[str, ...]]:
     ]
 
 
-def _legacy_veths(system: System) -> list[str]:
-    """Host-side veth interfaces that still carry the legacy host address."""
+def _legacy_veths(system: System, netns: str) -> tuple[list[str], list[str]]:
+    """Split the host veths carrying the legacy host address by ownership.
+
+    ``ip -o addr`` prints plain interface names, so the address holders are
+    matched against ``ip -o link show type veth``, which prints each veth as
+    ``<name>@<peer>`` followed by the peer's ``link-netns``. Only a veth whose
+    peer lives in the recorded sandbox namespace is ours to delete, as the
+    legacy cleanup script decided; any other veth with the address is
+    reported for manual review. Returns ``(ours, notes)``.
+    """
     try:
-        argv = unprivileged_argv(system, "ip", "-o", "-4", "addr", "show")
+        addr_argv = unprivileged_argv(system, "ip", "-o", "-4", "addr", "show")
+        link_argv = unprivileged_argv(system, "ip", "-o", "link", "show", "type", "veth")
     except UntrustedCommandError:
-        return []
-    result = system.runner(argv)
+        return [], []
+    result = system.runner(addr_argv)
     if result.returncode != 0:
-        return []
-    found: list[str] = []
+        return [], []
+    holders: list[str] = []
     for line in result.stdout.splitlines():
         fields = line.split()
         if len(fields) < 4 or fields[2] != "inet":
             continue
         if fields[3].split("/", 1)[0] != LEGACY_HOST_IP:
             continue
-        name, _, peer = fields[1].partition("@")
-        # A veth end is printed as "<name>@<peer>"; a plain interface that
-        # happens to carry the address is not ours to delete.
-        if peer and _IFNAME.match(name) and name not in found:
-            found.append(name)
+        name = fields[1].split("@", 1)[0].rstrip(":")
+        if _IFNAME.match(name) and name not in holders:
+            holders.append(name)
+    if not holders:
+        return [], []
+    links = system.runner(link_argv)
+    peer_netns: dict[str, str] = {}
+    if links.returncode == 0:
+        for line in links.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 2 or "@" not in fields[1]:
+                continue
+            name = fields[1].split("@", 1)[0]
+            namespace = ""
+            if "link-netns" in fields:
+                index = fields.index("link-netns")
+                namespace = fields[index + 1] if index + 1 < len(fields) else ""
+            peer_netns[name] = namespace
+    ours: list[str] = []
+    notes: list[str] = []
+    for name in holders:
+        if name not in peer_netns:
+            continue  # not a veth: the legacy sandbox only ever used a veth pair
+        if netns and peer_netns[name] == netns:
+            ours.append(name)
+        else:
+            notes.append(
+                f"veth {name} carries {LEGACY_HOST_IP} but its peer is not in the recorded sandbox namespace; "
+                f"left in place (if it belonged to the legacy sandbox, delete it with: sudo ip link delete {name})"
+            )
+    return ours, notes
+
+
+def _recorded_pids(data_dir: str) -> list[tuple[int, str, str]]:
+    """The PIDs the legacy launchers recorded, as (pid, program, pid file)."""
+    found: list[tuple[int, str, str]] = []
+    for rel, default_program in PID_FILES.items():
+        for line in _read_small_text(os.path.join(data_dir, rel)).splitlines():
+            fields = line.split()
+            if not fields or not _PID.match(fields[0]):
+                continue
+            pid = int(fields[0])
+            if not 1 < pid <= _PID_MAX:
+                continue
+            program = fields[1] if len(fields) > 1 and _PROGRAM.match(fields[1]) else default_program
+            if (pid, program, rel) not in found:
+                found.append((pid, program, rel))
     return found
 
 
@@ -645,36 +767,142 @@ def _pinned_home(cfg) -> str:
     return os.path.realpath(os.path.expanduser(pinned))
 
 
+def _recorded_home(receipt: dict[str, Any]) -> str:
+    raw = receipt.get("openclaw_home")
+    if not isinstance(raw, str) or not os.path.isabs(raw.strip()):
+        return ""
+    return os.path.realpath(raw.strip())
+
+
 def _resolve_openclaw_home(
-    cfg,
+    pinned: str,
+    recorded: str,
     backup: dict[str, Any] | None,
     backup_error: str,
-) -> tuple[str, str]:
-    """Return the trusted real OpenClaw home, or ("", reason).
+) -> tuple[str, str, str]:
+    """Return ``(home, source, "")`` for the trusted real OpenClaw home, or ``("", "", reason)``.
 
-    The pinned ``claw.openclaw_home_original`` and the ownership backup must
-    agree. The sandbox-owned ``$SANDBOX_HOME/.openclaw`` symlink is never
-    trusted: its target is attacker-writable (F-0161/F-0162).
+    Every anchor that exists must agree: the pinned
+    ``claw.openclaw_home_original``, the home an earlier cleanup run recorded
+    in its receipt (so clearing the pin never turns a refused backup into a
+    trusted one), and the ownership backup. The sandbox-owned
+    ``$SANDBOX_HOME/.openclaw`` symlink is never trusted: its target is
+    attacker-writable (F-0161/F-0162).
     """
-    pinned = _pinned_home(cfg)
     backup_home = ""
     if backup is not None:
         raw = backup.get("openclaw_home")
         if not isinstance(raw, str) or not raw.strip():
-            return "", "ownership backup has no openclaw_home"
+            return "", "", "ownership backup has no openclaw_home"
         backup_home = os.path.realpath(os.path.expanduser(raw.strip()))
-    if pinned and backup_home and pinned != backup_home:
-        return "", (
-            f"ownership backup names {backup_home} but the pinned original OpenClaw home is {pinned}; "
-            "refusing a possibly tampered backup"
+    anchors = [
+        (label, path)
+        for label, path in (
+            ("pinned original OpenClaw home", pinned),
+            ("OpenClaw home recorded by an earlier cleanup run", recorded),
+            ("ownership backup", backup_home),
         )
-    home = pinned or backup_home
-    if not home:
-        return "", backup_error
+        if path
+    ]
+    if not anchors:
+        return "", "", backup_error
+    first_label, home = anchors[0]
+    for label, path in anchors[1:]:
+        if path != home:
+            return "", "", (
+                f"the {label} names {path} but the {first_label} is {home}; refusing a possibly tampered backup"
+            )
     reason = validate_restore_home(home)
     if reason:
-        return "", reason
-    return home, ""
+        return "", "", reason
+    return home, "pin" if pinned else "receipt" if recorded else "backup", ""
+
+
+def _expand_home(path: str, system: System) -> str:
+    """Expand a leading ``~`` against the invoking user's home."""
+    if path == "~":
+        return system.home()
+    if path.startswith("~/"):
+        return os.path.join(system.home(), path[2:])
+    return path
+
+
+def _fallback_openclaw_home(cfg, state: LegacyState, system: System) -> str:
+    """The host OpenClaw home of an install with no pin or backup left.
+
+    The removed ``sandbox setup --disable`` restored ownership, then deleted
+    the backup and cleared the pin, but never removed the sandbox ACLs (rwX
+    plus default entries) from the home. It reset ``claw.home_dir`` to the
+    host home, so that (or ``~/.openclaw``) is where those ACLs remain.
+    """
+    sandbox_home = os.path.realpath(state.sandbox_home)
+    candidates: list[str] = []
+    home_dir = str(getattr(getattr(cfg, "claw", None), "home_dir", "") or "").strip()
+    if home_dir:
+        candidates.append(_expand_home(home_dir, system))
+    candidates.append(os.path.join(system.home(), ".openclaw"))
+    for candidate in candidates:
+        if not os.path.isabs(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        if _under(real, sandbox_home) or validate_restore_home(real):
+            continue
+        try:
+            if stat.S_ISDIR(os.lstat(real).st_mode):
+                return real
+        except OSError:
+            continue
+    return ""
+
+
+def _acl_uids(system: System, path: str) -> set[int] | None:
+    """Numeric uids with a named ACL entry (access or default) on *path*."""
+    try:
+        argv = unprivileged_argv(system, "getfacl", "-n", "-p", "--", path)
+    except UntrustedCommandError:
+        return None
+    result = system.runner(argv)
+    if result.returncode != 0:
+        return None
+    uids: set[int] = set()
+    for line in result.stdout.splitlines():
+        match = _ACL_USER_ENTRY.match(line.strip())
+        if match:
+            uids.add(int(match.group(1)))
+    return uids
+
+
+def _recover_sandbox_uid(paths: Sequence[str], system: System) -> tuple[int | None, str]:
+    """Find the uid of a sandbox account deleted outside cleanup.
+
+    Only a uid that maps to no account and owns, or has an ACL entry on, the
+    sandbox or OpenClaw home qualifies, so a recovered uid can only ever
+    match leftovers of the deleted account.
+    """
+    candidates: dict[int, list[str]] = {}
+    for path in paths:
+        if not path:
+            continue
+        try:
+            owner = os.lstat(path).st_uid
+        except OSError:
+            continue
+        for uid in sorted({owner} | (_acl_uids(system, path) or set())):
+            if uid != 0 and not system.uid_exists(uid):
+                candidates.setdefault(uid, []).append(path)
+    if len(candidates) == 1:
+        uid, where = next(iter(candidates.items()))
+        return uid, (
+            f"the sandbox user no longer exists; using uid {uid}, which maps to no account and owns or "
+            f"has ACL entries on {', '.join(where)}"
+        )
+    if candidates:
+        listed = ", ".join(str(uid) for uid in sorted(candidates))
+        return None, (
+            f"the sandbox user no longer exists and several unmapped uids ({listed}) own or have ACL entries "
+            "on its old paths; remove the stale entries by hand (getfacl -R -n shows them)"
+        )
+    return None, ""
 
 
 def _validated_ownership(
@@ -693,6 +921,7 @@ def _validated_ownership(
     if sandbox_uid is not None and uid == sandbox_uid:
         return None, "ownership backup names the sandbox user as the original owner"
     parents: list[tuple[str, int]] = []
+    notes: list[str] = []
     raw_parents = backup.get("parents_modified") or []
     if not isinstance(raw_parents, list):
         return None, "ownership backup parents_modified is not a list"
@@ -710,15 +939,28 @@ def _validated_ownership(
             mode = int(mode_text, 8)
         except ValueError:
             continue
-        if mode & 0o002 or mode & ~0o7777:
-            continue
         try:
-            current = stat.S_IMODE(os.stat(real_parent).st_mode)
+            info = os.stat(real_parent)
         except OSError:
             continue
-        if current != mode:
+        current = stat.S_IMODE(info.st_mode)
+        if current == mode:
+            continue
+        # Legacy setup only ever added o+x to an ancestor that lacked it, so
+        # the one restore a backup can justify is clearing that bit again, on
+        # a directory the home's owner owns. Anything else would let a
+        # rewritten backup make root chmod an arbitrary ancestor (even /).
+        if real_parent in FORBIDDEN_ROOTS:
+            reason = "it is a system directory"
+        elif mode != current & ~stat.S_IXOTH or mode & 0o002:
+            reason = f"the backup's mode {mode:o} is not the current mode with only o+x cleared"
+        elif info.st_uid != uid:
+            reason = f"it is owned by uid {info.st_uid}, not by the OpenClaw home's owner {uid}"
+        else:
             parents.append((real_parent, mode))
-    return Ownership(home=home, uid=uid, gid=gid, parent_modes=parents), ""
+            continue
+        notes.append(f"left {real_parent} at mode {current:o}: {reason}")
+    return Ownership(home=home, uid=uid, gid=gid, parent_modes=parents, parent_notes=notes), ""
 
 
 def _ancestors(path: str) -> list[str]:
@@ -840,7 +1082,11 @@ def detect(cfg, *, system: System | None = None, probe_binary: bool = False) -> 
     )
     sandbox_pw = system.lookup_user(SANDBOX_USER)
     state.sandbox_user_exists = sandbox_pw is not None
-    state.sandbox_uid = sandbox_pw.pw_uid if sandbox_pw is not None else _strict_int(receipt.get("sandbox_uid"))
+    if sandbox_pw is not None:
+        state.sandbox_uid = sandbox_pw.pw_uid
+        state.sandbox_pw_dir = str(getattr(sandbox_pw, "pw_dir", "") or "")
+    else:
+        state.sandbox_uid = _strict_int(receipt.get("sandbox_uid"))
     state.invoking_user = system.invoking_user()
     state.legacy_gateway = _legacy_gateway(cfg, receipt)
 
@@ -854,8 +1100,9 @@ def detect(cfg, *, system: System | None = None, probe_binary: bool = False) -> 
             found = _marked_file(os.path.join(system.launcher_dir, name), LAUNCHER_MARKERS[name], system)
             if found is not None:
                 state.launchers.append(found)
+        state.recorded_pids = _recorded_pids(data_dir)
         state.netns, state.netns_note = _recorded_netns(data_dir, system)
-        state.veths = _legacy_veths(system)
+        state.veths, state.veth_notes = _legacy_veths(system, state.netns)
         state.iptables_rules = iptables_rules(state.legacy_gateway["host"], state.legacy_gateway["port"])
         saved = _read_small_text(os.path.join(data_dir, "saved.route_localnet"))
         state.route_localnet_saved = saved if saved in ("0", "1") else ""
@@ -865,9 +1112,23 @@ def detect(cfg, *, system: System | None = None, probe_binary: bool = False) -> 
         user = state.invoking_user
         state.user_in_sandbox_group = bool(members and user and user not in ("root", SANDBOX_USER) and user in members)
         state.binary = _binary_state(system, probe=probe_binary)
+    state.artifacts = [rel for rel in DATA_DIR_ARTIFACTS if os.path.lexists(os.path.join(data_dir, rel))]
 
     backup, backup_error = _load_ownership_backup(data_dir)
-    state.openclaw_home, state.openclaw_home_error = _resolve_openclaw_home(cfg, backup, backup_error)
+    home, source, home_error = _resolve_openclaw_home(_pinned_home(cfg), _recorded_home(receipt), backup, backup_error)
+    state.openclaw_home, state.openclaw_home_source, state.openclaw_home_error = home, source, home_error
+    if linux and not home and not home_error and state.has_system_evidence and not state.step_done("ownership"):
+        fallback = _fallback_openclaw_home(cfg, state, system)
+        if fallback:
+            state.openclaw_home, state.openclaw_home_source = fallback, "fallback"
+    if linux and state.sandbox_uid is None and (state.has_system_evidence or state.openclaw_home):
+        # A manual `userdel sandbox` before any cleanup run: the ACLs are
+        # keyed by the numeric uid, never by a name that no longer resolves.
+        state.sandbox_uid, state.sandbox_uid_note = _recover_sandbox_uid(
+            [sandbox_home, state.openclaw_home], system,
+        )
+    if state.openclaw_home_source == "fallback" and state.sandbox_uid is None:
+        state.openclaw_home = state.openclaw_home_source = ""
     if state.openclaw_home:
         try:
             info = os.lstat(state.openclaw_home)
@@ -883,16 +1144,23 @@ def detect(cfg, *, system: System | None = None, probe_binary: bool = False) -> 
         state.acl_ancestors = [path for path in _ancestors(state.openclaw_home) if os.path.isdir(path)]
         # The sandbox user may have left the home untraversable for the
         # operator, so plan the rewrite whenever the home exists; it runs
-        # after ownership is restored and treats a missing file as done.
-        if state.openclaw_home_exists:
+        # after ownership is restored and treats a missing file as done. A
+        # fallback home was already restored by the old --disable.
+        if state.openclaw_home_exists and state.validated_home:
             state.openclaw_config = os.path.join(state.openclaw_home, "openclaw.json")
     elif state.openclaw_home_error:
         state.ownership_error = state.openclaw_home_error
 
     state.sandbox_link = os.path.join(sandbox_home, ".openclaw")
     state.sandbox_link_state = _sandbox_link_state(state.sandbox_link) if linux else "absent"
+    roots = {os.path.normpath(sandbox_home), os.path.realpath(sandbox_home)}
+    claw = getattr(cfg, "claw", None)
+    state.claw_paths_in_sandbox_home = any(
+        _under(_expand_home(str(getattr(claw, key, "") or "").strip(), system), root)
+        for key in ("home_dir", "config_file")
+        for root in roots
+    )
 
-    state.artifacts = [rel for rel in DATA_DIR_ARTIFACTS if os.path.lexists(os.path.join(data_dir, rel))]
     state.config_changes = _config_changes(cfg, state, _pinned_home(cfg), system)
     return state
 
@@ -910,6 +1178,8 @@ class Command:
     exits 0, e.g. ``iptables -C``) or ``"check-fails"`` (run only when the
     probe exits non-zero, e.g. ``pgrep`` finding no processes). ``repeat``
     re-probes and re-runs a ``check-ok`` command so duplicate rules go too.
+    A command with a ``refusal`` is itself a probe: when it exits non-zero
+    the step stops and reports the refusal.
     """
 
     argv: tuple[str, ...]
@@ -917,8 +1187,11 @@ class Command:
     run_when: str = "always"
     repeat: int = 1
     precondition: Callable[[], str] | None = None
+    refusal: str = ""
 
     def render(self) -> list[str]:
+        if self.refusal:
+            return [render_argv(self.argv), f"  (the step stops here unless it succeeds: {self.refusal})"]
         if not self.check:
             return [render_argv(self.argv)]
         gate = "succeeds" if self.run_when == "check-ok" else "fails"
@@ -946,6 +1219,7 @@ class Step:
 def _step_title(step_id: str) -> str:
     return {
         "units": "Stop and remove the legacy systemd units and launcher scripts",
+        "stopped": "Verify that nothing of the legacy sandbox is still running",
         "network": "Remove the sandbox network namespace, veth peer, and NAT rules",
         "ownership": "Restore OpenClaw home ownership and remove sandbox ACLs",
         "openclaw_json": "Restore the OpenClaw gateway settings in openclaw.json",
@@ -991,9 +1265,96 @@ def _units_step(state: LegacyState, system: System) -> Step | None:
     return _finish(step)
 
 
+def _still_running(state: LegacyState, system: System) -> list[str]:
+    """What of the legacy sandbox still runs, one finding per item.
+
+    Covers both launchers: the systemd units (a foreign or tampered unit the
+    units step left alone included), the PIDs run-sandbox.sh and the old
+    gateway recorded (its root ACL-fixer loop lives exactly as long as the
+    recorded openshell-sandbox PID), and any process of the sandbox uid.
+    Anything that cannot be checked counts as running.
+    """
+    found: list[str] = []
+    for marked in state.units:
+        name = os.path.basename(marked.path)
+        try:
+            argv = unprivileged_argv(system, "systemctl", "is-active", "--quiet", name)
+        except UntrustedCommandError as exc:
+            found.append(f"cannot check {name}: {exc}")
+            continue
+        if system.runner(argv).returncode == 0:
+            found.append(f"{name} is active")
+    for pid, program, source in state.recorded_pids:
+        if not system.pid_alive(pid):
+            continue
+        cmdline = system.pid_cmdline(pid)
+        if cmdline is not None and program and program not in cmdline:
+            continue  # the PID was reused by an unrelated process
+        found.append(f"PID {pid} ({program or 'unnamed'}) from {source} is running")
+    if state.sandbox_uid is not None:
+        try:
+            argv = unprivileged_argv(system, "pgrep", "-u", str(state.sandbox_uid))
+        except UntrustedCommandError as exc:
+            found.append(f"cannot check for processes of uid {state.sandbox_uid}: {exc}")
+        else:
+            result = system.runner(argv)
+            if result.returncode == 0:
+                pids = result.stdout.split()
+                shown = ", ".join(pids[:5]) + (", ..." if len(pids) > 5 else "")
+                found.append(f"uid {state.sandbox_uid} still runs PID {shown}")
+            elif result.returncode != 1:
+                found.append(f"`{render_argv(argv)}` exited {result.returncode}")
+    return found
+
+
+def _stopped_step(state: LegacyState, system: System) -> Step | None:
+    """Gate every later step on the legacy sandbox being fully stopped.
+
+    Only the systemd units can be stopped for the operator; the non-systemd
+    run-sandbox.sh launcher lives in the operator-writable data directory and
+    must never run through sudo from here. Restoring ownership, ACLs, or
+    config under a live sandbox would hand the home straight back to it.
+    """
+    checks: list[str] = []
+    if state.units:
+        names = " and ".join(os.path.basename(marked.path) for marked in state.units)
+        checks.append(f"`systemctl is-active` reports {names} inactive")
+    if state.recorded_pids:
+        sources = ", ".join(sorted({source for _, _, source in state.recorded_pids}))
+        checks.append(f"no PID recorded in {sources} is still running")
+    if state.sandbox_uid is not None:
+        checks.append(f"`pgrep -u {state.sandbox_uid}` finds no process")
+    if not checks:
+        return None
+    step = Step("stopped", _step_title("stopped"))
+    launcher = os.path.join(state.data_dir, "scripts", "run-sandbox.sh")
+
+    def run() -> str:
+        running = _still_running(state, system)
+        if not running:
+            return "the legacy sandbox is not running"
+        how: list[str] = []
+        if state.units:
+            how.append("`sudo systemctl stop defenseclaw-sandbox.target openshell-sandbox.service`")
+        if os.path.lexists(launcher):
+            how.append(f"`sudo {shlex.quote(launcher)} stop` for the run-sandbox.sh launcher")
+        how.append("or stop the listed processes yourself")
+        stale = ""
+        if any(finding.startswith("PID ") for finding in running):
+            stale = " (if a listed PID now belongs to an unrelated process, delete that stale PID file)"
+        raise RuntimeError(
+            f"the legacy sandbox is still running ({'; '.join(running)}); stop it first with "
+            + ", ".join(how)
+            + f", then re-run cleanup{stale}"
+        )
+
+    step.actions.append(Action("check that " + "; ".join(checks), run))
+    return step
+
+
 def _network_step(state: LegacyState, system: System) -> Step | None:
     step = Step("network", _step_title("network"))
-    if state.netns_note:
+    if state.netns_note and state.has_system_evidence:
         step.notes.append(state.netns_note)
     try:
         if state.netns:
@@ -1039,6 +1400,10 @@ def _network_step(state: LegacyState, system: System) -> Step | None:
                 f"no saved {ROUTE_LOCALNET_SYSCTL} value; leaving the current value "
                 f"({state.route_localnet_current or 'unknown'}) unchanged"
             )
+        if step.commands:
+            # Advisory only: a veth this install cannot be tied to must never
+            # keep the cleanup unfinished, so it is reported alongside work.
+            step.notes.extend(state.veth_notes)
     except UntrustedCommandError as exc:
         step.blocked = str(exc)
     return _finish(step, already_done=state.step_done("network"))
@@ -1046,8 +1411,9 @@ def _network_step(state: LegacyState, system: System) -> Step | None:
 
 def _ownership_step(state: LegacyState, system: System) -> Step | None:
     step = Step("ownership", _step_title("ownership"))
+    done = state.step_done("ownership")
     link_needs_removal = state.sandbox_link_state == "link" or (
-        state.sandbox_link_state == "unknown" and state.has_system_evidence and not state.step_done("ownership")
+        state.sandbox_link_state == "unknown" and state.has_system_evidence and not done
     )
     if state.ownership_error:
         # Fail closed: a backup or pin that does not validate means the
@@ -1055,31 +1421,33 @@ def _ownership_step(state: LegacyState, system: System) -> Step | None:
         # runs, and the backup is kept so the operator can fix and re-run.
         step.blocked = f"ownership not restored: {state.ownership_error}"
         return step
-    if state.openclaw_home and state.ownership is None and state.openclaw_home_exists:
+    if state.sandbox_uid_note and state.openclaw_home and not done:
+        step.notes.append(state.sandbox_uid_note)
+    if state.openclaw_home_source == "fallback" and not done:
+        step.notes.append(
+            f"no pinned OpenClaw home or ownership backup is left (the old `sandbox setup --disable` "
+            f"removed them); removing the sandbox ACLs from {state.openclaw_home}"
+        )
+    elif state.openclaw_home and state.ownership is None and state.openclaw_home_exists and not done:
         step.notes.append(
             f"no ownership backup; {state.openclaw_home} keeps its current owner "
             f"(restore it with: sudo chown -hR {state.invoking_user or '<user>'}: {state.openclaw_home})"
         )
-    identifier = f"u:{state.sandbox_uid}" if state.sandbox_uid is not None else f"u:{SANDBOX_USER}"
     try:
-        ownership = state.ownership
-        if ownership is not None and state.openclaw_home_exists:
-            from_owner = [f"--from={state.sandbox_uid}"] if state.sandbox_uid is not None else []
-            step.commands.append(
-                Command(
-                    privileged_argv(
-                        system, "chown", "-hR", *from_owner, f"{ownership.uid}:{ownership.gid}", "--", ownership.home,
-                    ),
-                    precondition=_home_unchanged(ownership.home),
+        # The ACLs go first: the chown alone would leave the sandbox uid its
+        # rwX (and default) entries on everything it no longer owns.
+        if state.openclaw_home and not done:
+            if state.sandbox_uid is None:
+                # Never a bare `u:sandbox`: setfacl rejects a name that no
+                # longer resolves, so the step could never complete.
+                step.notes.append(
+                    "the sandbox user no longer exists and its uid is unknown; check "
+                    f"`getfacl -R -n {shlex.quote(state.openclaw_home)}` for entries of an unmapped uid"
                 )
-            )
-            for path, mode in ownership.parent_modes:
-                step.commands.append(Command(privileged_argv(system, "chmod", f"{mode:o}", "--", path)))
-        acl_needed = bool(state.openclaw_home) and not state.step_done("ownership")
-        if acl_needed:
-            if not system.trusted("setfacl"):
+            elif not system.trusted("setfacl"):
                 step.notes.append("setfacl is not installed; no sandbox ACLs can remain to remove")
             else:
+                identifier = f"u:{state.sandbox_uid}"
                 if state.openclaw_home_exists:
                     home = state.openclaw_home
                     step.commands.append(
@@ -1096,6 +1464,20 @@ def _ownership_step(state: LegacyState, system: System) -> Step | None:
                     )
                 for ancestor in state.acl_ancestors:
                     step.commands.append(Command(privileged_argv(system, "setfacl", "-x", identifier, "--", ancestor)))
+        ownership = state.ownership
+        if ownership is not None and state.openclaw_home_exists and not done:
+            from_owner = [f"--from={state.sandbox_uid}"] if state.sandbox_uid is not None else []
+            step.commands.append(
+                Command(
+                    privileged_argv(
+                        system, "chown", "-hR", *from_owner, f"{ownership.uid}:{ownership.gid}", "--", ownership.home,
+                    ),
+                    precondition=_home_unchanged(ownership.home),
+                )
+            )
+            for path, mode in ownership.parent_modes:
+                step.commands.append(Command(privileged_argv(system, "chmod", f"{mode:o}", "--", path)))
+            step.notes.extend(ownership.parent_notes)
         if link_needs_removal:
             step.commands.append(
                 Command(
@@ -1108,7 +1490,7 @@ def _ownership_step(state: LegacyState, system: System) -> Step | None:
             step.notes.append(f"{state.sandbox_link} is not a symlink; left in place")
     except UntrustedCommandError as exc:
         step.blocked = str(exc)
-    return _finish(step, already_done=state.step_done("ownership"))
+    return _finish(step, already_done=done)
 
 
 def _home_unchanged(expected: str) -> Callable[[], str]:
@@ -1130,7 +1512,7 @@ def _home_unchanged(expected: str) -> Callable[[], str]:
 
 
 def _openclaw_json_step(state: LegacyState, earlier: Sequence[Step]) -> Step | None:
-    if not state.openclaw_config:
+    if not state.openclaw_config or state.step_done("openclaw_json"):
         return None
     step = Step("openclaw_json", _step_title("openclaw_json"))
     if state.ownership_error:
@@ -1161,8 +1543,17 @@ def _openclaw_json_step(state: LegacyState, earlier: Sequence[Step]) -> Step | N
     return step
 
 
+def _sandbox_account_is_legacy(state: LegacyState) -> bool:
+    """Whether the ``sandbox`` account/group can be attributed to this install.
+
+    The name alone proves nothing: legacy setup reused any existing account
+    called ``sandbox``, and unrelated software creates one too.
+    """
+    return state.has_system_evidence or _strict_int(state.receipt.get("sandbox_uid")) is not None
+
+
 def _group_step(state: LegacyState, system: System) -> Step | None:
-    if not state.user_in_sandbox_group:
+    if not state.user_in_sandbox_group or not _sandbox_account_is_legacy(state):
         return None
     step = Step("group", _step_title("group"))
     try:
@@ -1172,29 +1563,93 @@ def _group_step(state: LegacyState, system: System) -> Step | None:
     return step
 
 
-def _user_step(state: LegacyState, system: System) -> Step | None:
-    if state.sandbox_uid is None or not state.sandbox_user_exists:
+def _user_blocker(state: LegacyState) -> str:
+    """Why ``userdel -r`` must not be planned, or ""."""
+    pw_dir = os.path.realpath(state.sandbox_pw_dir) if state.sandbox_pw_dir else ""
+    expected = os.path.realpath(state.sandbox_home)
+    if state.ownership_error:
+        return f"waits for the OpenClaw home ownership and ACL restore ({state.ownership_error})"
+    if not pw_dir or pw_dir in FORBIDDEN_ROOTS:
+        return f"the sandbox account's home is {state.sandbox_pw_dir or 'unset'}; `userdel -r` would delete it"
+    if pw_dir != expected:
+        return (
+            f"the sandbox account's home is {pw_dir}, not the configured sandbox home {expected}; it may not be "
+            "the account legacy setup created, so `userdel -r` would delete a directory cleanup knows nothing about"
+        )
+    if state.openclaw_home and _under(state.openclaw_home, pw_dir):
+        return f"the OpenClaw home {state.openclaw_home} lives inside {pw_dir}; `userdel -r` would delete it"
+    if state.claw_paths_in_sandbox_home and not state.validated_home:
+        return (
+            f"claw.home_dir or claw.config_file points into {pw_dir} and no pinned OpenClaw home was found, so "
+            "that directory may hold the only OpenClaw state; move it out before `userdel -r` deletes it"
+        )
+    if state.sandbox_link_state == "not-a-link":
+        return f"{state.sandbox_link} is a real directory; `userdel -r` would delete it"
+    return ""
+
+
+def _user_removal_ready(state: LegacyState, system: System, ownership_planned: bool) -> Callable[[], str]:
+    """Refuse ``userdel`` while the uid it frees still owns or has ACLs on the home.
+
+    A deleted account's uid is handed to the next system account, which
+    would inherit whatever the sandbox user kept in the OpenClaw home.
+    """
+
+    def check() -> str:
+        if ownership_planned and not state.step_done("ownership"):
+            return "the OpenClaw home ownership and ACL restore did not complete"
+        home = state.openclaw_home
+        if not home:
+            return ""
+        try:
+            info = os.lstat(home)
+        except OSError:
+            return ""
+        if not stat.S_ISDIR(info.st_mode):
+            return ""
+        if info.st_uid == state.sandbox_uid:
+            return f"{home} is still owned by uid {state.sandbox_uid}"
+        if state.sandbox_uid in (_acl_uids(system, home) or set()):
+            return f"{home} still carries ACL entries for uid {state.sandbox_uid}"
+        return ""
+
+    return check
+
+
+def _user_step(state: LegacyState, system: System, earlier: Sequence[Step]) -> Step | None:
+    if state.sandbox_uid is None or not state.sandbox_user_exists or not _sandbox_account_is_legacy(state):
         return None
     step = Step("user", _step_title("user"))
-    if state.openclaw_home and _under(state.openclaw_home, os.path.realpath(state.sandbox_home)):
-        step.blocked = (
-            f"the OpenClaw home {state.openclaw_home} lives inside {state.sandbox_home}; "
-            "`userdel -r` would delete it"
-        )
+    step.blocked = _user_blocker(state)
+    if step.blocked:
         return step
-    if state.sandbox_link_state == "not-a-link":
-        step.blocked = f"{state.sandbox_link} is a real directory; `userdel -r` would delete it"
-        return step
+    ownership_planned = any(other.id == "ownership" and not other.blocked for other in earlier)
     try:
+        if state.sandbox_link_state == "unknown":
+            # The operator cannot see into the sandbox home (0700 on most
+            # distributions); look as root now that any symlink is gone.
+            step.commands.append(
+                Command(
+                    privileged_argv(system, "test", "!", "-e", state.sandbox_link),
+                    refusal=f"{state.sandbox_link} still exists and `userdel -r` would delete it",
+                )
+            )
         step.commands.append(
             Command(
                 privileged_argv(system, "userdel", "-r", SANDBOX_USER),
                 check=unprivileged_argv(system, "pgrep", "-u", str(state.sandbox_uid)),
                 run_when="check-fails",
+                precondition=_user_removal_ready(state, system, ownership_planned),
             )
         )
     except UntrustedCommandError as exc:
         step.blocked = str(exc)
+        return step
+    home = state.sandbox_pw_dir
+    step.notes.append(
+        f"deletes {home} and runs only once the ownership and ACL restore completed and "
+        f"{state.openclaw_home or 'the OpenClaw home'} no longer carries uid {state.sandbox_uid}"
+    )
     return step
 
 
@@ -1213,14 +1668,27 @@ def _binary_step(state: LegacyState, system: System) -> Step | None:
     return step
 
 
-def _config_step(state: LegacyState, cfg) -> Step | None:
+# Steps the config reset waits for: the pinned claw.openclaw_home_original is
+# the anchor that keeps a rewritten ownership backup from being trusted, and
+# claw.* must keep pointing at the home until its restore is complete.
+_CONFIG_WAITS_FOR = ("ownership", "openclaw_json")
+
+
+def _config_step(state: LegacyState, cfg, earlier: Sequence[Step]) -> Step | None:
     if not state.config_changes:
         return None
     step = Step("config", _step_title("config"))
+    if state.ownership_error:
+        step.blocked = "waits for the OpenClaw home ownership restore"
+        return step
     changes = dict(state.config_changes)
     rendered = ", ".join(f"{key}: {old!r} -> {new!r}" for key, (old, new) in changes.items())
+    waits_for = [other.id for other in earlier if other.id in _CONFIG_WAITS_FOR and not other.blocked]
 
     def run() -> str:
+        pending = [step_id for step_id in waits_for if not state.step_done(step_id)]
+        if pending:
+            raise RuntimeError(f"skipped: waits for the {' and '.join(pending)} step to complete")
         reset_config(cfg, changes)
         return "config saved"
 
@@ -1228,23 +1696,32 @@ def _config_step(state: LegacyState, cfg) -> Step | None:
     return step
 
 
-# Data-dir files an earlier step still needs; each is only discarded once that
-# step completed (or was not needed), so a failed step can be retried.
-_ARTIFACT_DEPENDS_ON = {
-    "saved.route_localnet": "network",
-    "sandbox.netns": "network",
-    OWNERSHIP_BACKUP_NAME: "ownership",
+# Data-dir files an earlier step still needs; each is only discarded once those
+# steps completed (or were not needed), so a failed step can be retried.
+_ARTIFACT_DEPENDS_ON: dict[str, tuple[str, ...]] = {
+    "saved.route_localnet": ("network",),
+    "sandbox.netns": ("network",),
+    # The PID files and run-sandbox.sh (the documented way to stop the
+    # non-systemd launcher) stay until the sandbox is verified stopped.
+    "sandbox.pids": ("stopped",),
+    "openshell.pid": ("stopped",),
+    "scripts/run-sandbox.sh": ("stopped",),
+    # The backup locates the home for a retried openclaw.json rewrite.
+    OWNERSHIP_BACKUP_NAME: ("ownership", "openclaw_json"),
 }
 
 
 def _artifacts_step(state: LegacyState, system: System, earlier: Sequence[Step]) -> Step | None:
-    if not state.artifacts:
+    candidates = [
+        rel for rel in state.artifacts if rel not in NON_EVIDENCE_ARTIFACTS or state.has_system_evidence
+    ]
+    if not candidates:
         return None
     step = Step("artifacts", _step_title("artifacts"))
     planned = {other.id for other in earlier if not other.blocked}
     blocked = {other.id for other in earlier if other.blocked}
-    artifacts = [rel for rel in state.artifacts if _ARTIFACT_DEPENDS_ON.get(rel) not in blocked]
-    kept = [rel for rel in state.artifacts if rel not in artifacts]
+    artifacts = [rel for rel in candidates if not blocked.intersection(_ARTIFACT_DEPENDS_ON.get(rel, ()))]
+    kept = [rel for rel in candidates if rel not in artifacts]
     if not artifacts:
         return None
     data_dir = state.data_dir
@@ -1255,7 +1732,7 @@ def _artifacts_step(state: LegacyState, system: System, earlier: Sequence[Step])
         ready = [
             rel
             for rel in artifacts
-            if _ARTIFACT_DEPENDS_ON.get(rel) not in planned or state.step_done(_ARTIFACT_DEPENDS_ON[rel])
+            if all(dep not in planned or state.step_done(dep) for dep in _ARTIFACT_DEPENDS_ON.get(rel, ()))
         ]
         return backup_and_remove_artifacts(data_dir, ready, backup_dir)
 
@@ -1277,28 +1754,32 @@ def plan(
 ) -> list[Step]:
     """Return the ordered steps still needed for *state*.
 
-    Ownership is restored before ``openclaw.json`` is rewritten so that the
-    rewrite never needs root inside a tree the sandbox user controlled.
+    Nothing after the units step runs until the ``stopped`` step verifies
+    that no part of the legacy sandbox is still running. Ownership is
+    restored before ``openclaw.json`` is rewritten so that the rewrite never
+    needs root inside a tree the sandbox user controlled.
     """
     system = system or System()
+    steps: list[Step] = []
     builders: dict[str, Callable[[], Step | None]] = {
         "units": lambda: _units_step(state, system),
+        "stopped": lambda: _stopped_step(state, system),
         "network": lambda: _network_step(state, system),
         "ownership": lambda: _ownership_step(state, system),
         "openclaw_json": lambda: _openclaw_json_step(state, steps),
         "group": lambda: _group_step(state, system),
-        "user": lambda: _user_step(state, system) if remove_user else None,
+        "user": lambda: _user_step(state, system, steps) if remove_user else None,
         "binary": lambda: _binary_step(state, system) if remove_binary else None,
-        "config": lambda: _config_step(state, cfg),
+        "config": lambda: _config_step(state, cfg, steps),
+        "artifacts": lambda: _artifacts_step(state, system, steps),
     }
-    steps: list[Step] = []
     for step_id in STEP_ORDER:
-        if step_id == "artifacts":
-            step = _artifacts_step(state, system, steps)
-        else:
-            step = builders[step_id]()
+        step = builders[step_id]()
         if step is not None:
             steps.append(step)
+    if all(step.id in ("units", "stopped") for step in steps):
+        # Nothing runs after the units step, so there is nothing to guard.
+        steps = [step for step in steps if step.id != "stopped"]
     return steps
 
 
@@ -1307,12 +1788,28 @@ def plan(
 # ---------------------------------------------------------------------------
 
 
+def _parse_openclaw_json(text: str) -> Any:
+    """Parse openclaw.json as OpenClaw does: JSON, or JSON with comments and trailing commas."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    from defenseclaw.connector_paths import _normalize_jsonc
+
+    try:
+        return json.loads(_normalize_jsonc(text))
+    except ValueError as exc:
+        raise ValueError(f"openclaw.json is neither JSON nor JSON with comments ({exc})") from exc
+
+
 def restore_openclaw_gateway(openclaw_config: str) -> str:
     """Restore host-mode gateway settings in openclaw.json (F-0425).
 
     Runs as the invoking user after ownership is restored. The file is opened
     with ``O_NOFOLLOW`` and replaced atomically in its own directory, so a
-    planted symlink can neither disclose nor redirect the write.
+    planted symlink can neither disclose nor redirect the write. JSON with
+    comments or trailing commas is accepted, as OpenClaw accepts it; the
+    rewrite is plain JSON.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1327,10 +1824,11 @@ def restore_openclaw_gateway(openclaw_config: str) -> str:
             raise RuntimeError(f"refusing to rewrite {openclaw_config}: not a regular file")
         with os.fdopen(fd, encoding="utf-8") as fh:
             fd = -1
-            document = json.load(fh)
+            text = fh.read()
     finally:
         if fd != -1:
             os.close(fd)
+    document = _parse_openclaw_json(text)
     if not isinstance(document, dict):
         raise RuntimeError(f"{openclaw_config} is not a JSON object")
     updated = copy.deepcopy(document)
@@ -1524,6 +2022,10 @@ def apply(
     receipt.setdefault("legacy_gateway", dict(state.legacy_gateway))
     if state.sandbox_uid is not None:
         receipt.setdefault("sandbox_uid", state.sandbox_uid)
+    if state.validated_home:
+        # An anchor that outlives the pin and the backup: a later run still
+        # finds the home to retry on, and still refuses a rewritten backup.
+        receipt.setdefault("openclaw_home", state.openclaw_home)
     receipt.setdefault("steps", {})
     # Later actions consult completed steps through the live receipt.
     state.receipt = receipt
@@ -1574,7 +2076,7 @@ def apply(
     return result
 
 
-_CRITICAL_STEPS = frozenset({"units"})
+_CRITICAL_STEPS = frozenset({"units", "stopped"})
 
 
 def quick_evidence(cfg) -> list[str]:
@@ -1601,6 +2103,23 @@ def quick_evidence(cfg) -> list[str]:
     return evidence
 
 
+def complete_idle_receipt(state: LegacyState, system: System | None = None) -> bool:
+    """Mark an unfinished receipt complete when no cleanup step is left.
+
+    A run that fails or skips a step leaves the receipt unfinished, which
+    doctor reports; once a later detect plans nothing, that is stale.
+    """
+    if not state.receipt or state.receipt.get("completed"):
+        return False
+    system = system or System()
+    receipt = copy.deepcopy(state.receipt)
+    receipt["completed"] = True
+    receipt["updated_at"] = system.now().isoformat()
+    _write_receipt(state.receipt_path, receipt)
+    state.receipt = receipt
+    return True
+
+
 def hints(state: LegacyState, *, remove_user: bool, remove_binary: bool) -> list[str]:
     """Opt-in cleanup the operator did not ask for, worth mentioning."""
     out: list[str] = []
@@ -1611,8 +2130,34 @@ def hints(state: LegacyState, *, remove_user: bool, remove_binary: bool) -> list
     return out
 
 
+def review_notes(state: LegacyState) -> list[str]:
+    """What to review before OpenClaw runs on the host again.
+
+    In legacy mode the sandboxed agent owned (and had rwX ACLs on) the whole
+    real OpenClaw home, so cleanup hands back a tree it could have seeded
+    with plugins, skills, hooks, or MCP server commands. Cleanup only resets
+    the gateway settings in openclaw.json.
+    """
+    home = state.openclaw_home
+    if not home:
+        return []
+    present = [rel for rel in REVIEW_PATHS if os.path.lexists(os.path.join(home, rel))]
+    listed = f", including {', '.join(present)}" if present else ""
+    return [
+        f"while sandboxed, the agent could write anywhere in {home}{listed}; run the scans below "
+        "before OpenClaw runs on this host again",
+    ]
+
+
+# Scans come first: `setup guardrail` restarts OpenClaw, which loads whatever
+# the sandboxed agent left in the home.
 NEXT_STEPS = (
-    ("Restart OpenClaw on this host so it binds loopback again", "openclaw gateway restart"),
-    ("Point the guardrail back at the host proxy", "defenseclaw setup guardrail"),
-    ("Restart the gateway so it leaves the legacy bind address", "defenseclaw-gateway restart"),
+    ("Scan the skills the sandboxed agent could have changed", "defenseclaw skill scan --all"),
+    ("Scan the OpenClaw plugins it could have changed or added", "defenseclaw plugin scan --all"),
+    ("Scan the MCP servers it could have added to openclaw.json", "defenseclaw mcp scan --all"),
+    (
+        "Point the guardrail back at the host proxy; this re-registers the DefenseClaw plugin and restarts "
+        "the gateway and OpenClaw",
+        "defenseclaw setup guardrail",
+    ),
 )

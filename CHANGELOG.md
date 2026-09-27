@@ -61,23 +61,32 @@ deleted.
   confirmation unless `--yes`; `--dry-run` changes nothing. Each artifact is
   handled idempotently and recorded in `<data_dir>/legacy-sandbox-cleanup.json`.
   Steps: disable and remove the generated systemd units and root-owned,
-  DefenseClaw-generated launchers; delete the recorded namespace and veth
-  peers, remove the exact NAT rules (checked with `iptables -C` first), and
-  restore `net.ipv4.conf.all.route_localnet`; restore the OpenClaw home's
-  original ownership and parent-directory modes from the validated backup,
-  remove the `sandbox` user's ACLs (which the old `--disable` never did) and
-  the `/home/sandbox/.openclaw` symlink; then, as the operator and refusing
-  symlinks, restore the `openclaw.json` gateway and provider settings to
-  loopback; remove the invoking user from the
-  `sandbox` group; optionally `userdel -r sandbox` (`--remove-user`, refused
-  while that user has processes) and remove a non-package-owned 0.0.x
-  `/usr/local/bin/openshell-sandbox` (`--remove-binary`); reset
-  `openshell.mode`, `gateway.host`, `gateway.port`, `guardrail.host`,
-  `claw.home_dir`, `claw.config_file`, and `claw.openclaw_home_original`;
-  back up legacy data-dir artifacts to
-  `<data_dir>/backups/legacy-sandbox-<timestamp>/` before removing them; and
-  print next steps (restart OpenClaw on the host,
-  `defenseclaw setup guardrail`, `defenseclaw-gateway restart`).
+  DefenseClaw-generated launchers; stop unless nothing of the legacy sandbox
+  still runs (no active unit, no live PID from `sandbox.pids` or
+  `openshell.pid`, no process of the sandbox uid; the non-systemd
+  `run-sandbox.sh` launcher must be stopped by the operator first); delete the
+  recorded namespace and the veths whose peer is in it, remove the exact NAT
+  rules (checked with `iptables -C` first), and restore
+  `net.ipv4.conf.all.route_localnet`; remove the `sandbox` user's ACLs, then
+  restore the OpenClaw home's original ownership from the validated backup and
+  clear only the `o+x` legacy setup added to the home's ancestors, and remove
+  the `/home/sandbox/.openclaw` symlink (a host whose old `--disable` erased the
+  pin and backup still has its sandbox ACLs removed from `claw.home_dir` or
+  `~/.openclaw`); then, as the operator and refusing symlinks, restore the
+  `openclaw.json` gateway and provider settings to loopback; remove the
+  invoking user from the `sandbox` group; optionally `userdel -r sandbox`
+  (`--remove-user`, refused while that user has processes, until its
+  ownership and ACLs are gone from the OpenClaw home, or when the account's
+  home is not the configured sandbox home) and remove a non-package-owned
+  0.0.x `/usr/local/bin/openshell-sandbox` (`--remove-binary`); once the
+  ownership and `openclaw.json` restores are done, reset `openshell.mode`,
+  `gateway.host`, `gateway.port`, `guardrail.host`, `claw.home_dir`,
+  `claw.config_file`, and `claw.openclaw_home_original`; back up legacy
+  data-dir artifacts to `<data_dir>/backups/legacy-sandbox-<timestamp>/`
+  before removing them; and print next steps (scan the skills, plugins, and
+  MCP servers the sandboxed agent could have changed, then
+  `defenseclaw setup guardrail`, which restarts the gateway and OpenClaw).
+  The group and user steps only run on a host with legacy evidence.
 - Legacy bind shim: until cleanup runs on a host whose config still says
   `openshell.mode: standalone` with a non-localhost `guardrail.host`, the
   gateway API keeps binding to that host (an explicit `gateway.api_bind`

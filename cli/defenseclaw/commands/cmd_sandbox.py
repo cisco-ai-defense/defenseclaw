@@ -32,7 +32,10 @@ def sandbox() -> None:
 @click.option(
     "--remove-user",
     is_flag=True,
-    help="Also delete the 'sandbox' user and its home (userdel -r); refused while it has processes.",
+    help=(
+        "Also delete the 'sandbox' user and its home (userdel -r); refused while it has processes or "
+        "until its ownership and ACLs are gone from the OpenClaw home."
+    ),
 )
 @click.option(
     "--remove-binary",
@@ -46,7 +49,8 @@ def legacy_cleanup(app: AppContext, dry_run: bool, yes: bool, remove_user: bool,
     Detects each legacy artifact, prints every step with the exact command it
     runs, and asks before changing anything unless --yes is given. Privileged
     commands run through sudo with binaries resolved only from root-owned
-    system directories. Progress is recorded in
+    system directories. Nothing after the systemd units step runs while any
+    part of the legacy sandbox is still running. Progress is recorded in
     <data_dir>/legacy-sandbox-cleanup.json, so re-running only does what is
     left.
 
@@ -82,7 +86,10 @@ def legacy_cleanup(app: AppContext, dry_run: bool, yes: bool, remove_user: bool,
 
     ux.section("Legacy sandbox cleanup")
     if not steps:
-        ux.ok("No legacy openshell-sandbox standalone install found; nothing to clean up.")
+        if not dry_run and sandbox_legacy.complete_idle_receipt(state, system):
+            ux.ok("Nothing is left to clean up; the legacy cleanup is complete.")
+        else:
+            ux.ok("No legacy openshell-sandbox standalone install found; nothing to clean up.")
         for hint in extra:
             ux.subhead(hint, indent="  ")
         return
@@ -98,6 +105,8 @@ def legacy_cleanup(app: AppContext, dry_run: bool, yes: bool, remove_user: bool,
             "'defenseclaw sandbox legacy-cleanup' (completed steps are skipped)",
         )
     click.echo()
+    for note in sandbox_legacy.review_notes(state):
+        ux.warn(note)
     ux.section("Next steps")
     for index, (why, command) in enumerate(sandbox_legacy.NEXT_STEPS, 1):
         click.echo(f"    {index}. {why}:")
