@@ -929,12 +929,11 @@ or it moves to `strict`), all of its open tunnels close.
 
 The proxy also counts bytes per destination and reports an upload of more
 than the configured threshold to a destination the sandbox had not contacted
-before. The threshold is `openshell.egress.large_upload_mb`, or else the
-configured pack's `egress.large_upload_mb` (25 MiB in `open`, 10 MiB in
-`balanced`; `0` in a pack turns the report off). It is one threshold for every sandbox
-of the daemon, whatever pack a run chose, and it is read when the sandbox
-runtime starts: a change takes effect when the daemon restarts, or when the
-API listener restarts with the sandbox runtime. The report is an
+before. The threshold is the sandbox's own: `openshell.egress.large_upload_mb`,
+or else the `egress.large_upload_mb` of the pack the sandbox resolved to
+(25 MiB in `open`, 10 MiB in `balanced`; `0` in a pack turns the report off).
+It follows configuration changes with the rest of the sandbox's egress
+policy. The report is an
 `egress.large_upload` activity event and a finding; the upload itself is not
 cut off.
 

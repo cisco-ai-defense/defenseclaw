@@ -53,10 +53,6 @@ enforced but advisory. See
 | Hook failure | Tool call denied | Tool call denied | Tool call denied |
 | Hook tamper | Reported, sandbox keeps running | Sandbox stopped | Sandbox stopped |
 
-The large-upload alert is the one row that doesn't follow each sandbox's
-pack: the daemon uses one threshold for all its sandboxes, taken from the
-configured pack (see [Large-upload alert](#large-upload-alert-threshold)).
-
 All three packs use the built-in blocklist feed, hide the same list of secret
 files, and flag the same list of files that can run code on your machine.
 `defenseclaw sandbox pack list` lists the packs with their digests, and
@@ -166,8 +162,7 @@ These are the settings each pack controls. The
   the only ports a connection request can open.
 - **Large-upload alert** (`egress.large_upload_mb`): report an upload of more
   than this many MiB to a host the sandbox hasn't contacted before. `0` turns
-  the report off. The upload itself is not cut off. Only the configured
-  pack's value counts; see
+  the report off. The upload itself is not cut off; see
   [Large-upload alert](#large-upload-alert-threshold).
 - **Workspace mode** (`workspace.mode`): `mount` shares the project folder
   live. `copy` gives the agent a copy, and its changes come back as a patch or
@@ -503,17 +498,15 @@ a pack.
 
 ### Large-upload alert threshold
 
-The egress proxy has one large-upload threshold for every sandbox of the
-daemon: `openshell.egress.large_upload_mb` when it is above 0, else the
-`egress.large_upload_mb` of the configured pack (`openshell.pack`, or the pack
-`openshell.admin` requires). A run's `--pack` or `--profile` doesn't change
-it, so `sandbox run --pack balanced` on an `open` configuration still
-reports uploads over 25 MiB, not 10 MiB. (Under the `strict` profile traffic
-doesn't pass the proxy, so there is nothing to report.) The daemon reads the threshold when its
-sandbox runtime starts. A change to either key takes effect when the daemon
-restarts, or when the API listener restarts with the sandbox runtime (for
-example after `openshell.enabled` or a listener port changes), not on a config
-reload.
+Each sandbox has its own large-upload threshold:
+`openshell.egress.large_upload_mb` when it is above 0, else the
+`egress.large_upload_mb` of the pack the sandbox resolved to, including a
+run's `--pack` or `--profile`. So `sandbox run --pack balanced` on an `open`
+configuration reports uploads over 10 MiB. (Under the `strict` profile
+traffic doesn't pass the proxy, so there is nothing to report.) A change to
+either key reaches running sandboxes on the next config reload, with the
+rest of their egress policy. The report is an activity event and a finding;
+the upload itself is not cut off.
 
 Because `openshell.profile` replaces the pack's profile, it can loosen a pack
 as well as tighten it. For example, `profile: open` on the `strict` pack turns
