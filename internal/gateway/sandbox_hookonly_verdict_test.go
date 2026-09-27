@@ -17,8 +17,10 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -26,10 +28,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
-// TestAgentHookTrustedActionShellShapes pins the two shell shapes that parsed
-// only partially, so command rules could not prove a trusted action and a
+// TestAgentHookTrustedActionShellShapes pins the shell shapes that did not
+// parse completely, so command rules could not prove a trusted action and a
 // CRITICAL finding stayed an allowed candidate: OmniGent's sys_os_shell tool
-// name and OpenHands' TerminalAction fields.
+// name, OpenHands' TerminalAction fields, and agy's run_command fields,
+// including a Cwd other than the session's working directory.
 func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	const command = `{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"}`
 	for _, tc := range []struct {
@@ -40,15 +43,20 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`},
 		{"antigravity-run-command", "antigravity", "run_command",
 			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/work/app","WaitMsBeforeAsync":500,"toolSummary":"write marker","toolAction":"Writing marker"}`},
+		{"antigravity-other-cwd", "antigravity", "run_command",
+			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/tmp"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := actionfacts.Analyze(actionfacts.Input{Tool: tc.tool, Args: json.RawMessage(tc.args)})
+			const sessionCWD = "/work/app/sub"
+			raw := actionfacts.Analyze(actionfacts.Input{Tool: tc.tool, Args: json.RawMessage(tc.args), CWD: sessionCWD})
 			if raw.Parse.Status == actionfacts.StatusComplete {
 				t.Skip("the raw shape now parses completely upstream; the mapping is redundant")
 			}
+			args, toolCWD := agentHookTrustedActionArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
 			mapped := actionfacts.Analyze(actionfacts.Input{
 				Tool: agentHookTrustedActionTool(tc.connector, tc.tool, "linux"),
-				Args: agentHookTrustedActionArgs(tc.connector, tc.tool, json.RawMessage(tc.args)),
+				Args: args,
+				CWD:  agentHookTrustedActionCWD(context.Background(), sessionCWD, toolCWD),
 			})
 			if mapped.Parse.Status != actionfacts.StatusComplete {
 				t.Fatalf("mapped parse = %+v, want complete", mapped.Parse)
@@ -60,11 +68,27 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		t.Errorf("hermes sys_os_shell = %q, want passthrough", got)
 	}
 	args := json.RawMessage(`{"command":"ls","is_input":false}`)
-	if got := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) {
-		t.Errorf("hermes terminal args = %s, want passthrough", got)
+	if got, cwd := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) || cwd != "" {
+		t.Errorf("hermes terminal args = %s (cwd %q), want passthrough", got, cwd)
 	}
-	if got := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls","is_input":true}` {
+	if got, _ := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls","is_input":true}` {
 		t.Errorf("input to a running process was projected: %s", got)
+	}
+	// The tool call's directory replaces the session's, mapped the same way
+	// (on the host: an existing absolute directory, symlinks resolved).
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", ""); got != "/work/app" {
+		t.Errorf("no tool cwd = %q, want the request's", got)
+	}
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", dir); got != want {
+		t.Errorf("tool cwd = %q, want %q", got, want)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", filepath.Join(dir, "missing")); got != "" {
+		t.Errorf("missing tool cwd = %q, want none", got)
 	}
 }
 
@@ -77,6 +101,9 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 	installSandboxMarkerRules(t)
 	var mu sync.Mutex
 	var decisions []SandboxHookDecision
+	// Mount mode, as the E2E runs: the request working directory /work/app
+	// maps to a host directory.
+	project := t.TempDir()
 	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
 		c.OnHookDecision = func(d SandboxHookDecision) {
 			mu.Lock()
@@ -121,7 +148,7 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
 			// toolSummary and toolAction next to CommandLine and Cwd.
 			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
-				`"CommandLine":"` + command + `","Cwd":"/work/app","WaitMsBeforeAsync":500,` +
+				`"CommandLine":"` + command + `","Cwd":"/tmp","WaitMsBeforeAsync":500,` +
 				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
 			output: func(t *testing.T, resp map[string]interface{}) {
 				out, _ := resp["hook_output"].(map[string]interface{})
@@ -141,7 +168,8 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 			_, token, err := f.store.Mint(sandboxauth.Spec{
 				SandboxName: "dc-" + tc.connector + "-app", Connector: tc.connector,
 				AgentVersion: tc.version, HookContractID: tc.contract, PolicyProfile: "open",
-				Workdir:  sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+				Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirMount,
+					Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: project}}},
 				HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
 			})
 			if err != nil {

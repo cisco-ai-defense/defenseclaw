@@ -87,13 +87,24 @@ func TestOpenHandsTrustedShellArgs(t *testing.T) {
 }
 
 func TestAntigravityTrustedShellArgs(t *testing.T) {
-	const want = `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`
-	checkTrustedShellArgs(t, AntigravityTrustedShellArgs, want, []trustedShellArgsCase{
+	const want = `{"CommandLine":"echo hi > /tmp/x"}`
+	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
+		out, cwd, ok := AntigravityTrustedShellArgs(tool, args)
+		if ok && cwd != "/work/app" {
+			t.Errorf("cwd = %q, want /work/app", cwd)
+		}
+		if !ok && cwd != "" {
+			t.Errorf("refused projection returned cwd %q", cwd)
+		}
+		return out, ok
+	}
+	checkTrustedShellArgs(t, project, want, []trustedShellArgsCase{
 		{"schema-required", "run_command",
 			`{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","WaitMsBeforeAsync":500,"toolSummary":"write","toolAction":"Writing"}`, true},
 		{"schema-optional", "run_command",
 			`{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","WaitMsBeforeAsync":0,"IsDaemon":true,"RunPersistent":false,"RequestedTerminalID":"t1","toolSummary":null,"toolAction":"x"}`, true},
 		{"plain", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, true},
+		{"relative-cwd", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"work/app"}`, false},
 		{"unknown-field", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","Env":{"A":"1"}}`, false},
 		{"duplicate-command", "run_command", `{"CommandLine":"ls","CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, false},
 		{"command-not-string", "run_command", `{"CommandLine":["echo","hi"],"Cwd":"/work/app"}`, false},
@@ -104,9 +115,12 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 		{"not-an-object", "run_command", `"echo hi"`, false},
 		{"other-tool", "view_file", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, false},
 	})
-	// Without Cwd the projection carries the command alone.
-	got, ok := AntigravityTrustedShellArgs("run_command", json.RawMessage(`{"CommandLine":"ls","toolAction":"x"}`))
-	if !ok || string(got) != `{"CommandLine":"ls"}` {
-		t.Fatalf("projection without Cwd = %s, %t", got, ok)
+	// Without Cwd (or with a null one) the command runs in the session's
+	// directory: no cwd comes back.
+	for _, args := range []string{`{"CommandLine":"ls","toolAction":"x"}`, `{"CommandLine":"ls","Cwd":null}`} {
+		got, cwd, ok := AntigravityTrustedShellArgs("run_command", json.RawMessage(args))
+		if !ok || string(got) != `{"CommandLine":"ls"}` || cwd != "" {
+			t.Fatalf("%s: projection = %s, cwd %q, %t", args, got, cwd, ok)
+		}
 	}
 }

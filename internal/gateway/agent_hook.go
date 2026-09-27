@@ -1943,11 +1943,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
+		trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
-				Args:                     agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs),
-				CWD:                      req.CWD,
+				Args:                     trustedArgs,
+				CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
 				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
@@ -2083,18 +2084,35 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
 // project them onto the plain shell shape when that is exact. The recorded
 // ToolArgs never change.
-func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) json.RawMessage {
-	project := func(string, json.RawMessage) (json.RawMessage, bool) { return nil, false }
+//
+// cwd is the directory the tool call names for its command (agy's Cwd), or
+// "". It is the command's working directory, so the caller uses it in place
+// of the session's; left in the arguments, any Cwd other than the workspace
+// conflicted with the request's working directory and the parse was
+// ambiguous.
+func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "openhands":
-		project = connector.OpenHandsTrustedShellArgs
+		if out, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
+			return out, ""
+		}
 	case "antigravity":
-		project = connector.AntigravityTrustedShellArgs
+		if out, dir, ok := connector.AntigravityTrustedShellArgs(toolName, args); ok {
+			return out, dir
+		}
 	}
-	if projected, ok := project(toolName, args); ok {
-		return projected
+	return args, ""
+}
+
+// agentHookTrustedActionCWD is the working directory of a structured tool
+// call: the one the call names, mapped like the request's (host-sanitized,
+// or to the host directory a sandbox path is mounted from, "" when it has
+// none), else the request's.
+func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
+	if toolCWD == "" {
+		return requestCWD
 	}
-	return args
+	return hookCWDForContext(ctx, toolCWD)
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy
