@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -546,16 +547,37 @@ func (c *cliEnv) nestedRepo() {
 
 func (c *cliEnv) reviewUndo() {
 	t := c.t
+	// Files git never sees that run on the host: a package bin entry and an
+	// executable in a Python bytecode cache, each hidden by the .gitignore
+	// its directory carries (as `python -m venv` writes one).
+	plant := "mkdir -p node_modules/.bin calc/__pycache__ && echo '*' > node_modules/.gitignore && echo '*' > calc/__pycache__/.gitignore" +
+		" && printf '#!/bin/sh\\necho dce2e\\n' > node_modules/.bin/dce2e-tool && cp node_modules/.bin/dce2e-tool calc/__pycache__/dce2e.sh" +
+		" && chmod +x node_modules/.bin/dce2e-tool calc/__pycache__/dce2e.sh"
+	if out, code := c.execOut(c.claude, "sh", "-c", plant); code != 0 {
+		t.Fatalf("could not write the ignored files (exit %d): %s", code, out)
+	}
 	rev := c.ok(2*time.Minute, "review", c.claude)
 	if !strings.Contains(rev, "changed") {
 		t.Fatalf("review:\n%s", rev)
 	}
 	t.Logf("review:\n%s", truncate(rev, 2000))
+	wantAll(t, "review", rev, "node_modules/", "Undo cannot restore node_modules/", "calc/__pycache__/dce2e.sh")
 	out := c.ok(5*time.Minute, "undo", c.claude, "--yes")
 	t.Logf("undo:\n%s", truncate(out, 2000))
+	wantAll(t, "undo", out, "remove  2 files the session wrote to calc/__pycache__/", "undo cannot restore node_modules/")
 	restored, err := os.ReadFile(filepath.Join(c.project, "README.md"))
 	if err != nil || string(restored) != c.readme {
 		t.Fatalf("README after undo = %q, %v", restored, err)
+	}
+	if _, err := os.Lstat(filepath.Join(c.project, "calc", "__pycache__")); !os.IsNotExist(err) {
+		t.Fatalf("undo left the bytecode cache the session wrote: %v", err)
+	}
+	// What undo cannot restore is left, named in its output; remove it.
+	if _, err := os.Lstat(filepath.Join(c.project, "node_modules", ".bin", "dce2e-tool")); err != nil {
+		t.Fatalf("node_modules changed under undo: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(c.project, "node_modules")); err != nil {
+		t.Fatal(err)
 	}
 	// Undo removes the quarantined .git file (content git tracks); the
 	// quarantined directory held only an empty folder, which git cannot see.
@@ -592,6 +614,18 @@ func (c *cliEnv) approvalsPolicy() {
 
 func (c *cliEnv) delete(name string) {
 	t := c.t
+	// The --credential profiles the sandbox's providers use go with it
+	// once nothing else uses them.
+	var credProfiles []string
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if list, err := c.gw.ListProviders(ctx); err == nil {
+		for _, p := range list {
+			if strings.HasPrefix(p.Name, name+"-cred-") && strings.HasPrefix(p.Type, "dc-cred-") {
+				credProfiles = append(credProfiles, p.Type)
+			}
+		}
+	}
 	c.ok(5*time.Minute, "delete", name, "--yes")
 	waitFor(t, 3*time.Minute, "OpenShell to forget "+name, func() error {
 		out, _, _ := c.cli(time.Minute, "list", "--output", "json")
@@ -600,6 +634,15 @@ func (c *cliEnv) delete(name string) {
 		}
 		return nil
 	})
+	// Nothing of it is left in the data dir.
+	if _, err := os.Lstat(filepath.Join(c.work, "dc", "sandboxes", name)); !os.IsNotExist(err) {
+		t.Fatalf("delete left %s's data directory: %v", name, err)
+	}
+	for _, id := range credProfiles {
+		if _, err := c.gw.GetProfile(ctx, id); !openshell.IsNotFound(err) {
+			t.Fatalf("delete left the credential profile %s of %s: %v", id, name, err)
+		}
+	}
 }
 
 func (c *cliEnv) codexMockArgs() []string {
@@ -717,15 +760,39 @@ func (c *cliEnv) copyGitPull() {
 	if got := c.readFile(readme); got != "host edit during the session\n" {
 		t.Fatalf("a conflicting apply changed README: %q", got)
 	}
+	// The fallback patch sits in the project folder, where deleting the
+	// sandbox cannot take it along.
+	wantAll(t, "the fallback patch", c.readFile(filepath.Join(dir, name+".patch")), "+dce2e-edited")
 
 	// --apply on a clean checkout lands the edit.
 	c.gitIn(dir, "checkout", "--", "README.md")
 	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
-	wantAll(t, "pull --apply", out, "applied 1 change to")
+	wantAll(t, "pull --apply", out, "applied 1 change to", "`defenseclaw sandbox undo "+name+"` reverts the apply")
 	wantAll(t, "README after --apply", c.readFile(readme), "dce2e-edited")
 	if got := c.readFile(filepath.Join(dir, ".env")); got != "DCE2E_PLACEHOLDER=not-a-secret\n" {
 		t.Fatalf("the held-back .env changed: %q", got)
 	}
+
+	// The same work again changes nothing and keeps the undo point.
+	preRef := "refs/defenseclaw/copy/" + name + "/pre-apply"
+	pre := c.gitIn(dir, "rev-parse", preRef)
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	wantAll(t, "pull --apply again", out, "nothing to apply:", "already has these changes")
+	if now := c.gitIn(dir, "rev-parse", preRef); now != pre {
+		t.Fatalf("a second apply of the same work moved %s from %s to %s", preRef, pre, now)
+	}
+	// undo reverts the apply (a copy-mode sandbox changes the folder only
+	// that way); applying again brings the edit back for the next steps.
+	out = c.okIn(dir, 5*time.Minute, "undo", name, "--yes")
+	t.Logf("undo of the apply:\n%s", truncate(out, 2000))
+	wantAll(t, "undo of the apply", out, "Undo will revert the last `pull --apply` of "+name, "revert  README.md", "reverted the last apply: 1 path")
+	if got := c.readFile(readme); got != c.readme {
+		t.Fatalf("README after the undo = %q", got)
+	}
+	out = c.okIn(dir, 5*time.Minute, "undo", name, "--yes")
+	wantAll(t, "a second undo", out, "nothing to undo")
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	wantAll(t, "pull --apply after the undo", out, "applied 1 change to")
 }
 
 // copyGitRefresh resumes the stopped copy-mode sandbox with `connect
@@ -784,10 +851,17 @@ func (c *cliEnv) copyPlainRun() {
 	if code == 0 || !strings.Contains(errOut, "not a git repository") || !strings.Contains(errOut, "--apply or --patch-out") {
 		t.Fatalf("pull --branch of a plain folder exited %d: %s", code, truncate(errOut, 1000))
 	}
+	// A pull from a stopped sandbox starts it to read its work and stops
+	// it again.
+	c.okIn(dir, 5*time.Minute, "stop", name)
 	patch := filepath.Join(c.work, name+".patch")
-	c.okIn(dir, 5*time.Minute, "pull", name, "--patch-out", patch)
+	out := c.okIn(dir, 5*time.Minute, "pull", name, "--patch-out", patch)
+	wantAll(t, "pull from a stopped sandbox", out, "starting "+name, "stopped "+name+" again")
+	if phase := c.status(name).Phase; phase != "stopped" {
+		t.Fatalf("the pull left %s %s", name, phase)
+	}
 	wantAll(t, "the plain patch", c.readFile(patch), "+dce2e-edited")
-	out := c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
 	wantAll(t, "pull --apply", out, "applied 1 change to")
 	wantAll(t, "README after --apply", c.readFile(filepath.Join(dir, "README.md")), "dce2e-edited")
 	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
