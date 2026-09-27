@@ -151,6 +151,7 @@ def test_setup_runs_in_the_terminal_and_doctor_does_not() -> None:
     model.form_fields = _set(model.form_fields, "Action", "doctor")
     doctor = model.submit_wizard_form()
     assert doctor.intent is not None and doctor.intent.terminal is False
+    assert doctor.intent.category == "info" and action.intent.category == "setup"
     assert doctor.intent.args == ("sandbox", "doctor")
 
 

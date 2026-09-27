@@ -50,3 +50,27 @@ Key(key='backspace', character='\x7f', name='backspace', is_printable=False)
 FEED 'A'
 character='A'
 Key(key='A', character='A', name='upper_a', is_printable=True)
+---
+FEED '\x12'
+character='\x12'
+Key(key='ctrl+r', character='\x12', name='ctrl_r', is_printable=False)
+---
+FEED '\x14'
+character='\x14'
+Key(key='ctrl+t', character='\x14', name='ctrl_t', is_printable=False)
+---
+FEED '\x15'
+character='\x15'
+Key(key='ctrl+u', character='\x15', name='ctrl_u', is_printable=False)
+---
+FEED '\t'
+character='\t'
+Key(key='tab', character='\t', name='tab', is_printable=False, aliases=['tab', 'ctrl+i'])
+---
+FEED '\x7f'
+character='\x7f'
+Key(key='backspace', character='\x7f', name='backspace', is_printable=False)
+---
+FEED 'A'
+character='A'
+Key(key='A', character='A', name='upper_a', is_printable=True)

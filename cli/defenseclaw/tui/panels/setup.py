@@ -1441,6 +1441,8 @@ class SetupPanelModel:
         terminal = self.active_wizard == SetupWizard.SANDBOX and tuple(args[:2]) == ("sandbox", "setup")
         if terminal:
             risk = "setup"
+        # The Sandbox wizard's doctor action only reads this machine.
+        category = "info" if tuple(args[:2]) == ("sandbox", "doctor") else "setup"
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
@@ -1450,7 +1452,7 @@ class SetupPanelModel:
                 label="setup " + name,
                 args=args,
                 binary="defenseclaw",
-                category="setup",
+                category=category,
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
