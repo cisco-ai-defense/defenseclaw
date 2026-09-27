@@ -1,12 +1,14 @@
 ---
 title: Gateway API
-description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, and inspection verdict shape. The handler code is authoritative.
+description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, inspection verdict shape, and the OpenShell sandbox hook ingress and egress proxy. The handler code is authoritative.
 keywords:
   - DefenseClaw gateway API
   - defenseclaw-gateway endpoints
   - DefenseClaw inspect API
   - X-DefenseClaw-Token
   - X-DefenseClaw-Client
+  - OpenShell sandbox hook ingress
+  - DefenseClaw egress proxy
 ---
 
 `defenseclaw-gateway` exposes a sidecar management API used by hook scripts,
@@ -22,7 +24,9 @@ and the files referenced from its `mux.HandleFunc` registrations.
 <Callout type="info">
 This page covers the sidecar API on `gateway.api_port`. The separate guardrail
 proxy listener on `guardrail.port` has its own OpenAI-compatible and provider
-routes in `internal/gateway/proxy.go`.
+routes in `internal/gateway/proxy.go`. The two OpenShell sandbox listeners,
+the hook ingress and the egress proxy, are described under
+[Sandbox listeners](#sandbox-listeners).
 </Callout>
 
 ## Bind address
@@ -80,6 +84,11 @@ surface. Copilot connector telemetry therefore reaches this API through its
 authenticated hook route only. OmniGent's separately documented optional
 native source currently authenticates loopback `/v1/{signal}` requests with
 the master gateway token.
+
+A request that carries an OpenShell sandbox binding credential (a `dcsb_`
+value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
+token) gets 401 on every route of this API, before any other check. Those
+credentials are valid only on the [hook ingress](#hook-ingress).
 
 The token is resolved from one of, in priority order:
 
@@ -526,6 +535,147 @@ For `/api/v1/inspect/*`, evidence is redacted by default.
 handler records an `inspect-reveal` audit event; the request, response, and
 tool-response handlers currently reveal without that extra audit event.
 
+## Sandbox listeners
+
+<Callout type="warn" title="Implemented, not started yet">
+The code for both listeners ships in this release, but `defenseclaw-gateway`
+does not start either of them yet, whatever `openshell.enabled` says, and
+nothing issues the per-sandbox credentials they check. They are part of the
+NVIDIA OpenShell sandbox integration, which is in development. The
+[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+</Callout>
+
+An OpenShell sandbox has no network of its own. Its traffic leaves through
+the host-networked OpenShell supervisor, which connects to host loopback, so
+every sandbox request reaches DefenseClaw from `127.0.0.1`. Neither listener
+trusts loopback for that reason: each request must carry a credential issued
+to one sandbox. Inside the sandbox, both listeners are addressed as
+`host.openshell.internal:<port>`.
+
+| Listener | Config key | Default port | Listens on |
+| --- | --- | --- | --- |
+| Hook ingress | `openshell.ingress_port` | `gateway.api_port` + 1 (`18971`) | A loopback IP address only, never the main API address |
+| Egress proxy | `openshell.egress_port` | `gateway.api_port` + 2 (`18972`) | Loopback addresses only |
+
+When `openshell.enabled` is `true`, config validation rejects a port above
+65535, a port equal to `gateway.api_port` or `guardrail.port`, and two
+listeners on the same port.
+
+### Hook ingress
+
+The hook ingress (`internal/gateway/api_sandbox_ingress.go`) is a second API
+listener that serves only what a sandboxed harness needs. Each sandbox has a
+**binding**: a record of its credential (stored only as a SHA-256 hash), the
+one connector it runs, and the route classes it may call. By default a
+binding may call its hook route and OTLP, plus notify for Codex; inspect is
+added only when asked for.
+
+| Route class | Paths | Extra condition |
+| --- | --- | --- |
+| Hook | The connector's hook route, for example `POST /api/v1/claude-code/hook` or `POST /api/v1/codex/hook` | The route belongs to the binding's connector. |
+| Notify | `POST /api/v1/codex/notify` | The binding is for Codex. |
+| Inspect | `POST /api/v1/inspect/{tool,request,response,tool-response}` | `X-DefenseClaw-Connector` names the binding's connector. |
+| OTLP | `POST /v1/{logs,metrics,traces}` | `X-DefenseClaw-Source`, when sent, names the binding's connector. |
+
+For an authenticated sandbox, every other path returns 404. That includes
+all management routes and the `/otlp/{source}/{token}/v1/{signal}` path-token
+form, which would put a credential in the URL.
+
+**Authentication.** A request must send exactly one
+`Authorization: Bearer dcsb_…` header with the sandbox's binding credential.
+The harness never sees the real value: OpenShell gives the sandbox a
+placeholder and substitutes the credential only on the way to the ingress. The
+master gateway token, connector hook tokens and OTLP path tokens are never
+accepted here.
+
+| Response | When |
+| --- | --- |
+| 401 | The credential is missing, malformed, unknown, expired or revoked. Auth-failure events are rate-limited to about ten per second, because every sandbox shares one source address. |
+| 400 | The credential also appears somewhere other than `Authorization` (another header, the host, the path or the query), where it could be echoed back or written to audit records. |
+| 403 | The route exists, but the binding may not call it, or the request acts for another connector. |
+| 429 | The sandbox is over its budget. The response carries `Retry-After: 1`. |
+
+**Default per-sandbox limits.**
+
+| Traffic | Rate | Burst | Concurrent requests |
+| --- | --- | --- | --- |
+| Hook, notify and inspect | 25/s | 100 | 32 |
+| OTLP | 10/s | 50 | 4 per sandbox, 16 across all sandboxes |
+
+Hook and inspect bodies are capped at 1 MiB, like the main API. OTLP bodies
+are capped at 4 MiB, far below the main receiver's 64 MiB.
+
+**Other differences from the main API.**
+
+- Identity comes from the binding: records are attributed to the host user
+  who launched the sandbox. Identity headers such as `X-User-Id` are dropped.
+- Client-supplied request IDs are ignored. The gateway always mints the
+  `X-DefenseClaw-Request-Id` it returns.
+- A hook or notify post may send `X-DefenseClaw-Hook-Idempotency-Key`. A retry
+  with the same key and the same request within two minutes gets the original
+  response, marked `X-DefenseClaw-Idempotent-Replay: true`, instead of a
+  second evaluation. The same key on a different request gets 422.
+- The [CSRF rules](#csrf-protection) are the same as on the main API.
+
+### Egress proxy
+
+The egress proxy (`internal/openshell/egress`) is the sandbox's general path
+to the web. The sandbox's `HTTPS_PROXY` and `HTTP_PROXY` point at
+`http://host.openshell.internal:<egress_port>`, with a per-sandbox username
+and password in the URL. `NO_PROXY` lists `host.openshell.internal` and the
+model provider hosts, so hook traffic and LLM traffic do not go through the
+proxy.
+
+**Authentication.** Clients send the credential as
+`Proxy-Authorization: Basic`. A request without it, or with a wrong one, gets
+`407 Proxy Authentication Required` with
+`Proxy-Authenticate: Basic realm="DefenseClaw egress"`. The proxy keeps only
+SHA-256 digests of the passwords, and issuing a new credential for a sandbox
+revokes the old one. The credential does not grant extra reach: it
+attributes each connection to a sandbox and applies per-sandbox limits.
+
+**What it forwards.**
+
+- `CONNECT` tunnels for HTTPS. TLS is never terminated, so certificate
+  pinning keeps working. The proxy reads only the server name in the TLS
+  handshake and closes a tunnel whose name it would block.
+- Absolute-form `http://` requests, with hop-by-hop headers and the proxy
+  credential removed.
+- Only destination ports on the allowlist: 80 and 443 in the built-in policy
+  packs, replaced by `openshell.egress.ports` when you set it. On 80 and 443
+  the proxy relays only web traffic; other protocols such as SSH pass only on
+  ports you add.
+
+**What it decides.** Under the `open` profile, destination names are allowed
+unless they are on the built-in feed of exfiltration and abuse destinations
+(paste sites, file drops, webhook catchers, tunnels, anonymizers). Under
+`balanced`, only names on the curated allowlist are allowed. The `strict`
+profile runs without the proxy. Operator block rules always win; unblocks and
+operator allow rules are checked next, then the feed, then the profile's
+default. In every mode:
+
+- This machine is never reachable: loopback, its own addresses, link-local
+  and cloud metadata addresses.
+- Private networks are reachable only when an operator allow rule, such as
+  an `openshell.egress.allow` entry, names them. An unblock never opens them.
+- Under `open`, a destination given as an IP address is blocked until it is
+  unblocked, because it would sidestep the name-based feed.
+- Names are resolved by the proxy, and each answer is checked just before the
+  connection, so a DNS answer that changes between check and connect cannot
+  redirect it.
+
+A blocked request gets `403` with a JSON body: `error: "egress_blocked"`, the
+host, port and category, whether it can be unblocked, and a `how_to_unblock`
+sentence written for the agent to pass on to you.
+
+The proxy also counts bytes per destination and reports an upload of more
+than 25 MiB (the default threshold) to a destination the sandbox had not
+contacted before.
+
+**Default per-sandbox limits.** 256 open connections, 256 concurrent tunnels
+or requests, and 50 new tunnels per second (burst 200), with 1024 connections
+across all sandboxes.
+
 ## Headers
 
 | Header | Direction | Purpose |
@@ -534,4 +684,6 @@ tool-response handlers currently reveal without that extra audit event.
 | `X-DefenseClaw-Client` | request | CSRF marker — any non-empty caller identifier (`cli`, `openclaw-plugin`, `inspect-hook/1.0`). Required on non-`GET`/`HEAD` requests except the constrained loopback path-token OTLP case described above. |
 | `X-DefenseClaw-Connector` | request | On loopback generic inspect routes, selects the registered connector whose scoped hook token is being presented. |
 | `X-DefenseClaw-Source` | request | On loopback `/v1/{logs,metrics,traces}`, selects and must match a header-scoped Codex or Claude Code OTLP token. |
-| `X-DefenseClaw-Request-Id` | request *(optional)*, response | Caller-supplied correlation id. The gateway also accepts `X-Request-Id` and `X-Correlation-Id`; if none is supplied, it mints one. The chosen ID is always returned as `X-DefenseClaw-Request-Id`. See [`requestctx.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/requestctx.go). |
+| `X-DefenseClaw-Request-Id` | request *(optional)*, response | Caller-supplied correlation id. The gateway also accepts `X-Request-Id` and `X-Correlation-Id`; if none is supplied, it mints one. The chosen ID is always returned as `X-DefenseClaw-Request-Id`. The [hook ingress](#hook-ingress) ignores caller-supplied IDs and always mints one. See [`requestctx.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/requestctx.go). |
+| `X-DefenseClaw-Hook-Idempotency-Key` | request *(optional)* | [Hook ingress](#hook-ingress) only: a retry-stable key on a sandbox hook or notify post. |
+| `X-DefenseClaw-Idempotent-Replay` | response | [Hook ingress](#hook-ingress) only: `true` when the response replays an earlier one for the same key. |
