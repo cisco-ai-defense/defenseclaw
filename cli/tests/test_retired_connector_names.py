@@ -11,18 +11,18 @@
 """Retired connector names must not reappear in the tree.
 
 Two connectors are gone: the pre-rename Devin Desktop connector (now covered by
-``devin``) and the Gemini CLI connector (replaced by Antigravity). Only these
-files may still name them:
+``devin``) and Google's retired command-line connector (replaced by
+Antigravity). Only these files may still name them:
 
-* the two legacy-migration modules and their tests, for the old Desktop ID;
-* the two native Windows install-state compatibility lists, which let Setup
+* the old Desktop connector: the two legacy-migration modules and their tests,
+  and the two native Windows install-state compatibility lists, which let Setup
   and the uninstaller read state written by pre-release builds;
-* ``CHANGELOG.md``;
-* the "Renamed and removed connectors" section of the upgrade guide;
-* this test.
+* both connectors: ``CHANGELOG.md`` and the "Renamed and removed connectors"
+  section of the upgrade guide.
 
-``openwiki/`` is generated and excluded. The old Desktop strings are built from
-``defenseclaw.legacy_connector`` so this file does not spell them itself.
+``openwiki/`` is generated and excluded. This test is scanned like any other
+file, so it builds every retired name from fragments (and the old Desktop
+strings from ``defenseclaw.legacy_connector``) instead of spelling them.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import pytest
 from defenseclaw import legacy_connector
 
 ROOT = Path(__file__).resolve().parents[2]
+THIS_FILE = Path(__file__).resolve().relative_to(ROOT).as_posix()
 
 _DESKTOP_ID = legacy_connector.RETIRED_DESKTOP_ID
 _DESKTOP_PUBLISHER = legacy_connector.INVENTORY_DOT_DIRS[1].lstrip(".")
@@ -44,14 +45,16 @@ _CASCADE_RESPONSE = "post_" + "cascade" + "_response"
 _GEMINI = "gemini"
 _CLI = "cli"
 
-# Desktop patterns: allowed in the legacy modules and their tests.
+# Desktop patterns: allowed in the legacy modules, their tests and the
+# install-state compatibility lists.
 DESKTOP_PATTERNS = (
     re.escape(_DESKTOP_ID),
     re.escape(_DESKTOP_PUBLISHER),
     re.escape(_CASCADE_RESPONSE),
     re.escape(_CASCADE_RESPONSE.replace("_", "")),
 )
-# Gemini CLI patterns: allowed nowhere except the upgrade notes.
+# Command-line connector patterns: allowed only in the changelog and the
+# upgrade notes.
 GEMINI_PATTERNS = (
     re.escape(_GEMINI + _CLI),
     _GEMINI + r"[-_ ]" + _CLI,
@@ -63,33 +66,30 @@ GEMINI_PATTERNS = (
 )
 
 DESKTOP_RE = re.compile("|".join(DESKTOP_PATTERNS), re.IGNORECASE)
+GEMINI_RE = re.compile("|".join(GEMINI_PATTERNS), re.IGNORECASE)
 ANY_RE = re.compile("|".join(DESKTOP_PATTERNS + GEMINI_PATTERNS), re.IGNORECASE)
-# "Gemini" listed next to hook connectors in prose ("Hermes / Gemini /
-# Copilot"). Case-sensitive and limited to agent names that are not also model
-# families, so provider lists and Antigravity's ~/.gemini paths do not match.
+# The bare Google agent name listed next to hook connectors in prose, as in
+# "Hermes / <name> / Copilot". Case-sensitive and limited to agent names that
+# are not also model families, so provider lists and Antigravity's ~/.gemini
+# paths do not match.
 _HOOK_AGENTS = r"(?:Claude Code|Cursor|Devin|Hermes|Copilot|OpenCode|Amp|Kiro|OpenHands)"
-GEMINI_LIST_RE = re.compile(
-    r"\b" + _GEMINI.capitalize() + r"\s*[/,]\s*" + _HOOK_AGENTS + r"\b|\b" + _HOOK_AGENTS + r"\s*[/,]\s*" + _GEMINI.capitalize() + r"\b"
-)
+_LISTED = _GEMINI.capitalize()
+_LIST_SEP = r"\s*[/,]\s*"
+GEMINI_LIST_RE = re.compile(rf"\b{_LISTED}{_LIST_SEP}{_HOOK_AGENTS}\b|\b{_HOOK_AGENTS}{_LIST_SEP}{_LISTED}\b")
 
-# Files that may name the old Desktop connector (but not Gemini CLI).
+# Files that may name the old Desktop connector (but not the command-line one).
 DESKTOP_ONLY_FILES = frozenset(
     {
         "cli/defenseclaw/legacy_connector.py",
+        "cli/defenseclaw/retired_install_state.py",
         "cli/tests/test_legacy_connector.py",
+        "cmd/defenseclaw-setup/retired_install_state.go",
         "internal/legacyconnector/legacyconnector.go",
         "internal/legacyconnector/legacyconnector_test.go",
     }
 )
-# Files that may name any retired connector.
-UNRESTRICTED_FILES = frozenset(
-    {
-        "CHANGELOG.md",
-        "cli/defenseclaw/retired_install_state.py",
-        "cli/tests/test_retired_connector_names.py",
-        "cmd/defenseclaw-setup/retired_install_state.go",
-    }
-)
+# Files that may name either retired connector.
+UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
 UPGRADE_SECTION = "## Renamed and removed connectors"
 EXCLUDED_PREFIXES = ("openwiki/",)
@@ -139,27 +139,61 @@ def _hits(text: str, pattern: re.Pattern[str]) -> list[str]:
     return hits
 
 
+def _violations(relative: str, text: str) -> list[str]:
+    """Return the retired names ``text`` may not contain at path ``relative``."""
+    if relative.startswith(EXCLUDED_PREFIXES) or relative in UNRESTRICTED_FILES:
+        return []
+    if relative in DESKTOP_ONLY_FILES:
+        hits = _hits(text, GEMINI_RE) + _hits(text, GEMINI_LIST_RE)
+    else:
+        if relative == UPGRADE_GUIDE:
+            text = _outside_upgrade_section(text)
+        hits = _hits(text, ANY_RE) + _hits(text, GEMINI_LIST_RE)
+    return [f"{relative}:{hit}" for hit in hits]
+
+
 def test_retired_connector_names_do_not_reappear() -> None:
     violations: list[str] = []
     for relative in _tracked_files():
-        if relative.startswith(EXCLUDED_PREFIXES) or relative in UNRESTRICTED_FILES:
-            continue
         text = _read_text(relative)
-        if text is None:
-            continue
-        if relative in DESKTOP_ONLY_FILES:
-            gemini_only = re.compile("|".join(GEMINI_PATTERNS), re.IGNORECASE)
-            for hit in _hits(text, gemini_only) + _hits(text, GEMINI_LIST_RE):
-                violations.append(f"{relative}:{hit}")
-            continue
-        if relative == UPGRADE_GUIDE:
-            text = _outside_upgrade_section(text)
-        for hit in _hits(text, ANY_RE) + _hits(text, GEMINI_LIST_RE):
-            violations.append(f"{relative}:{hit}")
+        if text is not None:
+            violations.extend(_violations(relative, text))
     assert not violations, (
         "retired connector names reappeared outside the allowlisted migration and "
         "upgrade-notes files:\n" + "\n".join(violations[:50])
     )
+
+
+def test_tripwire_flags_reappearing_names() -> None:
+    gemini_names = (
+        _GEMINI + _CLI,
+        _GEMINI + "-" + _CLI,
+        _GEMINI.capitalize() + " " + _CLI.upper(),
+        _GEMINI + "_" + _CLI + "_home",
+        (_GEMINI + "_" + _CLI + "_home").upper(),
+        _GEMINI + "_config_dir",
+        "otlp-" + _GEMINI + _CLI,
+        "OTLPScope" + _GEMINI.capitalize() + _CLI.upper(),
+    )
+    desktop_names = (_DESKTOP_ID, _DESKTOP_ID + "_user_home", _DESKTOP_PUBLISHER, _CASCADE_RESPONSE)
+    ordinary = "cli/defenseclaw/example.py"
+    for name in gemini_names:
+        line = f'value = "{name}"\n'
+        assert _violations(ordinary, line), name
+        assert _violations(THIS_FILE, line), name
+        for relative in DESKTOP_ONLY_FILES:
+            assert _violations(relative, line), (relative, name)
+        assert not _violations("CHANGELOG.md", line)
+    for name in desktop_names:
+        line = f'value = "{name}"\n'
+        assert _violations(ordinary, line), name
+        for relative in DESKTOP_ONLY_FILES:
+            assert not _violations(relative, line), (relative, name)
+
+    gemini = _GEMINI + _CLI
+    guide = f"# Upgrade\n\n{UPGRADE_SECTION}\n\nRemove `{gemini}`.\n\n## Next\n\n"
+    assert not _violations(UPGRADE_GUIDE, guide)
+    assert _violations(UPGRADE_GUIDE, guide + f"Remove `{gemini}`.\n")
 
 
 def test_gemini_list_pattern_matches_connector_lists_only() -> None:
@@ -181,4 +215,4 @@ def test_upgrade_guide_documents_both_changes() -> None:
     assert UPGRADE_SECTION in text
     section = text[text.index(UPGRADE_SECTION) :]
     assert DESKTOP_RE.search(section)
-    assert re.search("|".join(GEMINI_PATTERNS), section, re.IGNORECASE)
+    assert GEMINI_RE.search(section)

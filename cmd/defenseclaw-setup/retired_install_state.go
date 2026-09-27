@@ -26,32 +26,32 @@ import (
 )
 
 // Install state written by pre-release native Windows builds made after
-// 0.8.10 can still select a connector this release no longer ships and carry
-// that connector's home bindings. The strict state decoder would reject those
+// 0.8.10 can still select the pre-rename Devin Desktop connector (windsurf)
+// and carry its home bindings. The strict state decoder would reject those
 // files, so upgrade, repair and uninstall would all fail. They are accepted on
 // read only: the bindings are dropped, the retired selection becomes "none" in
 // the loaded state, and repair and upgrade move it to its replacement
 // (retiredConnectorReplacementAt). Nothing here is ever
 // written; the normal state rewrite omits these fields.
 //
-// This file and cli/defenseclaw/retired_install_state.py are the only code
-// that names these connectors; cli/tests/test_retired_connector_names.py
-// allowlists both.
+// No other removed connector is accepted: a pre-release state that selected
+// one fails strict validation, and the upgrade guide tells those users to
+// uninstall with their original build first.
+//
+// This file and cli/defenseclaw/retired_install_state.py mirror each other;
+// cli/tests/test_retired_connector_names.py allows both to name the old
+// Desktop connector.
 
 // retiredInstallStateFields are the home-binding fields older states carry.
 var retiredInstallStateFields = []string{
 	"windsurf_user_home",
 	"windsurf_hooks_path",
-	"gemini_cli_home",
-	"gemini_config_dir",
 }
 
 // retiredInstallStateConnectors maps a retired connector selection to the
-// connector repair and upgrade select instead ("none" when nothing replaces
-// it).
+// connector repair and upgrade select instead.
 var retiredInstallStateConnectors = map[string]string{
-	"windsurf":  "devin",
-	"geminicli": "none",
+	"windsurf": "devin",
 }
 
 // readInstallStateJSON decodes install-state.json strictly after removing the

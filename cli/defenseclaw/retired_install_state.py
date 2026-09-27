@@ -10,14 +10,16 @@
 
 """Native Windows install state written by pre-release builds.
 
-Pre-release native Windows builds made after 0.8.10 could select a connector
-this release no longer ships and record that connector's home bindings in
-``installer/install-state.json``. The uninstaller's closed-schema check
-accepts those fields and selections so such an install can still be removed;
-nothing reads their values. The Go Setup mirrors this list in
-``cmd/defenseclaw-setup/retired_install_state.go``. These two files are the
-only code that names these connectors
-(``cli/tests/test_retired_connector_names.py`` allowlists both).
+Pre-release native Windows builds made after 0.8.10 could select the
+pre-rename Devin Desktop connector (``windsurf``) and record its home bindings
+in ``installer/install-state.json``. The uninstaller's closed-schema check
+accepts those fields and that selection so such an install can still be
+removed; nothing reads their values. No other removed connector is accepted:
+the upgrade guide tells users whose pre-release install selected one to
+uninstall it with its original build first. The Go Setup mirrors these lists
+in ``cmd/defenseclaw-setup/retired_install_state.go``;
+``cli/tests/test_retired_connector_names.py`` allows both files to name the old
+Desktop connector.
 """
 
 from __future__ import annotations
@@ -27,10 +29,8 @@ RETIRED_INSTALL_STATE_FIELDS: frozenset[str] = frozenset(
     {
         "windsurf_user_home",
         "windsurf_hooks_path",
-        "gemini_cli_home",
-        "gemini_config_dir",
     }
 )
 
 # Connector selections older states may record.
-RETIRED_INSTALL_STATE_CONNECTORS: frozenset[str] = frozenset({"windsurf", "geminicli"})
+RETIRED_INSTALL_STATE_CONNECTORS: frozenset[str] = frozenset({"windsurf"})

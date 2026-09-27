@@ -662,11 +662,15 @@ resolve and retries their teardown later instead of dropping them.
 
 Native Windows Setup builds made after 0.8.10 and before this release could
 select Windsurf or Gemini CLI. This release's Setup and uninstaller still read
-that install state. Repair and upgrade switch a Windsurf selection to `devin`
-and a Gemini CLI selection to no connector, and the gateway removes
-DefenseClaw's Cascade hook entries on its next start. To remove such an
-install, upgrade it first and then uninstall, so that cleanup runs. Clean up
-Gemini CLI entries with the steps above.
+an install state that selected Windsurf: repair and upgrade switch the
+selection to `devin`, and the gateway removes DefenseClaw's Cascade hook
+entries on its next start. To remove such an install, upgrade it first and
+then uninstall, so that cleanup runs.
+
+Native Windows installs made from pre-release main builds that selected Gemini
+CLI must be uninstalled with their original build before installing this
+release; this release's Setup and uninstaller refuse that install state. Then
+clean up Gemini CLI entries with the steps above.
 
 Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
 an older release exported with that value do not validate against the current

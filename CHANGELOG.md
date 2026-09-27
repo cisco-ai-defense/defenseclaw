@@ -74,17 +74,18 @@ deleted.
   plugin discovery fails, unresolved names are kept and retried instead. The
   0.8.11 upgrade migration removes such names from `config.yaml` when another
   connector remains. An unknown `guardrail.connector` still fails boot and
-  points at the upgrade notes.
-- **Native Windows state from pre-release builds.** Setup and the uninstaller
-  accept install state from pre-release native builds that selected Windsurf or
-  Gemini CLI; repair and upgrade move the selection to `devin` or to no
-  connector.
-- **Devin on macOS.** Devin hooks are registered in `~/.config/devin/config.json`
-  (or `$XDG_CONFIG_HOME/devin`) on macOS, where the Devin CLI reads them,
-  instead of `~/Library/Application Support/devin`. `defenseclaw setup remove` and
+  points at the upgrade notes. `defenseclaw setup remove` and
   `defenseclaw uninstall` handle such names without aborting, and
   `setup remove` does not require `--force` when such a name is the last
   connector.
+- **Native Windows state from pre-release builds.** Setup and the uninstaller
+  accept install state from pre-release native builds that selected Windsurf;
+  repair and upgrade move the selection to `devin`. Native Windows installs
+  made from pre-release main builds that selected Gemini CLI must be
+  uninstalled with their original build before installing this release.
+- **Devin on macOS.** Devin hooks are registered in `~/.config/devin/config.json`
+  (or `$XDG_CONFIG_HOME/devin`) on macOS, where the Devin CLI reads them,
+  instead of `~/Library/Application Support/devin`.
 
 ### Observability v8
 

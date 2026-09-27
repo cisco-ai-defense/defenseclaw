@@ -64,6 +64,20 @@ func retiredConnectorNames() []string {
 	return names
 }
 
+func TestRetiredInstallStateConnectorsMoveToShippedConnectors(t *testing.T) {
+	if len(retiredInstallStateConnectors) == 0 {
+		t.Fatal("no retired connector mapping")
+	}
+	for retired, replacement := range retiredInstallStateConnectors {
+		if validConnector(retired) {
+			t.Errorf("%s is listed as retired but is still a valid connector", retired)
+		}
+		if !isNativeLifecycleConnector(replacement) {
+			t.Errorf("%s moves to %q; want a connector this release ships", retired, replacement)
+		}
+	}
+}
+
 func TestLoadInstallStateAcceptsRetiredConnectorState(t *testing.T) {
 	bindings := map[string]any{}
 	for _, field := range retiredInstallStateFields {
