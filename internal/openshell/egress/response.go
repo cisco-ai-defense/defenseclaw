@@ -107,9 +107,9 @@ func DefaultUnblockHint(p Principal, d Decision) string {
 			"`defenseclaw sandbox run --host-port PORT`."
 	case d.Category == CategoryPrivateNetwork:
 		return "Tell the user DefenseClaw blocked this private-network destination. `defenseclaw sandbox unblock` does not " +
-			"open private networks; the operator can, by adding the host name, or a CIDR no wider than its private range " +
-			"(for example 10.0.0.0/8), to openshell.egress.allow in the DefenseClaw configuration. " +
-			"Do not try to reach it another way."
+			"open private networks; the operator can, by adding the exact host name or the IP address to " +
+			"openshell.egress.allow in the DefenseClaw configuration (a \"*.\" wildcard opens private addresses only " +
+			"for intranet names such as *.corp). Do not try to reach it another way."
 	case d.Category == CategoryPortNotAllowed:
 		return "Only the configured web ports are relayed. The operator can add ports with openshell.egress.ports in the " +
 			"DefenseClaw configuration; prefer an HTTPS alternative (for example an HTTPS git remote instead of SSH)."

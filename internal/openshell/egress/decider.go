@@ -155,13 +155,22 @@ type DeciderOptions struct {
 	// at dial time.
 	//
 	// Allow is also the only way to open a private network destination
-	// (CategoryPrivateNetwork): a pattern covering the name opens the name
-	// and every private address it resolves to, and an IP or CIDR opens the
-	// private addresses it covers when it is no wider than their private
-	// range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
-	// fc00::/7) or on-link subnet, so 0.0.0.0/0 opens none. Nothing opens
-	// this machine itself, loopback, link-local or metadata addresses
+	// (CategoryPrivateNetwork). An exact name opens every private address
+	// it resolves to. A "*." wildcard opens the intranet names it covers
+	// (.internal, .corp and similar) and their private addresses, but not
+	// the private answers of names under a public domain: those are often
+	// names the operator does not control (anyone can put a private address
+	// behind a name under a cloud provider's domain), so they need an entry
+	// for the exact name or the address. An IP or CIDR opens the private
+	// addresses it covers when it is no wider than their private range
+	// (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7)
+	// or on-link subnet, so 0.0.0.0/0 opens none. Nothing opens this machine
+	// itself, loopback, link-local or metadata addresses
 	// (CategoryHostInternal).
+	//
+	// openshell.egress.allow and sandbox packs accept names, "*." wildcards
+	// and single IP addresses, not CIDRs, so DefaultUnblockHint points
+	// operators at names and IP addresses only.
 	Block []string
 	Allow []string
 	// Unblocks supplies unblock decisions; nil means none.

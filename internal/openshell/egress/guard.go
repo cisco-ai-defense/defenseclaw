@@ -165,10 +165,11 @@ func classifyAddr(addr netip.Addr, local *localAddrs) guardVerdict {
 const reservedWhat = "a loopback, link-local, cloud metadata, multicast or reserved address"
 
 // allowsPrivate reports the operator allow rule that opens a private
-// destination: any allow pattern covering the name, or for an address an
-// allow IP or CIDR no wider than the private range or subnet it is in, so
-// that a wide CIDR meant for public IP literals (0.0.0.0/0) opens no private
-// network.
+// destination: any allow pattern covering an intranet name (only those are
+// private by name, and a wildcard opens their answers too, see
+// opensPrivateName), or for an address an allow IP or CIDR no wider than the
+// private range or subnet it is in, so that a wide CIDR meant for public IP
+// literals (0.0.0.0/0) opens no private network.
 func (d *Decider) allowsPrivate(host string, addr netip.Addr, scope netip.Prefix) (string, bool) {
 	if !addr.IsValid() {
 		item, ok := d.allow.match(host, addr)

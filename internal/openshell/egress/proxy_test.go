@@ -458,12 +458,13 @@ func TestProxyGuardRefusals(t *testing.T) {
 // An operator allow rule opens a private-network destination end to end,
 // such as an npm mirror on the corporate network: CONNECT and absolute-form
 // requests reach it, while private destinations no rule names stay closed
-// with a hint that points at the allow list.
+// with a hint that points at the allow list. A wildcard under a public
+// domain opens its public answers only.
 func TestProxyOperatorAllowOpensPrivateNetworks(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "mirror") }))
 	defer upstream.Close()
 	h := newHarness(t, func(c *harnessConfig) {
-		c.decider.Allow = []string{"artifactory.corp.example", "10.20.0.0/16", "git.corp"}
+		c.decider.Allow = []string{"artifactory.corp.example", "10.20.0.0/16", "git.corp", "*.cloud.example"}
 	})
 	h.dialer.route(443, startEcho(t))
 	h.dialer.route(80, upstream.Listener.Addr().String())
@@ -471,8 +472,10 @@ func TestProxyOperatorAllowOpensPrivateNetworks(t *testing.T) {
 	h.resolver.set("db.example.com", []string{"10.20.1.1"})
 	h.resolver.set("git.corp", []string{"192.168.4.4"})
 	h.resolver.set("wiki.example.com", []string{"10.9.9.9"})
+	h.resolver.set("api.cloud.example", []string{publicV4})
+	h.resolver.set("internal-lb.cloud.example", []string{"10.30.0.1"})
 
-	for _, target := range []string{"artifactory.corp.example:443", "db.example.com:443", "git.corp:443", "10.20.3.3:443"} {
+	for _, target := range []string{"artifactory.corp.example:443", "db.example.com:443", "git.corp:443", "10.20.3.3:443", "api.cloud.example:443"} {
 		conn, _, resp := h.connect(target, basicAuth(h.cred), nil)
 		if resp.status != http.StatusOK {
 			t.Errorf("CONNECT %s = %d %s", target, resp.status, resp.body)
@@ -490,7 +493,7 @@ func TestProxyOperatorAllowOpensPrivateNetworks(t *testing.T) {
 		t.Errorf("absolute-form to the allowed mirror = %d %q", resp.StatusCode, body)
 	}
 
-	for _, target := range []string{"wiki.example.com:443", "10.9.9.9:443", "nas.lan:443"} {
+	for _, target := range []string{"wiki.example.com:443", "10.9.9.9:443", "nas.lan:443", "internal-lb.cloud.example:443"} {
 		_, _, resp := h.connect(target, basicAuth(h.cred), nil)
 		b := decodeBlock(t, resp.body)
 		if resp.status != http.StatusForbidden || b.Category != CategoryPrivateNetwork || b.Unblockable ||

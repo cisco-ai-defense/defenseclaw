@@ -339,13 +339,19 @@ func TestGuardDialResolvesRootedNames(t *testing.T) {
 	}
 }
 
-// An operator allow rule opens private answers at dial time: a pattern for
-// the name opens every private address it resolves to, an IP or CIDR the
-// private addresses it covers when it is no wider than their range. Nothing
-// opens this machine, loopback or metadata, whatever the rule says.
+// An operator allow rule opens private answers at dial time: an exact name
+// every private address it resolves to, an intranet wildcard (*.corp) those
+// of the names it covers, an IP or CIDR the private addresses it covers when
+// it is no wider than their range. A wildcard under a public domain opens
+// only public answers: names under it are often not the operator's (a cloud
+// provider's internal load balancer names resolve to private addresses).
+// Nothing opens this machine, loopback or metadata, whatever the rule says.
 func TestGuardDialOperatorOpensPrivate(t *testing.T) {
 	g, r, d := newTestGuard(t)
-	dec, err := NewDecider(DeciderOptions{Allow: []string{"*.corp.example", "192.168.7.0/24", "0.0.0.0/0"}})
+	dec, err := NewDecider(DeciderOptions{Allow: []string{
+		"artifactory.corp.example", "loop.corp.example", "meta.corp.example", "own.corp.example",
+		"*.cloud.example", "*.corp", "192.168.7.0/24", "0.0.0.0/0",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,15 +359,25 @@ func TestGuardDialOperatorOpensPrivate(t *testing.T) {
 	r.set("loop.corp.example", []string{"10.1.2.3", "127.0.0.1"})
 	r.set("meta.corp.example", []string{"169.254.169.254"})
 	r.set("own.corp.example", []string{ownV4})
+	r.set("git.corp", []string{"10.1.2.3"})
 	r.set("nas.example", []string{"192.168.7.7"})
 	r.set("other.example", []string{"192.168.8.8"})
+	r.set("internal-lb.cloud.example", []string{"10.4.4.4"})
+	r.set("cdn.cloud.example", []string{publicV4})
+	r.set("office.cloud.example", []string{"192.168.7.8"})
 	tests := []struct {
 		host     string
 		category Category // empty: the dial succeeds
 	}{
 		{host: "artifactory.corp.example"},
+		{host: "git.corp"},
 		{host: "nas.example"},
 		{host: "192.168.7.7"},
+		{host: "cdn.cloud.example"},
+		// The public-domain wildcard does not open the private answer; the
+		// allow CIDR covering the address does.
+		{host: "internal-lb.cloud.example", category: CategoryPrivateNetwork},
+		{host: "office.cloud.example"},
 		{host: "loop.corp.example", category: CategoryHostInternal},
 		{host: "meta.corp.example", category: CategoryHostInternal},
 		{host: "own.corp.example", category: CategoryHostInternal},
@@ -383,7 +399,9 @@ func TestGuardDialOperatorOpensPrivate(t *testing.T) {
 		}
 	}
 	for _, addr := range d.addresses() {
-		if a := netip.MustParseAddrPort(addr).Addr().String(); a != "10.1.2.3" && a != "192.168.7.7" {
+		switch netip.MustParseAddrPort(addr).Addr().String() {
+		case "10.1.2.3", "192.168.7.7", "192.168.7.8", publicV4:
+		default:
 			t.Errorf("dialer was handed %s", addr)
 		}
 	}

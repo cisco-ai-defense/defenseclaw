@@ -17,12 +17,14 @@
 package egress
 
 import (
+	"context"
 	"errors"
 	"net"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
@@ -324,6 +326,53 @@ func TestDecidePrivateNetworksOpenThroughOperatorAllow(t *testing.T) {
 		if got.Category == CategoryHostInternal && !strings.Contains(DefaultUnblockHint(testPrincipal, got), "--host-port") {
 			t.Errorf("Decide(%s) hint = %q", tt.host, DefaultUnblockHint(testPrincipal, got))
 		}
+	}
+}
+
+// The private-network hint names only entries openshell.egress.allow
+// accepts, and each of them opens the destination it is meant for: the
+// configuration takes names, "*." wildcards and single IP addresses, not
+// CIDRs.
+func TestPrivateNetworkHintMatchesConfig(t *testing.T) {
+	hint := DefaultUnblockHint(testPrincipal, Decision{Host: "wiki.example.com", Port: 443, Category: CategoryPrivateNetwork})
+	for _, want := range []string{"openshell.egress.allow", "exact host name", "IP address", "*.corp"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint %q does not mention %q", hint, want)
+		}
+	}
+	if strings.Contains(hint, "CIDR") || strings.Contains(hint, "/8") {
+		t.Errorf("hint %q suggests a CIDR, which openshell.egress.allow rejects", hint)
+	}
+	for _, entry := range []string{"wiki.example.com", "10.9.9.9", "fd00::9", "*.corp"} {
+		if err := config.ValidateOpenShellHostGlob(entry); err != nil {
+			t.Errorf("config rejects the hinted entry %q: %v", entry, err)
+		}
+	}
+	if config.ValidateOpenShellHostGlob("10.0.0.0/8") == nil {
+		t.Error("config accepts CIDRs now; the hint and DeciderOptions.Allow docs can offer them")
+	}
+	g, r, _ := newTestGuard(t)
+	r.set("wiki.example.com", []string{"10.9.9.9"})
+	r.set("git.corp", []string{"10.9.9.10"})
+	for _, tt := range []struct{ allow, host string }{
+		{"wiki.example.com", "wiki.example.com"},
+		{"10.9.9.9", "wiki.example.com"},
+		{"10.9.9.9", "10.9.9.9"},
+		{"*.corp", "git.corp"},
+	} {
+		d := mustDecider(t, DeciderOptions{Allow: []string{tt.allow}})
+		d.local = g.local
+		dec := d.Decide(testPrincipal, tt.host, 443)
+		if !dec.Allowed {
+			t.Errorf("allow %q: Decide(%s) = %+v", tt.allow, tt.host, dec)
+			continue
+		}
+		conn, _, err := g.dial(context.Background(), dec.Host, dec.Port, d.dialRules(testPrincipal, dec))
+		if err != nil {
+			t.Errorf("allow %q: dial(%s) = %v", tt.allow, tt.host, err)
+			continue
+		}
+		_ = conn.Close()
 	}
 }
 

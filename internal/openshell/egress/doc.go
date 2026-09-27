@@ -61,7 +61,9 @@
 // (host_internal). Private networks (RFC 1918, CGNAT and ULA addresses, the
 // other hosts on this machine's public subnets, at least the /64 of a global
 // IPv6 address, and intranet names) are reachable only where an operator
-// allow rule names them (private_network); unblocks never open them.
+// allow rule names them (private_network): the exact name, an intranet
+// wildcard such as *.corp, or the address. A wildcard under a public domain
+// never opens private addresses, and unblocks never open them.
 //
 // Blocked requests get a JSON 403 body that explains the reason and how to
 // ask for an unblock. Every decision, tunnel close and large upload to a

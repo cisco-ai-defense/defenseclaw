@@ -79,8 +79,8 @@ type guardDialer struct {
 type dialRules struct {
 	d *Decider
 	p Principal
-	// nameAllowed reports an operator allow rule covering the destination
-	// name: the private addresses it resolves to are open.
+	// nameAllowed reports an operator allow rule that opens the private
+	// addresses the destination name resolves to (opensPrivateName).
 	nameAllowed bool
 	// feeds applies the blocklist feeds' IP and CIDR entries to the address;
 	// off when an unblock or an operator allow rule admitted the
@@ -93,9 +93,28 @@ type dialRules struct {
 func (d *Decider) dialRules(p Principal, dec Decision) dialRules {
 	r := dialRules{d: d, p: p, feeds: dec.Source != SourceUnblock && dec.Source != SourceOperator}
 	if _, err := netip.ParseAddr(dec.Host); err != nil {
-		_, r.nameAllowed = d.allow.match(dec.Host, netip.Addr{})
+		r.nameAllowed = d.opensPrivateName(dec.Host)
 	}
 	return r
+}
+
+// opensPrivateName reports an operator allow rule that opens every private
+// address the name resolves to: an exact entry for the name, or a "*."
+// wildcard covering an intranet name (.internal, .corp and similar), which
+// only the operator's own DNS answers. A wildcard under a public domain also
+// covers names the operator does not control, some of which resolve to
+// private addresses (a cloud provider's internal load balancer names, for
+// example), so it opens only public answers; a private answer needs an
+// allow entry for the exact name or for the address.
+func (d *Decider) opensPrivateName(host string) bool {
+	if _, ok := d.allow.exact[host]; ok {
+		return true
+	}
+	if _, ok := d.allow.match(host, netip.Addr{}); !ok {
+		return false
+	}
+	_, intranet := intranetNames.match(host, netip.Addr{})
+	return intranet
 }
 
 // mayOpenPrivate reports whether any private address can be open, which
@@ -106,7 +125,8 @@ func (r dialRules) mayOpenPrivate() bool {
 
 // guard applies the address guard to one address: this machine and what
 // only it can reach are refused, private addresses unless an operator allow
-// rule opened them.
+// rule opened them (for the name, opensPrivateName; else an allow IP or
+// CIDR covering the address).
 func (r dialRules) guard(addr netip.Addr, local *localAddrs) *dialError {
 	v := classifyAddr(addr, local)
 	switch v.class {
