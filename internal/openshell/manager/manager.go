@@ -106,8 +106,8 @@ type Options struct {
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
 	ForgetBinding func(bindingID string)
-	// IngressPort and EgressPort are the DefenseClaw listeners; APIPort
-	// is the main API. Required.
+	// IngressPort and EgressPort are the DefenseClaw listeners (required);
+	// APIPort is the main API, zero meaning config.DefaultGatewayAPIPort.
 	IngressPort int
 	EgressPort  int
 	APIPort     int
@@ -196,6 +196,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.Owner == "" {
 		return nil, errors.New("sandbox manager: an owner id is required")
+	}
+	if opts.APIPort <= 0 {
+		opts.APIPort = config.DefaultGatewayAPIPort
 	}
 	if opts.Workspace == nil {
 		opts.Workspace = DefaultWorkspace{}

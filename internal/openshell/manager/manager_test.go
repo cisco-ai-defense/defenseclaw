@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -196,6 +197,36 @@ func TestCreateGeneratesName(t *testing.T) {
 	sb := e.create(sandboxapi.CreateRequest{})
 	if !strings.HasPrefix(sb.Name, "dc-claude-myapp-") || !openshell.ValidSandboxName(sb.Name) {
 		t.Fatalf("generated name %q", sb.Name)
+	}
+}
+
+// TestCreateResolvesUnsetPorts pins that a registration without a port and
+// an unset API port still render a policy: policy.Render refuses zero ports,
+// so the manager passes the same defaults packs.Resolve reserves.
+func TestCreateResolvesUnsetPorts(t *testing.T) {
+	e := newEnv(t, nil)
+	e.gw.Port = 0
+	m, err := New(Options{
+		DataDir: e.dataDir, Owner: testOwner, Config: e.config,
+		Connect:  func(context.Context) (*Gateway, error) { return e.gw, nil },
+		Bindings: e.store, Images: e.images, Workspace: e.ws, Profiles: e.importer, Telemetry: e.tel,
+		Persist: e.persist, IngressPort: testIngressPort, EgressPort: testEgressPort,
+		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch,
+		DefenseClawVersion: "1.2.3", SettleDelay: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.opts.APIPort != config.DefaultGatewayAPIPort {
+		t.Fatalf("APIPort = %d, want %d", m.opts.APIPort, config.DefaultGatewayAPIPort)
+	}
+	e.m = m
+	sb := e.create(sandboxapi.CreateRequest{Name: "noports"})
+	if pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name); pol == nil {
+		t.Fatal("no policy applied")
+	}
+	if got := policyGatewayPort(0); got != packs.OpenShellGatewayPort {
+		t.Fatalf("policyGatewayPort(0) = %d", got)
 	}
 }
 

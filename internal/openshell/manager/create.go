@@ -356,7 +356,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		Profile: policy.Profile(eff.Profile), Harness: spec.Name, Workdir: rec.Workdir,
 		WorkdirMode: policy.WorkdirMode(in.mode), RunAsUser: strconv.Itoa(m.host.UID), RunAsGroup: strconv.Itoa(m.host.GID),
 		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort, HarnessReadOnly: []string{spec.InstallRoot()},
-		HostPorts: eff.MCP.HostPorts, APIPort: m.opts.APIPort, GatewayPort: gw.Port,
+		HostPorts: eff.MCP.HostPorts, APIPort: m.opts.APIPort, GatewayPort: policyGatewayPort(gw.Port),
 	}
 	if plan != nil {
 		for _, p := range plan.ReadWrite {

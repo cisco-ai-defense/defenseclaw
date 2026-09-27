@@ -186,6 +186,17 @@ func (m *Manager) gatewayPort() int {
 	return int(m.gwPort.Load())
 }
 
+// policyGatewayPort is the OpenShell gateway port a sandbox policy
+// reserves: the registration's, else the local gateway's default, the
+// same fallback packs.Resolve applies to Flags.OpenShellGatewayPort
+// (policy.Render refuses an unresolved zero).
+func policyGatewayPort(port int) int {
+	if port > 0 {
+		return port
+	}
+	return packs.OpenShellGatewayPort
+}
+
 // violationError turns a policy refusal into the API error, logging admin
 // refusals with their gateway error code.
 func (m *Manager) violationError(ctx context.Context, err error, sandbox string) error {
