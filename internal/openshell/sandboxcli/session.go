@@ -276,7 +276,7 @@ func (s *session) end(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("undo: %w", apiError(err))
 		}
-		a.ok("undone: " + firstNonEmpty(res.Summary, "the folder is back to its pre-session snapshot"))
+		a.ok("undone: " + undoDone(res, "see below"))
 		if res.Result != nil {
 			for _, w := range res.Result.Warnings {
 				a.warn(w)

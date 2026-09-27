@@ -138,6 +138,24 @@ func TestRunMountSessionUndoAfterDiff(t *testing.T) {
 	}
 }
 
+// Undo at the end of a session names what it could not restore.
+func TestRunMountSessionUndoNamesWhatItCannotRestore(t *testing.T) {
+	ta := newTestApp(t, "u\n")
+	ta.daemon.undo = sandboxapi.UndoResponse{Result: &workspace.UndoResult{Project: ta.project,
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}},
+		Ignored: []workspace.IgnoredChange{{Path: ".venv/", Modified: 1, Dependencies: true, Remedy: "delete it and create the virtual environment again"}}}}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	for _, want := range []string{"undone: 1 file restored, except .venv/ (see below)",
+		"undo cannot restore .venv/ (1 file added or changed during the session): delete it and create the virtual environment again"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunHarnessExitStatusPropagates(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.term.code = 3

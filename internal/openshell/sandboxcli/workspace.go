@@ -138,7 +138,7 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	if res.Stopped {
 		a.note("stopped " + o.Name)
 	}
-	a.ok("restored: " + firstNonEmpty(res.Summary, "the folder is back to its pre-session snapshot"))
+	a.ok("restored: " + undoDone(res, "see above"))
 	if res.Result != nil {
 		if res.Result.PostCommit != "" {
 			a.note("the session's state is kept in commit " + shortOID(res.Result.PostCommit))
@@ -146,18 +146,29 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		for _, w := range res.Result.Warnings {
 			a.warn(w)
 		}
-		if left := res.Result.Unrestored(); len(left) > 0 {
-			paths := make([]string, len(left))
-			for i, c := range left {
-				paths[i] = c.Path
-			}
-			a.warn("not restored (see above): " + strings.Join(firstN(paths, 6), ", "))
-		}
 	}
 	if res.Restarted {
 		a.ok("restarted " + o.Name)
 	}
 	return nil
+}
+
+// undoDone is what a finished mount-mode undo restored: the daemon's
+// summary, or the snapshot, except the places it could not restore (where
+// says where the output lists them).
+func undoDone(res *sandboxapi.UndoResponse, where string) string {
+	msg := firstNonEmpty(res.Summary, "the folder is back to its pre-session snapshot")
+	if res.Result == nil {
+		return msg
+	}
+	var left []string
+	for _, c := range res.Result.Unrestored() {
+		left = append(left, c.Path)
+	}
+	if len(left) == 0 {
+		return msg
+	}
+	return msg + ", except " + strings.Join(firstN(left, 6), ", ") + " (" + where + ")"
 }
 
 // undoApply reverts a copy-mode sandbox's last `pull --apply` after a

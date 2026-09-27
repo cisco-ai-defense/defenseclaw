@@ -281,8 +281,7 @@ func TestUndoNamesWhatItCannotRestore(t *testing.T) {
 	for _, want := range []string{
 		"remove  2 files the session wrote to calc/__pycache__/ (a Python bytecode cache)",
 		"undo cannot restore node_modules/",
-		"restored: 1 file restored",
-		"not restored (see above): node_modules/",
+		"restored: 1 file restored, except node_modules/ (see above)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
