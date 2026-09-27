@@ -313,6 +313,12 @@ func TestNormalizeRootsAndAreas(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("normalizeRoots = %v, want %v", got, want)
 	}
+	m := &ignoredManifest{Roots: []ignoredRoot{{Path: "build/", Complete: true}, {Path: "a.log", Complete: true}, {Path: "dist/"}}}
+	for rel, want := range map[string]bool{"build": true, "build/": true, "build/x/y": true, "a.log": true, "dist/x": false, "builds/x": false, "x": false} {
+		if got := m.covers(rel); got != want {
+			t.Errorf("covers(%s) = %v", rel, got)
+		}
+	}
 	roots := map[string]bool{"build/": true}
 	for rel, want := range map[string]string{
 		"node_modules/.bin/tool":                   "node_modules/",

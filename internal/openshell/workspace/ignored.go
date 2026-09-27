@@ -70,6 +70,8 @@ type ignoredManifest struct {
 	Skip []string `json:"skip,omitempty"`
 	// Truncated reports that the file cap stopped the recording.
 	Truncated bool `json:"truncated,omitempty"`
+
+	complete map[string]bool // Complete roots, without the trailing "/"
 }
 
 // ignoredRoot is one ignored path (a directory ends in "/"). Complete
@@ -413,18 +415,22 @@ func (m *ignoredManifest) rootPaths() []string {
 	return out
 }
 
-// covers reports whether rel is, or is inside, a root recorded in full.
+// covers reports whether rel is, or is inside, a root recorded in full. It
+// looks rel and its parents up, so a comparison stays linear in the files.
 func (m *ignoredManifest) covers(rel string) bool {
 	if m == nil {
 		return false
 	}
-	rel = strings.TrimSuffix(rel, "/")
-	for _, r := range m.Roots {
-		if !r.Complete {
-			continue
+	if m.complete == nil {
+		m.complete = map[string]bool{}
+		for _, r := range m.Roots {
+			if r.Complete {
+				m.complete[strings.TrimSuffix(r.Path, "/")] = true
+			}
 		}
-		p := strings.TrimSuffix(r.Path, "/")
-		if rel == p || (strings.HasSuffix(r.Path, "/") && strings.HasPrefix(rel, r.Path)) {
+	}
+	for p := strings.TrimSuffix(rel, "/"); p != "." && p != "/" && p != ""; p = path.Dir(p) {
+		if m.complete[p] {
 			return true
 		}
 	}
