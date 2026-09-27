@@ -418,6 +418,11 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		tools += ")"
 	}
 	parts = append(parts, tools)
+	// A hook call DefenseClaw answered with an error failed closed: the
+	// harness's action was blocked without a verdict.
+	if failed := after.Hooks.HookFailed - before.Hooks.HookFailed; failed > 0 {
+		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
+	}
 	sites := after.Egress.Destinations - before.Egress.Destinations
 	requestsBlocked := after.Egress.Blocked - before.Egress.Blocked
 	siteText := plural(int64(max(sites, 0)), "site contacted", "sites contacted")

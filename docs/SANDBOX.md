@@ -1198,6 +1198,19 @@ doctor", and exits 69 when not one hook of the session got through (the
 harness's own non-zero status wins). `sandbox logs` does the same for a
 finished detached run with no hook since it started.
 
+A hook that does reach the ingress still fails closed when the answer is an
+error: a route or connector the binding does not allow (403), the rate limit
+(429), a malformed or oversized request (400, 413). The ingress reports every
+authenticated hook or inspect post it answers outside 2xx, except a replay of
+an answer already reported, and the sandbox's hook coverage counts them as
+`hook_failed` with `last_hook_failure` (for example `HTTP 429 Too Many
+Requests`). `sandbox list` ("4 calls, 1 blocked, 2 failed"), `sandbox status`
+(the "Hook traffic" and "Hook error" rows) and the end-of-session summary ("1
+hook call failed (blocked)") show them, and the feed gets a `hook.failed`
+entry at once and then at most one every 10 seconds per sandbox, summing up
+the failures in between. Tool calls and blocks count only verdicts, so a
+failed pre-tool hook is not among them.
+
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
 OTLP to the ingress, the skip of the dangerous-mode prompt, and Claude's own

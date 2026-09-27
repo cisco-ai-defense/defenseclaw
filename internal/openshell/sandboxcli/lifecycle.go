@@ -97,6 +97,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 	if sb.Hooks.ToolBlocked > 0 {
 		s += fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
 	}
+	if sb.Hooks.HookFailed > 0 {
+		s += fmt.Sprintf(", %d failed", sb.Hooks.HookFailed)
+	}
 	return s
 }
 
@@ -188,6 +191,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	row("Policy", fmt.Sprintf("profile %s, pack %s %s, network %s, approvals %s", sb.Profile, firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest), networkLabel(sb), sb.Approvals))
 	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
 	cov := fmt.Sprintf("%d requests, %d tool calls, %d blocked", sb.Hooks.HookRequests, sb.Hooks.ToolCalls, sb.Hooks.ToolBlocked)
+	if sb.Hooks.HookFailed > 0 {
+		cov += fmt.Sprintf(", %d failed (fail closed)", sb.Hooks.HookFailed)
+	}
 	if !sb.Hooks.LastHookAt.IsZero() {
 		cov += ", last " + sb.Hooks.LastHookAt.Local().Format("15:04:05")
 	}
@@ -203,6 +209,13 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	row("Hook traffic", cov)
 	if sb.Hooks.LastBlocked != "" {
 		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
+	}
+	if sb.Hooks.LastHookFailure != "" {
+		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure
+		if !sb.Hooks.LastHookFailureAt.IsZero() {
+			last += " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
+		}
+		row("Hook error", last+" (the hook failed closed)")
 	}
 	row("Egress", fmt.Sprintf("%d destinations (%d blocked), %s up, %s down", sb.Egress.Destinations, sb.Egress.Blocked,
 		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown)))

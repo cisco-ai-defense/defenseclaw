@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -148,6 +150,61 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	if alarm != nil {
 		m.raiseTamper(b, *alarm)
 	}
+}
+
+// HookFailure is an authenticated hook post from a sandbox binding that the
+// ingress answered with an error status.
+type HookFailure struct {
+	BindingID   string
+	SandboxName string
+	// Status is the HTTP status of the answer.
+	Status int
+}
+
+// hookFailureNoticeInterval spaces the feed's hook-failure events per
+// sandbox, so a flood of refused posts (the rate limit) cannot crowd out
+// the rest of the feed; the counters see every failure.
+const hookFailureNoticeInterval = 10 * time.Second
+
+// ObserveHookFailure counts a hook post the ingress answered with an error
+// status. Sandbox hooks fail closed, so the harness did not do what the
+// hook was about: list, status and the session summary show the count, and
+// the feed says so.
+func (m *Manager) ObserveHookFailure(f HookFailure) {
+	now := m.now()
+	answer := hookFailureAnswer(f.Status)
+	m.mu.Lock()
+	b := m.boxes[f.SandboxName]
+	if b == nil || b.rec.BindingID != f.BindingID {
+		m.mu.Unlock()
+		return
+	}
+	b.hooks.failed++
+	b.hooks.lastFailure, b.hooks.lastFailureAt = answer, now
+	b.hooks.unnoticed++
+	count := int64(0)
+	if b.hooks.failureNoticeAt.IsZero() || now.Sub(b.hooks.failureNoticeAt) >= hookFailureNoticeInterval {
+		count, b.hooks.unnoticed, b.hooks.failureNoticeAt = b.hooks.unnoticed, 0, now
+	}
+	name := b.rec.Name
+	m.mu.Unlock()
+	if count == 0 {
+		return
+	}
+	msg := "✗ a hook call failed (" + answer + "), so the harness's action was blocked (hooks fail closed)"
+	if count > 1 {
+		msg = fmt.Sprintf("✗ %d hook calls failed (last: %s), so the harness's actions were blocked (hooks fail closed)", count, answer)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookFailed, Sandbox: name, Reason: answer, Message: msg})
+}
+
+// hookFailureAnswer names an HTTP answer: "HTTP 429 Too Many Requests".
+func hookFailureAnswer(status int) string {
+	answer := "HTTP " + strconv.Itoa(status)
+	if text := http.StatusText(status); text != "" {
+		answer += " " + text
+	}
+	return answer
 }
 
 // displayReason keeps a verdict reason fit for the session summary and the

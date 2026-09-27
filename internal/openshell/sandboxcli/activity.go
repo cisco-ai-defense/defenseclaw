@@ -114,6 +114,12 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		if ev.Reason != "" {
 			b.WriteString(": " + truncate(ev.Reason, 120))
 		}
+	case sandboxapi.ActivityHookFailed:
+		msg := strings.TrimPrefix(ev.Message, "✗ ")
+		if msg == "" {
+			msg = "a hook call failed (" + firstNonEmpty(ev.Reason, "error") + "), so the harness's action was blocked"
+		}
+		b.WriteString(a.style("✗", ansiRed) + " " + msg)
 	case sandboxapi.ActivityFinding:
 		switch msg := firstNonEmpty(ev.Message, ev.Reason); ev.Reason {
 		case sandboxapi.ReasonHooksRestored:

@@ -141,6 +141,12 @@ type SandboxIngressConfig struct {
 	// OnListening is told once RunSandboxIngress holds its socket: until
 	// then another program may be the one listening on the ingress port.
 	OnListening func()
+	// OnHookFailure observes every authenticated hook or inspect post the
+	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
+	// on such an answer, so the harness did not do what the hook was about.
+	// A replayed answer to a retried post is not reported again. It runs on
+	// the request goroutine and must not block.
+	OnHookFailure func(SandboxHookFailure)
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -172,6 +178,18 @@ type SandboxHookDecision struct {
 	Reason string
 }
 
+// SandboxHookFailure is one authenticated sandbox hook or inspect post the
+// ingress answered with an error status.
+type SandboxHookFailure struct {
+	BindingID   string
+	SandboxName string
+	Connector   string
+	// Route is the route class of the post (hook or inspect).
+	Route sandboxauth.Route
+	// Status is the HTTP status of the answer.
+	Status int
+}
+
 type sandboxIngressState struct {
 	addr     string
 	bindings sandboxauth.Matcher
@@ -181,10 +199,12 @@ type sandboxIngressState struct {
 	fs       sandboxauth.FS
 	// otlpMaxBytes is the OTLP request body cap.
 	otlpMaxBytes int64
-	// onRequest and onHookDecision are the manager's observers.
+	// onRequest, onHookDecision and onHookFailure are the manager's
+	// observers.
 	onRequest      func(sandboxauth.Binding, sandboxauth.Route)
 	onHookDecision func(SandboxHookDecision)
 	onListening    func()
+	onHookFailure  func(SandboxHookFailure)
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -231,6 +251,7 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		onRequest:      cfg.OnRequest,
 		onHookDecision: cfg.OnHookDecision,
 		onListening:    cfg.OnListening,
+		onHookFailure:  cfg.OnHookFailure,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -633,14 +654,26 @@ func (a *APIServer) sandboxIngressAuthorize(
 			writeSandboxIngressError(w, http.StatusNotFound, "not found")
 			return
 		}
+		observed := st.onHookFailure != nil && sandboxRouteFailsClosed(route.class)
+		var sw *sandboxStatusRecorder
+		if observed {
+			sw = &sandboxStatusRecorder{ResponseWriter: w}
+			w = sw
+		}
 		if err := binding.Authorize(route.class, route.connector); err != nil {
 			writeSandboxIngressError(w, http.StatusForbidden, err.Error())
+			if observed {
+				st.observeHookFailure(binding, route, sw)
+			}
 			return
 		}
 		release, err := st.limiter.Acquire(binding, route.class)
 		if err != nil {
 			w.Header().Set("Retry-After", "1")
 			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
+			if observed {
+				st.observeHookFailure(binding, route, sw)
+			}
 			return
 		}
 		defer release()
@@ -669,7 +702,72 @@ func (a *APIServer) sandboxIngressAuthorize(
 		// registry; restore the binding's host user on top of it.
 		ctx = contextWithSandboxUser(ctx, binding)
 		next.ServeHTTP(w, r.WithContext(ctx))
+		// A panicking handler never gets here: the server drops its
+		// connection, which the hook sees as a transport failure.
+		if observed {
+			st.observeHookFailure(binding, route, sw)
+		}
 	})
+}
+
+// sandboxRouteFailsClosed reports whether the sandbox hooks posting to a
+// route class fail closed on an error answer: the connector hooks and the
+// inspect scripts do; the Codex notify bridge and the OTLP exporters are
+// advisory.
+func sandboxRouteFailsClosed(route sandboxauth.Route) bool {
+	return route == sandboxauth.RouteHook || route == sandboxauth.RouteInspect
+}
+
+// observeHookFailure reports an authenticated hook or inspect post answered
+// outside 2xx, unless the answer replays the first answer to a retried post.
+func (st *sandboxIngressState) observeHookFailure(binding sandboxauth.Binding, route sandboxIngressRoute, sw *sandboxStatusRecorder) {
+	status := sw.finalStatus()
+	if (status >= 200 && status < 300) || sw.Header().Get(sandboxIdempotentReplayHeader) != "" {
+		return
+	}
+	st.onHookFailure(SandboxHookFailure{
+		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
+		Route: route.class, Status: status,
+	})
+}
+
+// sandboxStatusRecorder keeps the final status of a response: the first
+// status of 200 or above that was written, or the implicit 200 of a body
+// written without one.
+type sandboxStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *sandboxStatusRecorder) WriteHeader(status int) {
+	if r.status == 0 && status >= 200 {
+		r.status = status
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *sandboxStatusRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(p)
+}
+
+func (r *sandboxStatusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *sandboxStatusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// finalStatus is the recorded status; a handler that wrote nothing answered
+// 200.
+func (r *sandboxStatusRecorder) finalStatus() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
 }
 
 // classifySandboxIngressRequest maps a request onto its route class and the

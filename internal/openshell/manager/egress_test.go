@@ -385,6 +385,68 @@ func TestHookCoverageAndSilence(t *testing.T) {
 	}
 }
 
+// TestHookFailuresCountedAndReported: every hook post the ingress answered
+// with an error counts (the hook failed closed, so the harness's action was
+// blocked); the feed reports the first at once and then at most one summary
+// per interval, so a flood of refused posts cannot crowd it.
+func TestHookFailuresCountedAndReported(t *testing.T) {
+	e := newEnv(t, nil)
+	var nowMu sync.Mutex
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { nowMu.Lock(); defer nowMu.Unlock(); return now }
+	advance := func(d time.Duration) { nowMu.Lock(); now = now.Add(d); nowMu.Unlock() }
+	e.m.opts.Now, e.m.now = clock, clock
+	sb := e.create(sandboxapi.CreateRequest{Name: "failbox"})
+	binding, _ := e.store.Lookup(sb.Name)
+	failures := func() []sandboxapi.ActivityEvent {
+		var out []sandboxapi.ActivityEvent
+		for _, ev := range e.m.ActivitySince(0, sb.Name) {
+			if ev.Kind == sandboxapi.ActivityHookFailed {
+				out = append(out, ev)
+			}
+		}
+		return out
+	}
+
+	// A stale binding (a rotated session) and another sandbox's name do not
+	// count.
+	e.m.ObserveHookFailure(HookFailure{BindingID: "sb_old", SandboxName: sb.Name, Status: 403})
+	e.m.ObserveHookFailure(HookFailure{BindingID: binding.ID, SandboxName: "other", Status: 403})
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Hooks.HookFailed != 0 || len(failures()) != 0 {
+		t.Fatalf("foreign failures counted: %+v", got.Hooks)
+	}
+
+	e.m.ObserveHookFailure(HookFailure{BindingID: binding.ID, SandboxName: sb.Name, Status: 400})
+	evs := failures()
+	if len(evs) != 1 || evs[0].Reason != "HTTP 400 Bad Request" ||
+		evs[0].Message != "✗ a hook call failed (HTTP 400 Bad Request), so the harness's action was blocked (hooks fail closed)" {
+		t.Fatalf("first failure on the feed = %+v", evs)
+	}
+	// A burst within the interval counts but stays off the feed.
+	for i := 0; i < 5; i++ {
+		advance(time.Second)
+		e.m.ObserveHookFailure(HookFailure{BindingID: binding.ID, SandboxName: sb.Name, Status: 429})
+	}
+	got, _ := e.m.Get(context.Background(), sb.Name)
+	if got.Hooks.HookFailed != 6 || got.Hooks.LastHookFailure != "HTTP 429 Too Many Requests" || !got.Hooks.LastHookFailureAt.Equal(clock()) {
+		t.Fatalf("hooks = %+v", got.Hooks)
+	}
+	if len(failures()) != 1 {
+		t.Fatalf("the burst flooded the feed: %+v", failures())
+	}
+	// The next failure after the interval sums up what the feed skipped.
+	advance(hookFailureNoticeInterval)
+	e.m.ObserveHookFailure(HookFailure{BindingID: binding.ID, SandboxName: sb.Name, Status: 429})
+	evs = failures()
+	if len(evs) != 2 || evs[1].Message != "✗ 6 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)" {
+		t.Fatalf("summary on the feed = %+v", evs)
+	}
+	// Failures are not verdicts: the tool-call counters are untouched.
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Hooks.HookFailed != 7 || got.Hooks.ToolCalls != 0 || got.Hooks.ToolBlocked != 0 {
+		t.Fatalf("hooks = %+v", got.Hooks)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{
 		"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972",

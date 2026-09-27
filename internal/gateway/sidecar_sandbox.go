@@ -200,6 +200,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
 			})
 		},
+		OnHookFailure: func(f SandboxHookFailure) {
+			mgr.ObserveHookFailure(manager.HookFailure{BindingID: f.BindingID, SandboxName: f.SandboxName, Status: f.Status})
+		},
 	}); err != nil {
 		return nil, err
 	}

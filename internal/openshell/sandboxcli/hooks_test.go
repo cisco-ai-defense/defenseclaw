@@ -334,3 +334,57 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		t.Fatalf("unreachable: %+v", c)
 	}
 }
+
+// TestHookFailuresShown: hook calls DefenseClaw answered with an error were
+// blocked (the hooks fail closed), and list, status, the session summary
+// and the activity feed say so.
+func TestHookFailuresShown(t *testing.T) {
+	ta := newTestApp(t, "")
+	at := time.Date(2026, 9, 27, 12, 1, 2, 0, time.Local)
+	sb := sampleSandbox("f-box")
+	sb.Hooks.HookFailed, sb.Hooks.LastHookFailure, sb.Hooks.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
+	ta.daemon.add(sb)
+
+	if err := ta.List(context.Background(), OutputText); err != nil {
+		t.Fatal(err)
+	}
+	if out := ta.output(); !strings.Contains(out, "4 calls, 1 blocked, 2 failed") {
+		t.Fatalf("list:\n%s", out)
+	}
+	ta.out.Reset()
+	if err := ta.Status(context.Background(), "f-box", OutputText); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
+		"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 12:01:02 (the hook failed closed)",
+	} {
+		if !strings.Contains(ta.output(), want) {
+			t.Errorf("status lacks %q:\n%s", want, ta.output())
+		}
+	}
+
+	s := &session{app: ta.App, before: &sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}}
+	if got, want := s.summaryLine(&sb, nil), "Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 sites contacted (1 request blocked)"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+	s.before = &sb
+	if got := s.summaryLine(&sb, nil); strings.Contains(got, "hook call") {
+		t.Fatalf("summary without new failures = %q", got)
+	}
+
+	ta.out.Reset()
+	ta.daemon.events = []sandboxapi.ActivityEvent{
+		{Seq: 1, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "f-box", Reason: "HTTP 429 Too Many Requests",
+			Message: "✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)"},
+		{Seq: 2, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "f-box", Reason: "HTTP 403 Forbidden"},
+	}
+	if err := ta.Activity(context.Background(), ActivityOptions{Sandbox: "f-box"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "12:01:02 ✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)\n" +
+		"12:01:02 ✗ a hook call failed (HTTP 403 Forbidden), so the harness's action was blocked\n"
+	if got := ta.output(); got != want {
+		t.Fatalf("activity =\n%s\nwant\n%s", got, want)
+	}
+}

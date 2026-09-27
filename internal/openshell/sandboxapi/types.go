@@ -247,6 +247,14 @@ type HookCoverage struct {
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`
+	// HookFailed counts the authenticated hook posts DefenseClaw answered
+	// with an error status (a refused route, the rate limit, a malformed
+	// request). The hooks fail closed, so the harness did not do what each
+	// of them was about. LastHookFailure is how the last one was answered,
+	// for example "HTTP 429 Too Many Requests".
+	HookFailed        int64     `json:"hook_failed,omitempty"`
+	LastHookFailure   string    `json:"last_hook_failure,omitempty"`
+	LastHookFailureAt time.Time `json:"last_hook_failure_at,omitzero"`
 	// IngressRefused counts the hook connections and requests to the
 	// DefenseClaw ingress that OpenShell refused (the sandbox's network
 	// policy does not allow its port or path).
@@ -570,6 +578,9 @@ const (
 	ActivityLifecycle         = "sandbox.lifecycle"
 	ActivityFinding           = "finding"
 	ActivityWorkspace         = "workspace"
+	// ActivityHookFailed reports hook posts DefenseClaw answered with an
+	// error status (HookCoverage.HookFailed).
+	ActivityHookFailed = "hook.failed"
 	// ActivityDropped tells a slow subscriber that events were skipped.
 	ActivityDropped = "dropped"
 )

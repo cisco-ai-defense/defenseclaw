@@ -157,6 +157,14 @@ type hookStats struct {
 	// refused.
 	ingressRefused     int64
 	lastIngressRefused time.Time
+	// failed counts the hook posts the ingress answered with an error;
+	// lastFailure says how the last one was answered. failureNoticeAt is
+	// when the feed last reported failures, unnoticed how many came since.
+	failed          int64
+	lastFailure     string
+	lastFailureAt   time.Time
+	failureNoticeAt time.Time
+	unnoticed       int64
 }
 
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -363,6 +371,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
 		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
+		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,

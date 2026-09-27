@@ -877,6 +877,102 @@ func TestSandboxIngressObservers(t *testing.T) {
 	}
 }
 
+// TestSandboxIngressReportsHookFailures pins which answers count as a failed
+// hook: an authenticated hook or inspect post answered outside 2xx, since
+// the sandbox hooks fail closed on it. Verdicts, advisory routes, requests
+// no binding is known for and replays of an answer already reported do not.
+func TestSandboxIngressReportsHookFailures(t *testing.T) {
+	var mu sync.Mutex
+	var failures []SandboxHookFailure
+	var decisions int
+	observe := func(c *SandboxIngressConfig) {
+		c.OnHookFailure = func(f SandboxHookFailure) {
+			mu.Lock()
+			defer mu.Unlock()
+			failures = append(failures, f)
+		}
+		c.OnHookDecision = func(SandboxHookDecision) {
+			mu.Lock()
+			defer mu.Unlock()
+			decisions++
+		}
+	}
+	take := func() []SandboxHookFailure {
+		mu.Lock()
+		defer mu.Unlock()
+		out := failures
+		failures = nil
+		return out
+	}
+	f := newSandboxIngressFixture(t, observe)
+	hook := `{"hook_event_name":"PreToolUse","session_id":"sess-fail","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
+
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, hook); rec.Code != http.StatusOK {
+		t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := take(); len(got) != 0 {
+		t.Fatalf("a verdict was reported as a failure: %+v", got)
+	}
+
+	for _, tc := range []struct {
+		name, token, path, body string
+		headers                 []string
+		status                  int
+		want                    *SandboxHookFailure
+	}{
+		{"malformed hook body", f.claudeTok, "/api/v1/claude-code/hook", `not json`, nil, http.StatusBadRequest,
+			&SandboxHookFailure{BindingID: f.claude.ID, SandboxName: "dc-claude-app", Connector: "claudecode", Route: sandboxauth.RouteHook, Status: http.StatusBadRequest}},
+		{"another connector's hook", f.codexTok, "/api/v1/claude-code/hook", hook, nil, http.StatusForbidden,
+			&SandboxHookFailure{BindingID: f.codex.ID, SandboxName: "dc-codex-app", Connector: "codex", Route: sandboxauth.RouteHook, Status: http.StatusForbidden}},
+		{"inspect as another connector", f.claudeTok, "/api/v1/inspect/tool", `{}`, []string{"X-DefenseClaw-Connector", "codex"}, http.StatusForbidden,
+			&SandboxHookFailure{BindingID: f.claude.ID, SandboxName: "dc-claude-app", Connector: "claudecode", Route: sandboxauth.RouteInspect, Status: http.StatusForbidden}},
+		{"refused OTLP upload", f.claudeTok, "/v1/logs", `{}`, []string{otelSourceHeader, "codex"}, http.StatusForbidden, nil},
+		{"codex notify", f.claudeTok, "/api/v1/codex/notify", `{}`, nil, http.StatusForbidden, nil},
+		{"unknown path", f.claudeTok, "/api/v1/nope", `{}`, nil, http.StatusNotFound, nil},
+		{"unknown credential", "wrong-token", "/api/v1/claude-code/hook", hook, nil, http.StatusUnauthorized, nil},
+	} {
+		rec := f.do(t, http.MethodPost, tc.path, tc.token, tc.body, tc.headers...)
+		if rec.Code != tc.status {
+			t.Fatalf("%s: status %d, want %d (%s)", tc.name, rec.Code, tc.status, rec.Body.String())
+		}
+		got := take()
+		switch {
+		case tc.want == nil && len(got) != 0:
+			t.Fatalf("%s: reported %+v, want nothing", tc.name, got)
+		case tc.want != nil && (len(got) != 1 || got[0] != *tc.want):
+			t.Fatalf("%s: reported %+v, want %+v", tc.name, got, *tc.want)
+		}
+	}
+
+	// A retried post that gets the first answer replayed is one failure.
+	for i := 0; i < 2; i++ {
+		rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, `not json`, SandboxHookIdempotencyHeader, "fail-key-0001")
+		if rec.Code != http.StatusBadRequest || (i == 1) != (rec.Header().Get(sandboxIdempotentReplayHeader) == "true") {
+			t.Fatalf("attempt %d: %d replay=%q", i, rec.Code, rec.Header().Get(sandboxIdempotentReplayHeader))
+		}
+	}
+	if got := take(); len(got) != 1 || got[0].Status != http.StatusBadRequest {
+		t.Fatalf("retried failure reported %+v, want once", got)
+	}
+
+	// The rate limit.
+	limited := newSandboxIngressFixture(t, observe, func(c *SandboxIngressConfig) {
+		c.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{HookRPS: 0.001, HookBurst: 1, OTLPRPS: 1, OTLPBurst: 1})
+	})
+	limited.do(t, http.MethodPost, "/api/v1/claude-code/hook", limited.claudeTok, hook)
+	if rec := limited.do(t, http.MethodPost, "/api/v1/claude-code/hook", limited.claudeTok, hook); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second hook: %d", rec.Code)
+	}
+	if got := take(); len(got) != 1 || got[0].Status != http.StatusTooManyRequests || got[0].BindingID != limited.claude.ID {
+		t.Fatalf("throttled hook reported %+v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if decisions != 2 {
+		t.Fatalf("decisions = %d, want the two verdicts only", decisions)
+	}
+}
+
 func TestSandboxIngressIdempotentHookRetry(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	body := `{"hook_event_name":"UserPromptSubmit","session_id":"sess-idem","prompt":"hello","cwd":"/work/app"}`
