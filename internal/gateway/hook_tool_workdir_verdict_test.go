@@ -126,6 +126,13 @@ func workdirShellCalls() []workdirShellCall {
 			dirs: []string{"/work/app/sub"},
 		},
 		{
+			name: "antigravity-run-command-bypass-sandbox", connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
+				`"CommandLine":"` + c + `","Cwd":"{DIR}","WaitMsBeforeAsync":500,"BypassSandbox":true,"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
+			dirs: []string{"/work/app/sub"},
+		},
+		{
 			name: "antigravity-run-command", connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook",
 			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
 			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +

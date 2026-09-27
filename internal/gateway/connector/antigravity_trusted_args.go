@@ -27,9 +27,10 @@ import (
 // and returns the call's Cwd separately as the command's working directory.
 //
 // agy 1.2's run_command schema requires WaitMsBeforeAsync, toolSummary and
-// toolAction next to CommandLine and Cwd, and offers IsDaemon, RunPersistent
-// and RequestedTerminalID. With those left in, every real call parsed only
-// partially. Cwd is where agy runs the command; left in the arguments, any
+// toolAction next to CommandLine and Cwd, and offers IsDaemon, RunPersistent,
+// RequestedTerminalID and BypassSandbox (run outside agy's own sandbox).
+// With those left in, every real call parsed only partially. Cwd is where
+// agy runs the command; left in the arguments, any
 // Cwd other than the session's workspace (a subdirectory, /tmp, or the
 // sandbox path of a mounted workspace, which the gateway sees under its host
 // path) conflicted with the request's working directory and the parse was
@@ -39,9 +40,9 @@ import (
 // Every one of those fields still runs CommandLine in a shell, so the
 // projection keeps only the command. It is exact or refused (ok false,
 // arguments unchanged): every key must be unique and known, CommandLine a
-// string, Cwd an absolute path, WaitMsBeforeAsync a number, IsDaemon and
-// RunPersistent booleans, and the model's labels and the terminal ID
-// strings; each optional field may also be null.
+// string, Cwd an absolute path, WaitMsBeforeAsync a number, IsDaemon,
+// RunPersistent and BypassSandbox booleans, and the model's labels and the
+// terminal ID strings; each optional field may also be null.
 func AntigravityTrustedShellArgs(toolName string, args json.RawMessage) (projected json.RawMessage, cwd string, ok bool) {
 	if strings.TrimSpace(toolName) == "send_command_input" {
 		out, ok := antigravityCommandInputArgs(args)
@@ -77,7 +78,7 @@ func AntigravityTrustedShellArgs(toolName string, args json.RawMessage) (project
 			if json.Unmarshal(raw, &ms) != nil {
 				return args, "", false
 			}
-		case "IsDaemon", "RunPersistent":
+		case "IsDaemon", "RunPersistent", "BypassSandbox":
 			var flag *bool
 			if json.Unmarshal(raw, &flag) != nil {
 				return args, "", false

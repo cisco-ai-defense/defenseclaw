@@ -106,6 +106,10 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 		{"schema-optional", "run_command",
 			`{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","WaitMsBeforeAsync":0,"IsDaemon":true,"RunPersistent":false,"RequestedTerminalID":"t1","toolSummary":null,"toolAction":"x"}`, true},
 		{"plain", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, true},
+		// Running outside agy's sandbox still runs the command.
+		{"bypass-sandbox", "run_command",
+			`{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","WaitMsBeforeAsync":500,"BypassSandbox":true,"toolSummary":"write","toolAction":"Writing"}`, true},
+		{"bypass-sandbox-not-bool", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","BypassSandbox":"yes"}`, false},
 		{"relative-cwd", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"work/app"}`, false},
 		{"unknown-field", "run_command", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app","Env":{"A":"1"}}`, false},
 		{"duplicate-command", "run_command", `{"CommandLine":"ls","CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, false},
