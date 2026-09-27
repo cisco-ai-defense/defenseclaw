@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -516,6 +517,9 @@ func newSandboxEnvAttack(t *testing.T, h *sandboxHookHarness) *sandboxEnvAttack 
 // forward the untouched payload to the baked ingress, run none of the
 // planted code, and hand its children only the variables it reads.
 func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sandbox hooks run only inside the Linux sandbox image (bash 5); macOS /bin/bash 3.2 differs")
+	}
 	const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	hooks := []struct {
 		name     string
