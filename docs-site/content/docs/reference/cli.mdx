@@ -331,21 +331,27 @@ hard-cut version or rerun a fresh installer over an old installation.
 
 ## Sandbox
 
+Linux and macOS. The `sandbox` commands run coding agents in NVIDIA OpenShell
+0.1 sandboxes. `defenseclaw sandbox` checks the command line, then hands it
+unchanged to `defenseclaw-gateway sandbox`; `legacy-cleanup` is the one
+command the Python CLI runs itself. Every command and flag, with an example,
+is on [Sandbox CLI](/docs/reference/sandbox-cli). The walkthrough is the
+[Sandbox guide](/docs/setup/sandbox).
+
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw sandbox setup [--install-openshell] [--no-mounts] [--wrappers] [--non-interactive] [--yes]` | Linux and macOS. One-time setup for NVIDIA OpenShell 0.1 sandboxes: checks the machine, installs OpenShell when you agree, enables project-folder mounts, records the harnesses and builds their images. |
-| `defenseclaw sandbox run <harness> [--copy] [--safe] [--profile open\|balanced\|strict] [-- args]` | Run Claude Code (`claude`) or Codex (`codex`) in a sandbox on the current folder. |
-| `defenseclaw sandbox doctor [--json] [--fix]` | Check that this machine can run sandboxes. `defenseclaw doctor` shows the same checks in its Sandbox section. |
-| `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. It prints every step with its exact commands and asks once unless you pass `--yes`. |
-
-The `sandbox` commands are implemented by `defenseclaw-gateway sandbox`;
-`defenseclaw sandbox` accepts the same commands and flags and hands them
-over unchanged (`legacy-cleanup` is the one Python-only command). Run
-`defenseclaw sandbox --help` for the full list: lifecycle (`list`, `status`,
-`connect`, `stop`, `start`, `delete`, `logs`), the activity feed and asks
-(`activity`, `approvals`, `approve`, `reject`, `unblock`), the workspace
-(`undo`, `review`, `pull`), `policy`, `pack`, `image`, the shell wrappers
-(`enable`, `disable`) and `teardown`.
+| `defenseclaw sandbox setup [--harness H]... [--wrappers] [--non-interactive]` | One-time setup: checks the machine, installs OpenShell when you agree, enables project-folder mounts, records the harnesses, offers shell wrappers, and builds the harness images. |
+| `defenseclaw sandbox doctor [--fix] [--output json]` | Check that this machine can run sandboxes. `defenseclaw doctor` shows the same checks in its Sandbox section. |
+| `defenseclaw sandbox run <harness> [--copy] [--safe] [--profile open\|balanced\|strict] [-- args]` | Run a harness, such as `claude` or `codex`, in a new sandbox on the current folder. |
+| `defenseclaw sandbox list\|status\|connect\|exec\|logs\|stop\|start\|delete` | Manage sandboxes and their sessions. |
+| `defenseclaw sandbox activity [-f]\|approvals\|approve\|reject\|unblock` | Follow the live activity feed, answer the rare asks, and lift egress blocks. |
+| `defenseclaw sandbox review\|undo\|pull <name>` | Review a mounted project's changes, restore its pre-session snapshot, or bring a copy-mode sandbox's work back. |
+| `defenseclaw sandbox policy show\|explain\|suggest\|allow\|block` | Show where each setting of the sandbox policy comes from, suggest an allowlist, and edit the egress lists. |
+| `defenseclaw sandbox pack list\|show\|validate` | Inspect sandbox policy packs and their digests. |
+| `defenseclaw sandbox image build\|list\|prune` | Build, list, and prune the harness images. |
+| `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
+| `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
+| `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. |
 
 ## Discoverability
 

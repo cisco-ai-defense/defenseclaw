@@ -1,0 +1,886 @@
+---
+title: Sandbox CLI
+description: Every defenseclaw sandbox command and flag for NVIDIA OpenShell sandboxes, with an example for each. Covers setup and doctor, run and connect, the activity feed and asks, undo, review and pull, policy and packs, images, wrappers, and teardown.
+keywords:
+  - defenseclaw sandbox
+  - defenseclaw sandbox run
+  - defenseclaw sandbox setup
+  - OpenShell sandbox CLI
+  - defenseclaw sandbox undo
+  - defenseclaw sandbox unblock
+  - defenseclaw sandbox policy explain
+---
+
+`defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
+agents in NVIDIA OpenShell 0.1 sandboxes on Linux and macOS. This page lists
+every `sandbox` command and flag. For the walkthrough, see the
+[Sandbox guide](/docs/setup/sandbox). Packs and organization limits are covered
+in [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
+the `openshell:` keys in
+[Configuration](/docs/reference/configuration#openshell-sandbox-settings).
+
+The flag tables are generated from the `defenseclaw-gateway sandbox` command
+tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
+--help` prints the same flags.
+
+## How the commands run
+
+- **One entry point.** Type `defenseclaw sandbox …`. The Python CLI checks the
+  command line against the same commands and flags, then replaces itself with
+  `defenseclaw-gateway sandbox …` and passes your arguments on exactly as
+  typed. `legacy-cleanup` is the only command the Python CLI runs itself.
+- **Linux and macOS only.** On Windows every command stops with exit
+  status 3 before doing anything. `setup`, `run`, `image build`, and `enable`
+  also stop with status 3 under WSL2, in a `managed_enterprise` install, and
+  when run as root: sandboxes run as your own user.
+- **The daemon does the work.** Commands that create, change, or read
+  sandboxes call the DefenseClaw daemon's
+  [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
+  port, using the gateway token. The daemon runs them only while
+  `openshell.enabled` is `true`, which `sandbox setup` turns on. The CLI keeps
+  the terminal, the copy-mode workspace, the image builds, and the installer.
+  `pack`, `image`, `enable`, `disable`, and `doctor` work without the daemon.
+- **Harness names.** A harness can be named by the command you type
+  (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `amp`,
+  `cursor-agent`, `devin`), by its connector name (`claudecode`), or by its
+  display name. Setup and the image commands default to
+  `openshell.harnesses`, and then to Claude Code and Codex. Amp, Cursor Agent,
+  and Devin CLI are not verified end to end yet: their images build, but they
+  never pass the hook check, so no sandbox runs them. The
+  [capability matrix](/docs/capability-matrix) says why for each harness.
+- **Sandbox names.** A name is lowercase letters, digits, and `-`, up to 63
+  characters. Without `--name`, `run` picks `dc-<harness>-<folder>-<random>`,
+  for example `dc-claude-myapp-7f3a`. `sandbox list` shows the names.
+- **Output.** Commands with `-o, --output` print `text` (the default) or
+  `json`.
+- **Exit status.** `0` on success and `1` on an error. `run`, `connect`, and
+  `exec` return the exit status of the harness or command they ran. An
+  interrupted command returns `130`, and an unsupported platform returns `3`.
+
+| Command | What it does |
+| --- | --- |
+| [`sandbox setup`](#sandbox-setup) | One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, and images. |
+| [`sandbox doctor`](#sandbox-doctor) | Check that this machine can run sandboxes. |
+| [`sandbox image`](#sandbox-image) | Build, list, and prune the harness images. |
+| [`sandbox enable`](#sandbox-enable), [`disable`](#sandbox-disable) | Add or remove the shell wrapper that runs a harness command in a sandbox. |
+| [`sandbox teardown`](#sandbox-teardown) | Remove everything DefenseClaw set up for sandboxes. |
+| [`sandbox run`](#sandbox-run) | Run a harness in a new sandbox on the current folder. |
+| [`sandbox connect`](#sandbox-connect) | Resume a sandbox and attach the harness, or a shell. |
+| [`sandbox exec`](#sandbox-exec) | Run one command in a sandbox. |
+| [`sandbox logs`](#sandbox-logs) | Show the output of a detached run. |
+| [`sandbox list`](#sandbox-list), [`status`](#sandbox-status) | List sandboxes, or show one in detail. |
+| [`sandbox stop`](#sandbox-stop), [`start`](#sandbox-start), [`delete`](#sandbox-delete) | Stop, start, or delete sandboxes. |
+| [`sandbox activity`](#sandbox-activity) | The live activity feed. |
+| [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
+| [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
+| [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its snapshot. |
+| [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
+| [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, and edit the sandbox policy. |
+| [`sandbox pack`](#sandbox-pack) | List, show, and validate policy packs. |
+| [`sandbox legacy-cleanup`](#sandbox-legacy-cleanup) | Remove a retired `openshell-sandbox` 0.0.x install. |
+
+## Set up and maintain
+
+### `sandbox setup`
+
+One-time setup. It checks this machine and installs OpenShell with NVIDIA's
+installer when you agree (`sudo`, sha256-verified). It enables project-folder
+bind mounts on your local OpenShell gateway, backing up the gateway config so
+that `teardown` can restore it. It turns OpenShell's anonymous usage telemetry
+off unless you keep it, records the harnesses in `openshell.harnesses`, and
+sets `openshell.enabled: true`. It then offers the shell wrappers and builds
+the harness images (the first build downloads about 3 GB).
+
+```bash
+defenseclaw sandbox setup
+defenseclaw sandbox setup --harness claude --harness codex --wrappers
+defenseclaw sandbox setup --non-interactive --skip-images
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags setup */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--harness` | text, repeatable or comma-separated |  | Harness to set up (repeatable; default: claude and codex). |
+| `--install-openshell` | switch |  | Install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo). |
+| `--no-mounts` | switch |  | Leave bind mounts off; every run then works on a copy. |
+| `--no-wrappers` | switch |  | Do not offer the shell wrappers. |
+| `--non-interactive` | switch |  | Never prompt: take the defaults and skip steps that need consent. |
+| `--skip-images` | switch |  | Do not build the harness images now (the first run builds them). |
+| `--upstream-telemetry` | switch |  | Keep OpenShell's anonymous usage telemetry on. |
+| `--wrappers` | switch |  | Make the harness commands run sandboxed without asking. |
+| `-y`, `--yes` | switch |  | Answer every question with its default. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox doctor`
+
+Checks the platform, Landlock, Docker, the OpenShell service, CLI,
+registration and version, bind mounts, telemetry, ports, the DefenseClaw
+daemon, harness images, shell wrappers, and the organization policy. Each
+failed check names its fix. `--fix` applies the fixes it can make as your user,
+after asking. Doctor exits `1` when a check fails. With `--output json` it
+prints the result and exits `0`, so read the `ok` field instead.
+`defenseclaw doctor` shows the same checks in its Sandbox section.
+
+```bash
+defenseclaw sandbox doctor
+defenseclaw sandbox doctor --fix
+defenseclaw sandbox doctor --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags doctor */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--fix` | switch |  | Apply the fixes doctor can make as your user (asks first). |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `-y`, `--yes` | switch |  | Apply fixes without asking. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image`
+
+The harness images are a local DefenseClaw layer on a digest-pinned NVIDIA
+OpenShell community base. The layer holds the harness at DefenseClaw's
+reviewed version, root-owned hooks, and the harness's hook configuration. An
+image is used only after its hooks pass a live check: they fire, a blocked
+tool call has no effect, and an allowed one runs.
+
+```bash
+defenseclaw sandbox image list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox image build`](#sandbox-image-build) | Build and hook-verify harness images (default: the configured harnesses). |
+| [`sandbox image list`](#sandbox-image-list) | List the harness images. |
+| [`sandbox image prune`](#sandbox-image-prune) | Remove superseded harness images. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image build`
+
+Builds and hook-checks the images of the named harnesses, or of
+`openshell.harnesses` (then Claude Code and Codex) when you name none. A
+current, checked image is kept unless you pass `--force`. The build log is
+written to `<data_dir>/logs/sandbox-image-<harness>.log`.
+
+```bash
+defenseclaw sandbox image build
+defenseclaw sandbox image build codex --force --verbose
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image build */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--force` | switch |  | Rebuild even when a verified image is current. |
+| `--verbose` | switch |  | Stream the docker build output. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image list`
+
+Lists the recorded harness images, newest first.
+
+```bash
+defenseclaw sandbox image list --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image list */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image prune`
+
+Removes superseded harness images. It keeps the current images and leaves
+images that another DefenseClaw data directory recorded, or that nothing
+recorded.
+
+```bash
+defenseclaw sandbox image prune --dry-run
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image prune */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--dry-run` | switch |  | Only show what would be removed. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox enable`
+
+Makes typing the harness command run it in a sandbox. It writes a marked block
+to your shell's rc file (`~/.bashrc`, `~/.zshrc` or `$ZDOTDIR/.zshrc`, or
+`~/.config/fish/config.fish`). The block defines a shell function named after
+the command that runs `sandbox run <harness>` with your arguments after `--`.
+The harness is also recorded in `openshell.wrappers`. New shells pick the
+block up. To skip the sandbox for one call, run the command with
+`DEFENSECLAW_NO_SANDBOX=1` set. Inside a sandbox the function runs the harness
+directly. Nothing outside the block changes, and removing the last wrapper
+removes the block.
+
+```bash
+defenseclaw sandbox enable claude
+defenseclaw sandbox enable codex --shell zsh
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags enable */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--rc` | text |  | Rc file to edit (default: the shell's). |
+| `--shell` | text |  | Bash, zsh or fish (default: `$SHELL`). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox disable`
+
+Removes the harness's wrapper block. Without `--shell` or `--rc`, it removes
+the block from the rc files of bash, zsh, and fish.
+
+```bash
+defenseclaw sandbox disable claude
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags disable */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--rc` | text |  | Rc file to edit (default: the shell's). |
+| `--shell` | text |  | Bash, zsh or fish (default: `$SHELL`). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox teardown`
+
+Deletes DefenseClaw's sandboxes, its OpenShell providers and provider
+profiles, and its harness images. It restores the OpenShell gateway config
+that setup changed, unless the file changed since. It also removes the shell
+wrappers and sets `openshell.enabled: false`. OpenShell itself stays
+installed. `defenseclaw uninstall` runs teardown for you. It works without a
+DefenseClaw config, so it can clean up a half-installed host.
+
+```bash
+defenseclaw sandbox teardown --dry-run
+defenseclaw sandbox teardown --yes --keep-images
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags teardown */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--dry-run` | switch |  | Only show what would be removed. |
+| `--keep-images` | switch |  | Keep the harness images. |
+| `-y`, `--yes` | switch |  | Do not ask. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+## Run and manage sandboxes
+
+### `sandbox run`
+
+Runs a harness in a new sandbox on the current folder. By default the folder
+is mounted live, secret files are masked, `.git/hooks` and `.git/config` are
+read-only, and a snapshot is taken first so that `undo` can restore the
+folder. `--copy` works on a copy with secrets held back instead, and you bring
+its work back with `pull`. Skip-permissions mode is on by default, and
+`--safe` keeps the harness's own prompts. The harness gets your terminal.
+Arguments after `--` go to the harness.
+
+When the harness exits, you get a summary line: tool calls and blocks, sites
+contacted and blocked, and files changed. Changes that can run code on your
+machine are called out. For a mounted folder you then keep the changes, undo
+them, or see the diff first (`openshell.workdir.on_exit` can decide for you).
+In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
+patch, or skip, which leaves them in the sandbox for `pull`. The sandbox is
+then stopped and kept for `connect`, unless you passed `--rm`.
+
+When you run interactively without `--name` and this folder already has a
+sandbox of the same harness, `run` offers to resume it; `--new` starts
+another one instead. Inside a sandbox, `sandbox run <harness>` runs the
+harness directly.
+
+```bash
+defenseclaw sandbox run claude
+defenseclaw sandbox run codex --copy --name fix-tests
+defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
+defenseclaw sandbox run claude --credential STRIPE_API_KEY=api.stripe.com -- --model sonnet
+defenseclaw sandbox run claude --profile balanced --context ~/code/shared-lib --host-port 5432
+```
+
+A few rules the flags follow:
+
+- `--detach` needs a prompt: `--prompt TEXT`, or the harness's own print
+  mode after `--` (for example `-- -p "TEXT"` for Claude Code or
+  `-- exec "TEXT"` for Codex). It can't be combined with `--rm`. Follow the
+  run with `sandbox logs -f`.
+- Without a terminal, `run` needs `--prompt`.
+- `--llm auto` shares the first model credential it finds for the harness.
+  For Claude Code that is `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
+  For Codex it is `OPENAI_API_KEY` (or `CODEX_API_KEY`), then the API key
+  that `codex login --with-api-key` saved in `~/.codex/auth.json`; a ChatGPT
+  login is not shared. `--llm bedrock` shares `AWS_BEARER_TOKEN_BEDROCK` for
+  Amazon Bedrock in `--bedrock-region`, and `auto` never picks it. OpenShell
+  gives the harness a placeholder that works only against the provider's
+  hosts. With `--llm none`, or when nothing is found, you log in inside the
+  sandbox.
+- `--credential NAME=host[:port]` gives the sandbox a placeholder in `$NAME`
+  that OpenShell swaps for your value only on requests to that host (port 443
+  unless you give one). `--github-write` does the same for your `GH_TOKEN` or
+  `GITHUB_TOKEN` and `api.github.com`.
+- `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
+  `--no-mcp`, `--cpu`, and `--memory` go through the
+  [sandbox policy](/docs/setup/sandbox-policy). An organization limit can
+  clamp or refuse them, and `sandbox policy explain` shows the outcome
+  before you run.
+- In a safe run (`--safe`, or a policy that keeps the prompts), harness
+  arguments that would turn the prompts off are dropped with a warning.
+
+{/* AUTOGEN-BEGIN: sandbox-flags run */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--bedrock-region` | text |  | Amazon Bedrock region for --llm bedrock (default `$AWS_REGION`). |
+| `--context` | text, repeatable |  | Extra folder mounted read-only (repeatable). |
+| `--copy` | switch |  | Work on a copy of the folder with secrets held back; bring changes back with pull. |
+| `--cpu` | text |  | CPU limit, for example 2 or 500m. |
+| `--credential` | text, repeatable |  | NAME=host[:port]: give the sandbox a placeholder for `$NAME` that works only against that host (repeatable). |
+| `-d`, `--detach` | switch |  | Run in the background (needs --prompt); follow with sandbox logs -f. |
+| `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
+| `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so the agent can push and open pull requests. |
+| `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
+| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock. |
+| `--memory` | text |  | Memory limit, for example 4Gi. |
+| `--name` | text |  | Sandbox name (default `dc-<harness>-<folder>-<random>`). |
+| `--new` | switch |  | Start a new sandbox even when one already holds this folder. |
+| `--no-build` | switch |  | Fail instead of building a missing harness image. |
+| `--no-mcp` | switch |  | Leave the harness's MCP servers behind. |
+| `--no-snapshot` | switch |  | Skip the pre-session snapshot (and so undo). |
+| `--pack` | text |  | Sandbox policy pack (open, balanced, strict, or a custom pack). |
+| `--profile` | text |  | Network profile: open, balanced or strict. |
+| `-p`, `--prompt` | text |  | Run the harness headless with this prompt. |
+| `--refresh` | switch |  | When resuming a copy-mode sandbox, copy the folder again. |
+| `--rm` | switch |  | Delete the sandbox when the session ends. |
+| `--safe` | switch |  | Keep the harness's own permission prompts (skip-permissions off). |
+| `--unmask` | text, repeatable |  | Share a masked secret file or glob with the sandbox (repeatable). |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (keep the changes). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox connect`
+
+Resumes a sandbox: it starts the sandbox if it is stopped, then attaches the
+harness to your terminal, or a shell with `--shell`. The session ends the
+same way as a `run` session. Needs a terminal.
+
+```bash
+defenseclaw sandbox connect dc-claude-myapp-7f3a
+defenseclaw sandbox connect fix-tests --refresh -- --model sonnet
+defenseclaw sandbox connect dc-claude-myapp-7f3a --shell
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags connect */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--refresh` | switch |  | Copy-mode: copy the folder into the sandbox again first. |
+| `--rm` | switch |  | Delete the sandbox when the session ends. |
+| `--shell` | switch |  | Open a shell in the sandbox instead of the harness. |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox exec`
+
+Runs one command in a running sandbox, in the project folder unless you pass
+`--workdir`. The command gets the same environment, including the egress
+proxy, as the harness. A terminal is allocated when yours is one. The command
+goes after `--`.
+
+```bash
+defenseclaw sandbox exec dc-claude-myapp-7f3a -- npm test
+defenseclaw sandbox exec fix-tests --no-tty -- git status --short
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags exec */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--no-tty` | switch |  | Never allocate a terminal. |
+| `--tty` | switch |  | Allocate a terminal even when this one is not. |
+| `--workdir` | text |  | Working directory in the sandbox (default: the project). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox logs`
+
+Shows the output of a detached run (`run --detach`) while the sandbox runs.
+
+```bash
+defenseclaw sandbox logs fix-tests -f
+defenseclaw sandbox logs fix-tests --lines 50
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags logs */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-f`, `--follow` | switch |  | Keep following the output. |
+| `-n`, `--lines` | number | `200` | Lines to show. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox list`
+
+Lists this DefenseClaw's sandboxes with their harness, phase, workspace mode,
+profile, uptime, hook traffic, and project folder.
+
+```bash
+defenseclaw sandbox list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags list */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox status`
+
+Without a name, shows the sandbox subsystem: whether it is on and reachable,
+the OpenShell gateway, the listener addresses, the default pack and profile,
+the organization policy, and counts. With a name, shows that sandbox in
+detail: the harness and its version, phase, project folder, permissions mode,
+policy, hook tamper tier, hook traffic and the last blocked tool call, egress
+totals, credential endpoints, the undo snapshot, waiting asks, nested
+repositories, and warnings.
+
+```bash
+defenseclaw sandbox status
+defenseclaw sandbox status dc-claude-myapp-7f3a --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags status */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox stop`
+
+Stops a sandbox. It is kept, so `start` or `connect` can resume it.
+
+```bash
+defenseclaw sandbox stop dc-claude-myapp-7f3a
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags stop */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox start`
+
+Starts a stopped sandbox as a new session. A mounted project gets a fresh
+snapshot unless you pass `--no-snapshot`. Attach to it with `connect`.
+
+```bash
+defenseclaw sandbox start dc-claude-myapp-7f3a
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags start */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--no-snapshot` | switch |  | Keep the previous session's snapshot instead of taking a new one. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox delete`
+
+Deletes sandboxes together with their OpenShell providers and credentials,
+and their undo snapshot unless you pass `--keep-snapshot`. Asks once per
+sandbox unless you pass `--yes`.
+
+```bash
+defenseclaw sandbox delete dc-claude-myapp-7f3a
+defenseclaw sandbox delete fix-tests docs --yes
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags delete */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--keep-snapshot` | switch |  | Keep the pre-session snapshot. |
+| `-y`, `--yes` | switch |  | Do not ask. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+## During a session
+
+### `sandbox activity`
+
+Shows the activity feed of every sandbox, or one: destinations reached (✓)
+and blocked (✗), large uploads, asks, blocked tool calls, and findings such
+as hooks that stopped reaching DefenseClaw. A blocked destination that can be
+unblocked shows the `unblock` command to run. `-f` keeps following the
+feed. The daemon keeps a bounded buffer of recent events. Each event has a
+sequence number, and `--since` starts after one.
+
+```bash
+defenseclaw sandbox activity -f
+defenseclaw sandbox activity --sandbox dc-claude-myapp-7f3a --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags activity */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-f`, `--follow` | switch |  | Keep following the feed. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--sandbox` | text |  | Only this sandbox. |
+| `--since` | number | `0` | Start after this event sequence number. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox approvals`
+
+Lists the asks waiting for you. Asks are rare: a program in the sandbox tried
+to connect somewhere directly, around the egress proxy, and the policy would
+not decide it alone. Typical asks are ports on your machine and private
+network addresses. `--watch` keeps the list current.
+
+```bash
+defenseclaw sandbox approvals
+defenseclaw sandbox approvals --sandbox dc-claude-myapp-7f3a --watch
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags approvals */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--sandbox` | text |  | Only this sandbox. |
+| `--watch` | switch |  | Keep watching for new asks. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox approve`
+
+Approves an ask. The approval opens a direct OpenShell rule for the
+destination. It is applied at the sandbox's next quiet moment, because every
+OpenShell policy change closes the sandbox's open connections. `--always`
+also saves the hosts to `openshell.egress.unblocked` for future sandboxes.
+
+```bash
+defenseclaw sandbox approve dc-claude-myapp-7f3a a1b2c3
+defenseclaw sandbox approve dc-claude-myapp-7f3a a1b2c3 --always --reason "team registry"
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags approve */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--always` | switch |  | Keep the decision for future sandboxes. |
+| `--reason` | text |  | Note recorded with the decision. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox reject`
+
+Rejects an ask. `--always` also adds the hosts to `openshell.egress.block`.
+
+```bash
+defenseclaw sandbox reject dc-claude-myapp-7f3a a1b2c3 --reason "not needed"
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags reject */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--always` | switch |  | Keep the decision for future sandboxes. |
+| `--reason` | text |  | Note recorded with the decision. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox unblock`
+
+Lifts an egress block for one sandbox (`--sandbox NAME`) or for every sandbox
+(`--always`, saved to `openshell.egress.unblocked`). Choose exactly one of
+the two. Only blocks from the blocklist feed or the profile's default can be
+lifted: IP addresses under `open`, and hosts off the allowlist under
+`balanced`. Your own block list, private networks, this machine, and your
+organization's lists can't be unblocked, and neither can anything under
+`strict`, which runs without the egress proxy. With
+`openshell.admin.allow_unblock: false`, nothing can be unblocked. The
+[decision order](/docs/setup/sandbox-policy#how-a-destination-is-decided)
+has the details.
+
+```bash
+defenseclaw sandbox unblock webhook.site --sandbox dc-claude-myapp-7f3a
+defenseclaw sandbox unblock docs.example.com --always
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags unblock */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--always` | switch |  | Unblock for every sandbox from now on. |
+| `--sandbox` | text |  | Unblock for this sandbox only. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+## After a session
+
+### `sandbox review`
+
+Reviews a mounted project's changes since the session's snapshot. It prints
+a summary of the changes and flags the files that can run code on your
+machine, such as `package.json` scripts, build and task files, CI workflows,
+git attributes and submodules, harness and agent config, lock files, new or
+newly executable files, symbolic links, and embedded git repositories. It
+also flags secret-like files, and lists the review's findings and the nested
+repositories the session's guard found. `--diff` prints the unified diff too.
+
+```bash
+defenseclaw sandbox review dc-claude-myapp-7f3a
+defenseclaw sandbox review dc-claude-myapp-7f3a --diff
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags review */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--diff` | switch |  | Print the unified diff too. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox undo`
+
+Restores a mounted project to its pre-session snapshot. It shows a preview
+first, then asks. The sandbox is stopped before the restore, and `--restart`
+starts it again afterwards. Branches and tags the session moved are put back
+too, unless you pass `--keep-refs`.
+
+```bash
+defenseclaw sandbox undo dc-claude-myapp-7f3a --preview
+defenseclaw sandbox undo dc-claude-myapp-7f3a --yes --restart
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags undo */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--keep-refs` | switch |  | Leave branches and tags as the session left them. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--preview` | switch |  | Only show what undo would change. |
+| `--restart` | switch |  | Start the sandbox again afterwards. |
+| `-y`, `--yes` | switch |  | Do not ask after the preview. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox pull`
+
+Brings a copy-mode sandbox's work back, starting the sandbox first if it is
+stopped. Without a mode it shows the review: the changed files, the ones that
+can run code on your machine, and files held back from the sandbox. Choose
+one mode to bring the work back: `--apply` (a
+3-way merge into your working tree), `--branch` (branch `dc/<name>`) or
+`--branch-name NAME`, or `--patch-out FILE`. A folder that is not a git
+repository has no branch mode. Changes that can run code on your machine need
+your confirmation, or `--accept-sensitive` without a terminal.
+
+```bash
+defenseclaw sandbox pull fix-tests
+defenseclaw sandbox pull fix-tests --branch
+defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags pull */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--accept-sensitive` | switch |  | Bring back changes that can run code on this machine. |
+| `--apply` | switch |  | Merge the changes into your working tree (3-way). |
+| `--branch` | switch |  | Put the changes on branch `dc/<name>`. |
+| `--branch-name` | text |  | Put the changes on this branch. |
+| `--force` | switch |  | Override blocking review gates, an existing branch or patch file. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--patch-out` | text |  | Write the changes to this patch file. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+## Policy and packs
+
+### `sandbox policy`
+
+The effective sandbox policy combines the pack, your `openshell` keys, the run
+flags, and the organization's `openshell.admin` limits. See
+[How the effective policy is computed](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed).
+
+```bash
+defenseclaw sandbox policy show
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox policy allow`](#sandbox-policy-allow) | Add hosts to openshell.egress.allow (used by the balanced and strict profiles). |
+| [`sandbox policy block`](#sandbox-policy-block) | Add hosts to openshell.egress.block. |
+| [`sandbox policy explain`](#sandbox-policy-explain) | Show every resolved setting and where it comes from (pack, config, flag, organization). |
+| [`sandbox policy show`](#sandbox-policy-show) | Show the effective sandbox policy. |
+| [`sandbox policy suggest`](#sandbox-policy-suggest) | Suggest an egress allowlist from the destinations sandboxes reached. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy show`
+
+Shows the effective policy of one sandbox (`--sandbox`), or the policy a
+`run` in this folder with the given flags would get. It lists the pack and
+its digest, the profile, network and approvals modes, the organization
+policy, the main settings, and any setting a limit refused.
+
+```bash
+defenseclaw sandbox policy show
+defenseclaw sandbox policy show --harness codex --profile balanced --copy
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy show */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--copy` | switch |  | Resolve for a copy-mode run. |
+| `--harness` | text |  | Resolve for this harness. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--pack` | text |  | Resolve with this pack. |
+| `--profile` | text |  | Resolve with this profile. |
+| `--safe` | switch |  | Resolve for a --safe run. |
+| `--sandbox` | text |  | The policy of this sandbox. |
+| `--unmask` | text, repeatable |  | Resolve with these --unmask globs. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy explain`
+
+Shows every resolved setting with its value, the layer that set it (`pack`,
+`user`, `flag`, `admin`, or `default`), and its precise origin, such as
+`openshell.admin.min_profile`. A clamped setting also shows the value that
+was asked for.
+
+```bash
+defenseclaw sandbox policy explain
+defenseclaw sandbox policy explain --sandbox dc-claude-myapp-7f3a --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy explain */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--copy` | switch |  | Resolve for a copy-mode run. |
+| `--harness` | text |  | Resolve for this harness. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--pack` | text |  | Resolve with this pack. |
+| `--profile` | text |  | Resolve with this profile. |
+| `--safe` | switch |  | Resolve for a --safe run. |
+| `--sandbox` | text |  | The policy of this sandbox. |
+| `--unmask` | text, repeatable |  | Resolve with these --unmask globs. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy suggest`
+
+Prints an `openshell.egress.allow` list, as YAML, of the destinations your
+sandboxes reached in the daemon's activity buffer, with a count for each and
+the blocked ones listed apart. Use it before you move to the default-deny
+`balanced` profile.
+
+```bash
+defenseclaw sandbox policy suggest
+defenseclaw sandbox policy suggest --sandbox dc-claude-myapp-7f3a --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy suggest */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--sandbox` | text |  | Only this sandbox's destinations. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy allow`
+
+Adds host patterns to `openshell.egress.allow` in `config.yaml`, and refuses
+patterns that cover every host or a whole top-level domain. Allow entries
+matter under the `balanced` profile, which reaches only allowed hosts. Under
+`strict`, a direct connection to an allowed host is approved without asking.
+The daemon applies the change to running sandboxes within a few seconds.
+
+```bash
+defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy allow */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy block`
+
+Adds host patterns to `openshell.egress.block` in `config.yaml`. A host on the
+block list can't be unblocked; remove the entry to reach it again.
+
+```bash
+defenseclaw sandbox policy block files.example.net
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy block */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+Both commands check each pattern and refuse a change that would make
+`config.yaml` invalid. In a `managed_enterprise` install they are refused,
+because the administrator owns `config.yaml`.
+
+### `sandbox pack`
+
+Policy packs set the whole sandbox posture. See
+[Sandbox policy packs](/docs/setup/sandbox-policy).
+
+```bash
+defenseclaw sandbox pack list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags pack */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox pack list`](#sandbox-pack-list) | List the built-in and custom packs with their sha256 digests. |
+| [`sandbox pack show`](#sandbox-pack-show) | Print a pack and its sha256 digest (for openshell.admin.required_pack_digest). |
+| [`sandbox pack validate`](#sandbox-pack-validate) | Validate a pack file strictly. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox pack list`
+
+Lists the built-in packs and the custom packs under `openshell.pack_dir`, with
+their profile and `sha256` digest. A custom pack that fails to load shows why.
+
+```bash
+defenseclaw sandbox pack list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags pack list */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox pack show`
+
+Prints a pack, normalized, with its source and digest. The digest is the one
+`openshell.admin.required_pack_digest` pins. It takes the same references as
+`openshell.pack`: a built-in name, a custom pack name, or an absolute path.
+
+```bash
+defenseclaw sandbox pack show balanced
+defenseclaw sandbox pack show ~/.defenseclaw/policies/sandbox/team-web
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags pack show */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox pack validate`
+
+Loads a custom pack file strictly, with the same checks a run applies, and
+prints its name, profile, and digest. It takes an absolute path (or one
+starting with `~/`) to a `pack.yaml` or its directory.
+
+```bash
+defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.yaml
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags pack validate */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+## Legacy cleanup
+
+### `sandbox legacy-cleanup`
+
+Linux only, and the one `sandbox` command the Python CLI runs itself. It
+removes a retired `openshell-sandbox` 0.0.x standalone install and restores
+the host's OpenClaw networking, ownership, and config. It prints every step
+with its exact commands and asks once, unless you pass `--yes`. Progress is
+recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
+does what is left. The [Sandbox guide](/docs/setup/sandbox) says when you need
+it.
+
+```bash
+defenseclaw sandbox legacy-cleanup --dry-run
+defenseclaw sandbox legacy-cleanup
+```
+
+| Flag | Description |
+| --- | --- |
+| `--dry-run` | Print the cleanup plan and exact commands; change nothing. |
+| `-y`, `--yes` | Apply the plan without asking for confirmation. |
+| `--remove-user` | Also delete the `sandbox` user and its home (`userdel -r`). Refused while it has processes, or until its ownership and ACLs are gone from the OpenClaw home. |
+| `--remove-binary` | Also remove `/usr/local/bin/openshell-sandbox` when it is a legacy 0.0.x build that no package owns. |
