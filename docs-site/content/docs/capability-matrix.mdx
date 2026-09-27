@@ -32,7 +32,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
-  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image: the policy tier, then the hook config file. managed tier = a root-owned system policy file that user and project settings cannot switch off. user tier = a file in the image home the agent can edit (some launchers restore it from a root-owned copy before every start), or code the agent or a repository adds runs beside the hooks. The image pin is the harness version the image installs by default. The last line says whether the harness has run end to end in an OpenShell sandbox. pending = DefenseClaw renders no sandbox image files for this connector yet." />
+  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell sandbox image: the tamper tier, then the hook config file. managed tier = a root-owned system policy file that user and project settings cannot switch off. user tier = a file in the image home the agent can edit (some launchers restore it from a root-owned copy before every start), or code the agent or a repository adds runs beside the hooks. The image pin is the harness version the image installs by default. verified = the harness ran end to end in a sandbox; unverified = its image never passes the hook check, so it cannot run yet. pending = DefenseClaw builds no sandbox image for this connector." />
   <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
 </Cards>
 
@@ -46,9 +46,9 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
 | Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
-| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); `DefaultVersion` and `Verification()` in `internal/openshell/harness/` (image pin and end-to-end status) |
+| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); in `internal/openshell/harness/`, each harness's `DefaultVersion` (image pin), `Verification()` (status, and the reason an unverified harness is unverified), and the credential profiles and in-sandbox login marked unverified (sign-in paths not tested live) |
 
-The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
+The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change. The Go tests in `internal/gateway/connector` and `internal/openshell/harness` fail when its sandbox fields disagree with the code.
 
 <Callout type="info" title="Advertised contract vs empirical verification">
 The Antigravity contract documents native ask and hard deny only on
@@ -80,17 +80,42 @@ connector-specific fallback; there is no TUI approval queue.
 
 ### "I want to run the agent in an OpenShell sandbox"
 
-DefenseClaw can render OpenShell sandbox image files for Claude Code, Codex,
-OpenCode, GitHub Copilot CLI, Amp, Cursor Agent, Kiro CLI, Devin CLI, Hermes,
-OpenHands, Antigravity and OmniGent. The matrix shows each one's tier: Claude
-Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their hooks in a
-root-owned managed policy. The others are in the user tier: the agent can
-edit their hook file, or code the agent or a repository adds runs beside the
-hooks (Hermes, for example, loads `.env` files and plugins from its home).
-Every sandbox hook fails closed. The **OpenShell sandbox** column says which
-harnesses have run end to end in a sandbox. `defenseclaw sandbox run
-<harness>` starts one; `defenseclaw sandbox --help` lists the other sandbox
-commands. Every other connector is pending.
+`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
+sandbox, on Linux or macOS, that sees only your project folder. The
+[sandbox guide](/docs/setup/sandbox) covers setup and every `sandbox` command.
+DefenseClaw builds sandbox images for twelve harnesses; every other connector is
+pending in the matrix above.
+
+<SandboxHarnessTable />
+
+- **Tamper tier.** In the managed tier the hooks are in a root-owned system or
+  managed policy file that user and project settings cannot switch off. In the
+  user tier the agent can edit its own hook file, or code the agent or a
+  repository adds runs beside the hooks (Hermes, for example, loads `.env`
+  files and plugins from its home, which its launcher checks before every
+  start). DefenseClaw reports a sandbox whose
+  hooks go silent while the harness is active, and OpenShell's network policy
+  holds either way. `defenseclaw sandbox status <name>` shows the tier.
+- **Verification.** Before DefenseClaw starts a sandbox from an image, the
+  image must pass a hook check against a built-in mock model (for Kiro CLI,
+  Kiro's own scripted-response mode): the hooks fire, a blocked tool call has
+  no effect, and an allowed one runs. *Verified end to end* also means the
+  harness ran in a live OpenShell sandbox with the DefenseClaw daemon, where a
+  blocked command stayed blocked and the egress block list held.
+- **Unverified.** These harnesses send every request, the account check
+  included, to their vendor's service and need an account before the first
+  turn, so no mock model can drive them. Their images build but never pass the
+  hook check, and `sandbox run` refuses them until a check with a vendor
+  account passes.
+- **Not tested live.** A sign-in path whose endpoints or login no live run
+  exercised, because no account was available. The connector page says which
+  sign-ins `defenseclaw sandbox run` shares.
+- **Setup defaults.** `defenseclaw sandbox setup`, the image commands and the
+  sandbox doctor cover Claude Code and Codex unless you name other harnesses
+  with `--harness` or the `openshell.harnesses` setting. The TUI and macOS
+  setup wizards offer Claude Code and Codex.
+
+Every sandbox hook fails closed.
 
 ### "I want fail-closed on transport failures"
 

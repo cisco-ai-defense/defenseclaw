@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -31,9 +33,12 @@ import (
 // harness row shows its artifacts' tamper tier, the hook config file the
 // harness reads (root-owned for the managed tier; for the user tier the
 // workload's copy, or a root-owned file the launcher forces, as for Kiro's
-// agent), the default image pin and the verification status; every other
-// row is pending. internal/gateway/connector checks the status against
-// SandboxArtifactsSupported.
+// agent), the default image pin, the verification status with the reason
+// an unverified harness is unverified (the lead clause of its
+// Verification.Note), and the sign-in paths not tested live (credential
+// profiles with an Unverified reason, then "login" for an unverified
+// in-sandbox login); every other row is pending. internal/gateway/connector
+// checks the status against SandboxArtifactsSupported.
 func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
@@ -56,6 +61,10 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 				HookConfig string `json:"hookConfig"`
 				HarnessPin string `json:"harnessPin"`
 				Verified   string `json:"verified"`
+				// UnverifiedReason and UntestedAuth are rendered on the
+				// capability matrix page's sandbox harness table.
+				UnverifiedReason string   `json:"unverifiedReason"`
+				UntestedAuth     []string `json:"untestedAuth"`
 			} `json:"sandbox"`
 		} `json:"connectors"`
 	}
@@ -68,7 +77,8 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 		sb := row.Sandbox
 		spec, ok := Get(row.ID)
 		if !ok {
-			if sb.Status != "pending" || sb.TamperTier != "" || sb.HookConfig != "" || sb.HarnessPin != "" || sb.Verified != "" {
+			if sb.Status != "pending" || sb.TamperTier != "" || sb.HookConfig != "" || sb.HarnessPin != "" || sb.Verified != "" ||
+				sb.UnverifiedReason != "" || len(sb.UntestedAuth) != 0 {
 				t.Errorf("%s has no sandbox harness but documents sandbox %+v; want only status pending", row.ID, sb)
 			}
 			continue
@@ -84,8 +94,19 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 		if sb.HarnessPin != spec.DefaultVersion {
 			t.Errorf("%s sandbox.harnessPin=%q want %q", row.ID, sb.HarnessPin, spec.DefaultVersion)
 		}
-		if sb.Verified != spec.Verification().Status {
-			t.Errorf("%s sandbox.verified=%q want %q", row.ID, sb.Verified, spec.Verification().Status)
+		verification := spec.Verification()
+		if sb.Verified != verification.Status {
+			t.Errorf("%s sandbox.verified=%q want %q", row.ID, sb.Verified, verification.Status)
+		}
+		wantReason := ""
+		if verification.Status == Unverified {
+			wantReason = docsVerificationReason(verification.Note)
+		}
+		if sb.UnverifiedReason != wantReason {
+			t.Errorf("%s sandbox.unverifiedReason=%q want %q (the lead clause of its Verification.Note)", row.ID, sb.UnverifiedReason, wantReason)
+		}
+		if want := docsUntestedAuth(spec); !slices.Equal(sb.UntestedAuth, want) {
+			t.Errorf("%s sandbox.untestedAuth=%q want %q", row.ID, sb.UntestedAuth, want)
 		}
 		// A managed registration is a root-owned file; a user-tier one is
 		// the file in the image HOME the harness reads, or a root-owned file
@@ -106,4 +127,32 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 			t.Errorf("harness %s is missing from the docs capability matrix", name)
 		}
 	}
+}
+
+// docsVerificationReason is how the docs state why a harness is unverified:
+// the lead clause of its Verification.Note (up to the first ": "), without
+// code backticks and starting with a capital letter.
+func docsVerificationReason(note string) string {
+	lead, _, _ := strings.Cut(note, ": ")
+	lead = strings.TrimSpace(strings.ReplaceAll(lead, "`", ""))
+	if lead == "" {
+		return ""
+	}
+	return strings.ToUpper(lead[:1]) + lead[1:]
+}
+
+// docsUntestedAuth lists the harness's sign-in paths no live run exercised:
+// the credential profiles with an Unverified reason, in registry order, then
+// "login" when its in-sandbox login is unverified.
+func docsUntestedAuth(spec *Spec) []string {
+	var out []string
+	for _, cp := range spec.CredentialProfiles("") {
+		if cp.Unverified != "" {
+			out = append(out, cp.ProfileID)
+		}
+	}
+	if login, ok := spec.Login(); ok && login.Unverified != "" {
+		out = append(out, "login")
+	}
+	return out
 }
