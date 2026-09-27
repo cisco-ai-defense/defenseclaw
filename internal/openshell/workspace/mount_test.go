@@ -57,13 +57,14 @@ func TestPlanMountGitRepoProtectsHostExecutableState(t *testing.T) {
 		kind MountKind
 		ro   bool
 	}{
-		"/work/myapp":                {MountProject, false},
-		"/work/myapp/.git":           {MountPin, false},
-		"/work/myapp/.git/config":    {MountProtect, true},
-		"/work/myapp/.git/hooks":     {MountProtect, true},
-		"/work/myapp/.git/commondir": {MountProtect, true},
-		"/work/myapp/.env":           {MountMask, true},
-		"/work/myapp/certs/dev.pem":  {MountMask, true},
+		"/work/myapp":                      {MountProject, false},
+		"/work/myapp/.git":                 {MountPin, false},
+		"/work/myapp/.git/config":          {MountProtect, true},
+		"/work/myapp/.git/config.worktree": {MountProtect, true},
+		"/work/myapp/.git/hooks":           {MountProtect, true},
+		"/work/myapp/.git/commondir":       {MountProtect, true},
+		"/work/myapp/.env":                 {MountMask, true},
+		"/work/myapp/certs/dev.pem":        {MountMask, true},
 	}
 	for target, w := range want {
 		m, ok := mountByTarget(plan, target)
@@ -103,7 +104,7 @@ func TestPlanMountGitRepoProtectsHostExecutableState(t *testing.T) {
 	}
 
 	lines := strings.Join(plan.Summary().Lines(), "\n")
-	for _, s := range []string{"~/code/myapp → /work/myapp (live)", ".env", "certs/dev.pem", "--unmask", ".git/hooks .git/config (read-only)", "Not visible"} {
+	for _, s := range []string{"~/code/myapp → /work/myapp (live)", ".env", "certs/dev.pem", "--unmask", ".git/hooks", ".git/config", ".git/config.worktree", "(read-only)", "Not visible"} {
 		if !strings.Contains(lines, s) {
 			t.Fatalf("banner missing %q:\n%s", s, lines)
 		}

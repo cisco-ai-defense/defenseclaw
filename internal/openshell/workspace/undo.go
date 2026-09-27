@@ -232,9 +232,13 @@ func controlChanges(gs *GitSnapshot) ([]string, error) {
 	}
 	var out []string
 	for rel, before := range gs.Control {
-		if !before.equal(now[rel]) {
-			out = append(out, rel)
+		after := now[rel]
+		// Empty pins (absent or empty files) created by PlanMount are not
+		// reported as control changes when they stay empty.
+		if before.equal(after) || (emptyPin(before) && emptyPin(after)) {
+			continue
 		}
+		out = append(out, rel)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -677,8 +681,12 @@ func removeNestedRepos(ctx context.Context, sh *shadow, project, preTree string,
 			dirTracked = true
 		}
 
-		// Always remove the .git entry first.
+		// Remove the .git entry first. When dir is "." (top-level .git),
+		// always target just ".git", never the entire project directory.
 		gitPath := path.Join(dir, ".git")
+		if dir == "." {
+			gitPath = ".git"
+		}
 		if err := r.clear(gitPath); err != nil {
 			return fmt.Errorf("workspace: remove nested repository %s: %w", dir, err)
 		}

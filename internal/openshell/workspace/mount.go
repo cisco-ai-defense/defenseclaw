@@ -310,6 +310,14 @@ func planGitProtection(plan *MountPlan, state *mountState) error {
 			return err
 		}
 		protect(cfg)
+		// Pin config.worktree read-only, even if it doesn't exist. An empty
+		// file is harmless because git reads it only when the read-only main
+		// config enables extensions.worktreeConfig.
+		cfgWorktree := filepath.Join(gitDir, "config.worktree")
+		if err := ensurePinFile(state, cfgWorktree, "", 0o644); err != nil {
+			return err
+		}
+		protect(cfgWorktree)
 		hooks := filepath.Join(gitDir, "hooks")
 		if err := ensurePinDir(state, hooks); err != nil {
 			return err
@@ -355,7 +363,7 @@ func planGitProtection(plan *MountPlan, state *mountState) error {
 		protect(inc)
 	}
 
-	plan.Protected = []string{gitRel + "/hooks", gitRel + "/config"}
+	plan.Protected = []string{gitRel + "/hooks", gitRel + "/config", gitRel + "/config.worktree"}
 	if g.DotGitFile {
 		plan.Protected = append(plan.Protected, ".git")
 	}

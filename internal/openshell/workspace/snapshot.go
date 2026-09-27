@@ -377,6 +377,7 @@ func capturePinned(src *Source) (map[string]FileState, error) {
 	g := src.Git
 	paths := []string{
 		filepath.Join(g.GitDir, "config"),
+		filepath.Join(g.GitDir, "config.worktree"),
 		filepath.Join(g.GitDir, "hooks"),
 	}
 	if g.HooksPath != "" {
@@ -384,7 +385,7 @@ func capturePinned(src *Source) (map[string]FileState, error) {
 	}
 	paths = append(paths, g.IncludeFiles...)
 	for _, sub := range g.Submodules {
-		paths = append(paths, filepath.Join(sub, "config"), filepath.Join(sub, "hooks"))
+		paths = append(paths, filepath.Join(sub, "config"), filepath.Join(sub, "config.worktree"), filepath.Join(sub, "hooks"))
 	}
 	out := map[string]FileState{}
 	for _, p := range paths {
@@ -546,7 +547,12 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 			return nil
 		}
 		if d.Name() == ".git" {
-			if rel != ".git" {
+			if rel == ".git" {
+				// Top-level .git: if this is a non-git snapshot (the folder
+				// was non-git when snapshotted), record it as a nested repo
+				// so Review flags it and Undo can remove it.
+				res.nested = append(res.nested, ".")
+			} else {
 				res.nested = append(res.nested, path.Dir(rel))
 			}
 			return nil
