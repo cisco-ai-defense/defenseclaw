@@ -561,6 +561,69 @@ func TestHookSinkCodexOTLPNeedsTheToken(t *testing.T) {
 	}
 }
 
+// TestHookSinkAdvisoryAlert: for Claude Code and Codex the stand-in answers
+// an allowed PreToolUse with the gateway's advisory alert, so the allowed
+// runs prove an alert lets the tool run; the marker is still blocked and
+// every other hook is still a plain allow.
+func TestHookSinkAdvisoryAlert(t *testing.T) {
+	for _, tc := range []struct {
+		harness, path string
+		header        map[string]string
+	}{
+		{"claudecode", "/api/v1/claude-code/hook", nil},
+		{"codex", "/api/v1/codex/hook", map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse"}},
+	} {
+		t.Run(tc.harness, func(t *testing.T) {
+			sink := &hookSink{token: "tok", adapter: hookSinkAdapters[tc.harness]}
+			sink.begin(&BlockScenario{Marker: "BLOCKME"})
+			post := func(body string, header map[string]string) map[string]interface{} {
+				req, _ := http.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer tok")
+				for k, v := range header {
+					req.Header.Set(k, v)
+				}
+				rec := &responseRecorder{header: http.Header{}}
+				sink.ServeHTTP(rec, req)
+				var out map[string]interface{}
+				if err := json.Unmarshal(rec.body.Bytes(), &out); err != nil || rec.status() != http.StatusOK {
+					t.Fatalf("answer %d %q: %v", rec.status(), rec.body.String(), err)
+				}
+				return out
+			}
+			alert := post(`{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok"}}`, tc.header)
+			if alert["action"] != "alert" || alert["would_block"] != false {
+				t.Fatalf("allowed PreToolUse answered %v, want an advisory alert", alert)
+			}
+			for _, field := range []string{"claude_code_output", "codex_output"} {
+				notice, _ := alert[field].(map[string]interface{})
+				if msg, _ := notice["systemMessage"].(string); msg == "" || len(notice) != 1 {
+					t.Fatalf("%s = %v, want the harness notice only", field, alert[field])
+				}
+			}
+			if blocked := post(`{"hook_event_name":"PreToolUse","tool_input":{"command":"echo BLOCKME"}}`, tc.header); blocked["action"] != "block" {
+				t.Fatalf("the marker was answered %v", blocked)
+			}
+			stopHeader := map[string]string{}
+			if tc.header != nil {
+				stopHeader["X-DefenseClaw-Hook-Event"] = "Stop"
+			}
+			if stop := post(`{"hook_event_name":"Stop"}`, stopHeader); stop["action"] != "allow" || len(stop) != 1 {
+				t.Fatalf("Stop answered %v, want a plain allow", stop)
+			}
+			events, _ := sink.end()
+			if len(events) != 3 || !events[0].Alerted || events[0].Blocked || !events[1].Blocked || events[1].Alerted || events[2].Alerted {
+				t.Fatalf("events = %+v", events)
+			}
+		})
+	}
+	// The other harnesses keep the plain allow.
+	for name, adapter := range hookSinkAdapters {
+		if adapter.advisoryAllow && name != "claudecode" && name != "codex" {
+			t.Errorf("%s answers allowed tool calls with an alert its probe was never verified with", name)
+		}
+	}
+}
+
 // TestHookSinkHookOnlyContracts drives the stand-in ingress the way the
 // OpenCode and Amp plugins and the Copilot hook do: the event comes from the
 // body or Copilot's event header, the marker is found in the pre-tool

@@ -1061,7 +1061,9 @@ whole managed-settings drop-in that has one field it does not accept. So
 image against a built-in mock LLM and a stand-in ingress on the image's baked
 port, and requires that:
 
-- an allowed tool call's side effect appears;
+- an allowed tool call's side effect appears (for Claude Code and Codex the
+  stand-in answers its `PreToolUse` with the gateway's advisory `alert`
+  verdict, so the run also proves an alert never blocks a tool);
 - a tool call the stand-in ingress blocks has no side effect;
 - `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `Stop`
   each arrive authenticated and with an idempotency key.

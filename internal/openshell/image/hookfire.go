@@ -322,13 +322,19 @@ type hookSinkAdapter struct {
 	// token as an unauthorized event, which fails the probe: the harness
 	// exports OTLP to the ingress with the token its launcher hands it.
 	otlpAuth bool
+	// advisoryAllow answers a pre-tool call it does not block with the
+	// gateway's advisory alert verdict (would_block false, the harness
+	// notice in claude_code_output / codex_output) instead of a plain allow,
+	// so every allowed run also proves an alert never blocks a tool.
+	advisoryAllow bool
 }
 
 var hookSinkAdapters = map[string]hookSinkAdapter{
-	"amp": {preTool: "tool.call", wholePayload: true},
+	"amp":        {preTool: "tool.call", wholePayload: true},
+	"claudecode": {advisoryAllow: true},
 	// The Codex launcher passes the OTLP Authorization header in
 	// OTEL_EXPORTER_OTLP_*_HEADERS.
-	"codex": {otlpAuth: true},
+	"codex": {otlpAuth: true, advisoryAllow: true},
 	"copilot": {preTool: "preToolUse", wholePayload: true, hookOutput: func(reason string) interface{} {
 		return map[string]string{"permissionDecision": "deny", "permissionDecisionReason": reason}
 	}},
@@ -404,6 +410,8 @@ type HookEvent struct {
 	Authorized     bool   `json:"authorized"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	Blocked        bool   `json:"blocked,omitempty"`
+	// Alerted marks a pre-tool call answered with an advisory alert.
+	Alerted bool `json:"alerted,omitempty"`
 }
 
 // HookFireRun is one harness run.
@@ -1005,6 +1013,17 @@ func (b *Builder) hookFireRun(
 	return run, nil
 }
 
+// hookSinkAlertVerdict is the gateway's answer to an advisory finding on a
+// Claude Code or Codex PreToolUse (claudeCodeOutput / codexOutput).
+var hookSinkAlertVerdict = func() []byte {
+	notice := map[string]string{"systemMessage": "DefenseClaw hook-fire probe: an advisory finding; the tool runs"}
+	b, _ := json.Marshal(map[string]interface{}{
+		"action": "alert", "raw_action": "alert", "would_block": false, "severity": "HIGH",
+		"reason": "DefenseClaw hook-fire probe advisory", "claude_code_output": notice, "codex_output": notice,
+	})
+	return b
+}()
+
 // hookSink stands in for the DefenseClaw hook ingress: it authenticates the
 // bearer, records every hook, notify and OTLP request, and answers with
 // DefenseClaw-shaped verdicts.
@@ -1057,6 +1076,7 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if authorized && block != nil && s.adapter.blocks(ev.Event, body, payload, block.Marker) {
 		ev.Blocked = true
 	}
+	ev.Alerted = authorized && !ev.Blocked && s.adapter.advisoryAllow && ev.Event == s.adapter.preToolEvent()
 	s.events = append(s.events, ev)
 	s.mu.Unlock()
 
@@ -1065,6 +1085,10 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if ev.Alerted {
+		_, _ = w.Write(hookSinkAlertVerdict)
+		return
+	}
 	if !ev.Blocked {
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 		return
