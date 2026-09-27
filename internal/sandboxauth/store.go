@@ -46,6 +46,9 @@ const (
 	// defaultRefreshInterval is how stale the in-memory table may be relative
 	// to disk. A revoke written by another process takes effect within it.
 	defaultRefreshInterval = time.Second
+	// maxStableReadAttempts bounds how often readState retries a table that
+	// was replaced while it was being read.
+	maxStableReadAttempts = 4
 )
 
 // Matcher authenticates a presented credential. The ingress needs only this.
@@ -84,6 +87,16 @@ type FileStore struct {
 	byHash    map[string]string
 	loaded    fs.FileInfo
 	checkedAt time.Time
+	// installs counts table installs. A refresh publishes what it read only
+	// if nothing was installed since it started, so a slow refresh can never
+	// replace the table a concurrent Revoke or Rotate just published.
+	installs uint64
+
+	// Test seams, nil in production: afterRead runs between reading the
+	// table and re-checking its identity, beforeRefreshInstall between a
+	// refresh's read and its install.
+	afterRead            func()
+	beforeRefreshInstall func()
 }
 
 // StoreOption customises a FileStore.
@@ -341,6 +354,7 @@ func (s *FileStore) maybeRefresh() {
 	current, statErr := os.Lstat(s.path)
 	s.mu.RLock()
 	previous := s.loaded
+	started := s.installs
 	s.mu.RUnlock()
 	if statErr == nil && previous != nil && sameFileVersion(previous, current) {
 		s.mu.Lock()
@@ -355,14 +369,18 @@ func (s *FileStore) maybeRefresh() {
 		return
 	}
 	state, info, err := s.readState()
+	if s.beforeRefreshInstall != nil {
+		s.beforeRefreshInstall()
+	}
 	if err != nil {
 		// A table that no longer validates (permissions broadened, file
 		// swapped, content corrupted) authenticates nobody until repaired.
-		fmt.Fprintf(os.Stderr, "[sandboxauth] binding table rejected, refusing all sandbox credentials: %v\n", err)
-		s.install(storeFile{Version: storeFileVersion}, nil)
+		if s.installIfUnchanged(started, storeFile{Version: storeFileVersion}, nil) {
+			fmt.Fprintf(os.Stderr, "[sandboxauth] binding table rejected, refusing all sandbox credentials: %v\n", err)
+		}
 		return
 	}
-	s.install(state, info)
+	s.installIfUnchanged(started, state, info)
 }
 
 func (s *FileStore) mutate(fn func(*storeFile) error) error {
@@ -403,33 +421,60 @@ func (s *FileStore) mutate(fn func(*storeFile) error) error {
 }
 
 // readState loads and validates the table. A missing file is an empty
-// table; every other irregularity is an error.
+// table; every other irregularity is an error. The returned FileInfo always
+// describes the file the bytes came from: the table's identity is taken
+// before and after the read, and a table replaced in between is read again.
+// Recording a newer file's identity next to older contents would let a
+// revoked credential authenticate until the next mutation.
 func (s *FileStore) readState() (storeFile, fs.FileInfo, error) {
-	empty := storeFile{Version: storeFileVersion}
-	if _, err := os.Lstat(s.path); errors.Is(err, fs.ErrNotExist) {
-		return empty, nil, nil
-	} else if err != nil {
-		return storeFile{}, nil, fmt.Errorf("sandboxauth: stat binding table: %w", err)
+	for attempt := 0; attempt < maxStableReadAttempts; attempt++ {
+		state, info, stable, err := s.readStateOnce()
+		if stable {
+			return state, info, err
+		}
 	}
+	return storeFile{}, nil, errors.New("sandboxauth: binding table kept changing while it was read")
+}
+
+// readStateOnce reads the table once. stable is false when the table was
+// replaced during the read, in which case the result must be discarded.
+func (s *FileStore) readStateOnce() (state storeFile, info fs.FileInfo, stable bool, err error) {
+	before, err := os.Lstat(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return storeFile{Version: storeFileVersion}, nil, true, nil
+	} else if err != nil {
+		return storeFile{}, nil, true, fmt.Errorf("sandboxauth: stat binding table: %w", err)
+	}
+	data, readErr := s.readValidated()
+	if s.afterRead != nil {
+		s.afterRead()
+	}
+	after, err := os.Lstat(s.path)
+	if err != nil || !sameFileVersion(before, after) {
+		return storeFile{}, nil, false, nil
+	}
+	if readErr != nil {
+		return storeFile{}, nil, true, readErr
+	}
+	state, err = decodeStore(data)
+	if err != nil {
+		return storeFile{}, nil, true, err
+	}
+	return state, before, true, nil
+}
+
+func (s *FileStore) readValidated() ([]byte, error) {
 	if err := safefile.ValidatePrivateDirectory(filepath.Dir(s.path)); err != nil {
-		return storeFile{}, nil, fmt.Errorf("sandboxauth: binding table directory is not private: %w", err)
+		return nil, fmt.Errorf("sandboxauth: binding table directory is not private: %w", err)
 	}
 	if err := safefile.ValidatePrivateFile(s.path); err != nil {
-		return storeFile{}, nil, fmt.Errorf("sandboxauth: binding table is not a private regular file: %w", err)
+		return nil, fmt.Errorf("sandboxauth: binding table is not a private regular file: %w", err)
 	}
 	data, err := safefile.ReadRegularFileBounded(s.path, maxStoreBytes)
 	if err != nil {
-		return storeFile{}, nil, fmt.Errorf("sandboxauth: read binding table: %w", err)
+		return nil, fmt.Errorf("sandboxauth: read binding table: %w", err)
 	}
-	info, err := os.Lstat(s.path)
-	if err != nil {
-		return storeFile{}, nil, fmt.Errorf("sandboxauth: stat binding table: %w", err)
-	}
-	state, err := decodeStore(data)
-	if err != nil {
-		return storeFile{}, nil, err
-	}
-	return state, info, nil
+	return data, nil
 }
 
 func decodeStore(data []byte) (storeFile, error) {
@@ -466,19 +511,43 @@ func decodeStore(data []byte) (storeFile, error) {
 	return state, nil
 }
 
+// install publishes a table this process just wrote or opened.
 func (s *FileStore) install(state storeFile, info fs.FileInfo) {
+	byID, byHash := indexBindings(state)
+	s.mu.Lock()
+	s.installLocked(byID, byHash, info)
+	s.mu.Unlock()
+}
+
+// installIfUnchanged publishes a refresh's read only if no install happened
+// since the refresh sampled started. It reports whether it installed.
+func (s *FileStore) installIfUnchanged(started uint64, state storeFile, info fs.FileInfo) bool {
+	byID, byHash := indexBindings(state)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.installs != started {
+		return false
+	}
+	s.installLocked(byID, byHash, info)
+	return true
+}
+
+func (s *FileStore) installLocked(byID map[string]Binding, byHash map[string]string, info fs.FileInfo) {
+	s.byID = byID
+	s.byHash = byHash
+	s.loaded = info
+	s.checkedAt = s.now()
+	s.installs++
+}
+
+func indexBindings(state storeFile) (map[string]Binding, map[string]string) {
 	byID := make(map[string]Binding, len(state.Bindings))
 	byHash := make(map[string]string, len(state.Bindings))
 	for _, b := range state.Bindings {
 		byID[b.ID] = b
 		byHash[b.TokenHash] = b.ID
 	}
-	s.mu.Lock()
-	s.byID = byID
-	s.byHash = byHash
-	s.loaded = info
-	s.checkedAt = s.now()
-	s.mu.Unlock()
+	return byID, byHash
 }
 
 func bindingFromSpec(id string, spec Spec) Binding {

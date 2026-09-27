@@ -340,6 +340,120 @@ func TestConcurrentWritersAcrossStores(t *testing.T) {
 	}
 }
 
+// TestRefreshRereadsATableReplacedDuringTheRead covers a revoke published by
+// another process while a refresh is reading the previous table. The
+// refresh must not record the new file's identity next to the old contents:
+// that pairing would pass every later identity check and keep the revoked
+// credential authenticating until some unrelated mutation.
+func TestRefreshRereadsATableReplacedDuringTheRead(t *testing.T) {
+	a, path := newStore(t, WithRefreshInterval(0))
+	b, err := OpenFileStore(path, WithRefreshInterval(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, token, err := a.Mint(mountSpec("dc-app", "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another write makes a's next Match re-read the table.
+	if _, _, err := b.Mint(mountSpec("dc-other", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	a.afterRead = func() {
+		once.Do(func() {
+			if err := b.Revoke(revoked.ID); err != nil {
+				t.Errorf("Revoke during refresh: %v", err)
+			}
+		})
+	}
+	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Match during a concurrent revoke = %v, want the re-read table", err)
+	}
+	a.afterRead = nil
+	for i := 0; i < 3; i++ {
+		if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("revoked credential still authenticates on check %d: %v", i, err)
+		}
+	}
+	a.mu.RLock()
+	loaded := a.loaded
+	a.mu.RUnlock()
+	onDisk, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil || !sameFileVersion(loaded, onDisk) {
+		t.Fatal("recorded table identity does not match the table on disk")
+	}
+}
+
+// TestRefreshNeverOverwritesANewerMutation covers a Revoke in this process
+// that lands after a refresh has read the table but before it installs it.
+// The revoke must win at once, as its documentation promises.
+func TestRefreshNeverOverwritesANewerMutation(t *testing.T) {
+	clock := newTestClock()
+	a, path := newStore(t, WithClock(clock.Now), WithRefreshInterval(time.Second))
+	other, err := OpenFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, token, err := a.Mint(mountSpec("dc-app", "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := other.Mint(mountSpec("dc-other", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	var once sync.Once
+	a.beforeRefreshInstall = func() {
+		once.Do(func() {
+			if err := a.Revoke(revoked.ID); err != nil {
+				t.Errorf("Revoke during refresh: %v", err)
+			}
+		})
+	}
+	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("refresh reinstalled the pre-revoke table: %v", err)
+	}
+	a.beforeRefreshInstall = nil
+	// No refresh is due, so this is served from memory.
+	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("revoked credential authenticates from memory: %v", err)
+	}
+	if len(a.List()) != 1 {
+		t.Fatalf("in-memory table = %+v, want only the other binding", a.List())
+	}
+}
+
+func TestReadStateGivesUpOnATableThatNeverSettles(t *testing.T) {
+	s, _ := newStore(t)
+	if _, _, err := s.Mint(mountSpec("dc-app", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	// Every read is followed by a write, as if another process rewrote the
+	// table continuously. The hook skips the nested read Mint itself does.
+	n, inHook := 0, false
+	s.afterRead = func() {
+		if inHook {
+			return
+		}
+		inHook = true
+		defer func() { inHook = false }()
+		n++
+		if _, _, err := s.Mint(mountSpec(fmt.Sprintf("dc-churn-%d", n), "codex")); err != nil {
+			t.Errorf("Mint: %v", err)
+		}
+	}
+	if _, _, err := s.readState(); err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("readState on a constantly replaced table = %v", err)
+	}
+	if n != maxStableReadAttempts {
+		t.Fatalf("readState made %d attempts, want %d", n, maxStableReadAttempts)
+	}
+}
+
 func TestTamperedTableFailsClosed(t *testing.T) {
 	s, path := newStore(t, WithRefreshInterval(0))
 	_, token, err := s.Mint(mountSpec("dc-app", "codex"))
