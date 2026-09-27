@@ -141,9 +141,8 @@ type env struct {
 	// tokenDelivery is openshell.token_delivery (DEFENSECLAW_E2E_TOKEN_DELIVERY,
 	// default provider).
 	tokenDelivery string
-
-	gw  openshell.Client
-	api *sandboxapi.Client
+	gw            openshell.Client
+	api           *sandboxapi.Client
 
 	daemon *exec.Cmd
 	mockPx *exec.Cmd
