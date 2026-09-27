@@ -1586,13 +1586,20 @@ Do not use the service account's home directory as the hook target for user prot
 
 ## Sandbox policy pushdown
 
-Developers may run agents inside NVIDIA OpenShell sandboxes. The
-`openshell.admin` block of the managed config sets organization-wide limits
-for those sandboxes, such as the pack every run must use, the loosest network
-profile, and whether skip-permissions mode, live project mounts, host ports, or
-unblocking are allowed. With `deployment_mode: managed_enterprise`, users
-can't write `config.yaml`, so the admin block is **authoritative**. On any
-other install it is enforced but advisory, because the user owns the file.
+The `openshell.admin` block of the managed config sets organization-wide
+limits for agents that run inside NVIDIA OpenShell sandboxes. Examples are the
+pack every run must use, the loosest network profile, and whether
+skip-permissions mode, live project mounts, host ports, or unblocking are
+allowed. With `deployment_mode: managed_enterprise`, users can't write
+`config.yaml`, so the admin block is **authoritative**. On any other install it
+is advisory, because the user owns the file.
+
+<Callout title="Stage the limits now; they apply once sandbox support ships">
+Support for NVIDIA OpenShell 0.1 is being rebuilt, and no DefenseClaw command
+starts an OpenShell 0.1 sandbox yet. The managed config already accepts and
+validates the `openshell.admin` block, so you can roll it out ahead of time.
+The limits take effect once sandbox support ships.
+</Callout>
 
 ```yaml
 deployment_mode: managed_enterprise
@@ -1605,37 +1612,48 @@ openshell:
     egress_block:
       - files.example.net
     require_copy_for:
-      - ~/code/customers
+      - /Users/*/code/customers    # macOS home directories
+      - /home/*/code/customers     # Linux home directories
     max_resources:
       cpu: "4"
       memory: 8Gi
     locked: [workdir.unmask, mcp.host_ports]
 ```
 
-Push it the same way as any other managed change: edit the administrator-owned
-config through the platform channel under
-[Restart-required controls](#restart-required-controls). The gateway reloads the
-`openshell` block without a restart, and each sandbox reads the settings when
-it starts.
+Use absolute paths in `require_copy_for`, as above. A `~/` path expands to the
+home directory of the account that computes the policy, which in a managed
+install may be the service account rather than the developer.
 
-When a user asks for something the admin block forbids, DefenseClaw replaces
-it with the allowed value, or refuses the action, and says
-"blocked by your organization's DefenseClaw policy", naming the setting and
+Push the change through the same administrator channel as any other managed
+edit, shown under [Restart-required controls](#restart-required-controls). The
+`openshell` block is an exception to the restart rule there: the gateway
+reloads it in place in both `gateway.config_reload.mode` settings. On Linux and
+macOS, the edit is enough, and you can skip the restart step. On Windows, the
+installer's `Repair` action restarts the services anyway.
+
+Once sandbox support ships, a request the admin block forbids is replaced with
+the allowed value or refused. The message starts with
+"blocked by your organization's DefenseClaw policy" and names the setting and
 the reason.
 
 To require your own pack instead of a built-in one, set `required_pack` to an
 absolute path and pin its content with `required_pack_digest`. In
-`managed_enterprise`, DefenseClaw loads a custom required pack only when the
-file and every directory above it are owned by root, not writable by group or
-others, and free of symbolic links, such as
-`/opt/acme/sandbox-packs/acme-dev/pack.yaml`. Keep the file readable by the
-accounts that run sandboxes. The default pack directory inside the service's
-data directory doesn't qualify. Built-in packs are always trusted.
+`managed_enterprise`, DefenseClaw loads a custom required pack only when it is
+as protected as the config. On macOS and Linux, the file and every directory
+above it must be owned by root, not writable by group or others, and free of
+symbolic links, such as `/opt/acme/sandbox-packs/acme-dev/pack.yaml`. On
+macOS, an ACL entry that grants write access is refused too. On Windows, the
+file must be on a local NTFS drive, owned together with every folder above it
+by Administrators, LocalSystem, or TrustedInstaller, and no other account may
+be able to change or replace it. Keep the file readable by the accounts that
+run sandboxes. The default pack directory inside the service's data directory
+doesn't qualify. Built-in packs are always trusted.
 
 <Callout title="Where sandboxes run">
-OpenShell sandboxes run under the developer's own account, because OpenShell's
-gateway is a per-user service. Check the [Sandbox guide](/docs/setup/sandbox)
-for the deployments that can run them.
+OpenShell's gateway is a per-user service, so OpenShell sandboxes run under
+the developer's own account, not under the DefenseClaw service account. The
+sandbox commands aren't built yet; the [Sandbox guide](/docs/setup/sandbox)
+covers the `sandbox` command as it is today.
 </Callout>
 
 Every admin key, the built-in packs, custom packs, and two complete
@@ -1780,5 +1798,5 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 - [ ] Status and central monitoring alert on guardian errors, connector errors, repeated repair, and enforcement downgrade.
 - [ ] Allow/block tests and adversarial tamper tests are recorded for the deployed version.
 - [ ] MDM/EDR controls cover native config immutability if bounded repair is not sufficient.
-- [ ] If developers use OpenShell sandboxes, the managed config sets `openshell.admin`, and any custom required pack is root-owned and pinned with `required_pack_digest`.
+- [ ] If developers will use OpenShell sandboxes, the managed config sets `openshell.admin`, `require_copy_for` uses absolute paths, and any custom required pack is administrator-owned and pinned with `required_pack_digest`.
 - [ ] Upgrade and incident-response procedures use an administrator channel unavailable to the AI agent.
