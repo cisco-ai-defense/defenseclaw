@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -29,10 +30,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
 )
 
 // RunOptions are the `sandbox run` flags.
@@ -95,18 +98,22 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if a.Getenv(openshell.EnvSandboxID) != "" {
 		return a.runNative(spec, o.Args)
 	}
+	if infoArgs(o) {
+		return a.runInfo(spec, o.Args)
+	}
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
 	if o.Detach && o.Rm {
 		return errors.New("--rm cannot be combined with --detach: nothing is left to delete the sandbox when the run ends")
 	}
+	o.Name = strings.TrimSpace(o.Name)
+	if err := checkNewName(o.Name); err != nil {
+		return err
+	}
 	headless := o.Prompt != "" || printMode(spec, o.Args)
 	if o.Detach && !headless {
 		return fmt.Errorf("a detached run needs a prompt: pass --prompt TEXT%s", printHint(spec))
-	}
-	if !o.Detach && !headless && !a.IO.TTY {
-		return fmt.Errorf("`sandbox run` attaches %s to your terminal, and there is none; pass --prompt TEXT (with --detach to run in the background)", spec.DisplayName)
 	}
 	env, err := ParseEnv(o.Env)
 	if err != nil {
@@ -146,18 +153,39 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 			return errors.New(violationMessage(&v, v.Message, v.Detail, v.Admin))
 		}
 	}
+	// The organization's refusals come first; then what the run needs from
+	// this terminal.
+	if !o.Detach && !headless && !a.IO.TTY {
+		return fmt.Errorf("`sandbox run` attaches %s to your terminal, and there is none; pass --prompt TEXT (with --detach to run in the background)", spec.DisplayName)
+	}
+	if err := a.checkHostPorts(spec, project, o, st); err != nil {
+		return err
+	}
+	// What the policy changed about the request is said before anything
+	// is copied or created, and a loosening flag it overrode is confirmed.
+	shown, err := a.preflightViolations(ex.Violations)
+	if err != nil {
+		return err
+	}
 	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy
 
 	// Resume this folder's sandbox instead of starting another.
-	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach && !headless {
+	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
 			resume, err := a.ask(fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode), true, false)
 			if err != nil {
 				return err
 			}
 			if resume {
-				return a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Args: o.Args})
+				return a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 			}
+		}
+	}
+	// A name in use is refused before anything is staged: a copy-mode
+	// stage would replace that sandbox's copy record.
+	if o.Name != "" {
+		if err := a.checkNameFree(ctx, api, o.Name, headless); err != nil {
+			return err
 		}
 	}
 
@@ -182,7 +210,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		// Stage first: a project that cannot be copied (too large, a
 		// secret that cannot be held back) fails before a sandbox exists.
 		if req.Name == "" {
-			if req.Name, err = manager.GenerateName(project); err != nil {
+			if req.Name, err = a.freeName(ctx, api, project); err != nil {
 				return err
 			}
 		}
@@ -192,7 +220,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	}
 
 	a.println()
-	a.note("Starting a " + spec.DisplayName + " sandbox… (the first run builds its image, about 3 GB)")
+	a.note("Starting a " + spec.DisplayName + " sandbox…" + a.buildNote(spec, o))
 	sb, err := api.Create(ctx, req)
 	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
 		// A linked worktree, a git directory outside the folder and the
@@ -206,7 +234,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 			CommandName + " pull` brings its changes back")
 		copyMode, req.Copy = true, true
 		if req.Name == "" {
-			if req.Name, err = manager.GenerateName(project); err != nil {
+			if req.Name, err = a.freeName(ctx, api, project); err != nil {
 				return err
 			}
 		}
@@ -216,12 +244,17 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		sb, err = api.Create(ctx, req)
 	}
 	if err != nil {
-		if copyRec != nil {
+		taken := req.Name != "" && nameConflict(err)
+		if copyRec != nil && !taken {
+			// Unless a sandbox has the name, the stage was this run's own.
 			a.discardStagedCopy(ctx, api, req.Name)
+		}
+		if taken {
+			return nameTakenError(req.Name, headless)
 		}
 		return apiError(err)
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
@@ -242,7 +275,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 			return fail(err)
 		}
 	}
-	a.banner(sb, llm, o)
+	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown})
 	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
@@ -341,6 +374,53 @@ func filterBypass(spec *harness.Spec, yolo bool, args []string, a *App) []string
 	return kept
 }
 
+// infoArgs reports an invocation that only prints the harness's version or
+// help (`claude --version` through the shell wrapper): no agent session, so
+// no sandbox.
+func infoArgs(o RunOptions) bool {
+	if len(o.Args) != 1 || o.Prompt != "" || o.Detach {
+		return false
+	}
+	switch o.Args[0] {
+	case "--version", "-v", "-V", "--help", "-h":
+		return true
+	}
+	return false
+}
+
+// runInfo answers a version or help invocation: with the harness installed
+// on this machine it answers (it runs no agent); without it, the sandbox
+// image's version, or how to run it.
+func (a *App) runInfo(spec *harness.Spec, args []string) error {
+	if a.Getenv(wrapper.EnvBypass) == "" {
+		if path, err := a.LookPath(spec.Command); err == nil {
+			// A command named like the harness that calls the sandbox
+			// again answers from the image below instead.
+			env := append(a.Environ(), wrapper.EnvBypass+"=1")
+			return a.ExecProcess(path, append([]string{spec.Command}, args...), env)
+		}
+	}
+	if args[0] == "--help" || args[0] == "-h" {
+		a.println(spec.Command + " is not installed on this machine; DefenseClaw runs " + spec.DisplayName + " in a sandbox.")
+		a.println("  " + CommandName + " run " + spec.Command + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
+		return nil
+	}
+	var latest image.Record
+	if recs, err := a.Images.List(); err == nil {
+		for _, r := range recs {
+			if r.Connector == spec.Name && r.HookFireVerified && r.BuiltAt.After(latest.BuiltAt) {
+				latest = r
+			}
+		}
+	}
+	if latest.HarnessVersion == "" {
+		return fmt.Errorf("%s is not installed on this machine, and no %s sandbox image is built yet (`%s image build %s`)",
+			spec.Command, spec.DisplayName, CommandName, spec.Command)
+	}
+	a.println(latest.HarnessVersion + " (" + spec.DisplayName + ", in the DefenseClaw sandbox image)")
+	return nil
+}
+
 // runNative execs the harness directly inside a sandbox.
 func (a *App) runNative(spec *harness.Spec, args []string) error {
 	path, err := a.LookPath(spec.Command)
@@ -364,6 +444,156 @@ func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error
 		return nil, fmt.Errorf("sandboxes are unavailable: %s (see `%s doctor`)", reason, CommandName)
 	}
 	return st, nil
+}
+
+// checkNewName refuses, before anything else happens, a --name OpenShell
+// does not create.
+func checkNewName(name string) error {
+	switch {
+	case name == "":
+		return nil
+	case openshell.ValidSandboxName(name) && len(name) > openshell.MaxSandboxNameLen:
+		return fmt.Errorf("--name %q is %d characters; OpenShell takes at most %d", name, len(name), openshell.MaxSandboxNameLen)
+	case !openshell.ValidNewSandboxName(name):
+		return fmt.Errorf("--name %q: use at most %d lowercase letters, digits and '-', starting and ending with a letter or digit",
+			name, openshell.MaxSandboxNameLen)
+	case workspace.ValidateName(name) != nil:
+		return fmt.Errorf("--name %q is reserved; choose another", name)
+	}
+	return nil
+}
+
+// checkNameFree refuses a name an existing sandbox has, with the ways on.
+func (a *App) checkNameFree(ctx context.Context, api API, name string, headless bool) error {
+	_, err := api.Get(ctx, name)
+	switch {
+	case err == nil:
+		return nameTakenError(name, headless)
+	case sandboxapi.IsCode(err, sandboxapi.CodeNotFound):
+		return nil
+	}
+	return apiError(err)
+}
+
+func nameTakenError(name string, headless bool) error {
+	resume := "`" + CommandName + " connect " + name + "`"
+	if headless {
+		resume = "`" + CommandName + " connect " + name + " --prompt TEXT`"
+	}
+	return fmt.Errorf("a sandbox named %s already exists: resume it with %s, delete it with `%s delete %s`, or choose another --name",
+		name, resume, CommandName, name)
+}
+
+// nameConflict reports the daemon's refusal of a name one of its sandboxes
+// has.
+func nameConflict(err error) bool {
+	var e *sandboxapi.Error
+	return errors.As(err, &e) && e.Code == sandboxapi.CodeConflict && strings.HasPrefix(e.Message, "a sandbox named ")
+}
+
+// freeName generates a sandbox name no sandbox has (a copy-mode run stages
+// under it before the daemon could refuse it).
+func (a *App) freeName(ctx context.Context, api API, project string) (string, error) {
+	for i := 0; i < 8; i++ {
+		name, err := manager.GenerateName(project)
+		if err != nil {
+			return "", err
+		}
+		_, err = api.Get(ctx, name)
+		switch {
+		case sandboxapi.IsCode(err, sandboxapi.CodeNotFound):
+			return name, nil
+		case err != nil:
+			return "", apiError(err)
+		}
+	}
+	return "", errors.New("could not pick a free sandbox name; pass --name")
+}
+
+// buildNote says, when the harness image is missing, that the run builds
+// it first.
+func (a *App) buildNote(spec *harness.Spec, o RunOptions) string {
+	if o.NoBuild {
+		return ""
+	}
+	if ok, err := a.Images.Current(spec); err != nil || ok {
+		return ""
+	}
+	return " (building its image first: about 3 GB, a few minutes)"
+}
+
+// checkHostPorts refuses a --host-port DefenseClaw does not open, the way
+// the daemon refuses a --credential for one: DefenseClaw's own listeners
+// and the gateways, and ports the organization or the pack keeps closed.
+// The daemon would only drop them, after the banner promised them.
+func (a *App) checkHostPorts(spec *harness.Spec, project string, o RunOptions, st *sandboxapi.Status) error {
+	if len(o.HostPorts) == 0 || a.Cfg == nil {
+		return nil
+	}
+	eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile,
+		Copy: o.Copy, Safe: o.Safe, Unmask: o.Unmask, OpenShellGatewayPort: gatewayPort(st)})
+	if err != nil {
+		// The daemon resolved this run already; it reports what is wrong.
+		return nil
+	}
+	for _, port := range o.HostPorts {
+		err := eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: port})
+		if err == nil {
+			continue
+		}
+		var v *packs.Violation
+		if !errors.As(err, &v) {
+			return fmt.Errorf("--host-port %d: %w", port, err)
+		}
+		w := wireViolation(*v)
+		return fmt.Errorf("--host-port %d: %s", port, violationMessage(&w, w.Message, w.Detail, w.Admin))
+	}
+	return nil
+}
+
+// gatewayPort is the OpenShell gateway's port from the daemon's status (0
+// when unknown).
+func gatewayPort(st *sandboxapi.Status) int {
+	if st == nil || st.Gateway == nil {
+		return 0
+	}
+	u, err := url.Parse(st.Gateway.Endpoint)
+	if err != nil {
+		return 0
+	}
+	port, _ := strconv.Atoi(u.Port())
+	return port
+}
+
+// preflightViolations prints what the policy changed about the run before
+// anything is copied or created, and returns them so the banner does not
+// repeat them. A flag the organization overrode is confirmed on a
+// terminal: the run would not do what was asked.
+func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool, error) {
+	shown := map[string]bool{}
+	overridden := false
+	for _, v := range list {
+		if v.Fatal {
+			continue
+		}
+		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+		shown[violationKey(v)] = true
+		overridden = overridden || (v.Admin && v.Source == string(packs.SourceFlag))
+	}
+	if overridden && a.IO.TTY {
+		yes, err := a.ask("Your organization's policy overrides a flag you passed. Run with its setting?", true, false)
+		if err != nil {
+			return nil, err
+		}
+		if !yes {
+			return nil, &Silent{Err: errors.New("the run was cancelled")}
+		}
+	}
+	return shown, nil
+}
+
+func violationKey(v sandboxapi.Violation) string {
+	return v.Key + "\x00" + v.Constraint + "\x00" + v.Attempted
 }
 
 // resumable returns this folder's most recent sandbox of the harness.
@@ -401,9 +631,6 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
-	}
-	if req.Name != "" && !openshell.ValidNewSandboxName(req.Name) {
-		return req, llmChoice{}, fmt.Errorf("--name %q: use at most 19 lowercase letters, digits and '-'", req.Name)
 	}
 	reserved := map[string]bool{}
 	for _, c := range o.Credentials {
@@ -444,7 +671,7 @@ func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name s
 	a.note("Copying " + a.tildePath(project) + " (secrets are held back)…")
 	rec, err := a.Workspace.Stage(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("stage the project copy: %w", err)
+		return nil, workspaceFailure("stage the project copy", err, "")
 	}
 	return rec, nil
 }
@@ -477,12 +704,24 @@ func (a *App) copyStageOptions(flags packs.Flags, name string) (workspace.StageO
 	}, nil
 }
 
+// bannerInfo is what the launch banner shows beyond the sandbox itself.
+type bannerInfo struct {
+	llm llmChoice
+	// o carries the run's --credential, --github-write and --host-port.
+	o RunOptions
+	// keptSnapshot marks an undo point an earlier session left (a resume
+	// that did not take a new one).
+	keptSnapshot bool
+	// shown are the violations the preflight printed already.
+	shown map[string]bool
+}
+
 // banner prints the plan's launch banner.
-func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
+func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
 	perms := "skip-permissions ON"
 	if !sb.Launch.Yolo {
-		perms = "skip-permissions OFF (harness prompts kept)"
+		perms = "skip-permissions OFF (" + a.promptsKept(sb) + ")"
 	}
 	a.println()
 	a.printf("%s %s · %s · %s · network: %s\n", a.bold("Sandbox"), a.bold(sb.Name), name, perms, networkLabel(sb))
@@ -496,22 +735,22 @@ func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
 			Context: sb.Workspace.Context, Warnings: sb.Workspace.Warnings}
 		for i, l := range sum.Lines() {
 			if i == 0 && sb.Snapshot != nil {
-				l += "   snapshot taken → `" + CommandName + " undo` restores it"
+				l += "   " + a.undoPointText(sb, b.keptSnapshot)
 			}
 			a.line(l)
 		}
 	default:
 		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir)
 	}
-	if llm.Credential != nil {
-		row("Model", llm.Source+" → "+strings.Join(llm.Hosts, ", ")+" only (the sandbox sees a placeholder)")
-	} else if llm.Note != "" {
-		row("Model", llm.Note)
+	if b.llm.Credential != nil {
+		row("Model", b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)")
+	} else if b.llm.Note != "" {
+		row("Model", b.llm.Note)
 	}
-	for _, c := range sbCredentials(o) {
+	for _, c := range sbCredentials(b.o) {
 		row("Secret", c)
 	}
-	if ports := bannerHostPorts(sb, o); len(ports) > 0 {
+	if ports := bannerHostPorts(sb, b.o); len(ports) > 0 {
 		var hosts []string
 		for _, p := range ports {
 			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
@@ -527,7 +766,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
 		row("Hooks", sb.TamperTier+" tier: the agent could edit its own hook settings (hook silence is detected)")
 	}
 	for _, v := range sb.Violations {
-		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+		if !b.shown[violationKey(v)] {
+			a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+		}
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
@@ -552,6 +793,44 @@ func bannerHostPorts(sb *sandboxapi.Sandbox, o RunOptions) []int {
 		}
 	}
 	return out
+}
+
+// promptsKept says why a sandbox keeps the harness's permission prompts.
+func (a *App) promptsKept(sb *sandboxapi.Sandbox) string {
+	const orgOff = "your organization disables skip-permissions"
+	for _, v := range sb.Violations {
+		if v.Key == "yolo" && v.Admin {
+			if v.Constraint == "openshell.admin.allow_yolo" {
+				return orgOff
+			}
+			return "harness prompts kept by your organization's policy"
+		}
+	}
+	if a.Cfg != nil && a.Cfg.OpenShell.Admin.AllowYolo != nil && !*a.Cfg.OpenShell.Admin.AllowYolo {
+		return orgOff
+	}
+	return "harness prompts kept"
+}
+
+// undoPointText is the banner's note on the mount-mode undo point.
+func (a *App) undoPointText(sb *sandboxapi.Sandbox, kept bool) string {
+	undo := "`" + CommandName + " undo " + sb.Name + "`"
+	if kept {
+		return "undo point from " + a.clock(sb.Snapshot.CreatedAt) + " kept → " + undo + " reverts every session since"
+	}
+	return "snapshot taken → " + undo + " restores it"
+}
+
+// clock is a local time of day, with the date when it is not today.
+func (a *App) clock(t time.Time) string {
+	if t.IsZero() {
+		return "an earlier session"
+	}
+	t, now := t.Local(), a.Now().Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2 15:04")
 }
 
 func sbCredentials(o RunOptions) []string {

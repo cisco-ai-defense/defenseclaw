@@ -19,8 +19,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -28,6 +30,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
@@ -173,5 +177,152 @@ func TestSandboxRunArgs(t *testing.T) {
 	_ = cmd.ParseFlags([]string{"box", "ls"})
 	if err := cmd.Args(cmd, cmd.Flags().Args()); err == nil {
 		t.Error("exec without -- accepted")
+	}
+}
+
+// Every command that can ask a question takes --yes, the answer the
+// no-terminal refusal points to; nothing points to --non-interactive, which
+// only setup takes (manual test L6).
+func TestSandboxCommandsThatAskTakeYes(t *testing.T) {
+	for _, path := range []string{"delete", "undo", "teardown", "doctor", "setup", "stop", "run", "connect"} {
+		cmd, _, err := sandboxCmd.Find(strings.Fields(path))
+		if err != nil {
+			t.Fatalf("sandbox %s: %v", path, err)
+		}
+		if f := cmd.Flags().Lookup("yes"); f == nil || f.Shorthand != "y" {
+			t.Errorf("sandbox %s asks questions but takes no --yes/-y", path)
+		}
+	}
+	msg := sandboxcli.ErrNoTerminal.Error()
+	if strings.Contains(msg, "--non-interactive") || !strings.Contains(msg, "--yes") {
+		t.Fatalf("ErrNoTerminal = %q", msg)
+	}
+}
+
+var (
+	// hintLiteral is a Go string literal.
+	hintLiteral = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
+	// hintFormat is a fmt hint whose %s is CommandName: "`%s start %s`".
+	hintFormat = regexp.MustCompile("`%s ([^`]*)`")
+)
+
+// sandboxHints returns every `defenseclaw sandbox …` suggestion in the
+// sandboxcli sources: the string literals after CommandName on its line
+// (the first one holds the command's words), or a fmt verb standing for it.
+func sandboxHints(t *testing.T) map[string][]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("..", "openshell", "sandboxcli", "*.go"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("sandboxcli sources: %v", err)
+	}
+	hints := map[string][]string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for n, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "CommandName") || strings.HasPrefix(strings.TrimSpace(line), "//") || strings.Contains(line, "const CommandName") {
+				continue
+			}
+			where := fmt.Sprintf("%s:%d", filepath.Base(f), n+1)
+			for _, seg := range strings.Split(line, "CommandName")[1:] {
+				var lits []string
+				for _, m := range hintLiteral.FindAllStringSubmatch(seg, -1) {
+					lits = append(lits, m[1])
+				}
+				if len(lits) > 0 && strings.HasPrefix(lits[0], " ") {
+					hints[where+" "+strings.Join(lits, "…")] = lits
+				}
+			}
+			for _, m := range hintFormat.FindAllStringSubmatch(line, -1) {
+				hints[where+" "+m[1]] = []string{" " + m[1]}
+			}
+		}
+	}
+	return hints
+}
+
+// Every command a sandbox message suggests exists, and so do the flags it
+// names: the hints are what users type next (manual test M13).
+func TestSandboxHintsNameCommandsThatExist(t *testing.T) {
+	hints := sandboxHints(t)
+	if len(hints) < 30 {
+		t.Fatalf("found only %d hints; the scan is broken", len(hints))
+	}
+	for where, lits := range hints {
+		cmd := sandboxCmd
+		for _, word := range strings.Fields(lits[0]) {
+			word = strings.Trim(word, "`(),;.")
+			var next *cobra.Command
+			for _, sub := range cmd.Commands() {
+				if sub.Name() == word {
+					next = sub
+				}
+			}
+			if next == nil {
+				break
+			}
+			cmd = next
+		}
+		if cmd == sandboxCmd {
+			t.Errorf("%s: suggests `defenseclaw sandbox%s`, which is no command", where, lits[0])
+			continue
+		}
+		for _, lit := range lits {
+			for _, tok := range strings.FieldsFunc(lit, func(r rune) bool { return r == ' ' || r == '|' || r == '`' || r == '(' || r == ')' }) {
+				if !strings.HasPrefix(tok, "-") || tok == "-" || tok == "--" || strings.HasPrefix(tok, "--help") {
+					continue
+				}
+				name := strings.TrimLeft(strings.SplitN(tok, "=", 2)[0], "-")
+				var f *pflag.Flag
+				if strings.HasPrefix(tok, "--") {
+					f = cmd.Flags().Lookup(name)
+				} else if len(name) == 1 {
+					f = cmd.Flags().ShorthandLookup(name)
+				}
+				if f == nil {
+					t.Errorf("%s: suggests `%s %s`, which takes no %s", where, cmd.CommandPath(), tok, tok)
+				}
+			}
+		}
+	}
+}
+
+// `sandbox pack list|show|validate` work on a fresh DEFENSECLAW_HOME with no
+// config.yaml: an administrator reads a digest before pinning it (manual
+// test L11). Other commands still need the configuration, and a broken one
+// is reported.
+func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
+	prev := cfg
+	t.Cleanup(func() { cfg = prev })
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	for _, path := range []string{"pack list", "pack show", "pack validate"} {
+		cmd, _, err := sandboxCmd.Find(strings.Fields(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg = nil
+		if err := sandboxPreRun(cmd, nil); err != nil {
+			t.Fatalf("sandbox %s without config.yaml: %v", path, err)
+		}
+		if cfg == nil || cfg.OpenShell.PackDir != filepath.Join(home, "policies", "sandbox") {
+			t.Fatalf("sandbox %s: cfg = %+v", path, cfg)
+		}
+	}
+	list, _, _ := sandboxCmd.Find([]string{"list"})
+	if err := sandboxPreRun(list, nil); err == nil {
+		t.Fatal("sandbox list ran without a configuration")
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("version: [not yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	show, _, _ := sandboxCmd.Find([]string{"pack", "show"})
+	if err := sandboxPreRun(show, nil); err == nil {
+		t.Fatal("a broken config.yaml was ignored")
 	}
 }

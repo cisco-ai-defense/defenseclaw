@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
@@ -46,6 +47,11 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 // sandboxConfigOptional marks commands that run without a DefenseClaw
 // configuration (teardown during an uninstall of a half-installed host).
 const sandboxConfigOptional = "defenseclaw.sandbox.config-optional"
+
+// sandboxConfigDefault marks read-only commands that use the default
+// configuration when there is no config.yaml yet (an administrator reads a
+// pack's digest before writing the file that pins it).
+const sandboxConfigDefault = "defenseclaw.sandbox.config-default"
 
 var sandboxCmd = &cobra.Command{
 	Use:   "sandbox",
@@ -76,6 +82,12 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 		if cmd.Annotations[sandboxConfigOptional] == "true" {
 			cfg = nil
 			return nil
+		}
+		if cmd.Annotations[sandboxConfigDefault] == "true" {
+			if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+				cfg = config.DefaultConfig()
+				return nil
+			}
 		}
 		return err
 	}
@@ -293,6 +305,13 @@ func newSandboxConnectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "connect <name> [-- harness-args...]",
 		Short: "Resume a sandbox: start it if stopped and attach the harness",
+		Long: `Resumes a sandbox: starts it when it is stopped and attaches the harness to your
+terminal, or with --prompt (or the harness's own print flag after --) runs one prompt
+headless, which needs no terminal. A sandbox this command started is stopped again when
+the session ends; one that was already running (a detached run) keeps running.`,
+		Example: `  defenseclaw sandbox connect myapp-7f3a
+  defenseclaw sandbox connect myapp-7f3a --prompt "now add the tests"
+  defenseclaw sandbox connect myapp-7f3a --shell`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if n := cmd.ArgsLenAtDash(); n == 1 || (n < 0 && len(args) == 1) {
 				return nil
@@ -310,7 +329,8 @@ func newSandboxConnectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.Shell, "shell", false, "open a shell in the sandbox instead of the harness")
 	cmd.Flags().BoolVar(&o.Refresh, "refresh", false, "copy-mode: copy the folder into the sandbox again first")
 	cmd.Flags().BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
-	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "take the defaults at the end of the session")
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "take the defaults at the end of the session (keep the changes)")
+	cmd.Flags().StringVarP(&o.Prompt, "prompt", "p", "", "run the harness headless with this prompt")
 	return cmd
 }
 
@@ -337,22 +357,34 @@ func newSandboxExecCmd() *cobra.Command {
 }
 
 func newSandboxStopCmd() *cobra.Command {
-	return &cobra.Command{
+	var o sandboxcli.StopOptions
+	cmd := &cobra.Command{
 		Use:   "stop <name>",
 		Short: "Stop a sandbox (it is kept for start or connect)",
-		Args:  nameArg("sandbox"),
+		Long: `Stops a sandbox and keeps it for start or connect. When its detached run is still
+going, the stop ends it: stop asks first on a terminal (--yes does not), marks the run
+interrupted and keeps its log, so "sandbox logs" still shows it.`,
+		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
-			return app.Stop(ctx, args[0])
+			o.Name = args[0]
+			return app.Stop(ctx, o)
 		}),
 	}
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run is still going")
+	return cmd
 }
 
 func newSandboxStartCmd() *cobra.Command {
 	var o sandboxcli.StartOptions
 	cmd := &cobra.Command{
 		Use:   "start <name>",
-		Short: "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
-		Args:  nameArg("sandbox"),
+		Short: "Start a stopped sandbox for a new session",
+		Long: `Starts a stopped sandbox for a new session. A mounted project gets a fresh undo
+snapshot, unless the folder still holds changes an earlier session made that were
+neither undone nor kept at its end (a headless or detached run, say): then the earlier
+undo point stays, so "sandbox undo" still reverts them. --new-snapshot accepts those
+changes and takes a fresh snapshot.`,
+		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			return app.Start(ctx, args[0], o)
 		}),
@@ -526,7 +558,12 @@ func newSandboxPullCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pull <name>",
 		Short: "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
-		Args:  nameArg("sandbox"),
+		Long: `Brings a copy-mode sandbox's work back after a review: --apply merges it into your
+working tree (3-way), --branch puts it on branch dc/<name>, --patch-out writes a patch.
+When --apply cannot merge (a conflict, or git older than 2.38), your working tree is
+left as it was, the changes go to branch dc/<name> and a patch instead, and pull exits
+with status 4.`,
+		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -630,9 +667,10 @@ func newSandboxPackCmd() *cobra.Command {
 		Short: "Inspect sandbox policy packs",
 	}
 	list := &cobra.Command{
-		Use:   "list",
-		Short: "List the built-in and custom packs with their sha256 digests",
-		Args:  cobra.NoArgs,
+		Use:         "list",
+		Short:       "List the built-in and custom packs with their sha256 digests",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sandboxConfigDefault: "true"},
 		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -643,9 +681,10 @@ func newSandboxPackCmd() *cobra.Command {
 	}
 	outputFlag(list)
 	show := &cobra.Command{
-		Use:   "show <pack>",
-		Short: "Print a pack and its sha256 digest (for openshell.admin.required_pack_digest)",
-		Args:  cobra.ExactArgs(1),
+		Use:         "show <pack>",
+		Short:       "Print a pack and its sha256 digest (for openshell.admin.required_pack_digest)",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{sandboxConfigDefault: "true"},
 		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -656,9 +695,10 @@ func newSandboxPackCmd() *cobra.Command {
 	}
 	outputFlag(show)
 	validate := &cobra.Command{
-		Use:   "validate <path>",
-		Short: "Validate a pack file strictly",
-		Args:  cobra.ExactArgs(1),
+		Use:         "validate <path>",
+		Short:       "Validate a pack file strictly",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{sandboxConfigDefault: "true"},
 		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			return app.PackValidate(args[0])
 		}),

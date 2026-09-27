@@ -44,7 +44,14 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 	return &openshell.Installer{
 		Out: a.IO.Out, Consent: consent, Discover: d,
 		ConfirmBreakingUpgrade: func(*openshell.InstallPlan) (bool, error) {
-			return a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up (`defenseclaw sandbox legacy-cleanup`)?", false, false)
+			// Only a person can say the old runtime is backed up: --yes
+			// does not answer this.
+			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up (`defenseclaw sandbox legacy-cleanup`)?", false, false)
+			if errors.Is(err, ErrNoTerminal) {
+				return false, errors.New("an OpenShell 0.0.x runtime is installed and 0.1 cannot use its state; back it up, clean it up " +
+					"(`defenseclaw sandbox legacy-cleanup`) and run setup again on a terminal")
+			}
+			return ok, err
 		},
 	}
 }
@@ -229,12 +236,20 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return err
 		}
 	}
+	// Steps left out say so at the end, with the command that does them.
+	var skipped []string
+	cmd := "claude"
+	if len(specs) > 0 {
+		cmd = specs[0].Command
+	}
 	if wrap {
 		for _, s := range specs {
 			if err := a.Enable(WrapperOptions{Harness: s.Name}); err != nil {
 				a.warn("wrapper for " + s.Command + ": " + err.Error())
 			}
 		}
+	} else if o.NonInteractive && !o.NoWrappers {
+		skipped = append(skipped, "shell wrappers (not asked with --non-interactive; add one with `"+CommandName+" enable "+cmd+"`)")
 	}
 
 	// 7. Images, then the ingress provider profile (imported once here:
@@ -245,14 +260,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 				return err
 			}
 		}
+	} else {
+		skipped = append(skipped, "harness images (--skip-images; the first run builds them, or `"+CommandName+" image build`)")
 	}
 	a.importIngressProfile(ctx)
 
 	// 8. The daemon picks the change up.
 	a.waitDaemon(ctx)
-	cmd := "claude"
-	if len(specs) > 0 {
-		cmd = specs[0].Command
+	for _, s := range skipped {
+		a.note("skipped: " + s)
 	}
 	a.println()
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)

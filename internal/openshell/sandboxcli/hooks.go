@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -134,22 +133,6 @@ func (s *session) exit(code int) error {
 		return errNoHooks()
 	}
 	return nil
-}
-
-// runStatus is what a detached run left in RunDir: its exit status and the
-// epoch second it started (0 when unknown).
-type runStatus struct {
-	exit    string
-	started int64
-}
-
-func parseRunStatus(out string) runStatus {
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	st := runStatus{exit: strings.TrimSpace(lines[0])}
-	if len(lines) > 1 {
-		st.started, _ = strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
-	}
-	return st
 }
 
 // runReachedHooks reports whether a hook reached DefenseClaw during a

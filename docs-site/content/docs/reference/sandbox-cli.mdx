@@ -399,10 +399,11 @@ defenseclaw sandbox connect myapp-7f3a --shell
 {/* AUTOGEN-BEGIN: sandbox-flags connect */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `-p`, `--prompt` | text |  | Run the harness headless with this prompt. |
 | `--refresh` | switch |  | Copy-mode: copy the folder into the sandbox again first. |
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--shell` | switch |  | Open a shell in the sandbox instead of the harness. |
-| `-y`, `--yes` | switch |  | Take the defaults at the end of the session. |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (keep the changes). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox exec`
@@ -486,7 +487,9 @@ defenseclaw sandbox stop myapp-7f3a
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags stop */}
-This command has no flags.
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-y`, `--yes` | switch |  | Stop without asking when a detached run is still going. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox start`

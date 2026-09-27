@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // TestSandboxCLI drives the `defenseclaw-gateway sandbox` commands against
@@ -101,6 +103,7 @@ func TestSandboxCLI(t *testing.T) {
 	e.step("delete claude", func() { c.delete(c.claude) })
 	e.step("run codex detached", c.runCodex)
 	e.step("delete codex", func() { c.delete(c.codex) })
+	e.step("detached run lifecycle under a generated name", c.detachedLifecycle)
 	e.step("copy mode: git project run", c.copyGitRun)
 	e.step("copy mode: pull back", c.copyGitPull)
 	e.step("copy mode: resume with refresh", c.copyGitRefresh)
@@ -124,6 +127,8 @@ type cliEnv struct {
 	// plain folder, each with a held-back secret.
 	copyGit, copyPlain         string
 	copyGitProj, copyPlainProj string
+	// generated are the sandboxes a run named itself.
+	generated []string
 }
 
 func (c *cliEnv) setupCLI() {
@@ -169,7 +174,7 @@ func (c *cliEnv) setupCLI() {
 	c.root.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		for _, name := range []string{c.claude, c.codex, c.copyGit, c.copyPlain, c.prefix + "-bc", c.prefix + "-bx"} {
+		for _, name := range append([]string{c.claude, c.codex, c.copyGit, c.copyPlain, c.prefix + "-bc", c.prefix + "-bx"}, c.generated...) {
 			if _, err := c.gw.GetSandbox(ctx, name); err != nil {
 				continue
 			}
@@ -645,6 +650,73 @@ func (c *cliEnv) delete(name string) {
 	}
 }
 
+// detachedLifecycle starts a detached Claude Code run without --name (the
+// name the run picks fits OpenShell's 19 characters) that works for a few
+// minutes, and while it is going:
+//   - a copy-mode run under the same name is refused before anything is
+//     staged, with the way to resume it;
+//   - a headless `connect --prompt` session in the sandbox leaves the
+//     sandbox and the run going;
+//   - `stop` says it ends the run, marks it interrupted and keeps its log,
+//     which `logs` shows once the sandbox is stopped and after a restart.
+func (c *cliEnv) detachedLifecycle() {
+	t := c.t
+	dir := filepath.Join(c.work, "proj", c.prefix+"-gen")
+	writeFile(t, filepath.Join(dir, "README.md"), []byte(c.readme), 0o644)
+	c.gitIn(dir, "init", "-q", "-b", "main")
+	c.gitIn(dir, "add", "README.md")
+	c.gitIn(dir, "commit", "-q", "-m", "initial")
+	mock := []string{"--llm", "none", "--credential", "ANTHROPIC_API_KEY=host.openshell.internal:" + strconv.Itoa(c.mock),
+		"--env", "ANTHROPIC_BASE_URL=http://host.openshell.internal:" + strconv.Itoa(c.mock)}
+	out := c.okIn(dir, 45*time.Minute, append(append([]string{"run", "claude", "--detach"}, mock...), "--", "-p", "Run the DCE2E-SLOW scenario.")...)
+	m := regexp.MustCompile(`Sandbox (\S+) · Claude Code`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no sandbox name in the run's output:\n%s", truncate(out, 3000))
+	}
+	name := m[1]
+	c.generated = append(c.generated, name)
+	t.Logf("the run named its sandbox %s", name)
+	if !openshell.ValidNewSandboxName(name) {
+		t.Fatalf("generated name %q is not one OpenShell creates (at most %d characters)", name, openshell.MaxSandboxNameLen)
+	}
+	waitFor(t, 5*time.Minute, "the slow tool call in the streamed log", func() error {
+		logs, _, _ := c.cliIn(dir, time.Minute, "logs", name)
+		if !strings.Contains(logs, "→ Bash: sleep 200") || !strings.Contains(logs, "the run is still going") {
+			return fmt.Errorf("logs:\n%s", truncate(logs, 800))
+		}
+		return nil
+	})
+
+	_, errOut, code := c.cliIn(dir, 5*time.Minute, append(append([]string{"run", "claude", "--copy", "--name", name, "--detach"}, mock...), "--", "-p", "x")...)
+	if code == 0 || !strings.Contains(errOut, "a sandbox named "+name+" already exists") || !strings.Contains(errOut, "connect "+name+" --prompt TEXT") {
+		t.Fatalf("run --copy --name %s exited %d:\n%s", name, code, truncate(errOut, 1000))
+	}
+	if _, err := os.Stat(filepath.Join(c.work, "dc", "sandboxes", name, "copy")); !os.IsNotExist(err) {
+		t.Fatalf("the refused run staged a copy for %s: %v", name, err)
+	}
+
+	out = c.okIn(dir, 15*time.Minute, "connect", name, "--prompt", "Write the allowed marker file.", "--yes")
+	t.Logf("connect --prompt:\n%s", truncate(out, 2000))
+	wantAll(t, "connect --prompt", out, "Session ended", "keeps running: its detached run is still going")
+	if sb := c.status(name); sb.Phase != "ready" {
+		t.Fatalf("phase after the headless session = %s", sb.Phase)
+	}
+	wantAll(t, "logs after the headless session", c.okIn(dir, time.Minute, "logs", name), "the run is still going")
+
+	out = c.okIn(dir, 5*time.Minute, "stop", name)
+	wantAll(t, "stop", out, "is still going; stopping the sandbox ends it", name+" is stopped")
+	logs := c.okIn(dir, time.Minute, "logs", name)
+	wantAll(t, "logs of the stopped sandbox", logs, "→ Bash: sleep 200", "this is the log kept when it stopped", "the run did not finish")
+
+	c.okIn(dir, 5*time.Minute, "start", name)
+	logs = c.okIn(dir, time.Minute, "logs", name)
+	wantAll(t, "logs after the restart", logs, "the run did not finish")
+	if strings.Contains(logs, "still going") {
+		t.Fatalf("the interrupted run reads as going after the restart:\n%s", truncate(logs, 1000))
+	}
+	c.delete(name)
+}
+
 func (c *cliEnv) codexMockArgs() []string {
 	base := "http://host.openshell.internal:" + strconv.Itoa(c.openaiPort) + "/v1"
 	return []string{"-c", `model_provider="mock"`, "-c", `model_providers.mock.name="mock"`,
@@ -751,12 +823,16 @@ func (c *cliEnv) copyGitPull() {
 		t.Fatalf("the patch carries the held-back secret:\n%s", truncate(data, 2000))
 	}
 
-	// --apply over a conflicting host edit leaves the folder alone and
-	// falls back to a branch and a patch.
+	// --apply over a conflicting host edit leaves the folder alone, falls
+	// back to a branch and a patch, says how to merge, and exits 4.
 	writeFile(t, readme, []byte("host edit during the session\n"), 0o644)
-	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
-	t.Logf("pull --apply over a conflict:\n%s", truncate(out, 2000))
-	wantAll(t, "pull --apply (conflict)", out, "the 3-way apply conflicted in README.md", "the changes are on branch dc/"+name+"-2", "and in ")
+	out, _, code := c.cliIn(dir, 5*time.Minute, "pull", name, "--apply")
+	t.Logf("pull --apply over a conflict (exit %d):\n%s", code, truncate(out, 2000))
+	if code != sandboxcli.ExitPullConflict {
+		t.Fatalf("pull --apply over a conflict exited %d, want %d", code, sandboxcli.ExitPullConflict)
+	}
+	wantAll(t, "pull --apply (conflict)", out, "the 3-way apply conflicted in README.md", "the changes are on branch dc/"+name+"-2", "and in ",
+		"git merge dc/"+name+"-2")
 	if got := c.readFile(readme); got != "host edit during the session\n" {
 		t.Fatalf("a conflicting apply changed README: %q", got)
 	}

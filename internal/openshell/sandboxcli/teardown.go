@@ -330,6 +330,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 	// Data of sandboxes the daemon no longer knew: mount pins and masks,
 	// copy-mode state and run files an interrupted create or delete left.
 	for _, name := range p.orphans {
+		a.forgetCLIState(name)
 		if err := manager.RemoveOrphanedSandboxData(a.dataDir(), name); err != nil {
 			fail("remove the leftover data of "+name, err)
 			continue

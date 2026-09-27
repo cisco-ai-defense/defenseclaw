@@ -71,6 +71,11 @@
     "short": "Resume a sandbox: start it if stopped and attach the harness",
     "flags": [
       {
+        "name": "prompt",
+        "shorthand": "p",
+        "type": "string"
+      },
+      {
         "name": "refresh",
         "type": "bool",
         "default": "false"
@@ -680,7 +685,7 @@
   {
     "path": "sandbox start",
     "use": "start \u003cname\u003e",
-    "short": "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
+    "short": "Start a stopped sandbox for a new session",
     "flags": [
       {
         "name": "new-snapshot",
@@ -710,7 +715,15 @@
   {
     "path": "sandbox stop",
     "use": "stop \u003cname\u003e",
-    "short": "Stop a sandbox (it is kept for start or connect)"
+    "short": "Stop a sandbox (it is kept for start or connect)",
+    "flags": [
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
   },
   {
     "path": "sandbox teardown",

@@ -124,8 +124,9 @@ func ParseOutput(s string) (OutputFormat, error) {
 	return "", fmt.Errorf("--output must be text or json, not %q", s)
 }
 
-// ErrNoTerminal refuses a prompt without a terminal.
-var ErrNoTerminal = errors.New("this needs an answer but there is no terminal; pass --yes (or --non-interactive) to accept the defaults")
+// ErrNoTerminal refuses a prompt without a terminal. Every command that
+// asks takes --yes (internal/cli pins that).
+var ErrNoTerminal = errors.New("this needs an answer but there is no terminal; pass --yes to accept the defaults")
 
 // ask asks a yes/no question. Without a terminal it returns def when
 // allowed, else ErrNoTerminal.

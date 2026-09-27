@@ -257,17 +257,19 @@ func (a *App) Decide(ctx context.Context, o DecideOptions) error {
 	if o.Approve {
 		verb = "approved"
 	}
+	// One line per decision: the daemon's message only when it says more
+	// than the verb and the queueing.
 	msg := verb + " " + o.ID + " (" + res.Approval.Host + ")"
-	if res.Approval.Status == sandboxapi.ApprovalQueued {
+	if res.Persisted {
+		msg += ", kept for future sandboxes"
+	}
+	switch m := strings.TrimSpace(res.Message); {
+	case res.Approval.Status == sandboxapi.ApprovalQueued:
 		msg += "; it applies at the next quiet moment of the sandbox"
+	case m != "" && m != verb && !strings.HasPrefix(m, verb+";") && !strings.HasPrefix(m, verb+" "):
+		msg += "; " + m
 	}
 	a.ok(msg)
-	if res.Persisted {
-		a.note("kept for future sandboxes")
-	}
-	if res.Message != "" {
-		a.note(res.Message)
-	}
 	return nil
 }
 
@@ -294,13 +296,14 @@ func (a *App) Unblock(ctx context.Context, o UnblockOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	where := "in " + res.Sandbox
+	// One line: the daemon's message repeats where the unblock applies.
+	msg := "unblocked " + res.Host + " in " + res.Sandbox
 	if res.Scope == "always" {
-		where = "for every sandbox"
+		msg = "unblocked " + res.Host + " for every sandbox"
+		if res.Persisted {
+			msg += " (saved to openshell.egress.unblocked)"
+		}
 	}
-	a.ok("unblocked " + res.Host + " " + where)
-	if res.Message != "" {
-		a.note(res.Message)
-	}
+	a.ok(msg)
 	return nil
 }

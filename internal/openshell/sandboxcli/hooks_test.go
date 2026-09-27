@@ -178,24 +178,25 @@ func TestRunCopySessionWithoutHooks(t *testing.T) {
 
 func TestLogsChecksTheRunsHooks(t *testing.T) {
 	started := time.Now().Add(-time.Minute)
+	exited := fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", started.Unix())
 	cases := []struct {
 		name    string
-		status  string // "" while the run is going
+		status  string // the run-state script's answer
 		hooks   sandboxapi.HookCoverage
 		code    int
 		warning string
 	}{
-		{"hooks during the run", fmt.Sprintf("0\n%d\n", started.Unix()),
-			sandboxapi.HookCoverage{HookRequests: 3, LastHookAt: time.Now()}, 0, ""},
-		{"no hook since the run started", fmt.Sprintf("0\n%d\n", started.Unix()),
+		{"hooks during the run", exited, sandboxapi.HookCoverage{HookRequests: 3, LastHookAt: time.Now()}, 0, ""},
+		{"no hook since the run started", exited,
 			sandboxapi.HookCoverage{HookRequests: 3, LastHookAt: started.Add(-time.Hour)}, ExitHooksUnreachable,
 			"not one hook request of this run reached DefenseClaw"},
-		{"never a hook, the daemon knows why", fmt.Sprintf("0\n%d\n", started.Unix()),
+		{"never a hook, the daemon knows why", exited,
 			sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "OpenShell refused the hooks' connections"}, ExitHooksUnreachable,
 			"(OpenShell refused the hooks' connections). Run: defenseclaw sandbox doctor"},
-		{"run of an older version, no start", "0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable, "every tool call is being blocked"},
-		{"run of an older version with hooks", "0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
-		{"still going, unreachable", "", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
+		{"run of an older version, no start", "started=\nstate=exited\nexit=0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable,
+			"every tool call is being blocked"},
+		{"run of an older version with hooks", "state=exited\nexit=0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
+		{"still going, unreachable", "started=1\nstate=running\n", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
 			"every tool call is being blocked (no hook request)"},
 	}
 	for _, c := range cases {
@@ -207,9 +208,6 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 			ta.daemon.add(sb)
 			ta.stream.answer = func(argv []string) (int, string) {
 				if isRunStatus(sandboxCommand(argv)) {
-					if c.status == "" {
-						return 1, ""
-					}
 					return 0, c.status
 				}
 				return 0, "log line\n"
@@ -232,14 +230,18 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 	}
 }
 
-func TestParseRunStatus(t *testing.T) {
-	for in, want := range map[string]runStatus{
-		"0\n":              {exit: "0"},
-		"3\n1790000000\n":  {exit: "3", started: 1790000000},
-		" 0 \n garbage \n": {exit: "0"},
+func TestParseDetachedRun(t *testing.T) {
+	for in, want := range map[string]detachedRun{
+		"state=none\n":                          {State: runNone},
+		"started=1790000000\nstate=running\n":   {State: runRunning, Started: 1790000000},
+		"started=\nstate=exited\nexit=3\n":      {State: runExited, Exit: "3"},
+		"started=17\nstate=interrupted\n":       {State: runInterrupted, Started: 17},
+		" state=exited \n exit=0 \n garbage \n": {State: runExited, Exit: "0"},
+		"state=bogus\n":                         {State: runNone},
+		"":                                      {State: runNone},
 	} {
-		if got := parseRunStatus(in); got != want {
-			t.Errorf("parseRunStatus(%q) = %+v, want %+v", in, got, want)
+		if got := parseDetachedRun(in); got != want {
+			t.Errorf("parseDetachedRun(%q) = %+v, want %+v", in, got, want)
 		}
 	}
 }

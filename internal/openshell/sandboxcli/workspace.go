@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -39,7 +40,8 @@ type CopyWorkspace interface {
 	Pull(ctx context.Context, opts workspace.PullOptions) (*workspace.PullResult, error)
 	Apply(ctx context.Context, opts workspace.ApplyOptions) (*workspace.ApplyResult, error)
 	UndoApply(ctx context.Context, opts workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error)
-	// Discard removes a staged copy no sandbox was created for.
+	// Discard removes a copy this run staged for a sandbox that was never
+	// created.
 	Discard(dataDir, name string) error
 }
 
@@ -67,7 +69,10 @@ func (defaultCopyWorkspace) UndoApply(ctx context.Context, o workspace.UndoApply
 	return workspace.UndoApply(ctx, o)
 }
 func (defaultCopyWorkspace) Discard(dataDir, name string) error {
-	return workspace.DeleteCopy(dataDir, name)
+	if err := workspace.DeleteCopy(dataDir, name); err != nil && !errors.Is(err, workspace.ErrCopyNotFound) {
+		return err
+	}
+	return nil
 }
 
 // UndoOptions are the `sandbox undo` flags.
@@ -114,10 +119,34 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		return nil
 	}
 	a.printUndo(preview.Result, true)
+	// Undo stops a running sandbox first (the agent could race the
+	// restore): say so, and what it ends, before asking.
+	sb, _ := api.Get(ctx, o.Name)
+	running := sb != nil && sb.Phase == "ready"
+	var cli *openshell.CLI
+	run := detachedRun{State: runNone}
+	if running {
+		if gateway, err := a.gatewayName(ctx); err == nil {
+			c := a.cli(gateway)
+			cli = &c
+			if r, err := a.detachedRun(ctx, c, sb); err == nil {
+				run = r
+			}
+		}
+		ends := "its harness session ends"
+		if run.State == runRunning {
+			ends = "its detached run" + a.startedText(run.Started) + " ends unfinished"
+		}
+		a.line("  stop " + o.Name + " first (" + ends + ")")
+	}
 	if o.Preview {
 		return nil
 	}
-	yes, err := a.confirm("Restore "+a.tildePath(preview.Result.Project)+" to the snapshot? (the sandbox is stopped first)", o.Yes)
+	question := "Restore " + a.tildePath(preview.Result.Project) + " to the snapshot?"
+	if running {
+		question = "Stop " + o.Name + " and restore " + a.tildePath(preview.Result.Project) + " to the snapshot?"
+	}
+	yes, err := a.confirm(question, o.Yes)
 	if err != nil {
 		return err
 	}
@@ -127,6 +156,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 			return writeJSON(stdout, preview)
 		}
 		return nil
+	}
+	if cli != nil {
+		a.keepRunLog(ctx, *cli, sb, run)
 	}
 	res, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Stop: true, Restart: o.Restart, KeepRefs: o.KeepRefs})
 	if err != nil {
@@ -307,8 +339,32 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 		}
 		a.line("  " + undoVerb(c.Status) + " " + c.Path)
 	}
-	if r.BranchBefore != "" && r.BranchBefore != r.BranchAfter {
-		a.line("  switch back to branch " + r.BranchBefore)
+	switch {
+	case r.BranchBefore != "" && r.BranchBefore != r.BranchAfter:
+		a.line("  switch back to branch " + r.BranchBefore + " at " + firstNonEmpty(shortCommit(r.HeadBefore), "its snapshot commit"))
+	case r.HeadBefore != r.HeadAfter && r.HeadBefore != "":
+		on := ""
+		if r.BranchBefore != "" {
+			on = " (" + r.BranchBefore + ")"
+		}
+		a.line("  reset HEAD" + on + " from " + firstNonEmpty(shortCommit(r.HeadAfter), "none") + " back to " + shortCommit(r.HeadBefore) +
+			" (undo saves the session's state first)")
+	}
+	if n := len(r.RefChanges); n > 0 {
+		var refs []string
+		for _, rc := range r.RefChanges {
+			refs = append(refs, strings.TrimPrefix(strings.TrimPrefix(rc.Ref, "refs/heads/"), "refs/tags/"))
+		}
+		a.line("  restore " + plural(int64(n), "branch or tag", "branches and tags") + ": " + strings.Join(firstN(refs, 6), ", "))
+	}
+	if n := len(r.ControlChanges); n > 0 {
+		a.line("  reset " + plural(int64(n), "git control file", "git control files") + ": " + strings.Join(firstN(r.ControlChanges, 6), ", "))
+	}
+	if n := len(r.LostObjects); n > 0 {
+		a.line("  bring back " + plural(int64(n), "pre-session commit", "pre-session commits") + " the session deleted")
+	}
+	if n := len(r.HiddenRemoved); n > 0 {
+		a.line("  remove " + plural(int64(n), "file", "files") + " the session hid from git with changed ignore rules")
 	}
 	for _, n := range r.NestedRepos {
 		a.line("  remove nested repository " + n)
@@ -387,13 +443,19 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 		}
 		return writeJSON(a.IO.Out, out)
 	}
-	a.line(a.bold(o.Name) + ": " + rev.Summary)
-	if rev.RiskLine != "" {
-		a.line(a.style(rev.RiskLine, ansiYellow))
+	summary := rev.Summary
+	if r := rev.Report; r != nil {
+		if moved := headMoved(r.BranchBefore, r.BranchAfter, r.HeadBefore, r.HeadAfter); moved != "" {
+			summary += " · " + moved
+		}
+	}
+	a.line(a.bold(o.Name) + ": " + summary)
+	if line := firstNonEmpty(riskLine(rev.Report), rev.RiskLine); line != "" {
+		a.line(a.style(line, ansiYellow))
 	}
 	if r := rev.Report; r != nil {
-		for _, f := range r.Flags {
-			a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.Severity)), f.Label, f.Detail))
+		for _, f := range mergeFlags(r.Flags) {
+			a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), f.name, strings.Join(f.details, "; ")))
 		}
 		for _, f := range r.Findings {
 			a.line(findingLine(f))
@@ -410,6 +472,11 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 	}
 	return nil
 }
+
+// ExitPullConflict is the exit status of a `sandbox pull --apply` that left
+// the working tree alone (a 3-way conflict, or a git too old to merge in
+// place): the changes went to a branch and a patch instead.
+const ExitPullConflict = 4
 
 // PullOptions are the `sandbox pull` flags (copy mode).
 type PullOptions struct {
@@ -484,7 +551,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return writeJSON(stdout, res)
 	}
 	a.line(a.bold(o.Name) + ": " + res.Review.SummaryLine())
-	if line := res.Review.RiskLine(); line != "" {
+	if line := riskLine(&res.Review); line != "" {
 		a.line(a.style(line, ansiYellow))
 	}
 	for _, c := range res.Changes {
@@ -532,9 +599,23 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return err
 	}
 	if stdout != nil {
-		return writeJSON(stdout, applied)
+		if err := writeJSON(stdout, applied); err != nil {
+			return err
+		}
+	}
+	if fellBack(applied) {
+		// The work did not land in the working tree: scripts tell by the
+		// status.
+		return &ExitError{Code: ExitPullConflict, Err: &Silent{Err: errors.New("the changes were not applied to the working tree")}}
 	}
 	return nil
+}
+
+// fellBack reports an --apply that left the working tree alone (a 3-way
+// conflict, or a git too old to merge without touching it) and put the
+// changes on a branch and in a patch instead.
+func fellBack(r *workspace.ApplyResult) bool {
+	return r != nil && r.Mode == workspace.ApplyMerge && !r.Applied && (len(r.Conflicts) > 0 || r.Branch != "" || r.PatchPath != "")
 }
 
 // applyMode is how --apply, --branch or --patch-out brings the work back
@@ -558,7 +639,7 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	a.note("Pulling " + sb.Name + "'s work…")
 	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
 	if err != nil {
-		return nil, fmt.Errorf("pull %s: %w", sb.Name, err)
+		return nil, workspaceFailure("pull "+sb.Name, err, "")
 	}
 	return res, nil
 }
@@ -601,16 +682,26 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		a.warn("could not record the pull with the daemon: " + apiError(rerr).Error())
 	}
 	if err != nil {
-		return nil, fmt.Errorf("bring back %s's changes: %w", sb.Name, err)
+		return nil, workspaceFailure("bring back "+sb.Name+"'s changes", err, applyHint(opts.Mode, err))
 	}
 	switch {
-	case len(applied.Conflicts) > 0:
-		a.warn(fmt.Sprintf("the 3-way apply conflicted in %s", strings.Join(firstN(applied.Conflicts, 6), ", ")))
+	case fellBack(applied):
+		if len(applied.Conflicts) > 0 {
+			a.warn(fmt.Sprintf("the 3-way apply conflicted in %s; your working tree is unchanged", strings.Join(firstN(applied.Conflicts, 6), ", ")))
+		} else {
+			a.warn("the changes could not be applied to your working tree, which is unchanged")
+		}
 		if applied.Branch != "" {
 			a.ok("the changes are on branch " + applied.Branch + " instead")
 		}
 		if applied.PatchPath != "" {
 			a.ok("and in " + applied.PatchPath)
+		}
+		switch {
+		case applied.Branch != "":
+			a.note("merge them when you are ready: git merge " + applied.Branch + "   (or pick hunks: git checkout -p " + applied.Branch + " -- .)")
+		case applied.PatchPath != "":
+			a.note("apply them when you are ready: git apply --3way " + applied.PatchPath)
 		}
 	case applied.Mode == workspace.ApplyMerge && applied.UpToDate:
 		a.ok("nothing to apply: " + a.tildePath(sb.Project) + " already has these changes")
@@ -643,4 +734,93 @@ func findingLine(f workspace.ScanFinding) string {
 		text += ": " + title
 	}
 	return fmt.Sprintf("  %-8s %s", sev, truncate(text, 160))
+}
+
+// wsError is a workspace failure as people read it: what failed, then
+// why, without package workspace's "workspace:" prefixes, and the way on.
+type wsError struct {
+	msg string
+	err error
+}
+
+func (e *wsError) Error() string { return e.msg }
+func (e *wsError) Unwrap() error { return e.err }
+
+func workspaceFailure(what string, err error, hint string) error {
+	msg := what + ": " + strings.ReplaceAll(err.Error(), "workspace: ", "")
+	if hint != "" {
+		msg += "; " + hint
+	}
+	return &wsError{msg: msg, err: err}
+}
+
+// applyHint is the way on after a pull could not land.
+func applyHint(mode workspace.ApplyMode, err error) string {
+	if !strings.Contains(err.Error(), "already exists") {
+		return ""
+	}
+	switch mode {
+	case workspace.ApplyBranch:
+		return "pass --branch-name NAME for another branch, or --force to move this one"
+	case workspace.ApplyPatch:
+		return "pass another --patch-out FILE, or --force to overwrite this one"
+	}
+	return ""
+}
+
+// fileFlag is every review flag of one path: package.json's changed
+// install scripts and bin entries are one line, not three.
+type fileFlag struct {
+	name     string
+	severity workspace.Severity
+	details  []string
+}
+
+var severityRank = map[workspace.Severity]int{
+	workspace.SeverityInfo: 0, workspace.SeverityMedium: 1, workspace.SeverityHigh: 2, workspace.SeverityCritical: 3,
+}
+
+// mergeFlags groups review flags by path, in the review's order (most
+// severe first), with each path's details once.
+func mergeFlags(flags []workspace.Flag) []fileFlag {
+	var out []fileFlag
+	index := map[string]int{}
+	for _, f := range flags {
+		name, detail := f.Label, f.Detail
+		if f.Path != "" && strings.HasPrefix(f.Label, f.Path+"#") {
+			name = f.Path
+			detail = strings.TrimPrefix(f.Label, f.Path+"#") + ": " + detail
+		}
+		i, ok := index[name]
+		if !ok {
+			i = len(out)
+			index[name] = i
+			out = append(out, fileFlag{name: name, severity: f.Severity})
+		}
+		if severityRank[f.Severity] > severityRank[out[i].severity] {
+			out[i].severity = f.Severity
+		}
+		if detail != "" && !slices.Contains(out[i].details, detail) {
+			out[i].details = append(out[i].details, detail)
+		}
+	}
+	return out
+}
+
+// riskLine is the review's warning about changed files that can run code
+// on this machine, one name per file, or "".
+func riskLine(r *workspace.ReviewReport) string {
+	if r == nil {
+		return ""
+	}
+	var names []string
+	for _, f := range mergeFlags(r.Flags) {
+		if severityRank[f.severity] >= severityRank[workspace.SeverityMedium] {
+			names = append(names, f.name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return "⚠ Changed files that can run code on your machine: " + strings.Join(firstN(names, 6), ", ") + "  → review before running"
 }

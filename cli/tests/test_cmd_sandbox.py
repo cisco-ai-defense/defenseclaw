@@ -286,6 +286,10 @@ def test_an_unstartable_gateway_binary_is_a_plain_error(monkeypatch: pytest.Monk
     ("argv", "env", "expected"),
     [
         (["sandbox", "teardown", "--yes"], {}, True),
+        (["sandbox", "pack", "list"], {}, True),
+        (["sandbox", "pack", "show", "strict"], {}, True),
+        (["sandbox", "pack", "validate", "pack.yaml"], {}, True),
+        (["sandbox", "pack"], {}, False),
         (["sandbox", "run", "claude"], {"DEFENSECLAW_SANDBOX_ID": "sb-1"}, True),
         (["sandbox", "run", "claude"], {}, False),
         (["sandbox", "list"], {}, False),

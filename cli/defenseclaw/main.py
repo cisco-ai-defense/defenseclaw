@@ -142,11 +142,13 @@ def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     """Return whether a ``sandbox`` stub runs without a DefenseClaw config.
 
-    The Go command tree loads the configuration itself. Two commands work
+    The Go command tree loads the configuration itself. These commands work
     without one, mirroring internal/cli/sandbox.go: ``sandbox teardown`` (an
-    uninstall of a half-installed host) and a nested ``sandbox run`` inside a
-    sandbox, which runs the harness natively. An existing non-v8 document is
-    still refused by the preflight.
+    uninstall of a half-installed host), a nested ``sandbox run`` inside a
+    sandbox, which runs the harness natively, and the read-only ``sandbox
+    pack list|show|validate`` (an administrator reads a pack's digest before
+    writing the config that pins it). An existing non-v8 document is still
+    refused by the preflight.
     """
     if ctx.invoked_subcommand != "sandbox":
         return False
@@ -158,6 +160,9 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     child = argv[index + 1] if index + 1 < len(argv) else ""
     if child == "teardown":
         return True
+    if child == "pack":
+        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
+        return grandchild in {"list", "show", "validate"}
     return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 

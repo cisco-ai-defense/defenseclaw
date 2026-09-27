@@ -77,7 +77,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	out := ta.output()
 	for _, want := range []string{
 		"Sandbox dc-claude-proj-1a2b · Claude Code · skip-permissions ON · network: open + blocklist",
-		"Project   ~/proj → /work/proj (live)   snapshot taken → `defenseclaw sandbox undo` restores it",
+		"Project   ~/proj → /work/proj (live)   snapshot taken → `defenseclaw sandbox undo dc-claude-proj-1a2b` restores it",
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     ANTHROPIC_API_KEY → api.anthropic.com only",
@@ -180,7 +180,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 	}
 	last := sandboxCommand(ta.stream.runs[1])
 	tail := last[4:]
-	want := []string{harness.ClaudeCodeLauncherPath, "--dangerously-skip-permissions", "-p", "fix the failing tests"}
+	want := []string{harness.ClaudeCodeLauncherPath, "--dangerously-skip-permissions", "-p", "fix the failing tests", "--output-format", "stream-json", "--verbose"}
 	if !slices.Equal(tail, want) {
 		t.Fatalf("detached harness argv = %q, want %q", tail, want)
 	}
@@ -620,7 +620,7 @@ func TestBannerHostLineListsAcceptedPortsOnly(t *testing.T) {
 	sb := sampleSandbox("box")
 	sb.Violations = []sandboxapi.Violation{{Key: "mcp.host_ports", Attempted: "18970", Constraint: "defenseclaw",
 		Message: "DefenseClaw never opens DefenseClaw's API (port 18970) to a sandbox"}}
-	ta.banner(&sb, llmChoice{}, RunOptions{HostPorts: []int{5432, 18970, 5432}})
+	ta.banner(&sb, bannerInfo{o: RunOptions{HostPorts: []int{5432, 18970, 5432}}})
 	out := ta.output()
 	if !strings.Contains(out, "Host      localhost:5432 (opens when you approve the sandbox's first connection)") {
 		t.Fatalf("banner host line:\n%s", out)
@@ -630,7 +630,7 @@ func TestBannerHostLineListsAcceptedPortsOnly(t *testing.T) {
 	}
 	ta.out.Reset()
 	sb.Violations = []sandboxapi.Violation{{Key: "mcp.host_ports", Attempted: "5432", Constraint: "pack strict"}}
-	ta.banner(&sb, llmChoice{}, RunOptions{HostPorts: []int{5432}})
+	ta.banner(&sb, bannerInfo{o: RunOptions{HostPorts: []int{5432}}})
 	if strings.Contains(ta.output(), "Host ") {
 		t.Fatalf("banner shows a Host line although every port was refused:\n%s", ta.output())
 	}

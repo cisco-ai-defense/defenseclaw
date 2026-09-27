@@ -304,7 +304,7 @@ func TestReviewAndDelete(t *testing.T) {
 	if err := ta.Review(context.Background(), ReviewOptions{Name: "box", Diff: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"box: 8 files changed (+212 −37)", "package.json#scripts.postinstall — runs on npm install", "+changed",
+	for _, want := range []string{"box: 8 files changed (+212 −37)", "HIGH     package.json — scripts.postinstall: runs on npm install", "+changed",
 		"  CRITICAL config/dev.env:3 — clawshield-secrets: AWS access key"} {
 		if !strings.Contains(ta.output(), want) {
 			t.Errorf("review lacks %q:\n%s", want, ta.output())
@@ -334,9 +334,11 @@ func TestExecAndLogs(t *testing.T) {
 		switch {
 		case cmd[0] == "tail":
 			return 0, "log line\n"
+		case len(cmd) > 2 && cmd[2] == runFollowScript:
+			return 0, "log line\nmore\n"
 		case isRunStatus(cmd):
 			// The run started a minute ago; the sandbox's last hook is now.
-			return 0, fmt.Sprintf("0\n%d\n", time.Now().Add(-time.Minute).Unix())
+			return 0, fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", time.Now().Add(-time.Minute).Unix())
 		case cmd[0] == "false":
 			return 7, ""
 		}
@@ -361,11 +363,18 @@ func TestExecAndLogs(t *testing.T) {
 	if out := ta.output(); !strings.Contains(out, "log line") || !strings.Contains(out, "exited with status 0") || strings.Contains(out, "not reaching") {
 		t.Fatalf("logs output:\n%s", out)
 	}
+	// -f follows the log until the run ends, then reports how it ended.
+	ta.out.Reset()
 	if err := ta.Logs(context.Background(), LogsOptions{Name: "box", Follow: true}); err != nil {
 		t.Fatal(err)
 	}
-	if cmds := ta.stream.commands(); cmds[len(cmds)-1] != "tail -n 200 -F "+RunDir+"/latest.log" {
-		t.Fatalf("follow = %q", cmds[len(cmds)-1])
+	runs := ta.stream.runs
+	follow, status := sandboxCommand(runs[len(runs)-2]), sandboxCommand(runs[len(runs)-1])
+	if len(follow) != 6 || follow[2] != runFollowScript || follow[4] != RunDir || follow[5] != "200" || !isRunStatus(status) {
+		t.Fatalf("follow = %q, then %q", follow, status)
+	}
+	if out := ta.output(); !strings.Contains(out, "more") || !strings.Contains(out, "exited with status 0") {
+		t.Fatalf("logs -f output:\n%s", out)
 	}
 }
 
@@ -514,7 +523,7 @@ func TestUndoJSONKeepsStdoutParseable(t *testing.T) {
 		undos    int
 		stderr   []string
 	}{
-		{"restore", "y\n", nil, true, 2, []string{"revert  README.md", "Restore "}},
+		{"restore", "y\n", nil, true, 2, []string{"revert  README.md", "stop box first (its harness session ends)", "Stop box and restore "}},
 		{"declined", "n\n", nil, false, 1, []string{"revert  README.md", "nothing changed"}},
 		{"nothing to undo", "", func(ta *testApp) {
 			ta.daemon.undo = sandboxapi.UndoResponse{Result: &workspace.UndoResult{Project: ta.project, Preview: true}}

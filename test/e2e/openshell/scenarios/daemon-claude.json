@@ -19,6 +19,25 @@
       ]
     },
     {
+      "name": "slow-run",
+      "match": "DCE2E-SLOW",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "sleep 200 && echo dce2e-slow-done > /tmp/dce2e-slow.txt",
+              "description": "Work for a while",
+              "timeout": 300000
+            }
+          }
+        },
+        {
+          "text": "Done after the pause."
+        }
+      ]
+    },
+    {
       "name": "project-edit",
       "match": "DCE2E-EDIT",
       "turns": [

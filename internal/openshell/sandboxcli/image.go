@@ -38,6 +38,9 @@ type ImageService interface {
 	// Build builds (and hook-verifies) spec's image unless a verified one
 	// is current; log receives the docker build output.
 	Build(ctx context.Context, spec *harness.Spec, force bool, log io.Writer) (image.Record, bool, error)
+	// Current reports whether spec's image is built and hook-verified (the
+	// daemon uses it without building).
+	Current(spec *harness.Spec) (bool, error)
 	List() ([]image.Record, error)
 	Prune(ctx context.Context, dryRun bool) (image.PruneReport, error)
 	// Remove deletes every image this data dir built.
@@ -84,6 +87,12 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, force bool, 
 		return rec, true, fmt.Errorf("the %s image %s was built but its hooks did not verify", h.DisplayName, rec.Tag)
 	}
 	return rec, true, nil
+}
+
+func (b *builderImages) Current(h *harness.Spec) (bool, error) {
+	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	rec, ok, err := builder.Current(b.spec(h))
+	return ok && rec.HookFireVerified, err
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }

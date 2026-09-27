@@ -43,6 +43,16 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// started is set when the session created or started the sandbox; one
+	// that was already running (a detached run, another session) is left
+	// running when the session ends.
+	started bool
+	// liveRun is set at the end of a session in a sandbox whose detached
+	// run is still going: nothing may stop the sandbox under it.
+	liveRun bool
+	// headless marks a one-prompt session (the resume hint says how to
+	// run the next prompt).
+	headless bool
 
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
@@ -150,8 +160,9 @@ func (s *session) watchNotices(ctx context.Context) func() {
 }
 
 // detach starts the harness in the background inside the sandbox; its
-// output goes to RunDir/latest.log.
+// output goes to RunDir/latest.log (see runs.go).
 func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error {
+	opts.Args = streamingArgs(s.spec, opts.Args)
 	argv, err := s.spec.LaunchArgv(opts)
 	if err != nil {
 		return err
@@ -215,11 +226,11 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t)
 	if err != nil {
 		report("failed", rec, "upload_failed")
-		return fmt.Errorf("upload the project copy: %w", err)
+		return workspaceFailure("upload the project copy", err, "")
 	}
 	if _, err := a.Workspace.Baseline(ctx, a.dataDir(), s.sb.Name, t); err != nil {
 		report("failed", up, "baseline_failed")
-		return fmt.Errorf("record the copy's baseline: %w", err)
+		return workspaceFailure("record the copy's baseline", err, "")
 	}
 	report("completed", up, "")
 	for _, w := range up.Warnings {
@@ -247,6 +258,13 @@ func (s *session) end(ctx context.Context) error {
 		return apiError(err)
 	}
 	a.println()
+	if !s.started {
+		// The sandbox was running before the session: a detached run may
+		// still be going in it.
+		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == runRunning {
+			s.liveRun = true
+		}
+	}
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
 		return s.endCopy(ctx, after)
 	}
@@ -256,12 +274,23 @@ func (s *session) end(ctx context.Context) error {
 	}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after)
-	changed := rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0)
-	if rev != nil && rev.RiskLine != "" {
+	changed := rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0 ||
+		rev.Report.HeadBefore != rev.Report.HeadAfter || rev.Report.BranchBefore != rev.Report.BranchAfter)
+	if rev != nil && rev.Report != nil {
+		if line := riskLine(rev.Report); line != "" {
+			a.println(a.style(line, ansiYellow))
+		}
+	} else if rev != nil && rev.RiskLine != "" {
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
 	s.printNested(after)
-	decision := s.onExit(changed)
+	if s.liveRun && changed {
+		// Undo stops the sandbox, which would end the run.
+		a.note("the detached run in " + s.sb.Name + " is still going; review or undo once it ends: `" + CommandName + " review " + s.sb.Name +
+			"`, `" + CommandName + " undo " + s.sb.Name + "`")
+		return s.finish(ctx, false)
+	}
+	decision, accepted := s.onExit(changed)
 	for decision == "d" {
 		diff, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{Diff: true})
 		if err != nil {
@@ -269,7 +298,7 @@ func (s *session) end(ctx context.Context) error {
 		} else {
 			a.println(strings.TrimRight(diff.Diff, "\n"))
 		}
-		decision = s.onExit(changed)
+		decision, accepted = s.onExit(changed)
 	}
 	if decision == "u" {
 		res, err := s.api.Undo(ctx, s.sb.Name, sandboxapi.UndoRequest{Stop: true})
@@ -285,14 +314,21 @@ func (s *session) end(ctx context.Context) error {
 		}
 		return s.finish(ctx, true)
 	}
+	if accepted {
+		// The next session starts from here: its snapshot replaces this
+		// undo point.
+		a.acceptUndoPoint(after)
+	}
 	return s.finish(ctx, false)
 }
 
-// onExit returns k (keep), u (undo) or d (diff).
-func (s *session) onExit(changed bool) string {
+// onExit returns k (keep), u (undo) or d (diff), and whether keeping was
+// the user's choice (an answer, --yes, or on_exit: keep) rather than the
+// default without a terminal.
+func (s *session) onExit(changed bool) (string, bool) {
 	a := s.app
 	if !changed {
-		return "k"
+		return "k", false
 	}
 	policy := config.OpenShellOnExitAsk
 	if a.Cfg != nil && a.Cfg.OpenShell.Workdir.OnExit != "" {
@@ -300,37 +336,64 @@ func (s *session) onExit(changed bool) string {
 	}
 	switch policy {
 	case config.OpenShellOnExitKeep:
-		return "k"
+		return "k", true
 	case config.OpenShellOnExitUndo:
-		return "u"
+		return "u", false
 	}
-	if !a.IO.TTY || s.yes || s.sb.Snapshot == nil {
-		return "k"
+	if s.sb.Snapshot == nil {
+		return "k", false
+	}
+	if !a.IO.TTY || s.yes {
+		return "k", s.yes
 	}
 	ans, err := a.choose("Keep changes?", []choice{{"y", "keep"}, {"u", "undo everything"}, {"d", "show diff"}}, "y")
-	if err != nil || ans == "y" {
-		return "k"
+	if err != nil {
+		return "k", false
 	}
-	return ans
+	if ans == "y" {
+		return "k", true
+	}
+	return ans, false
 }
 
-// finish stops (or with --rm deletes) the sandbox after a session.
+// finish stops (or with --rm deletes) the sandbox after a session. A
+// sandbox the session did not start, or whose detached run is still going,
+// keeps running.
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
+	name := s.sb.Name
+	if s.rm && s.liveRun {
+		a.warn(name + " is not deleted (--rm): its detached run is still going; delete it once the run ends: `" + CommandName + " delete " + name + "`")
+		s.rm = false
+	}
 	if s.rm {
-		if _, err := s.api.Delete(ctx, s.sb.Name, sandboxapi.DeleteRequest{}); err != nil {
-			return fmt.Errorf("delete %s: %w", s.sb.Name, apiError(err))
+		if _, err := s.api.Delete(ctx, name, sandboxapi.DeleteRequest{}); err != nil {
+			return fmt.Errorf("delete %s: %w", name, apiError(err))
 		}
-		a.ok("sandbox " + s.sb.Name + " deleted (--rm)")
+		a.forgetCLIState(name)
+		a.ok("sandbox " + name + " deleted (--rm)")
 		return nil
 	}
 	if !stopped {
-		if _, err := s.api.Stop(ctx, s.sb.Name); err != nil {
-			a.warn("could not stop " + s.sb.Name + ": " + apiError(err).Error())
+		switch {
+		case s.liveRun:
+			a.note("Sandbox " + name + " keeps running: its detached run is still going → follow: " + CommandName + " logs " + name + " -f   stop: " +
+				CommandName + " stop " + name)
+			return nil
+		case !s.started:
+			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
+			return nil
+		}
+		if _, err := s.api.Stop(ctx, name); err != nil {
+			a.warn("could not stop " + name + ": " + apiError(err).Error())
 			return nil
 		}
 	}
-	a.note("Sandbox kept (stopped) → resume: " + CommandName + " connect " + s.sb.Name + "   delete: " + CommandName + " delete " + s.sb.Name)
+	next := "resume: " + CommandName + " connect " + name
+	if s.headless {
+		next += " --prompt TEXT"
+	}
+	a.note("Sandbox kept (stopped) → " + next + "   delete: " + CommandName + " delete " + name)
 	return nil
 }
 
@@ -368,7 +431,35 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	case rev != nil && rev.Report != nil:
 		parts = append(parts, rev.Report.SummaryLine())
 	}
+	if rev != nil && rev.Report != nil {
+		if moved := headMoved(rev.Report.BranchBefore, rev.Report.BranchAfter, rev.Report.HeadBefore, rev.Report.HeadAfter); moved != "" {
+			parts = append(parts, moved)
+		}
+	}
 	return strings.Join(parts, " · ")
+}
+
+// headMoved describes what a session did to HEAD: "switched main → fix",
+// "HEAD moved on main (1a2b3c4 → 5d6e7f8)", or "" when it stayed.
+func headMoved(branchBefore, branchAfter, headBefore, headAfter string) string {
+	switch {
+	case branchBefore != branchAfter:
+		return "switched " + firstNonEmpty(branchBefore, "a detached HEAD") + " → " + firstNonEmpty(branchAfter, "a detached HEAD")
+	case headBefore != headAfter:
+		on := ""
+		if branchAfter != "" {
+			on = " on " + branchAfter
+		}
+		return "HEAD moved" + on + " (" + firstNonEmpty(shortCommit(headBefore), "none") + " → " + firstNonEmpty(shortCommit(headAfter), "none") + ")"
+	}
+	return ""
+}
+
+func shortCommit(oid string) string {
+	if len(oid) > 7 {
+		return oid[:7]
+	}
+	return oid
 }
 
 // printNested lists what the nested-repository guard found.
@@ -398,7 +489,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 		s.rm = false
 		return s.finish(ctx, false)
 	}
-	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: pull.Review.RiskLine()}
+	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after)
 	if rev.RiskLine != "" {

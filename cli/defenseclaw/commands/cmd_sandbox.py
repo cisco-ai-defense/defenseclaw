@@ -180,7 +180,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(
-            _Flag("name", "string", "sandbox name (default dc-<harness>-<folder>-<random>)", metavar="NAME"),
+            _Flag(
+                "name",
+                "string",
+                "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)",
+                metavar="NAME",
+            ),
             _Flag(
                 "copy",
                 "bool",
@@ -279,7 +284,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("shell", "bool", "open a shell in the sandbox instead of the harness"),
             _Flag("refresh", "bool", "copy-mode: copy the folder into the sandbox again first"),
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
-            _Flag("yes", "bool", "take the defaults at the end of the session", short="y"),
+            _Flag("yes", "bool", "take the defaults at the end of the session (keep the changes)", short="y"),
+            _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
         ),
     ),
     _Cmd(
@@ -293,10 +299,15 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("no-tty", "bool", "never allocate a terminal"),
         ),
     ),
-    _Cmd(("stop",), "Stop a sandbox (it is kept for start or connect)", args=(_Arg("name"),)),
+    _Cmd(
+        ("stop",),
+        "Stop a sandbox (it is kept for start or connect)",
+        args=(_Arg("name"),),
+        flags=(_Flag("yes", "bool", "stop without asking when a detached run is still going", short="y"),),
+    ),
     _Cmd(
         ("start",),
-        "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
+        "Start a stopped sandbox for a new session",
         args=(_Arg("name"),),
         flags=(
             _Flag("no-snapshot", "bool", "keep the previous session's snapshot instead of taking a new one"),

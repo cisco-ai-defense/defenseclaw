@@ -17,10 +17,10 @@
 package sandboxcli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,7 +93,7 @@ func hooksText(sb sandboxapi.Sandbox) string {
 	case sb.Hooks.LastHookAt.IsZero():
 		return "-"
 	}
-	s := strconv.FormatInt(sb.Hooks.ToolCalls, 10) + " calls"
+	s := plural(sb.Hooks.ToolCalls, "call", "calls")
 	if sb.Hooks.ToolBlocked > 0 {
 		s += fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
 	}
@@ -214,7 +214,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		if !sb.Snapshot.UndoneAt.IsZero() {
 			snap += ", undone " + sb.Snapshot.UndoneAt.Local().Format("15:04")
 		}
-		row("Undo", snap)
+		row("Undo point", snap)
 	}
 	if sb.PendingApprovals > 0 {
 		row("Asks", fmt.Sprintf("%d waiting (`%s approvals --sandbox %s`)", sb.PendingApprovals, CommandName, sb.Name))
@@ -248,15 +248,19 @@ type ConnectOptions struct {
 	Refresh bool
 	Rm      bool
 	Yes     bool
-	Args    []string
+	// Prompt runs the harness headless with one prompt (no terminal
+	// needed).
+	Prompt string
+	Args   []string
 }
 
 // Connect resumes a sandbox: it starts it when stopped and attaches the
-// harness (or, with Shell, a login shell) to the terminal.
+// harness (or, with Shell, a login shell) to the terminal, or runs one
+// prompt headless (Prompt, or the harness's own print flag in Args).
 func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 	a.defaults()
-	if !a.IO.TTY {
-		return errors.New("`sandbox connect` needs a terminal")
+	if o.Shell && (o.Prompt != "" || len(o.Args) > 0) {
+		return errors.New("--shell opens a shell; it takes no --prompt or harness arguments")
 	}
 	api, err := a.api()
 	if err != nil {
@@ -270,18 +274,27 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 	if err != nil {
 		return err
 	}
+	headless := !o.Shell && (o.Prompt != "" || printMode(spec, o.Args))
+	if !a.IO.TTY && !headless {
+		if o.Shell {
+			return errors.New("`sandbox connect --shell` needs a terminal; run one command with `" + CommandName + " exec " + sb.Name + " -- COMMAND`")
+		}
+		return fmt.Errorf("`sandbox connect` attaches %s to your terminal, and there is none; pass --prompt TEXT to run one prompt headless", spec.DisplayName)
+	}
 	gateway, err := a.gatewayName(ctx)
 	if err != nil {
 		return err
 	}
 	cli := a.cli(gateway)
+	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
 		a.note("starting " + sb.Name + "…")
-		if sb, err = api.Start(ctx, sb.Name, sandboxapi.StartRequest{}); err != nil {
-			return apiError(err)
+		if sb, kept, err = a.startSandbox(ctx, api, sb, StartOptions{}); err != nil {
+			return err
 		}
+		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless}
 	if o.Refresh && sb.WorkdirMode == config.OpenShellWorkdirCopy {
 		// The refresh replaces the copy, workdir included (a failed refresh
 		// may have left none): probe outside it, and the refresh's baseline
@@ -303,10 +316,14 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		_, err = a.Terminal.Run(ctx, inv)
 		return err
 	}
-	a.banner(sb, llmChoice{}, RunOptions{})
-	code, err := s.attach(ctx, harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
+	a.banner(sb, bannerInfo{llm: sandboxLLM(spec, sb), keptSnapshot: kept})
+	opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
 		CredentialProfile: sb.Launch.CredentialProfile, BedrockRegion: sb.Launch.BedrockRegion,
-		Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}, false)
+		Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}
+	if o.Prompt != "" {
+		opts.Mode, opts.Prompt = harness.Headless, o.Prompt
+	}
+	code, err := s.attach(ctx, opts, headless)
 	if err != nil {
 		return err
 	}
@@ -327,7 +344,7 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
-		return fmt.Errorf("refresh the copy: %w", err)
+		return workspaceFailure("refresh the copy", err, "")
 	}
 	files, b := int64(rec.Files), rec.Bytes
 	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})
@@ -396,13 +413,39 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	return nil
 }
 
-// Stop is `sandbox stop`.
-func (a *App) Stop(ctx context.Context, name string) error {
+// StopOptions are the `sandbox stop` flags.
+type StopOptions struct {
+	Name string
+	// Yes stops a sandbox whose detached run is still going without
+	// asking.
+	Yes bool
+}
+
+// Stop is `sandbox stop`. A detached run the stop would end is confirmed
+// on a terminal (said otherwise), and its log is kept for `sandbox logs`.
+func (a *App) Stop(ctx context.Context, o StopOptions) error {
+	a.defaults()
 	api, err := a.api()
 	if err != nil {
 		return err
 	}
-	sb, err := api.Stop(ctx, name)
+	sb, err := api.Get(ctx, o.Name)
+	if err != nil {
+		return apiError(err)
+	}
+	if sb.Phase == "ready" {
+		if gateway, err := a.gatewayName(ctx); err == nil {
+			ok, err := a.beforeStop(ctx, a.cli(gateway), sb, o.Yes)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				a.note(sb.Name + " keeps running")
+				return nil
+			}
+		}
+	}
+	sb, err = api.Stop(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -427,11 +470,22 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	if err != nil {
 		return err
 	}
-	sb, err := api.Start(ctx, name, sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot})
+	sb, err := api.Get(ctx, name)
 	if err != nil {
 		return apiError(err)
 	}
+	if sb.Phase == "ready" {
+		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
+		return nil
+	}
+	kept := false
+	if sb, kept, err = a.startSandbox(ctx, api, sb, o); err != nil {
+		return err
+	}
 	a.ok(sb.Name + " is " + sb.Phase + " → attach with `" + CommandName + " connect " + sb.Name + "`")
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && sb.Snapshot != nil {
+		a.note(a.undoPointText(sb, kept))
+	}
 	return nil
 }
 
@@ -463,6 +517,7 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 			continue
 		}
 		a.ok("deleted " + res.Name)
+		a.forgetCLIState(name)
 		for _, w := range res.Warnings {
 			a.warn(w)
 		}
@@ -488,64 +543,98 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	lines := o.Lines
+	if lines <= 0 {
+		lines = 200
+	}
+	out, flush := a.runLogWriter(sb)
 	if sb.Phase != "ready" {
-		return fmt.Errorf("%s is %s; its logs are readable while it runs (`%s start %s`)", sb.Name, sb.Phase, CommandName, sb.Name)
+		return a.keptLogs(sb, lines, out, flush)
 	}
 	gateway, err := a.gatewayName(ctx)
 	if err != nil {
 		return err
 	}
 	cli := a.cli(gateway)
-	lines := o.Lines
-	if lines <= 0 {
-		lines = 200
-	}
-	log := RunDir + "/latest.log"
-	args := []string{"tail", "-n", strconv.Itoa(lines)}
+	var inv openshell.Invocation
 	if o.Follow {
-		args = append(args, "-F")
+		// Follows the log until the run ends, then the status below.
+		inv, err = cli.Exec(sb.Name, []string{"sh", "-c", runFollowScript, "sh", RunDir, strconv.Itoa(lines)},
+			openshell.CLIExecOptions{WorkDir: sb.Workdir})
+	} else {
+		inv, err = cli.Exec(sb.Name, []string{"tail", "-n", strconv.Itoa(lines), RunDir + "/latest.log"},
+			openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: time.Minute})
 	}
-	opts := openshell.CLIExecOptions{WorkDir: sb.Workdir}
-	if !o.Follow {
-		opts.Timeout = time.Minute
-	}
-	inv, err := cli.Exec(sb.Name, append(args, log), opts)
 	if err != nil {
 		return err
 	}
-	code, err := a.Streamer.Stream(ctx, inv, a.IO.Out, a.IO.Err)
+	code, err := a.Streamer.Stream(ctx, inv, out, a.IO.Err)
+	_ = flush()
 	if err != nil {
 		return err
 	}
-	if code != 0 && !o.Follow {
-		return fmt.Errorf("%s has no detached run output (start one with `%s run --detach`)", sb.Name, CommandName)
+	if code != 0 {
+		return fmt.Errorf("%s has no detached run output (start one with `%s run <harness> --detach --prompt TEXT`)", sb.Name, CommandName)
 	}
-	if o.Follow {
-		return nil
-	}
-	// The exit status, then (for runs this version started) the start.
-	script := `cat "$1/latest.exit" || exit 1; cat "$1/latest.started" 2>/dev/null || true`
-	statusInv, err := cli.Exec(sb.Name, []string{"sh", "-c", script, "sh", RunDir}, openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: 30 * time.Second})
+	run, err := a.detachedRun(ctx, cli, sb)
 	if err != nil {
 		return nil
 	}
-	var out bytes.Buffer
-	if code, err := a.Streamer.Stream(ctx, statusInv, &out, &bytes.Buffer{}); err != nil || code != 0 {
+	switch run.State {
+	case runRunning:
 		a.note("the run is still going (follow it with -f)")
 		if sb.Hooks.Unreachable {
 			a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 		}
 		return nil
+	case runInterrupted, runNone:
+		a.warn("the run did not finish: the sandbox stopped while it ran")
+		return nil
 	}
-	st := parseRunStatus(out.String())
-	a.note("the run exited with status " + st.exit)
+	a.note("the run exited with status " + run.Exit)
 	// The hooks of a finished run: read after it ended.
 	if now, err := api.Get(ctx, o.Name); err == nil {
 		sb = now
 	}
-	if !runReachedHooks(sb, st.started) {
+	if !runReachedHooks(sb, run.Started) {
 		a.warn(hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason, "not one hook request of this run reached DefenseClaw")))
 		return errNoHooks()
+	}
+	return nil
+}
+
+// runLogWriter is where a run's log goes: Claude Code's streamed events are
+// rendered as lines.
+func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
+	if sb.Harness != "claudecode" {
+		return a.IO.Out, func() error { return nil }
+	}
+	r := &streamRenderer{w: a.IO.Out}
+	return r, r.Flush
+}
+
+// keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.
+func (a *App) keptLogs(sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
+	meta, log, err := a.savedRunLog(sb)
+	if err != nil {
+		return err
+	}
+	if meta == nil {
+		return fmt.Errorf("%s is %s, and no log of a detached run was kept when it stopped; its log is inside it (`%s start %s`, then `%s logs %s`)",
+			sb.Name, sb.Phase, CommandName, sb.Name, CommandName, sb.Name)
+	}
+	if _, err := out.Write(lastLines(log, lines)); err != nil {
+		return err
+	}
+	_ = flush()
+	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(meta.SavedAt)))
+	switch meta.State {
+	case runExited:
+		a.note("the run exited with status " + meta.Exit)
+	case runInterrupted:
+		a.warn("the run did not finish: the sandbox stopped while it ran")
+	case runRunning:
+		a.note("the run was still going when the log was kept")
 	}
 	return nil
 }

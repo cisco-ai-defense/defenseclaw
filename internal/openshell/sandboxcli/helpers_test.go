@@ -70,8 +70,9 @@ type fakeDaemon struct {
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
 	// createMCP and createWarnings are what create reports.
-	createMCP      *sandboxapi.MCPSummary
-	createWarnings []string
+	createMCP        *sandboxapi.MCPSummary
+	createWarnings   []string
+	createViolations []sandboxapi.Violation
 	// live are events only a followed activity stream delivers (they
 	// happen during the session).
 	live []sandboxapi.ActivityEvent
@@ -80,6 +81,10 @@ type fakeDaemon struct {
 	timeline *timeline
 	// refuseCreate, when set, may refuse a create request.
 	refuseCreate func(req sandboxapi.CreateRequest) *sandboxapi.Error
+	// pendingChanges says the folder holds changes on top of the snapshot
+	// that were neither undone nor accepted: like the manager, a start
+	// then keeps the snapshot unless it asks for a new one.
+	pendingChanges bool
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -278,6 +283,10 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = "dc-claude-proj-1a2b"
 		}
+		if _, taken := d.sandboxes[name]; taken {
+			fail(sandboxapi.CodeConflict, "a sandbox named "+name+" already exists")
+			return
+		}
 		mode, workdir := "mount", "/work/"+filepath.Base(req.Project)
 		if req.Copy {
 			mode, workdir = "copy", "/sandbox/work/"+filepath.Base(req.Project)
@@ -296,6 +305,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			sb.MCP = d.createMCP
 		}
 		sb.Warnings = append(sb.Warnings, d.createWarnings...)
+		sb.Violations = append(sb.Violations, d.createViolations...)
 		d.sandboxes[name] = sb
 		d.timeline.add("create " + name)
 		reply(sb)
@@ -320,7 +330,14 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			sb.Phase = "stopped"
 			reply(sb)
 		case verb == "start":
+			var req sandboxapi.StartRequest
+			_ = json.Unmarshal(body, &req)
 			sb.Phase = "ready"
+			fresh := req.NewSnapshot || !d.pendingChanges || !sb.Snapshot.UndoneAt.IsZero()
+			if sb.WorkdirMode == "mount" && sb.Snapshot != nil && !req.NoSnapshot && fresh {
+				// A new session's snapshot replaces the undo point.
+				sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: sb.Snapshot.Kind, CreatedAt: time.Now()}
+			}
 			reply(sb)
 		case verb == "review":
 			rev := d.review
@@ -475,6 +492,14 @@ type fakeImages struct {
 	built   []string
 	removed []string
 	err     error
+	// missing are harnesses whose image is not built yet (Current).
+	missing map[string]bool
+}
+
+func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.missing[spec.Name], nil
 }
 
 func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, _ io.Writer) (image.Record, bool, error) {
@@ -519,8 +544,10 @@ type fakeCopy struct {
 	steps    []string
 	pull     *workspace.PullResult
 	apply    []workspace.ApplyOptions
-	applied  *workspace.ApplyResult
 	timeline *timeline
+	// applied and applyErr replace what Apply returns.
+	applied  *workspace.ApplyResult
+	applyErr error
 	// undo is what UndoApply answers (ErrNothingApplied when nil).
 	undo    *workspace.UndoApplyResult
 	undoErr error
@@ -584,10 +611,14 @@ func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspac
 	f.step("apply " + string(o.Mode))
 	f.mu.Lock()
 	f.apply = append(f.apply, o)
+	applied, err := f.applied, f.applyErr
 	f.mu.Unlock()
-	if f.applied != nil {
-		r := *f.applied
-		return &r, nil
+	if applied != nil || err != nil {
+		if applied != nil {
+			r := *applied
+			applied = &r
+		}
+		return applied, err
 	}
 	return &workspace.ApplyResult{Mode: o.Mode, Applied: true, Branch: o.Branch, PatchPath: o.PatchPath,
 		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}}, nil

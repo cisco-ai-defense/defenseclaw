@@ -209,6 +209,21 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 	return llmChoice{Note: "no model credential found (" + llmHint(spec.Name, choice) + "); log in inside the sandbox"}, nil
 }
 
+// sandboxLLM is the banner's model line for a sandbox that exists: the
+// provider profile it was created with, whose placeholder resolves only at
+// the profile's hosts.
+func sandboxLLM(spec *harness.Spec, sb *sandboxapi.Sandbox) llmChoice {
+	id := sb.Launch.CredentialProfile
+	if id == "" {
+		return llmChoice{}
+	}
+	cp, err := spec.CredentialProfile(id, sb.Launch.BedrockRegion)
+	if err != nil || len(cp.Hosts) == 0 {
+		return llmChoice{Note: id}
+	}
+	return llmChoice{Credential: &sandboxapi.LLMCredential{Profile: id}, Source: strings.TrimPrefix(id, "defenseclaw-") + " credential", Hosts: cp.Hosts}
+}
+
 func llmHint(harnessName, choice string) string {
 	switch {
 	case choice == LLMBedrock:
@@ -275,6 +290,9 @@ func (a *App) ParseCredential(spec string) (sandboxapi.CredentialBinding, error)
 	name, target, ok := strings.Cut(strings.TrimSpace(spec), "=")
 	if !ok || !credentialNamePattern.MatchString(name) || target == "" {
 		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: use NAME=host[:port]", spec)
+	}
+	if strings.Contains(target, "://") {
+		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: name a host, not a URL (like %s=api.stripe.com or %s=host:8443)", spec, name, name)
 	}
 	host, port := target, 0
 	if h, p, err := net.SplitHostPort(target); err == nil {
