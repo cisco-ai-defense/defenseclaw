@@ -415,13 +415,15 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 				var stdin bytes.Buffer
 				for _, p := range batch {
 					stdin.WriteString(p)
-					stdin.WriteByte('\n')
+					stdin.WriteByte(0)
 				}
 				g := st.sh.git()
 				g.stdin = &stdin
-				if err := g.run(ctx, "update-index", "--force-remove", "--stdin"); err != nil {
-					res.Warnings = append(res.Warnings, fmt.Sprintf("could not preserve some ignored files: %v", err))
-					break
+				// The reset below would delete any file still in the shadow
+				// index, so a failure here must stop the undo rather than
+				// lose files that existed before the session.
+				if err := g.run(ctx, "update-index", "-z", "--force-remove", "--stdin"); err != nil {
+					return fmt.Errorf("workspace: keep pre-existing ignored files out of the undo: %w", err)
 				}
 			}
 		}

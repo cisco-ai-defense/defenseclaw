@@ -969,18 +969,18 @@ func TestUndoPreservesLargeIgnoredFiles(t *testing.T) {
 	// Pre-session: create a large ignored file using a sparse file.
 	writeFile(t, e.project, ".gitignore", "large.dat\n")
 	largePath := filepath.Join(e.project, "large.dat")
-	// Create a sparse file (2 GB nominal size, but minimal actual disk use).
+	// Create a sparse file (200 MiB nominal, above the old 128 MiB cap, with minimal disk use).
 	f, err := os.Create(largePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(2 << 30); err != nil {
+	if err := f.Truncate(200 << 20); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
 	// Write a marker at the beginning and end.
 	f.WriteString("START")
-	f.Seek(2<<30-3, 0)
+	f.Seek(200<<20-3, 0)
 	f.WriteString("END")
 	origMtime := time.Now().Add(-1 * time.Hour)
 	f.Close()
@@ -1016,7 +1016,7 @@ func TestUndoPreservesLargeIgnoredFiles(t *testing.T) {
 	if string(start) != "START" {
 		t.Errorf("large.dat content start = %q", start)
 	}
-	f.Seek(2<<30-3, 0)
+	f.Seek(200<<20-3, 0)
 	end := make([]byte, 3)
 	f.Read(end)
 	if string(end) != "END" {
