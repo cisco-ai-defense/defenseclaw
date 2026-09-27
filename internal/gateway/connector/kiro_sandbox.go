@@ -141,13 +141,12 @@ func kiroSandboxSettings() map[string]interface{} {
 }
 
 // kiroSandboxAgentHook is one DefenseClaw agent-hook entry: the host's CLI
-// 2.x shape with the in-image hook and the "*" matcher. Kiro 2.24.1 matches
-// tool names as globs, so "*" matches every tool while the host's ".*"
-// matches none and the tool hooks would never fire.
+// 2.x shape with the in-image hook and the glob matcher that matches every
+// tool (kiroV2MatchAllTools; ".*" matches none on Kiro 2.24.1).
 func kiroSandboxAgentHook(description string) map[string]interface{} {
 	return map[string]interface{}{
 		"command":     kiroSandboxHookScript(),
-		"matcher":     "*",
+		"matcher":     kiroV2MatchAllTools,
 		"description": description,
 	}
 }

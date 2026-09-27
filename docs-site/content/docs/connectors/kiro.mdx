@@ -14,6 +14,13 @@ a CLI 2.x `defenseclaw` agent for bare `kiro-cli` (`kiro-cli` cannot put hooks
 on built-in `kiro_default`). Restart the CLI or run `/agent swap defenseclaw`
 so `/hooks` lists them.
 
+The agent's `preToolUse` and `postToolUse` hooks use the matcher `*`. Kiro CLI
+reads matchers as globs, so `*` matches every tool. Releases before this fix
+wrote `.*`, which matches no tool, so those tool hooks never ran. The gateway
+rewrites DefenseClaw's entries the first time it starts after an upgrade, and
+`defenseclaw setup kiro` rewrites them too. Hook entries you added yourself
+are not changed.
+
 ## What each surface can veto
 
 In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a

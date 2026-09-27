@@ -143,7 +143,7 @@ func TestVerifyKiroSandboxAgentRejectsTampering(t *testing.T) {
 		return doc["hooks"].(map[string]interface{})[event].([]interface{})[0].(map[string]interface{})
 	}
 	for name, body := range map[string][]byte{
-		// The host's ".*" matches no tool on Kiro 2.24.1.
+		// The regular expression ".*" matches no tool on Kiro 2.24.1.
 		"regex-matcher":   mutate(func(d map[string]interface{}) { hook(d, "preToolUse")["matcher"] = ".*" }),
 		"other-command":   mutate(func(d map[string]interface{}) { hook(d, "stop")["command"] = "/bin/true" }),
 		"missing-trigger": mutate(func(d map[string]interface{}) { delete(d["hooks"].(map[string]interface{}), "postToolUse") }),

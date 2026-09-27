@@ -113,6 +113,17 @@ deleted.
   install-directory variable; the `sandbox setup` pre-pairing device-key trust
   override; and the sandbox proxy test harness's bearer token.
 
+### Kiro CLI tool hooks
+
+- Fixes the Kiro CLI 2.x agent hooks (`~/.kiro/agents/defenseclaw.json`, and
+  the operator's own default agent when `chat.defaultAgent` names one):
+  setup registered `preToolUse` and `postToolUse` with the matcher `.*`.
+  Kiro CLI reads matchers as globs, so `.*` matched no tool and no tool call
+  on the host was ever checked. Setup now writes `*`. The gateway runs
+  connector setup at every start, so the first start after an upgrade
+  rewrites DefenseClaw's own entries in place; entries the operator added
+  are left as they are. Measured against kiro-cli 2.24.1 on Linux.
+
 ### Observability v8
 
 - Defaults an omitted `observability.local.retention_days` to a rolling seven-day

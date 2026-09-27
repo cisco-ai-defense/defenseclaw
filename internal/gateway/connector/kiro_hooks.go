@@ -22,17 +22,27 @@ var kiroV3HookSpecs = []struct {
 	{"defenseclaw-stop", "DefenseClaw session stop", "Stop", ""},
 }
 
+// kiroV2MatchAllTools is the CLI 2.x agent-hook matcher for every tool.
+// kiro-cli matches a hook's matcher against the tool name as a glob
+// (measured on 2.24.1), so "*" matches every tool. The regular expression
+// ".*" that earlier releases wrote matches none: their preToolUse and
+// postToolUse hooks never ran, so no tool call was checked. The prompt and
+// stop triggers ignore the matcher. Setup replaces DefenseClaw's own entries
+// on every run, so the first gateway start after an upgrade rewrites an old
+// agent file.
+const kiroV2MatchAllTools = "*"
+
 var kiroV2HookSpecs = []struct {
 	event       string
 	description string
 	matcher     string
 }{
-	{"userPromptSubmit", "DefenseClaw prompt inspection", ".*"},
-	{"preToolUse", "DefenseClaw tool-use inspection", ".*"},
-	{"postToolUse", "DefenseClaw tool-use audit", ".*"},
+	{"userPromptSubmit", "DefenseClaw prompt inspection", kiroV2MatchAllTools},
+	{"preToolUse", "DefenseClaw tool-use inspection", kiroV2MatchAllTools},
+	{"postToolUse", "DefenseClaw tool-use audit", kiroV2MatchAllTools},
 	// kiro-cli 2.22's agent schema accepts `stop` only. `agentStop` is
 	// documented as an alias but fails validation, so /hooks stays empty.
-	{"stop", "DefenseClaw session stop", ".*"},
+	{"stop", "DefenseClaw session stop", kiroV2MatchAllTools},
 }
 
 const kiroV2StopAlias = "agentStop"
