@@ -75,7 +75,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		return err
 	}
 	if a.Cfg == nil {
-		return errors.New("DefenseClaw is not set up yet; run `defenseclaw setup` first")
+		return errors.New("DefenseClaw is not set up yet; run `defenseclaw init` first")
 	}
 	assume := o.Yes || o.NonInteractive || !a.IO.TTY
 	a.println()

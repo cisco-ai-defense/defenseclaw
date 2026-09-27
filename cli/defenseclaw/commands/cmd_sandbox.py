@@ -143,7 +143,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "harness",
                 "stringSlice",
-                "harness to set up (repeatable; default: all supported)",
+                "harness to set up (repeatable; default: openshell.harnesses, else claude and codex)",
                 metavar="HARNESS",
             ),
             _Flag("upstream-telemetry", "bool", "keep OpenShell's anonymous usage telemetry on"),
@@ -217,8 +217,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "github-write",
                 "bool",
-                "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so the agent can "
-                "push and open pull requests",
+                "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the "
+                "GitHub API (for example to open pull requests)",
             ),
             _Flag("no-mcp", "bool", "leave the harness's MCP servers behind"),
             _Flag(
