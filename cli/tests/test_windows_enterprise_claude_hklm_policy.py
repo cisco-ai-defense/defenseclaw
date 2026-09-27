@@ -12,6 +12,7 @@ that matrix.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -95,7 +96,38 @@ def test_status_reports_hklm_shadowing_with_the_fix() -> None:
     assert "SetValue" not in view and "CreateSubKey" not in view
     assert "export-claude-policy" in view
     catch = view[view.index("    catch {") :]
-    assert "$state.shadowed = $true" in catch[: catch.index("finally")]
+    assert "shadowed = $true" in catch[: catch.index("finally")]
+    assert "Get-DefenseClawClaudeHKLMPolicyVerdict -Raw $raw -Layout $Layout" in view
+    verdict = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
+    assert "export-claude-policy" in verdict and "allowManagedHooksOnly" in verdict
+    catch = verdict[verdict.index("    catch {") :]
+    assert "$state.shadowed = $true" in catch
+    # #899 review: settings keys match by exact case, as Claude and the
+    # gateway read them; PSObject.Properties[...] ignores case.
+    for owner in (
+        "function Get-DefenseClawClaudeHKLMPolicyVerdict",
+        "function Test-DefenseClawClaudeHKLMCarriesInstalledHooks",
+        "function Get-DefenseClawClaudeInstalledHookContract",
+        "function Test-DefenseClawClaudeHandlerTargetsHook",
+    ):
+        body = _slice(module, owner, "\nfunction ")
+        assert ".PSObject.Properties['" not in body, owner
+        assert "Get-DefenseClawJsonMember" in body, owner
+
+
+def test_status_and_gate_share_the_hklm_admission_vectors() -> None:
+    vectors = ROOT / "internal" / "gateway" / "connector" / "testdata" / "claude_hklm_admission_vectors.json"
+    data = json.loads(vectors.read_text(encoding="utf-8"))
+    wants = {case["want"] for case in data["cases"]}
+    assert wants == {"inactive", "carry", "merge", "refuse"}
+    smoke = SMOKE.read_text(encoding="utf-8")
+    assert "claude_hklm_admission_vectors.json" in smoke
+    assert "Get-DefenseClawClaudeHKLMPolicyVerdict" in smoke
+    go_test = (ROOT / "internal" / "gateway" / "connector" / "claudecode_policy_merge_windows_test.go").read_text(
+        encoding="utf-8"
+    )
+    assert "//go:embed testdata/claude_hklm_admission_vectors.json" in go_test
+    assert "ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, caseOpts)" in go_test
 
 
 
@@ -109,10 +141,10 @@ def test_module_merge_client_floor_matches_the_connector_constant() -> None:
 
 def test_status_withholds_claude_verification_under_merge_until_the_floor_is_attested() -> None:
     module = MODULE.read_text(encoding="utf-8")
-    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyState", "function ConvertTo-DefenseClawBoundedDiagnostic")
+    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
     # A merge policy that carries the DefenseClaw hooks is effective on every
     # client; only one that relies on merge raises the approved-client floor.
-    floor = view[view.index("managedSourcesBehavior") :]
+    floor = view[view.index("$merge = [bool]") :]
     assert floor.index("Test-DefenseClawClaudeHKLMCarriesInstalledHooks") < floor.index(
         "$state.merge_client_floor_required = $true"
     )

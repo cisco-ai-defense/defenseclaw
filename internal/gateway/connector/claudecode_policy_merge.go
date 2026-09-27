@@ -57,6 +57,14 @@ func claudeCodeOSAdminRemedy(opts SetupOpts) string {
 // when it opts into merging managed sources, which clients honor from
 // ClaudeCodeManagedSourcesMergeMinimumVersion. A policy that disables hooks
 // defeats both, and anything else fails closed with the two ways to fix it.
+// Either admission also keeps the managed-hooks-only lock effective (see
+// claudeCodeOSAdminKeepsManagedHooksOnly).
+//
+// The Windows lifecycle module's Status view applies the same rules to the
+// same registry value (Get-DefenseClawClaudeHKLMPolicyVerdict in
+// packaging/windows/DefenseClawEnterprise.psm1). Both run the documents in
+// testdata/claude_hklm_admission_vectors.json (in this package), so change
+// them together.
 func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) error {
 	if !source.active() {
 		return nil

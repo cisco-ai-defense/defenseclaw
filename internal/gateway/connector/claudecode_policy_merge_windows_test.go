@@ -6,6 +6,7 @@
 package connector
 
 import (
+	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -148,5 +149,113 @@ func TestClaudeHKLMShadowingPolicyRefusesWithTheFixOnWindows(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), ClaudeCodeManagedPolicyExportCommand) ||
 		!strings.Contains(err.Error(), "managedSourcesBehavior") {
 		t.Fatalf("shadowing HKLM policy = %v, want an actionable refusal", err)
+	}
+}
+
+//go:embed testdata/claude_hklm_admission_vectors.json
+var claudeHKLMAdmissionVectorsJSON []byte
+
+type claudeHKLMAdmissionVectors struct {
+	ContractID      string      `json:"contract_id"`
+	Events          []string    `json:"events"`
+	HookExecutable  string      `json:"hook_executable"`
+	Tokens          [][2]string `json:"tokens"`
+	Installed       string      `json:"installed"`
+	InstalledOptOut string      `json:"installed_opt_out"`
+	Cases           []struct {
+		Name     string `json:"name"`
+		Settings string `json:"settings"`
+		Want     string `json:"want"`
+		OptOut   bool   `json:"opt_out"`
+	} `json:"cases"`
+}
+
+func (v claudeHKLMAdmissionVectors) expand(text string) string {
+	for _, token := range v.Tokens {
+		text = strings.ReplaceAll(text, token[0], token[1])
+	}
+	return text
+}
+
+// TestClaudeHKLMAdmissionVectorsOnWindows is the #899 review regression for
+// the Status view and the admission gate disagreeing about one HKLM policy.
+// The lifecycle module's Get-DefenseClawClaudeHKLMPolicyVerdict runs the same
+// documents (enterprise-claude-hklm-policy-smoke.ps1) against the installed
+// drop-in this test proves the gateway renders.
+func TestClaudeHKLMAdmissionVectorsOnWindows(t *testing.T) {
+	var vectors claudeHKLMAdmissionVectors
+	if err := json.Unmarshal(claudeHKLMAdmissionVectorsJSON, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	if len(vectors.Cases) < 40 {
+		t.Fatalf("only %d HKLM admission vectors", len(vectors.Cases))
+	}
+	// A small registered contract keeps the documents readable. The pinned
+	// ID selects it, and no agent version resolves to it.
+	previous := builtinHookContracts["claudecode"]
+	builtinHookContracts["claudecode"] = append(append([]HookContract(nil), previous...), HookContract{
+		Connector:          "claudecode",
+		ContractID:         vectors.ContractID,
+		ExactAgentVersions: []string{"0.0.0-hklm-admission-vectors"},
+		Events:             vectors.Events,
+	})
+	t.Cleanup(func() { builtinHookContracts["claudecode"] = previous })
+	opts := SetupOpts{
+		ManagedEnterprise: true,
+		HookFailMode:      "closed",
+		HookExecutable:    vectors.HookExecutable,
+		DataDir:           t.TempDir(),
+		HookContractID:    vectors.ContractID,
+	}
+	for _, form := range []struct {
+		optOut    bool
+		installed string
+	}{{false, vectors.Installed}, {true, vectors.InstalledOptOut}} {
+		rendered := opts
+		rendered.ClaudeCodeAllowUnmanagedHooks = form.optOut
+		body, err := renderClaudeCodeManagedHookPolicy(rendered)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want interface{}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(vectors.expand(form.installed)), &want); err != nil {
+			t.Fatal(err)
+		}
+		gotText, _ := claudeCodeCanonicalJSON(got)
+		wantText, _ := claudeCodeCanonicalJSON(want)
+		if gotText != wantText {
+			t.Fatalf("installed drop-in (opt-out=%v) in the vectors is not the rendered policy:\n got %s\nwant %s", form.optOut, gotText, wantText)
+		}
+	}
+	for _, tc := range vectors.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			caseOpts := opts
+			caseOpts.ClaudeCodeAllowUnmanagedHooks = tc.OptOut
+			raw := vectors.expand(tc.Settings)
+			err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, caseOpts)
+			switch tc.Want {
+			case "refuse":
+				if err == nil {
+					t.Fatal("admitted, want a refusal")
+				}
+				return
+			case "inactive", "carry", "merge":
+				if err != nil {
+					t.Fatalf("refused, want %s: %v", tc.Want, err)
+				}
+			default:
+				t.Fatalf("unknown want %q", tc.Want)
+			}
+			if tc.Want == "inactive" {
+				return
+			}
+			carries, err := claudeCodeOSAdminCarriesManagedHooks(claudeOSAdminSource(t, raw), caseOpts)
+			if err != nil || carries != (tc.Want == "carry") {
+				t.Fatalf("carries = (%v, %v), want %s", carries, err, tc.Want)
+			}
+		})
 	}
 }

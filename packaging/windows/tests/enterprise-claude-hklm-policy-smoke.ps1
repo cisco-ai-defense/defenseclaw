@@ -9,7 +9,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$ScratchRoot = [IO.Path]::GetTempPath()
+    [string]$ScratchRoot = [IO.Path]::GetTempPath(),
+    [string]$VectorsPath = ''
 )
 
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
@@ -20,6 +21,14 @@ $modulePath = [IO.Path]::GetFullPath(
         $PSScriptRoot `
         '..\DefenseClawEnterprise.psm1')
 )
+if ([string]::IsNullOrWhiteSpace($VectorsPath)) {
+    $VectorsPath = [IO.Path]::GetFullPath(
+        (Microsoft.PowerShell.Management\Join-Path `
+            $PSScriptRoot `
+            '..\..\..\internal\gateway\connector\testdata\claude_hklm_admission_vectors.json')
+    )
+}
+$vectorsText = [IO.File]::ReadAllText($VectorsPath)
 $module = Microsoft.PowerShell.Core\Import-Module `
     -Name $modulePath `
     -Force `
@@ -33,7 +42,7 @@ $root = [IO.Path]::Combine(
 [void][IO.Directory]::CreateDirectory($root)
 try {
     $failures = & $module {
-        param([string]$Root)
+        param([string]$Root, [string]$VectorsText)
         $failures = [Collections.Generic.List[string]]::new()
         $policyPath = [IO.Path]::Combine($Root, '90-defenseclaw.json')
         $layout = @{ ClaudeManagedPolicyPath = $policyPath }
@@ -170,8 +179,69 @@ try {
         if (@(Get-DefenseClawClaudeMergePendingTargets -Report $null).Count -ne 0) {
             $failures.Add("a missing guardian report listed merge pending targets")
         }
+        # #899 review: the Status verdict reads an HKLM policy the way the
+        # gateway admission gate does. TestClaudeHKLMAdmissionVectorsOnWindows
+        # runs the same documents through connector
+        # ClaudeCodeOSAdminPolicyAdmitsManagedHooks and checks that the
+        # installed drop-in below is the one the gateway renders.
+        $vectors = $VectorsText | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $expand = {
+            param([string]$Text)
+            foreach ($token in @($vectors.tokens)) {
+                $Text = $Text.Replace([string]$token[0], [string]$token[1])
+            }
+            return $Text
+        }
+        $vectorCount = 0
+        foreach ($case in @($vectors.cases)) {
+            $vectorCount++
+            $optOut = [bool]($null -ne $case.PSObject.Properties['opt_out'] -and [bool]$case.opt_out)
+            $installedText = if ($optOut) { [string]$vectors.installed_opt_out } else { [string]$vectors.installed }
+            [IO.File]::WriteAllText($policyPath, (& $expand $installedText), [Text.UTF8Encoding]::new($false))
+            $want = [string]$case.want
+            $wantShadowed = $want -ceq 'refuse'
+            $wantFloor = $want -ceq 'merge'
+            $wantMerge = [bool](
+                $want -ceq 'merge' -or
+                ($want -ceq 'carry' -and $null -ne $case.PSObject.Properties['managed_sources_merge'] -and
+                    [bool]$case.managed_sources_merge)
+            )
+            try {
+                $verdict = Get-DefenseClawClaudeHKLMPolicyVerdict -Raw (& $expand ([string]$case.settings)) -Layout $layout
+                if ([bool]$verdict.shadowed -ne $wantShadowed -or
+                    (-not $wantShadowed -and
+                        ([bool]$verdict.merge_client_floor_required -ne $wantFloor -or
+                            [bool]$verdict.managed_sources_merge -ne $wantMerge))) {
+                    $failures.Add("vector $($case.name): shadowed=$($verdict.shadowed) merge=$($verdict.managed_sources_merge) floor=$($verdict.merge_client_floor_required), want $want ($($verdict.detail))")
+                }
+                if ($wantShadowed -and [string]::IsNullOrWhiteSpace([string]$verdict.detail)) {
+                    $failures.Add("vector $($case.name): refused without a detail")
+                }
+            }
+            catch {
+                $failures.Add("vector $($case.name): threw $($_.Exception.Message)")
+            }
+        }
+        if ($vectorCount -lt 40) {
+            $failures.Add("only $vectorCount HKLM admission vectors were read")
+        }
+        # Without an installed drop-in nothing can be carried, while a merge
+        # policy still only raises the client floor.
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $policyPath -Force
+        $carried = Get-DefenseClawClaudeHKLMPolicyVerdict -Raw (& $expand '{"allowManagedHooksOnly":true,"hooks":{@MATRIX@}}') -Layout $layout
+        if (-not [bool]$carried.shadowed) {
+            $failures.Add('a carried matrix was admitted without an installed drop-in')
+        }
+        $merged = Get-DefenseClawClaudeHKLMPolicyVerdict -Raw '{"managedSourcesBehavior":"merge"}' -Layout $layout
+        if ([bool]$merged.shadowed -or -not [bool]$merged.merge_client_floor_required) {
+            $failures.Add("merge without an installed drop-in = shadowed=$($merged.shadowed) floor=$($merged.merge_client_floor_required)")
+        }
+        $none = Get-DefenseClawClaudeHKLMPolicyVerdict -Raw $null -Layout $layout
+        if ([bool]$none.shadowed) {
+            $failures.Add('a missing Settings value was reported as shadowing')
+        }
         return @($failures)
-    } $root
+    } $root $vectorsText
 }
 finally {
     if ([IO.Directory]::Exists($root)) {

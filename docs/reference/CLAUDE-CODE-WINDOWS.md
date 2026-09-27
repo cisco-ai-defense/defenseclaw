@@ -157,7 +157,10 @@ carry the DefenseClaw hooks) and
 `agent_application_control_claude_minimum_version` (the floor the
 application-control evidence was attested at). A shadowed policy, or a merge
 policy whose floor is not attested, reports
-`claude_effective_policy_verified=false`.
+`claude_effective_policy_verified=false`. Status reads the policy by the same
+rules as enrollment, comparing it with the installed DefenseClaw drop-in:
+settings keys match by exact case and values by JSON type, as Claude reads
+them, and an empty `Settings` value or `{}` is no policy.
 
 ## Hook contract
 
