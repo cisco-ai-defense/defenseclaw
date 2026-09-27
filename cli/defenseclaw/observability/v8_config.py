@@ -63,6 +63,7 @@ from yaml.nodes import MappingNode
 from defenseclaw.observability.detector_catalog_v1 import (
     DETECTOR_GROUPS as CATALOG_DETECTOR_GROUPS,
 )
+from defenseclaw.openshell_validation import openshell_error
 
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_YAML_NODES = 65_536
@@ -807,6 +808,7 @@ def _semantic_error(source_name: str, path: str, action: str) -> None:
 
 def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
     _validate_private_upstream_allowlist(document.get("guardrail") or {}, source_name)
+    _validate_openshell(document, source_name)
     observability = document.get("observability") or {}
     profiles = observability.get("redaction_profiles", {})
     _validate_profiles(profiles, source_name)
@@ -840,6 +842,14 @@ def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
                 )
             route_names.add(route["name"])
         _validate_destination(destination, path, source_name)
+
+
+def _validate_openshell(document: dict[str, Any], source_name: str) -> None:
+    """Mirror the Go openshell section validation (see openshell_validation)."""
+
+    error = openshell_error(document)
+    if error is not None:
+        _semantic_error(source_name, error[0], error[1])
 
 
 def _validate_private_upstream_allowlist(guardrail: dict[str, Any], source_name: str) -> None:

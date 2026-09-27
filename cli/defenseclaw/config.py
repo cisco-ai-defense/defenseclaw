@@ -1015,10 +1015,13 @@ class OpenShellAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
 
     Every field is optional; ``None`` / empty imposes no constraint. The Go
-    resolver (internal/openshell/packs) enforces them at every decision point.
+    resolver (internal/openshell/packs) enforces them at every decision point;
+    ``required_pack``'s posture is a floor user keys and run flags cannot
+    loosen, and ``required_pack_digest`` pins its content.
     """
 
     required_pack: str = ""
+    required_pack_digest: str = ""
     min_profile: str = ""
     allow_yolo: bool | None = None
     allow_mount: bool | None = None
@@ -4982,6 +4985,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
         admin=OpenShellAdminConfig(
             required_pack=_openshell_str(admin.get("required_pack")),
+            required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
             min_profile=_openshell_str(admin.get("min_profile")),
             allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
             allow_mount=_openshell_optional_bool(admin.get("allow_mount")),

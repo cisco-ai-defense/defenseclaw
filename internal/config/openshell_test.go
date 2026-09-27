@@ -238,6 +238,12 @@ func TestOpenShellValidate(t *testing.T) {
 		{"admin max", func(o *OpenShellConfig) { o.Admin.MaxResources.CPU = "lots" }, "admin.max_resources.cpu"},
 		{"admin copy glob", func(o *OpenShellConfig) { o.Admin.RequireCopyFor = []string{" "} }, "admin.require_copy_for[0]"},
 		{"admin block", func(o *OpenShellConfig) { o.Admin.EgressBlock = []string{"x.example/path"} }, "admin.egress_block[0]"},
+		{"pack digest format", func(o *OpenShellConfig) {
+			o.Admin.RequiredPack, o.Admin.RequiredPackDigest = "strict", "sha256:ABC"
+		}, "admin.required_pack_digest"},
+		{"pack digest without a pack", func(o *OpenShellConfig) {
+			o.Admin.RequiredPackDigest = "sha256:" + strings.Repeat("a", 64)
+		}, "needs admin.required_pack"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := DefaultConfig().OpenShell
@@ -253,12 +259,66 @@ func TestOpenShellValidate(t *testing.T) {
 	valid.Egress.Block = []string{"*", "Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]"}
 	valid.Resources = OpenShellResourcesConfig{CPU: "1.5", Memory: "512Mi"}
 	valid.Admin.Locked = append([]string(nil), OpenShellLockableKeys...)
+	valid.Admin.RequiredPack, valid.Admin.RequiredPackDigest = "strict", "sha256:"+strings.Repeat("0f", 32)
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid section rejected: %v", err)
 	}
 	var nilSection *OpenShellConfig
 	if err := nilSection.Validate(); err != nil {
 		t.Fatalf("nil section: %v", err)
+	}
+}
+
+func TestConfigValidateOpenShellListeners(t *testing.T) {
+	config := func(edit func(*Config)) *Config {
+		cfg := DefaultConfig()
+		cfg.Gateway.APIPort = 18970
+		cfg.Guardrail.Port = 4000
+		cfg.OpenShell.Enabled = true
+		if edit != nil {
+			edit(cfg)
+		}
+		return cfg
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*Config)
+		want string // "" is valid
+	}{
+		{"derived ports", nil, ""},
+		{"explicit distinct ports", func(c *Config) { c.OpenShell.IngressPort, c.OpenShell.EgressPort = 19001, 19002 }, ""},
+		{"default api port", func(c *Config) { c.Gateway.APIPort = 0 }, ""},
+		{"ingress on the derived egress port", func(c *Config) { c.OpenShell.IngressPort = 18972 }, "resolve to the same port 18972"},
+		{"egress on the derived ingress port", func(c *Config) { c.OpenShell.EgressPort = 18971 }, "resolve to the same port 18971"},
+		{"egress on the api port", func(c *Config) { c.OpenShell.EgressPort = 18970 }, "egress_port 18970 collides with gateway.api_port"},
+		{"ingress on the guardrail port", func(c *Config) { c.OpenShell.IngressPort = 4000 }, "ingress_port 4000 collides with guardrail.port"},
+		{"derived port on the guardrail port", func(c *Config) { c.Guardrail.Port = 18972 }, "egress_port 18972 collides with guardrail.port"},
+		{"derived port out of range", func(c *Config) { c.Gateway.APIPort = 65535 }, "leaves no room"},
+		{"explicit ports near the top", func(c *Config) {
+			c.Gateway.APIPort, c.OpenShell.IngressPort, c.OpenShell.EgressPort = 65535, 65533, 65534
+		}, ""},
+		{"disabled integration binds nothing", func(c *Config) {
+			c.OpenShell.Enabled = false
+			c.Guardrail.Port, c.OpenShell.EgressPort = 18971, 18970
+		}, ""},
+		{"section errors come first", func(c *Config) {
+			c.OpenShell.Enabled = false
+			c.OpenShell.Profile = "wide"
+		}, "profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := config(tc.edit).ValidateOpenShell()
+			if tc.want == "" && err != nil {
+				t.Fatalf("ValidateOpenShell() = %v", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("ValidateOpenShell() = %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+	var nilConfig *Config
+	if err := nilConfig.ValidateOpenShell(); err != nil {
+		t.Fatalf("nil config: %v", err)
 	}
 }
 

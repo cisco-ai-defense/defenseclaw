@@ -1,0 +1,247 @@
+# Shared openshell config validation corpus. The Go loader (schema +
+# Config.ValidateOpenShell, internal/config/openshell_parity_test.go) and the
+# Python writer (schema + defenseclaw.openshell_validation,
+# cli/tests/test_config_openshell.py) must agree on every case, so Python can
+# never save a section the gateway refuses to load.
+schema_version: 1
+cases:
+  - name: absent-section
+    valid: true
+    source: |
+      config_version: 8
+
+  - name: full-valid-section
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        enabled: true
+        ingress_port: 19001
+        egress_port: 19002
+        pack: balanced
+        profile: strict
+        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
+        egress: {block: ['*', Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2'], allow: ['*.npmjs.org', pypi.org], ports: [443]}
+        resources: {cpu: '1.5', memory: 512Mi}
+        admin:
+          required_pack: strict
+          required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
+          egress_allow_only: ['*.corp.example']
+          require_copy_for: [/src/customer-*]
+          max_resources: {cpu: 500m, memory: 8Gi}
+
+  - name: numeric-labels-are-host-names
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [01.2.3.4, 999.1.1.1]}
+
+  - name: host-glob-with-port
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['paste.example:443']}
+
+  - name: host-glob-inner-wildcard
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: ['a.*.example']}
+
+  - name: host-glob-double-wildcard
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['**.example']}
+
+  - name: host-glob-with-scheme
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_allow_only: ['https://corp.example']}
+
+  - name: host-glob-two-trailing-dots
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['example.com..']}
+
+  - name: host-glob-label-too-long
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example]}
+
+  - name: host-glob-label-with-leading-dash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [-bad.example]}
+
+  - name: host-glob-malformed-ipv6
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [':::1']}
+
+  - name: host-glob-scoped-ipv6
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['fe80::1%eth0']}
+
+  - name: cpu-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0'}
+
+  - name: cpu-zero-millicores
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: 0m}
+
+  - name: cpu-zero-fraction
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0.000'}
+
+  - name: cpu-fraction
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: '0.001'}
+
+  - name: memory-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {max_resources: {memory: 0Mi}}
+
+  - name: memory-overflow
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {memory: 999999999999999Ti}
+
+  - name: admin-cpu-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {max_resources: {cpu: '0'}}
+
+  - name: explicit-equal-ports
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        ingress_port: 19001
+        egress_port: 19001
+
+  - name: explicit-equal-ports-disabled
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        enabled: false
+        ingress_port: 19001
+        egress_port: 19001
+
+  - name: ingress-on-derived-egress-port
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        enabled: true
+        ingress_port: 18972
+
+  - name: ingress-on-derived-egress-port-disabled
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        ingress_port: 18972
+
+  - name: egress-on-api-port
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 19000}
+      openshell:
+        enabled: true
+        egress_port: 19000
+
+  - name: ingress-on-guardrail-port
+    valid: false
+    source: |
+      config_version: 8
+      guardrail: {port: 4100}
+      openshell:
+        enabled: true
+        ingress_port: 4100
+
+  - name: derived-port-on-default-guardrail-port
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 3998}
+      openshell:
+        enabled: true
+
+  - name: derived-port-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      gateway: {api_port: 65535}
+      openshell:
+        enabled: true
+
+  - name: explicit-ports-at-the-top
+    valid: true
+    source: |
+      config_version: 8
+      gateway: {api_port: 65535}
+      openshell:
+        enabled: true
+        ingress_port: 65533
+        egress_port: 65534
+
+  - name: blank-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['  ']}
+
+  - name: pack-digest-format
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {required_pack: strict, required_pack_digest: 'sha256:ABC'}
+
+  - name: pack-digest-without-pack
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f}

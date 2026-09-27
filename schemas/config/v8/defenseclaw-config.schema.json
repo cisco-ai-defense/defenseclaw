@@ -785,10 +785,11 @@
       ]
     },
     "openShellHostGlob": {
+      "description": "\"*\", a host name, \"*.<host>\" (every subdomain), or an IP address; no scheme, port, path or inner wildcard.",
       "type": "string",
       "minLength": 1,
-      "maxLength": 255,
-      "pattern": "^[^\\s/@]+$"
+      "maxLength": 253,
+      "pattern": "^(\\*|(\\*\\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\\.?|\\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\\]?)$"
     },
     "openShellHostGlobList": {
       "type": "array",
@@ -969,6 +970,10 @@
       "properties": {
         "required_pack": {
           "$ref": "#/$defs/openShellPackRef"
+        },
+        "required_pack_digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
         },
         "min_profile": {
           "$ref": "#/$defs/openShellProfileOrInherit"

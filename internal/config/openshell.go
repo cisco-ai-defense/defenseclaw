@@ -243,11 +243,16 @@ type OpenShellMiddlewareConfig struct {
 // optional; an unset field imposes no constraint. The Allow* switches are
 // tri-state so an absent key never reads as "false".
 type OpenShellAdminConfig struct {
-	// RequiredPack forces the pack (name or absolute path). It replaces
-	// only the pack layer: user keys and run flags still apply on top, so
-	// pair it with MinProfile, the Allow* switches and Locked to keep them
-	// from loosening it.
+	// RequiredPack forces the pack (name or absolute path) and makes its
+	// posture a floor: user keys and run flags may tighten its profile,
+	// skip-permissions default, workspace mode, MCP import, blocklist feeds
+	// and proxy ports, but not loosen them. In managed_enterprise a custom
+	// required pack must be an administrator-owned file users cannot modify.
 	RequiredPack string `mapstructure:"required_pack" yaml:"required_pack,omitempty"`
+	// RequiredPackDigest pins RequiredPack's content ("sha256:<hex>", the
+	// pack digest `defenseclaw sandbox pack show` reports); a pack with any
+	// other content refuses to run.
+	RequiredPackDigest string `mapstructure:"required_pack_digest" yaml:"required_pack_digest,omitempty"`
 	// MinProfile is the loosest profile allowed (strict > balanced > open).
 	MinProfile     string `mapstructure:"min_profile"      yaml:"min_profile,omitempty"`
 	AllowYolo      *bool  `mapstructure:"allow_yolo"       yaml:"allow_yolo,omitempty"`
@@ -275,7 +280,7 @@ type OpenShellAdminConfig struct {
 
 // IsZero reports whether no administrator constraint is configured.
 func (a OpenShellAdminConfig) IsZero() bool {
-	return a.RequiredPack == "" && a.MinProfile == "" && a.AllowYolo == nil &&
+	return a.RequiredPack == "" && a.RequiredPackDigest == "" && a.MinProfile == "" && a.AllowYolo == nil &&
 		a.AllowMount == nil && a.AllowHostPorts == nil && a.AllowUnblock == nil &&
 		a.AllowLearnMode == nil && len(a.AllowedHarnesses) == 0 &&
 		len(a.EgressBlock) == 0 && len(a.EgressAllowOnly) == 0 &&
@@ -408,6 +413,7 @@ var (
 	openShellHostLabel        = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
 	openShellCPUPattern       = regexp.MustCompile(`^([0-9]{1,6})(\.[0-9]{1,3})?$|^([0-9]{1,9})m$`)
 	openShellMemoryPattern    = regexp.MustCompile(`^([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?$`)
+	openShellPackDigest       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	openShellMemoryMultiplier = map[string]int64{
 		"": 1, "k": 1000, "K": 1000, "M": 1000 * 1000, "G": 1000 * 1000 * 1000,
 		"T": 1000 * 1000 * 1000 * 1000, "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40,
@@ -495,9 +501,57 @@ func ValidateOpenShellHostGlob(glob string) error {
 	return nil
 }
 
+// ValidateOpenShell checks the openshell section (OpenShellConfig.Validate)
+// and, when the sandbox integration is enabled, that its effective listener
+// ports are usable and collide neither with each other nor with DefenseClaw's
+// API and guardrail proxy. A disabled integration binds nothing, so its derived
+// ports are not checked.
+func (c *Config) ValidateOpenShell() error {
+	if c == nil {
+		return nil
+	}
+	if err := c.OpenShell.Validate(); err != nil {
+		return err
+	}
+	if !c.OpenShell.Enabled {
+		return nil
+	}
+	return c.validateOpenShellListeners()
+}
+
+func (c *Config) validateOpenShellListeners() error {
+	apiPort := effectiveAPIPort(c.Gateway.APIPort)
+	listeners := []struct {
+		key  string
+		port int
+	}{
+		{"ingress_port", c.OpenShellIngressPort()},
+		{"egress_port", c.OpenShellEgressPort()},
+	}
+	var errs []error
+	for _, l := range listeners {
+		if l.port > 65535 {
+			errs = append(errs, fmt.Errorf("%s: gateway.api_port %d leaves no room for the derived port %d; set openshell.%s",
+				l.key, apiPort, l.port, l.key))
+			continue
+		}
+		if l.port == apiPort {
+			errs = append(errs, fmt.Errorf("%s %d collides with gateway.api_port", l.key, l.port))
+		}
+		if c.Guardrail.Port > 0 && l.port == c.Guardrail.Port {
+			errs = append(errs, fmt.Errorf("%s %d collides with guardrail.port", l.key, l.port))
+		}
+	}
+	if in, eg := listeners[0].port, listeners[1].port; in == eg {
+		errs = append(errs, fmt.Errorf("ingress_port and egress_port resolve to the same port %d", in))
+	}
+	return errors.Join(errs...)
+}
+
 // Validate checks the openshell section's values and relationships. The v8
 // schema owns shape; this also protects programmatic configs and checks what
 // the schema cannot express (quantities, distinct ports, known lockable keys).
+// Config.ValidateOpenShell adds the checks that need the rest of the config.
 func (o *OpenShellConfig) Validate() error {
 	if o == nil {
 		return nil
@@ -552,6 +606,14 @@ func (a *OpenShellAdminConfig) validate() error {
 	check := func(err error) {
 		if err != nil {
 			errs = append(errs, err)
+		}
+	}
+	if a.RequiredPackDigest != "" {
+		if !openShellPackDigest.MatchString(a.RequiredPackDigest) {
+			check(fmt.Errorf("admin.required_pack_digest %q must be sha256:<64 lowercase hex digits>", a.RequiredPackDigest))
+		}
+		if strings.TrimSpace(a.RequiredPack) == "" {
+			check(errors.New("admin.required_pack_digest needs admin.required_pack"))
 		}
 	}
 	check(validateOpenShellEnum("admin.min_profile", a.MinProfile, true,

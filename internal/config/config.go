@@ -2948,7 +2948,7 @@ func loadConfigSource(
 		}
 		return nil, fmt.Errorf("config: application_protection: %w", err)
 	}
-	if err := cfg.OpenShell.Validate(); err != nil {
+	if err := cfg.ValidateOpenShell(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}

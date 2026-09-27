@@ -820,6 +820,7 @@ openshell:
   middleware: {enabled: false}
   admin:
     required_pack: balanced
+    required_pack_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
     min_profile: balanced
     allow_yolo: true
     allow_mount: false
@@ -1060,6 +1061,13 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"unknown token delivery", openshell(map[string]any{"token_delivery": "file"})},
 		{"unknown workdir mode", openshell(map[string]any{"workdir": map[string]any{"mode": "overlay"}})},
 		{"host glob with scheme", openshell(map[string]any{"egress": map[string]any{"block": []any{"https://paste.example"}}})},
+		{"host glob with port", openshell(map[string]any{"egress": map[string]any{"block": []any{"paste.example:443"}}})},
+		{"host glob with inner wildcard", openshell(map[string]any{"egress": map[string]any{"allow": []any{"a.*.example"}}})},
+		{"host glob with double wildcard", openshell(map[string]any{"admin": map[string]any{"egress_allow_only": []any{"**.example"}}})},
+		{"host glob with space", openshell(map[string]any{"egress": map[string]any{"allow": []any{"a b.example"}}})},
+		{"host glob with two trailing dots", openshell(map[string]any{"egress": map[string]any{"block": []any{"example.com.."}}})},
+		{"host glob label too long", openshell(map[string]any{"egress": map[string]any{"block": []any{strings.Repeat("a", 64) + ".example"}}})},
+		{"pack digest format", openshell(map[string]any{"admin": map[string]any{"required_pack_digest": "sha256:ABC"}})},
 		{"harness name with space", openshell(map[string]any{"harnesses": []any{"claude code"}})},
 		{"string yolo", openshell(map[string]any{"yolo": "yes"})},
 	} {
@@ -1088,7 +1096,7 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 			"resources": map[string]any{"cpu": "1500m", "memory": "512Mi"},
 		})},
 		{"ip literal and wildcard globs", openshell(map[string]any{
-			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "*"}},
+			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "*", "[2001:db8::1]", "2001:db8::2", "*.Ngrok.IO", "paste.example."}},
 		})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

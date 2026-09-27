@@ -40,6 +40,11 @@ from defenseclaw.config import (
     _merge_openshell,
     load,
 )
+from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+from defenseclaw.openshell_validation import openshell_error, valid_cpu, valid_host_glob, valid_memory
+
+_REPO = Path(__file__).resolve().parents[2]
+_PARITY_CORPUS = _REPO / "testdata" / "openshell" / "config_validation_cases.yaml"
 
 _FULL_SECTION = {
     "enabled": True,
@@ -76,6 +81,7 @@ _FULL_SECTION = {
     "middleware": {"enabled": True},
     "admin": {
         "required_pack": "strict",
+        "required_pack_digest": "sha256:" + "0f" * 32,
         "min_profile": "balanced",
         "allow_yolo": False,
         "allow_mount": True,
@@ -143,6 +149,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.token_delivery, "env")
         self.assertTrue(oc.middleware.enabled)
         self.assertEqual(oc.admin.required_pack, "strict")
+        self.assertEqual(oc.admin.required_pack_digest, "sha256:" + "0f" * 32)
         self.assertIs(oc.admin.allow_yolo, False)
         self.assertIs(oc.admin.allow_mount, True)
         self.assertIsNone(oc.admin.allow_unblock)
@@ -184,6 +191,60 @@ class TestOpenShellMerge(unittest.TestCase):
         go_keys = tuple(line.strip().strip(",").strip('"') for line in block.splitlines() if line.strip())
         self.assertEqual(go_keys, OPENSHELL_LOCKABLE_KEYS)
         self.assertEqual(OPENSHELL_PROFILES, ("open", "balanced", "strict"))
+
+
+class TestOpenShellValidation(unittest.TestCase):
+    """Python twin of Validate / ValidateOpenShell (internal/config/openshell.go)."""
+
+    def test_shared_corpus_matches_go(self):
+        corpus = yaml.safe_load(_PARITY_CORPUS.read_text(encoding="utf-8"))
+        self.assertEqual(corpus["schema_version"], 1)
+        names = [case["name"] for case in corpus["cases"]]
+        self.assertGreaterEqual(len(names), 20)
+        self.assertEqual(len(names), len(set(names)))
+        disagreements = []
+        for case in corpus["cases"]:
+            try:
+                load_validate_v8(case["source"], source_name=f"shared:{case['name']}")
+                accepted = True
+            except V8ConfigError:
+                accepted = False
+            if accepted != case["valid"]:
+                disagreements.append(f"{case['name']}: expected valid={case['valid']}, accepted={accepted}")
+        self.assertEqual(disagreements, [])
+
+    def test_host_globs(self):
+        for glob in ("*", "Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]", "::ffff:1.2.3.4", " a_b.example "):
+            self.assertTrue(valid_host_glob(glob), glob)
+        for glob in ("", ".", "paste.example:443", "a.*.example", "**.example", "https://x.example", "x.example/path",
+                     "example.com..", "a" * 64 + ".example", "-bad.example", ":::1", "fe80::1%eth0", "a b.example",
+                     ("a" * 60 + ".") * 5 + "example"):
+            self.assertFalse(valid_host_glob(glob), glob)
+
+    def test_quantities_mirror_go(self):
+        # The same cases as TestParseOpenShellQuantities.
+        for value in ("2", "1.5", "0.25", "500m", " 3 "):
+            self.assertTrue(valid_cpu(value), value)
+        for value in ("", "0", "0m", "-1", "1.2345", "2cores", "1e3", "0.000"):
+            self.assertFalse(valid_cpu(value), value)
+        for value in ("1024", "1k", "1Ki", "512Mi", "4Gi", "2G", "1Ti"):
+            self.assertTrue(valid_memory(value), value)
+        for value in ("", "0", "4GB", "1.5Gi", "-1Mi", "999999999999999Ti"):
+            self.assertFalse(valid_memory(value), value)
+
+    def test_error_paths(self):
+        self.assertIsNone(openshell_error({"config_version": 8}))
+        self.assertEqual(
+            openshell_error({"openshell": {"egress": {"allow": ["pypi.org", "x:1"]}}})[0], "openshell.egress.allow[1]"
+        )
+        self.assertEqual(
+            openshell_error({"openshell": {"enabled": True, "ingress_port": 18972}})[0], "openshell.egress_port"
+        )
+        self.assertEqual(
+            openshell_error({"gateway": {"api_port": 19000}, "openshell": {"enabled": True, "egress_port": 19000}})[0],
+            "openshell.egress_port",
+        )
+        self.assertIsNone(openshell_error({"openshell": {"enabled": False, "ingress_port": 18972}}))
 
 
 class TestPolicyConnectors(unittest.TestCase):
@@ -262,6 +323,27 @@ class TestOpenShellSave(unittest.TestCase):
             reloaded.openshell.yolo = None
             reloaded.save()
             self.assertIsNone(self._load(tmpdir).openshell.yolo)
+
+    def test_refuses_to_save_what_the_gateway_would_reject(self):
+        edits = {
+            "host glob with a port": lambda oc: setattr(oc.egress, "block", ["paste.example:443"]),
+            "inner wildcard": lambda oc: setattr(oc.egress, "allow", ["a.*.example"]),
+            "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
+            "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
+            "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),
+            "digest without a pack": lambda oc: setattr(oc.admin, "required_pack_digest", "sha256:" + "0" * 64),
+        }
+        for name, edit in edits.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, "config.yaml")
+                with open(path, "w") as f:
+                    yaml.safe_dump({"config_version": 8, "data_dir": tmpdir}, f)
+                before = Path(path).read_bytes()
+                cfg = self._load(tmpdir)
+                edit(cfg.openshell)
+                with self.assertRaises(V8ConfigError):
+                    cfg.save()
+                self.assertEqual(Path(path).read_bytes(), before)
 
 
 if __name__ == "__main__":
