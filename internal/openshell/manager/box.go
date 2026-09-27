@@ -44,14 +44,17 @@ type box struct {
 	eff *packs.Effective
 	// decider is the sandbox's own egress proxy decider, built from eff
 	// (Manager.egressDecider) whenever eff is.
-	decider  *egress.Decider
-	cred     egress.Credential
-	phase    audit.SandboxPhase
-	creating bool
-	deleted  bool
-	orphaned bool
-	missing  bool
-	started  time.Time
+	decider *egress.Decider
+	// policyErr is why the sandbox's policy last failed to resolve, while
+	// it fails (Manager.policyUnresolved); eff and decider are nil then.
+	policyErr string
+	cred      egress.Credential
+	phase     audit.SandboxPhase
+	creating  bool
+	deleted   bool
+	orphaned  bool
+	missing   bool
+	started   time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}

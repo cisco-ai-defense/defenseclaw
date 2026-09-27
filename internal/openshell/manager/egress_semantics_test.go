@@ -30,9 +30,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
@@ -378,5 +381,128 @@ func TestPerSandboxDeciders(t *testing.T) {
 	e.create(sandboxapi.CreateRequest{Name: "balbox2", Profile: "balanced"})
 	if status, _ := proxy.connect(t, e, "balbox2", "example.org:443"); status != http.StatusForbidden {
 		t.Fatalf("another sandbox got balbox's unblock: %d", status)
+	}
+}
+
+// TestUnresolvablePolicyFailsClosed: a sandbox whose policy no longer
+// resolves (its custom pack was deleted while it runs) must not keep the
+// decider of its last good policy, which carries the administrator's lists
+// of that time. Its proxy credential is revoked until the policy resolves
+// again, triage leaves its proposals alone, and its approved OpenShell
+// rules are judged by the organization's policy alone.
+func TestUnresolvablePolicyFailsClosed(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.run()
+	proxy := startLiveProxy(t, e)
+	e.create(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
+	e.create(sandboxapi.CreateRequest{Name: "openbox"})
+	e.watch.waitStarted(t, "teambox")
+	blocked := addChunk(e, "teambox", chunk("allow_example_org_443", "example.org", 443))
+	kept := addChunk(e, "teambox", chunk("allow_keep_example_net_443", "keep.example.net", 443))
+	e.watch.push(t, "teambox", stream.Event{Kind: stream.KindDraft})
+	eventually(t, "approvals applied", func() bool {
+		return chunkStatus(e, "teambox", blocked) == "approved" && chunkStatus(e, "teambox", kept) == "approved"
+	})
+
+	// The pack goes away, then the administrator blocks example.org.
+	packFile := filepath.Join(packDir, "team", "pack.yaml")
+	if err := os.Remove(packFile); err != nil {
+		t.Fatal(err)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"example.org"} })
+	e.m.refreshEgress()
+	if status, body := proxy.connect(t, e, "openbox", "example.org:443"); status != http.StatusForbidden || body.Category != egress.CategoryAdminBlock {
+		t.Fatalf("openbox CONNECT example.org = %d %+v, want the admin block", status, body)
+	}
+	for _, target := range []string{"example.org:443", "keep.example.net:443"} {
+		if status, _ := proxy.connect(t, e, "teambox", target); status != http.StatusProxyAuthRequired {
+			t.Fatalf("teambox CONNECT %s with an unresolvable policy = %d, want its credential refused", target, status)
+		}
+	}
+	var fed bool
+	for _, ev := range e.m.ActivitySince(0, "teambox") {
+		fed = fed || (ev.Kind == sandboxapi.ActivityEgressBlocked && ev.Reason == policyUnresolvedReason)
+	}
+	if !fed {
+		t.Fatal("no feed event for the unresolvable policy")
+	}
+	var degraded bool
+	e.tel.mu.Lock()
+	for _, h := range e.tel.health {
+		degraded = degraded || (h.Sandbox.Name == "teambox" && h.ErrorCode == "openshell_pack_invalid")
+	}
+	e.tel.mu.Unlock()
+	if !degraded {
+		t.Fatal("no degraded health record for the unresolvable policy")
+	}
+
+	// The approved direct rules answer to the organization's policy.
+	e.m.enforceAll(context.Background())
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, "teambox")
+	if _, ok := policy.NetworkPolicies["allow_example_org_443"]; ok {
+		t.Fatal("the admin-blocked direct rule survived the unresolvable policy")
+	}
+	if _, ok := policy.NetworkPolicies["allow_keep_example_net_443"]; !ok {
+		t.Fatal("a direct rule the organization allows was removed")
+	}
+
+	// Triage does not decide proposals under the policy it no longer has.
+	e.m.mu.Lock()
+	b := e.m.boxes["teambox"]
+	e.m.mu.Unlock()
+	waiting := addChunk(e, "teambox", chunk("allow_new_example_net_443", "new.example.net", 443))
+	e.m.triageSandbox(context.Background(), b)
+	if s := chunkStatus(e, "teambox", waiting); s != "pending" {
+		t.Fatalf("proposal under an unresolvable policy = %s, want pending", s)
+	}
+
+	// The pack comes back: the sandbox is served again, under the current
+	// administrator's list.
+	if err := os.WriteFile(packFile, []byte(teamPack), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.m.refreshEgress()
+	if status, body := proxy.connect(t, e, "teambox", "example.org:443"); status != http.StatusForbidden || body.Category != egress.CategoryAdminBlock {
+		t.Fatalf("teambox CONNECT example.org after the pack returned = %d %+v, want the admin block", status, body)
+	}
+	if status, _ := proxy.connect(t, e, "teambox", "keep.example.net:443"); status != http.StatusOK {
+		t.Fatalf("teambox CONNECT keep.example.net after the pack returned = %d", status)
+	}
+	e.m.triageSandbox(context.Background(), b)
+	eventually(t, "the waiting proposal approved", func() bool { return chunkStatus(e, "teambox", waiting) == "approved" })
+}
+
+// TestNoPolicyRemovesDirectRules: when not even the organization's policy
+// resolves (the required pack is gone), nothing can vouch for a sandbox's
+// approved OpenShell rules, which bypass the proxy: every triaged rule is
+// removed, and DefenseClaw's own rules stay.
+func TestNoPolicyRemovesDirectRules(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "orphanbox"})
+	e.watch.waitStarted(t, sb.Name)
+	id := addChunk(e, sb.Name, chunk("allow_keep_example_net_443", "keep.example.net", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "approval applied", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.RequiredPack = filepath.Join(t.TempDir(), "gone", "pack.yaml")
+	})
+	e.m.enforceAll(context.Background())
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	if _, ok := policy.NetworkPolicies["allow_keep_example_net_443"]; ok {
+		t.Fatal("a direct rule survived without any policy")
+	}
+	if _, ok := policy.NetworkPolicies["defenseclaw_egress"]; !ok {
+		t.Fatalf("DefenseClaw's own rule was removed: %v", policy.NetworkPolicies)
+	}
+	var recorded bool
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		recorded = recorded || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == "allow_keep_example_net_443" && p.Reason == "policy_unresolved")
+	}
+	e.tel.mu.Unlock()
+	if !recorded {
+		t.Fatal("no rule_remove record for the unbound rule")
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
@@ -55,24 +56,120 @@ func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
 }
 
 // resolveBoxViolations is resolveBox with the clamps and refusals the
-// current configuration applies to the sandbox's run flags.
+// current configuration applies to the sandbox's run flags. A sandbox whose
+// policy no longer resolves fails closed (policyUnresolved) until it does
+// again (policyRestored).
 func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
 	cfg := m.config()
 	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
-	if err != nil {
-		return nil, nil, err
+	var d *egress.Decider
+	if err == nil {
+		d, err = m.egressDecider(cfg, eff)
 	}
-	d, err := m.egressDecider(cfg, eff)
 	if err != nil {
+		m.policyUnresolved(b, err)
 		return nil, nil, err
 	}
 	m.mu.Lock()
 	b.eff, b.decider = eff, d
+	failed := b.policyErr != ""
+	b.policyErr = ""
 	m.mu.Unlock()
+	if failed {
+		m.policyRestored(b, eff)
+	}
 	return eff, violations, nil
+}
+
+// policyUnresolved fails a sandbox closed while its policy cannot be
+// resolved: its custom pack was deleted or edited into one that no longer
+// loads, or the configuration no longer accepts one of its run flags. The
+// administrator's egress lists live only in each sandbox's own decider, so
+// serving the sandbox with the decider of its last good policy would keep
+// it out of every later tightening. Instead its cached policy is dropped
+// (triage and approvals resolve it again and refuse while that fails) and
+// its egress proxy credential is revoked, so the proxy refuses the sandbox
+// altogether, as in the deny network mode. enforceAll judges its approved
+// OpenShell rules by the organization's policy alone (orgPolicy). The first
+// failure (and every different one) is logged with
+// OPENSHELL_PACK_INVALID, recorded as degraded health and published to the
+// feed.
+func (m *Manager) policyUnresolved(b *box, err error) {
+	detail := err.Error()
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) && apiErr.Detail != "" {
+		detail = apiErr.Detail
+	}
+	m.mu.Lock()
+	b.eff, b.decider = nil, nil
+	changed := b.policyErr != detail
+	b.policyErr = detail
+	name, bindingID, skip := b.rec.Name, b.rec.BindingID, b.creating || b.deleted
+	id := b.identity()
+	m.mu.Unlock()
+	if skip {
+		return
+	}
+	if bindingID != "" {
+		m.creds.Revoke(bindingID)
+	}
+	if !changed {
+		return
+	}
+	m.logf("%s: sandbox %s: its policy cannot be resolved; its egress is blocked until it can: %s",
+		gatewaylog.ErrCodeOpenShellPackInvalid, name, detail)
+	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid),
+		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+detail, 512), Timestamp: m.now(),
+	}); err != nil {
+		m.logf("health telemetry for %s: %v", name, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
+		Reason: policyUnresolvedReason, Message: truncate("✗ all web egress: the sandbox policy cannot be resolved ("+detail+
+			"); fix the pack or the configuration, or delete the sandbox", 512)})
+}
+
+// policyUnresolvedReason is the feed reason of a sandbox that fails closed
+// because its policy cannot be resolved.
+const policyUnresolvedReason = "policy_unresolved"
+
+// policyRestored re-registers the egress proxy credential of a sandbox
+// whose policy resolves again, with its rebuilt decider.
+func (m *Manager) policyRestored(b *box, eff *packs.Effective) {
+	m.mu.Lock()
+	name, skip := b.rec.Name, b.creating || b.deleted
+	id := b.identity()
+	m.mu.Unlock()
+	if skip {
+		return
+	}
+	m.syncCredential(b, eff)
+	m.logf("sandbox %s: its policy resolves again; its egress follows it", name)
+	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+		Sandbox: id, State: audit.SandboxHealthRestored, Timestamp: m.now(),
+	}); err != nil {
+		m.logf("health telemetry for %s: %v", name, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "policy_restored",
+		Message: "the sandbox policy resolves again; its egress follows it"})
+}
+
+// orgPolicy resolves what binds a sandbox whose own policy cannot be
+// resolved: the administrator's constraints (openshell.admin, including a
+// required pack) and DefenseClaw's own, which do not depend on the pack the
+// user chose, under the built-in default pack with the sandbox's harness,
+// project and gateway port.
+func (m *Manager) orgPolicy(b *box) (*packs.Effective, error) {
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	eff, _, err := packs.Resolve(m.config(), packs.Flags{
+		Pack: packs.DefaultPack, Harness: rec.Harness, Project: rec.Project, OpenShellGatewayPort: m.gatewayPort(),
+	})
+	return eff, err
 }
 
 // checkStart refuses to start a sandbox the current policy would not let
@@ -119,12 +216,13 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 // every reconcile). Approved rules bypass the egress proxy, so an
 // administrator change or a changed DNS answer must reach them too. Only
 // triaged rules (allow_*) are judged; DefenseClaw renders its own and the
-// provider rules.
+// provider rules. A nil eff means no policy binds the sandbox at all (not
+// even the organization's, see enforceAll): every triaged rule is removed.
 func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	name, ready := b.rec.Name, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
 	m.mu.Unlock()
-	if !ready || eff == nil {
+	if !ready {
 		return
 	}
 	cfg, err := gw.Client.SandboxConfig(ctx, name)
@@ -132,8 +230,11 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		return
 	}
 	var ops []openshell.PolicyMergeOperation
-	var removed, rebound []string
-	pol := m.triagePolicy(b, eff)
+	var removed, rebound, unbound []string
+	var pol triage.Policy
+	if eff != nil {
+		pol = m.triagePolicy(b, eff)
+	}
 	// The DNS re-check runs on the reconcile path: a slow resolver skips
 	// the rest of it (keeping the rules) rather than stalling the loop.
 	dnsCtx, cancel := context.WithTimeout(ctx, enforceDNSBudget)
@@ -144,6 +245,8 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		}
 		p := triage.FromChunk(name, openshell.PolicyChunk{RuleName: ruleName, ProposedRule: &rule})
 		switch {
+		case eff == nil:
+			unbound = append(unbound, ruleName)
 		case orgRefusal(triage.CheckProposal(eff, p, false)):
 			removed = append(removed, ruleName)
 		case triage.ResolvesToHost(dnsCtx, p, pol):
@@ -158,10 +261,15 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	}
 	sort.Strings(removed)
 	sort.Strings(rebound)
-	all := append(append([]string{}, removed...), rebound...)
+	sort.Strings(unbound)
+	all := append(append(append([]string{}, removed...), rebound...), unbound...)
 	reason, code := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation)
-	if len(removed) == 0 {
+	switch {
+	case len(removed) > 0:
+	case len(rebound) > 0:
 		reason, code = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST"
+	default:
+		reason, code = "policy-unresolved", string(gatewaylog.ErrCodeOpenShellPackInvalid)
 	}
 	res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
 		Annotations: map[string]string{"source": "defenseclaw", "reason": reason},
@@ -183,7 +291,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	for _, list := range []struct {
 		rules  []string
 		reason string
-	}{{removed, policyReasonAdmin}, {rebound, policyReasonResolvesToHost}} {
+	}{{removed, policyReasonAdmin}, {rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
 		for _, rule := range list.rules {
 			ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
 				Target: rule, Reason: list.reason, ChangeCount: 1, Timestamp: m.now()}
@@ -203,6 +311,11 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: string(triage.ReasonResolvesToHost), Message: fmt.Sprintf(
 				"removed %d approved rule(s) whose destination now resolves to this machine: %s", len(rebound), strings.Join(rebound, ", "))})
+	}
+	if len(unbound) > 0 {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Reason: policyUnresolvedReason, Message: fmt.Sprintf(
+				"removed %d approved rule(s): neither the sandbox's nor your organization's policy can be resolved", len(unbound))})
 	}
 }
 

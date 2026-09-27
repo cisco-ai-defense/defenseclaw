@@ -331,6 +331,23 @@ Unblocks take effect at once, because the decider looks them up live. The
 proxy's own decider (`Options.Decider`, `SetDecider`) is only the fallback
 for a principal without one.
 
+A sandbox whose policy stops resolving fails closed. This happens when its
+custom pack is deleted or edited into one that no longer loads, or when the
+configuration no longer accepts one of its run flags. The manager does not
+keep serving it with the decider of its last good policy, because that
+decider holds the administrator's lists as they were then. Instead:
+
+- its proxy credential is revoked, so the proxy refuses the sandbox (407);
+- triage leaves its proposals pending, and approvals report the error;
+- each reconcile judges its approved OpenShell rules by the organization's
+  policy alone: the administrator's constraints and DefenseClaw's own, under
+  the default pack. When even that cannot be resolved (a broken required
+  pack), every triaged rule is removed.
+
+The feed, the log (`OPENSHELL_PACK_INVALID`) and a degraded health record
+say so once. The credential comes back with a rebuilt decider as soon as
+the policy resolves again.
+
 ### Request handling
 
 - **CONNECT tunnels** carry HTTPS as opaque bytes. The proxy never terminates

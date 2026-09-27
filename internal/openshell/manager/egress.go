@@ -148,7 +148,10 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 }
 
 // enforceAll re-checks the approved rules of every ready sandbox against
-// the current policy (enforceApprovedRules).
+// the current policy (enforceApprovedRules). A sandbox whose own policy
+// cannot be resolved has its rules judged by the organization's policy
+// alone (orgPolicy), so an administrator's tightening still reaches them;
+// when even that cannot be resolved, every triaged rule is removed.
 func (m *Manager) enforceAll(ctx context.Context) {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -166,9 +169,18 @@ func (m *Manager) enforceAll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if eff, err := m.resolveBox(b); err == nil {
-			m.enforceApprovedRules(ctx, gw, b, eff)
+		eff, err := m.resolveBox(b)
+		if err != nil {
+			if eff, err = m.orgPolicy(b); err != nil {
+				m.mu.Lock()
+				name := b.rec.Name
+				m.mu.Unlock()
+				m.logf("%s: sandbox %s: the organization's sandbox policy cannot be resolved either: %v",
+					gatewaylog.ErrCodeOpenShellPackInvalid, name, err)
+				eff = nil
+			}
 		}
+		m.enforceApprovedRules(ctx, gw, b, eff)
 	}
 }
 

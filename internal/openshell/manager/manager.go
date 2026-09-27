@@ -483,6 +483,9 @@ const (
 	// policyReasonResolvesToHost: an approved rule whose destination now
 	// resolves to this machine was removed.
 	policyReasonResolvesToHost = "rule_resolves_to_host"
+	// policyReasonUnresolved: an approved rule was removed because no
+	// policy, not even the organization's, can be resolved for the sandbox.
+	policyReasonUnresolved = "policy_unresolved"
 )
 
 func (m *Manager) config() *config.Config {
