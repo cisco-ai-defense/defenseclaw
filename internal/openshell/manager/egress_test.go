@@ -209,6 +209,16 @@ func TestEgressSinkMapping(t *testing.T) {
 		defer e.tel.mu.Unlock()
 		return len(e.tel.egress) == 3 && len(e.tel.findings) == 1
 	})
+	// The sink publishes the large upload to the feed after recording its
+	// finding.
+	eventually(t, "the large upload in the feed", func() bool {
+		for _, ev := range e.m.ActivitySince(0, sb.Name) {
+			if ev.Kind == sandboxapi.ActivityEgressLargeUpload {
+				return true
+			}
+		}
+		return false
+	})
 	e.tel.mu.Lock()
 	allowed, blocked := e.tel.egress[0], e.tel.egress[2]
 	finding := e.tel.findings[0]
