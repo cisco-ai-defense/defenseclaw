@@ -1137,20 +1137,37 @@ plus `{{if .Sandbox}}` branches) differs from the host hooks:
 
 Each connector below has an overlay image recipe (`internal/openshell/harness`)
 and rendered hook artifacts (`SandboxArtifacts` in
-`internal/gateway/connector`). The tamper tier says where the hook
-registration lives in the image:
+`internal/gateway/connector`). The tamper tier says whether the agent or a
+repository can switch the hooks off:
 
-- **managed**: a root-owned system or managed policy that user and project
-  settings cannot switch off;
-- **user**: a file in the image HOME that the agent can edit or delete. For
-  these connectors the hook-silence detector and OpenShell's egress
-  enforcement are the backstop.
+- **managed**: the hook registration is a root-owned system or managed
+  policy that user and project settings cannot switch off;
+- **user**: the agent or a repository can switch the hooks off, because the
+  registration is a file in the image HOME that the agent can edit or delete
+  (Amp), or because code they add runs in the same process as the hooks
+  (OpenCode's plugins). For these connectors the hook-silence detector and
+  OpenShell's egress enforcement are the backstop.
+
+Every sandbox invocation starts the harness through a root-owned launcher
+(`/usr/local/lib/defenseclaw/bin/<connector>-launch`). The launcher refuses
+the switches that would run the harness without its hooks, puts the system
+directories first on `PATH`, exports the egress proxy settings, and drops
+`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH` and `GLOBIGNORE` from the
+harness environment. Harnesses run hooks and tool commands through bash, which
+reads the file `BASH_ENV` names before the command, so one `export` in a shell
+start-up file the agent can edit would otherwise run inside every hook, or end
+it with exit 0 (allow). Starting the pinned binary directly, for example from
+a connect shell or as a nested run inside a tool call, skips the launcher and
+everything it does.
 
 A connector is **verified** when its image passes the hook-fire probe (the
 harness runs headless against the built-in mock LLM, its hooks reach a
 stand-in ingress with the sandbox token and an idempotency key, a blocked
-tool call has no side effect, an allowed one has, and hostile user and project
-settings change nothing) and it has run end to end in an OpenShell sandbox.
+tool call has no side effect, an allowed one has, hostile user and project
+settings and a hostile launch environment change nothing, and the launcher
+refuses to start beside the code it must refuse) and it has run end to end in
+an OpenShell sandbox, where a tool call the real DefenseClaw gateway blocks
+never runs.
 An **unverified** connector has everything up to that run implemented. Its
 images stay unverified, so they are never selected for a sandbox.
 
@@ -1158,7 +1175,7 @@ images stay unverified, so they are never selected for a sandbox.
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
 | Codex | 0.146.0 (npm) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
-| OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json` | managed | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
+| OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
 | Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |
 
@@ -1168,13 +1185,22 @@ bind-mounted, the DefenseClaw hook ingress holding a real binding, and the
 DefenseClaw egress proxy, once against the E2E mock model and once against
 `anthropic.claude-haiku-4-5` on Bedrock Mantle through each harness's curated
 Mantle profile (the key reached the model only as an OpenShell credential
-placeholder). Every hook arrived authenticated with an idempotency key, the
-allowed tool call ran, the proxy allowed example.org and blocked webhook.site,
-and a connection that bypassed the proxy was refused by OpenShell. Besides
-the model endpoint, OpenCode contacted `models.opencode.ai` (its model
-catalog) and `registry.npmjs.org` (it installs its plugin SDK into each config
-directory in the background; a failure is only logged). Copilot CLI in
-offline bring-your-own-provider mode contacted nothing else.
+placeholder). Every hook arrived authenticated with an idempotency key and
+the allowed tool call ran. With the mock and the shell tool on DefenseClaw's
+block list (what `POST /enforce/block` records), the next tool call got the
+real gateway's block verdict and never ran (the marker file its redirect
+would create stayed absent), and DefenseClaw's reason reached the model and
+showed in the harness output (OpenCode prints it as the tool's error, Copilot
+CLI as "Denied by preToolUse hook"). The default rules did not flag that
+call, a read of `~/.ssh/id_rsa`. A tool call's plain `curl` (no `--proxy`)
+reached example.org through the DefenseClaw proxy the launcher exported, the
+proxy blocked webhook.site, and a connection that bypassed the proxy was
+refused by OpenShell. Besides the model endpoint, OpenCode contacted
+`models.opencode.ai` (its model catalog) and `registry.npmjs.org` (it
+installs its plugin SDK into each config directory in the background; a
+failure is only logged). Since the launcher exports the proxy, those
+registry installs go through the DefenseClaw proxy and succeed. Copilot CLI
+in offline bring-your-own-provider mode contacted nothing else.
 
 ### Harness facts
 
@@ -1194,6 +1220,30 @@ These were measured on the pinned releases inside the community base image
   but not the nested session's tools. `opencode run --auto` is the headless
   skip-permissions mode. The base image ships OpenCode 1.2.18, which is
   outside every hook contract. The image removes it.
+- **OpenCode plugins share the process, so the tier is user.** OpenCode
+  imports every plugin into the process the DefenseClaw plugin runs in: the
+  `{plugin,plugins}/*.{js,ts}` files and `{tool,tools}` custom tools of every
+  config directory (`~/.config/opencode`, each `.opencode` from the working
+  directory up to the worktree root, `~/.opencode`, `OPENCODE_CONFIG_DIR`),
+  the `plugin` entries of every user, project and environment config layer,
+  a provider SDK package it does not bundle (or a `file://` one), and the
+  plugins of a remote config that a `wellknown` login fetches. The DefenseClaw
+  plugin reaches the ingress through the global `fetch`. In a test with the
+  pinned release, a project plugin that loaded first replaced that `fetch`,
+  so it could have answered `allow` for every tool call.
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1` does not help: the project plugin left
+  the plugin list but its module was still imported. So
+  the launcher refuses to start OpenCode, naming the file, while any of
+  these is present (it checks every ancestor of the working directory and of
+  any directory argument, and reads config the way OpenCode does: `{env:}`
+  substituted, JSONC comments dropped). The hook-fire probe plants a
+  fetch-replacing project plugin, a user plugin and a project config entry
+  and requires the launcher to refuse each one. What the launcher cannot
+  cover keeps the tier at user: a nested `opencode` run inside a tool call
+  (or the pinned binary started directly), directories OpenCode opens after
+  it starts (a server's per-request directory), code added while it runs,
+  and the model catalog cache in `~/.cache/opencode`, which names provider
+  packages too.
 - **GitHub Copilot CLI 1.0.88.** Copilot loads hook documents from
   `/etc/github-copilot/policy.d/*.json` whatever `COPILOT_HOME` says, and runs
   them even with `disableAllHooks: true` in the user settings or config. With
@@ -1205,16 +1255,22 @@ These were measured on the pinned releases inside the community base image
   event shows as a warning and does not stop the session. The executable
   extracts its JavaScript into `~/.cache/copilot/pkg` on first run. Unless
   auto-update is off, it prefers the newest package it finds in any cache
-  under HOME, so the workload could make the next launch run other code. The
-  image pre-extracts the pinned package into a root-owned cache, and the
-  launcher sets `COPILOT_PKG_CACHE_HOME` to it with `COPILOT_AUTO_UPDATE=false`.
-  The hook-fire probe plants newer packages in both user caches to prove they
-  are ignored. Bring-your-own-provider mode (`COPILOT_PROVIDER_BASE_URL`,
-  `COPILOT_PROVIDER_TYPE=anthropic`) needs no GitHub login, and
-  `COPILOT_OFFLINE=true` stops every other request. The GitHub-token profile's
-  hosts (`api.github.com`, `api.githubcopilot.com` and the per-plan Copilot
-  API hosts) come from the CLI, not from a live run: no Copilot-entitled
-  account was available.
+  under HOME, so the workload could make the next launch run other code. The image pre-extracts the pinned
+  package into a root-owned cache, and the launcher sets
+  `COPILOT_PKG_CACHE_HOME` to it with `COPILOT_AUTO_UPDATE=false`. The
+  hook-fire probe plants newer packages in both user caches to prove they are
+  ignored. Copilot runs every hook through `/bin/bash` (a `bash` earlier on
+  `PATH` is ignored), and that shell reads `BASH_ENV` before the hook command;
+  the hook script's own `bash -p` starts too late. The launcher drops
+  `BASH_ENV` and the other shell start-up variables and leads `PATH` with the
+  system directories, and the probe starts Copilot with a `BASH_ENV` (and
+  `ENV`) file that ends the shell with exit 0 and a `PATH` of planted `bash`,
+  `sh`, `curl` and `jq`, none of which may run. Bring-your-own-provider mode
+  (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE=anthropic`) needs no
+  GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
+  GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
+  the per-plan Copilot API hosts) come from the CLI, not from a live run: no
+  Copilot-entitled account was available.
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -1372,7 +1428,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |
 | A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted but covers only hosts with three or more labels. | The egress rule allows every binary; there is no catch-all host rule. |
 | curl, Node `fetch` (with `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS and Python urllib all honour `HTTPS_PROXY` through the relay. | The proxy environment covers the common tools. |
-| `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | The proxy settings have to be exported inside the sandbox (by the harness launcher), not passed at create. |
+| `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | DefenseClaw also passes the proxy URL and bypass list as `DEFENSECLAW_EGRESS_URL` and `DEFENSECLAW_EGRESS_BYPASS`, which do arrive, and every harness launcher exports the standard variables from them. The harness and every tool it runs then use the proxy: a plain `curl` in a tool call reaches example.org through it. A shell that did not start through a launcher (`sandbox exec`, a connect shell) still has no proxy settings. |
 | A direct connection to an unknown host is refused (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`) and a draft proposal is filed. The metadata address is denied. | Non-proxy-aware clients surface as proposals for triage. |
 
 ### Credentials
