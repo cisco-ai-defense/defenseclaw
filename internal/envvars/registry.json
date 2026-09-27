@@ -4002,6 +4002,24 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_E2E_CONTAINER_PREFIX",
+      "category": "test_fixture",
+      "purpose": "Name prefix of the hook-fire probe containers the live overlay build test starts, so runs sharing a Docker daemon can tell their containers apart.",
+      "default": "e-hookfire",
+      "accepted_values": [
+        "container name prefix"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/image/integration_test.go",
+          "description": "Live overlay build test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_SCRUB_BIN",
       "category": "runtime_path",
       "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
