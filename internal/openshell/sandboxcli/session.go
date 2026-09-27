@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -43,14 +42,10 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
-	llm  llmChoice
 
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
 	before *sandboxapi.Sandbox
-
-	mu      sync.Mutex
-	notices []string
 }
 
 // probe runs a trivial command until the sandbox answers.
@@ -122,9 +117,6 @@ func (s *session) watchNotices(ctx context.Context) func() {
 		defer close(done)
 		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
 			if ev.Kind == sandboxapi.ActivityFinding && ev.Reason == sandboxapi.ReasonNestedRepo {
-				s.mu.Lock()
-				s.notices = append(s.notices, ev.Message)
-				s.mu.Unlock()
 				// The harness owns the terminal: one line on stderr, in
 				// column 0, is all that is safe.
 				fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", strings.TrimPrefix(ev.Message, "⚠ "))

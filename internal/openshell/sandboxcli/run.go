@@ -184,7 +184,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, llm: llm}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
 	fail := func(err error) error {
 		a.warn("removing sandbox " + sb.Name + " after the failure")
 		ctx := context.WithoutCancel(ctx)
