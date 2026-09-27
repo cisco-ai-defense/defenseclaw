@@ -99,8 +99,14 @@ func (p *teardownPlan) empty() bool {
 		len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
 }
 
+// owner is this data dir's sandbox owner label, "" when it never had one
+// (reading it must not create the image store).
 func (a *App) owner() string {
-	owner, err := image.NewStore(a.dataDir()).Owner()
+	store := image.NewStore(a.dataDir())
+	if _, err := os.Stat(store.Path()); err != nil {
+		return ""
+	}
+	owner, err := store.Owner()
 	if err != nil {
 		return ""
 	}

@@ -95,11 +95,15 @@ func (b *builderImages) Prune(ctx context.Context, dryRun bool) (image.PruneRepo
 
 func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, error) {
 	store := b.store()
-	owner, err := store.Owner()
+	if _, err := os.Stat(store.Path()); err != nil {
+		// No image was ever recorded here; do not create the store.
+		return nil, nil
+	}
+	recs, err := store.List()
 	if err != nil {
 		return nil, err
 	}
-	recs, err := store.List()
+	owner, err := store.Owner()
 	if err != nil {
 		return nil, err
 	}
