@@ -81,16 +81,15 @@ var claudeCodeSandboxStartupEnv = map[string]string{
 // above, and PATH, in user and project settings, and fails the image when a
 // hook no longer fires or a planted program runs.
 //
-// Model provider selection (ANTHROPIC_BASE_URL, ANTHROPIC_API_URL,
-// ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS, CLAUDE_CODE_USE_BEDROCK,
-// CLAUDE_CODE_USE_VERTEX) is deliberately not pinned in this static image.
-// Managed env outranks the process environment, so a pin here would override
-// the provider each run passes with sandbox create --env and break every
-// non-default endpoint: Bedrock Mantle through ANTHROPIC_BASE_URL, mock
-// servers and custom gateways. A repository's committed settings can still
-// point these at another endpoint. Provider selection is pinned per run by
-// the manager's read-only per-sandbox managed drop-in, which carries the
-// provider env that run chose (tracked as p2-render-2), not by the image.
+// Model provider selection (claudeCodeSandboxProviderEnv: the provider
+// switches, base URLs, bearer and custom headers) is deliberately not pinned
+// in this static image. Managed env outranks the process environment, so a
+// pin here would override the provider each run passes with sandbox create
+// --env and break every non-default endpoint: Bedrock Mantle through
+// ANTHROPIC_BASE_URL, mock servers and custom gateways. It is pinned per run
+// instead, by the sandbox manager's read-only 60-defenseclaw-run.json drop-in
+// (SandboxRunFiles), which carries the provider env that run chose, so a
+// repository's committed settings cannot point the conversation elsewhere.
 var claudeCodeSandboxPinnedEnv = map[string]string{
 	"CLAUDE_CODE_SIMPLE":                      "0",
 	"CLAUDE_CODE_SHELL_PREFIX":                "",
@@ -186,10 +185,9 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 //     non-interactively or when skipDangerousModePermissionPrompt is set in
 //     any tier (as here), and a project's own enabledMcpjsonServers list
 //     merges past any managed value. Those servers start without a
-//     PreToolUse, inside the sandbox, where the egress proxy and the file
-//     boundary still apply; closing them needs the managed MCP allowlist
-//     (allowManagedMcpServersOnly, allowedMcpServers), a policy decision of
-//     its own.
+//     PreToolUse. The per-run managed configuration closes them (pack key
+//     mcp.project_servers: block): managed-mcp.json, Claude's exclusive MCP
+//     mode, plus allowManagedMcpServersOnly and allowedMcpServers.
 func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 	hookCommand := path.Join(SandboxHookDir, "claude-code-hook.sh")
 	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, nil, rt.opts)
@@ -257,25 +255,45 @@ func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, e
 // verifiers against it, so the image never ships a policy the guardian would
 // reject.
 func verifyClaudeCodeSandboxDropIn(dropIn []byte, rt resolvedSandboxTarget) error {
+	source, err := stageClaudeCodeManagedSettings(map[string][]byte{claudeCodeSandboxDropInName: dropIn})
+	if err != nil {
+		return err
+	}
+	return verifyClaudeCodeSandboxManagedSource(source, rt)
+}
+
+// stageClaudeCodeManagedSettings writes dropIns (file name → content) into a
+// scratch managed-settings.d and returns what Claude's file-tier reader
+// merges from them, in Claude's sorted drop-in order.
+func stageClaudeCodeManagedSettings(dropIns map[string][]byte) (*claudeCodeSettingsSource, error) {
 	root, err := os.MkdirTemp("", "defenseclaw-claude-managed-")
 	if err != nil {
-		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+		return nil, fmt.Errorf("stage Claude Code managed settings: %w", err)
 	}
 	defer os.RemoveAll(root)
 	dir := filepath.Join(root, "managed-settings.d")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+		return nil, fmt.Errorf("stage Claude Code managed settings: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, claudeCodeSandboxDropInName), dropIn, 0o600); err != nil {
-		return fmt.Errorf("stage Claude Code managed settings: %w", err)
+	for name, data := range dropIns {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			return nil, fmt.Errorf("stage Claude Code managed settings: %w", err)
+		}
 	}
 	source, err := readClaudeCodeManagedFileSettingsAt(root)
 	if err != nil {
-		return fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
+		return nil, fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
 	}
 	if source == nil {
-		return fmt.Errorf("verify Claude Code sandbox managed settings: drop-in was not loaded")
+		return nil, fmt.Errorf("verify Claude Code sandbox managed settings: drop-in was not loaded")
 	}
+	return source, nil
+}
+
+// verifyClaudeCodeSandboxManagedSource checks the merged managed tier of a
+// sandbox image: the hook contract, allowManagedHooksOnly, Claude's own
+// sandbox off, the pinned helpers and the pinned env.
+func verifyClaudeCodeSandboxManagedSource(source *claudeCodeSettingsSource, rt resolvedSandboxTarget) error {
 	if err := validateClaudeCodeManagedHookControls(source, true); err != nil {
 		return fmt.Errorf("verify Claude Code sandbox managed settings: %w", err)
 	}
