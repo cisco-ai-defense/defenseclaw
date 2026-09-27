@@ -47,6 +47,7 @@ today.
 | Copy size limit | 500 MiB | 500 MiB | 200 MiB |
 | Skip-permissions mode | On | On | Off (the harness keeps its prompts) |
 | MCP servers | Brought along | Brought along | Left behind |
+| The repository's own MCP servers | Stay stopped | Stay stopped | Stay stopped |
 | Host ports for MCP servers | Can be opened | Can be opened | Never |
 | Hook failure | Tool call denied | Tool call denied | Tool call denied |
 
@@ -137,15 +138,51 @@ These are the settings each pack controls. The
   and CI workflows. Changes to them are called out at the end of a session.
 - **Skip-permissions default** (`harness.yolo`) and **allowed harnesses**
   (`harness.allowed`).
-- **MCP** (`mcp.import`, `mcp.host_ports`, `mcp.blocked_tools`): whether the
-  harness's MCP servers come along, whether host ports may be opened for MCP
-  servers running on your machine, and MCP tools to block.
+- **MCP** (`mcp.import`, `mcp.host_ports`, `mcp.blocked_tools`,
+  `mcp.project_servers`): whether your own MCP servers come along, whether
+  host ports may be opened for MCP servers running on your machine, MCP tools
+  to block, and whether the MCP servers a repository defines may start.
+  Those servers (a Claude Code `.mcp.json`, a Codex `.codex/config.toml`)
+  start when the harness does, without a tool call, so no DefenseClaw hook
+  sees them launch. With `mcp.project_servers: block`, the default, they stay
+  stopped and the run prints one line naming them. `allow` starts them.
 - **Hook fail mode** (`hooks.fail_mode`): always `closed`. A sandbox hook that
   cannot reach DefenseClaw denies the tool call.
 - **Hook tamper response** (`hooks.on_tamper`): what DefenseClaw does when a
   tool runs without its verdict, because the workload killed or bypassed its
   hook. `stop` stops the sandbox; `alert` reports a high-severity finding and
   keeps it running. `open` alerts; `balanced` and `strict` stop.
+
+## MCP servers in a sandbox
+
+With `mcp.import: true`, a run brings along your own MCP servers for the
+harness: the user-scope servers in `~/.claude.json` and
+`~/.claude/settings.json` for Claude Code, and in `~/.codex/config.toml` for
+Codex. Project and workspace-local servers are the repository's, and
+`mcp.project_servers` decides whether those start. A server stays behind
+when:
+
+- DefenseClaw blocks it: a scan verdict the watcher acted on,
+  `defenseclaw mcp block`, or the MCP asset policy in `action` mode;
+- it is disabled, runs on this machine (a `localhost` or private URL), or
+  uses a transport the harness cannot run in a sandbox (Codex has no SSE);
+- for Codex with repository servers blocked, the repository defines a server
+  of the same name. Codex would merge the repository's settings, such as
+  extra environment variables, into yours.
+
+Environment values and HTTP headers never enter the sandbox, since they can
+hold secrets. The run names the variables it left out. To give a server a
+secret, bind it to its endpoint with `--credential NAME=host`. The server
+reads the placeholder from its environment, and OpenShell substitutes the
+real value only on requests to that host.
+
+DefenseClaw writes the result into each sandbox's own managed harness
+configuration, mounted read-only: Claude Code gets
+`/etc/claude-code/managed-mcp.json` (Claude's exclusive MCP mode) plus an
+allowlist of your servers by exact command or URL. Codex gets an
+`mcp_servers` allowlist in `/etc/codex/requirements.toml` and the server
+definitions in `/etc/codex/managed_config.toml`. With `allow`, the allowlists
+are left out and your servers join the harness's user registry.
 
 ## Choose a pack
 
@@ -259,6 +296,7 @@ you need from `policies/sandbox/balanced/pack.yaml`.
 | `mcp.import` | Yes | | `true` or `false`. |
 | `mcp.host_ports` | Yes | | `true` or `false`. |
 | `mcp.blocked_tools` | No | `[]` | Tool names or globs using letters, digits, `_`, `.`, `:`, `*`, and `-`. At most 1024. |
+| `mcp.project_servers` | No | `block` | `block` or `allow`. `allow` is looser, so a required or locked pack cannot be replaced by a pack that allows them. |
 | `hooks.fail_mode` | Yes | | Must be `closed`. |
 | `hooks.on_tamper` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`. When an administrator locks the pack, a pack that alerts where the configured one stops is refused. |
 
@@ -363,6 +401,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Allow list | See [The allow list](#the-allow-list). |
 | Proxy ports | The pack's ports, or `openshell.egress.ports`, which replaces them. |
 | MCP import | The pack's `mcp.import`, then `openshell.mcp.import`, then leaving MCP servers behind for a run. |
+| Repository MCP servers | The pack's `mcp.project_servers` only. |
 | Host ports | `openshell.mcp.host_ports` plus the run's ports. Each port is checked. |
 | Resources | `openshell.resources`, then the run's CPU and memory request, capped by `openshell.admin.max_resources`. |
 

@@ -889,9 +889,12 @@ port, and requires that:
 - `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `Stop`
   each arrive authenticated and with an idempotency key.
 
-For Claude Code the allowed run is repeated with hostile user and project
+For both harnesses the allowed run is repeated with hostile user and project
 settings planted: every known way to switch the managed hooks off or divert
 them. The hooks must still fire, and none of the planted programs may run.
+`HookFireOptions.RunFiles` mounts a sandbox's per-run files into every probe
+container. `TestLiveRunConfig` (tag `openshell_integration`) uses it to prove
+the per-run configuration below against the real harnesses.
 
 `Store.Current` selects only an image built from exactly the expected inputs
 whose hooks were proven to fire. There is no fallback to an older image. An
@@ -969,13 +972,67 @@ every start. Skip-permissions runs pass `--dangerously-skip-permissions`.
 **Codex.** `/etc/codex/requirements.toml` sets `allow_managed_hooks_only`,
 pins `features.hooks` on (without it a user setting can turn hooks off) and
 holds the hook matrix. `/etc/codex/managed_config.toml` turns off the update
-check, analytics and features that sync over the network, and sets notify
-and the OTLP exporters. Codex's own sandbox cannot nest inside OpenShell, so
+check, analytics and features that sync over the network, sets notify and
+the OTLP exporters, and pins `BASH_ENV`, `ENV` and the loader variables to
+empty in `shell_environment_policy.set`, which a user or trusted project
+config could otherwise use to make every command source a file first.
+Codex's own sandbox cannot nest inside OpenShell, so
 skip-permissions runs pass `--dangerously-bypass-approvals-and-sandbox`, and
 runs that keep the prompts pass `sandbox_mode="danger-full-access"` with
 `approval_policy="on-request"`. The launcher exports `CODEX_API_KEY` from
 `OPENAI_API_KEY`, trusts the exact working directory, stores the API key
 login for interactive runs, and adds the OTLP authorization header.
+
+### Per-sandbox managed configuration
+
+What differs per run cannot live in the image. For every sandbox the manager
+renders `connector.SandboxRunFiles` for the image's render target, writes the
+files under `<data_dir>/sandboxes/<name>/run-config/` (owner-only directory,
+files 0644) and bind-mounts each read-only at its in-sandbox path, in mount
+and copy mode alike. Stop and start keep the files; delete removes them.
+
+- **Claude Code:** `managed-settings.d/60-defenseclaw-run.json` sorts after
+  the image's drop-in and wins over it. It pins every model-provider
+  variable Claude reads (`CLAUDE_CODE_USE_*`, each provider's base URL,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`) to the run's value or
+  empty, never a credential placeholder. In safe mode it sets
+  `permissions.disableBypassPermissionsMode: "disable"` and
+  `skipDangerousModePermissionPrompt: false`. With `mcp.project_servers:
+  block` it sets `allowManagedMcpServersOnly` and `allowedMcpServers` by
+  exact `serverCommand` or `serverUrl` (never `serverName`, which a
+  repository could reuse). `/etc/claude-code/managed-mcp.json` lists the
+  imported servers, putting Claude in its exclusive MCP mode. With `allow`
+  the servers go to `/usr/local/lib/defenseclaw/run/claude-mcp-servers.json`
+  instead, which the launcher merges into `~/.claude.json`. Every key is
+  checked against the 2.1.156 settings schema, and the merge with the
+  image's drop-in must keep the hook contract.
+- **Codex:** Codex reads one `managed_config.toml` and one
+  `requirements.toml`, so both are the image's documents with run keys
+  added, mounted over the image's files and re-verified with the image
+  verifier. `managed_config.toml` pins the run's model provider
+  (`model_provider`, plus `openai_base_url` or a `model_providers` table) and
+  defines the imported servers with `cwd` and `env_vars` pinned.
+  `requirements.toml` gets `allowed_approval_policies` without `never`
+  (`on-request` first; Codex falls back to the first entry) and
+  `allowed_sandbox_modes` in safe mode. With `block` it also gets an
+  `mcp_servers` allowlist by name and command or URL identity, empty when
+  nothing is imported.
+
+The imported servers come from `Options.MCP`: the gateway's
+`sandboxMCPInventory` reads the harness's user-scope servers
+(`config.ReadUserMCPServersForConnector`) and drops the ones DefenseClaw
+blocks (block list or MCP asset policy). The manager leaves env values and
+HTTP headers out, and skips disabled servers, servers on this machine,
+transports the harness cannot run, and, for Codex with `block`, a server
+whose name the repository's `.codex/config.toml` also defines. Codex matches
+an allowlisted server by command only and merges a project table of the same
+name key by key, so the repository could otherwise add environment
+variables to it. The repository's own servers are listed in the create
+response's one-line notice and in `Sandbox.MCP`.
+
+The run-as identity has one source, `Manager.runAs`: the image is built for
+it, create refuses an image record with another uid/gid, and the policy runs
+the workload as the record's numeric uid/gid in both workspace modes.
 
 ### Sandbox hook scripts
 

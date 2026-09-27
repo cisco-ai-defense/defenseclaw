@@ -236,12 +236,36 @@ only in the image and nothing on your host changes:
   ran in it against a mock model, every required hook fired, and a blocked
   tool call did not run. A second run with hostile user and project settings
   planted, including `disableAllHooks`, must show the same result. Only
-  verified images are selected for use.
+  verified images are selected for use. A live probe runs the same checks
+  with the per-sandbox drop-in mounted, and shows that the provider pin, the
+  MCP lockdown and the bypass refusal hold against hostile project settings.
+- **Per-sandbox settings.** Each sandbox also gets its own read-only managed
+  drop-in, `/etc/claude-code/managed-settings.d/60-defenseclaw-run.json`,
+  which sorts after the image's and wins over it:
+  - It pins the model provider the run chose (`ANTHROPIC_BASE_URL` and the
+    other provider variables; the ones the run does not use are pinned to
+    empty). A repository's committed `.claude/settings.json` cannot send the
+    conversation to another endpoint.
+  - Unless the sandbox pack sets
+    [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox),
+    it sets `allowManagedMcpServersOnly` and an `allowedMcpServers` list of
+    your imported servers, matched by exact command or URL. A read-only
+    `/etc/claude-code/managed-mcp.json` lists the same servers, which puts
+    Claude Code in its exclusive MCP mode, so a repository's `.mcp.json`
+    servers never start. Neither does `--mcp-config`: Claude Code refuses it
+    while `managed-mcp.json` is present.
+  - Without skip-permissions it sets
+    `permissions.disableBypassPermissionsMode: "disable"` and turns the
+    pre-accepted bypass prompt off. Claude Code then refuses
+    `bypassPermissions` from a flag or from any settings file.
 - **Launch flags.** In skip-permissions mode
   ([`openshell.yolo`](/docs/reference/configuration#openshell-sandbox-settings),
   on in the `open` and `balanced` packs) Claude Code starts with
-  `--dangerously-skip-permissions`; otherwise it keeps its permission prompts.
-  DefenseClaw hooks gate every tool call in both modes.
+  `--dangerously-skip-permissions`; otherwise it keeps its permission prompts,
+  and `--dangerously-skip-permissions`,
+  `--allow-dangerously-skip-permissions` and
+  `--permission-mode bypassPermissions` are dropped from the arguments you
+  pass. DefenseClaw hooks gate every tool call in both modes.
 - **Image pin.** The image installs Claude Code 2.1.156 by default. The build
   refuses a Claude Code version that has no reviewed Linux hook contract.
 
