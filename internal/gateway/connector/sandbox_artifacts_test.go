@@ -295,6 +295,17 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 			t.Errorf("env must not carry %s", key)
 		}
 	}
+	// Managed env outranks sandbox create --env: a provider pin in the static
+	// image would override every run's provider (Bedrock Mantle, mocks,
+	// custom gateways). The manager pins the run's provider per sandbox.
+	for _, key := range []string{
+		"ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+	} {
+		if _, present := env[key]; present {
+			t.Errorf("env must not pin provider selection (%s): it would override the per-run provider", key)
+		}
+	}
 	hooks := dropIn["hooks"].(map[string]interface{})
 	contract, ok := hookContractByID("claudecode", artifacts.HookContract)
 	if !ok {

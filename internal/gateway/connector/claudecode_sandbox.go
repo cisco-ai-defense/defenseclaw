@@ -80,6 +80,17 @@ var claudeCodeSandboxStartupEnv = map[string]string{
 // build's hook-fire probe plants the mode, shell and shell-startup variables
 // above, and PATH, in user and project settings, and fails the image when a
 // hook no longer fires or a planted program runs.
+//
+// Model provider selection (ANTHROPIC_BASE_URL, ANTHROPIC_API_URL,
+// ANTHROPIC_AUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS, CLAUDE_CODE_USE_BEDROCK,
+// CLAUDE_CODE_USE_VERTEX) is deliberately not pinned in this static image.
+// Managed env outranks the process environment, so a pin here would override
+// the provider each run passes with sandbox create --env and break every
+// non-default endpoint: Bedrock Mantle through ANTHROPIC_BASE_URL, mock
+// servers and custom gateways. A repository's committed settings can still
+// point these at another endpoint. Provider selection is pinned per run by
+// the manager's read-only per-sandbox managed drop-in, which carries the
+// provider env that run chose (tracked as p2-render-2), not by the image.
 var claudeCodeSandboxPinnedEnv = map[string]string{
 	"CLAUDE_CODE_SIMPLE":                      "0",
 	"CLAUDE_CODE_SHELL_PREFIX":                "",
@@ -92,14 +103,6 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"LD_AUDIT":                                "",
 	"BASH_ENV":                                "",
 	"ENV":                                     "",
-	// Pin model provider selection to prevent project settings from redirecting
-	// the conversation to an attacker-controlled endpoint (p2-render-2).
-	"ANTHROPIC_BASE_URL":       "",
-	"ANTHROPIC_API_URL":        "",
-	"ANTHROPIC_AUTH_TOKEN":     "",
-	"ANTHROPIC_CUSTOM_HEADERS": "",
-	"CLAUDE_CODE_USE_BEDROCK":  "",
-	"CLAUDE_CODE_USE_VERTEX":   "",
 }
 
 // claudeCodeSandboxPinnedHelpers name programs Claude runs by itself, outside

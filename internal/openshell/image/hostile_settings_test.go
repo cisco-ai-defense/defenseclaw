@@ -105,9 +105,7 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 			}
 			sort.Strings(keys)
 			want := []string{
-				"ANTHROPIC_API_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
 				"BASH_ENV", "CLAUDE_CODE_SHELL", "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SIMPLE",
-				"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
 				"DEFENSECLAW_GATEWAY_TOKEN", "DEFENSECLAW_HOME", "PATH", "SHELL",
 			}
 			if strings.Join(keys, " ") != strings.Join(want, " ") {
