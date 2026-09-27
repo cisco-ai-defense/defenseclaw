@@ -700,6 +700,27 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 	}
 }
 
+// gatewayRecoveryFix restarts a gateway that runs but does not answer
+// (starting it again would do nothing) and starts one that is stopped.
+func (r *doctorRun) gatewayRecoveryFix() *Fix {
+	if r.service != nil && r.service.Active {
+		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+	}
+	start := r.startCommand()
+	return &Fix{Summary: "start the gateway", Command: start.String(), Automatic: true, Apply: r.runAndWait(start, true)}
+}
+
+// credentialFailure reports an error from the gateway refusing
+// DefenseClaw's TLS credentials, or from the credentials themselves,
+// rather than from a gateway that is down.
+func credentialFailure(err error) bool {
+	if IsUnauthenticated(err) || IsPermissionDenied(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "x509:") || strings.Contains(msg, "tls:") || strings.Contains(msg, "authentication handshake failed")
+}
+
 func (r *doctorRun) checkCLI(ctx context.Context) {
 	c := Check{ID: CheckIDCLI, Title: "OpenShell CLI"}
 	defer func() { r.add(c) }()
@@ -858,13 +879,18 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	}
 	if err != nil || !r.gateway.Healthy {
 		version.Status = StatusFail
-		if err != nil {
+		switch {
+		case err != nil && credentialFailure(err):
+			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
+			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",
+				Command: fmt.Sprintf("openshell gateway remove %s && openshell gateway add %s --local --name %s", r.reg.Name, shellQuote(r.reg.Endpoint), r.reg.Name)}
+		case err != nil:
 			version.Detail = "the gateway is not answering: " + err.Error()
-		} else {
+			version.Fix = r.gatewayRecoveryFix()
+		default:
 			version.Detail = "the gateway reports unhealthy"
+			version.Fix = r.gatewayRecoveryFix()
 		}
-		start := r.startCommand()
-		version.Fix = &Fix{Summary: "start or restart the gateway", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}
 		skipRest("the gateway is not answering")
 		return
 	}

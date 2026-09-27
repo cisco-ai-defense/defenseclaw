@@ -503,6 +503,50 @@ func TestDoctorVersions(t *testing.T) {
 	})
 }
 
+// TestDoctorGatewayRecovery covers the fix for a gateway that does not
+// answer: a running (hung) gateway is restarted, since starting it again
+// does nothing, a stopped one is started, and one that refuses
+// DefenseClaw's credentials is registered again instead.
+func TestDoctorGatewayRecovery(t *testing.T) {
+	t.Run("running but hung is restarted", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.FailNext(openshelltest.MethodHealth, &types.StatusError{Code: types.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "not answering")
+		if c.Fix.Command != "systemctl --user restart openshell-gateway" || !c.Fix.Automatic {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayVersion, nil }); err != nil {
+			t.Fatal(err)
+		}
+		if !f.runner.Called("systemctl --user restart openshell-gateway") || f.runner.Called("systemctl --user enable") || f.verified != 1 {
+			t.Fatalf("fix did not restart and verify the gateway (verified %d): %v", f.verified, f.runner.Calls())
+		}
+	})
+	t.Run("stopped is started", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
+		f.fake.SetHealth(false, "0.1.1")
+		c := expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "unhealthy")
+		if c.Fix.Command != "systemctl --user enable --now openshell-gateway" || !c.Fix.Automatic {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+	})
+	t.Run("credentials refused", func(t *testing.T) {
+		for _, err := range []error{
+			&types.StatusError{Code: types.ErrorUnauthenticated, Message: "client certificate not trusted"},
+			&types.StatusError{Code: types.ErrorUnavailable, Message: "connection error: desc = \"transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority\""},
+		} {
+			f := newDoctorFixture(t)
+			f.fake.FailNext(openshelltest.MethodHealth, err)
+			c := expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "refused DefenseClaw's TLS credentials")
+			if c.Fix.Automatic || c.Fix.Command != "openshell gateway remove openshell && openshell gateway add 'https://127.0.0.1:17670' --local --name openshell" {
+				t.Fatalf("fix = %+v", c.Fix)
+			}
+		}
+	})
+}
+
 func TestDoctorGatewayFeatures(t *testing.T) {
 	t.Run("wrong compute driver", func(t *testing.T) {
 		f := newDoctorFixture(t)
