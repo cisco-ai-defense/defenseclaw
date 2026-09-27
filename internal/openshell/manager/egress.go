@@ -111,6 +111,7 @@ func (m *Manager) refreshEgress() {
 	for _, b := range boxes {
 		eff, err := m.resolveBox(b)
 		if err != nil {
+			// resolveBox revoked the credential (policyUnresolved).
 			continue
 		}
 		m.syncCredential(b, eff)
