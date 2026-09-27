@@ -268,7 +268,10 @@ type Effective struct {
 	HookFailMode     string      `json:"hook_fail_mode"`
 	Admin            AdminStatus `json:"admin"`
 
-	admin         config.OpenShellAdminConfig
+	admin config.OpenShellAdminConfig
+	// requiredPack: Pack is openshell.admin.required_pack, whose posture is
+	// a floor for runtime actions too.
+	requiredPack  bool
 	reservedPorts map[int]string
 	home          string
 	// hostNames are this machine's own names, which reach the host.
@@ -376,7 +379,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	r.eff.Pack = pack
+	r.eff.Pack, r.eff.requiredPack = pack, r.required
 	r.resolveProfile(o, flags)
 	r.resolveYolo(o, flags)
 	r.resolveHarness(flags)

@@ -151,9 +151,21 @@ func TestAllowActions(t *testing.T) {
 			Action{Kind: ActionMount, Path: "/src/internal"}, allowed},
 		{"mount relative", nil, Flags{}, Action{Kind: ActionMount, Path: "lib"}, invalid},
 
+		{"mount under a required copy-mode pack", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "strict" }, Flags{},
+			Action{Kind: ActionMount, Path: "/src/app"}, outcome{constraint: "openshell.admin.required_pack"}},
+		{"mount under a required mount-mode pack", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "balanced" }, Flags{},
+			Action{Kind: ActionMount, Path: "/src/app"}, allowed},
+		// A chosen (not required) copy-mode pack is no floor.
+		{"mount under a chosen copy-mode pack", nil, Flags{Pack: "strict"}, Action{Kind: ActionMount, Path: "/src/app"}, allowed},
+
 		{"yolo", nil, Flags{}, Action{Kind: ActionYolo}, allowed},
 		{"yolo off", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) }, Flags{},
 			Action{Kind: ActionYolo}, outcome{constraint: "openshell.admin.allow_yolo"}},
+		{"yolo under a required pack that keeps the prompts", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "strict" }, Flags{},
+			Action{Kind: ActionYolo}, outcome{constraint: "openshell.admin.required_pack"}},
+		{"yolo under a required pack that skips the prompts", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "open" }, Flags{},
+			Action{Kind: ActionYolo}, allowed},
+		{"yolo under a chosen pack that keeps the prompts", nil, Flags{Pack: "strict"}, Action{Kind: ActionYolo}, allowed},
 		{"learn", nil, Flags{}, Action{Kind: ActionLearnMode}, allowed},
 		{"learn off", func(o *config.OpenShellConfig) { o.Admin.AllowLearnMode = boolPtr(false) }, Flags{},
 			Action{Kind: ActionLearnMode}, outcome{constraint: "openshell.admin.allow_learn_mode"}},

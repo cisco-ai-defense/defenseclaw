@@ -105,6 +105,10 @@ func (e *Effective) Allow(action Action) error {
 			return e.adminViolation("yolo", "true", "openshell.admin.allow_yolo",
 				"skip-permissions mode is disabled; the harness keeps its permission prompts")
 		}
+		if e.requiredPack && e.Pack != nil && !e.Pack.Harness.Yolo {
+			return e.adminViolation("yolo", "true", requiredPackConstraint,
+				"the required "+e.Pack.Name+" sandbox pack keeps the harness permission prompts")
+		}
 		return nil
 	case ActionLearnMode:
 		if isFalse(e.admin.AllowLearnMode) {
@@ -234,6 +238,10 @@ func (e *Effective) allowMount(path string) error {
 	if isFalse(e.admin.AllowMount) {
 		return e.adminViolation(key, "mount "+path, "openshell.admin.allow_mount",
 			"live host mounts are disabled; use copy mode")
+	}
+	if e.requiredPack && e.Pack != nil && e.Pack.Workspace.Mode == config.OpenShellWorkdirCopy {
+		return e.adminViolation(key, "mount "+path, requiredPackConstraint,
+			"the required "+e.Pack.Name+" sandbox pack works on a copy of the project; host folders are not mounted")
 	}
 	if pattern := e.requiresCopy(path); pattern != "" {
 		return e.adminViolation(key, "mount "+path, "openshell.admin.require_copy_for",
