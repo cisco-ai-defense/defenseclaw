@@ -59,6 +59,8 @@ type box struct {
 	silenceSent bool
 	seenChunks  map[string]struct{}
 	blocked     int
+	// triageTimer is a pending draft poll after a denied connection.
+	triageTimer *time.Timer
 }
 
 type hookStats struct {

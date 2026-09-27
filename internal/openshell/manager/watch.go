@@ -219,6 +219,10 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 			m.mu.Lock()
 			b.blocked++
 			m.mu.Unlock()
+			// OpenShell drafts a proposal for the denied destination a few
+			// seconds later; OpenShell 0.1.1 does not always announce it
+			// on the stream.
+			m.scheduleTriage(b)
 		} else {
 			ev.DecisionCode = "SANDBOX_EGRESS_ALLOWED"
 		}

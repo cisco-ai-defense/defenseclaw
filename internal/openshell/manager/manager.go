@@ -54,6 +54,7 @@ const (
 	DefaultSettleDelay       = 15 * time.Second
 	DefaultReconcileInterval = 5 * time.Minute
 	DefaultHookSilence       = 10 * time.Minute
+	DefaultTriageInterval    = 30 * time.Second
 	defaultConnectRetry      = 30 * time.Second
 	// connectBackoff bounds how often API requests redial a gateway that
 	// just failed.
@@ -128,6 +129,9 @@ type Options struct {
 	HookSilence time.Duration
 	// ConnectRetry paces gateway reconnects.
 	ConnectRetry time.Duration
+	// TriageInterval paces the draft poll of ready sandboxes
+	// (DefaultTriageInterval).
+	TriageInterval time.Duration
 	// Now overrides the clock.
 	Now func() time.Time
 	// Logf receives operational messages; nil writes to stderr.
@@ -207,6 +211,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.ConnectRetry <= 0 {
 		opts.ConnectRetry = defaultConnectRetry
+	}
+	if opts.TriageInterval <= 0 {
+		opts.TriageInterval = DefaultTriageInterval
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -322,12 +329,18 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer reconcile.Stop()
 	silence := time.NewTicker(minDuration(m.opts.HookSilence/4, time.Minute))
 	defer silence.Stop()
+	drafts := time.NewTicker(m.opts.TriageInterval)
+	defer drafts.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-silence.C:
 			m.checkHookSilence(ctx)
+		case <-drafts.C:
+			if m.gatewayUp() {
+				m.triageSweep(ctx)
+			}
 		case <-reconcile.C:
 			if _, err := m.gateway(ctx); err != nil {
 				reconcile.Reset(m.opts.ConnectRetry)
@@ -386,6 +399,13 @@ func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 	m.gw, m.gwErr = gw, nil
 	m.gwPort.Store(int64(gw.Port))
 	return gw, nil
+}
+
+// gatewayUp reports whether a gateway connection is held, without dialing.
+func (m *Manager) gatewayUp() bool {
+	m.gwMu.RLock()
+	defer m.gwMu.RUnlock()
+	return m.gw != nil
 }
 
 // dropGateway forgets a connection that failed, so the next call redials.

@@ -21,12 +21,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
@@ -231,6 +233,36 @@ func TestDeleteDropsApprovals(t *testing.T) {
 	if asks, _ := e.m.Approvals(context.Background(), ""); len(asks) != 0 {
 		t.Fatalf("asks left: %v", asks)
 	}
+}
+
+// TestDeniedConnectionTriggersTriage pins that a proposal is decided after
+// OpenShell denies a direct connection even when no draft notification
+// arrives on the stream.
+func TestDeniedConnectionTriggersTriage(t *testing.T) {
+	saved := triageDelay
+	triageDelay = 10 * time.Millisecond
+	t.Cleanup(func() { triageDelay = saved })
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "denybox2"})
+	e.watch.waitStarted(t, sb.Name)
+	id := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_example", "www.example.com", 443))
+	line := "NET:OPEN [MED] DENIED /usr/bin/curl(3) -> www.example.com:443 [reason:transparent_tcp_policy_denied]"
+	rec, err := ocsf.Parse(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindLog, Log: &stream.Log{Message: line, OCSF: &rec}})
+	eventually(t, "triaged without a draft event", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+}
+
+func TestTriageSweep(t *testing.T) {
+	e := newEnv(t, nil)
+	e.m.opts.TriageInterval = 20 * time.Millisecond
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "sweepbox"})
+	id := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_example", "www.example.com", 443))
+	eventually(t, "sweep", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
 }
 
 func TestProposalFloodsCollapse(t *testing.T) {

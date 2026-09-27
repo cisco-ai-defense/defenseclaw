@@ -110,6 +110,52 @@ func (a batchApplier) ApproveDraftChunk(ctx context.Context, sandbox, chunkID, r
 	return gw.Client.ApproveDraftChunk(ctx, sandbox, chunkID, reviewToken)
 }
 
+// triageDelay is how long after a denied connection the drafted proposal is
+// looked for: the supervisor flushes its denial analysis every few seconds.
+var triageDelay = 12 * time.Second
+
+// scheduleTriage polls a sandbox's drafts once, triageDelay from now,
+// unless a poll is already pending.
+func (m *Manager) scheduleTriage(b *box) {
+	ctx := m.running()
+	if ctx == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b.triageTimer != nil || b.deleted {
+		return
+	}
+	b.triageTimer = time.AfterFunc(triageDelay, func() {
+		m.mu.Lock()
+		b.triageTimer = nil
+		gone := b.deleted
+		m.mu.Unlock()
+		if !gone && ctx.Err() == nil {
+			m.triageSandbox(ctx, b)
+		}
+	})
+}
+
+// triageSweep polls the drafts of every ready sandbox; draft notifications
+// on the stream are not guaranteed.
+func (m *Manager) triageSweep(ctx context.Context) {
+	m.mu.Lock()
+	var ready []*box
+	for _, b := range m.boxes {
+		if !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
+			ready = append(ready, b)
+		}
+	}
+	m.mu.Unlock()
+	for _, b := range ready {
+		if ctx.Err() != nil {
+			return
+		}
+		m.triageSandbox(ctx, b)
+	}
+}
+
 // triageSandbox fetches a sandbox's pending proposals and decides the ones
 // it has not seen yet.
 func (m *Manager) triageSandbox(ctx context.Context, b *box) {
