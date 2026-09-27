@@ -100,8 +100,8 @@ the details window takes the keys of its view, and `Esc` closes it.
 | View | Columns | What it shows |
 | --- | --- | --- |
 | Sandboxes | Name, Phase, Harness, Pack/Profile, Mode, Up, Sites, Blocked, Tools, Alerts | Every sandbox, running ones first. Tools is blocked/total tool calls. Above the table: the newest blocked destination still in force, and the most urgent alert. A narrow terminal drops Pack/Profile, Mode and Up; the details show them. |
-| Activity | Time, Sandbox, glyph, Event | The live feed, newest first (the last 500 events): `✓` an allowed destination, `✗` a blocked destination or tool call, `↺` a lifted block, `⚠` a large upload or a finding, `?` an ask. A block you can lift ends in `(u unblocks)`. |
-| Asks | Sandbox, Kind, Destination, Binary, Risk, Reason | Asks waiting for you. Only doors into your machine or network ask, such as a localhost port or a private address. |
+| Activity | Time, Sandbox, glyph, Event | The live feed, newest first (the last 500 events): `✓` an allowed destination, `✗` a blocked destination or tool call, `↺` a lifted block, `⚠` a large upload or a finding, `?` an ask, `·` a lifecycle step (such as creating, ready or stopped), an answered ask, a copy upload, a pull or an undo, `…` events skipped because the TUI fell behind. A block you can lift ends in `(u unblocks)`. |
+| Asks | Sandbox, Kind, Destination, Binary, Risk, Reason | Asks waiting for you. Doors into your machine or network, such as a localhost port or a private address, ask unless your organization's policy refuses them. With the default `open` pack only those ask, plus requests OpenShell's policy advisor flags; the `balanced` pack also asks for hosts off its allowlist, and `strict` asks about every request. |
 
 ### Keys
 
@@ -135,8 +135,11 @@ what needs attention:
 - **tamper**: tool calls ran without a DefenseClaw verdict.
 - **nested repo**: a new git repository or submodule entry appeared inside
   the mounted project. DefenseClaw renames a new `.git` to
-  `.git.defenseclaw-quarantine-<time>` as soon as it appears; see the
-  [sandbox guide](/docs/setup/sandbox).
+  `.git.defenseclaw-quarantine-<time>` within seconds: at once on Linux,
+  where it watches the folder with inotify, and on its next scan (about every
+  5 seconds, longer for a large project) on macOS or when the file-watch
+  limit is reached. Until the rename, git on your machine could still read
+  the planted repository; see the [sandbox guide](/docs/setup/sandbox).
 - **hooks unreachable**: the harness's hooks cannot reach DefenseClaw, so they
   block every tool call. Run `defenseclaw sandbox doctor`.
 - **silent**: the harness is active, but no DefenseClaw hook has been heard.
@@ -179,7 +182,7 @@ with `defenseclaw sandbox doctor` instead.
 | Field | Flag | Default |
 | --- | --- | --- |
 | Claude Code, Codex | `--harness claudecode`, `--harness codex` | Both, or the ones in `openshell.harnesses`; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
-| Credentials | none | Shows, by name only, the model key each harness would share |
+| Credentials | none | Names the model keys it finds for each harness, never their values. It also counts `AWS_BEARER_TOKEN_BEDROCK` and any `~/.codex/auth.json`, but `defenseclaw sandbox run` shares a Bedrock key only with `--llm bedrock`, and from `auth.json` only an API key (a ChatGPT login is not shared) |
 | This machine | none | Docker, Landlock (Linux), OpenShell and bind-mount status, from a `sandbox doctor` check that runs when the form opens |
 | Install OpenShell | `--install-openshell` | On when OpenShell is missing or its gateway needs attention: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` |
 | Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy |
