@@ -89,13 +89,23 @@ func OpenHandsTrustedShellArgs(toolName string, args json.RawMessage) (json.RawM
 			return args, false
 		}
 	}
+	projected, err := encodeTrustedShellArgs(map[string]string{"command": command})
+	if err != nil {
+		return args, false
+	}
+	return projected, true
+}
+
+// encodeTrustedShellArgs encodes a projected argument object without HTML
+// escaping, so a command's <, > and & reach the parser as written.
+func encodeTrustedShellArgs(fields map[string]string) (json.RawMessage, error) {
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(map[string]string{"command": command}); err != nil {
-		return args, false
+	if err := enc.Encode(fields); err != nil {
+		return nil, err
 	}
-	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), true
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
 }
 
 // openHandsProfileDecode supplies only the contract event name; every other

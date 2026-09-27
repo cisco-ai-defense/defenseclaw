@@ -2078,14 +2078,21 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 }
 
 // agentHookTrustedActionArgs selects the arguments the trusted-action parser
-// sees. OpenHands' terminal tool reports the SDK's TerminalAction fields next
-// to the command; connector.OpenHandsTrustedShellArgs projects them onto the
-// plain shell shape when that is exact. The recorded ToolArgs never change.
+// sees. OpenHands' terminal tool and agy's run_command report execution
+// controls and model labels next to the command;
+// connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
+// project them onto the plain shell shape when that is exact. The recorded
+// ToolArgs never change.
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) json.RawMessage {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "openhands") {
-		if projected, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
-			return projected
-		}
+	project := func(string, json.RawMessage) (json.RawMessage, bool) { return nil, false }
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "openhands":
+		project = connector.OpenHandsTrustedShellArgs
+	case "antigravity":
+		project = connector.AntigravityTrustedShellArgs
+	}
+	if projected, ok := project(toolName, args); ok {
+		return projected
 	}
 	return args
 }

@@ -38,6 +38,8 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		{"omnigent-sys-os-shell", "omnigent", "sys_os_shell", command},
 		{"openhands-terminal-action", "openhands", "terminal",
 			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`},
+		{"antigravity-run-command", "antigravity", "run_command",
+			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/work/app","WaitMsBeforeAsync":500,"toolSummary":"write marker","toolAction":"Writing marker"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := actionfacts.Analyze(actionfacts.Input{Tool: tc.tool, Args: json.RawMessage(tc.args)})
@@ -116,7 +118,11 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 		{
 			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "run_command",
 			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
-			body:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"` + command + `","Cwd":"/work/app"}}}`,
+			// agy 1.2's run_command schema requires WaitMsBeforeAsync,
+			// toolSummary and toolAction next to CommandLine and Cwd.
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
+				`"CommandLine":"` + command + `","Cwd":"/work/app","WaitMsBeforeAsync":500,` +
+				`"toolSummary":"write marker","toolAction":"Writing marker"}}}`,
 			output: func(t *testing.T, resp map[string]interface{}) {
 				out, _ := resp["hook_output"].(map[string]interface{})
 				if out["decision"] != "deny" {
