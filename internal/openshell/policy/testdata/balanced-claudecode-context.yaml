@@ -12,10 +12,14 @@ filesystem_policy:
     - /var/log
   read_write:
     - /context/scratch
+    - /dev/full
     - /dev/null
     - /dev/ptmx
     - /dev/pts
+    - /dev/random
+    - /dev/shm
     - /dev/tty
+    - /dev/zero
     - /sandbox
     - /tmp
     - /work/myapp

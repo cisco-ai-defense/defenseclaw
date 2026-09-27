@@ -10,10 +10,14 @@ filesystem_policy:
     - /usr
     - /var/log
   read_write:
+    - /dev/full
     - /dev/null
     - /dev/ptmx
     - /dev/pts
+    - /dev/random
+    - /dev/shm
     - /dev/tty
+    - /dev/zero
     - /sandbox
     - /tmp
     - /work/myapp
