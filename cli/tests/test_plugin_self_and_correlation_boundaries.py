@@ -118,6 +118,13 @@ def _write_bridge_publication(
     lock_path.chmod(0o600)
 
 
+def _bridge_host_templates(repository_root: Path) -> Path:
+    # The bridge templates share their source with the OpenShell sandbox
+    # variants, so the host bytes come from the Go-rendered host templates
+    # (TestBridgeHostTemplatesGolden keeps them in step with the source).
+    return repository_root / "internal" / "gateway" / "connector" / "testdata" / "bridge_host"
+
+
 def _render_bridge_publication(
     repository_root: Path,
     data_dir: Path,
@@ -128,9 +135,9 @@ def _render_bridge_publication(
         "amp": "amp-plugin.ts",
         "opencode": "opencode-plugin.js",
     }[connector]
-    template = (
-        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
-    ).read_text(encoding="utf-8")
+    template = (_bridge_host_templates(repository_root) / template_name).read_text(
+        encoding="utf-8"
+    )
     token_path = os.path.abspath(
         os.path.join(data_dir, "hooks", f".hook-{connector}.token")
     )
@@ -453,9 +460,7 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     template_name: str,
 ) -> None:
     repository_root = Path(__file__).resolve().parents[2]
-    payload = (
-        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
-    ).read_bytes()
+    payload = (_bridge_host_templates(repository_root) / template_name).read_bytes()
 
     assert (
         hashlib.sha256(payload).hexdigest()

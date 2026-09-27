@@ -250,3 +250,43 @@ func TestHostHookScriptBytesGolden(t *testing.T) {
 	}
 	t.Fatalf("host hook output drifted from %s:\n  %s", hostHookGoldenPath, strings.Join(diffs, "\n  "))
 }
+
+// bridgeHostTemplateDir holds each plugin bridge's host template: the
+// template with its OpenShell sandbox branches resolved to the host ones
+// and the values setup renders left as placeholders. The Python plugin
+// scanner fingerprints installed bridges against these bytes
+// (_BRIDGE_TEMPLATE_DIGESTS in
+// cli/defenseclaw/scanner/plugin_scanner/self_identity.py), and its tests
+// read them because they cannot run the Go template.
+const bridgeHostTemplateDir = "testdata/bridge_host"
+
+func TestBridgeHostTemplatesGolden(t *testing.T) {
+	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
+		got, err := renderHookTemplate(asset, templateData{
+			APIAddr:     "{{.APIAddr}}",
+			TokenFileJS: "{{.TokenFileJS}}",
+			FailMode:    "{{.FailMode}}",
+		})
+		if err != nil {
+			t.Fatalf("render %s: %v", asset, err)
+		}
+		path := filepath.Join(bridgeHostTemplateDir, asset)
+		if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+			if err := os.MkdirAll(bridgeHostTemplateDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, got, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		want, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s is out of date: regenerate it with DEFENSECLAW_UPDATE_GOLDEN=1 and update "+
+				"_BRIDGE_TEMPLATE_DIGESTS in cli/defenseclaw/scanner/plugin_scanner/self_identity.py", path)
+		}
+	}
+}
