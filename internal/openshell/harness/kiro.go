@@ -98,7 +98,7 @@ readlink -f /usr/local/bin/kiro-cli`,
 			ProfileID:  profiles.KiroID,
 			Hosts:      []string{"q.us-east-1.amazonaws.com", "runtime.us-east-1.kiro.dev", "management.us-east-1.kiro.dev", "prod.us-east-1.auth.desktop.kiro.dev"},
 			Note:       "KIRO_API_KEY (a Kiro Pro API key for headless use) sent to the Kiro and Amazon Q service endpoints in us-east-1",
-			Unverified: "no Kiro Pro account was available: the host set is the us-east-1 service endpoints the pinned kiro-cli-chat names (Amazon Q streaming, Kiro runtime, management and auth), not a live run",
+			Unverified: "no Kiro Pro account was available: the host set is the us-east-1 service endpoints the pinned kiro-cli-chat names (Amazon Q streaming, Kiro runtime, management and auth); the scripted live run, with a placeholder key, called management.<region>.kiro.dev in four regions and q.us-east-1.amazonaws.com, but never a model",
 		},
 	},
 	login: &LoginOption{
