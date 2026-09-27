@@ -218,8 +218,12 @@ func (i *Installer) defaults() {
 		i.LookPath = exec.LookPath
 	}
 	if i.Candidates == nil {
-		home, _ := os.UserHomeDir()
-		i.Candidates = []string{filepath.Join(home, ".local", "bin", "openshell"), "/usr/local/bin/openshell", "/usr/bin/openshell", "/opt/homebrew/bin/openshell"}
+		i.Candidates = []string{"/usr/local/bin/openshell", "/usr/bin/openshell", "/opt/homebrew/bin/openshell"}
+		// With HOME unset or relative the join would name a file below
+		// the working directory.
+		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+			i.Candidates = append([]string{filepath.Join(home, ".local", "bin", "openshell")}, i.Candidates...)
+		}
 	}
 	if i.PackageCLI == "" && runtime.GOOS == "linux" {
 		i.PackageCLI = linuxPackageCLI
@@ -476,9 +480,10 @@ func (i *Installer) onPath() string {
 }
 
 // probeCLI asks the executable at p for its version; nil when there is
-// none.
+// none. A relative p is never run: it would resolve against the working
+// directory.
 func (i *Installer) probeCLI(ctx context.Context, p string) *ExistingInstall {
-	if p == "" {
+	if p == "" || !filepath.IsAbs(p) {
 		return nil
 	}
 	info, err := os.Stat(p)

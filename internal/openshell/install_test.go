@@ -385,6 +385,58 @@ func TestInstallReplacesLegacyCLI(t *testing.T) {
 	})
 }
 
+// TestInstallNeverRunsRelativeCandidates covers a fresh install (no CLI on
+// PATH) from a directory holding .local/bin/openshell: with HOME unset or
+// relative the default home candidate would name that file, and the
+// installer would run it as the existing CLI.
+func TestInstallNeverRunsRelativeCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name, home string
+		candidates []string
+	}{
+		{name: "HOME unset", home: ""},
+		{name: "HOME relative", home: "relhome"},
+		{name: "relative candidate", home: "/nonexistent-home", candidates: []string{filepath.Join(".local", "bin", "openshell")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			work := t.TempDir()
+			for _, dir := range []string{work, filepath.Join(work, "relhome")} {
+				if err := os.MkdirAll(filepath.Join(dir, ".local", "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeExecutable(t, filepath.Join(dir, ".local", "bin", "openshell"))
+			}
+			t.Chdir(work)
+			t.Setenv("HOME", tc.home)
+			f.inst.Candidates = tc.candidates
+			f.inst.Consent = func(*openshell.InstallPlan) (bool, error) { return false, nil }
+			_, _ = f.inst.Install(context.Background())
+			for _, c := range f.runner.Calls() {
+				if !filepath.IsAbs(c.Name) {
+					t.Fatalf("installer ran %q, a path relative to the working directory", c.Name)
+				}
+			}
+		})
+	}
+	t.Run("absolute HOME still probed", func(t *testing.T) {
+		f := newInstallFixture(t, fakeScript, "", "")
+		home := t.TempDir()
+		cli := filepath.Join(home, ".local", "bin", "openshell")
+		if err := os.MkdirAll(filepath.Dir(cli), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable(t, cli)
+		f.runner.On(cli+" --version", "openshell 0.1.1\n", nil)
+		t.Setenv("HOME", home)
+		f.inst.Candidates = nil
+		res, err := f.inst.Install(context.Background())
+		if err != nil || res.Installed || res.Plan.Existing == nil || res.Plan.Existing.Path != cli {
+			t.Fatalf("Install = %+v, %v; want the CLI in the home directory found", res, err)
+		}
+	})
+}
+
 func TestInstallVerifiesOutcome(t *testing.T) {
 	t.Run("cli still old", func(t *testing.T) {
 		f := newInstallFixture(t, fakeScript, "", "openshell 0.0.40")
