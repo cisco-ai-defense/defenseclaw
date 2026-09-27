@@ -611,7 +611,7 @@ class PerConnectorToggleTests(unittest.TestCase):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         result = runner.invoke(
-            cmd_guardrail.disable_cmd, ["--connector", "windsurf", "--yes"], obj=app
+            cmd_guardrail.disable_cmd, ["--connector", "cursor", "--yes"], obj=app
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)

@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -333,10 +334,11 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		// Devin has no supported config-home environment override. The
 		// authenticated installer binding flows through SetupOpts.ConfigHome.
 		return func() {}, nil
-	case "windsurf":
-		// Windsurf has no vendor home override variable. Bind DefenseClaw's
-		// connector path resolver directly to Setup's validated profile root;
-		// never inherit a maintenance process's ambient USERPROFILE.
+	case legacyconnector.RetiredDesktopID:
+		// Retired-ID cleanup has no vendor home override variable. Bind
+		// DefenseClaw's connector path resolver directly to Setup's validated
+		// profile root; never inherit a maintenance process's ambient
+		// USERPROFILE.
 		return connector.BindUserHomeDir(home)
 	case "antigravity":
 		// Google has no documented Antigravity configuration-home environment

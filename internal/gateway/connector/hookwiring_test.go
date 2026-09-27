@@ -895,7 +895,7 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows Cursor, Windsurf, and Copilot use PowerShell adapters while
+// path; Windows Cursor and Copilot use PowerShell adapters while
 // other connectors invoke the native Go `hook` subcommand directly.
 // PowerShell shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
@@ -925,16 +925,6 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if isNativeHookCommand(unix) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
-	}
-
-	windsurf := hookInvocationCommandFor("windows", "windsurf", unix)
-	wantWindsurf := "& " + powershellQuoteLiteral(strings.TrimSuffix(unix, ".sh")+".ps1")
-	if windsurf != wantWindsurf {
-		t.Errorf("windsurf command = %q, want %q", windsurf, wantWindsurf)
-	}
-	if strings.Contains(windsurf, "bash") || strings.Contains(windsurf, "wsl") ||
-		strings.Contains(windsurf, nativeHookFlag) {
-		t.Errorf("windsurf command bypasses its documented PowerShell adapter: %q", windsurf)
 	}
 
 	// Codex passes this string to cmd.exe /C as one argument. The outer command
@@ -2344,7 +2334,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 		{"codex", NewCodexConnector(), &CodexConfigPathOverride, ".toml"},
 		{"claudecode", NewClaudeCodeConnector(), &ClaudeCodeSettingsPathOverride, ".json"},
 		{"cursor", NewCursorConnector(), &CursorHooksPathOverride, ".json"},
-		{"windsurf", NewWindsurfConnector(), &WindsurfHooksPathOverride, ".json"},
 		{"copilot", NewCopilotConnector(), &CopilotHooksPathOverride, ".json"},
 		{"antigravity", NewAntigravityConnector(), &AntigravityHooksPathOverride, ".json"},
 		{"hermes-preview", NewHermesConnector(), &HermesConfigPathOverride, ".yaml"},
@@ -2418,35 +2407,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				} {
 					if !strings.Contains(adapterText, marker) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
-					}
-				}
-			} else if connectorName == "windsurf" {
-				wantCommand := hookInvocationCommand(
-					"windsurf",
-					filepath.Join(dataDir, "hooks", "windsurf-hook.sh"),
-				)
-				encodedCommand, err := json.Marshal(wantCommand)
-				if err != nil {
-					t.Fatalf("encode Windsurf Windows adapter command: %v", err)
-				}
-				if !strings.Contains(text, string(encodedCommand)) {
-					t.Errorf("config missing Windsurf Windows adapter command %q:\n%s", wantCommand, text)
-				}
-				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "windsurf-hook.ps1"))
-				if err != nil {
-					t.Fatalf("read Windsurf Windows adapter: %v", err)
-				}
-				adapterText := string(adapter)
-				for _, marker := range []string{
-					windowsHookBinaryName,
-					"hook --connector windsurf",
-					fmt.Sprintf("$timeoutMS = %d", windowsHookAdapterTimeoutMS),
-					"WaitForExit($remainingMS)",
-					"$process.Kill()",
-					"[Environment]::Exit([int]$exitCode)",
-				} {
-					if !strings.Contains(adapterText, marker) {
-						t.Errorf("Windsurf adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
 			} else if connectorName == "antigravity" {

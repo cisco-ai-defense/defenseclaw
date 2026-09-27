@@ -211,8 +211,8 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 }
 
 // TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
-// contract for the six hook-only connectors (hermes, cursor,
-// windsurf, geminicli, copilot, openhands). Two contracts differ from the
+// contract for the hook-only connectors (hermes, cursor,
+// geminicli, copilot, openhands). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
@@ -225,12 +225,10 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     surface rather than applying one connector's plugin semantics to all
 //     hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/windsurf/geminicli/copilot/openhands
+//  2. Skills support varies: hermes/cursor/geminicli/copilot/openhands
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
-//     framework-owned subpath. Windsurf is limited to the documented
-//     legacy Cascade user/workspace skill roots; Devin Local remains
-//     outside this connector. This split is what justifies a dedicated
+//     framework-owned subpath. This split is what justifies a dedicated
 //     matrix rather than reusing the openclaw/zeptoclaw/claudecode/codex
 //     one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
@@ -264,13 +262,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			expectSkillFrag:  filepath.Join(".cursor", "skills"),
 			expectPluginSrc:  watcherDirsFromConnector,
 			expectPluginFrag: filepath.Join(".cursor", "plugins", "local"),
-		},
-		{
-			name:            "windsurf",
-			ctor:            func() connector.Connector { return connector.NewWindsurfConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".codeium", "windsurf", "skills"),
-			expectPluginSrc: watcherDirsFromDefault,
 		},
 		{
 			name:             "geminicli",

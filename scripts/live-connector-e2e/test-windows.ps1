@@ -2558,7 +2558,7 @@ connection.close()
         'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
     )
     $excludedContractConnectors = @(
-        'geminicli', 'openhands', 'openclaw', 'windsurf', 'zeptoclaw'
+        'geminicli', 'openhands', 'openclaw', 'zeptoclaw'
     )
     $genericContractConnectors = if ($connectorMatrix.Success) {
         @($connectorMatrix.Groups[1].Value -split '\s*,\s*')
@@ -3445,8 +3445,7 @@ connection.close()
         $setupAcceptanceFunction -notmatch '\(@\(\$roster \| Sort-Object\) -join "`0"\)\) \{' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorCleanupAuthorityPresent \$dataRoot \$repairedRoster' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorBackupMarkersConsumed \$dataRoot' -and
-        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)' -and
-        $setupAcceptanceFunction -match "Get-NativeConnectorBackupMarkers \`$dataRoot 'windsurf'") `
+        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)') `
         'packaged Setup preserves and migrates the exact staged connector roster with complete supported cleanup custody'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
@@ -3731,8 +3730,8 @@ connection.close()
         $harnessText,
         '(?s)function Assert-PackagedConnectorHomes\b.*?(?=\nfunction Get-StableHookRuntimeExecutable\b)'
     ).Value
-    Assert-True ($packagedConnectorHomes -notmatch '(?i)windsurf|cascade|geminicli|gemini cli') `
-        'packaged connector-home setup exposes no retired Windsurf/Cascade or Gemini CLI binding'
+    Assert-True ($packagedConnectorHomes -notmatch '(?i)cascade|geminicli|gemini cli') `
+        'packaged connector-home setup exposes no retired Cascade or Gemini CLI binding'
     $setupOtlpFixture = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Start-SetupAcceptanceOtlpCollector\b.*?(?=\nfunction Stop-SetupAcceptanceOtlpCollector\b)'
@@ -5010,9 +5009,8 @@ connection.close()
         $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''opencode-home''' -and
         $nativeHarnessText -match '\$openCodePluginDir = Join-Path \$openCodeHome ''plugins''' -and
         $nativeHarnessText -match '(?s)Assert-WindowsNativePathsDisjoint @\(\s*\$contractHome, \$codexHome, \$claudeHome, \$copilotHome, \$hermesHome,\s*\$openCodeHome, \$geminiCLIHome\s*\)' -and
-        $nativeHarnessText -notmatch '\$officialWindsurfConfig' -and
         $contractInstall -ge 0) `
-        'connector contract keeps active connector homes and legacy Gemini cleanup custody disjoint without a Windsurf target'
+        'connector contract keeps active connector homes and legacy Gemini cleanup custody disjoint'
     foreach ($homeAssignment in @(
         '$env:CODEX_HOME = $codexHome',
         '$env:CLAUDE_CONFIG_DIR = $claudeHome',
@@ -5027,9 +5025,8 @@ connection.close()
     }
     Assert-True ($contractFunction -match 'fresh native Setup install state retained deprecated connector custody' -and
         $contractFunction -match "'gemini_cli_home', 'gemini_config_dir'" -and
-        $contractFunction -match "'windsurf_user_home', 'windsurf_hooks_path'" -and
-        $contractFunction -notmatch '\$contractInstallState\.(gemini_cli_home|gemini_config_dir|windsurf_user_home|windsurf_hooks_path)') `
-        'connector contract rejects fresh retired Gemini/Windsurf custody without dereferencing absent state properties'
+        $contractFunction -notmatch '\$contractInstallState\.(gemini_cli_home|gemini_config_dir)') `
+        'connector contract rejects fresh retired Gemini custody without dereferencing absent state properties'
     $contractCleanupTry = $contractFunction.IndexOf('    try {', [StringComparison]::Ordinal)
     $contractProfileCreate = $contractFunction.IndexOf(
         '[IO.Directory]::CreateDirectory($path)',

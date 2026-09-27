@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
-
 from defenseclaw import legacy_connector, migrations
 from defenseclaw.commands import cmd_uninstall
 from defenseclaw.config import load

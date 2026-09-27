@@ -95,7 +95,6 @@ type setupTransaction struct {
 	PreviousDevinConfigDir         string                   `json:"previous_devin_config_dir,omitempty"`
 	PreviousDevinExecutable        string                   `json:"previous_devin_executable,omitempty"`
 	PreviousHermesHome             string                   `json:"previous_hermes_home,omitempty"`
-	PreviousWindsurfUserHome       string                   `json:"previous_windsurf_user_home,omitempty"`
 	PreviousAntigravityConfigDir   string                   `json:"previous_antigravity_config_dir,omitempty"`
 	PreviousGeminiCLIHome          string                   `json:"previous_gemini_cli_home,omitempty"`
 	PreviousGeminiConfigDir        string                   `json:"previous_gemini_config_dir,omitempty"`
@@ -107,7 +106,6 @@ type setupTransaction struct {
 	CursorHome                     string                   `json:"cursor_home,omitempty"`
 	DevinConfigDir                 string                   `json:"devin_config_dir,omitempty"`
 	DevinExecutable                string                   `json:"devin_executable,omitempty"`
-	WindsurfUserHome               string                   `json:"windsurf_user_home,omitempty"`
 	AntigravityConfigDir           string                   `json:"antigravity_config_dir,omitempty"`
 	GeminiCLIHome                  string                   `json:"gemini_cli_home,omitempty"`
 	GeminiConfigDir                string                   `json:"gemini_config_dir,omitempty"`
@@ -319,19 +317,14 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	legacyWindsurfManaged := stringSliceContains(previousConnectors, "windsurf")
 	legacyGeminiManaged := stringSliceContains(previousConnectors, "geminicli")
 	defaultLegacyUserHome := ""
-	if legacyWindsurfManaged || legacyGeminiManaged {
+	if legacyGeminiManaged {
 		defaultLegacyUserHome, err = defaultProfileRoot()
 		if err != nil {
 			return setupTransaction{}, fmt.Errorf("resolve retired connector user profile: %w", err)
 		}
 		defaultLegacyUserHome = filepath.Clean(defaultLegacyUserHome)
-	}
-	defaultWindsurfUserHome := ""
-	if legacyWindsurfManaged {
-		defaultWindsurfUserHome = defaultLegacyUserHome
 	}
 	defaultAntigravityConfigDir, err := defaultConnectorConfigHome(filepath.Join(".gemini", "config"))
 	if err != nil {
@@ -393,7 +386,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	previousCodexState, previousClaudeState, previousCopilotState, previousCursorState, previousDevinState, previousDevinExecutable, previousHermesState, previousWindsurfState, previousAntigravityState, previousGeminiCLIState, previousGeminiState, previousOpenCodeState, previousOmnigentState := "", "", "", "", "", "", "", "", "", "", "", "", ""
+	previousCodexState, previousClaudeState, previousCopilotState, previousCursorState, previousDevinState, previousDevinExecutable, previousHermesState, previousAntigravityState, previousGeminiCLIState, previousGeminiState, previousOpenCodeState, previousOmnigentState := "", "", "", "", "", "", "", "", "", "", "", ""
 	if oldState != nil {
 		previousCodexState = oldState.CodexHome
 		previousClaudeState = oldState.ClaudeConfigDir
@@ -402,9 +395,6 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		previousDevinState = oldState.DevinConfigDir
 		previousDevinExecutable = oldState.DevinExecutable
 		previousHermesState = oldState.HermesHome
-		if legacyWindsurfManaged {
-			previousWindsurfState = oldState.WindsurfUserHome
-		}
 		previousAntigravityState = oldState.AntigravityConfigDir
 		if legacyGeminiManaged {
 			previousGeminiCLIState = oldState.GeminiCLIHome
@@ -485,18 +475,8 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	previousWindsurfUserHome, err := resolvePreviousWindsurfUserHome(
-		previousWindsurfState,
-		previousConnectors,
-		dataRoot,
-		defaultWindsurfUserHome,
-	)
-	if err != nil {
-		return setupTransaction{}, err
-	}
 	// Current install state never establishes new custody for retired
-	// Windsurf or Gemini CLI. Previous* remains the sole cleanup authority.
-	windsurfUserHome := ""
+	// Gemini CLI. Previous* remains the sole cleanup authority.
 	geminiCLIHome = ""
 	geminiConfigDir = ""
 	if preserveConnectorConfiguration {
@@ -511,7 +491,6 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		// previous Devin custody only for teardown; never let stale native state
 		// redirect a refreshed registration or admission probe.
 		hermesHome = previousHermesHome
-		windsurfUserHome = previousWindsurfUserHome
 		openCodeConfigDir = previousOpenCodeConfigDir
 		omnigentConfigHome = previousOmnigentConfigHome
 		if previousGeminiCLIHome != "" {
@@ -576,7 +555,6 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		PreviousDevinConfigDir:         previousDevinConfigDir,
 		PreviousDevinExecutable:        previousDevinExecutable,
 		PreviousHermesHome:             previousHermesHome,
-		PreviousWindsurfUserHome:       previousWindsurfUserHome,
 		PreviousAntigravityConfigDir:   previousAntigravityConfigDir,
 		PreviousGeminiCLIHome:          previousGeminiCLIHome,
 		PreviousGeminiConfigDir:        previousGeminiConfigDir,
@@ -589,7 +567,6 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		DevinConfigDir:                 devinConfigDir,
 		DevinExecutable:                devinExecutable,
 		HermesHome:                     hermesHome,
-		WindsurfUserHome:               windsurfUserHome,
 		AntigravityConfigDir:           antigravityConfigDir,
 		GeminiCLIHome:                  geminiCLIHome,
 		GeminiConfigDir:                geminiConfigDir,
@@ -661,16 +638,16 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	defaultWindsurfUserHome, err := defaultProfileRoot()
+	defaultUserHome, err := defaultProfileRoot()
 	if err != nil {
-		return setupTransaction{}, fmt.Errorf("resolve Windsurf user profile: %w", err)
+		return setupTransaction{}, fmt.Errorf("resolve user profile: %w", err)
 	}
-	defaultWindsurfUserHome = filepath.Clean(defaultWindsurfUserHome)
+	defaultUserHome = filepath.Clean(defaultUserHome)
 	defaultAntigravityConfigDir, err := defaultConnectorConfigHome(filepath.Join(".gemini", "config"))
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	defaultGeminiCLIHome := defaultWindsurfUserHome
+	defaultGeminiCLIHome := defaultUserHome
 	defaultGeminiConfigDir := filepath.Join(defaultGeminiCLIHome, ".gemini")
 	defaultOpenCodeConfigDir, err := defaultConnectorConfigHome(filepath.Join(".config", "opencode"))
 	if err != nil {
@@ -684,7 +661,7 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	configuredCodexHome, configuredClaudeHome, configuredCopilotHome, configuredCursorHome, configuredDevinHome, configuredDevinExecutable, configuredHermesHome, configuredWindsurfHome, configuredAntigravityHome, configuredGeminiCLIHome, configuredGeminiHome, configuredOpenCodeHome, configuredOmnigentHome := "", "", "", "", "", "", "", "", "", "", "", "", ""
+	configuredCodexHome, configuredClaudeHome, configuredCopilotHome, configuredCursorHome, configuredDevinHome, configuredDevinExecutable, configuredHermesHome, configuredAntigravityHome, configuredGeminiCLIHome, configuredGeminiHome, configuredOpenCodeHome, configuredOmnigentHome := "", "", "", "", "", "", "", "", "", "", "", ""
 	if oldState != nil {
 		configuredCodexHome = oldState.CodexHome
 		configuredClaudeHome = oldState.ClaudeConfigDir
@@ -693,7 +670,6 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		configuredDevinHome = oldState.DevinConfigDir
 		configuredDevinExecutable = oldState.DevinExecutable
 		configuredHermesHome = oldState.HermesHome
-		configuredWindsurfHome = oldState.WindsurfUserHome
 		configuredAntigravityHome = oldState.AntigravityConfigDir
 		configuredGeminiCLIHome = oldState.GeminiCLIHome
 		configuredGeminiHome = oldState.GeminiConfigDir
@@ -793,19 +769,6 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	}
 	if previousDevinExecutable == "" {
 		previousDevinExecutable = devinDefaultExecutable
-	}
-	legacyWindsurfFallback := source.WindsurfUserHome
-	if legacyWindsurfFallback == "" {
-		legacyWindsurfFallback = defaultWindsurfUserHome
-	}
-	previousWindsurfUserHome, err := resolvePreviousWindsurfUserHome(
-		configuredWindsurfHome,
-		previousConnectors,
-		source.DataRoot,
-		legacyWindsurfFallback,
-	)
-	if err != nil {
-		return setupTransaction{}, err
 	}
 	previousAntigravityConfigDir, err := resolvePreviousConnectorHome(
 		configuredAntigravityHome,
@@ -946,7 +909,6 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		PreviousDevinConfigDir:       previousDevinConfigDir,
 		PreviousDevinExecutable:      previousDevinExecutable,
 		PreviousHermesHome:           previousHermesHome,
-		PreviousWindsurfUserHome:     previousWindsurfUserHome,
 		PreviousAntigravityConfigDir: previousAntigravityConfigDir,
 		PreviousGeminiCLIHome:        previousGeminiCLIHome,
 		PreviousGeminiConfigDir:      previousGeminiConfigDir,
@@ -959,7 +921,6 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		DevinConfigDir:               previousDevinConfigDir,
 		DevinExecutable:              previousDevinExecutable,
 		HermesHome:                   previousHermesHome,
-		WindsurfUserHome:             previousWindsurfUserHome,
 		AntigravityConfigDir:         previousAntigravityConfigDir,
 		GeminiCLIHome:                previousGeminiCLIHome,
 		GeminiConfigDir:              previousGeminiConfigDir,
@@ -1161,55 +1122,6 @@ func resolvePreviousConnectorHome(
 	return inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallbackHome)
 }
 
-func resolvePreviousWindsurfUserHome(
-	configured string,
-	previousConnectors []string,
-	dataRoot, fallback string,
-) (string, error) {
-	managed := false
-	for _, previous := range previousConnectors {
-		if previous == "windsurf" {
-			managed = true
-			break
-		}
-	}
-	fallbackHome := configured
-	if fallbackHome == "" {
-		fallbackHome = fallback
-	}
-	if !managed {
-		return fallbackHome, nil
-	}
-
-	bindingPath := filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")
-	data, err := os.ReadFile(bindingPath)
-	if errors.Is(err, os.ErrNotExist) {
-		if configured != "" {
-			return configured, nil
-		}
-		return "", errors.New("windsurf managed backup is missing and no bound user profile was persisted")
-	}
-	if err != nil {
-		return "", fmt.Errorf("read windsurf managed backup binding: %w", err)
-	}
-	var binding struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(data, &binding); err != nil {
-		return "", fmt.Errorf("parse windsurf managed backup binding: %w", err)
-	}
-	target := filepath.Clean(binding.Path)
-	if strings.TrimSpace(binding.Path) == "" || !filepath.IsAbs(target) {
-		return "", errors.New("windsurf managed backup has an invalid target path")
-	}
-	userHome := filepath.Dir(filepath.Dir(filepath.Dir(target)))
-	expected := filepath.Join(userHome, ".codeium", "windsurf", "hooks.json")
-	if !strings.EqualFold(target, filepath.Clean(expected)) {
-		return "", errors.New("windsurf managed backup is outside the bound user profile")
-	}
-	return userHome, nil
-}
-
 func transactionChildEnv(transaction setupTransaction) []string {
 	return transactionChildEnvForConnectorHomes(
 		transaction,
@@ -1219,7 +1131,6 @@ func transactionChildEnv(transaction setupTransaction) []string {
 		transaction.CursorHome,
 		transaction.DevinConfigDir,
 		transaction.DevinExecutable,
-		transaction.WindsurfUserHome,
 		transaction.AntigravityConfigDir,
 		transaction.GeminiCLIHome,
 		transaction.GeminiConfigDir,
@@ -1238,7 +1149,6 @@ func transactionPreviousChildEnv(transaction setupTransaction) []string {
 		transaction.PreviousCursorHome,
 		transaction.PreviousDevinConfigDir,
 		transaction.PreviousDevinExecutable,
-		transaction.PreviousWindsurfUserHome,
 		transaction.PreviousAntigravityConfigDir,
 		transaction.PreviousGeminiCLIHome,
 		transaction.PreviousGeminiConfigDir,
@@ -1265,7 +1175,6 @@ func transactionChildEnvForHomes(
 		transaction.CursorHome,
 		transaction.DevinConfigDir,
 		transaction.DevinExecutable,
-		transaction.WindsurfUserHome,
 		antigravityConfigDir,
 		transaction.GeminiCLIHome,
 		transaction.GeminiConfigDir,
@@ -1287,7 +1196,6 @@ func transactionChildEnvForAllHomes(
 		transaction.CursorHome,
 		transaction.DevinConfigDir,
 		transaction.DevinExecutable,
-		transaction.WindsurfUserHome,
 		transaction.AntigravityConfigDir,
 		transaction.GeminiCLIHome,
 		transaction.GeminiConfigDir,
@@ -1299,7 +1207,7 @@ func transactionChildEnvForAllHomes(
 
 func transactionChildEnvForConnectorHomes(
 	transaction setupTransaction,
-	codexHome, claudeConfigDir, copilotHome, cursorHome, devinConfigDir, devinExecutable, windsurfUserHome, antigravityConfigDir, geminiCLIHome, geminiConfigDir, openCodeConfigDir, omnigentConfigHome, hermesHome string,
+	codexHome, claudeConfigDir, copilotHome, cursorHome, devinConfigDir, devinExecutable, antigravityConfigDir, geminiCLIHome, geminiConfigDir, openCodeConfigDir, omnigentConfigHome, hermesHome string,
 ) []string {
 	base := managedChildEnv(transaction.DataRoot)
 	filtered := make([]string, 0, len(base)+12)
@@ -1311,8 +1219,6 @@ func transactionChildEnvForConnectorHomes(
 			strings.EqualFold(name, "DEFENSECLAW_CURSOR_CONFIG_HOME") ||
 			strings.EqualFold(name, "DEFENSECLAW_DEVIN_CONFIG_HOME") ||
 			strings.EqualFold(name, "DEFENSECLAW_DEVIN_EXECUTABLE") ||
-			strings.EqualFold(name, "WINDSURF_USER_HOME") ||
-			strings.EqualFold(name, "WINDSURF_HOOK_CONFIG_PATH") ||
 			strings.EqualFold(name, "ANTIGRAVITY_CONFIG_DIR") ||
 			strings.EqualFold(name, "GEMINI_CLI_HOME") ||
 			strings.EqualFold(name, "GEMINI_CONFIG_DIR") ||
@@ -1342,18 +1248,6 @@ func transactionChildEnvForConnectorHomes(
 	}
 	if devinExecutable != "" {
 		filtered = append(filtered, "DEFENSECLAW_DEVIN_EXECUTABLE="+devinExecutable)
-	}
-	if windsurfUserHome != "" {
-		filtered = append(filtered, "WINDSURF_USER_HOME="+windsurfUserHome)
-		filtered = append(
-			filtered,
-			"WINDSURF_HOOK_CONFIG_PATH="+filepath.Join(
-				windsurfUserHome,
-				".codeium",
-				"windsurf",
-				"hooks.json",
-			),
-		)
 	}
 	if antigravityConfigDir != "" {
 		// Internal Setup-to-gateway custody binding. The hidden --config-home
@@ -1611,7 +1505,6 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 			!samePath(transaction.PreviousCursorHome, transaction.CursorHome) ||
 			!samePath(transaction.PreviousDevinConfigDir, transaction.DevinConfigDir) ||
 			!samePath(transaction.PreviousDevinExecutable, transaction.DevinExecutable) ||
-			!samePath(transaction.PreviousWindsurfUserHome, transaction.WindsurfUserHome) ||
 			!samePath(transaction.PreviousOpenCodeConfigDir, transaction.OpenCodeConfigDir) ||
 			!samePath(transaction.PreviousOmnigentConfigHome, transaction.OmnigentConfigHome) ||
 			!samePath(transaction.PreviousHermesHome, transaction.HermesHome) {
@@ -1648,7 +1541,6 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		"previous Cursor home":                   transaction.PreviousCursorHome,
 		"previous Devin configuration dir":       transaction.PreviousDevinConfigDir,
 		"previous Devin executable":              transaction.PreviousDevinExecutable,
-		"previous Windsurf user home":            transaction.PreviousWindsurfUserHome,
 		"previous Antigravity configuration dir": transaction.PreviousAntigravityConfigDir,
 		"previous Gemini CLI home":               transaction.PreviousGeminiCLIHome,
 		"previous Gemini CLI configuration dir":  transaction.PreviousGeminiConfigDir,
@@ -1660,7 +1552,6 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		"Cursor home":                            transaction.CursorHome,
 		"Devin configuration dir":                transaction.DevinConfigDir,
 		"Devin executable":                       transaction.DevinExecutable,
-		"Windsurf user home":                     transaction.WindsurfUserHome,
 		"Antigravity configuration dir":          transaction.AntigravityConfigDir,
 		"Gemini CLI home":                        transaction.GeminiCLIHome,
 		"Gemini CLI configuration dir":           transaction.GeminiConfigDir,
@@ -1707,7 +1598,7 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 	}
 	seenConnectors := map[string]bool{}
 	for _, connectorName := range transaction.PreviousConnectors {
-		if connectorName == "none" || !validCleanupConnector(connectorName) {
+		if connectorName == "none" || !validConnector(connectorName) {
 			return fmt.Errorf("setup transaction has an invalid previous connector %q", connectorName)
 		}
 		if seenConnectors[connectorName] {
@@ -1738,7 +1629,7 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 	}
 	if state.SchemaVersion != 1 || state.InstallKind != "native-windows-exe" ||
 		state.InstallScope != "user" || !validPayloadVersion(state.Version) ||
-		!validCleanupConnector(state.Connector) || !validMode(state.Mode) {
+		!validConnector(state.Connector) || !validMode(state.Mode) {
 		return errors.New("installer state is not a supported native Windows install")
 	}
 	if state.TransactionID != "" && !validSetupTransactionID(state.TransactionID) {
@@ -1769,8 +1660,6 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 		"Cursor home":                   state.CursorHome,
 		"Devin configuration dir":       state.DevinConfigDir,
 		"Devin executable":              state.DevinExecutable,
-		"Windsurf user home":            state.WindsurfUserHome,
-		"Windsurf hooks path":           state.WindsurfHooksPath,
 		"Antigravity configuration dir": state.AntigravityConfigDir,
 		"Gemini CLI home":               state.GeminiCLIHome,
 		"Gemini CLI configuration dir":  state.GeminiConfigDir,
@@ -1785,13 +1674,6 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 			(strings.TrimSpace(value) != value || containsPathControl(value)) {
 			return fmt.Errorf("installer state has an invalid %s", label)
 		}
-	}
-	if state.WindsurfHooksPath != "" && (state.WindsurfUserHome == "" ||
-		!strings.EqualFold(
-			state.WindsurfHooksPath,
-			filepath.Join(state.WindsurfUserHome, ".codeium", "windsurf", "hooks.json"),
-		)) {
-		return errors.New("installer state has an inconsistent Windsurf hooks path")
 	}
 	if state.GeminiCLIHome != "" &&
 		!geminiCLIConfigBindingConsistent(state.GeminiCLIHome, state.GeminiConfigDir) {
@@ -3744,8 +3626,6 @@ func connectorHomeChanged(transaction setupTransaction, connectorName string) bo
 	case "devin":
 		return !samePath(transaction.PreviousDevinConfigDir, transaction.DevinConfigDir) ||
 			!samePath(transaction.PreviousDevinExecutable, transaction.DevinExecutable)
-	case "windsurf":
-		return !samePath(transaction.PreviousWindsurfUserHome, transaction.WindsurfUserHome)
 	case "antigravity":
 		return !samePath(transaction.PreviousAntigravityConfigDir, transaction.AntigravityConfigDir)
 	case "geminicli":

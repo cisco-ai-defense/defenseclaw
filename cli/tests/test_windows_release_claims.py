@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 import yaml
+from defenseclaw import legacy_connector
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
     DEPRECATED_CONNECTORS,
@@ -357,7 +358,7 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         assert f'<ConnectorLabel id="{connector_id}" />' in compatibility
 
 
-def test_public_docs_expose_devin_and_no_windsurf_setup_surface() -> None:
+def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None:
     docs_root = ROOT / "docs-site"
     public_sources = [
         *sorted((docs_root / "content").rglob("*.mdx")),
@@ -367,11 +368,12 @@ def test_public_docs_expose_devin_and_no_windsurf_setup_surface() -> None:
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in public_sources)
 
-    assert "defenseclaw setup windsurf" not in combined
-    assert "/docs/connectors/windsurf" not in combined
-    assert '<ConnectorLabel id="windsurf"' not in combined
-    assert '"id": "windsurf"' not in combined
-    assert "id: 'windsurf'" not in combined
+    retired = legacy_connector.RETIRED_DESKTOP_ID
+    assert f"defenseclaw setup {retired}" not in combined
+    assert f"/docs/connectors/{retired}" not in combined
+    assert f'<ConnectorLabel id="{retired}"' not in combined
+    assert f'"id": "{retired}"' not in combined
+    assert f"id: '{retired}'" not in combined
     assert "legacy Cascade" not in combined
     assert "Devin Desktop" not in combined
     assert "defenseclaw setup devin" in combined

@@ -90,23 +90,6 @@ class TestIsKnown:
         assert connector_paths.is_known(None)
 
 
-def test_legacy_windsurf_teardown_paths_use_explicit_profile_binding_not_ambient_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bound = tmp_path / "bound-profile"
-    ambient = tmp_path / "ambient-profile"
-    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
-    monkeypatch.setattr(Path, "home", lambda: ambient)
-
-    assert connector_paths.windsurf_config_home() == str(
-        bound / ".codeium" / "windsurf"
-    )
-    assert connector_paths.windsurf_hook_config_path() == str(
-        bound / ".codeium" / "windsurf" / "hooks.json"
-    )
-    assert not connector_paths.is_known("windsurf")
-
-
 def test_gemini_paths_keep_only_exact_cleanup_binding_and_block_active_surfaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,37 +199,6 @@ def test_gemini_official_cli_home_rejects_invalid_nonempty_paths(
     monkeypatch.setenv("GEMINI_CLI_HOME", binding)
     with pytest.raises(ValueError, match="GEMINI_CLI_HOME.*absolute normalized path"):
         connector_paths.connector_home("geminicli")
-
-
-def test_windsurf_profile_binding_rejects_non_normalized_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(
-        "WINDSURF_USER_HOME",
-        str(tmp_path / "profile" / ".." / "redirected"),
-    )
-
-    with pytest.raises(ValueError, match="absolute normalized"):
-        connector_paths.windsurf_hook_config_path()
-
-
-def test_windsurf_hook_binding_must_match_bound_profile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bound = tmp_path / "bound-profile"
-    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
-    monkeypatch.setenv(
-        "WINDSURF_HOOK_CONFIG_PATH",
-        str(tmp_path / "ambient-profile" / ".codeium" / "windsurf" / "hooks.json"),
-    )
-
-    with pytest.raises(ValueError, match="does not match"):
-        connector_paths.windsurf_hook_config_path()
-
-
-# ---------------------------------------------------------------------------
-# skill_dirs
-# ---------------------------------------------------------------------------
 
 
 class TestSkillDirs:
@@ -3106,7 +3058,6 @@ class TestMCPSourceLocations:
             "geminicli",
             "openhands",
             "hermes",
-            "windsurf",
         ],
     )
     def test_every_file_opened_was_declared(

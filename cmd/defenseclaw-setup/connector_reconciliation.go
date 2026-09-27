@@ -106,7 +106,7 @@ func retryPendingConnectorReconciliation(
 		}
 		seen[identity] = true
 		connectorName := strings.ToLower(failure.Connector)
-		codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, windsurfHome, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome := "", "", "", "", "", "", "", "", "", "", "", "", ""
+		codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome := "", "", "", "", "", "", "", "", "", "", "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
 		} else if connectorName == "claudecode" {
@@ -118,8 +118,6 @@ func retryPendingConnectorReconciliation(
 		} else if connectorName == "devin" {
 			devinHome = failure.ConfigHome
 			devinExecutable = transaction.PreviousDevinExecutable
-		} else if connectorName == "windsurf" {
-			windsurfHome = failure.ConfigHome
 		} else if connectorName == "antigravity" {
 			antigravityHome = failure.ConfigHome
 		} else if connectorName == "geminicli" {
@@ -133,7 +131,7 @@ func retryPendingConnectorReconciliation(
 			hermesHome = failure.ConfigHome
 		}
 		env := transactionChildEnvForConnectorHomes(
-			transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, windsurfHome, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
+			transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
 		)
 		verify := func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
@@ -324,8 +322,6 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.CursorHome)
 		case "devin":
 			candidates = append(candidates, transaction.PreviousState.DevinConfigDir)
-		case "windsurf":
-			candidates = append(candidates, transaction.PreviousState.WindsurfUserHome)
 		case "antigravity":
 			candidates = append(candidates, transaction.PreviousState.AntigravityConfigDir)
 		case "geminicli":
@@ -339,17 +335,14 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 		}
 	}
 	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
-	if connectorName != "windsurf" && connectorName != "devin" &&
+	if connectorName != "devin" &&
 		!connectorManagedBackupExists(transaction.DataRoot, connectorName) {
 		// A predecessor or concurrent reconcile can discard its exact managed
 		// backup after detecting config drift while retaining the field-level
 		// cleanup authority. Installer state from a pre-home-binding release can
 		// then name only a stale override. The native data root is already bound
 		// to %USERPROFILE%\.defenseclaw, so its finite sibling is the only safe
-		// default-home fallback. Windsurf is deliberately excluded: it has no
-		// vendor home override and maintenance may target only the profile root
-		// captured in installer state or managed backup, never an inferred
-		// ambient profile. Verification runs before any mutation, and the
+		// default-home fallback. Verification runs before any mutation, and the
 		// lifecycle command still rejects reparse points and unsafe ownership.
 		candidates = append(candidates, connectorDefaultHomeBesideDataRoot(
 			transaction.DataRoot,
@@ -393,8 +386,6 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 	case "cursor":
 		logicalName = "hooks.json"
 	case "devin":
-		logicalName = "config"
-	case "windsurf":
 		logicalName = "config"
 	case "antigravity":
 		logicalName = "hooks.json"
@@ -458,7 +449,6 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 	cursorHome := transaction.PreviousCursorHome
 	devinHome := transaction.PreviousDevinConfigDir
 	devinExecutable := transaction.PreviousDevinExecutable
-	windsurfHome := transaction.PreviousWindsurfUserHome
 	antigravityHome := transaction.PreviousAntigravityConfigDir
 	geminiCLIHome := transaction.PreviousGeminiCLIHome
 	geminiHome := transaction.PreviousGeminiConfigDir
@@ -475,8 +465,6 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 		cursorHome = configHome
 	} else if connectorName == "devin" {
 		devinHome = configHome
-	} else if connectorName == "windsurf" {
-		windsurfHome = configHome
 	} else if connectorName == "antigravity" {
 		antigravityHome = configHome
 	} else if connectorName == "geminicli" {
@@ -490,7 +478,7 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 		hermesHome = configHome
 	}
 	return transactionChildEnvForConnectorHomes(
-		transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, windsurfHome, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
+		transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
 	)
 }
 
@@ -709,7 +697,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName == "none" || !validCleanupConnector(connectorName) {
+	if connectorName == "none" || !validConnector(connectorName) {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -792,11 +780,6 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousDevinConfigDir
 		}
 		return transaction.DevinConfigDir
-	case "windsurf":
-		if previous {
-			return transaction.PreviousWindsurfUserHome
-		}
-		return transaction.WindsurfUserHome
 	case "antigravity":
 		if previous {
 			return transaction.PreviousAntigravityConfigDir

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -164,8 +165,8 @@ func TestLoadAISignatures_DevinUsesNativeCLIContractOnly(t *testing.T) {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
 	for _, sig := range sigs {
-		if sig.ID == "windsurf" {
-			t.Fatal("retired Windsurf signature remains public")
+		if legacyconnector.IsRetired(sig.ID) {
+			t.Fatal("the retired Desktop connector signature remains public")
 		}
 		if sig.ID != "devin" {
 			continue

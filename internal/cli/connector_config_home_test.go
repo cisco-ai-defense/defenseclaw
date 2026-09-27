@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -45,7 +47,7 @@ func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testin
 	}
 }
 
-func TestBindWindsurfLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T) {
+func TestBindRetiredDesktopLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T) {
 	root := t.TempDir()
 	ambient := filepath.Join(root, "ambient-profile")
 	bound := filepath.Join(root, "bound-profile")
@@ -65,22 +67,40 @@ func TestBindWindsurfLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T)
 	connectorFlagConfigHome = bound
 	t.Cleanup(func() { connectorFlagConfigHome = "" })
 
-	restore, err := bindConnectorLifecycleConfigHome("windsurf")
+	// Only the bound profile carries an entry an older release wrote, so the
+	// retired connector's verification observes which profile is bound.
+	dataDir := filepath.Join(root, "data")
+	script := legacyconnector.OwnedHookScripts(dataDir)[0]
+	hooks := legacyconnector.CascadeUserHooksPath(bound)
+	body, err := json.Marshal(map[string]any{"hooks": map[string]any{
+		"pre_run_command": []any{map[string]any{"command": script}},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBound := filepath.Join(bound, ".codeium", "windsurf", "hooks.json")
-	if got := connector.NewWindsurfConnector().Capabilities(
-		connector.SetupOpts{},
-	).Hooks.ConfigPath; filepath.Clean(got) != filepath.Clean(wantBound) {
-		t.Fatalf("bound Windsurf hooks path = %q, want %q", got, wantBound)
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retired, ok := connector.RetiredConnector(legacyconnector.RetiredDesktopID)
+	if !ok {
+		t.Fatal("retired Desktop connector did not resolve")
+	}
+	opts := connector.SetupOpts{DataDir: dataDir}
+
+	restore, err := bindConnectorLifecycleConfigHome(legacyconnector.RetiredDesktopID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retired.VerifyClean(opts); err == nil {
+		restore()
+		t.Fatal("bound profile residue was not observed")
 	}
 	restore()
-	wantAmbient := filepath.Join(ambient, ".codeium", "windsurf", "hooks.json")
-	if got := connector.NewWindsurfConnector().Capabilities(
-		connector.SetupOpts{},
-	).Hooks.ConfigPath; filepath.Clean(got) != filepath.Clean(wantAmbient) {
-		t.Fatalf("restored Windsurf hooks path = %q, want ambient %q", got, wantAmbient)
+	if err := retired.VerifyClean(opts); err != nil {
+		t.Fatalf("ambient profile after restore = %v, want clean", err)
 	}
 }
 

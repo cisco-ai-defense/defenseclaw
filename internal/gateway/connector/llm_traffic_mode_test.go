@@ -25,7 +25,7 @@ import "testing"
 func TestLLMTrafficModeForConnector(t *testing.T) {
 	proxy := []string{"openclaw", "zeptoclaw"}
 	hooks := []string{
-		"claudecode", "codex", "hermes", "cursor", "windsurf",
+		"claudecode", "codex", "hermes", "cursor", "devin",
 		"geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp", "kiro",
 	}
 	for _, name := range proxy {

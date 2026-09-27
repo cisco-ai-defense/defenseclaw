@@ -107,10 +107,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		}
 	case "cursor":
 		output = CursorHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
-	case "windsurf":
-		if in.Action == "block" {
-			output = map[string]interface{}{"message": reason}
-		}
 	case "devin":
 		output = devinHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "geminicli":

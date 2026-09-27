@@ -71,7 +71,6 @@ type deferredVerifyInstallState struct {
 	ClaudeConfigDir      string `json:"claude_config_dir,omitempty"`
 	CopilotHome          string `json:"copilot_home,omitempty"`
 	CursorHome           string `json:"cursor_home,omitempty"`
-	WindsurfUserHome     string `json:"windsurf_user_home,omitempty"`
 	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
 	GeminiConfigDir      string `json:"gemini_config_dir,omitempty"`
 	OpenCodeConfigDir    string `json:"opencode_config_dir,omitempty"`
@@ -91,7 +90,6 @@ type deferredVerifyTransaction struct {
 	PreviousClaudeConfigDir      string                      `json:"previous_claude_config_dir,omitempty"`
 	PreviousCopilotHome          string                      `json:"previous_copilot_home,omitempty"`
 	PreviousCursorHome           string                      `json:"previous_cursor_home,omitempty"`
-	PreviousWindsurfUserHome     string                      `json:"previous_windsurf_user_home,omitempty"`
 	PreviousAntigravityConfigDir string                      `json:"previous_antigravity_config_dir,omitempty"`
 	PreviousGeminiConfigDir      string                      `json:"previous_gemini_config_dir,omitempty"`
 	PreviousOpenCodeConfigDir    string                      `json:"previous_opencode_config_dir,omitempty"`
@@ -101,7 +99,6 @@ type deferredVerifyTransaction struct {
 	ClaudeConfigDir              string                      `json:"claude_config_dir,omitempty"`
 	CopilotHome                  string                      `json:"copilot_home,omitempty"`
 	CursorHome                   string                      `json:"cursor_home,omitempty"`
-	WindsurfUserHome             string                      `json:"windsurf_user_home,omitempty"`
 	AntigravityConfigDir         string                      `json:"antigravity_config_dir,omitempty"`
 	GeminiConfigDir              string                      `json:"gemini_config_dir,omitempty"`
 	OpenCodeConfigDir            string                      `json:"opencode_config_dir,omitempty"`
@@ -409,11 +406,6 @@ func deferredVerifyConfigHomes(transaction deferredVerifyTransaction, connectorN
 			add(previous.CursorHome)
 		}
 		add(filepath.Join(filepath.Dir(transaction.DataRoot), ".cursor"))
-	case "windsurf":
-		add(transaction.PreviousWindsurfUserHome, transaction.WindsurfUserHome)
-		if previous != nil {
-			add(previous.WindsurfUserHome)
-		}
 	case "antigravity":
 		add(transaction.PreviousAntigravityConfigDir, transaction.AntigravityConfigDir)
 		if previous != nil {

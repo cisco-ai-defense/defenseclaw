@@ -669,26 +669,6 @@ func TestDeferredCleanupRecordCarriesCopilotRestorationReceipt(t *testing.T) {
 	}
 }
 
-func TestDeferredCleanupAcceptsCompleteWindsurfConnectorSet(t *testing.T) {
-	fixture := newDeferredCleanupFixture(t)
-	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "windsurf"}
-	paths := hookruntime.Paths{
-		Root:     fixture.record.RuntimeRoot,
-		Launcher: fixture.record.LauncherPath,
-		State:    fixture.record.StatePath,
-	}
-	if err := validateDeferredUninstallCleanupRecord(
-		fixture.record,
-		paths,
-		fixture.record.InstallerStateRoot,
-		fixture.record.MaintenancePath,
-		fixture.record.RunValueName,
-		fixture.record.RunCommand,
-	); err != nil {
-		t.Fatalf("Windsurf deferred-cleanup receipt rejected: %v", err)
-	}
-}
-
 func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndGemini(t *testing.T) {
 	fixture := newDeferredCleanupFixture(t)
 	paths := hookruntime.Paths{

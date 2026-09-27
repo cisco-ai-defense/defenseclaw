@@ -18,7 +18,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -320,63 +319,6 @@ args = ["hi"]
 	}
 	if entries[0].Source != mcpPath || entries[0].SourceScope != "project" || !entries[0].TrustRequired {
 		t.Errorf("project metadata = %+v, want source/project/trust-required", entries[0])
-	}
-}
-
-func TestWindsurfInventoryUsesPersistedBoundUserHome(t *testing.T) {
-	root := t.TempDir()
-	bound := filepath.Join(root, "bound-profile")
-	ambient := filepath.Join(root, "ambient-profile")
-	workspace := filepath.Join(root, "repo")
-	testenv.SetHome(t, ambient)
-	t.Setenv("WINDSURF_USER_HOME", bound)
-
-	for _, item := range []struct {
-		home string
-		name string
-	}{
-		{home: bound, name: "bound"},
-		{home: ambient, name: "ambient"},
-	} {
-		dir := filepath.Join(item.home, ".codeium", "windsurf")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		body := fmt.Sprintf(`{"mcpServers":{"%s":{"command":"%s-mcp"}}}`, item.name, item.name)
-		if err := os.WriteFile(filepath.Join(dir, "mcp_config.json"), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	guessed := filepath.Join(bound, ".codeium", "windsurf", "mcp.json")
-	if err := os.WriteFile(guessed, []byte(`{"mcpServers":{"guessed":{"command":"guessed-mcp"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
-	if got, want := cfg.ConnectorHomeDir("windsurf"), filepath.Join(bound, ".codeium", "windsurf"); got != want {
-		t.Fatalf("ConnectorHomeDir(windsurf) = %q, want %q", got, want)
-	}
-	wantSkills := []string{
-		filepath.Join(bound, ".codeium", "windsurf", "skills"),
-		filepath.Join(bound, ".agents", "skills"),
-		filepath.Join(workspace, ".windsurf", "skills"),
-		filepath.Join(workspace, ".agents", "skills"),
-	}
-	if got := cfg.SkillDirsForConnector("windsurf"); len(got) != len(wantSkills) {
-		t.Fatalf("SkillDirsForConnector(windsurf) = %v, want %v", got, wantSkills)
-	} else {
-		for _, want := range wantSkills {
-			if !containsPath(got, want) {
-				t.Fatalf("SkillDirsForConnector(windsurf) = %v, missing %q", got, want)
-			}
-		}
-	}
-	entries, err := cfg.ReadMCPServersForConnector("windsurf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name != "bound" || entries[0].Command != "bound-mcp" {
-		t.Fatalf("Windsurf MCP entries = %+v, want only bound profile", entries)
 	}
 }
 

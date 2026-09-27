@@ -204,21 +204,6 @@ def test_prepare_uses_known_folders_and_exact_fixed_argv(tmp_path: Path) -> None
     assert request.source_commit == _SOURCE
 
 
-def test_prepare_accepts_bound_windsurf_profile_state(tmp_path: Path) -> None:
-    local_app_data, profile = _native_tree(tmp_path)
-    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
-    state = _install_state(local_app_data, profile)
-    state["connector"] = "windsurf"
-    state["windsurf_user_home"] = str(profile)
-    state["windsurf_hooks_path"] = str(profile / ".codeium" / "windsurf" / "hooks.json")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    request = _prepare_from_tree(local_app_data, profile)
-
-    assert request is not None
-    assert request.argv[1:] == ("/uninstall", "/quiet")
-
-
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows inherited ACLs")
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("publication", ["fresh-install", "repair"])

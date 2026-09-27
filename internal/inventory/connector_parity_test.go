@@ -31,7 +31,7 @@ import (
 // Antigravity, OpenCode, and Amp coverage gaps.
 //
 // The test enumerates the failure per-connector-per-artifact so a
-// regression names the exact gap (e.g. "windsurf: skill_paths
+// regression names the exact gap (e.g. "devin: skill_paths
 // empty") instead of a monolithic "some connector broke".
 func TestSupportedConnectorParityMatrix(t *testing.T) {
 	t.Parallel()

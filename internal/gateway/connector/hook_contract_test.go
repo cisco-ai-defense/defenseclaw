@@ -1188,7 +1188,7 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 		})
 	}
 
-	for _, connectorName := range []string{"windsurf", "geminicli", "copilot", "openhands", "omnigent"} {
+	for _, connectorName := range []string{"geminicli", "copilot", "openhands", "omnigent"} {
 		contract := ResolveHookContract(connectorName, "").Contract.ToolCallLifecycle
 		if contract.SupportsExactInvocationJoin() {
 			t.Fatalf("%s must not claim exact invocation joins", connectorName)

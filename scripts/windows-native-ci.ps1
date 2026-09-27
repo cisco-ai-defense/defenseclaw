@@ -4262,11 +4262,6 @@ function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector)
                 'connector_backups\cursor\hooks.json.json'
             )
         }
-        # Retired Windsurf/Cascade is accepted only as an old backup namespace
-        # so uninstall can restore bytes owned by a pre-Devin installation.
-        'windsurf' {
-            @('connector_backups\windsurf\config.json')
-        }
         'antigravity' {
             @('connector_backups\antigravity\hooks.json.json')
         }
@@ -4303,11 +4298,6 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
         @(Get-NativeConnectorBackupMarkers $DataRoot 'cursor').Count -ne 0) {
         $required += 'cursor'
     }
-    # Preserve cleanup authority for a pre-Devin Cascade backup, but never
-    # treat the retired connector as configured or selectable.
-    if (@(Get-NativeConnectorBackupMarkers $DataRoot 'windsurf').Count -ne 0) {
-        $required += 'windsurf'
-    }
     foreach ($connector in $required) {
         # Setup intentionally classifies uninstall work from the configured
         # roster as well as active state and backup markers. Exact connector
@@ -4322,9 +4312,7 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
 
 function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
     $remaining = [Collections.Generic.List[string]]::new()
-    # The final legacy entry proves uninstall consumed old Cascade restoration
-    # custody without exposing Windsurf as a current connector.
-    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf')) {
+    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor')) {
         foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
             $remaining.Add("$connector/$relativePath")
         }
@@ -6213,17 +6201,6 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
                     Write-Warning "setup acceptance $configuredConnector teardown cleanup failed: $($_.Exception.Message)"
                 }
             }
-            # Retired Windsurf/Cascade is not a setup target. Invoke its
-            # compatibility teardown only when an old restoration marker proves
-            # that a pre-Devin installation still owns cleanup work.
-            if (@(Get-NativeConnectorBackupMarkers $dataRoot 'windsurf').Count -ne 0) {
-                try {
-                    Invoke-Installed $gateway @('connector', 'teardown', '--connector', 'windsurf') `
-                        @(0, 1) 120 | Out-Null
-                } catch {
-                    Write-Warning "legacy Cascade teardown cleanup failed: $($_.Exception.Message)"
-                }
-            }
         }
         try {
             Stop-SetupAcceptanceHealthSampler $setupHealthSampler
@@ -8000,8 +7977,7 @@ function Invoke-Contract {
             -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
         $installStatePropertyNames = @($contractInstallState.PSObject.Properties.Name)
         foreach ($retiredProperty in @(
-            'gemini_cli_home', 'gemini_config_dir',
-            'windsurf_user_home', 'windsurf_hooks_path'
+            'gemini_cli_home', 'gemini_config_dir'
         )) {
             if ($installStatePropertyNames -contains $retiredProperty) {
                 throw "fresh native Setup install state retained deprecated connector custody: $retiredProperty"

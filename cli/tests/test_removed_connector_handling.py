@@ -22,7 +22,6 @@ import unittest
 from unittest.mock import patch
 
 from click.testing import CliRunner
-
 from defenseclaw.commands import cmd_setup, cmd_uninstall
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig

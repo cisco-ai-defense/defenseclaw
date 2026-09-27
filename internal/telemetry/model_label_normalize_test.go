@@ -131,7 +131,7 @@ func TestNormalizeHookEventTypeLabel_BoundsCardinality(t *testing.T) {
 		"beforeShellExecution":     "tool_call",
 		"UserPromptSubmit":         "prompt",
 		"PostToolUse":              "tool_result",
-		"post_cascade_response":    "response",
+		"post_llm_call":            "response",
 		"MessageDisplay":           "response",
 		"Stop":                     "stop",
 		"StopFailure":              "stop",

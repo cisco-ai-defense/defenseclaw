@@ -49,7 +49,7 @@ CONNECTORS = (
     "codex",
     "hermes",
     "cursor",
-    "windsurf",
+    "devin",
     "copilot",
     "openhands",
     "antigravity",

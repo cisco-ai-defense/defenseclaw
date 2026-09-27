@@ -227,8 +227,6 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersCursor(workspaceDir)
 	case "devin":
 		return readMCPServersDevin(workspaceDir)
-	case "windsurf":
-		return readMCPServersWindsurf()
 	case "geminicli":
 		return readMCPServersGeminiCLI(workspaceDir)
 	case "copilot":
@@ -593,12 +591,6 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return ""
 		}
 		return configHome
-	case "windsurf":
-		boundHome, err := windsurfUserHome()
-		if err != nil {
-			return ""
-		}
-		return filepath.Join(boundHome, ".codeium", "windsurf")
 	case "geminicli":
 		configHome, err := geminiCLIConfigHome()
 		if err != nil {
@@ -755,17 +747,6 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".cursor", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "windsurf":
-		boundHome, err := windsurfUserHome()
-		if err != nil {
-			return nil
-		}
-		return dedupNonEmpty([]string{
-			filepath.Join(boundHome, ".codeium", "windsurf", "skills"),
-			filepath.Join(boundHome, ".agents", "skills"),
-			workspaceJoin(cwd, ".windsurf", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		})
 	case "devin":
 		configHome, err := devinConfigHome()
 		if err != nil {
@@ -878,7 +859,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".config", "amp", "plugins"),
 			workspaceJoin(cwd, ".amp", "plugins"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands", "opencode", "omnigent":
+	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()
@@ -1283,33 +1264,6 @@ func ReadMCPFromDevinConfig(path string) ([]MCPServerEntry, error) {
 		return readMCPFromAnyPaths(raw, []string{"mcpServers"})
 	}
 	return readMCPFromAnyPaths(map[string]any{"mcpServers": raw}, []string{"mcpServers"})
-}
-
-func readMCPServersWindsurf() ([]MCPServerEntry, error) {
-	home, err := windsurfUserHome()
-	if err != nil {
-		return nil, err
-	}
-	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
-	entries, err := readMCPFromDotMCPJSON(path)
-	if err != nil {
-		return nil, nil
-	}
-	return dedupMCPEntries(entries), nil
-}
-
-func windsurfUserHome() (string, error) {
-	configured := os.Getenv("WINDSURF_USER_HOME")
-	if configured == "" {
-		return os.UserHomeDir()
-	}
-	if strings.TrimSpace(configured) != configured ||
-		strings.ContainsAny(configured, "\x00\r\n") ||
-		!filepath.IsAbs(configured) ||
-		filepath.Clean(configured) != configured {
-		return "", fmt.Errorf("WINDSURF_USER_HOME is not an absolute normalized path")
-	}
-	return configured, nil
 }
 
 func readMCPServersGeminiCLI(workspaceDir string) ([]MCPServerEntry, error) {

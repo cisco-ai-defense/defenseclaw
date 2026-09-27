@@ -57,7 +57,7 @@ try:  # Python 3.11+; the project supports 3.10 via its pinned fallback.
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
-from defenseclaw import credential_provenance, rulepack_validation, ux
+from defenseclaw import credential_provenance, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
 from defenseclaw.connector_paths import (
@@ -9197,7 +9197,6 @@ _CONNECTOR_LABELS = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "windsurf": "Retired Cascade (cleanup only)",
     "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
@@ -9833,9 +9832,8 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "devin": (
         os.path.join("connector_backups", "devin", "config.json"),
     ),
-    "windsurf": (
-        os.path.join("connector_backups", "windsurf", "config.json"),
-    ),
+    # A retired connector ID's setup backup is residue an older release left.
+    **legacy_connector.BACKUP_MARKERS,
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),

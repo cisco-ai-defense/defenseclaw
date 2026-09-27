@@ -64,49 +64,6 @@ func testInstallState(installRoot, dataRoot, maintenancePath, transactionID, ver
 	}
 }
 
-func TestValidateInstallStateForRootsRequiresExactWindsurfHooksTarget(t *testing.T) {
-	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
-	state := testInstallState(
-		installRoot,
-		dataRoot,
-		maintenancePath,
-		testCurrentTransactionID,
-		"1.0.0",
-	)
-	state.Connector = "windsurf"
-	state.WindsurfUserHome = filepath.Join(t.TempDir(), "bound-profile")
-	state.WindsurfHooksPath = filepath.Join(
-		state.WindsurfUserHome,
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if err := validateInstallStateForRoots(
-		&state,
-		installRoot,
-		dataRoot,
-		maintenancePath,
-	); err != nil {
-		t.Fatalf("exact Windsurf hook target was rejected: %v", err)
-	}
-
-	state.WindsurfHooksPath = filepath.Join(
-		t.TempDir(),
-		"other-profile",
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if err := validateInstallStateForRoots(
-		&state,
-		installRoot,
-		dataRoot,
-		maintenancePath,
-	); err == nil || !strings.Contains(err.Error(), "inconsistent Windsurf hooks path") {
-		t.Fatalf("mismatched Windsurf hook target error = %v", err)
-	}
-}
-
 func TestValidateInstallStateForRootsRequiresConsistentGeminiCLIHomeBinding(t *testing.T) {
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	state := testInstallState(
@@ -1668,7 +1625,7 @@ func TestTeardownSupersededConnectorsSwitchesConnector(t *testing.T) {
 func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *testing.T) {
 	transaction := setupTransaction{
 		DataRoot:           `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors: []string{"codex", "claudecode", "cursor", "windsurf", "opencode"},
+		PreviousConnectors: []string{"codex", "claudecode", "cursor", "opencode"},
 		TargetConnector:    "none",
 	}
 	var calls []string
@@ -1683,7 +1640,6 @@ func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *test
 		"codex:teardown", "codex:verify",
 		"claudecode:teardown", "claudecode:verify",
 		"cursor:teardown", "cursor:verify",
-		"windsurf:teardown", "windsurf:verify",
 		"opencode:teardown", "opencode:verify",
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -1799,62 +1755,6 @@ func TestTeardownSupersededCursorMovesSelectedConnectorToNewHome(t *testing.T) {
 	}
 }
 
-func TestTeardownSupersededWindsurfUsesExactPreviousProfile(t *testing.T) {
-	transaction := setupTransaction{
-		DataRoot:                 `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors:       []string{"windsurf"},
-		TargetConnector:          "windsurf",
-		PreviousWindsurfUserHome: `C:\Users\bound-profile`,
-		WindsurfUserHome:         `C:\Users\new-profile`,
-	}
-	var calls []string
-	run := func(_, _, connector, action string, env []string) error {
-		calls = append(calls, connector+":"+action+":"+envValue(env, "WINDSURF_USER_HOME"))
-		return nil
-	}
-	if err := teardownSupersededConnectors(
-		transaction,
-		`C:\DefenseClaw\gateway.exe`,
-		transactionPreviousChildEnv(transaction),
-		run,
-	); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		`windsurf:teardown:C:\Users\bound-profile`,
-		`windsurf:verify:C:\Users\bound-profile`,
-	}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("Windsurf profile migration calls = %v, want %v", calls, want)
-	}
-}
-
-func TestTransactionChildEnvReplacesAmbientWindsurfBindings(t *testing.T) {
-	t.Setenv("WINDSURF_USER_HOME", `C:\Users\ambient-profile`)
-	t.Setenv(
-		"WINDSURF_HOOK_CONFIG_PATH",
-		`C:\Users\ambient-profile\.codeium\windsurf\hooks.json`,
-	)
-	transaction := setupTransaction{
-		DataRoot:         `C:\Users\tester\.defenseclaw`,
-		WindsurfUserHome: `C:\Users\bound-profile`,
-	}
-
-	env := transactionChildEnv(transaction)
-	if got := envValue(env, "WINDSURF_USER_HOME"); got != transaction.WindsurfUserHome {
-		t.Fatalf("Windsurf user home = %q, want %q", got, transaction.WindsurfUserHome)
-	}
-	wantHooks := filepath.Join(
-		transaction.WindsurfUserHome,
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
-	if got := envValue(env, "WINDSURF_HOOK_CONFIG_PATH"); got != wantHooks {
-		t.Fatalf("Windsurf hooks path = %q, want %q", got, wantHooks)
-	}
-}
-
 func TestGeminiTransactionRoundTripRehydratesVendorRootAndPrivateCustody(t *testing.T) {
 	root := t.TempDir()
 	previousCLIHome := filepath.Join(root, "previous")
@@ -1925,9 +1825,8 @@ func TestNewSetupTransactionIgnoresRetiredConnectorAmbientAndCreatesNoCustody(t 
 		t.Fatalf("fresh unrelated setup consulted retired GEMINI_CLI_HOME: %v", err)
 	}
 	for label, value := range map[string]string{
-		"WindsurfUserHome": transaction.WindsurfUserHome,
-		"GeminiCLIHome":    transaction.GeminiCLIHome,
-		"GeminiConfigDir":  transaction.GeminiConfigDir,
+		"GeminiCLIHome":   transaction.GeminiCLIHome,
+		"GeminiConfigDir": transaction.GeminiConfigDir,
 	} {
 		if value != "" {
 			t.Fatalf("fresh unrelated setup created retired %s custody %q", label, value)
@@ -2184,73 +2083,6 @@ func TestResolvePreviousConnectorHomePrefersManagedBindingOverInstallState(t *te
 	}
 	if !samePath(got, want) {
 		t.Fatalf("resolved previous connector home = %q, want managed binding %q", got, want)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeUsesExactManagedProfileBinding(t *testing.T) {
-	dataRoot := t.TempDir()
-	bindingPath := filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")
-	if err := os.MkdirAll(filepath.Dir(bindingPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(t.TempDir(), "bound-windsurf-profile")
-	if err := os.WriteFile(
-		bindingPath,
-		[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, ".codeium", "windsurf", "hooks.json"))),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	got, err := resolvePreviousWindsurfUserHome(
-		filepath.Join(t.TempDir(), "stale-profile"),
-		[]string{"windsurf"},
-		dataRoot,
-		filepath.Join(t.TempDir(), "ambient-profile"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !samePath(got, want) {
-		t.Fatalf("resolved Windsurf user home = %q, want managed binding %q", got, want)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeRejectsUnboundManagedProfile(t *testing.T) {
-	dataRoot := t.TempDir()
-	ambient := filepath.Join(t.TempDir(), "ambient-profile")
-	_, err := resolvePreviousWindsurfUserHome(
-		"",
-		[]string{"windsurf"},
-		dataRoot,
-		ambient,
-	)
-	if err == nil || !strings.Contains(err.Error(), "no bound user profile was persisted") {
-		t.Fatalf("error = %v, want refusal to guess ambient profile %q", err, ambient)
-	}
-}
-
-func TestResolvePreviousWindsurfUserHomeRejectsBindingOutsideVendorConfig(t *testing.T) {
-	dataRoot := t.TempDir()
-	bindingPath := filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")
-	if err := os.MkdirAll(filepath.Dir(bindingPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	foreign := filepath.Join(t.TempDir(), "foreign", "hooks.json")
-	if err := os.WriteFile(
-		bindingPath,
-		[]byte(fmt.Sprintf(`{"path":%q}`, foreign)),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	_, err := resolvePreviousWindsurfUserHome(
-		"",
-		[]string{"windsurf"},
-		dataRoot,
-		filepath.Join(t.TempDir(), "ambient-profile"),
-	)
-	if err == nil || !strings.Contains(err.Error(), "outside the bound user profile") {
-		t.Fatalf("error = %v, want invalid vendor config path refusal", err)
 	}
 }
 

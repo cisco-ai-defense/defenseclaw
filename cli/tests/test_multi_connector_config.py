@@ -231,7 +231,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("openhands"), "action")
         self.assertFalse(g.effective_enabled("openhands"))
         # Genuinely-absent connector still falls through to the global.
-        self.assertEqual(g.effective_mode("windsurf"), "observe")
+        self.assertEqual(g.effective_mode("retired-example"), "observe")
 
     def test_effective_enabled(self):
         # Mirrors Go EffectiveEnabled: default True; False only on an
@@ -248,7 +248,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_enabled("claudecode"))
         self.assertTrue(g.effective_enabled("cursor"))
         # Unknown / empty / single-connector all default True.
-        self.assertTrue(g.effective_enabled("windsurf"))
+        self.assertTrue(g.effective_enabled("retired-example"))
         self.assertTrue(g.effective_enabled(""))
         self.assertTrue(GuardrailConfig(connector="codex").effective_enabled("codex"))
 

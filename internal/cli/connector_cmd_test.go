@@ -1380,7 +1380,6 @@ func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
 		filepath.Join("geminicli", "settings.json"):    `{"connector":"geminicli"}`,
 		filepath.Join("copilot", "defenseclaw.json"):   `{"connector":"copilot"}`,
 		filepath.Join("cursor", "hooks.json.backup"):   `{"connector":"cursor"}`,
-		filepath.Join("windsurf", "hooks.json.backup"): `{"connector":"windsurf"}`,
 		filepath.Join("hermes", "config.yaml.managed"): `{"connector":"hermes"}`,
 	} {
 		path := filepath.Join(dir, "connector_backups", rel)
@@ -1396,7 +1395,7 @@ func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", exitCode)
 	}
-	for _, want := range []string{"codex", "geminicli", "copilot", "cursor", "windsurf", "hermes", "connector_backups"} {
+	for _, want := range []string{"codex", "geminicli", "copilot", "cursor", "hermes", "connector_backups"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected %s in managed backup output, got: %s", want, stdout)
 		}

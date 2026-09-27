@@ -1272,14 +1272,14 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
-			hookPath := filepath.Join(testenv.PrivateTempDir(t), "windsurf-hook")
+			hookPath := filepath.Join(testenv.PrivateTempDir(t), "orphan-example-hook")
 			const hookBody = "truthful pre-reconciliation hook bytes\n"
 			if err := os.WriteFile(hookPath, []byte(hookBody), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			conn := &orphanReconcileFailureConnector{
 				bootStubConnector: bootStubConnector{
-					stubConnector: stubConnector{name: "windsurf"},
+					stubConnector: stubConnector{name: "orphan-example"},
 					artifactPath:  hookPath,
 				},
 				hookPath:             hookPath,
@@ -1337,7 +1337,7 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 			if body, readErr := os.ReadFile(activePath); readErr != nil || !reflect.DeepEqual(body, priorActive) {
 				t.Fatalf("active state = %q, %v; want exact prior bytes %q", body, readErr, priorActive)
 			}
-			if connector.ConnectorExplicitlyInactive(dataDir, "windsurf") {
+			if connector.ConnectorExplicitlyInactive(dataDir, "orphan-example") {
 				t.Fatal("failed reconciliation committed a new inactive tombstone")
 			}
 			if body, readErr := os.ReadFile(lockPath); readErr != nil || !reflect.DeepEqual(body, priorLock) {
@@ -1368,14 +1368,14 @@ func TestReconcileOrphanedConnectorRegistrationRequiresProtectedActiveAuthority(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
-			hookPath := filepath.Join(testenv.PrivateTempDir(t), "windsurf-hook")
+			hookPath := filepath.Join(testenv.PrivateTempDir(t), "orphan-example-hook")
 			const hookBody = "protected orphan hook bytes\n"
 			if err := os.WriteFile(hookPath, []byte(hookBody), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			conn := &orphanReconcileFailureConnector{
 				bootStubConnector: bootStubConnector{
-					stubConnector: stubConnector{name: "windsurf"},
+					stubConnector: stubConnector{name: "orphan-example"},
 					artifactPath:  hookPath,
 				},
 				hookPath: hookPath,
@@ -1906,8 +1906,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.HookFailMode = "open"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"cursor":   {Mode: "action", HookFailMode: "closed"},
-		"windsurf": {Mode: "observe", HookFailMode: "closed"},
+		"cursor": {Mode: "action", HookFailMode: "closed"},
+		"devin":  {Mode: "observe", HookFailMode: "closed"},
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
@@ -1921,12 +1921,12 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	if cursorOpts.GuardrailMode != "action" {
 		t.Errorf("cursor GuardrailMode=%q, want action", cursorOpts.GuardrailMode)
 	}
-	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
-	if windsurfOpts.HookFailMode != "closed" {
-		t.Errorf("windsurf HookFailMode=%q, want connector override independent of observe mode", windsurfOpts.HookFailMode)
+	devinOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "devin"}}, "tok", "a", "b")
+	if devinOpts.HookFailMode != "closed" {
+		t.Errorf("devin HookFailMode=%q, want connector override independent of observe mode", devinOpts.HookFailMode)
 	}
-	if windsurfOpts.GuardrailMode != "observe" {
-		t.Errorf("windsurf GuardrailMode=%q, want observe", windsurfOpts.GuardrailMode)
+	if devinOpts.GuardrailMode != "observe" {
+		t.Errorf("devin GuardrailMode=%q, want observe", devinOpts.GuardrailMode)
 	}
 }
 

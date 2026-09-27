@@ -566,19 +566,6 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
-			name:       "windsurf block writes stderr exit 2 no stdout",
-			connector:  "windsurf",
-			respBody:   `{"action":"block","reason":"nope"}`,
-			wantStderr: "nope",
-			wantCode:   2,
-		},
-		{
-			name:      "windsurf allow exit 0",
-			connector: "windsurf",
-			respBody:  `{"action":"allow"}`,
-			wantCode:  0,
-		},
-		{
 			name:       "amp block writes stderr exit 2 no stdout",
 			connector:  "amp",
 			respBody:   `{"action":"block","reason":"nope"}`,
@@ -658,7 +645,6 @@ func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 		"devin",
 		"geminicli",
 		"openhands",
-		"windsurf",
 	} {
 		t.Run(connector, func(t *testing.T) {
 			result := run(t, connector, ok(`{"action":"alert","reason":"advisory finding"}`), func(opts *Options) {
@@ -855,7 +841,6 @@ func TestOversizedPayload(t *testing.T) {
 		"copilot":    {stdout: "", code: 0},
 		"geminicli":  {stdout: "", code: 2},
 		"hermes":     {stdout: "", code: 0},
-		"windsurf":   {stdout: "", code: 2},
 	}
 	for connector, want := range cases {
 		t.Run("fail closed "+connector, func(t *testing.T) {
@@ -1281,7 +1266,6 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 		"codex":       "/api/v1/codex/hook",
 		"claudecode":  "/api/v1/claude-code/hook",
 		"cursor":      "/api/v1/cursor/hook",
-		"windsurf":    "/api/v1/windsurf/hook",
 		"geminicli":   "/api/v1/geminicli/hook",
 		"copilot":     "/api/v1/copilot/hook",
 		"antigravity": "/api/v1/antigravity/hook",

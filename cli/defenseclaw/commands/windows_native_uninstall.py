@@ -91,8 +91,6 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "cursor_home",
         "devin_config_dir",
         "devin_executable",
-        "windsurf_user_home",
-        "windsurf_hooks_path",
         "antigravity_config_dir",
         "gemini_cli_home",
         "gemini_config_dir",
@@ -485,7 +483,6 @@ def _validate_install_state(
             "hermes",
             "kiro",
             "omnigent",
-            "windsurf",
             "opencode",
             "none",
         }

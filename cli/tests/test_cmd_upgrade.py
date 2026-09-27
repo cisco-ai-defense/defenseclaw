@@ -7730,7 +7730,6 @@ class TestUpgradeManifest(unittest.TestCase):
             "hermes",
             "omnigent",
             "opencode",
-            "windsurf",
         )
         for connector in connectors:
             with self.subTest(connector=connector), TemporaryDirectory() as temp:
@@ -8271,7 +8270,6 @@ class TestUpgradeManifest(unittest.TestCase):
             "hermes",
             "omnigent",
             "opencode",
-            "windsurf",
         ):
             with self.subTest(connector=connector):
                 state = {

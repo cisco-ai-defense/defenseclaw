@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
@@ -347,18 +348,13 @@ func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	}
 }
 
-func TestRetiredWindsurfIdentityIsMigrationOnly(t *testing.T) {
-	if validConnector("windsurf") || isNativeLifecycleConnector("windsurf") {
-		t.Fatal("retired Windsurf identity remained publicly installable")
+func TestRetiredDesktopIdentityIsRejected(t *testing.T) {
+	retired := legacyconnector.RetiredDesktopID
+	if validConnector(retired) || isNativeLifecycleConnector(retired) {
+		t.Fatal("the retired Desktop connector identity remained installable")
 	}
-	if !validCleanupConnector("windsurf") {
-		t.Fatal("retired Windsurf identity lost teardown compatibility")
-	}
-	if got := normalizeConnector("windsurf"); got != "windsurf" {
-		t.Fatalf("retired public choice unexpectedly normalized to %q", got)
-	}
-	if _, err := parseArgs([]string{"/quiet", "CONNECTOR=windsurf"}); err == nil {
-		t.Fatal("retired Windsurf identity remained an accepted setup argument")
+	if _, err := parseArgs([]string{"/quiet", "CONNECTOR=" + retired}); err == nil {
+		t.Fatal("the retired Desktop connector identity remained an accepted setup argument")
 	}
 }
 
@@ -927,7 +923,6 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 		filepath.Join("connector_backups", "copilot", "config.json"),
 		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
 		filepath.Join("connector_backups", "devin", "config.json"),
-		filepath.Join("connector_backups", "windsurf", "config.json"),
 		filepath.Join("connector_backups", "geminicli", "config.json"),
 		filepath.Join("connector_backups", "opencode", "config.json"),
 		filepath.Join("connector_backups", "omnigent", "config.json"),
@@ -947,7 +942,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "windsurf", "devin", "antigravity", "geminicli", "opencode", "omnigent", "hermes"}
+	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "devin", "antigravity", "geminicli", "opencode", "omnigent", "hermes"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}

@@ -85,7 +85,7 @@ func WithUserHomeDir(home string, fn func() error) error {
 // BindUserHomeDir holds an explicit user-home binding until the returned
 // restore function is called. Native Windows Setup uses this for maintenance
 // commands whose connector config lives below the profile root (for example,
-// Windsurf's .codeium/windsurf/hooks.json). The caller validates the path
+// a legacy per-user hooks file under the profile). The caller validates the path
 // before binding it; this function deliberately never falls back to an ambient
 // profile.
 func BindUserHomeDir(home string) (func(), error) {
@@ -187,11 +187,8 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "copilot" {
 		return windowsCopilotPowerShellAdapterCommand(unixCommand)
 	}
-	// Cursor requires an adapter for its object-pipeline transport. Retired Cascade
-	// documents a `powershell` command field and JSON stdin; its adapter uses
-	// byte streams so the payload and response streams reach the exact packaged
-	// launcher unchanged, synchronously preserving exit 2.
-	if connector == "cursor" || connector == "windsurf" {
+	// Cursor requires an adapter for its object-pipeline transport.
+	if connector == "cursor" {
 		adapter := strings.TrimSuffix(unixCommand, ".sh") + ".ps1"
 		return "& " + powershellQuoteLiteral(adapter)
 	}

@@ -43,7 +43,7 @@ const (
 	// `decision` is deny/block. (openhands-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
-	// stderr + exit 2. (windsurf-hook.sh)
+	// stderr + exit 2. (amp-plugin)
 	styleActionStderr
 )
 
@@ -155,15 +155,6 @@ var specs = map[string]spec{
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
-	"windsurf": {
-		connector: "windsurf", hookName: "windsurf-hook", errLabel: "windsurf",
-		subject: "windsurf tool", endpoint: "/api/v1/windsurf/hook",
-		outputField: "", style: styleActionStderr,
-		defaultBlockReason: "DefenseClaw blocked this Cascade action.",
-		oversizedClosed:    failResult{exit: blockExit},
-		unreachableStrict:  failResult{exit: blockExit},
-		responseClosed:     failResult{exit: blockExit},
-	},
 	"devin": {
 		connector: "devin", hookName: "devin-hook", errLabel: "devin",
 		subject: "devin hook", endpoint: "/api/v1/devin/hook",
@@ -242,11 +233,6 @@ func specFor(connector string) (spec, bool) {
 func SupportedConnectors() []string {
 	names := make([]string, 0, len(specs))
 	for name := range specs {
-		if name == "windsurf" {
-			// Retained solely so already-installed Cascade hooks can fail safely
-			// while the upgrade transaction restores their legacy backup.
-			continue
-		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

@@ -454,7 +454,7 @@ type HookCapabilityProvider interface {
 //     context vs. mint a fresh root span. v6-managed hooks set this true.
 //   - NativeOTLP: optional descriptor for the connector's native OTLP
 //     emission. nil when the connector does not emit native OTLP (cursor,
-//     windsurf, hermes, copilot today). Non-nil for codex (TOML),
+//     hermes, copilot today). Non-nil for codex (TOML),
 //     claudecode (env), and geminicli (JSON + path-token).
 //   - Decode: optional decoder for connector-specific event/content/tool
 //     wire shape. Identity fields returned by Decode are advisory only and

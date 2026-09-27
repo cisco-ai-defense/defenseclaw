@@ -77,9 +77,6 @@ func correlationContractSources(name string) []CorrelationContractSource {
 	case "cursor":
 		return source("cursor-hooks-doc-d13a6fc6",
 			"https://cursor.com/docs/hooks", "sha256:d13a6fc6c1cc3fbe1abccf8bbd9044781a24ebb6cb8ed4870574c3bd4b9694d4")
-	case "windsurf":
-		return source("windsurf-hooks-doc-9a43fa5d",
-			"https://docs.windsurf.com/windsurf/cascade/hooks", "sha256:9a43fa5d3f3963f842e8b18b4861f59d121e3782c053dbedb230788f19ff04bd")
 	case "devin":
 		return []CorrelationContractSource{{
 			ID:          "devin-hooks-doc-d420df73",

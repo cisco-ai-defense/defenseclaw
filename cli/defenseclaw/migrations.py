@@ -54,9 +54,8 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from defenseclaw import legacy_connector
+from defenseclaw import legacy_connector, ux
 from defenseclaw import migration_state as migration_state_helpers
-from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,

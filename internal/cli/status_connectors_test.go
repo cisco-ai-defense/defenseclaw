@@ -389,7 +389,6 @@ func TestFriendlyConnectorNameAmp(t *testing.T) {
 func TestFriendlyConnectorNamesMarkRetiredCleanupOnly(t *testing.T) {
 	for connector, want := range map[string]string{
 		"geminicli": "Retired Gemini CLI (cleanup only)",
-		"windsurf":  "Retired Cascade (cleanup only)",
 	} {
 		if got := friendlyConnectorName(connector); got != want {
 			t.Errorf("friendlyConnectorName(%s) = %q, want %q", connector, got, want)

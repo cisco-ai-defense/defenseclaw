@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -50,7 +49,6 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}{
 		{NewHermesConnector(), true, false, false, "user", "config.yaml"},
 		{NewCursorConnector(), true, false, true, "user", "hooks.json"},
-		{NewWindsurfConnector(), true, false, true, "user", "hooks.json"},
 		{NewGeminiCLIConnector(), true, false, true, "user", "settings.json"},
 		{NewCopilotConnector(), true, true, false, "user,workspace", "defenseclaw.json"},
 		{NewOpenHandsConnector(), true, false, true, "user,workspace", "hooks.json"},
@@ -872,7 +870,6 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	}{
 		{NewHermesConnector(), []string{"skill"}, false, true, true},
 		{NewCursorConnector(), []string{"skill", "rule"}, false, true, true},
-		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
 		{NewGeminiCLIConnector(), []string{"skill"}, true, true, true},
 		{NewCopilotConnector(), []string{"skill", "rule"}, false, true, true},
 		{NewOpenHandsConnector(), []string{"skill"}, runtime.GOOS == "darwin", false, true},
@@ -898,158 +895,6 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 			}
 			if caps.Plugins.Supported != tc.pluginsSupported {
 				t.Fatalf("Plugins.Supported = %v, want %v", caps.Plugins.Supported, tc.pluginsSupported)
-			}
-		})
-	}
-}
-
-func TestWindsurfConnector_CascadeOnlyInventorySurfaces(t *testing.T) {
-	t.Setenv("WINDSURF_USER_HOME", "")
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", "")
-	home := filepath.Join(t.TempDir(), "bound-profile")
-	workspace := filepath.Join(t.TempDir(), "repo")
-	err := WithUserHomeDir(home, func() error {
-		caps := NewWindsurfConnector().Capabilities(SetupOpts{WorkspaceDir: workspace})
-		wantMCP := []string{filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")}
-		if !caps.MCP.Supported || !caps.MCP.DiscoveryOnly || !sameStrings(caps.MCP.ReadPaths, wantMCP) {
-			return fmt.Errorf("Windsurf MCP capability = %+v, want bound legacy Cascade path %v", caps.MCP, wantMCP)
-		}
-		for _, path := range caps.MCP.ReadPaths {
-			if filepath.Base(path) == "mcp.json" {
-				return fmt.Errorf("undocumented guessed MCP path remains: %q", path)
-			}
-		}
-		wantSkills := []string{
-			filepath.Join(home, ".codeium", "windsurf", "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			filepath.Join(workspace, ".windsurf", "skills"),
-			filepath.Join(workspace, ".agents", "skills"),
-		}
-		if !caps.Skills.Supported || !caps.Skills.DiscoveryOnly || !sameStrings(caps.Skills.ReadPaths, wantSkills) {
-			return fmt.Errorf("Windsurf skills capability = %+v, want %v", caps.Skills, wantSkills)
-		}
-		rulePaths := strings.Join(caps.Rules.ReadPaths, "\n")
-		for _, want := range []string{"global_rules.md", ".devin", ".windsurf", ".windsurfrules", "AGENTS.md"} {
-			if !strings.Contains(rulePaths, want) {
-				return fmt.Errorf("Windsurf rule paths %v missing %q", caps.Rules.ReadPaths, want)
-			}
-		}
-		notes := strings.Join(append(append([]string{}, caps.MCP.Notes...), caps.Rules.Notes...), " ")
-		for _, want := range []string{"Devin Local", "ProgramData", "unverified"} {
-			if !strings.Contains(notes, want) {
-				return fmt.Errorf("Windsurf capability notes %q missing %q", notes, want)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWindsurfConnector_UsesOnePersistedProfileForHooksAndInventory(t *testing.T) {
-	previousOverride := WindsurfHooksPathOverride
-	WindsurfHooksPathOverride = ""
-	t.Cleanup(func() { WindsurfHooksPathOverride = previousOverride })
-
-	bound := filepath.Join(t.TempDir(), "windsurf-profile")
-	hooks := filepath.Join(bound, ".codeium", "windsurf", "hooks.json")
-	t.Setenv("WINDSURF_USER_HOME", bound)
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", hooks)
-	conn := NewWindsurfConnector()
-	opts := SetupOpts{WorkspaceDir: filepath.Join(t.TempDir(), "workspace")}
-
-	if got := windsurfHooksPath(opts); got != hooks {
-		t.Fatalf("hooks path = %q, want persisted binding %q", got, hooks)
-	}
-	caps := conn.Capabilities(opts)
-	profilePaths := append([]string{}, caps.MCP.ReadPaths...)
-	profilePaths = append(profilePaths, caps.Skills.ReadPaths[:2]...)
-	profilePaths = append(profilePaths, caps.Rules.ReadPaths[0])
-	for _, path := range profilePaths {
-		if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(bound)+string(filepath.Separator)) {
-			t.Fatalf("inventory path escaped persisted profile: %q", path)
-		}
-	}
-
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", filepath.Join(t.TempDir(), "other", "hooks.json"))
-	if got := windsurfHooksPath(opts); got != "" {
-		t.Fatalf("mismatched hook binding resolved to %q, want fail-closed empty path", got)
-	}
-	if err := conn.Setup(context.Background(), SetupOpts{DataDir: t.TempDir()}); err == nil ||
-		!strings.Contains(err.Error(), "WINDSURF_HOOK_CONFIG_PATH does not match") {
-		t.Fatalf("Setup path mismatch error = %v", err)
-	}
-}
-
-func TestWindsurfOwnedHooksPresent_RequiresExactTwelveEventContract(t *testing.T) {
-	for _, goos := range []string{"windows", "linux"} {
-		t.Run(goos, func(t *testing.T) {
-			previousOverride := WindsurfHooksPathOverride
-			path := filepath.Join(t.TempDir(), "hooks.json")
-			WindsurfHooksPathOverride = path
-			t.Cleanup(func() { WindsurfHooksPathOverride = previousOverride })
-
-			conn := NewWindsurfConnector()
-			opts := SetupOpts{DataDir: t.TempDir()}
-			command := conn.hookCommandForOS(goos, opts)
-			entry := map[string]interface{}{"show_output": true}
-			if goos == "windows" {
-				entry["powershell"] = command
-			} else {
-				entry["command"] = shellWord(command)
-			}
-			hooks := make(map[string]interface{}, len(windsurfCascadeHookEvents))
-			for _, event := range windsurfCascadeHookEvents {
-				hooks[event] = []interface{}{
-					map[string]interface{}{"command": "operator-hook"},
-					maps.Clone(entry),
-				}
-			}
-			cfg := map[string]interface{}{"hooks": hooks}
-			writeFixture := func() {
-				t.Helper()
-				body, err := json.MarshalIndent(cfg, "", "  ")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			writeFixture()
-			present, err := windsurfOwnedHooksPresentForOS(conn, opts, goos)
-			if err != nil || !present {
-				t.Fatalf("complete Cascade contract = %v, %v; want true", present, err)
-			}
-
-			delete(hooks, windsurfCascadeHookEvents[len(windsurfCascadeHookEvents)-1])
-			writeFixture()
-			present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-			if err != nil || present {
-				t.Fatalf("eleven-event Cascade contract = %v, %v; want false", present, err)
-			}
-
-			if goos == "windows" {
-				hooks[windsurfCascadeHookEvents[len(windsurfCascadeHookEvents)-1]] = []interface{}{maps.Clone(entry)}
-				managed := hooks[windsurfCascadeHookEvents[0]].([]interface{})[1].(map[string]interface{})
-				managed["command"] = command
-				writeFixture()
-				present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-				if err != nil || present {
-					t.Fatalf("Windows fallback-bearing contract = %v, %v; want false", present, err)
-				}
-
-				delete(managed, "command")
-				hooks[windsurfCascadeHookEvents[0]] = append(
-					hooks[windsurfCascadeHookEvents[0]].([]interface{}),
-					map[string]interface{}{"command": command, "show_output": true},
-				)
-				writeFixture()
-				present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-				if err != nil || present {
-					t.Fatalf("separate Windows fallback contract = %v, %v; want false", present, err)
-				}
 			}
 		})
 	}

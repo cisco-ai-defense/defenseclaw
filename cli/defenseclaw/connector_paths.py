@@ -398,12 +398,6 @@ def cleanup_only_guidance(connector: str | None) -> str:
             "connector. Remove existing DefenseClaw-managed Gemini CLI state "
             "with `defenseclaw setup remove geminicli --yes`."
         )
-    if name == "windsurf":
-        return (
-            "Windsurf/Cascade is retired and cleanup-only; use Devin. "
-            "DefenseClaw upgrade and uninstall retain authenticated legacy "
-            "receipt cleanup without exposing new Windsurf asset surfaces."
-        )
     return f"Connector {name!r} is retired and cleanup-only."
 
 
@@ -1108,62 +1102,6 @@ def devin_hook_config_path(workspace_dir: str | None = None) -> str:
     """Return the canonical project hook registration, if scope is pinned."""
 
     return _workspace_path(workspace_dir, ".devin", "hooks.v1.json")
-
-
-def windsurf_user_home() -> str:
-    """Return DefenseClaw's exact Windsurf user-profile binding.
-
-    Windsurf has no vendor configuration-home override. Native Setup records
-    the Windows Profile Known Folder and the packaged launcher supplies that
-    validated value through this DefenseClaw-only environment contract.
-    Reject malformed bindings instead of falling back to an ambient profile.
-    """
-
-    configured = os.environ.get("WINDSURF_USER_HOME")
-    if configured:
-        if (
-            configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-        ):
-            raise ValueError("WINDSURF_USER_HOME is not an absolute normalized path")
-        return configured
-    if os.name == "nt" and os.environ.get("DEFENSECLAW_INSTALL_ROOT"):
-        raise ValueError("packaged Windsurf profile binding is missing")
-    return os.path.abspath(str(Path.home()))
-
-
-def windsurf_config_home() -> str:
-    """Return the bound user-level Windsurf configuration directory."""
-
-    root = windsurf_user_home()
-    candidate = os.path.normpath(os.path.join(root, ".codeium", "windsurf"))
-    if os.path.commonpath((root, candidate)) != os.path.commonpath((root, root)):
-        raise ValueError("Windsurf configuration path escapes its bound profile")
-    return candidate
-
-
-def windsurf_hook_config_path() -> str:
-    """Return the exact bound user-level Cascade hooks file."""
-
-    expected = os.path.join(windsurf_config_home(), "hooks.json")
-    configured = os.environ.get("WINDSURF_HOOK_CONFIG_PATH")
-    if configured:
-        if (
-            configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-            or os.path.normcase(configured) != os.path.normcase(expected)
-        ):
-            raise ValueError("WINDSURF_HOOK_CONFIG_PATH does not match the bound profile")
-        return configured
-    return expected
 
 
 def gemini_config_home() -> str:

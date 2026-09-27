@@ -43,7 +43,6 @@ const (
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
 	CorrelationProfileDevinV1       CorrelationProfileVersion = "devin-correlation-v1"
-	CorrelationProfileWindsurfV1    CorrelationProfileVersion = "windsurf-correlation-v1"
 	CorrelationProfileGeminiCLIV1   CorrelationProfileVersion = "geminicli-correlation-v1"
 	CorrelationProfileCopilotV1     CorrelationProfileVersion = "copilot-correlation-v1"
 	CorrelationProfileOpenHandsV1   CorrelationProfileVersion = "openhands-correlation-v1"
@@ -424,11 +423,6 @@ func declaredCorrelationAliases(name string) []CorrelationPathAlias {
 		}
 	case "hermes":
 		return []CorrelationPathAlias{{Path: "extra.child_role", Targets: []CorrelationTarget{CorrelationTargetAgentName, CorrelationTargetAgentType}}}
-	case "windsurf":
-		return []CorrelationPathAlias{
-			{Path: "execution_id", Targets: []CorrelationTarget{CorrelationTargetTurn, CorrelationTargetExecution}},
-			{Path: "executionId", Targets: []CorrelationTarget{CorrelationTargetTurn, CorrelationTargetExecution}},
-		}
 	default:
 		return nil
 	}
@@ -451,23 +445,21 @@ func correlationLifecycleForContract(contract HookContract) []CorrelationLifecyc
 		}},
 		{Lifecycle: CorrelationLifecycleTurnStart, Events: []string{
 			"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit", "beforeSubmitPrompt",
-			"BeforeAgent", "PreInvocation", "pre_user_prompt", "pre_llm_call", "agent.start",
+			"BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
 		}},
 		{Lifecycle: CorrelationLifecycleTurnEnd, Events: []string{
 			"Stop", "stop", "agentStop", "AfterAgent", "AfterAgentResponse", "PostInvocation",
-			"afterAgentResponse", "post_cascade_response", "post_cascade_response_with_transcript", "post_llm_call", "agent.end",
+			"afterAgentResponse", "post_llm_call", "agent.end",
 		}},
 		{Lifecycle: CorrelationLifecycleToolStart, Events: []string{
 			"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool", "pre_tool_call",
-			"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use",
 			"beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
 			"tool.execute.before", "tool.call",
 		}},
 		{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
 			"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
 			"PermissionDenied",
-			"AfterTool", "post_tool_call", "post_read_code", "post_write_code", "post_run_command",
-			"post_mcp_tool_use", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
+			"AfterTool", "post_tool_call", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
 			"afterTabFileEdit", "tool.execute.after", "tool.result",
 		}},
 		{Lifecycle: CorrelationLifecycleModelStart, Events: []string{
@@ -732,15 +724,6 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetChildAgent, ns, "subagent", "subagent_id", "subagentId"),
 		)
 		return makeSpec(CorrelationProfileCursorV1, "cursor-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "no documented native OTLP surface"))
-	case "windsurf":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "trajectory", "trajectory_id", "trajectoryId"),
-			reported(CorrelationTargetTurn, ns, "execution", "execution_id", "executionId"),
-			reported(CorrelationTargetExecution, ns, "execution", "execution_id", "executionId"),
-			reported(CorrelationTargetTool, ns, "tool_invocation", "tool_call_id", "toolCallId"),
-			reported(CorrelationTargetSourceSeq, ns, "trajectory_step", "step_index", "stepIndex"),
-		)
-		return makeSpec(CorrelationProfileWindsurfV1, "windsurf-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "delegation and per-tool IDs are not consistently reported"))
 	case "devin":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "session_id", "sessionId"),

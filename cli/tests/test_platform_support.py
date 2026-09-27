@@ -30,8 +30,6 @@ from defenseclaw.commands.cmd_setup import (
 )
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
-    cleanup_only_guidance,
-    is_cleanup_only,
 )
 from defenseclaw.context import AppContext
 from defenseclaw.platform_support import (
@@ -193,20 +191,6 @@ def test_non_windows_behavior_is_unchanged() -> None:
             else:
                 assert support.status == SUPPORTED
                 assert support.available
-
-
-def test_windsurf_is_globally_cleanup_only_and_routes_to_devin() -> None:
-    assert "windsurf" in DEPRECATED_CONNECTORS
-    assert "windsurf" not in KNOWN_CONNECTORS
-    assert is_cleanup_only("windsurf") is True
-    guidance = cleanup_only_guidance("windsurf")
-    assert "cleanup-only" in guidance
-    assert "Devin" in guidance
-    for os_name in ("windows", "darwin", "linux"):
-        support = connector_platform_support("windsurf", os_name)
-        assert support.status == UNSUPPORTED
-        assert support.available is False
-        assert "use Devin" in support.reason
 
 
 def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:

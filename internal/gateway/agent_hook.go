@@ -2380,10 +2380,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		}
 	case "cursor":
 		return connector.CursorHookOutput(req.HookEventName, action, reason, additional)
-	case "windsurf":
-		if action == "block" {
-			return map[string]interface{}{"message": reason}
-		}
 	case "devin":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
@@ -2649,7 +2645,7 @@ func isResultLikeEvent(event string) bool {
 		// it through tool_result inspection. It stays non-blockable: it
 		// is absent from hermes BlockEvents, so verdicts demote to
 		// would_block.
-		"postllmcall", "postcascaderesponse", "postcascaderesponsewithtranscript",
+		"postllmcall",
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
 		"toolexecuteafter", "toolresult", "agentend":

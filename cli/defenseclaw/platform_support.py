@@ -47,16 +47,12 @@ PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 # Kept as an empty set so taxonomy tests can still subtract ACP-only names.
 # Kiro is a regular connector with native ACP support, not an ACP-only agent.
 ACP_ONLY_CONNECTORS: frozenset[str] = frozenset()
-DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli", "windsurf"})
+DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli"})
 
 _DEPRECATED_REASONS: dict[str, str] = {
     "geminicli": (
         "Gemini CLI integration is deprecated; use the Antigravity connector. "
         "Existing managed Gemini CLI state remains removable through teardown and uninstall."
-    ),
-    "windsurf": (
-        "Windsurf/Cascade is retired; use Devin. Existing authenticated "
-        "Windsurf state remains recognizable only for upgrade and uninstall cleanup."
     ),
 }
 

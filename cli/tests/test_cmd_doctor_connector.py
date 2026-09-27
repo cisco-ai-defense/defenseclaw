@@ -1779,7 +1779,7 @@ class TestDoctorActiveConnectors(unittest.TestCase):
 
 class TestCheckHookHealth(unittest.TestCase):
     """D4: generic hook-health rows for connectors that previously had no
-    Services check (hermes/cursor/windsurf/geminicli/opencode). The check
+    Services check (hermes/cursor/geminicli/opencode). The check
     prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
     format-agnostic (YAML for hermes, flat ``.js`` for opencode).
     """

@@ -5396,7 +5396,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / windsurf / geminicli / copilot / openhands
+//	hermes / cursor / geminicli / copilot / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw
@@ -6073,22 +6073,6 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 	conn connector.Connector,
 	rollbackAuthority ...multiConnectorSetupTransaction,
 ) error {
-	if conn.Name() == "windsurf" {
-		// Publish the verified Cascade contract before making the connector
-		// active. Doctor must never observe active Windsurf state without the
-		// matching lock/runtime metadata. A failed publication is rolled back
-		// to an explicit inactive tombstone so stale or partially published
-		// readiness cannot survive the DCWIN-012 recovery path.
-		if err := publishWindsurfReadyEvidence(opts, conn); err != nil {
-			lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
-			return s.failWindsurfReadyStatePublication(ctx, opts, conn, lockErr)
-		}
-		if err := saveWindsurfReadyActiveState(opts.DataDir, conn.Name()); err != nil {
-			stateErr := fmt.Errorf("connector %s active state save failed after hook contract publication: %w", conn.Name(), err)
-			return s.failWindsurfReadyStatePublication(ctx, opts, conn, stateErr)
-		}
-		return nil
-	}
 	transaction := multiConnectorSetupTransaction{}
 	hasTransaction := false
 	if len(rollbackAuthority) > 0 {
@@ -6128,41 +6112,11 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 	return nil
 }
 
-var (
-	publishWindsurfReadyEvidence = publishFreshHookRegistrationEvidence
-	saveWindsurfReadyActiveState = connector.SaveActiveConnector
-	markWindsurfReadyInactive    = connector.MarkConnectorInactive
-)
-
 // ErrHookContractAdmission is returned when action-mode setup refuses a
 // connector before writing hook files. Callers must not tear down an already
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
-
-func (s *Sidecar) failWindsurfReadyStatePublication(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, cause error) error {
-	fmt.Fprintf(os.Stderr, "[guardrail] connector windsurf atomic readiness publication failed: %v\n", cause)
-	var cleanupErrors []string
-	if _, err := markWindsurfReadyInactive(opts.DataDir, "windsurf"); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear active connector readiness: %v", err))
-	}
-	if err := connector.ClearHookContractLockEntry(opts.DataDir, "windsurf"); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear hook contract metadata: %v", err))
-	}
-	if err := conn.Teardown(ctx, opts); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("rollback teardown: %v", err))
-	}
-	if err := conn.VerifyClean(opts); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("verify rollback: %v", err))
-	}
-	if len(cleanupErrors) > 0 {
-		cause = fmt.Errorf("%w; cleanup: %s", cause, strings.Join(cleanupErrors, "; "))
-	}
-	if s != nil && s.health != nil {
-		s.health.SetGuardrail(StateError, cause.Error(), nil)
-	}
-	return cause
-}
 
 func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {
 	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)

@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import legacy_connector
 from defenseclaw.commands.cmd_doctor import (
     _CONNECTOR_RESIDUE_ARTIFACTS,
     _check_connector_residue,
@@ -193,7 +194,8 @@ class FixConnectorResidueTests(unittest.TestCase):
     def test_calls_gateway_teardown_for_every_native_connector_receipt(self):
         native_connectors = {
             "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-            "geminicli", "hermes", "omnigent", "opencode", "windsurf",
+            "geminicli", "hermes", "omnigent", "opencode",
+            legacy_connector.RETIRED_DESKTOP_ID,
         }
         with tempfile.TemporaryDirectory() as data_dir:
             for name in native_connectors:
@@ -345,7 +347,7 @@ class ResidueArtifactsContractTests(unittest.TestCase):
         expected = {
             "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
             "devin", "geminicli", "hermes", "omnigent", "opencode", "openhands",
-            "windsurf", "zeptoclaw",
+            legacy_connector.RETIRED_DESKTOP_ID, "zeptoclaw",
         }
         self.assertEqual(set(_CONNECTOR_RESIDUE_ARTIFACTS), expected)
 

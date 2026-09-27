@@ -184,7 +184,6 @@ type options struct {
 	CursorHome           string
 	DevinConfigDir       string
 	DevinExecutable      string
-	WindsurfUserHome     string
 	AntigravityConfigDir string
 	GeminiCLIHome        string
 	GeminiConfigDir      string
@@ -269,8 +268,6 @@ type installState struct {
 	CursorHome             string            `json:"cursor_home,omitempty"`
 	DevinConfigDir         string            `json:"devin_config_dir,omitempty"`
 	DevinExecutable        string            `json:"devin_executable,omitempty"`
-	WindsurfUserHome       string            `json:"windsurf_user_home,omitempty"`
-	WindsurfHooksPath      string            `json:"windsurf_hooks_path,omitempty"`
 	AntigravityConfigDir   string            `json:"antigravity_config_dir,omitempty"`
 	GeminiCLIHome          string            `json:"gemini_cli_home,omitempty"`
 	GeminiConfigDir        string            `json:"gemini_config_dir,omitempty"`
@@ -449,11 +446,6 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 			// legacy entries before committing a connector-free install.
 			opts.Connector = "none"
 			opts.PreserveConnectorConfiguration = false
-		} else if !opts.ConnectorSet && strings.EqualFold(oldState.Connector, "windsurf") {
-			// One-way product-slot migration: cleanup retains the retired ID, while
-			// every refreshed installation persists and configures canonical Devin.
-			opts.Connector = "devin"
-			opts.PreserveConnectorConfiguration = false
 		} else if !opts.ConnectorSet && validConnector(oldState.Connector) {
 			opts.Connector = oldState.Connector
 			opts.PreserveConnectorConfiguration = !opts.ModeSet
@@ -536,7 +528,6 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	opts.CursorHome = transaction.CursorHome
 	opts.DevinConfigDir = transaction.DevinConfigDir
 	opts.DevinExecutable = transaction.DevinExecutable
-	opts.WindsurfUserHome = transaction.WindsurfUserHome
 	opts.AntigravityConfigDir = transaction.AntigravityConfigDir
 	opts.GeminiCLIHome = transaction.GeminiCLIHome
 	opts.GeminiConfigDir = transaction.GeminiConfigDir
@@ -1015,7 +1006,7 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	seen := map[string]bool{}
 	connectors := make([]string, 0, len(nativeLifecycleConnectorNames))
 	add := func(name string) {
-		if validCleanupConnector(name) && name != "none" && !seen[name] {
+		if validConnector(name) && name != "none" && !seen[name] {
 			seen[name] = true
 			connectors = append(connectors, name)
 		}
@@ -1054,9 +1045,6 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "cursor", "hooks.json.json")) {
 		add("cursor")
-	}
-	if pathExists(filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")) {
-		add("windsurf")
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "devin", "config.json")) {
 		add("devin")
@@ -1463,8 +1451,6 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "DEFENSECLAW_CURSOR_CONFIG_HOME"
 	case "devin":
 		variable = "DEFENSECLAW_DEVIN_CONFIG_HOME"
-	case "windsurf":
-		variable = "WINDSURF_USER_HOME"
 	case "antigravity":
 		// DefenseClaw-internal custody binding used to construct the hidden
 		// --config-home argument. Google publishes no Antigravity config-home
@@ -1524,13 +1510,6 @@ func samePath(a, b string) bool {
 
 func validConnector(value string) bool {
 	return value == "none" || isNativeLifecycleConnector(value)
-}
-
-// validCleanupConnector admits the retired Cascade identity only inside
-// authenticated native-state teardown and migration paths. It must never be
-// used by argument parsing, pickers, discovery, or new registration.
-func validCleanupConnector(value string) bool {
-	return validConnector(value) || value == "windsurf"
 }
 
 var nativeLifecycleConnectorNames = []string{
@@ -1804,10 +1783,6 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := writeJSON(filepath.Join(staging, "installer", "payload-manifest.json"), payload.Manifest); err != nil {
 		return err
 	}
-	windsurfHooksPath := ""
-	if opts.WindsurfUserHome != "" {
-		windsurfHooksPath = filepath.Join(opts.WindsurfUserHome, ".codeium", "windsurf", "hooks.json")
-	}
 	state := installState{
 		SchemaVersion:          1,
 		Version:                payload.Manifest.Version,
@@ -1829,8 +1804,6 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		CursorHome:             opts.CursorHome,
 		DevinConfigDir:         opts.DevinConfigDir,
 		DevinExecutable:        opts.DevinExecutable,
-		WindsurfUserHome:       opts.WindsurfUserHome,
-		WindsurfHooksPath:      windsurfHooksPath,
 		AntigravityConfigDir:   opts.AntigravityConfigDir,
 		GeminiCLIHome:          opts.GeminiCLIHome,
 		GeminiConfigDir:        opts.GeminiConfigDir,

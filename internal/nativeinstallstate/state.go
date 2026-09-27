@@ -37,8 +37,6 @@ type State struct {
 	CursorHome           string `json:"cursor_home,omitempty"`
 	DevinConfigDir       string `json:"devin_config_dir,omitempty"`
 	DevinExecutable      string `json:"devin_executable,omitempty"`
-	WindsurfUserHome     string `json:"windsurf_user_home,omitempty"`
-	WindsurfHooksPath    string `json:"windsurf_hooks_path,omitempty"`
 	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
 	GeminiCLIHome        string `json:"gemini_cli_home,omitempty"`
 	GeminiConfigDir      string `json:"gemini_config_dir,omitempty"`
@@ -63,8 +61,6 @@ func (state State) Environment(base []string) []string {
 		"DEFENSECLAW_CURSOR_CONFIG_HOME":      true,
 		"DEFENSECLAW_DEVIN_CONFIG_HOME":       true,
 		"DEFENSECLAW_DEVIN_EXECUTABLE":        true,
-		"WINDSURF_USER_HOME":                  true,
-		"WINDSURF_HOOK_CONFIG_PATH":           true,
 		"OPENCODE_CONFIG_DIR":                 true,
 		"OMNIGENT_CONFIG_HOME":                true,
 		"HERMES_HOME":                         true,
@@ -103,12 +99,6 @@ func (state State) Environment(base []string) []string {
 	}
 	if state.DevinExecutable != "" {
 		result = append(result, "DEFENSECLAW_DEVIN_EXECUTABLE="+state.DevinExecutable)
-	}
-	if state.WindsurfUserHome != "" {
-		result = append(result, "WINDSURF_USER_HOME="+state.WindsurfUserHome)
-	}
-	if state.WindsurfHooksPath != "" {
-		result = append(result, "WINDSURF_HOOK_CONFIG_PATH="+state.WindsurfHooksPath)
 	}
 	if state.OpenCodeConfigDir != "" {
 		result = append(result, "OPENCODE_CONFIG_DIR="+state.OpenCodeConfigDir)
@@ -213,8 +203,6 @@ func loadAt(executable, installRoot string) (State, error) {
 		state.CursorHome,
 		state.DevinConfigDir,
 		state.DevinExecutable,
-		state.WindsurfUserHome,
-		state.WindsurfHooksPath,
 		state.AntigravityConfigDir,
 		state.GeminiCLIHome,
 		state.GeminiConfigDir,
@@ -228,13 +216,6 @@ func loadAt(executable, installRoot string) (State, error) {
 	}
 	if state.DataRoot == "" {
 		return State{}, errors.New("native install state has no data root")
-	}
-	if state.WindsurfHooksPath != "" && (state.WindsurfUserHome == "" ||
-		!strings.EqualFold(
-			state.WindsurfHooksPath,
-			filepath.Join(state.WindsurfUserHome, ".codeium", "windsurf", "hooks.json"),
-		)) {
-		return State{}, errors.New("native install state has an inconsistent Windsurf hooks path")
 	}
 	if state.GeminiCLIHome != "" && !geminiBindingConsistent(state.GeminiCLIHome, state.GeminiConfigDir) {
 		return State{}, errors.New("native install state has an inconsistent Gemini CLI home binding")

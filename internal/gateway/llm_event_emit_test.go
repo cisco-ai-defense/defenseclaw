@@ -620,7 +620,6 @@ func TestAllHookConnectorsNormalizeStableLifecycle(t *testing.T) {
 		{"claudecode", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"hermes", "on_session_start", "on_session_end", "session_start", "session_end"},
 		{"cursor", "sessionStart", "sessionEnd", "session_start", "session_end"},
-		{"windsurf", "pre_user_prompt", "post_cascade_response", "turn_start", "turn_end"},
 		{"geminicli", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"copilot", "sessionStart", "sessionEnd", "session_start", "session_end"},
 		{"antigravity", "PreInvocation", "Stop", "turn_start", "turn_end"},

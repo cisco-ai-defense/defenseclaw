@@ -237,7 +237,6 @@ var connectorHookScripts = map[string][]string{
 	"hermes":      {"hermes-hook.sh"},
 	"kiro":        {"kiro-hook.sh"},
 	"openhands":   {"openhands-hook.sh"},
-	"windsurf":    {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -1583,29 +1582,6 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
-		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
-}
-
-// writeDisabledPowerShellHookTombstone is the native Windows equivalent used
-// by connector adapters cached by long-running desktop hosts. It emits no
-// protocol output and succeeds, so teardown cannot leave a stale adapter
-// forwarding payloads to a connector that is no longer active.
-func writeDisabledPowerShellHookTombstone(opts SetupOpts, scriptName, vendorLabel string) error {
-	if strings.TrimSpace(scriptName) == "" {
-		return fmt.Errorf("PowerShell tombstone: empty scriptName")
-	}
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		return fmt.Errorf("ensure hook dir: %w", err)
-	}
-	if vendorLabel == "" {
-		vendorLabel = "DefenseClaw connector"
-	}
-	body := "# DefenseClaw native Windows hook adapter\n" +
-		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
-		"# " + vendorLabel + " connector was torn down; cached host processes\n" +
-		"# must succeed without forwarding stale payloads.\n" +
 		"exit 0\n"
 	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }

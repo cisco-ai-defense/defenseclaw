@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // TestHookRegister_HasBuiltinFactories confirms init() wired up the
@@ -34,7 +35,7 @@ func TestHookRegister_HasBuiltinFactories(t *testing.T) {
 			t.Errorf("expected hook factory for connector %q to be registered", name)
 		}
 	}
-	for _, name := range []string{"windsurf", "geminicli"} {
+	for _, name := range []string{legacyconnector.RetiredDesktopID, "geminicli"} {
 		if _, ok := connectorHookHandlerByName[name]; ok {
 			t.Errorf("retired connector %q still has an active hook factory", name)
 		}

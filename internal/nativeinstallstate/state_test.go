@@ -39,7 +39,6 @@ func fixtureState(t *testing.T) (State, string) {
 		ClaudeConfigDir:      filepath.Join(t.TempDir(), "claude-home"),
 		CopilotHome:          filepath.Join(t.TempDir(), "copilot-home"),
 		CursorHome:           filepath.Join(t.TempDir(), "cursor-home"),
-		WindsurfUserHome:     filepath.Join(t.TempDir(), "windsurf-profile"),
 		AntigravityConfigDir: filepath.Join(t.TempDir(), ".gemini", "config"),
 		GeminiCLIHome:        filepath.Join(t.TempDir(), "gemini-cli-home"),
 		OpenCodeConfigDir:    filepath.Join(t.TempDir(), "opencode-home"),
@@ -47,12 +46,6 @@ func fixtureState(t *testing.T) (State, string) {
 		HermesHome:           filepath.Join(t.TempDir(), "hermes-home"),
 	}
 	state.GeminiConfigDir = filepath.Join(state.GeminiCLIHome, ".gemini")
-	state.WindsurfHooksPath = filepath.Join(
-		state.WindsurfUserHome,
-		".codeium",
-		"windsurf",
-		"hooks.json",
-	)
 	body, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +68,6 @@ func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
 		"claude_config_dir=project-claude",
 		"copilot_home=project-copilot",
 		"defenseclaw_cursor_config_home=project-cursor",
-		"windsurf_user_home=project-windsurf",
-		"windsurf_hook_config_path=project-windsurf-hooks",
 		"opencode_config_dir=project-opencode",
 		"omnigent_config_home=project-omnigent",
 		"hermes_home=project-hermes",
@@ -93,8 +84,6 @@ func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
 		"CLAUDE_CONFIG_DIR=" + want.ClaudeConfigDir,
 		"COPILOT_HOME=" + want.CopilotHome,
 		"DEFENSECLAW_CURSOR_CONFIG_HOME=" + want.CursorHome,
-		"WINDSURF_USER_HOME=" + want.WindsurfUserHome,
-		"WINDSURF_HOOK_CONFIG_PATH=" + want.WindsurfHooksPath,
 		"OPENCODE_CONFIG_DIR=" + want.OpenCodeConfigDir,
 		"OMNIGENT_CONFIG_HOME=" + want.OmnigentConfigHome,
 		"HERMES_HOME=" + want.HermesHome,
@@ -135,8 +124,6 @@ func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
 		"claude_config_dir=project-claude",
 		"copilot_home=project-copilot",
 		"defenseclaw_cursor_config_home=project-cursor",
-		"windsurf_user_home=project-windsurf",
-		"windsurf_hook_config_path=project-windsurf-hooks",
 		"opencode_config_dir=project-opencode",
 		"omnigent_config_home=project-omnigent",
 		"hermes_home=project-hermes",
@@ -151,8 +138,6 @@ func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
 		strings.Contains(strings.ToUpper(joined), "CLAUDE_CONFIG_DIR=") ||
 		strings.Contains(strings.ToUpper(joined), "COPILOT_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "DEFENSECLAW_CURSOR_CONFIG_HOME=") ||
-		strings.Contains(strings.ToUpper(joined), "WINDSURF_USER_HOME=") ||
-		strings.Contains(strings.ToUpper(joined), "WINDSURF_HOOK_CONFIG_PATH=") ||
 		strings.Contains(strings.ToUpper(joined), "OPENCODE_CONFIG_DIR=") ||
 		strings.Contains(strings.ToUpper(joined), "OMNIGENT_CONFIG_HOME=") ||
 		strings.Contains(strings.ToUpper(joined), "HERMES_HOME=") ||
@@ -174,22 +159,6 @@ func TestLoadAtRejectsRelocatedOrMalformedState(t *testing.T) {
 	}
 	if _, err := loadAt(executable, filepath.Dir(filepath.Dir(executable))); err == nil {
 		t.Fatal("relocated state was accepted")
-	}
-}
-
-func TestLoadAtRejectsMalformedWindsurfProfileBinding(t *testing.T) {
-	state, executable := fixtureState(t)
-	state.WindsurfUserHome = filepath.Join("relative", "profile")
-	body, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(filepath.Dir(filepath.Dir(executable)), "installer", "install-state.json")
-	if err := os.WriteFile(statePath, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadAt(executable, filepath.Dir(filepath.Dir(executable))); err == nil {
-		t.Fatal("malformed Windsurf profile binding was accepted")
 	}
 }
 

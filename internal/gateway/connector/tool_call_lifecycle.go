@@ -862,39 +862,6 @@ func cursorToolCallLifecycle() ToolCallLifecycleContract {
 	}
 }
 
-func windsurfToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use"},
-		AuthoritativeSuccessEvents:        []string{"post_read_code", "post_write_code", "post_mcp_tool_use"},
-		AuthoritativeFailureEvents:        []string{},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"post_cascade_response", "post_cascade_response_with_transcript"},
-		AuthoritativeTerminalEvents:       []string{},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeSurfaceSpecific,
-		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use"},
-			ResultContentEvents:    []string{"post_read_code", "post_write_code", "post_run_command", "post_mcp_tool_use"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"post_cascade_response", "post_cascade_response_with_transcript", "post_setup_worktree"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceShell, ToolSurfaceFileRead, ToolSurfaceFileWrite,
-			ToolSurfaceFileEdit, ToolSurfaceMCP,
-		},
-		OfficialSourceURLs: []string{
-			"https://docs.devin.ai/desktop/cascade/hooks",
-			"https://docs.devin.ai/desktop/cascade/skills",
-		},
-		Limitations: []string{
-			"Trajectory and execution identifiers are conversation/turn identifiers, not stable per-tool invocation IDs.",
-			"post_run_command exposes neither an authoritative exit status nor output; hook errors other than exit code 2 fail open.",
-		},
-	}
-}
-
 func devinToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
 		Version:                           ToolCallLifecycleContractVersion,
