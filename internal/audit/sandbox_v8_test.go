@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -31,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 func testSandboxIdentity() SandboxIdentity {
@@ -105,11 +107,18 @@ func assertSandboxCorrelation(t *testing.T, body map[string]any, identity Sandbo
 	}
 }
 
+// validatedSandboxMetrics holds the record IDs of metric points already
+// checked against the runtime contract; tests rescan the growing point list
+// after every event, and each point needs checking once.
+var validatedSandboxMetrics sync.Map
+
 func sandboxMetrics(t *testing.T, runtime *testRuntimeV8Emitter, instrument string) []observability.Record {
 	t.Helper()
 	var matched []observability.Record
 	for _, record := range runtime.metricSnapshot() {
-		assertRecordMatchesRuntimeCatalog(t, record)
+		if _, seen := validatedSandboxMetrics.LoadOrStore(record.RecordID(), struct{}{}); !seen {
+			assertRecordMatchesRuntimeContract(t, record)
+		}
 		if record.EventName() == observability.EventName(instrument) {
 			matched = append(matched, record)
 		}
@@ -192,7 +201,7 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 		}
 		_, records := runtime.snapshot()
 		record := records[len(records)-1]
-		assertRecordMatchesRuntimeCatalog(t, record)
+		assertRecordMatchesRuntimeContract(t, record)
 		if record.EventName() != observability.EventName(observability.TelemetryEventSandboxLifecycle) ||
 			record.Bucket() != observability.BucketAgentLifecycle || record.Outcome() != step.outcome ||
 			record.Mandatory() || record.Connector() != identity.Connector ||
@@ -376,6 +385,150 @@ func TestSandboxLifecycleConcurrentGaugeIsOrdered(t *testing.T) {
 			if last[connector] != active {
 				t.Fatalf("round %d final %s gauge=%d want %d (all=%#v)", round, connector, last[connector], active, last)
 			}
+		}
+	}
+}
+
+// rejectingEveryRuntimeV8Emitter rejects every nth log emission before the
+// record is built, like a runtime that is reloading. It is safe for
+// concurrent use.
+type rejectingEveryRuntimeV8Emitter struct {
+	*testRuntimeV8Emitter
+	every    int64
+	calls    atomic.Int64
+	rejected atomic.Int64
+}
+
+func (emitter *rejectingEveryRuntimeV8Emitter) EmitRuntimeV8(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder RuntimeV8Builder,
+) (RuntimeV8EmitOutcome, error) {
+	if emitter.calls.Add(1)%emitter.every == 0 {
+		emitter.rejected.Add(1)
+		return RuntimeV8EmitOutcome{}, fmt.Errorf("runtime reloading")
+	}
+	return emitter.testRuntimeV8Emitter.EmitRuntimeV8(ctx, metadata, builder)
+}
+
+// TestSandboxRecorderConcurrentRetriesAfterRejectedEmits races lifecycle,
+// egress, and workspace producers for many sandboxes against a runtime that
+// rejects every third emission; each caller retries a rejected event as is.
+// No retried event may be lost, skipped, or counted twice: every record fits
+// the runtime contract, each sandbox's previous phases chain in order, every
+// metric counts exactly the accepted events, and each connector's active
+// gauge moves one step at a time and ends at its true count.
+func TestSandboxRecorderConcurrentRetriesAfterRejectedEmits(t *testing.T) {
+	harness := newSandboxHarness(t)
+	runtime := &rejectingEveryRuntimeV8Emitter{
+		testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, harness.logger.store, router.AdmissionOrdinary), every: 3,
+	}
+	harness.logger.SetRuntimeV8Emitter(runtime)
+	recorder := NewSandboxRecorder(harness.logger)
+	// Rejections follow the global call count, so under contention one caller
+	// can draw several in a row; the bound only stops a broken retry path.
+	retry := func(record func() error) error {
+		var err error
+		for attempt := 0; attempt < 64; attempt++ {
+			if err = record(); err == nil {
+				return nil
+			}
+		}
+		return err
+	}
+	const sandboxes = 18
+	connectors := []string{"claudecode", "codex", "opencode"}
+	want := map[string]int64{}
+	lifecycleEvents := 0
+	var group sync.WaitGroup
+	errs := make(chan error, sandboxes*8)
+	for index := 0; index < sandboxes; index++ {
+		connector := connectors[index%len(connectors)]
+		phases := []SandboxPhase{SandboxPhaseCreating, SandboxPhaseProvisioning, SandboxPhaseReady}
+		if index%4 == 0 {
+			phases = append(phases, SandboxPhaseStopping, SandboxPhaseStopped)
+		} else {
+			want[connector]++
+		}
+		lifecycleEvents += len(phases)
+		group.Add(1)
+		go func(identity SandboxIdentity, phases []SandboxPhase) {
+			defer group.Done()
+			for _, phase := range phases {
+				identity.Phase = phase
+				errs <- retry(func() error {
+					return recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
+				})
+				if phase != SandboxPhaseReady {
+					continue
+				}
+				errs <- retry(func() error {
+					return recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+						Sandbox: identity, Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org", Port: 443,
+					})
+				})
+				errs <- retry(func() error {
+					return recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+						Sandbox: identity, Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit,
+					})
+				})
+			}
+		}(SandboxIdentity{Name: fmt.Sprintf("dc-%s-repo-%04d", connector, index), Connector: connector}, phases)
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("a retried event was never accepted: %v", err)
+		}
+	}
+	if runtime.rejected.Load() == 0 {
+		t.Fatal("the runtime rejected nothing; the retry paths were not exercised")
+	}
+	_, records := runtime.snapshot()
+	counts := map[string]int{}
+	previous := map[string]string{}
+	for _, record := range records {
+		assertRecordMatchesRuntimeContract(t, record)
+		counts[string(record.EventName())]++
+		if record.EventName() != observability.EventName(observability.TelemetryEventSandboxLifecycle) {
+			continue
+		}
+		body := sandboxBody(t, record)
+		name, _ := body["defenseclaw.sandbox.name"].(string)
+		got, _ := body["defenseclaw.sandbox.phase.previous"].(string)
+		if got != previous[name] {
+			t.Fatalf("%s previous phase=%q want %q: a rejected event moved the tracked phase", name, got, previous[name])
+		}
+		previous[name], _ = body["defenseclaw.sandbox.phase"].(string)
+	}
+	for eventName, want := range map[string]int{
+		observability.TelemetryEventSandboxLifecycle: lifecycleEvents,
+		observability.TelemetryEventEgressAllowed:    sandboxes,
+		observability.TelemetryEventSandboxWorkspace: sandboxes,
+	} {
+		if counts[eventName] != want {
+			t.Fatalf("%s records=%d want %d (all=%#v)", eventName, counts[eventName], want, counts)
+		}
+	}
+	if transitions := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxTransitions); len(transitions) != lifecycleEvents {
+		t.Fatalf("transition metrics=%d want %d", len(transitions), lifecycleEvents)
+	}
+	if egress := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawEgressEvents); len(egress) != sandboxes {
+		t.Fatalf("egress metrics=%d want %d", len(egress), sandboxes)
+	}
+	last := map[string]int64{}
+	for _, metric := range sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive) {
+		connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
+		value := sandboxMetricValue(t, metric)
+		if step := value - last[connector]; step > 1 || step < -1 {
+			t.Fatalf("%s gauge jumped %d -> %d", connector, last[connector], value)
+		}
+		last[connector] = value
+	}
+	for _, connector := range connectors {
+		if last[connector] != want[connector] {
+			t.Fatalf("final %s gauge=%d want %d (all=%#v)", connector, last[connector], want[connector], last)
 		}
 	}
 }
@@ -577,7 +730,7 @@ func TestSandboxEgressReusesEgressFamiliesAndMetric(t *testing.T) {
 				t.Fatalf("RecordSandboxEgress: %v", err)
 			}
 			metadata, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			severity, _ := record.Severity()
 			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
 				record.Mandatory() != test.input.Blocked || metadata.Source() != observability.SourceGateway ||
@@ -743,7 +896,7 @@ func TestSandboxApprovalFamilies(t *testing.T) {
 				t.Fatalf("RecordSandboxApproval: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
 				record.Mandatory() != test.mandatory || record.Bucket() != observability.BucketComplianceActivity {
 				t.Fatalf("record identity=%#v outcome=%q mandatory=%v", record.Identity(), record.Outcome(), record.Mandatory())
@@ -772,7 +925,7 @@ func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
 		t.Fatalf("RecordSandboxPolicy: %v", err)
 	}
 	_, record := onlySandboxRecord(t, runtime)
-	assertRecordMatchesRuntimeCatalog(t, record)
+	assertRecordMatchesRuntimeContract(t, record)
 	if record.EventName() != observability.EventName(observability.TelemetryEventPolicyUpdated) ||
 		!record.Mandatory() || record.Outcome() != observability.OutcomeApplied {
 		t.Fatalf("policy record identity=%#v mandatory=%v outcome=%q", record.Identity(), record.Mandatory(), record.Outcome())
@@ -828,7 +981,7 @@ func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
 				t.Fatalf("RecordSandboxHealth: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			severity, _ := record.Severity()
 			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
 				!record.Mandatory() || severity != test.severity {
@@ -863,7 +1016,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 				t.Fatalf("RecordSandboxFinding: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			body := sandboxBody(t, record)
 			wantRule := "SANDBOX-" + strings.ToUpper(strings.ReplaceAll(string(kind), "_", "-"))
 			findingID, _ := body["defenseclaw.finding.id"].(string)
@@ -940,7 +1093,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 				t.Fatalf("RecordSandboxWorkspace: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			severity, _ := record.Severity()
 			if record.EventName() != observability.EventName(observability.TelemetryEventSandboxWorkspace) ||
 				record.Bucket() != observability.BucketEnforcementAction || record.Outcome() != test.outcome ||
@@ -971,7 +1124,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 			t.Fatalf("RecordSandboxWorkspace: %v", err)
 		}
 		_, record := onlySandboxRecord(t, runtime)
-		assertRecordMatchesRuntimeCatalog(t, record)
+		assertRecordMatchesRuntimeContract(t, record)
 		kept, _ := sandboxBody(t, record)["defenseclaw.sandbox.workspace.paths"].([]any)
 		if len(kept) != maxSandboxWorkspacePaths {
 			t.Fatalf("paths kept=%d want %d", len(kept), maxSandboxWorkspacePaths)
@@ -1295,6 +1448,100 @@ func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
 	t.Run("approval hosts", func(t *testing.T) { testSandboxApprovalHostileHostIsOmitted(t, harness) })
 	t.Run("workspace paths", func(t *testing.T) { testSandboxWorkspacePathsAreSanitizedNotRejected(t, harness) })
 	t.Run("finding target ref", func(t *testing.T) { testSandboxFindingTargetRefIsBoundedNotDropped(t, harness) })
+	t.Run("free text", func(t *testing.T) { testSandboxFreeTextIsBoundedNotRejected(t, harness) })
+}
+
+// testSandboxFreeTextIsBoundedNotRejected feeds hostile text into every
+// free-text field a sandbox producer carries. Reasons, OpenShell condition
+// messages, and finding text can quote what the agent did, so each value is
+// bounded on a code point, dropped when it is not UTF-8 or blank, and never
+// allowed to cost the occurrence (mandatory or not) its record.
+func testSandboxFreeTextIsBoundedNotRejected(t *testing.T, harness *sandboxHarness) {
+	hostile := map[string]string{
+		"invalid utf-8":      "dc\xff\xfemarker",
+		"control characters": "\x1b[2J\r\nline two\x00after nul\u2028",
+		"blank":              " \t\r\n ",
+		"oversize":           strings.Repeat("\u00e9", 70000),
+	}
+	for _, test := range []struct {
+		name      string
+		mandatory bool
+		fields    []string
+		record    func(*SandboxRecorder, string) error
+	}{
+		{
+			name: "egress", mandatory: true,
+			fields: []string{"defenseclaw.network.reason", "defenseclaw.network.policy_outcome"},
+			record: func(r *SandboxRecorder, text string) error {
+				return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceOpenShell, Host: "pastebin.com",
+					Blocked: true, Reason: text, PolicyOutcome: text,
+				})
+			},
+		},
+		{
+			name: "approval", mandatory: true, fields: []string{"defenseclaw.guardrail.reason"},
+			record: func(r *SandboxRecorder, text string) error {
+				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
+					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-12",
+					Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalDenied, Reason: text,
+				})
+			},
+		},
+		{
+			name: "lifecycle", fields: []string{"defenseclaw.sandbox.condition.message"},
+			record: func(r *SandboxRecorder, text string) error {
+				return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
+					Sandbox: testSandboxIdentity(), Condition: &SandboxCondition{Type: "Ready", Status: "False", Message: text},
+				})
+			},
+		},
+		{
+			name: "health", mandatory: true, fields: []string{"defenseclaw.health.error_summary"},
+			record: func(r *SandboxRecorder, text string) error {
+				return r.RecordSandboxHealth(context.Background(), SandboxHealthEvent{
+					Sandbox: testSandboxIdentity(), State: SandboxHealthDegraded, ErrorSummary: text,
+				})
+			},
+		},
+		{
+			name: "finding",
+			fields: []string{
+				"defenseclaw.finding.title", "defenseclaw.finding.description",
+				"defenseclaw.guardrail.evidence_summary", "defenseclaw.finding.remediation",
+			},
+			record: func(r *SandboxRecorder, text string) error {
+				return r.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
+					Sandbox: testSandboxIdentity(), Kind: SandboxFindingLargeUpload, Severity: "HIGH",
+					Title: text, Description: text, Evidence: text, Remediation: text,
+				})
+			},
+		},
+	} {
+		for label, text := range hostile {
+			t.Run(test.name+"/"+label, func(t *testing.T) {
+				runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+				if err := test.record(recorder, text); err != nil {
+					t.Fatalf("hostile text cost the record: %v", err)
+				}
+				_, record := onlySandboxRecord(t, runtime)
+				assertRecordMatchesRuntimeContract(t, record)
+				if record.Mandatory() != test.mandatory {
+					t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
+				}
+				body := sandboxBody(t, record)
+				for _, field := range test.fields {
+					value, present := body[field].(string)
+					if present != (label == "control characters" || label == "oversize") {
+						t.Fatalf("%s present=%v for %s text", field, present, label)
+					}
+					if present && (!utf8.ValidString(value) || strings.TrimSpace(value) != value || len(value) > len(text)) {
+						t.Fatalf("%s=%q was not trimmed and bounded", field, value)
+					}
+				}
+			})
+		}
+	}
 }
 
 // testSandboxEgressHostileHostsAreStillRecorded feeds agent-chosen
@@ -1345,7 +1592,7 @@ func testSandboxEgressHostileHostsAreStillRecorded(t *testing.T, harness *sandbo
 				if admission == router.AdmissionFloor {
 					continue
 				}
-				assertRecordMatchesRuntimeCatalog(t, record)
+				assertRecordMatchesRuntimeContract(t, record)
 				body := sandboxBody(t, record)
 				if body["defenseclaw.network.target_ref"] != test.target {
 					t.Fatalf("target_ref=%#v want %q", body["defenseclaw.network.target_ref"], test.target)
@@ -1384,7 +1631,7 @@ func testSandboxApprovalHostileHostIsOmitted(t *testing.T, harness *sandboxHarne
 				t.Fatalf("the host cost the approval its record: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			encoded, _ := record.MarshalJSON()
 			if bytes.Contains(encoded, []byte("dcsecret")) {
 				t.Fatalf("approval kept userinfo: %s", encoded)
@@ -1427,7 +1674,7 @@ func testSandboxWorkspacePathsAreSanitizedNotRejected(t *testing.T, harness *san
 				t.Fatalf("a hostile file name cost the review its record: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			body := sandboxBody(t, record)
 			if body["defenseclaw.sandbox.workspace.flagged_count"] != int64(len(test.paths)) {
 				t.Fatalf("flagged count=%#v want %d", body["defenseclaw.sandbox.workspace.flagged_count"], len(test.paths))
@@ -1462,10 +1709,59 @@ func testSandboxFindingTargetRefIsBoundedNotDropped(t *testing.T, harness *sandb
 				t.Fatalf("the target reference cost the finding its record: %v", err)
 			}
 			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeCatalog(t, record)
+			assertRecordMatchesRuntimeContract(t, record)
 			got, present := sandboxBody(t, record)["defenseclaw.finding.target_ref"]
 			if present != (test.want != "") || (present && got != test.want) {
 				t.Fatalf("target_ref=%#v present=%v want %q", got, present, test.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeSchemaValidationRejectsContractViolations proves the schema
+// check the sandbox tests rely on is not vacuous: a real workspace record
+// passes, and each single-field violation of the envelope, correlation,
+// provenance, or body fails.
+func TestRuntimeSchemaValidationRejectsContractViolations(t *testing.T) {
+	runtime, recorder := newSandboxHarness(t).bind(t, router.AdmissionOrdinary)
+	flagged := int64(2)
+	if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+		Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview, FlaggedCount: &flagged,
+		Paths: []string{"package.json"},
+	}); err != nil {
+		t.Fatalf("RecordSandboxWorkspace: %v", err)
+	}
+	_, record := onlySandboxRecord(t, runtime)
+	if err := runtimeSchemaViolation(t, decodeRecordWire(t, record)); err != nil {
+		t.Fatalf("the unmodified record fails the schema: %v", err)
+	}
+	nested := func(wire map[string]any, key string) map[string]any {
+		object, _ := wire[key].(map[string]any)
+		return object
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"unregistered body field", func(w map[string]any) { nested(w, "body")["defenseclaw.sandbox.nickname"] = "x" }},
+		{"unregistered sandbox phase", func(w map[string]any) { nested(w, "body")["defenseclaw.sandbox.phase"] = "running" }},
+		{"missing workspace operation", func(w map[string]any) { delete(nested(w, "body"), "defenseclaw.sandbox.workspace.operation") }},
+		{"count as a string", func(w map[string]any) { nested(w, "body")["defenseclaw.sandbox.workspace.flagged_count"] = "2" }},
+		{"image digest pattern", func(w map[string]any) { nested(w, "body")["defenseclaw.sandbox.image.digest"] = "sha256:XYZ" }},
+		{"outcome outside the family", func(w map[string]any) { w["outcome"] = "blocked" }},
+		{"another family's bucket", func(w map[string]any) { w["bucket"] = "network.egress" }},
+		{"mandatory not a boolean", func(w map[string]any) { w["mandatory"] = "yes" }},
+		{"missing provenance", func(w map[string]any) { delete(w, "provenance") }},
+		{"unknown provenance member", func(w map[string]any) { nested(w, "provenance")["hostname"] = "build-01" }},
+		{"unknown correlation member", func(w map[string]any) { nested(w, "correlation")["sandbox_name"] = "dc-x" }},
+		{"unknown envelope member", func(w map[string]any) { w["sandbox"] = map[string]any{} }},
+		{"timestamp not a date-time", func(w map[string]any) { w["timestamp"] = "yesterday" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire := decodeRecordWire(t, record)
+			test.mutate(wire)
+			if err := runtimeSchemaViolation(t, wire); err == nil {
+				t.Fatal("the runtime schema accepted a contract violation")
 			}
 		})
 	}
@@ -1536,11 +1832,202 @@ func loadRuntimeCatalog(t *testing.T) runtimeCatalog {
 	return runtimeCatalogValue
 }
 
-// assertRecordMatchesRuntimeCatalog validates the canonical wire form of an
-// ordinary record against its generated family: bucket, outcome contract,
-// required fields, the closed field set, per-field types and registered
-// constraints, and field classes.
-func assertRecordMatchesRuntimeCatalog(t *testing.T, record observability.Record) {
+// runtimeSchema is the embedded generated runtime schema
+// (schemas/telemetry/runtime/telemetry.schema.json.gz). Each family is
+// compiled on demand from its own document: the family definition plus every
+// definition it references, verbatim. The root is a oneOf over all ~300
+// families; compiling only what a record's family reaches keeps the check
+// fast under -race and limits the RE2 rewrite below to patterns sandbox
+// records can meet.
+type runtimeSchema struct {
+	definitions map[string]any
+	mu          sync.Mutex
+	families    map[string]*jsonschema.Schema
+}
+
+const runtimeSchemaDefinitionRef = "#/$defs/"
+
+var (
+	runtimeSchemaOnce  sync.Once
+	runtimeSchemaValue *runtimeSchema
+	runtimeSchemaErr   error
+
+	schemaUnicodeEscape = regexp.MustCompile(`\\u([0-9A-Fa-f]{4})`)
+)
+
+func loadRuntimeSchema(t *testing.T) *runtimeSchema {
+	t.Helper()
+	runtimeSchemaOnce.Do(func() {
+		decoder := json.NewDecoder(bytes.NewReader(publicschemas.TelemetryV8Schema()))
+		decoder.UseNumber()
+		var document struct {
+			Schema      string         `json:"$schema"`
+			Definitions map[string]any `json:"$defs"`
+		}
+		if runtimeSchemaErr = decoder.Decode(&document); runtimeSchemaErr != nil {
+			return
+		}
+		if document.Schema != "https://json-schema.org/draft/2020-12/schema" || len(document.Definitions) == 0 {
+			runtimeSchemaErr = fmt.Errorf("unexpected runtime schema dialect %q with %d definitions",
+				document.Schema, len(document.Definitions))
+			return
+		}
+		runtimeSchemaValue = &runtimeSchema{
+			definitions: document.Definitions, families: make(map[string]*jsonschema.Schema),
+		}
+	})
+	if runtimeSchemaErr != nil {
+		t.Fatalf("decode embedded runtime schema: %v", runtimeSchemaErr)
+	}
+	return runtimeSchemaValue
+}
+
+func (schema *runtimeSchema) family(id string) (*jsonschema.Schema, error) {
+	schema.mu.Lock()
+	defer schema.mu.Unlock()
+	if compiled, ok := schema.families[id]; ok {
+		return compiled, nil
+	}
+	root := "family:" + id
+	reached := map[string]any{}
+	pending := []string{root}
+	for len(pending) > 0 {
+		name := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if _, done := reached[name]; done {
+			continue
+		}
+		definition, ok := schema.definitions[name]
+		if !ok {
+			return nil, fmt.Errorf("runtime schema has no definition %q", name)
+		}
+		// A deep copy, so the RE2 rewrite never touches the shared document.
+		encoded, err := json.Marshal(definition)
+		if err != nil {
+			return nil, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
+		decoder.UseNumber()
+		var copied any
+		if err := decoder.Decode(&copied); err != nil {
+			return nil, err
+		}
+		if err := rewriteSchemaPatternsForRE2(copied); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		reached[name] = copied
+		pending = append(pending, schemaDefinitionRefs(copied)...)
+	}
+	document, err := json.Marshal(map[string]any{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$defs":   reached,
+		"$ref":    runtimeSchemaDefinitionRef + root,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url := "memory://defenseclaw/telemetry/" + id + ".schema.json"
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft2020
+	compiler.AssertFormat = true
+	if err := compiler.AddResource(url, bytes.NewReader(document)); err != nil {
+		return nil, err
+	}
+	compiled, err := compiler.Compile(url)
+	if err != nil {
+		return nil, err
+	}
+	schema.families[id] = compiled
+	return compiled, nil
+}
+
+// schemaDefinitionRefs lists the $defs names a definition references. Every
+// reference in the generated schema has the form #/$defs/<name>.
+func schemaDefinitionRefs(node any) []string {
+	var names []string
+	switch value := node.(type) {
+	case map[string]any:
+		for key, child := range value {
+			if ref, ok := child.(string); ok && key == "$ref" && strings.HasPrefix(ref, runtimeSchemaDefinitionRef) {
+				names = append(names, strings.TrimPrefix(ref, runtimeSchemaDefinitionRef))
+				continue
+			}
+			names = append(names, schemaDefinitionRefs(child)...)
+		}
+	case []any:
+		for _, child := range value {
+			names = append(names, schemaDefinitionRefs(child)...)
+		}
+	}
+	return names
+}
+
+// rewriteSchemaPatternsForRE2 makes a definition's regular expressions
+// compile with Go's RE2 engine, which the validator uses. The generator
+// anchors each portable pattern as ^(?:P)$(?![\s\S]) so that engines whose $
+// also matches before a final newline still full-match; RE2's $ already
+// means end of text, so the guard is dropped, and \uXXXX escapes become
+// \x{XXXX}. A pattern that still does not compile (lookaround) is an error,
+// never skipped. Extension keywords and literal values are left alone.
+func rewriteSchemaPatternsForRE2(node any) error {
+	switch value := node.(type) {
+	case map[string]any:
+		for key, child := range value {
+			switch {
+			case key == "const" || key == "enum" || key == "default" || key == "examples" || strings.HasPrefix(key, "x-"):
+				continue
+			case key == "pattern":
+				if pattern, ok := child.(string); ok {
+					rewritten, err := re2SchemaPattern(pattern)
+					if err != nil {
+						return err
+					}
+					value[key] = rewritten
+					continue
+				}
+			case key == "patternProperties":
+				if properties, ok := child.(map[string]any); ok {
+					rewritten := make(map[string]any, len(properties))
+					for pattern, subschema := range properties {
+						if err := rewriteSchemaPatternsForRE2(subschema); err != nil {
+							return err
+						}
+						key, err := re2SchemaPattern(pattern)
+						if err != nil {
+							return err
+						}
+						rewritten[key] = subschema
+					}
+					value[key] = rewritten
+					continue
+				}
+			}
+			if err := rewriteSchemaPatternsForRE2(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if err := rewriteSchemaPatternsForRE2(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func re2SchemaPattern(pattern string) (string, error) {
+	rewritten := strings.TrimSuffix(pattern, `(?![\s\S])`)
+	rewritten = schemaUnicodeEscape.ReplaceAllString(rewritten, `\x{$1}`)
+	if _, err := regexp.Compile(rewritten); err != nil {
+		return "", fmt.Errorf("schema pattern %q has no RE2 equivalent: %w", pattern, err)
+	}
+	return rewritten, nil
+}
+
+// decodeRecordWire returns a record's canonical wire form with JSON numbers
+// kept exact.
+func decodeRecordWire(t *testing.T, record observability.Record) map[string]any {
 	t.Helper()
 	encoded, err := record.MarshalJSON()
 	if err != nil {
@@ -1552,6 +2039,50 @@ func assertRecordMatchesRuntimeCatalog(t *testing.T, record observability.Record
 	if err := decoder.Decode(&wire); err != nil {
 		t.Fatalf("decode record: %v", err)
 	}
+	return wire
+}
+
+// assertRecordMatchesRuntimeSchema validates an ordinary record's canonical
+// wire form (envelope, correlation, provenance, body or instrument data, and
+// field classes) against its family in the generated runtime schema. A
+// floor-only record is a content-free runtime projection the public schema
+// does not describe; the floor tests check it separately.
+func assertRecordMatchesRuntimeSchema(t *testing.T, record observability.Record) {
+	t.Helper()
+	if err := runtimeSchemaViolation(t, decodeRecordWire(t, record)); err != nil {
+		encoded, _ := record.MarshalJSON()
+		t.Fatalf("%v\nrecord: %s", err, encoded)
+	}
+}
+
+// runtimeSchemaViolation validates one wire-form record against the runtime
+// schema family its signal and event name select.
+func runtimeSchemaViolation(t *testing.T, wire map[string]any) error {
+	t.Helper()
+	signal, _ := wire["signal"].(string)
+	eventName, _ := wire["event_name"].(string)
+	family, ok := loadRuntimeCatalog(t).families[signal+"\x00"+eventName]
+	if !ok {
+		return fmt.Errorf("record %s/%s has no generated family", signal, eventName)
+	}
+	compiled, err := loadRuntimeSchema(t).family(family.ID)
+	if err != nil {
+		t.Fatalf("compile %s from the runtime schema: %v", family.ID, err)
+	}
+	if err := compiled.Validate(wire); err != nil {
+		return fmt.Errorf("%s record violates the generated runtime schema: %w", family.ID, err)
+	}
+	return nil
+}
+
+// assertRecordMatchesRuntimeContract validates an ordinary record against
+// the generated runtime schema, then checks what JSON Schema cannot express
+// against the generated catalog: the exact byte bounds and patterns of each
+// registered field, the closed field set, and per-leaf field classes.
+func assertRecordMatchesRuntimeContract(t *testing.T, record observability.Record) {
+	t.Helper()
+	assertRecordMatchesRuntimeSchema(t, record)
+	wire := decodeRecordWire(t, record)
 	catalog := loadRuntimeCatalog(t)
 	signal, _ := wire["signal"].(string)
 	eventName, _ := wire["event_name"].(string)
