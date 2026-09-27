@@ -57,10 +57,23 @@ type box struct {
 	activeAt    time.Time
 	silentSince time.Time
 	silenceSent bool
-	seenChunks  map[string]struct{}
-	blocked     int
+	// seenChunks are the pending draft chunks triage decided; it is pruned
+	// to the inbox's pending chunks on every poll.
+	seenChunks map[string]struct{}
+	blocked    int
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
+	// Proposal flood limits (see approvals.go): recent automatic
+	// approvals and recorded rejections, rejections not recorded in the
+	// current window, and rules approvals added since the last start.
+	autoApproved []time.Time
+	rejected     []time.Time
+	quietRejects int
+	rulesAdded   int
+
+	// triageMu serializes draft polls of this sandbox. It is taken before
+	// Manager.mu, never under it.
+	triageMu sync.Mutex
 }
 
 type hookStats struct {

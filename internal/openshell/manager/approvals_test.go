@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -35,12 +36,15 @@ import (
 
 func boolPtr(v bool) *bool { return &v }
 
+// chunk is a draft chunk in the shape OpenShell 0.1.1 drafts for a denied
+// direct connection (measured on the host: allow_<host>_<port>, no
+// protocol, advisor provenance).
 func chunk(rule, host string, port uint32) types.PolicyChunk {
 	return types.PolicyChunk{
 		RuleName: rule, ReviewToken: "rt-" + rule, Binary: "/usr/bin/curl",
 		ProposedRule: &types.NetworkPolicyRule{
 			Name:      rule,
-			Endpoints: []types.PolicyNetworkEndpoint{{Host: host, Port: port, Protocol: "rest"}},
+			Endpoints: []types.PolicyNetworkEndpoint{{Host: host, Port: port, Ports: []uint32{port}, AdvisorProposed: true}},
 			Binaries:  []types.PolicyNetworkBinary{{Path: "/usr/bin/curl"}},
 		},
 	}
@@ -277,8 +281,9 @@ func TestProposalFloodsCollapse(t *testing.T) {
 		asks, _ := e.m.Approvals(context.Background(), sb.Name)
 		return len(asks) == 1
 	})
-	second := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg2", "host.openshell.internal", 5432))
-	again := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_hook2", "webhook.site", 443))
+	// OpenShell drafts the same rule again (a retried connection).
+	second := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
+	again := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_hook", "webhook.site", 443))
 	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
 	eventually(t, "collapsed", func() bool { return chunkStatus(e, sb.Name, again) == "rejected" })
 	asks, _ := e.m.Approvals(context.Background(), sb.Name)
@@ -304,4 +309,256 @@ func TestProposalFloodsCollapse(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, "newest chunk approved", func() bool { return chunkStatus(e, sb.Name, second) == "approved" })
+}
+
+func addChunk(e *harnessEnv, sandbox string, c types.PolicyChunk) string {
+	return e.fake.AddDraftChunk(openshell.DefaultWorkspace, sandbox, c)
+}
+
+func waitAsks(t *testing.T, e *harnessEnv, sandbox string, n int) []sandboxapi.Approval {
+	t.Helper()
+	var asks []sandboxapi.Approval
+	eventually(t, fmt.Sprintf("%d asks", n), func() bool {
+		asks, _ = e.m.Approvals(context.Background(), sandbox)
+		return len(asks) == n
+	})
+	return asks
+}
+
+// TestApprovalsUseLiveReviewTokens pins that approvals decided before
+// another policy change still land: OpenShell's review token changes with
+// the policy, so the manager reads a fresh one when it applies.
+func TestApprovalsUseLiveReviewTokens(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Approvals.DebounceMs = 150 })
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "tokbox"})
+	e.watch.waitStarted(t, sb.Name)
+
+	// An ask waits for the user while an automatic approval lands.
+	door := addChunk(e, sb.Name, chunk("allow_host_openshell_internal_5432", "host.openshell.internal", 5432))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	auto := addChunk(e, sb.Name, chunk("allow_registry_example_org_443", "registry.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	// While the automatic approval is debounced, another client changes
+	// the policy, so the token triage read is stale by the time it applies.
+	other := addChunk(e, sb.Name, chunk("allow_other_example_org_443", "other.example.org", 443))
+	eventually(t, "automatic approval queued", func() bool { return e.m.batcher.Pending(sb.Name) == 1 })
+	live, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, other)
+	if _, err := e.client.ApproveDraftChunk(context.Background(), sb.Name, other, live.ReviewToken); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "automatic approval applied", func() bool { return chunkStatus(e, sb.Name, auto) == "approved" })
+
+	// The ask's token is stale twice over; the operator's approval lands.
+	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "operator approval applied", func() bool { return chunkStatus(e, sb.Name, door) == "approved" })
+	eventually(t, "both approvals recorded as approved", func() bool {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		for _, a := range e.m.approvals {
+			if a.status != sandboxapi.ApprovalApproved {
+				return false
+			}
+		}
+		return len(e.m.approvals) == 2
+	})
+	eventually(t, "rule_add records for both", func() bool {
+		var rules []string
+		e.tel.mu.Lock()
+		for _, p := range e.tel.policy {
+			if p.Operation == audit.SandboxPolicyRuleAdd {
+				rules = append(rules, p.Target)
+			}
+		}
+		e.tel.mu.Unlock()
+		return slices.Contains(rules, "registry.example.org") && slices.Contains(rules, "host.openshell.internal")
+	})
+}
+
+// TestApprovalShowsAndChecksTheWholeProposal pins that an ask names every
+// endpoint, allowed IP and binary, and that the decision re-checks all of
+// them against the current policy.
+func TestApprovalShowsAndChecksTheWholeProposal(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "wholebox"})
+	e.watch.waitStarted(t, sb.Name)
+	c := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
+	c.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
+	c.ProposedRule.Endpoints = append(c.ProposedRule.Endpoints, types.PolicyNetworkEndpoint{Host: "10.1.2.3", Port: 443})
+	id := addChunk(e, sb.Name, c)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	got := asks[0]
+	want := []sandboxapi.ApprovalEndpoint{{Host: "host.openshell.internal", Port: 3000}, {Host: "host.openshell.internal", Port: 22}, {Host: "10.1.2.3", Port: 443}}
+	if !slices.Equal(got.Endpoints, want) || got.RuleName != "allow_host_openshell_internal_3000" || !slices.Equal(got.Binaries, []string{"/usr/bin/curl"}) {
+		t.Fatalf("ask = %+v", got)
+	}
+	// The administrator now forbids unblocking, which refuses the private
+	// address — the second destination, not the one that decided the ask.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	_, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve"})
+	wantCode(t, err, sandboxapi.CodeAdminViolation)
+	if s := chunkStatus(e, sb.Name, id); s != "pending" {
+		t.Fatalf("refused proposal = %s", s)
+	}
+	// Always is refused for proposals that reach this machine.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = nil })
+	if _, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+		t.Fatalf("approve always: %v", err)
+	}
+}
+
+// TestPrivateAllowedIPsAsk pins that allowed_ips reaching the user's network
+// ask instead of being approved automatically, and that the decision checks
+// them against openshell.admin.allow_unblock.
+func TestPrivateAllowedIPsAsk(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "ipbox"})
+	e.watch.waitStarted(t, sb.Name)
+	c := chunk("allow_my_cdn_attacker_example_443", "my-cdn.attacker.example", 443)
+	c.ProposedRule.Endpoints[0].AllowedIPs = []string{"10.0.0.0/8"}
+	id := addChunk(e, sb.Name, c)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	if s := chunkStatus(e, sb.Name, id); s != "pending" {
+		t.Fatalf("private allowed_ips proposal = %s, want an ask", s)
+	}
+	if !asks[0].Risky || !slices.Equal(asks[0].AllowedIPs, []string{"10.0.0.0/8"}) || !strings.Contains(asks[0].Reason, "10.0.0.0/8") {
+		t.Fatalf("ask = %+v", asks[0])
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	_, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"})
+	wantCode(t, err, sandboxapi.CodeAdminViolation)
+}
+
+// TestChangedProposalDoesNotJoinAnAsk pins that a newer proposal with
+// different content (an extra port) gets its own ask instead of replacing
+// the one the user is reading.
+func TestChangedProposalDoesNotJoinAnAsk(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "swapbox"})
+	e.watch.waitStarted(t, sb.Name)
+	first := addChunk(e, sb.Name, chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	read := asks[0]
+	swapped := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
+	swapped.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
+	second := addChunk(e, sb.Name, swapped)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	waitAsks(t, e, sb.Name, 2)
+	if _, err := e.m.DecideApproval(context.Background(), read.ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the proposal the user read applied", func() bool { return chunkStatus(e, sb.Name, first) == "approved" })
+	if s := chunkStatus(e, sb.Name, second); s != "pending" {
+		t.Fatalf("the swapped-in proposal = %s", s)
+	}
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	for _, ep := range policy.NetworkPolicies["allow_host_openshell_internal_3000"].Endpoints {
+		if slices.Contains(ep.Ports, 22) || ep.Port == 22 {
+			t.Fatalf("port 22 was opened: %+v", ep)
+		}
+	}
+}
+
+// TestProposalFloodIsRateLimited pins the flood limits: automatic approvals
+// per window, then asks, and the seen-chunk set tracking only pending
+// chunks.
+func TestProposalFloodIsRateLimited(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "ratebox"})
+	e.watch.waitStarted(t, sb.Name)
+	total := autoApproveBurst + 5
+	for i := 0; i < total; i++ {
+		host := fmt.Sprintf("h%d.example.org", i)
+		addChunk(e, sb.Name, chunk(fmt.Sprintf("allow_h%d_example_org_443", i), host, 443))
+	}
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, total-autoApproveBurst)
+	for _, a := range asks {
+		if !strings.Contains(a.Reason, "many new destinations") {
+			t.Fatalf("ask = %+v", a)
+		}
+	}
+	eventually(t, "automatic approvals applied", func() bool {
+		d, _ := e.client.GetDraft(context.Background(), sb.Name, "approved")
+		return d != nil && len(d.Chunks) == autoApproveBurst
+	})
+	// A later poll forgets the decided chunks.
+	e.m.triageSandbox(context.Background(), e.m.boxes[sb.Name])
+	e.m.mu.Lock()
+	seen := len(e.m.boxes[sb.Name].seenChunks)
+	e.m.mu.Unlock()
+	if seen != total-autoApproveBurst {
+		t.Fatalf("seen chunks = %d, want the %d still pending", seen, total-autoApproveBurst)
+	}
+}
+
+// TestProposalFloodLimits pins the per-session rule ceiling and that a flood
+// of rejected proposals is rejected quietly after the first ones.
+func TestProposalFloodLimits(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "limitbox"})
+	e.watch.waitStarted(t, sb.Name)
+	total := rejectBurst + 5
+	var ids []string
+	for i := 0; i < total; i++ {
+		ids = append(ids, addChunk(e, sb.Name, chunk(fmt.Sprintf("allow_x%d_pastebin_com_443", i), fmt.Sprintf("x%d.pastebin.com", i), 443)))
+	}
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "all rejected", func() bool {
+		for _, id := range ids {
+			if chunkStatus(e, sb.Name, id) != "rejected" {
+				return false
+			}
+		}
+		return true
+	})
+	var blocked, notices int
+	for _, ev := range e.m.ActivitySince(0, sb.Name) {
+		if ev.Kind == sandboxapi.ActivityEgressBlocked {
+			if ev.Reason == "rate_limited" {
+				notices++
+			} else {
+				blocked++
+			}
+		}
+	}
+	if blocked != rejectBurst || notices != 1 {
+		t.Fatalf("feed: %d blocked, %d notices; want %d and one", blocked, notices, rejectBurst)
+	}
+
+	// The session's rule budget is spent: new proposals are rejected.
+	e.m.mu.Lock()
+	e.m.boxes[sb.Name].rulesAdded = maxRulesPerSession
+	e.m.mu.Unlock()
+	id := addChunk(e, sb.Name, chunk("allow_more_example_org_443", "more.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "rule limit", func() bool { return chunkStatus(e, sb.Name, id) == "rejected" })
+	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, id)
+	if !strings.Contains(c.RejectionReason, "rules this session") {
+		t.Fatalf("rejection = %q", c.RejectionReason)
+	}
+	// A restart starts a new budget.
+	if _, err := e.m.Stop(context.Background(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Start(context.Background(), sb.Name, sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	e.m.mu.Lock()
+	spent := e.m.boxes[sb.Name].rulesAdded
+	e.m.mu.Unlock()
+	if spent != 0 {
+		t.Fatalf("rules after a restart = %d", spent)
+	}
 }

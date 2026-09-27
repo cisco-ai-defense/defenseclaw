@@ -55,6 +55,7 @@ func (p *policyClient) GetDraft(ctx context.Context, workspace, sandboxName stri
 		if f := cfg.StatusFilter(); f != "" && c.Status != f {
 			continue
 		}
+		c.ReviewToken = st.reviewToken(&c)
 		c.ProposedRule = cloneRule(c.ProposedRule)
 		out.Chunks = append(out.Chunks, c)
 	}
@@ -116,8 +117,10 @@ func (p *policyClient) ApproveDraftChunk(ctx context.Context, workspace, sandbox
 	if c.Status != "pending" {
 		return nil, statusErr(types.ErrorConflict, "draft chunk %q is %s", chunkID, c.Status)
 	}
-	if c.ReviewToken != "" && c.ReviewToken != reviewToken {
-		return nil, statusErr(types.ErrorInvalidArgument, "review token does not match the evaluated candidate")
+	if want := st.reviewToken(c); want != "" && want != reviewToken {
+		// The gateway answers FAILED_PRECONDITION, which the SDK maps to
+		// Conflict.
+		return nil, statusErr(types.ErrorConflict, "review token does not match the live policy and candidate")
 	}
 	version, hash, err := p.approve(st, []*types.PolicyChunk{c})
 	if err != nil {
@@ -148,8 +151,12 @@ func (p *policyClient) ApproveAllDraftChunks(ctx context.Context, workspace, san
 			if c.Status != "pending" {
 				return nil, statusErr(types.ErrorConflict, "draft chunk %q is %s", a.ChunkID, c.Status)
 			}
-			if c.ReviewToken != "" && c.ReviewToken != a.ReviewToken {
-				return nil, statusErr(types.ErrorInvalidArgument, "review token for %q does not match", a.ChunkID)
+			if want := st.reviewToken(c); want != "" && want != a.ReviewToken {
+				// Measured on OpenShell 0.1.1: a stale token in a bulk
+				// approval is not an error; the chunk is counted as skipped
+				// and stays pending.
+				skipped++
+				continue
 			}
 			if c.SecurityNotes != "" && !cfg.IncludeSecurityFlagged() {
 				skipped++
@@ -248,6 +255,11 @@ func (p *policyClient) EditDraftChunk(ctx context.Context, workspace, sandboxNam
 		return statusErr(types.ErrorConflict, "draft chunk %q is %s", chunkID, c.Status)
 	}
 	c.ProposedRule = cloneRule(proposedRule)
+	if c.ReviewToken != "" {
+		// The candidate changed: earlier tokens no longer approve it.
+		c.ReviewToken += "~edited"
+		st.tokenAt[c.ID] = st.policyVersion
+	}
 	st.draftVersion++
 	return nil
 }

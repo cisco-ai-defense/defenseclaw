@@ -17,10 +17,12 @@
 package triage
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -54,8 +56,42 @@ func effective(t *testing.T, edit func(*config.OpenShellConfig), flags packs.Fla
 	return eff
 }
 
+// ruleName is the name OpenShell drafts for a denied connection, as
+// measured on 0.1.1 (allow_www_example_net_443).
+func ruleName(host string, port int) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(host) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	n := strings.Trim(b.String(), "_")
+	if n == "" {
+		n = "x"
+	}
+	return "allow_" + n + "_" + strconv.Itoa(port)
+}
+
 func proposal(host string, port int) Proposal {
-	return Proposal{Sandbox: "dc-claude-app-1a2b", ChunkID: "c1", ReviewToken: "rt", Endpoints: []Endpoint{{Host: host, Port: port, Protocol: "rest"}}}
+	return Proposal{Sandbox: "dc-claude-app-1a2b", ChunkID: "c1", ReviewToken: "rt", RuleName: ruleName(host, port),
+		Endpoints: []Endpoint{{Host: host, Port: port}}}
+}
+
+// liveChunk is a draft chunk in the shape OpenShell 0.1.1 drafts for a
+// denied direct connection (captured on the host).
+func liveChunk(host string, port uint32) openshell.PolicyChunk {
+	return openshell.PolicyChunk{
+		ID: "09ae94a5-80da-4bd8-b6c3-161aa5a05baa", Status: "pending", RuleName: ruleName(host, int(port)), Binary: "/usr/bin/curl",
+		ReviewToken: "20223bc770f1",
+		ProposedRule: &v1.NetworkPolicyRule{
+			Name:      ruleName(host, int(port)),
+			Endpoints: []v1.PolicyNetworkEndpoint{{Host: host, Port: port, Ports: []uint32{port}, AdvisorProposed: true}},
+			Binaries:  []v1.PolicyNetworkBinary{{Path: "/usr/bin/curl"}},
+		},
+		CurrentEffectivePolicy: &v1.SandboxPolicy{NetworkPolicies: map[string]v1.NetworkPolicyRule{"defenseclaw_egress": {}}},
+	}
 }
 
 func TestClassify(t *testing.T) {
@@ -118,7 +154,7 @@ func TestClassify(t *testing.T) {
 
 func TestClassifyWorstEndpointWins(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
-	p := Proposal{Sandbox: "s", ChunkID: "c", Endpoints: []Endpoint{
+	p := Proposal{Sandbox: "s", ChunkID: "c", RuleName: "allow_multi", Endpoints: []Endpoint{
 		{Host: "ok.example.org", Port: 443}, {Host: "host.openshell.internal", Port: 8080}, {Host: "webhook.site", Port: 443},
 	}}
 	if got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true}); got.Verdict != Reject || got.Host != "webhook.site" {
@@ -150,17 +186,141 @@ func TestClassifyAgentProposalsOff(t *testing.T) {
 
 func TestClassifyAllowedIPs(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
-	for _, entry := range []string{"169.254.169.254/32", "127.0.0.0/8", "0.0.0.0/0", "198.18.0.2", "not-an-ip"} {
-		p := proposal("ok.example.org", 443)
-		p.AllowedIPs = []string{entry}
-		if got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true}); got.Verdict != Reject {
-			t.Fatalf("allowed_ips %s = %+v, want a rejection", entry, got)
-		}
+	noUnblock := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, packs.Flags{})
+	for _, tc := range []struct {
+		entry   string
+		eff     *packs.Effective
+		verdict Verdict
+		reason  Reason
+	}{
+		{"169.254.169.254/32", open, Reject, ReasonPolicy},
+		{"127.0.0.0/8", open, Reject, ReasonPolicy},
+		{"0.0.0.0/0", open, Reject, ReasonPolicy},
+		{"198.18.0.2", open, Reject, ReasonPolicy},
+		{"not-an-ip", open, Reject, ReasonInvalid},
+		// A wide range that contains loopback or metadata is refused even
+		// though its base address is public.
+		{"64.0.0.0/2", open, Reject, ReasonPolicy},
+		{"100.64.0.0/10", open, Reject, ReasonPolicy}, // holds 100.100.100.200
+		{"::/0", open, Reject, ReasonPolicy},
+		{"fd00:ec2::254", open, Reject, ReasonPolicy},
+		// Private, CGNAT and ULA ranges, and ranges holding them, ask.
+		{"10.0.0.0/8", open, Ask, ReasonPrivateNetwork},
+		{"10.0.5.20", open, Ask, ReasonPrivateNetwork},
+		{"8.0.0.0/5", open, Ask, ReasonPrivateNetwork},
+		{"100.64.0.0/16", open, Ask, ReasonPrivateNetwork},
+		{"fc00::/8", open, Ask, ReasonPrivateNetwork},
+		{"::ffff:192.168.0.0/112", open, Ask, ReasonPrivateNetwork},
+		// Without allow_unblock the administrator refuses private ranges.
+		{"10.0.0.0/8", noUnblock, Reject, ReasonAdmin},
+		{"93.184.216.0/24", open, Approve, ReasonOpenNetwork},
+		{"93.184.216.0/24", noUnblock, Approve, ReasonOpenNetwork},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			p := proposal("my-cdn.attacker.example", 443)
+			p.AllowedIPs = []string{tc.entry}
+			got := Classify(p, Policy{Effective: tc.eff, Feed: testFeed, AgentProposals: true})
+			if got.Verdict != tc.verdict || got.Reason != tc.reason {
+				t.Fatalf("allowed_ips %s = %+v, want %s %s", tc.entry, got, tc.verdict, tc.reason)
+			}
+			if tc.verdict == Ask && (!got.Risky || !strings.Contains(got.Message, tc.entry) || got.Host != "my-cdn.attacker.example") {
+				t.Fatalf("private allowed_ips ask = %+v", got)
+			}
+			// The operator's decision runs the same checks.
+			if err := CheckProposal(tc.eff, p, false, testFeed); (err != nil) != (tc.verdict == Reject) {
+				t.Fatalf("CheckProposal(%s) = %v", tc.entry, err)
+			}
+		})
 	}
-	p := proposal("ok.example.org", 443)
-	p.AllowedIPs = []string{"203.0.113.0/24"}
-	if got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true}); got.Verdict != Approve {
-		t.Fatalf("public allowed_ips = %+v, want approval", got)
+}
+
+func TestClassifyRuleShape(t *testing.T) {
+	open := effective(t, nil, packs.Flags{})
+	pol := Policy{Effective: open, Feed: testFeed, AgentProposals: true}
+	if got := Classify(FromChunk("box", liveChunk("www.example.net", 443)), pol); got.Verdict != Approve || got.Reason != ReasonOpenNetwork {
+		t.Fatalf("OpenShell's own proposal = %+v, want an automatic approval", got)
+	}
+	for name, edit := range map[string]func(c *openshell.PolicyChunk){
+		"defenseclaw rule": func(c *openshell.PolicyChunk) { c.RuleName = "defenseclaw_egress" },
+		"provider rule":    func(c *openshell.PolicyChunk) { c.RuleName = "_provider_anthropic" },
+		"custom rule name": func(c *openshell.PolicyChunk) { c.RuleName = "github" },
+		"rule name case":   func(c *openshell.PolicyChunk) { c.RuleName = "Allow_www_example_net_443" },
+		"rest protocol":    func(c *openshell.PolicyChunk) { c.ProposedRule.Endpoints[0].Protocol = "rest" },
+		"layer-7 rules": func(c *openshell.PolicyChunk) {
+			c.ProposedRule.Endpoints[0].Rules = []v1.L7Rule{{Allow: &v1.L7Allow{Method: "GET"}}}
+		},
+		"access preset": func(c *openshell.PolicyChunk) { c.ProposedRule.Endpoints[0].Access = v1.NetworkAccessPresetFull },
+		"tls mode":      func(c *openshell.PolicyChunk) { c.ProposedRule.Endpoints[0].TLS = v1.NetworkTLSModeTerminate },
+		"credential": func(c *openshell.PolicyChunk) {
+			c.ProposedRule.Endpoints[0].CredentialBinding = &types.NetworkCredentialBinding{Provider: "llm"}
+		},
+		"credential rewrite": func(c *openshell.PolicyChunk) { c.ProposedRule.Endpoints[0].RequestBodyCredentialRewrite = true },
+		"merge into a credentialed rule": func(c *openshell.PolicyChunk) {
+			c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{
+				{Host: "api.anthropic.com", Port: 443, Protocol: "rest", ProviderCredentialed: true}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := liveChunk("www.example.net", 443)
+			edit(&c)
+			got := Classify(FromChunk("box", c), pol)
+			if got.Verdict != Reject || got.Reason != ReasonRuleShape {
+				t.Fatalf("Classify = %+v, want an unsupported-rule rejection", got)
+			}
+		})
+	}
+	// Merging into an earlier plain approval of the same rule is fine.
+	c := liveChunk("www.example.net", 443)
+	c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{{Host: "www.example.net", Port: 443}}}
+	if got := Classify(FromChunk("box", c), pol); got.Verdict != Approve {
+		t.Fatalf("merge into a plain rule = %+v", got)
+	}
+}
+
+func TestClassifyUnblocked(t *testing.T) {
+	balanced := effective(t, nil, packs.Flags{Profile: "balanced"})
+	adminBlock := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"webhook.site"} }, packs.Flags{})
+	unblocked := []string{"api.internal-tools.example", "webhook.site", "10.1.2.3"}
+	pol := Policy{Effective: balanced, Feed: testFeed, AgentProposals: true, Unblocked: unblocked}
+	if got := Classify(proposal("api.internal-tools.example", 443), pol); got.Verdict != Approve || got.Reason != ReasonAllowed {
+		t.Fatalf("unblocked host = %+v", got)
+	}
+	// An earlier always decision lifts the blocklist feed, as in the proxy.
+	if got := Classify(proposal("webhook.site", 443), pol); got.Verdict != Approve {
+		t.Fatalf("unblocked feed host = %+v", got)
+	}
+	// It never lifts the administrator's blocklist or the private checks.
+	pol.Effective = adminBlock
+	if got := Classify(proposal("webhook.site", 443), pol); got.Verdict != Reject || got.Reason != ReasonAdmin {
+		t.Fatalf("admin-blocked unblocked host = %+v", got)
+	}
+	if got := Classify(proposal("10.1.2.3", 443), pol); got.Verdict != Ask || got.Reason != ReasonPrivateNetwork {
+		t.Fatalf("unblocked private address = %+v", got)
+	}
+}
+
+func TestContentDigest(t *testing.T) {
+	a := liveChunk("www.example.net", 443)
+	b := liveChunk("www.example.net", 443)
+	b.ID, b.ReviewToken, b.HitCount = "other", "other-token", 7
+	b.ProposedRule.Endpoints[0].Rules = []v1.L7Rule{}
+	b.CurrentEffectivePolicy = nil
+	if ContentDigest(a) != ContentDigest(b) || RuleDigest(a) != RuleDigest(b) {
+		t.Fatal("the same proposal hashed differently")
+	}
+	b.SecurityNotes = "downloads executables"
+	if ContentDigest(a) == ContentDigest(b) || RuleDigest(a) != RuleDigest(b) {
+		t.Fatal("security notes must change the content digest only")
+	}
+	c := liveChunk("www.example.net", 443)
+	c.ProposedRule.Endpoints[0].Ports = []uint32{443, 22}
+	if RuleDigest(a) == RuleDigest(c) {
+		t.Fatal("an added port did not change the digest")
+	}
+	d := liveChunk("www.example.net", 443)
+	d.ProposedRule.Binaries = []v1.PolicyNetworkBinary{{Path: "/bin/sh"}}
+	if RuleDigest(a) == RuleDigest(d) {
+		t.Fatal("a different binary did not change the digest")
 	}
 }
 
@@ -186,6 +346,9 @@ func TestFromChunk(t *testing.T) {
 		t.Fatalf("proposal = %+v", p)
 	}
 	want := []Endpoint{{"pypi.org", 443, "rest"}, {"pypi.org", 80, "rest"}, {"files.pythonhosted.org", 0, ""}}
+	if p.RuleName != "allow_pypi" || len(p.Unsupported) != 1 || !strings.Contains(p.Unsupported[0], "rest") {
+		t.Fatalf("rule name %q, unsupported %v", p.RuleName, p.Unsupported)
+	}
 	if len(p.Endpoints) != len(want) {
 		t.Fatalf("endpoints = %+v", p.Endpoints)
 	}

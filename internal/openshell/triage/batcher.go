@@ -19,17 +19,28 @@ package triage
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
-// Applier applies approved draft chunks to a sandbox policy.
-// openshell.Client satisfies it.
+// Applier reads a sandbox's draft inbox and applies approved chunks to its
+// policy. openshell.Client satisfies it.
+//
+// OpenShell binds a chunk's review token to the live policy: once any other
+// change lands, the token a chunk was reviewed with no longer approves it
+// (the single call answers FAILED_PRECONDITION, the bulk call counts the
+// chunk as skipped without an error). The batcher therefore reads fresh
+// tokens right before it applies and reads the inbox again afterwards to
+// learn which chunks landed.
 type Applier interface {
+	// GetDraft returns the sandbox's draft chunks ("" status: all of them).
+	GetDraft(ctx context.Context, sandbox, status string) (*openshell.DraftPolicy, error)
 	// ApproveDraftChunks approves several reviewed chunks in one policy
-	// revision; security-flagged chunks are skipped.
+	// revision; security-flagged chunks and chunks with stale tokens are
+	// skipped.
 	ApproveDraftChunks(ctx context.Context, sandbox string, approvals []openshell.DraftChunkApproval) (*openshell.ApproveAllResult, error)
 	// ApproveDraftChunk approves one chunk, security-flagged ones included.
 	ApproveDraftChunk(ctx context.Context, sandbox, chunkID, reviewToken string) (*openshell.ApproveResult, error)
@@ -43,31 +54,49 @@ type Quiescer interface {
 
 // Item is one approval waiting to be applied.
 type Item struct {
-	Sandbox     string
-	BindingID   string
-	ChunkID     string
-	ReviewToken string
-	// Single applies the chunk on its own (ApproveDraftChunk): the bulk
-	// call skips security-flagged chunks, so an operator approval of a
-	// flagged chunk must go through the single call.
-	Single bool
+	Sandbox   string
+	BindingID string
+	ChunkID   string
+	// Digest is ContentDigest of the chunk as it was decided. A chunk whose
+	// content differs when the batch is applied is not approved (Result
+	// Changed); empty skips the check.
+	Digest string
 	// Tag is carried through to the Result.
 	Tag any
+
+	// attempts counts applications that lost a race with another policy
+	// change.
+	attempts int
 }
 
-// Result is the outcome of one applied Item.
+// Result is the outcome of one Item. At most one of Err, Skipped, Changed,
+// Stale and Gone is set; none means the chunk is approved.
 type Result struct {
 	Item Item
-	// Err is set when the approval failed; Skipped when OpenShell left the
-	// chunk out of a bulk approval.
-	Err     error
+	// Err is set when the approval failed.
+	Err error
+	// Skipped reports a security-flagged chunk OpenShell left out of a bulk
+	// approval.
 	Skipped bool
-	// PolicyVersion is the sandbox policy revision the approval landed in.
+	// Changed reports a chunk whose proposed content changed after it was
+	// decided; it was not approved and must be triaged again.
+	Changed bool
+	// Stale reports a chunk OpenShell kept refusing because its policy
+	// changed under every attempt; it was not approved.
+	Stale bool
+	// Gone reports a chunk that is no longer pending (rejected or removed).
+	Gone bool
+	// PolicyVersion is the sandbox policy revision the approval landed in
+	// (0 when another client approved the chunk first).
 	PolicyVersion uint32
 	PolicyHash    string
 	// Forced reports a batch applied after MaxWait without quiescence.
 	Forced bool
 }
+
+// maxApplyAttempts bounds how often an approval whose review token went
+// stale is retried with a fresh one.
+const maxApplyAttempts = 3
 
 // BatcherOptions configure a Batcher.
 type BatcherOptions struct {
@@ -135,6 +164,7 @@ func NewBatcher(opts BatcherOptions) *Batcher {
 }
 
 // Enqueue adds an approval. A chunk already queued is not added twice.
+// The chunk's review token is read when the batch is applied.
 func (b *Batcher) Enqueue(item Item) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -227,14 +257,14 @@ func (b *Batcher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case sandbox := <-b.ready:
-			items, ok := b.take(sandbox)
+			q, items, ok := b.take(sandbox)
 			if !ok {
 				continue
 			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				b.flush(ctx, sandbox, items)
+				b.flush(ctx, sandbox, q, items)
 			}()
 		}
 	}
@@ -242,30 +272,37 @@ func (b *Batcher) Run(ctx context.Context) error {
 
 // take claims a sandbox's queue for one flush; a flush already running for
 // the sandbox picks the new items up when it finishes.
-func (b *Batcher) take(sandbox string) ([]Item, bool) {
+func (b *Batcher) take(sandbox string) (*queue, []Item, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	q := b.queues[sandbox]
 	if q == nil || q.flushing || len(q.items) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	items := q.items
 	q.items = nil
 	q.flushing = true
 	b.busy++
-	return items, true
+	return q, items, true
 }
 
-func (b *Batcher) flush(ctx context.Context, sandbox string, items []Item) {
-	results := b.apply(ctx, sandbox, items)
+func (b *Batcher) flush(ctx context.Context, sandbox string, q *queue, items []Item) {
+	results, retry := b.apply(ctx, sandbox, items)
 	if b.opts.OnResult != nil && len(results) > 0 {
 		b.opts.OnResult(results)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.busy--
-	if q := b.queues[sandbox]; q != nil {
+	// A flushing queue stays in the map until the flush ends, unless Forget
+	// dropped the sandbox; its retries go with it.
+	if b.queues[sandbox] == q {
 		q.flushing = false
+		for _, it := range retry {
+			if !slices.ContainsFunc(q.items, func(have Item) bool { return have.ChunkID == it.ChunkID }) {
+				q.items = append(q.items, it)
+			}
+		}
 		if len(q.items) == 0 {
 			delete(b.queues, sandbox)
 		} else {
@@ -301,60 +338,183 @@ func (b *Batcher) Drain(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) []Result {
+// apply approves one sandbox's batch at a quiet moment. It returns the
+// finished results and the items to retry in a later batch.
+func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) ([]Result, []Item) {
 	forced := false
 	if q := b.opts.Quiesce; q != nil && items[0].BindingID != "" {
 		wctx, cancel := context.WithTimeout(ctx, b.opts.MaxWait)
 		err := q.WaitQuiescent(wctx, items[0].BindingID, b.opts.Idle)
 		cancel()
 		if ctx.Err() != nil {
-			return failAll(items, ctx.Err())
+			return failAll(items, ctx.Err()), nil
 		}
 		forced = err != nil
 	}
-	var bulk []Item
-	var results []Result
-	for _, it := range items {
-		if !it.Single {
-			bulk = append(bulk, it)
-			continue
-		}
-		res, err := b.opts.Apply.ApproveDraftChunk(ctx, sandbox, it.ChunkID, it.ReviewToken)
-		r := Result{Item: it, Err: err, Forced: forced}
-		if res != nil {
-			r.PolicyVersion, r.PolicyHash = res.PolicyVersion, res.PolicyHash
-		}
-		results = append(results, r)
-	}
-	if len(bulk) == 0 {
-		return results
-	}
-	approvals := make([]openshell.DraftChunkApproval, len(bulk))
-	for i, it := range bulk {
-		approvals[i] = openshell.DraftChunkApproval{ChunkID: it.ChunkID, ReviewToken: it.ReviewToken}
-	}
-	res, err := b.opts.Apply.ApproveDraftChunks(ctx, sandbox, approvals)
+	a := applyRun{b: b, ctx: ctx, sandbox: sandbox, forced: forced}
+	draft, err := a.draft()
 	if err != nil {
-		return append(results, failAll(bulk, err)...)
+		return failAll(items, err), nil
 	}
-	skipped := 0
-	if res != nil {
-		skipped = int(res.ChunksSkipped)
+	// Security-flagged chunks need the single call (the bulk call skips
+	// them); everything else lands in one revision.
+	var bulk, single []Item
+	for _, it := range items {
+		c, done := a.check(draft, it)
+		switch {
+		case done:
+		case c.SecurityNotes != "":
+			single = append(single, it)
+		default:
+			bulk = append(bulk, it)
+		}
 	}
-	for i, it := range bulk {
-		r := Result{Item: it, Forced: forced}
+	if len(bulk) > 0 {
+		a.bulk(draft, bulk)
+	}
+	for i, it := range single {
+		// Every approval that lands changes the policy and so every other
+		// chunk's review token: read a fresh one before each single call.
+		if len(bulk) > 0 || i > 0 {
+			if draft, err = a.draft(); err != nil {
+				a.fail(it, err)
+				continue
+			}
+			if _, done := a.check(draft, it); done {
+				continue
+			}
+		}
+		a.single(draft, it)
+	}
+	return a.results, a.retry
+}
+
+// applyRun collects one batch's outcomes.
+type applyRun struct {
+	b       *Batcher
+	ctx     context.Context
+	sandbox string
+	forced  bool
+	results []Result
+	retry   []Item
+}
+
+func (a *applyRun) draft() (map[string]openshell.PolicyChunk, error) {
+	d, err := a.b.opts.Apply.GetDraft(a.ctx, a.sandbox, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]openshell.PolicyChunk, len(d.Chunks))
+	for _, c := range d.Chunks {
+		out[c.ID] = c
+	}
+	return out, nil
+}
+
+func (a *applyRun) result(r Result) {
+	r.Forced = a.forced
+	a.results = append(a.results, r)
+}
+
+func (a *applyRun) fail(it Item, err error) { a.result(Result{Item: it, Err: err}) }
+
+// again retries an item whose review token went stale, up to
+// maxApplyAttempts.
+func (a *applyRun) again(it Item) {
+	it.attempts++
+	if it.attempts >= maxApplyAttempts {
+		a.result(Result{Item: it, Stale: true})
+		return
+	}
+	a.retry = append(a.retry, it)
+}
+
+// check settles an item that cannot be approved as decided: the chunk is
+// gone, already decided, or its content changed. It returns the live chunk
+// and whether the item is settled.
+func (a *applyRun) check(draft map[string]openshell.PolicyChunk, it Item) (openshell.PolicyChunk, bool) {
+	c, ok := draft[it.ChunkID]
+	switch {
+	case !ok:
+		a.result(Result{Item: it, Gone: true})
+	case c.Status == "approved":
+		// Approved by another client in the meantime.
+		a.result(Result{Item: it})
+	case c.Status != "" && c.Status != "pending":
+		a.result(Result{Item: it, Gone: true})
+	case it.Digest != "" && ContentDigest(c) != it.Digest:
+		a.result(Result{Item: it, Changed: true})
+	default:
+		return c, false
+	}
+	return c, true
+}
+
+func (a *applyRun) bulk(draft map[string]openshell.PolicyChunk, items []Item) {
+	approvals := make([]openshell.DraftChunkApproval, len(items))
+	for i, it := range items {
+		approvals[i] = openshell.DraftChunkApproval{ChunkID: it.ChunkID, ReviewToken: draft[it.ChunkID].ReviewToken}
+	}
+	res, err := a.b.opts.Apply.ApproveDraftChunks(a.ctx, a.sandbox, approvals)
+	if err != nil {
+		for _, it := range items {
+			a.fail(it, err)
+		}
+		return
+	}
+	if res == nil {
+		res = &openshell.ApproveAllResult{}
+	}
+	// The bulk answer counts skipped chunks without naming them: read the
+	// inbox again to learn which ones landed.
+	after, err := a.draft()
+	if err != nil {
+		if res.ChunksSkipped == 0 && int(res.ChunksApproved) == len(items) {
+			for _, it := range items {
+				a.result(Result{Item: it, PolicyVersion: res.PolicyVersion, PolicyHash: res.PolicyHash})
+			}
+			return
+		}
+		for _, it := range items {
+			a.again(it)
+		}
+		return
+	}
+	for _, it := range items {
+		c, ok := after[it.ChunkID]
+		switch {
+		case ok && c.Status == "approved":
+			a.result(Result{Item: it, PolicyVersion: res.PolicyVersion, PolicyHash: res.PolicyHash})
+		case ok && (c.Status == "" || c.Status == "pending"):
+			if c.SecurityNotes != "" {
+				a.result(Result{Item: it, Skipped: true})
+				continue
+			}
+			// Still pending without a flag: the token went stale under a
+			// concurrent policy change.
+			a.again(it)
+		default:
+			a.result(Result{Item: it, Gone: true})
+		}
+	}
+}
+
+func (a *applyRun) single(draft map[string]openshell.PolicyChunk, it Item) {
+	res, err := a.b.opts.Apply.ApproveDraftChunk(a.ctx, a.sandbox, it.ChunkID, draft[it.ChunkID].ReviewToken)
+	switch {
+	case openshell.IsConflict(err):
+		// A stale token, or a chunk decided meanwhile: the retry reads
+		// the inbox again and tells them apart.
+		a.again(it)
+	case err != nil:
+		a.fail(it, err)
+	default:
+		r := Result{Item: it}
 		if res != nil {
 			r.PolicyVersion, r.PolicyHash = res.PolicyVersion, res.PolicyHash
 		}
-		// The bulk answer counts skipped chunks without naming them; they
-		// are the security-flagged ones, which triage never sends in bulk,
-		// so a skip here marks the tail conservatively.
-		if skipped > 0 && i >= len(bulk)-skipped {
-			r.Skipped = true
-		}
-		results = append(results, r)
+		a.result(r)
 	}
-	return results
 }
 
 func failAll(items []Item, err error) []Result {

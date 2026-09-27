@@ -368,14 +368,24 @@ const (
 // Approval is one rare ask: an OpenShell draft proposal triage would not
 // decide on its own.
 type Approval struct {
-	ID       string `json:"id"`
-	Sandbox  string `json:"sandbox"`
-	ChunkID  string `json:"chunk_id"`
-	Kind     string `json:"kind"`
+	ID      string `json:"id"`
+	Sandbox string `json:"sandbox"`
+	ChunkID string `json:"chunk_id"`
+	Kind    string `json:"kind"`
+	// Host and Port name the endpoint that decided the ask; Endpoints are
+	// all of them, and approving opens every one.
 	Host     string `json:"host"`
 	Port     int    `json:"port,omitempty"`
 	Protocol string `json:"protocol,omitempty"`
-	Binary   string `json:"binary,omitempty"`
+	// Binary is the executable whose denied connection drafted the
+	// proposal; Binaries are the executables the rule would apply to.
+	Binary    string             `json:"binary,omitempty"`
+	Binaries  []string           `json:"binaries,omitempty"`
+	RuleName  string             `json:"rule_name,omitempty"`
+	Endpoints []ApprovalEndpoint `json:"endpoints,omitempty"`
+	// AllowedIPs are the addresses the destinations may resolve to. When
+	// set, they replace OpenShell's own private-address check.
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
 	// Risky marks private, IP-literal or host-local reach.
 	Risky bool `json:"risky,omitempty"`
 	// Reason is the triage reason; Rationale and SecurityNotes come from
@@ -389,6 +399,13 @@ type Approval struct {
 	ResolvedAt    time.Time `json:"resolved_at,omitzero"`
 }
 
+// ApprovalEndpoint is one destination of an ask.
+type ApprovalEndpoint struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+}
+
 // Approval decisions.
 const (
 	DecisionApprove = "approve"
@@ -398,8 +415,8 @@ const (
 // ApprovalDecision is POST /approvals/{id}.
 type ApprovalDecision struct {
 	Decision string `json:"decision"`
-	// Always keeps the decision for future sandboxes (approve: the host
-	// joins openshell.egress.allow; reject: openshell.egress.block).
+	// Always keeps the decision for future sandboxes (approve: the hosts
+	// join openshell.egress.allow; reject: openshell.egress.block).
 	Always bool   `json:"always,omitempty"`
 	Reason string `json:"reason,omitempty"`
 }

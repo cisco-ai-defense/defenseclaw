@@ -22,6 +22,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -43,6 +45,27 @@ const (
 // maxPendingApprovals bounds asks per sandbox so a proposal flood cannot
 // grow the table without limit; further asks are rejected.
 const maxPendingApprovals = 64
+
+// Proposal flood limits, per sandbox. Every approval that lands is an
+// OpenShell policy reload, which closes all of the sandbox's connections,
+// and an in-sandbox agent can draft proposals as fast as it likes.
+const (
+	// autoApproveBurst automatic approvals are allowed per
+	// autoApproveWindow; further proposals ask the user.
+	autoApproveBurst  = 20
+	autoApproveWindow = 10 * time.Minute
+	// maxRulesPerSession bounds the rules approvals add between two starts
+	// of a sandbox; beyond it triage rejects new proposals (the operator can
+	// still approve asks already queued).
+	maxRulesPerSession = 100
+	// rejectBurst rejections per rejectWindow are recorded and shown;
+	// further ones are rejected quietly, with one notice per window.
+	rejectBurst  = 20
+	rejectWindow = 10 * time.Minute
+	// maxTriagePerPass bounds the new proposals one draft poll decides; the
+	// next poll takes the rest.
+	maxTriagePerPass = 32
+)
 
 // collapseWindow is how long a rejected destination's new proposals are
 // rejected quietly, without another record or feed line. OpenShell drafts a
@@ -68,31 +91,47 @@ type approval struct {
 	resolvedAt  time.Time
 }
 
-// approvalID names the ask for one destination of one sandbox. Every
-// proposal OpenShell drafts for the same destination collapses into it.
-func approvalID(sandbox, kind, host string, port int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d", sandbox, kind, host, port)))
+// approvalID names the ask for one proposed rule of one sandbox: a digest
+// of everything approving it would add (rule name, every endpoint and port,
+// allowed IPs, binaries). Only proposals of exactly the same rule collapse
+// into one ask, so a newer proposal can never slip different endpoints or
+// binaries under an ask the user already read.
+func approvalID(sandbox, ruleDigest string) string {
+	sum := sha256.Sum256([]byte(sandbox + "\x00" + ruleDigest))
 	return "ap_" + hex.EncodeToString(sum[:8])
 }
 
 func (a *approval) wire() sandboxapi.Approval {
+	p := a.proposal
 	protocol := ""
-	for _, ep := range a.proposal.Endpoints {
-		if triage.NormalizeHost(ep.Host) == a.decision.Host {
-			protocol = ep.Protocol
-			break
-		}
-	}
-	return sandboxapi.Approval{
+	out := sandboxapi.Approval{
 		ID: a.id, Sandbox: a.sandbox, ChunkID: a.chunkID, Kind: a.decision.Kind, Host: a.decision.Host, Port: a.decision.Port,
-		Protocol: protocol, Binary: a.proposal.Binary, Risky: a.decision.Risky, Reason: a.decision.Message,
-		Rationale: a.proposal.Rationale, SecurityNotes: a.proposal.SecurityNotes, HitCount: a.proposal.HitCount,
+		Binary: p.Binary, Risky: a.decision.Risky, Reason: a.decision.Message,
+		Rationale: p.Rationale, SecurityNotes: p.SecurityNotes, HitCount: p.HitCount,
+		RuleName: p.RuleName, AllowedIPs: append([]string(nil), p.AllowedIPs...), Binaries: append([]string(nil), p.Binaries...),
 		Status: a.status, CreatedAt: a.createdAt, ResolvedAt: a.resolvedAt,
 	}
+	for _, ep := range p.Endpoints {
+		host := triage.NormalizeHost(ep.Host)
+		if protocol == "" && host == a.decision.Host {
+			protocol = ep.Protocol
+		}
+		out.Endpoints = append(out.Endpoints, sandboxapi.ApprovalEndpoint{Host: host, Port: ep.Port, Protocol: ep.Protocol})
+	}
+	out.Protocol = protocol
+	return out
 }
 
 // batchApplier routes the batcher's approvals to the current gateway.
 type batchApplier struct{ m *Manager }
+
+func (a batchApplier) GetDraft(ctx context.Context, sandbox, status string) (*openshell.DraftPolicy, error) {
+	gw, err := a.m.gateway(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return gw.Client.GetDraft(ctx, sandbox, status)
+}
 
 func (a batchApplier) ApproveDraftChunks(ctx context.Context, sandbox string, approvals []openshell.DraftChunkApproval) (*openshell.ApproveAllResult, error) {
 	gw, err := a.m.gateway(ctx)
@@ -156,9 +195,20 @@ func (m *Manager) triageSweep(ctx context.Context) {
 	}
 }
 
+// triagePolicy is what triage judges a sandbox's proposals against.
+func (m *Manager) triagePolicy(eff *packs.Effective) triage.Policy {
+	cfg := m.config()
+	return triage.Policy{
+		Effective: eff, Feed: m.feedMatcher(), AgentProposals: cfg.OpenShell.Approvals.AgentProposalsEnabled(),
+		Unblocked: cfg.OpenShell.Egress.Unblocked,
+	}
+}
+
 // triageSandbox fetches a sandbox's pending proposals and decides the ones
 // it has not seen yet.
 func (m *Manager) triageSandbox(ctx context.Context, b *box) {
+	b.triageMu.Lock()
+	defer b.triageMu.Unlock()
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return
@@ -178,86 +228,184 @@ func (m *Manager) triageSandbox(ctx context.Context, b *box) {
 		}
 		return
 	}
-	pol := triage.Policy{Effective: eff, Feed: m.feedMatcher(), AgentProposals: m.config().OpenShell.Approvals.AgentProposalsEnabled()}
+	pol := m.triagePolicy(eff)
+	// seenChunks tracks the inbox's pending chunks only: a decided chunk
+	// leaves the pending list and its entry goes with it.
+	pending := make(map[string]bool, len(draft.Chunks))
+	for _, chunk := range draft.Chunks {
+		pending[chunk.ID] = true
+	}
+	var fresh []openshell.PolicyChunk
+	more := false
+	m.mu.Lock()
+	if b.seenChunks == nil {
+		b.seenChunks = map[string]struct{}{}
+	}
+	for id := range b.seenChunks {
+		if !pending[id] {
+			delete(b.seenChunks, id)
+		}
+	}
 	for _, chunk := range draft.Chunks {
 		if chunk.Status != "" && chunk.Status != "pending" {
 			continue
 		}
-		m.mu.Lock()
-		_, seen := b.seenChunks[chunk.ID]
-		if !seen {
-			if b.seenChunks == nil {
-				b.seenChunks = map[string]struct{}{}
-			}
-			b.seenChunks[chunk.ID] = struct{}{}
-		}
-		m.mu.Unlock()
-		if seen {
+		if _, seen := b.seenChunks[chunk.ID]; seen {
 			continue
+		}
+		if len(fresh) == maxTriagePerPass {
+			more = true
+			break
+		}
+		b.seenChunks[chunk.ID] = struct{}{}
+		fresh = append(fresh, chunk)
+	}
+	m.mu.Unlock()
+	for _, chunk := range fresh {
+		if ctx.Err() != nil {
+			return
 		}
 		p := triage.FromChunk(name, chunk)
 		d := triage.Classify(p, pol)
 		m.applyTriage(ctx, gw, b, bindingID, p, d)
 	}
+	if more {
+		m.scheduleTriage(b)
+	}
+}
+
+// retriage forgets that a chunk was decided, so the next poll decides it
+// again, and schedules that poll.
+func (m *Manager) retriage(b *box, chunkID string) {
+	m.mu.Lock()
+	delete(b.seenChunks, chunkID)
+	m.mu.Unlock()
+	m.scheduleTriage(b)
+}
+
+// recent drops the times before cutoff.
+func recent(times []time.Time, cutoff time.Time) []time.Time {
+	i := 0
+	for i < len(times) && times[i].Before(cutoff) {
+		i++
+	}
+	return times[i:]
 }
 
 func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingID string, p triage.Proposal, d triage.Decision) {
+	now := m.now()
 	a := &approval{
-		id: approvalID(p.Sandbox, d.Kind, d.Host, d.Port), sandbox: p.Sandbox, chunkID: p.ChunkID, reviewToken: p.ReviewToken,
-		decision: d, proposal: p, createdAt: m.now().UTC(),
+		id: approvalID(p.Sandbox, p.RuleDigest), sandbox: p.Sandbox, chunkID: p.ChunkID, reviewToken: p.ReviewToken,
+		decision: d, proposal: p, createdAt: now.UTC(),
 	}
 	m.mu.Lock()
-	id := b.identity()
-	pending := 0
+	pending, queued := 0, 0
 	for _, other := range m.approvals {
-		if other.sandbox == p.Sandbox && other.status == sandboxapi.ApprovalPending {
+		if other.sandbox != p.Sandbox {
+			continue
+		}
+		switch other.status {
+		case sandboxapi.ApprovalPending:
 			pending++
+		case sandboxapi.ApprovalQueued:
+			queued++
 		}
 	}
+	// Flood limits apply to what triage decides on its own.
+	switch {
+	case d.Verdict != triage.Reject && b.rulesAdded+queued >= maxRulesPerSession:
+		d.Verdict, d.Reason = triage.Reject, triage.ReasonRuleLimit
+		d.Message = fmt.Sprintf("the sandbox already added %d rules this session; restart it to approve more", b.rulesAdded+queued)
+	case d.Verdict == triage.Approve:
+		b.autoApproved = recent(b.autoApproved, now.Add(-autoApproveWindow))
+		if len(b.autoApproved) >= autoApproveBurst {
+			d.Verdict, d.Reason = triage.Ask, triage.ReasonRateLimited
+			d.Message = "the sandbox proposed many new destinations in a short time; approve to open " + d.Host
+		}
+	}
+	if d.Verdict == triage.Ask && pending >= maxPendingApprovals {
+		d.Verdict, d.Reason = triage.Reject, triage.ReasonTooManyPending
+		d.Message = "too many proposals are waiting for you; this one was rejected"
+	}
+	a.decision = d
 	prev := m.approvals[a.id]
-	var superseded string
+	var superseded, duplicate string
 	collapse := false
 	switch {
 	case prev != nil && prev.status == sandboxapi.ApprovalPending && d.Verdict == triage.Ask:
-		// A newer proposal for a destination already waiting for the user:
-		// keep one ask, pointing at the newest chunk (its review token is
-		// the current one).
-		superseded = prev.chunkID
-		prev.chunkID, prev.reviewToken, prev.proposal = p.ChunkID, p.ReviewToken, p
+		// The same rule proposed again while the user has not decided: keep
+		// one ask, on the newest chunk. The content is identical (the ID is
+		// its digest); the decision is refreshed.
+		if prev.chunkID != p.ChunkID {
+			superseded = prev.chunkID
+		}
+		prev.chunkID, prev.reviewToken, prev.proposal, prev.decision = p.ChunkID, p.ReviewToken, p, d
 		collapse = true
+	case prev != nil && (prev.status == sandboxapi.ApprovalQueued || prev.status == approvalDeciding) && d.Verdict != triage.Reject:
+		// The same rule is being approved already.
+		duplicate = "a proposal for the same rule is already being applied"
 	case prev != nil && prev.status == sandboxapi.ApprovalRejected && d.Verdict == triage.Reject &&
-		m.now().Sub(prev.resolvedAt) < collapseWindow:
-		collapse = true
+		now.Sub(prev.resolvedAt) < collapseWindow:
+		duplicate = d.Message
+	case prev != nil && prev.status == sandboxapi.ApprovalRejected && prev.actor == actorOperator &&
+		now.Sub(prev.resolvedAt) < collapseWindow:
+		// The user just rejected exactly this rule; the agent proposing it
+		// again does not ask again.
+		duplicate = "the user rejected this proposal"
+	case prev != nil && prev.status == sandboxapi.ApprovalPending:
+		// The rule's verdict changed (the policy did): resolve the old ask's
+		// chunk and decide the new one.
+		superseded = prev.chunkID
 	}
+	quiet := false
+	if d.Verdict == triage.Reject && duplicate == "" {
+		b.rejected = recent(b.rejected, now.Add(-rejectWindow))
+		if len(b.rejected) >= rejectBurst {
+			quiet = true
+			b.quietRejects++
+		} else {
+			b.rejected = append(b.rejected, now)
+			b.quietRejects = 0
+		}
+	}
+	if d.Verdict == triage.Approve && duplicate == "" && !collapse {
+		b.autoApproved = append(b.autoApproved, now)
+	}
+	firstQuiet := quiet && b.quietRejects == 1
+	id := b.identity()
 	m.mu.Unlock()
+
+	if superseded != "" {
+		m.rejectChunk(ctx, gw, p.Sandbox, superseded, "superseded by a newer proposal for the same rule")
+	}
 	if collapse {
-		reject := superseded
-		reason := "superseded by a newer proposal for the same destination"
-		if reject == "" {
-			reject, reason = p.ChunkID, d.Message
-		}
-		if err := gw.Client.RejectDraftChunk(ctx, p.Sandbox, reject, truncate(reason, 512)); err != nil && !openshell.IsNotFound(err) && !openshell.IsConflict(err) {
-			m.logf("reject proposal %s of %s: %v", reject, p.Sandbox, err)
-		}
 		return
 	}
-	if d.Verdict == triage.Ask && pending >= maxPendingApprovals {
-		d.Verdict, d.Reason = triage.Reject, "too_many_pending"
-		d.Message = "too many proposals are waiting for you; this one was rejected"
-		a.decision = d
+	if duplicate != "" {
+		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, duplicate)
+		return
+	}
+	if quiet {
+		a.status, a.actor, a.resolvedAt = sandboxapi.ApprovalRejected, actorPolicy, now.UTC()
+		m.storeApproval(a)
+		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
+		if firstQuiet {
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Source: sandboxapi.SourceOpenShell,
+				Reason: "rate_limited", Message: fmt.Sprintf("%s is proposing many blocked destinations; further rejections are not shown for %s",
+					p.Sandbox, rejectWindow)})
+		}
+		return
 	}
 	m.recordApproval(ctx, id, a, audit.SandboxApprovalRequested, "", "")
 	switch d.Verdict {
 	case triage.Approve:
 		a.status, a.actor = sandboxapi.ApprovalQueued, actorAutomatic
 		m.storeApproval(a)
-		m.batcher.Enqueue(triage.Item{Sandbox: p.Sandbox, BindingID: bindingID, ChunkID: p.ChunkID, ReviewToken: p.ReviewToken, Tag: a.id})
+		m.batcher.Enqueue(triage.Item{Sandbox: p.Sandbox, BindingID: bindingID, ChunkID: p.ChunkID, Digest: p.Digest, Tag: a.id})
 	case triage.Reject:
-		a.status, a.actor, a.resolvedAt = sandboxapi.ApprovalRejected, actorPolicy, m.now().UTC()
+		a.status, a.actor, a.resolvedAt = sandboxapi.ApprovalRejected, actorPolicy, now.UTC()
 		m.storeApproval(a)
-		if err := gw.Client.RejectDraftChunk(ctx, p.Sandbox, p.ChunkID, d.Message); err != nil && !openshell.IsNotFound(err) {
-			m.logf("reject proposal %s of %s: %v", p.ChunkID, p.Sandbox, err)
-		}
+		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
 		m.recordApproval(ctx, id, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
@@ -271,6 +419,15 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 			Kind: sandboxapi.ActivityApprovalRequested, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port,
 			ApprovalID: a.id, Reason: string(d.Reason), Message: d.Message,
 		})
+	}
+}
+
+// rejectChunk rejects one draft chunk; a chunk already decided or gone is
+// not an error.
+func (m *Manager) rejectChunk(ctx context.Context, gw *Gateway, sandbox, chunkID, reason string) {
+	if err := gw.Client.RejectDraftChunk(ctx, sandbox, chunkID, truncate(reason, 512)); err != nil &&
+		!openshell.IsNotFound(err) && !openshell.IsConflict(err) {
+		m.logf("reject proposal %s of %s: %v", chunkID, sandbox, err)
 	}
 }
 
@@ -335,6 +492,9 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		id, _ := r.Item.Tag.(string)
 		m.mu.Lock()
 		a := m.approvals[id]
+		if a != nil && a.chunkID != r.Item.ChunkID {
+			a = nil // the approval moved on to another chunk
+		}
 		b := m.boxes[r.Item.Sandbox]
 		var ident audit.SandboxIdentity
 		if b != nil {
@@ -344,27 +504,47 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 				ident.PolicyVersion = r.PolicyVersion
 			}
 		}
+		applied := r.Err == nil && !r.Skipped && !r.Changed && !r.Stale && !r.Gone
+		if b != nil && applied {
+			b.rulesAdded++
+		}
 		if a != nil {
 			a.resolvedAt = m.now().UTC()
 			switch {
-			case r.Err != nil:
-				a.status = sandboxapi.ApprovalFailed
+			case applied:
+				a.status = sandboxapi.ApprovalApproved
 			case r.Skipped:
 				a.status = sandboxapi.ApprovalPending
 			default:
-				a.status = sandboxapi.ApprovalApproved
+				a.status = sandboxapi.ApprovalFailed
 			}
 		}
 		m.mu.Unlock()
+		if b != nil && (r.Changed || r.Stale) {
+			// Decide the chunk again as it is now.
+			m.retriage(b, r.Item.ChunkID)
+		}
 		if a == nil || b == nil {
 			continue
+		}
+		fail := func(reason, msg string) {
+			m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalCancelled, a.actor)
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
+				Host: a.decision.Host, Port: a.decision.Port, Reason: reason, Message: msg})
 		}
 		switch {
 		case r.Err != nil:
 			m.logf("apply approval %s of %s: %v", a.id, a.sandbox, r.Err)
-			m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalCancelled, a.actor)
-			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
-				Host: a.decision.Host, Port: a.decision.Port, Reason: "apply_failed", Message: "the approval could not be applied: " + truncate(r.Err.Error(), 200)})
+			fail("apply_failed", "the approval could not be applied: "+truncate(r.Err.Error(), 200))
+			continue
+		case r.Changed:
+			fail("changed", "the proposal for "+a.decision.Host+" changed after it was decided; DefenseClaw looks at it again")
+			continue
+		case r.Stale:
+			fail("stale", "OpenShell's policy kept changing while "+a.decision.Host+" was being approved; DefenseClaw looks at it again")
+			continue
+		case r.Gone:
+			fail("gone", "the proposal for "+a.decision.Host+" is no longer pending in OpenShell")
 			continue
 		case r.Skipped:
 			// OpenShell left a flagged chunk out; it needs an explicit
@@ -436,6 +616,9 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	if status == sandboxapi.ApprovalPending {
 		a.status = approvalDeciding
 	}
+	// While deciding, triage leaves the approval's proposal alone.
+	p, chunkID := a.proposal, a.chunkID
+	host, port := a.decision.Host, a.decision.Port
 	m.mu.Unlock()
 	if status != sandboxapi.ApprovalPending {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "approval %s is already %s", id, status)
@@ -458,19 +641,31 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	if err != nil {
 		return nil, err
 	}
-	host, port := a.decision.Host, a.decision.Port
+	hosts := networkHosts(p)
 	res := &sandboxapi.ApprovalResult{}
 	switch strings.ToLower(strings.TrimSpace(d.Decision)) {
 	case sandboxapi.DecisionApprove:
-		if d.Always && a.decision.Kind == triage.KindHostPort {
-			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "host ports are opened per sandbox; use --host-port %d for future sandboxes", port)
+		if d.Always {
+			if err := alwaysApprovable(p); err != nil {
+				return nil, err
+			}
 		}
-		if err := triage.CheckApproval(eff, host, port, d.Always, m.feedMatcher()); err != nil {
+		// The whole proposal is judged again against the current policy:
+		// approving applies every endpoint, port and allowed IP in it.
+		if cur := triage.Classify(p, m.triagePolicy(eff)); cur.Verdict == triage.Reject {
+			if cur.Violation != nil {
+				return nil, m.violationError(ctx, cur.Violation, a.sandbox)
+			}
+			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
+		}
+		if err := triage.CheckProposal(eff, p, d.Always, m.feedMatcher()); err != nil {
 			return nil, m.violationError(ctx, err, a.sandbox)
 		}
 		if d.Always {
-			if err := m.persistAllow(ctx, host); err != nil {
-				return nil, err
+			for _, h := range hosts {
+				if err := m.persistAllow(ctx, h); err != nil {
+					return nil, err
+				}
 			}
 			res.Persisted = true
 		}
@@ -478,22 +673,21 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		a.status, a.actor, a.always = sandboxapi.ApprovalQueued, actorOperator, d.Always
 		m.mu.Unlock()
 		decided = true
-		m.batcher.Enqueue(triage.Item{
-			Sandbox: a.sandbox, BindingID: bindingID, ChunkID: a.chunkID, ReviewToken: a.reviewToken,
-			Single: a.proposal.SecurityNotes != "", Tag: a.id,
-		})
+		m.batcher.Enqueue(triage.Item{Sandbox: a.sandbox, BindingID: bindingID, ChunkID: chunkID, Digest: p.Digest, Tag: a.id})
 		res.Message = "approved; OpenShell applies it once the sandbox's hooks are quiet"
 	case sandboxapi.DecisionReject:
 		reason := strings.TrimSpace(d.Reason)
 		if reason == "" {
 			reason = "rejected by the operator"
 		}
-		if err := gw.Client.RejectDraftChunk(ctx, a.sandbox, a.chunkID, truncate(reason, 512)); err != nil && !openshell.IsNotFound(err) {
+		if err := gw.Client.RejectDraftChunk(ctx, a.sandbox, chunkID, truncate(reason, 512)); err != nil && !openshell.IsNotFound(err) {
 			return nil, upstream("reject proposal", err)
 		}
-		if d.Always && a.decision.Kind == triage.KindNetworkRule {
-			if err := m.persistBlock(ctx, host); err != nil {
-				return nil, err
+		if d.Always && len(hosts) > 0 {
+			for _, h := range hosts {
+				if err := m.persistBlock(ctx, h); err != nil {
+					return nil, err
+				}
 			}
 			res.Persisted = true
 		}
@@ -513,6 +707,38 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	res.Approval = a.wire()
 	m.mu.Unlock()
 	return res, nil
+}
+
+// networkHosts are a proposal's destination names outside this machine
+// (what an "always" decision saves), each once.
+func networkHosts(p triage.Proposal) []string {
+	var out []string
+	for _, ep := range p.Endpoints {
+		host := triage.NormalizeHost(ep.Host)
+		if host == "" || triage.IsHostLocal(host) || slices.Contains(out, host) {
+			continue
+		}
+		out = append(out, host)
+	}
+	return out
+}
+
+// alwaysApprovable refuses "always" for proposals that reach this machine
+// or the user's network: those are opened per sandbox only.
+func alwaysApprovable(p triage.Proposal) error {
+	for _, ep := range p.Endpoints {
+		host := triage.NormalizeHost(ep.Host)
+		if triage.IsHostLocal(host) {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "host ports are opened per sandbox; use --host-port %d for future sandboxes", ep.Port)
+		}
+		if addr, err := netip.ParseAddr(host); err == nil && triage.IsPrivate(addr) {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "private network addresses are opened per sandbox, not for future sandboxes")
+		}
+	}
+	if len(p.AllowedIPs) > 0 {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "proposals with allowed_ips are approved per sandbox, not for future sandboxes")
+	}
+	return nil
 }
 
 func (m *Manager) persistAllow(ctx context.Context, host string) error {

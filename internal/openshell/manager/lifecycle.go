@@ -279,6 +279,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	m.mu.Lock()
 	b.sb = sb
+	// A new session: its rule budget and approval rate start over.
+	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
 	m.startWatch(b)

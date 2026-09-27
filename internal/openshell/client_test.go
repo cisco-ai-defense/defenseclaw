@@ -859,15 +859,32 @@ func TestDraftInbox(t *testing.T) {
 	if err != nil || len(draft.Chunks) != 5 {
 		t.Fatalf("draft = %+v, %v", draft, err)
 	}
-	if _, err := c.ApproveDraftChunk(ctx, "box", a, "wrong"); !openshell.IsInvalidArgument(err) {
-		t.Fatalf("approve with stale token = %v", err)
+	if _, err := c.ApproveDraftChunk(ctx, "box", a, "wrong"); !openshell.IsConflict(err) {
+		t.Fatalf("approve with a wrong token = %v", err)
 	}
+	late := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_late", ProposedRule: proposedRule("late.example.org"), ReviewToken: "tok-late"})
 	ar, err := c.ApproveDraftChunk(ctx, "box", a, "tok-a")
 	if err != nil || ar.PolicyVersion != 2 {
 		t.Fatalf("approve = %+v, %v", ar, err)
 	}
 	if _, err := c.ApproveDraftChunk(ctx, "box", a, "tok-a"); !openshell.IsConflict(err) {
 		t.Fatalf("double approve = %v", err)
+	}
+	// The policy changed, so the token read before is stale: the single
+	// call refuses it and the bulk call skips the chunk without an error.
+	if _, err := c.ApproveDraftChunk(ctx, "box", late, "tok-late"); !openshell.IsConflict(err) {
+		t.Fatalf("approve with a stale token = %v", err)
+	}
+	if res, err := c.ApproveDraftChunks(ctx, "box", []openshell.DraftChunkApproval{{ChunkID: late, ReviewToken: "tok-late"}}); err != nil ||
+		res.ChunksApproved != 0 || res.ChunksSkipped != 1 {
+		t.Fatalf("bulk approve with a stale token = %+v, %v", res, err)
+	}
+	fresh, _ := f.DraftChunk(ws, "box", late)
+	if fresh.ReviewToken == "tok-late" {
+		t.Fatal("the review token did not change with the policy")
+	}
+	if err := c.RejectDraftChunk(ctx, "box", late, "not needed"); err != nil {
+		t.Fatal(err)
 	}
 
 	batch, err := c.ApproveDraftChunks(ctx, "box", []openshell.DraftChunkApproval{{ChunkID: b}, {ChunkID: d}, {ChunkID: flagged}})

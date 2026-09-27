@@ -121,16 +121,19 @@ type Fake struct {
 
 // sandboxState is the configuration the SDK fake does not model.
 type sandboxState struct {
-	policy          *types.SandboxPolicy
-	createPolicy    *types.SandboxPolicy
-	policyVersion   uint32
-	revisions       []types.SandboxPolicyRevision
-	settings        map[string]types.SettingValue
-	settingsRev     uint64
-	configRev       uint64
-	admission       types.ConfigurationAdmissionState
-	admissionError  string
-	chunks          []types.PolicyChunk
+	policy         *types.SandboxPolicy
+	createPolicy   *types.SandboxPolicy
+	policyVersion  uint32
+	revisions      []types.SandboxPolicyRevision
+	settings       map[string]types.SettingValue
+	settingsRev    uint64
+	configRev      uint64
+	admission      types.ConfigurationAdmissionState
+	admissionError string
+	chunks         []types.PolicyChunk
+	// tokenAt is the policy version each chunk's seeded review token was
+	// issued against (see reviewToken).
+	tokenAt         map[string]uint32
 	draftVersion    uint64
 	history         []types.DraftHistoryEntry
 	nextChunkNumber int
@@ -394,8 +397,25 @@ func (f *Fake) AddDraftChunk(workspace, sandbox string, chunk types.PolicyChunk)
 	}
 	chunk.ProposedRule = cloneRule(chunk.ProposedRule)
 	st.chunks = append(st.chunks, chunk)
+	if st.tokenAt == nil {
+		st.tokenAt = map[string]uint32{}
+	}
+	st.tokenAt[chunk.ID] = st.policyVersion
 	st.draftVersion++
 	return chunk.ID
+}
+
+// reviewToken is the token that approves c now. Like the gateway, which
+// binds a review token to the live policy and the evaluated candidate, the
+// fake hands out the seeded token while the sandbox policy is unchanged
+// since the chunk was drafted (or last edited) and a revision-qualified
+// token after any policy change, so a token read before another approval
+// landed is stale. A chunk seeded without a token is never checked.
+func (st *sandboxState) reviewToken(c *types.PolicyChunk) string {
+	if c.ReviewToken == "" || st.tokenAt[c.ID] == st.policyVersion {
+		return c.ReviewToken
+	}
+	return fmt.Sprintf("%s@v%d", c.ReviewToken, st.policyVersion)
 }
 
 // DraftChunk returns a copy of one draft chunk.
@@ -408,6 +428,7 @@ func (f *Fake) DraftChunk(workspace, sandbox, id string) (types.PolicyChunk, boo
 	}
 	for _, c := range st.chunks {
 		if c.ID == id {
+			c.ReviewToken = st.reviewToken(&c)
 			c.ProposedRule = cloneRule(c.ProposedRule)
 			return c, true
 		}
