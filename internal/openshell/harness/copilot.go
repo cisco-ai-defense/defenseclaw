@@ -71,7 +71,7 @@ var Copilot = register(&Spec{
 	TamperTier:     connector.SandboxTamperTierManaged,
 	Verification: Verification{
 		Status: Verified,
-		Reason: "hook-fire probe (built-in mock LLM through Copilot's BYOK Anthropic provider): policy.d hooks sessionStart, userPromptSubmitted, preToolUse, postToolUse, agentStop and sessionEnd reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied (exit 2 and the JSON verdict both deny) and user disableAllHooks or user hooks cannot switch them off; GitHub-token model access is unverified (no entitled account)",
+		Reason: "hook-fire probe (built-in mock LLM through Copilot's BYOK Anthropic provider): policy.d hooks sessionStart, userPromptSubmitted, preToolUse, postToolUse, agentStop and sessionEnd reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied (exit 2 and the JSON verdict both deny) user disableAllHooks, user or repository hooks and planted newer packages change nothing; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness) with the DefenseClaw ingress and egress proxy: all eight fired hooks reach the ingress authenticated and keyed, an allowed tool call runs, the proxy allows example.org and blocks webhook.site, a connection around the proxy is refused; GitHub-token model access is unverified (no entitled account)",
 	},
 	probe: ProbeSpec{
 		// Through the launcher, so the probe uses the pre-extracted package

@@ -59,7 +59,7 @@ var OpenCode = register(&Spec{
 	TamperTier:     connector.SandboxTamperTierManaged,
 	Verification: Verification{
 		Status: Verified,
-		Reason: "hook-fire probe (built-in mock LLM through OpenCode's bundled Anthropic SDK): the managed plugin loads, tool.execute.before/after reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied and has no side effect; user config plugin:[] cannot remove it",
+		Reason: "hook-fire probe (built-in mock LLM through OpenCode's bundled Anthropic SDK): the managed plugin loads, tool.execute.before/after reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied and has no side effect, user and project config plugin:[] cannot remove it; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, the proxy allows example.org and blocks webhook.site, a connection around the proxy is refused",
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/opencode", "--version"},
