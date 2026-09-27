@@ -577,6 +577,7 @@ func (m *Manager) revokeBinding(id string) error {
 	if m.opts.ForgetBinding != nil {
 		m.opts.ForgetBinding(id)
 	}
+	m.tamperTracker.ForgetBinding(id)
 	return err
 }
 

@@ -339,6 +339,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer silence.Stop()
 	drafts := time.NewTicker(m.opts.TriageInterval)
 	defer drafts.Stop()
+	tamperCleanup := time.NewTicker(5 * time.Minute)
+	defer tamperCleanup.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -349,6 +351,8 @@ func (m *Manager) Run(ctx context.Context) error {
 			if m.gatewayUp() {
 				m.triageSweep(ctx)
 			}
+		case <-tamperCleanup.C:
+			m.tamperTracker.Cleanup(m.now())
 		case <-reconcile.C:
 			if _, err := m.gateway(ctx); err != nil {
 				reconcile.Reset(m.opts.ConnectRetry)

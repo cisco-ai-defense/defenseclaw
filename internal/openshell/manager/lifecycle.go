@@ -254,6 +254,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if m.opts.ForgetBinding != nil {
 			m.opts.ForgetBinding(binding.ID)
 		}
+		m.tamperTracker.ForgetBinding(rec.BindingID)
 		pname := providerName(rec.Name, roleIngress, 0)
 		p, err := gw.Client.GetProvider(ctx, pname)
 		if err != nil {
