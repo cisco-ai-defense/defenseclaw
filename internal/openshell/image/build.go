@@ -179,13 +179,26 @@ func (b *Builder) Context(spec BuildSpec) (*Context, error) {
 }
 
 // Current returns the verified image a sandbox built from spec must run
-// (see Store.Current).
+// (see Store.Current). It also confirms with Docker that the tag still
+// resolves to the verified ImageID (p2-render-3).
 func (b *Builder) Current(spec BuildSpec) (Record, bool, error) {
 	c, err := b.Context(spec)
 	if err != nil {
 		return Record{}, false, err
 	}
-	return b.Store.Current(c)
+	rec, ok, err := b.Store.Current(c)
+	if err != nil || !ok {
+		return Record{}, false, err
+	}
+	// Verify the tag still points to the verified ImageID. During a Force
+	// rebuild, the tag moves before verification completes, and a failed
+	// rebuild may have deleted the tag but left the old verified record.
+	id, err := b.imageID(context.Background(), c.Tag)
+	if err != nil || id != rec.ImageID {
+		// Tag moved or is gone; the record is stale.
+		return Record{}, false, nil
+	}
+	return rec, true, nil
 }
 
 func (b *Builder) now() time.Time {
