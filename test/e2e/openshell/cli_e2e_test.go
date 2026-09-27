@@ -188,29 +188,11 @@ func (c *cliEnv) cli(timeout time.Duration, args ...string) (string, string, int
 // cliIn runs `defenseclaw-gateway sandbox args...` in dir.
 func (c *cliEnv) cliIn(dir string, timeout time.Duration, args ...string) (string, string, int) {
 	c.t.Helper()
-	if c.environ == nil {
-		real, _ := os.UserHomeDir()
-		xdg := os.Getenv("XDG_CONFIG_HOME")
-		if xdg == "" {
-			xdg = filepath.Join(real, ".config")
-		}
-		for _, kv := range os.Environ() {
-			k, _, _ := strings.Cut(kv, "=")
-			if strings.HasPrefix(k, "DEFENSECLAW_") || strings.HasPrefix(k, "OPENCLAW_") || k == "HOME" || k == "XDG_CONFIG_HOME" ||
-				k == "ANTHROPIC_API_KEY" || k == "OPENAI_API_KEY" || k == "CODEX_API_KEY" || k == "CLAUDE_CODE_OAUTH_TOKEN" {
-				continue
-			}
-			c.environ = append(c.environ, kv)
-		}
-		c.environ = append(c.environ, "HOME="+filepath.Join(c.work, "home"), "XDG_CONFIG_HOME="+xdg, "SHELL=/bin/bash",
-			"DEFENSECLAW_HOME="+filepath.Join(c.work, "dc"), "DEFENSECLAW_GATEWAY_TOKEN="+c.token, "NO_COLOR=1",
-			"OPENAI_API_KEY=dce2e-mock-key-not-a-secret", "ANTHROPIC_API_KEY=dce2e-mock-key-not-a-secret")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(c.work, "bin", "defenseclaw-gateway"), append([]string{"sandbox"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = c.environ
+	cmd.Env = c.cliEnviron()
 	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -224,6 +206,13 @@ func (c *cliEnv) cliIn(dir string, timeout time.Duration, args ...string) (strin
 		code = exit.ExitCode()
 	}
 	return stdout.String(), stderr.String(), code
+}
+
+// cliEnviron is the environment the sandbox commands run with: the test's
+// home and data directory, the daemon token, and harmless mock model keys
+// in place of the user's.
+func (c *cliEnv) cliEnviron() []string {
+	return c.environ
 }
 
 func errorsAs(err error, target **exec.ExitError) bool {
@@ -450,7 +439,7 @@ func (c *cliEnv) terminalAttach() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, "-q", "-e", "-f", "-c", inner, "/dev/null")
-	cmd.Dir, cmd.Env = c.project, c.environ
+	cmd.Dir, cmd.Env = c.project, c.cliEnviron()
 	out, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
 	if !errorsAs(err, &exit) || exit.ExitCode() != 3 || !strings.Contains(string(out), "DCE2E-TTY-OK") {
@@ -766,7 +755,7 @@ func (c *cliEnv) bedrockClaude() {
 	if os.Getenv("AWS_BEARER_TOKEN_BEDROCK") == "" {
 		t.Skip("AWS_BEARER_TOKEN_BEDROCK is not set")
 	}
-	c.environ = append(c.environ, "AWS_BEARER_TOKEN_BEDROCK="+os.Getenv("AWS_BEARER_TOKEN_BEDROCK"))
+	c.environ = append(c.cliEnviron(), "AWS_BEARER_TOKEN_BEDROCK="+os.Getenv("AWS_BEARER_TOKEN_BEDROCK"))
 	name := c.prefix + "-bc"
 	c.ok(45*time.Minute, "run", "claude", "--detach", "--new", "--name", name, "--llm", "bedrock", "--bedrock-region", envOr("AWS_REGION", "us-east-1"),
 		"--prompt", "Run `echo dce2e-allowed > /tmp/dce2e-allowed.txt` with the Bash tool, then say done.", "--", "--model", "anthropic.claude-haiku-4-5")

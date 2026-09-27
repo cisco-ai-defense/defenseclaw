@@ -22,7 +22,11 @@
 #   3. runs TestSandboxCLI: the same through the `sandbox` commands
 #      (`run claude --detach`, `run codex`, masked .env, live edit on the
 #      host, the nested-repository guard, undo, unblock, approvals, the shell
-#      wrapper toggle, a teardown dry run).
+#      wrapper toggle, a teardown dry run);
+#   4. runs TestSandboxTUICodex (needs tmux, skipped without it): the real
+#      Codex TUI in a tmux terminal next to `codex exec`, with the hook
+#      matrix per mode, the block and its reason on screen, hook tamper,
+#      --safe approvals, exit/undo and the typed shell wrapper.
 #
 # Every OpenShell object is named after DEFENSECLAW_E2E_PREFIX and deleted at
 # the end; the OpenShell gateway itself is never reconfigured or restarted.
@@ -99,7 +103,7 @@ if failed:
     sys.exit(1)
 PY
 
-pattern="${1:-TestSandboxDaemon|TestSandboxCLI}"
+pattern="${1:-TestSandboxDaemon|TestSandboxCLI|TestSandboxTUICodex}"
 echo "== go test -run '$pattern'"
 go test -tags openshell_integration ./test/e2e/openshell/ -run "$pattern" -count=1 -v \
   -timeout "${DEFENSECLAW_E2E_TIMEOUT:-120m}" 2>&1 | tee "$DEFENSECLAW_E2E_WORK_DIR/go-test.log"
