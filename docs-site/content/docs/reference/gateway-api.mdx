@@ -559,9 +559,9 @@ sandbox. Inside the sandbox, both listeners are addressed as
 | Hook ingress | `openshell.ingress_port` | `gateway.api_port` + 1 (`18971`) | A loopback IP address only, never the main API address |
 | Egress proxy | `openshell.egress_port` | `gateway.api_port` + 2 (`18972`) | Loopback addresses only |
 
-The gateway checks the `openshell:` block every time it loads the config,
-even though it starts no sandbox listener yet, and refuses a config that
-fails; the error starts with `config: openshell:`. An explicit port that is
+The gateway starts both listeners with the API when `openshell.enabled` is
+`true`. It checks the `openshell:` block every time it loads the config and
+refuses a config that fails; the error starts with `config: openshell:`. An explicit port that is
 not between 1 and 65535, or both keys set to the same port, always fails. When
 `openshell.enabled` is `true`, the effective ports must also be at most
 65535 and differ from `gateway.api_port`, `guardrail.port` and each other.
