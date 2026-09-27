@@ -26,6 +26,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -174,6 +175,142 @@ func TestSetSandboxIngressValidatesConfig(t *testing.T) {
 	}
 	if err := api.RunSandboxIngress(context.Background()); err == nil {
 		t.Fatal("run while disabled")
+	}
+}
+
+func TestSandboxIngressAddrClashesWithMainAPI(t *testing.T) {
+	for _, tc := range []struct {
+		ingress, main string
+		clash         bool
+	}{
+		{"127.0.0.1:18970", "127.0.0.1:18970", true},
+		{"127.0.0.1:18970", "localhost:18970", true},
+		{"[::1]:18970", "LocalHost.:18970", true},
+		{"127.0.0.1:18970", ":18970", true},
+		{"127.0.0.1:18970", "0.0.0.0:18970", true},
+		{"127.0.0.1:18970", "[::]:18970", true},
+		// A hostname could resolve to loopback; only the port is known.
+		{"127.0.0.1:18970", "gateway.internal:18970", true},
+		{"127.0.0.1:18970", "127.0.0.2:18970", false},
+		{"127.0.0.1:18970", "[::1]:18970", false},
+		{"127.0.0.1:18971", "localhost:18970", false},
+		{"127.0.0.1:18971", ":18970", false},
+		{"127.0.0.1:18971", "", false},
+		// An ephemeral ingress port never clashes.
+		{"127.0.0.1:0", ":0", false},
+	} {
+		err := validateSandboxIngressAddr(tc.ingress, tc.main)
+		if (err != nil) != tc.clash {
+			t.Errorf("ingress %q with main %q: err = %v, want clash %v", tc.ingress, tc.main, err, tc.clash)
+		}
+	}
+}
+
+// TestRunSandboxIngressDrainsInFlightRequests pins graceful shutdown:
+// cancelling the run context stops new connections but does not cancel the
+// context of a request already running, which completes within the grace
+// period; a request that overruns it is cut off.
+func TestRunSandboxIngressDrainsInFlightRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		overrun bool
+	}{{"drain", false}, {"overrun", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Skipf("loopback listener unavailable: %v", err)
+			}
+			addr := ln.Addr().String()
+			_ = ln.Close()
+			api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil)
+			if err := api.SetSandboxIngress(SandboxIngressConfig{Addr: addr, Bindings: staticMatcher{}}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.overrun {
+				previous := sandboxIngressShutdownTimeout
+				sandboxIngressShutdownTimeout = 200 * time.Millisecond
+				t.Cleanup(func() { sandboxIngressShutdownTimeout = previous })
+			}
+			started := make(chan struct{})
+			release := make(chan struct{})
+			canceled := make(chan struct{}, 1)
+			st := api.sandboxIngressState()
+			st.handlerOnce.Do(func() {
+				st.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Like every hook handler, consume the body first; the
+					// server then watches the connection for a hang-up.
+					_, _ = io.Copy(io.Discard, r.Body)
+					close(started)
+					select {
+					case <-release:
+						w.WriteHeader(http.StatusOK)
+					case <-r.Context().Done():
+						canceled <- struct{}{}
+					}
+				})
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() { runErr <- api.RunSandboxIngress(ctx) }()
+
+			respCh := make(chan int, 1)
+			go func() {
+				client := &http.Client{Timeout: 10 * time.Second}
+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+					resp, err := client.Post("http://"+addr+"/", "application/json", strings.NewReader(`{}`))
+					if err == nil {
+						_ = resp.Body.Close()
+						respCh <- resp.StatusCode
+						return
+					}
+					select {
+					case <-started:
+						respCh <- 0
+						return
+					default:
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				respCh <- -1
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("request never reached the handler")
+			}
+			cancel()
+			select {
+			case <-canceled:
+				if !tc.overrun {
+					t.Fatal("stopping the ingress cancelled an in-flight request")
+				}
+			case <-time.After(100 * time.Millisecond):
+				if tc.overrun {
+					// Still running: the grace period has not ended yet.
+					break
+				}
+				close(release)
+			}
+			if tc.overrun {
+				select {
+				case <-canceled:
+				case <-time.After(5 * time.Second):
+					t.Fatal("an overrunning request was never cut off")
+				}
+			}
+			if status := <-respCh; !tc.overrun && status != http.StatusOK {
+				t.Fatalf("drained request status = %d", status)
+			}
+			select {
+			case err := <-runErr:
+				if tc.overrun != (err != nil) {
+					t.Fatalf("RunSandboxIngress = %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("ingress did not shut down")
+			}
+		})
 	}
 }
 

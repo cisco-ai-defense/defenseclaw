@@ -80,9 +80,11 @@ const (
 	// limiter's OTLP slots this bounds the memory sandbox telemetry can pin.
 	// Harness exporters batch far below it.
 	defaultSandboxOTLPMaxBodyBytes int64 = 4 << 20
-	// sandboxIngressShutdownTimeout bounds graceful shutdown.
-	sandboxIngressShutdownTimeout = 5 * time.Second
 )
+
+// sandboxIngressShutdownTimeout bounds graceful shutdown. A variable so
+// tests can shorten it.
+var sandboxIngressShutdownTimeout = 5 * time.Second
 
 // sandboxInspectPaths are the inspect endpoints a binding with
 // RouteInspect may call.
@@ -262,7 +264,10 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 		ReadTimeout:       2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		// Request contexts keep ctx's values but not its cancellation:
+		// stopping the ingress must let running hooks finish their verdicts
+		// during the shutdown grace period instead of failing them at once.
+		BaseContext: func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 	}
 	ln, err := listenWithRetry(ctx, st.addr, 30*time.Second)
 	if err != nil {
@@ -285,7 +290,13 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), sandboxIngressShutdownTimeout)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// Requests still running after the grace period are cut off;
+			// closing their connections cancels their contexts.
+			_ = srv.Close()
+			return fmt.Errorf("sandbox ingress: shutdown %s: %w", st.addr, err)
+		}
+		return nil
 	}
 }
 
@@ -314,26 +325,46 @@ func validateSandboxIngressAddr(addr, mainAddr string) error {
 	if err != nil || n < 0 || n > 65535 {
 		return fmt.Errorf("sandbox ingress: address %q has an invalid port", addr)
 	}
-	if n != 0 && sameListenAddr(addr, mainAddr) {
-		return fmt.Errorf("sandbox ingress: address %q is the main API address", addr)
+	if n != 0 && listenAddrsMayClash(ip, n, mainAddr) {
+		return fmt.Errorf("sandbox ingress: address %q clashes with the main API address %q", addr, mainAddr)
 	}
 	return nil
 }
 
-func sameListenAddr(a, b string) bool {
-	ah, ap, err := net.SplitHostPort(a)
+// listenAddrsMayClash reports whether the main API listen address other may
+// occupy the ingress socket ip:port. It errs toward a clash, so a bad pair
+// is refused at configuration time instead of failing only after
+// listenWithRetry's bind budget:
+//
+//   - an empty host (":18970") or an unspecified IP binds every address;
+//   - "localhost" binds loopback, which is all the ingress ever uses;
+//   - any other hostname resolves to addresses unknown here, so the same
+//     port alone counts as a clash.
+func listenAddrsMayClash(ip net.IP, port int, other string) bool {
+	host, otherPort, err := net.SplitHostPort(strings.TrimSpace(other))
 	if err != nil {
 		return false
 	}
-	bh, bp, err := net.SplitHostPort(b)
-	if err != nil || ap != bp {
+	p, err := strconv.Atoi(otherPort)
+	if err != nil {
+		if p, err = net.LookupPort("tcp", otherPort); err != nil {
+			return false
+		}
+	}
+	if p != port {
 		return false
 	}
-	aip, bip := net.ParseIP(ah), net.ParseIP(bh)
-	if aip == nil || bip == nil {
-		return ah == bh
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" {
+		return true
 	}
-	return aip.Equal(bip) || aip.IsUnspecified() || bip.IsUnspecified()
+	if otherIP := net.ParseIP(host); otherIP != nil {
+		return otherIP.IsUnspecified() || otherIP.Equal(ip)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return ip.IsLoopback()
+	}
+	return true
 }
 
 // sandboxIngressRoute is the route class and connector of one exact path.
