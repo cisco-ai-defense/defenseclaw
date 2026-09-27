@@ -35,6 +35,9 @@ skills/defenseclaw-dev-host/
 .claude/skills/defenseclaw-dev-host
 .codex/skills/defenseclaw-dev-host
 
+# Textual's XTermParser(debug=True) key dump.
+keys.log
+
 # Go build and test artifacts
 bin/
 dist/
