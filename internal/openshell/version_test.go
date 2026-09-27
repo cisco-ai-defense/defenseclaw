@@ -59,7 +59,21 @@ func TestCheckSupportedWindow(t *testing.T) {
 			t.Fatalf("%s accepted", s)
 		}
 	}
-	if msg := CheckSupported(mustParse("0.0.16")).Error(); !strings.Contains(msg, "cannot upgrade it in place") {
-		t.Fatalf("0.0.x message = %q", msg)
+	// The advice matches what Installer does: clean up before 0.0.37,
+	// upgrade in place from 0.0.37 on.
+	for v, want := range map[string]string{
+		"0.0.16": "predates 0.0.37",
+		"0.0.36": "openshell sandbox delete --all && openshell gateway destroy",
+		"0.0.37": "upgrade it in place",
+		"0.0.40": "upgrade it in place",
+		"0.1.0":  "upgrade it in place",
+		"0.2.0":  "not supported",
+	} {
+		if msg := CheckSupported(mustParse(v)).Error(); !strings.Contains(msg, want) {
+			t.Errorf("%s message = %q, want %q", v, msg, want)
+		}
+	}
+	if msg := CheckSupported(mustParse("0.0.40")).Error(); strings.Contains(msg, "remove") || strings.Contains(msg, "destroy") {
+		t.Errorf("0.0.40 message asks for a cleanup the installer does not need: %q", msg)
 	}
 }

@@ -457,7 +457,15 @@ func TestDoctorVersions(t *testing.T) {
 	t.Run("cli 0.0.x", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.runner.On("/usr/bin/openshell --version", "openshell 0.0.16\n", nil)
-		expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "0.0.x release")
+		expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "predates 0.0.37")
+	})
+	t.Run("cli 0.0.x that upgrades in place", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("/usr/bin/openshell --version", "openshell 0.0.40\n", nil)
+		c := expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "upgrade it in place")
+		if c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
 	})
 	t.Run("cli and gateway differ", func(t *testing.T) {
 		f := newDoctorFixture(t)

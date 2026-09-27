@@ -112,14 +112,28 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
+// breakingReleaseFloor is the upstream installer's BREAKING_RELEASE_VERSION:
+// gateway state from earlier releases is incompatible, so the installer
+// refuses to upgrade them without OPENSHELL_ACK_BREAKING_UPGRADE=1, while
+// 0.0.37 and later upgrade in place.
+const breakingReleaseFloor = "0.0.37"
+
 // ErrUnsupportedVersion reports an OpenShell release outside the window.
+// Its advice follows the upstream installer, as Installer does: releases
+// before 0.0.37 need their runtime cleaned up first, later ones upgrade
+// in place.
 type ErrUnsupportedVersion struct {
 	Found Version
 }
 
 func (e *ErrUnsupportedVersion) Error() string {
-	if e.Found.Compare(mustParse(SupportedMin)) < 0 && e.Found.Major == 0 && e.Found.Minor == 0 {
-		return fmt.Sprintf("OpenShell %s is a 0.0.x release; 0.1 cannot upgrade it in place — remove it and install %s", e.Found, SupportedMin)
+	switch {
+	case e.Found.Compare(mustParse(breakingReleaseFloor)) < 0:
+		return fmt.Sprintf("OpenShell %s predates %s, and %s cannot use its gateway state or sandboxes: back up what you need, "+
+			"clean up with the old CLI (openshell sandbox delete --all && openshell gateway destroy), then install %s",
+			e.Found, breakingReleaseFloor, SupportedMin, SupportedMin)
+	case e.Found.Compare(mustParse(SupportedMin)) < 0:
+		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, SupportedMin)
 	}
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }

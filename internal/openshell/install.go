@@ -50,11 +50,6 @@ var (
 	ErrBreakingUpgrade = errors.New("openshell: an incompatible OpenShell installation must be cleaned up first")
 )
 
-// breakingReleaseFloor is the upstream installer's BREAKING_RELEASE_VERSION:
-// state from earlier releases is incompatible and the installer refuses
-// to proceed without OPENSHELL_ACK_BREAKING_UPGRADE=1.
-const breakingReleaseFloor = "0.0.37"
-
 // installerEnvUnset are inherited variables that would change what the
 // pinned installer does behind the plan's back.
 var installerEnvUnset = []string{"OPENSHELL_VERSION", "OPENSHELL_ACK_BREAKING_UPGRADE", "OPENSHELL_INSTALL_METHOD"}

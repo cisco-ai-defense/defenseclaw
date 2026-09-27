@@ -259,6 +259,8 @@ func TestInstallExistingReleases(t *testing.T) {
 			return errors.As(err, &u)
 		}},
 		{name: "0.1.0 upgraded in place", existing: "openshell 0.1.0", installed: true, downloads: 1},
+		// As doctor advises: 0.0.37 and later need no cleanup.
+		{name: "0.0.40 upgraded in place", existing: "openshell 0.0.40", installed: true, downloads: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,8 +278,11 @@ func TestInstallExistingReleases(t *testing.T) {
 			if got := f.hits.Load(); got != tc.downloads {
 				t.Fatalf("downloads = %d, want %d", got, tc.downloads)
 			}
-			if tc.installed && !strings.Contains(f.out.String(), "upgrades the installed openshell 0.1.0 to v0.1.1 in place") {
+			if tc.installed && !strings.Contains(f.out.String(), "upgrades the installed "+tc.existing+" to v0.1.1 in place") {
 				t.Fatalf("plan lacks the in-place note:\n%s", f.out.String())
+			}
+			if strings.Contains(f.out.String(), "ACK_BREAKING") {
+				t.Fatalf("an in-place upgrade acknowledges a breaking one:\n%s", f.out.String())
 			}
 		})
 	}
