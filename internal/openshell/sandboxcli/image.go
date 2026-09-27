@@ -196,14 +196,21 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 	return nil
 }
 
+// defaultHarnesses are the harnesses setup selects, and image commands and
+// doctor cover, when neither the command nor openshell.harnesses names any:
+// Claude Code and Codex. Every other sandbox harness is opt-in by name
+// (setup --harness, openshell.harnesses), and one whose verification is
+// unverified builds an image that never passes the hook-fire probe.
+var defaultHarnesses = []string{"claudecode", "codex"}
+
 // harnesses resolves names, defaulting to openshell.harnesses and then to
-// every supported harness.
+// defaultHarnesses.
 func (a *App) harnesses(names []string) ([]*harness.Spec, error) {
 	if len(names) == 0 && a.Cfg != nil {
 		names = a.Cfg.OpenShell.Harnesses
 	}
 	if len(names) == 0 {
-		names = harness.Names()
+		names = defaultHarnesses
 	}
 	var out []*harness.Spec
 	seen := map[string]bool{}

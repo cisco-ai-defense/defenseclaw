@@ -79,7 +79,8 @@ readlink -f /usr/local/bin/kiro-cli`,
 			Run:     run + "; " + link,
 		}}, nil
 	},
-	launcher: kiroLauncher,
+	launcher:    kiroLauncher,
+	bypassFlags: []bypassFlag{{name: "--trust-all-tools"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{KiroLauncherPath}
 		if opts.Mode == Headless {

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -231,49 +230,63 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 }
 
 func printMode(spec *harness.Spec, args []string) bool {
-	switch spec.Name {
-	case "claudecode":
+	has := func(flags ...string) bool {
 		for _, a := range args {
-			if a == "-p" || a == "--print" || strings.HasPrefix(a, "--print=") {
-				return true
+			for _, f := range flags {
+				if a == f || strings.HasPrefix(a, f+"=") {
+					return true
+				}
 			}
 		}
+		return false
+	}
+	switch spec.Name {
+	case "claudecode", "cursor", "devin":
+		return has("-p", "--print")
 	case "codex":
 		return len(args) > 0 && args[0] == "exec"
+	case "opencode":
+		return len(args) > 0 && args[0] == "run"
+	case "copilot":
+		return has("-p", "--prompt")
+	case "amp":
+		return has("-x", "--execute")
+	case "kiro":
+		return has("--no-interactive")
 	}
 	return false
 }
 
 func printHint(spec *harness.Spec) string {
 	switch spec.Name {
-	case "claudecode":
+	case "claudecode", "cursor", "devin":
 		return ` or -- -p "TEXT"`
 	case "codex":
 		return ` or -- exec "TEXT"`
+	case "opencode":
+		return ` or -- run "TEXT"`
+	case "copilot":
+		return ` or -- -p "TEXT"`
+	case "amp":
+		return ` or -- -x "TEXT"`
+	case "kiro":
+		return ` or -- --no-interactive "TEXT"`
 	}
 	return ""
 }
 
-// bypassFlags are the harness flags that turn its own permission prompts
-// off; a --safe run drops them from the pass-through arguments.
-var bypassFlags = map[string][]string{
-	"claudecode": {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"},
-	"codex":      {"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto"},
-}
-
+// filterBypass drops, from a safe run's pass-through arguments, the harness
+// flags that turn its own permission prompts off (harness.Spec.BypassArgs),
+// and says so.
 func filterBypass(spec *harness.Spec, yolo bool, args []string, a *App) []string {
 	if yolo {
 		return args
 	}
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		if slices.Contains(bypassFlags[spec.Name], arg) {
-			a.warn(arg + " is ignored: this sandbox keeps " + spec.DisplayName + "'s permission prompts")
-			continue
-		}
-		out = append(out, arg)
+	kept, dropped := spec.BypassArgs(args)
+	if len(dropped) > 0 {
+		a.warn(strings.Join(dropped, " ") + " is ignored: this sandbox keeps " + spec.DisplayName + "'s permission prompts")
 	}
-	return out
+	return kept
 }
 
 // runNative execs the harness directly inside a sandbox.

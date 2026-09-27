@@ -100,6 +100,9 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 		}}, nil
 	},
 	launcher: copilotLauncher,
+	// --yolo is --allow-all; --allow-all-tools approves every tool call
+	// (safe headless runs add it themselves).
+	bypassFlags: []bypassFlag{{name: "--yolo"}, {name: "--allow-all"}, {name: "--allow-all-tools"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{CopilotLauncherPath}
 		if opts.Mode == Headless {

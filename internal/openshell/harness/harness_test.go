@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -949,6 +950,17 @@ func TestBypassArgs(t *testing.T) {
 			[]string{"-a", "never", "--ask-for-approval=never", "-c", `approval_policy="never"`, "--config", "approval_policy = 'never'"}},
 		{"codex keeps claude flags", Codex,
 			[]string{"--dangerously-skip-permissions"}, []string{"--dangerously-skip-permissions"}, nil},
+		{"codex full auto", Codex, []string{"--full-auto"}, []string{}, []string{"--full-auto"}},
+		{"opencode auto", OpenCode, []string{"run", "--auto", "hi"}, []string{"run", "hi"}, []string{"--auto"}},
+		{"copilot allow all", Copilot,
+			[]string{"--yolo", "--allow-all", "--allow-all-tools", "--model", "claude-sonnet-4.5"},
+			[]string{"--model", "claude-sonnet-4.5"}, []string{"--yolo", "--allow-all", "--allow-all-tools"}},
+		{"amp allow all", Amp, []string{"--dangerously-allow-all", "-x", "hi"}, []string{"-x", "hi"}, []string{"--dangerously-allow-all"}},
+		{"cursor force", Cursor, []string{"--force", "-p", "hi"}, []string{"-p", "hi"}, []string{"--force"}},
+		{"kiro trust all", Kiro, []string{"--trust-all-tools", "--trust-tools=fs_read"}, []string{"--trust-tools=fs_read"}, []string{"--trust-all-tools"}},
+		{"devin permission mode", Devin,
+			[]string{"--permission-mode", "dangerous", "--permission-mode=autonomous", "--permission-mode", "auto"},
+			[]string{"--permission-mode", "auto"}, []string{"--permission-mode", "dangerous", "--permission-mode=autonomous"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -957,6 +969,31 @@ func TestBypassArgs(t *testing.T) {
 				t.Fatalf("kept %q dropped %q, want %q / %q", kept, dropped, tc.kept, tc.dropped)
 			}
 		})
+	}
+	// Every flag a yolo launch adds is one a safe launch drops from the
+	// passthrough arguments.
+	for _, name := range Names() {
+		spec, _ := Get(name)
+		safe, err := spec.LaunchArgv(LaunchOptions{Mode: Interactive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		yolo, err := spec.LaunchArgv(LaunchOptions{Mode: Interactive, Yolo: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var added []string
+		for _, arg := range yolo {
+			if !slices.Contains(safe, arg) {
+				added = append(added, arg)
+			}
+		}
+		if len(added) == 0 {
+			t.Errorf("%s: a yolo launch adds no flag", name)
+		}
+		if kept, _ := spec.BypassArgs(added); len(kept) != 0 {
+			t.Errorf("%s: safe launches keep the yolo flags %q", name, kept)
+		}
 	}
 	// Safe launches drop them; yolo launches pass everything through.
 	safe, err := ClaudeCode.LaunchArgv(LaunchOptions{Mode: Interactive, Args: []string{"--dangerously-skip-permissions", "--model", "opus"}})

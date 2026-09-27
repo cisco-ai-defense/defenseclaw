@@ -80,7 +80,8 @@ var Amp = register(&Spec{
 			Run:     run + "; " + check,
 		}}, nil
 	},
-	launcher: ampLauncher,
+	launcher:    ampLauncher,
+	bypassFlags: []bypassFlag{{name: "--dangerously-allow-all"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{AmpLauncherPath}
 		if opts.Yolo {

@@ -618,6 +618,9 @@ func TestResolveHarness(t *testing.T) {
 func TestDetectLLM(t *testing.T) {
 	claude, _ := harness.Get("claudecode")
 	codex, _ := harness.Get("codex")
+	opencode, _ := harness.Get("opencode")
+	copilot, _ := harness.Get("copilot")
+	kiro, _ := harness.Get("kiro")
 	cases := []struct {
 		name    string
 		spec    *harness.Spec
@@ -638,6 +641,12 @@ func TestDetectLLM(t *testing.T) {
 		{"none", claude, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "none", "", "", false},
 		{"explicit missing", claude, nil, "", "anthropic", "", "", true},
 		{"wrong provider", codex, nil, "", "anthropic", "", "", true},
+		{"opencode anthropic", opencode, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.OpenCodeAnthropicID, "ANTHROPIC_API_KEY", false},
+		{"opencode openai", opencode, map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", profiles.OpenCodeOpenAIID, "OPENAI_API_KEY", false},
+		{"opencode bedrock", opencode, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.OpenCodeBedrockMantleID, EnvBedrockToken, false},
+		{"copilot byok anthropic", copilot, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.CopilotAnthropicID, "ANTHROPIC_API_KEY", false},
+		{"copilot has no openai", copilot, map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", "", "", true},
+		{"kiro logs in inside", kiro, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", "", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -665,6 +674,9 @@ func TestDetectLLM(t *testing.T) {
 				t.Fatalf("credential = %+v, want none", got.Credential)
 			case c.profile != "" && (got.Credential == nil || got.Credential.Profile != c.profile || got.Source != c.source):
 				t.Fatalf("detectLLM = %+v, want %s from %s", got, c.profile, c.source)
+			}
+			if c.name == "copilot byok anthropic" && got.Credential.Credentials["COPILOT_PROVIDER_API_KEY"] != "k" {
+				t.Fatalf("copilot credentials = %v", got.Credential.Credentials)
 			}
 			if c.name == "claude bedrock" && got.Credential.BedrockRegion != "us-west-2" {
 				t.Fatalf("region = %q", got.Credential.BedrockRegion)
@@ -694,5 +706,26 @@ func TestParseCredentialAndEnv(t *testing.T) {
 	}
 	if _, err := ParseEnv([]string{"no-equals"}); err == nil {
 		t.Fatal("bad env accepted")
+	}
+}
+
+// TestPrintModeEveryHarness: each harness's own headless switch in the
+// pass-through arguments makes a detached run acceptable without --prompt,
+// and the hint names it.
+func TestPrintModeEveryHarness(t *testing.T) {
+	for name, args := range map[string][]string{
+		"claudecode": {"-p", "x"}, "codex": {"exec", "x"}, "opencode": {"run", "x"}, "copilot": {"--prompt=x"},
+		"amp": {"-x", "x"}, "cursor": {"--print", "x"}, "kiro": {"--no-interactive", "x"}, "devin": {"-p", "x"},
+	} {
+		spec, ok := harness.Get(name)
+		if !ok {
+			t.Fatalf("%s is not registered", name)
+		}
+		if !printMode(spec, args) || printMode(spec, []string{"--model", "m"}) {
+			t.Errorf("%s: printMode(%q) is wrong", name, args)
+		}
+		if printHint(spec) == "" {
+			t.Errorf("%s has no print hint", name)
+		}
 	}
 }

@@ -18,6 +18,7 @@ package harness
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -78,6 +79,10 @@ var Devin = register(&Spec{
 		}}, nil
 	},
 	launcher: devinLauncher,
+	bypassFlags: []bypassFlag{{name: "--permission-mode", value: func(v string) bool {
+		v = strings.TrimSpace(v)
+		return v == "dangerous" || v == "autonomous"
+	}}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{DevinLauncherPath}
 		if opts.Yolo {

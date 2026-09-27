@@ -84,7 +84,8 @@ var Cursor = register(&Spec{
 			Run:     run + "; " + link,
 		}}, nil
 	},
-	launcher: cursorLauncher,
+	launcher:    cursorLauncher,
+	bypassFlags: []bypassFlag{{name: "--force"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		// The workspace is trusted without a prompt (every project is
 		// mounted under /work) and Cursor's own sandbox is off: it cannot

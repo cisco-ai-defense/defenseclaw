@@ -60,6 +60,9 @@ var Codex = register(&Spec{
 	bypassFlags: []bypassFlag{
 		{name: "--dangerously-bypass-approvals-and-sandbox"},
 		{name: "--yolo"},
+		// Workspace-write sandboxing plus on-request approvals: Codex's own
+		// sandbox cannot run inside OpenShell.
+		{name: "--full-auto"},
 		{name: "-a", value: func(v string) bool { return tomlStringIs(v, "never") }},
 		{name: "--ask-for-approval", value: func(v string) bool { return tomlStringIs(v, "never") }},
 		{name: "-c", value: codexApprovalNever},

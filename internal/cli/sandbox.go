@@ -140,7 +140,7 @@ keep it, records the harnesses, offers shell wrappers and builds the harness ima
 	f.BoolVar(&o.NoWrappers, "no-wrappers", false, "do not offer the shell wrappers")
 	f.BoolVar(&o.NonInteractive, "non-interactive", false, "never prompt: take the defaults and skip steps that need consent")
 	f.BoolVarP(&o.Yes, "yes", "y", false, "answer every question with its default")
-	f.StringSliceVar(&o.Harnesses, "harness", nil, "harness to set up (repeatable; default: all supported)")
+	f.StringSliceVar(&o.Harnesses, "harness", nil, "harness to set up (repeatable; default: claude and codex)")
 	f.BoolVar(&o.UpstreamTelemetry, "upstream-telemetry", false, "keep OpenShell's anonymous usage telemetry on")
 	f.BoolVar(&o.SkipImages, "skip-images", false, "do not build the harness images now (the first run builds them)")
 	return cmd

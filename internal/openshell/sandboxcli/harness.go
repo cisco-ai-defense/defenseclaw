@@ -126,6 +126,20 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "~/.codex/auth.json", a.codexAuthKey},
 			{LLMBedrock, profiles.CodexBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
 		}
+	case "opencode":
+		cands = []candidate{
+			{LLMAnthropic, profiles.OpenCodeAnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMOpenAI, profiles.OpenCodeOpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
+			{LLMBedrock, profiles.OpenCodeBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "copilot":
+		// Bring-your-own-provider mode: the key goes to Copilot as
+		// COPILOT_PROVIDER_API_KEY. The GitHub-token profile (Copilot's own
+		// models) has no --llm choice; its endpoint set is unverified.
+		cands = []candidate{
+			{LLMAnthropic, profiles.CopilotAnthropicID, "COPILOT_PROVIDER_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMBedrock, profiles.CopilotBedrockMantleID, "COPILOT_PROVIDER_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
 	}
 	// A --credential binding of the model's own variable wins.
 	for _, c := range cands {
@@ -183,6 +197,10 @@ func llmHint(harnessName, choice string) string {
 		return "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
 	case harnessName == "codex":
 		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
+	case harnessName == "opencode":
+		return "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+	case harnessName == "copilot":
+		return "set ANTHROPIC_API_KEY"
 	}
 	return "set the provider's API key"
 }

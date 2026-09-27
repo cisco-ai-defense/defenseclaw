@@ -88,6 +88,8 @@ var OpenCode = register(&Spec{
 		}}, nil
 	},
 	launcher: openCodeLauncher,
+	// A passthrough --auto would skip OpenCode's permission prompts.
+	bypassFlags: []bypassFlag{{name: "--auto"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{OpenCodeLauncherPath}
 		if opts.Mode == Headless {
