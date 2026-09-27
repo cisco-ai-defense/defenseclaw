@@ -296,6 +296,46 @@ func TestRunProbeFailureDeletesSandbox(t *testing.T) {
 	}
 }
 
+// A harness that fails to start leaves no sandbox behind, like a failed
+// probe: nothing else deletes it (a detached run cannot take --rm).
+func TestRunHarnessStartFailureDeletesSandbox(t *testing.T) {
+	cases := []struct {
+		name  string
+		opts  RunOptions
+		setup func(*testApp)
+		want  string
+	}{
+		{"detach", RunOptions{Harness: "claude", Detach: true, Prompt: "fix the failing tests"}, func(ta *testApp) {
+			ta.IO.TTY = false
+			ta.stream.answer = func(argv []string) (int, string) {
+				if cmd := sandboxCommand(argv); len(cmd) > 0 && cmd[0] == "sh" {
+					return 1, "mkdir: read-only file system"
+				}
+				return 0, ""
+			}
+		}, "start Claude Code in the background: exit status 1"},
+		{"attach", RunOptions{Harness: "claude"}, func(ta *testApp) {
+			ta.term.startErr = errors.New("exec: openshell: permission denied")
+		}, "permission denied"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			c.setup(ta)
+			err := ta.Run(context.Background(), c.opts)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Run = %v, want %q", err, c.want)
+			}
+			if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-proj-1a2b")); n != 1 {
+				t.Fatalf("delete calls = %d; a harness that did not start must not leave the sandbox", n)
+			}
+			if !strings.Contains(ta.output(), "removing sandbox dc-claude-proj-1a2b after the failure") {
+				t.Fatalf("output:\n%s", ta.output())
+			}
+		})
+	}
+}
+
 func TestRunCopySession(t *testing.T) {
 	ta := newTestApp(t, "a\n")
 	ta.env["OPENAI_API_KEY"] = "sk-openai-test"

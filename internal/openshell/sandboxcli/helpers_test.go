@@ -299,6 +299,8 @@ type fakeTerminal struct {
 	mu   sync.Mutex
 	runs [][]string
 	code int
+	// startErr fails the start of the harness (nothing runs).
+	startErr error
 	// during runs while the harness "owns" the terminal.
 	during func()
 }
@@ -306,10 +308,13 @@ type fakeTerminal struct {
 func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, inv.Argv)
-	during := f.during
+	during, startErr := f.during, f.startErr
 	f.mu.Unlock()
 	if !inv.Interactive {
 		return -1, io.ErrUnexpectedEOF
+	}
+	if startErr != nil {
+		return -1, startErr
 	}
 	if during != nil {
 		during()

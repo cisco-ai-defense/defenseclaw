@@ -185,6 +185,11 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		return apiError(err)
 	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
+	// fail removes the sandbox of a launch that failed before the harness
+	// ran: the upload, the probe, or starting the harness. An error from
+	// attach means the harness never started (its exit status, a signal's
+	// included, comes back as a code); one from detach, that the
+	// background start failed.
 	fail := func(err error) error {
 		a.warn("removing sandbox " + sb.Name + " after the failure")
 		ctx := context.WithoutCancel(ctx)
@@ -208,11 +213,14 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		opts.Mode, opts.Prompt = harness.Headless, o.Prompt
 	}
 	if o.Detach {
-		return s.detach(ctx, opts)
+		if err := s.detach(ctx, opts); err != nil {
+			return fail(err)
+		}
+		return nil
 	}
 	code, err := s.attach(ctx, opts, headless)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if err := s.end(ctx); err != nil {
 		return err
