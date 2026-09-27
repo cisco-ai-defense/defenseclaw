@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,5 +209,113 @@ func TestProbeManagedInspectionRecoversARateLimitedProvider(t *testing.T) {
 	empty.probeManagedInspection(context.Background())
 	if got := empty.health.Snapshot().ManagedInspection; got.Available {
 		t.Fatalf("probe without a provider reported available: %+v", got)
+	}
+}
+
+// blockingCloudProvider holds Token until released, so a test can land an
+// inspection outcome while a probe waits on its token.
+type blockingCloudProvider struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingCloudProvider) Token(context.Context) (string, error) {
+	close(p.entered)
+	<-p.release
+	return "token", nil
+}
+
+func (p *blockingCloudProvider) Refresh(context.Context) error { return nil }
+func (p *blockingCloudProvider) Invalidate()                   {}
+
+// A no-verdict failure an inspection reports while the probe waits on a
+// token is newer than the probe's result; the token must not clear it.
+func TestProbeManagedInspectionKeepsANewerNoVerdictFailure(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	provider := &blockingCloudProvider{entered: make(chan struct{}), release: make(chan struct{})}
+	s.cmidProviderInst = provider
+	s.setInspectionAvailability(errors.New("cmid daemon not running"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.probeManagedInspection(context.Background())
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not ask for a token")
+	}
+	s.setInspectionAvailability(errManagedAIDNoVerdict)
+	close(provider.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not finish")
+	}
+
+	got := s.health.Snapshot().ManagedInspection
+	if got == nil || got.Available || got.Error != errManagedAIDNoVerdict.Error() {
+		t.Fatalf("probe overwrote a newer no-verdict failure: %+v", got)
+	}
+	s.inspectionMu.RLock()
+	verdictFailure := s.inspectionVerdictFailure
+	s.inspectionMu.RUnlock()
+	if !verdictFailure {
+		t.Fatal("probe cleared the no-verdict flag, so later probes would clear the failure too")
+	}
+}
+
+// Publishes are serialized: a publisher that took its snapshot before a
+// newer outcome cannot write that older snapshot last.
+func TestPublishManagedInspectionHealthCannotWriteAnOlderSnapshotLast(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.setInspectionAvailability(nil)
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var first atomic.Bool
+	managedInspectionPublishTestHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { managedInspectionPublishTestHook = nil })
+
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		s.publishManagedInspectionHealth() // snapshots "available"
+	}()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale publisher did not reach its write")
+	}
+
+	newerDone := make(chan struct{})
+	go func() {
+		defer close(newerDone)
+		s.setInspectionAvailability(errManagedAIDNoVerdict)
+	}()
+	// Without serialization the newer publish completes here; with it,
+	// it waits for the stale publisher.
+	select {
+	case <-newerDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(resume)
+	for _, ch := range []chan struct{}{staleDone, newerDone} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("publisher did not finish")
+		}
+	}
+
+	if got := s.health.Snapshot().ManagedInspection; got == nil || got.Available ||
+		got.Error != errManagedAIDNoVerdict.Error() {
+		t.Fatalf("an older snapshot was written last: %+v", got)
 	}
 }

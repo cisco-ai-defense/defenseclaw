@@ -130,19 +130,32 @@ func (s *Sidecar) managedInspectionState() (bool, string) {
 	return available, detail
 }
 
+// managedInspectionPublishTestHook, when set by a test, runs between a
+// publisher's snapshot and its write into SidecarHealth. Production never
+// sets it.
+var managedInspectionPublishTestHook func()
+
 // publishManagedInspectionHealth mirrors the managed inspection state into
 // SidecarHealth, where /health and the Secure Client availability read it.
-// Outside the Secure Client inspection profile it does nothing.
+// Outside the Secure Client inspection profile it does nothing. Publishes are serialized and
+// each one reads the state it writes, so the last publish always carries
+// the latest state.
 func (s *Sidecar) publishManagedInspectionHealth() {
 	if s == nil || s.health == nil {
 		return
 	}
+	s.managedInspectionPublishMu.Lock()
+	defer s.managedInspectionPublishMu.Unlock()
 	cfg := s.currentConfig()
 	if cfg == nil || !cfg.ManagedAIDOnly() {
 		return
 	}
 	available, detail := s.managedInspectionState()
-	s.health.SetManagedInspection(available, detail, managedAIDEffectiveUnavailableAction(cfg))
+	action := managedAIDEffectiveUnavailableAction(cfg)
+	if hook := managedInspectionPublishTestHook; hook != nil {
+		hook()
+	}
+	s.health.SetManagedInspection(available, detail, action)
 }
 
 // refreshManagedInspectionHealth applies a reload: republish in
@@ -167,7 +180,9 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 // build is left to the next reload, which also rebuilds the inspector. A
 // failure reported by an inspection that had a token (AI Defense returned
 // no verdict) is not probed: a token says nothing about whether AI Defense
-// answers, so only the next real verdict clears it.
+// answers, so only the next real verdict clears it. The same holds for an
+// outcome an inspection reports while the probe waits on its token: the
+// probe then discards its result.
 func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	if s == nil {
 		return
@@ -180,6 +195,7 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 		return
 	}
 	s.inspectionLastProbe = now
+	generation := s.inspectionGeneration
 	s.inspectionMu.Unlock()
 
 	s.cmidProviderMu.Lock()
@@ -200,5 +216,15 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	if err == nil && strings.TrimSpace(token) == "" {
 		err = errors.New("managed cloud token is empty")
 	}
-	s.setInspectionAvailability(err)
+	s.inspectionMu.Lock()
+	if s.inspectionGeneration != generation {
+		// An inspection reported while the probe waited; its outcome is
+		// newer than a token, and may be a no-verdict failure a token
+		// must not clear.
+		s.inspectionMu.Unlock()
+		return
+	}
+	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionMu.Unlock()
+	s.publishManagedInspectionHealth()
 }

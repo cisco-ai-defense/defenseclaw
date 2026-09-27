@@ -202,9 +202,17 @@ type Sidecar struct {
 	// observer bound to a replaced inspector stops publishing (see
 	// inspectionAvailabilityObserver).
 	inspectionEpoch uint64
+	// inspectionGeneration counts recorded outcomes, so a probe that
+	// waited on a token can tell that an inspection reported meanwhile;
+	// guarded by inspectionMu.
+	inspectionGeneration uint64
 	// inspectionLastProbe rate-limits probeManagedInspection; guarded by
 	// inspectionMu.
 	inspectionLastProbe time.Time
+	// managedInspectionPublishMu serializes publishManagedInspectionHealth
+	// so a slower publisher cannot overwrite a newer state with an older
+	// snapshot.
+	managedInspectionPublishMu sync.Mutex
 	// managedHookInspector records whether the API server's hook lane has
 	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
 	// until the API server has picked one.
@@ -2617,7 +2625,10 @@ func (s *Sidecar) setInspectionAvailability(err error) {
 	s.publishManagedInspectionHealth()
 }
 
+// recordInspectionAvailabilityLocked stores an outcome and advances the
+// generation. Caller holds inspectionMu.
 func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
+	s.inspectionGeneration++
 	s.inspectionAvailable = err == nil
 	s.inspectionVerdictFailure = errors.Is(err, errManagedAIDNoVerdict)
 	s.inspectionDetail = ""
