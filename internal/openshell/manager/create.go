@@ -85,6 +85,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if !cfg.OpenShell.Enabled {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, "OpenShell sandboxes are disabled (openshell.enabled is false)")
 	}
+	if err := m.listenersReady(); err != nil {
+		return nil, err
+	}
 	harnessName := config.NormalizeConnectorName(req.Harness)
 	spec, ok := harness.Get(harnessName)
 	if !ok {

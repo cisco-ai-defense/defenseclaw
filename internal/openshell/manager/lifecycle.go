@@ -274,6 +274,9 @@ func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRe
 }
 
 func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest) error {
+	if err := m.listenersReady(); err != nil {
+		return err
+	}
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err

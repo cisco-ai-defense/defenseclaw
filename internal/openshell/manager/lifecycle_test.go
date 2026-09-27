@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -186,6 +187,27 @@ func TestStartKeepsTheSnapshotOfPendingChanges(t *testing.T) {
 	e.ws.mu.Unlock()
 	if before := restart(sandboxapi.StartRequest{}); e.ws.snapshots["keepsnap"] == before {
 		t.Fatal("the start of an unchanged folder kept the old snapshot")
+	}
+}
+
+// TestNoSandboxWithoutTheListeners pins that creates and starts are
+// refused while the process does not hold its sandbox listeners.
+func TestNoSandboxWithoutTheListeners(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lstbox"})
+	if _, err := e.m.Stop(ctx, "lstbox"); err != nil {
+		t.Fatal(err)
+	}
+	var down error = errors.New("the sandbox egress listener is not running in this process")
+	e.m.opts.Listeners = func() error { return down }
+	_, err := e.m.Create(ctx, sandboxapi.CreateRequest{Name: "lstbox2", Harness: "claudecode", Project: e.otherProject("l2")})
+	wantCode(t, err, sandboxapi.CodeUnavailable)
+	_, err = e.m.Start(ctx, "lstbox", sandboxapi.StartRequest{})
+	wantCode(t, err, sandboxapi.CodeUnavailable)
+	down = nil
+	if _, err := e.m.Start(ctx, "lstbox", sandboxapi.StartRequest{}); err != nil {
+		t.Fatalf("start once the listeners run: %v", err)
 	}
 }
 

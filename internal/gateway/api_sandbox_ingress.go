@@ -137,6 +137,9 @@ type SandboxIngressConfig struct {
 	// OnHookDecision observes every hook verdict reached for a sandbox
 	// binding. It must not block.
 	OnHookDecision func(SandboxHookDecision)
+	// OnListening is told once RunSandboxIngress holds its socket: until
+	// then another program may be the one listening on the ingress port.
+	OnListening func()
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -171,6 +174,7 @@ type sandboxIngressState struct {
 	// onRequest and onHookDecision are the manager's observers.
 	onRequest      func(sandboxauth.Binding, sandboxauth.Route)
 	onHookDecision func(SandboxHookDecision)
+	onListening    func()
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -216,6 +220,7 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		authFailures:   rate.NewLimiter(10, 20),
 		onRequest:      cfg.OnRequest,
 		onHookDecision: cfg.OnHookDecision,
+		onListening:    cfg.OnListening,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -304,6 +309,9 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 	ln, err := listenWithRetry(ctx, st.addr, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("sandbox ingress: listen %s: %w", st.addr, err)
+	}
+	if st.onListening != nil {
+		st.onListening()
 	}
 	errCh := make(chan error, 1)
 	go func() {

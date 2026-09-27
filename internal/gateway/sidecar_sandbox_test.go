@@ -186,3 +186,57 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 		return snap.Sandbox != nil && snap.Sandbox.State == StateDegraded && strings.Contains(snap.Sandbox.LastError, "openshell:")
 	})
 }
+
+// TestSandboxRuntimeRefusesSandboxesWithoutItsListeners pins that no
+// sandbox is created while another program holds a sandbox listener port:
+// OpenShell would relay the sandbox's hooks (with its real ingress token)
+// or egress to that program.
+func TestSandboxRuntimeRefusesSandboxesWithoutItsListeners(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("sandboxes run on Linux and macOS only")
+	}
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Gateway.Token = "test-token"
+	cfg.Gateway.APIPort = freePort(t)
+	cfg.OpenShell.Enabled = true
+	cfg.OpenShell.IngressPort = freePort(t)
+	cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
+	// Another program holds the egress port.
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer squatter.Close()
+	cfg.OpenShell.EgressPort = squatter.Addr().(*net.TCPAddr).Port
+	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
+	sc.cfgCurrent.Store(cfg)
+	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
+	rt, err := sc.newSandboxRuntime(api)
+	if err != nil || rt == nil {
+		t.Fatalf("runtime = %v, %v", rt, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rt.run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	eventuallyTrue(t, func() bool {
+		rt.listenMu.Lock()
+		defer rt.listenMu.Unlock()
+		return rt.listening["ingress"]
+	})
+	if err := rt.listenersReady(); err == nil || !strings.Contains(err.Error(), "egress") {
+		t.Fatalf("listeners ready while another program holds the egress port: %v", err)
+	}
+	_, err = rt.manager.Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode", Project: t.TempDir()})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "listeners") {
+		t.Fatalf("create while the egress port is someone else's = %v", err)
+	}
+	// Once the port is free the proxy takes it, and creates are allowed
+	// past this check again.
+	_ = squatter.Close()
+	eventuallyTrue(t, func() bool { return rt.listenersReady() == nil })
+}

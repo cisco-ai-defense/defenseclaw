@@ -157,6 +157,12 @@ type Options struct {
 	// OnGateway is told about every gateway connection attempt: nil once
 	// connected, the error when the gateway is unavailable.
 	OnGateway func(err error)
+	// Listeners reports whether this process holds the sandbox ingress and
+	// egress listeners. OpenShell relays host.openshell.internal:<port> to
+	// whatever listens on that host port, handing it the sandbox's ingress
+	// token, so while it returns an error Create and Start are refused.
+	// Nil assumes the caller holds them.
+	Listeners func() error
 	// Guard runs the nested-repository guard of a mounted project while
 	// its sandbox is ready (default: package nestguard). GuardGitlinks
 	// lists a project's index gitlinks (default: the host git through
@@ -528,6 +534,22 @@ const (
 	// policy, not even the organization's, can be resolved for the sandbox.
 	policyReasonUnresolved = "policy_unresolved"
 )
+
+// listenersReady refuses a create or start while this process does not
+// hold its sandbox listeners (Options.Listeners): another program on the
+// ingress or egress port would receive the sandbox's hooks, token and
+// traffic.
+func (m *Manager) listenersReady() error {
+	if m.opts.Listeners == nil {
+		return nil
+	}
+	if err := m.opts.Listeners(); err != nil {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+			Message: "DefenseClaw does not hold its sandbox listeners, so a sandbox's hooks and egress could reach another program; run `defenseclaw sandbox doctor`",
+			Detail:  err.Error()}
+	}
+	return nil
+}
 
 func (m *Manager) config() *config.Config {
 	cfg := m.opts.Config()

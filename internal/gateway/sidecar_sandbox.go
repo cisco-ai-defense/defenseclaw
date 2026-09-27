@@ -65,6 +65,41 @@ type sandboxRuntime struct {
 	// installs it.
 	reportMu sync.Mutex
 	report   func(part string, err error)
+
+	// listening records the sandbox listeners (ingress, egress) this
+	// process holds right now.
+	listenMu  sync.Mutex
+	listening map[string]bool
+}
+
+// setListening records whether this process holds one sandbox listener.
+func (rt *sandboxRuntime) setListening(part string, up bool) {
+	rt.listenMu.Lock()
+	defer rt.listenMu.Unlock()
+	if rt.listening == nil {
+		rt.listening = map[string]bool{}
+	}
+	rt.listening[part] = up
+}
+
+// listenersReady reports whether this process holds both sandbox
+// listeners (manager.Options.Listeners). OpenShell relays
+// host.openshell.internal:<port> to whatever listens on that host port, and
+// hands it the sandbox's real ingress token: while another program holds
+// one of them, no sandbox may be created or started.
+func (rt *sandboxRuntime) listenersReady() error {
+	rt.listenMu.Lock()
+	defer rt.listenMu.Unlock()
+	var missing []string
+	for _, part := range []string{"ingress", "egress"} {
+		if !rt.listening[part] {
+			missing = append(missing, part)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the sandbox %s listener is not running in this process", strings.Join(missing, " and "))
+	}
+	return nil
 }
 
 // gatewayState reports the OpenShell gateway connection as the "openshell"
@@ -148,13 +183,15 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		EgressAddr:         egressAddr,
 		DefenseClawVersion: manager.ImageVersion(),
 		OnGateway:          rt.gatewayState,
+		Listeners:          rt.listenersReady,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if err := api.SetSandboxIngress(SandboxIngressConfig{
 		Addr: ingressAddr, Bindings: store, InFlight: inflight,
-		OnRequest: mgr.ObserveIngress,
+		OnRequest:   mgr.ObserveIngress,
+		OnListening: func() { rt.setListening("ingress", true) },
 		OnHookDecision: func(d SandboxHookDecision) {
 			mgr.ObserveHookDecision(manager.HookDecision{
 				BindingID: d.BindingID, SandboxName: d.SandboxName, Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
@@ -226,6 +263,7 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
+		defer rt.setListening("ingress", false)
 		if err := rt.api.RunSandboxIngress(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, err)
 			report("ingress", err)
@@ -274,6 +312,8 @@ func (rt *sandboxRuntime) serveEgress(ctx context.Context) error {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[sandbox-egress] listening on %s\n", ln.Addr())
+	rt.setListening("egress", true)
+	defer rt.setListening("egress", false)
 	errCh := make(chan error, 1)
 	go func() { errCh <- rt.proxy.Serve(ln) }()
 	select {

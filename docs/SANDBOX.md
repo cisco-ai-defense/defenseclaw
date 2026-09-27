@@ -120,6 +120,12 @@ Both sandbox listeners refuse anything but a loopback address. With
 with each other, with `gateway.api_port` or with `guardrail.port`, and derived
 ports past 65535.
 
+OpenShell relays `host.openshell.internal:<port>` to whatever listens on that
+host port, and hands the ingress the sandbox's real token. So while the daemon
+does not hold both sandbox listeners (another program took a port, or a
+listener stopped), the manager refuses to create or start a sandbox, and the
+subsystem health says why.
+
 ### host.openshell.internal
 
 Inside the workload, `host.openshell.internal` resolves to a synthetic address
