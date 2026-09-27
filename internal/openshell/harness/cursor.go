@@ -112,8 +112,8 @@ var Cursor = register(&Spec{
 		},
 	},
 	login: &LoginOption{
-		Argv:       []string{"/usr/local/bin/cursor-agent", "login"},
-		Note:       "browser login inside the sandbox; the session stays in the sandbox HOME",
+		Argv:       []string{CursorLauncherPath, "login"},
+		Note:       "browser login inside the sandbox (cursor-agent login through the launcher); the session stays in the sandbox HOME, where the workload can read it and send it out, so prefer the CURSOR_API_KEY provider profile",
 		Unverified: "no Cursor account was available to complete a login",
 	},
 	customization: []CustomizationPath{

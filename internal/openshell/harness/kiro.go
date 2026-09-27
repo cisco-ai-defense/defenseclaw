@@ -104,8 +104,8 @@ readlink -f /usr/local/bin/kiro-cli`,
 		},
 	},
 	login: &LoginOption{
-		Argv:       []string{"/usr/local/bin/kiro-cli", "login", "--use-device-flow"},
-		Note:       "AWS Builder ID or IAM Identity Center device-code login inside the sandbox; the token stays in the sandbox's ~/.local/share/kiro-cli",
+		Argv:       []string{KiroLauncherPath, KiroLoginCommand, "--use-device-flow"},
+		Note:       "AWS Builder ID or IAM Identity Center device-code login inside the sandbox (kiro-cli login through the launcher); the token stays in the sandbox's ~/.local/share/kiro-cli, where the workload can read it and send it out, so prefer the KIRO_API_KEY provider profile",
 		Unverified: "no Kiro account was available to complete a device-code login",
 	},
 	customization: []CustomizationPath{
@@ -136,6 +136,11 @@ var kiroLauncherKeptEnv = []string{"KIRO_API_KEY", "KIRO_MOCK_CHAT_RESPONSE"}
 // paths from KIRO_*, Q_*, AMAZON_Q_*, ASBX_KIRO_* and KAS_* variables.
 var kiroLauncherDroppedEnv = []string{"KIRO_*", "Q_*", "AMAZON_Q_*", "ASBX_KIRO_*", "KAS_*"}
 
+// KiroLoginCommand, as the launcher's first argument, runs the Kiro login
+// (the kiro-cli front end) with the caller's other arguments instead of a
+// chat.
+const KiroLoginCommand = "login"
+
 var kiroLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw Kiro CLI launcher (OpenShell sandbox images, root-owned). Kiro
@@ -144,7 +149,7 @@ var kiroLauncher = `#!/bin/bash -p
 # points Kiro at the root-owned directory that holds only the DefenseClaw
 # agent, drops the other variables Kiro relocates itself with, and starts the
 # pinned kiro-cli-chat with that agent selected and the caller's chat
-# arguments.
+# arguments. "kiro-launch ` + KiroLoginCommand + ` ..." runs the Kiro login instead.
 set -u
 ` + launcherPreamble + `refuse() {
   echo "defenseclaw: refusing to start Kiro: $1. $2" >&2
@@ -159,6 +164,9 @@ for name in $(compgen -e); do
 done
 HOME=` + connector.SandboxHomeDir + `
 export HOME
+if [ "${1:-}" = ` + KiroLoginCommand + ` ]; then
+  shift
+  ` + launcherExec(`/usr/local/bin/kiro-cli `+KiroLoginCommand+` "$@"`) + `fi
 for arg in "$@"; do
   case "$arg" in
     --agent|--agent=*)

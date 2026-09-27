@@ -93,8 +93,8 @@ var Devin = register(&Spec{
 		return argv, nil
 	},
 	login: &LoginOption{
-		Argv:       []string{"/usr/local/bin/devin", "auth", "login", "--force-manual-token-flow"},
-		Note:       "Devin account login inside the sandbox (paste the token from the browser flow); the credential stays in the sandbox HOME",
+		Argv:       []string{DevinLauncherPath, "auth", "login", "--force-manual-token-flow"},
+		Note:       "Devin account login inside the sandbox (paste the token from the browser flow; devin auth login through the launcher); the credential stays in the sandbox's ~/.local/share/devin, where the workload can read it and send it out, and Devin has no API-key provider profile to use instead",
 		Unverified: "no Devin account was available to complete a login",
 	},
 	customization: []CustomizationPath{

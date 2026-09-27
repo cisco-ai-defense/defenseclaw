@@ -22,7 +22,7 @@
 // sandbox creation, the credential profiles and the user customization paths
 // worth importing, plus the tamper tier of the hook registration and the
 // evidence the harness was verified with. It covers claudecode, codex,
-// opencode, copilot and amp.
+// opencode, copilot, amp, cursor, kiro and devin.
 package harness
 
 import (
@@ -201,11 +201,14 @@ type CredentialProfile struct {
 }
 
 // LoginOption is a vendor login run inside the sandbox instead of (or next
-// to) a provider profile. The credential it stores lives in the sandbox HOME,
-// where the workload can read it (unlike a provider placeholder), and a kept
-// sandbox reuses it; its traffic goes through the egress proxy.
+// to) a provider profile. Argv starts with the harness launcher, which
+// exports the egress proxy (OpenShell refuses a connection around it), so
+// the login's traffic goes through the proxy like the harness's own. The
+// credential it stores is a long-lived vendor account token in the sandbox
+// HOME, where the workload can read it and send it out (unlike a provider
+// placeholder); a kept sandbox reuses it.
 type LoginOption struct {
-	// Argv runs the login inside the sandbox (via the launcher).
+	// Argv runs the login inside the sandbox; Argv[0] is the launcher.
 	Argv []string
 	Note string
 	// Unverified, when set, says why the login was not performed.

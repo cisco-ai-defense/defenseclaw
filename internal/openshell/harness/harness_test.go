@@ -81,8 +81,10 @@ func TestRegistry(t *testing.T) {
 		if len(spec.CredentialProfiles("")) == 0 && !hasLogin {
 			t.Fatalf("%s has neither a credential profile nor an in-sandbox login", name)
 		}
-		if hasLogin && (len(login.Argv) == 0 || !strings.HasPrefix(login.Argv[0], "/usr/local/bin/") || strings.TrimSpace(login.Note) == "") {
-			t.Fatalf("%s login %#v", name, login)
+		// The login runs through the launcher, the only place the egress
+		// proxy is exported (OpenShell refuses a connection around it).
+		if hasLogin && (len(login.Argv) < 2 || login.Argv[0] != spec.LauncherPath() || strings.TrimSpace(login.Note) == "") {
+			t.Fatalf("%s login %#v does not run through %s", name, login, spec.LauncherPath())
 		}
 	}
 	for _, name := range []string{"hermes", "openhands", "antigravity", "omnigent", "openclaw"} {
@@ -99,7 +101,7 @@ func TestLoginReturnsACopy(t *testing.T) {
 		t.Fatalf("kiro login = %#v, %t", login, ok)
 	}
 	login.Argv[0] = "/tmp/evil"
-	if again, _ := Kiro.Login(); again.Argv[0] != "/usr/local/bin/kiro-cli" {
+	if again, _ := Kiro.Login(); again.Argv[0] != KiroLauncherPath {
 		t.Fatalf("Login aliases the registered argv: %v", again.Argv)
 	}
 	if _, ok := ClaudeCode.Login(); ok {

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // recordArgsAndEnv is a stub body that records its argv (ARG lines) and
@@ -167,6 +168,87 @@ func TestKiroLauncherRefusals(t *testing.T) {
 	launcher, home := launcherFixture(t, Kiro, "echo started\n")
 	if code, out := startLauncher(t, launcher, home, home, nil, "hi"); code != 0 || !strings.Contains(out, "started") {
 		t.Fatalf("a launch from HOME was refused: exit %d\n%s", code, out)
+	}
+}
+
+// TestLoginsRunThroughTheLauncher runs every harness login with the pinned
+// binaries replaced by recording stubs: the vendor login must start through
+// the launcher with the egress proxy exported (a login that bypasses the
+// launcher gets no proxy, and OpenShell refuses its direct connections) and
+// the launcher's environment hygiene applied.
+func TestLoginsRunThroughTheLauncher(t *testing.T) {
+	proxy := "http://b1:secret@host.openshell.internal:18972"
+	for _, tc := range []struct {
+		spec *Spec
+		// binary is the pinned binary the login runs.
+		binary string
+		want   []string
+	}{
+		{Cursor, "/usr/local/bin/cursor-agent", []string{"login"}},
+		{Devin, "/usr/local/bin/devin", []string{"--respect-workspace-trust", "false", "auth", "login", "--force-manual-token-flow"}},
+		{Kiro, "/usr/local/bin/kiro-cli", []string{"login", "--use-device-flow"}},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			if tc.spec.Name == "devin" {
+				if _, err := os.Stat("/usr/bin/jq"); err != nil {
+					t.Skip("/usr/bin/jq is required")
+				}
+			}
+			login, ok := tc.spec.Login()
+			if !ok || login.Argv[0] != tc.spec.LauncherPath() {
+				t.Fatalf("login %#v does not start with %s", login, tc.spec.LauncherPath())
+			}
+			ownBinary := tc.binary != "/usr/local/bin/"+tc.spec.Command
+			stubBody := recordArgsAndEnv
+			if ownBinary {
+				// Only the login binary records; the chat binary fails loudly.
+				stubBody = "echo 'the chat binary ran' >&2; exit 9\n"
+			}
+			launcher, home := launcherFixture(t, tc.spec, stubBody)
+			if ownBinary {
+				loginStub := filepath.Join(home, "login-stub")
+				if err := os.WriteFile(loginStub, []byte("#!/bin/bash\n"+recordArgsAndEnv), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				rewriteLauncher(t, launcher, tc.binary+" ", loginStub+" ")
+			}
+			code, out := startLauncher(t, launcher, home, home, []string{
+				openshell.EnvEgressURL + "=" + proxy, openshell.EnvEgressBypass + "=host.openshell.internal", "NODE_OPTIONS=--require=/tmp/x.js",
+			}, login.Argv[1:]...)
+			if code != 0 {
+				t.Fatalf("exit %d:\n%s", code, out)
+			}
+			run := readRecord(t, home)
+			if !reflect.DeepEqual(run.args, tc.want) {
+				t.Errorf("%s argv = %q, want %q", tc.binary, run.args, tc.want)
+			}
+			for key, want := range map[string]string{
+				"HTTPS_PROXY": proxy, "https_proxy": proxy, "HTTP_PROXY": proxy, "NO_PROXY": "host.openshell.internal",
+				"NODE_USE_ENV_PROXY": "1", "NODE_DISABLE_COMPILE_CACHE": "1", "HOME": home,
+			} {
+				if run.env[key] != want {
+					t.Errorf("%s = %q, want %q", key, run.env[key], want)
+				}
+			}
+			if _, ok := run.env["NODE_OPTIONS"]; ok {
+				t.Error("NODE_OPTIONS reached the login")
+			}
+		})
+	}
+}
+
+// rewriteLauncher replaces old with new in a fixture launcher.
+func rewriteLauncher(t *testing.T, launcher, old, new string) {
+	t.Helper()
+	raw, err := os.ReadFile(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), old) {
+		t.Fatalf("the launcher does not run %q", old)
+	}
+	if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(raw), old, new)), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
