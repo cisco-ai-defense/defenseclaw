@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,10 +81,20 @@ func TestKiroSandboxArtifactsShape(t *testing.T) {
 	if a.TamperTier != SandboxTamperTierUser || a.HookContract != "kiro-cli-hooks-v1" {
 		t.Fatalf("tier %s contract %s", a.TamperTier, a.HookContract)
 	}
-	template := sandboxFile(t, a, KiroSandboxAgentTemplatePath)
+	// Kiro picks an agent by the name inside any file of its agents
+	// directories, so the DefenseClaw agent is alone in a root-owned one and
+	// no agent file lives in the workload-writable HOME.
 	agent := sandboxFile(t, a, KiroSandboxAgentPath)
-	if template.Owner != SandboxOwnerRoot || template.Mode != 0o644 || agent.Owner != SandboxOwnerUser || !bytes.Equal(template.Data, agent.Data) {
-		t.Fatalf("template %s %v, agent %s %v, same bytes %t", template.Owner, template.Mode, agent.Owner, agent.Mode, bytes.Equal(template.Data, agent.Data))
+	if agent.Owner != SandboxOwnerRoot || agent.Mode != 0o644 || path.Dir(KiroSandboxAgentPath) != KiroSandboxAgentDir {
+		t.Fatalf("agent %s %s %v", KiroSandboxAgentPath, agent.Owner, agent.Mode)
+	}
+	for _, file := range a.Files {
+		if file.Path != KiroSandboxAgentPath && (strings.HasPrefix(file.Path, KiroSandboxAgentDir+"/") || strings.Contains(file.Path, "/.kiro/agents")) {
+			t.Fatalf("%s is another agent file Kiro could read", file.Path)
+		}
+	}
+	if a.Env[KiroSandboxAgentDirEnv] != KiroSandboxAgentDir || len(a.Env) != 1 {
+		t.Fatalf("env = %v, want %s=%s", a.Env, KiroSandboxAgentDirEnv, KiroSandboxAgentDir)
 	}
 	var doc struct {
 		Name  string `json:"name"`

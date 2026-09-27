@@ -18,6 +18,7 @@ package harness
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -38,10 +39,11 @@ var kiroPin = tarballPin{
 	DigestSource: "Kiro release manifest (stable channel)",
 }
 
-// Kiro is the Kiro CLI harness. Its hooks live in the DefenseClaw agent in
-// ~/.kiro/agents (tamper tier user); the launcher restores that agent from a
-// root-owned template on every start, selects it, and refuses a project
-// agent that would shadow it.
+// Kiro is the Kiro CLI harness. Its hooks live in the DefenseClaw agent,
+// alone in a root-owned agents directory the launcher forces
+// KIRO_AGENT_CONFIG_DIR to, so no agent file in HOME or the project can take
+// its place; Kiro has no system settings tier and still reads user and
+// project settings and MCP servers (tamper tier user).
 var Kiro = register(&Spec{
 	Name:        "kiro",
 	DisplayName: "Kiro CLI",
@@ -53,7 +55,7 @@ var Kiro = register(&Spec{
 	TamperTier:     connector.SandboxTamperTierUser,
 	Verification: Verification{
 		Status: Verified,
-		Reason: "hook-fire probe (host and relay network modes) with Kiro's own scripted-response mode (KIRO_MOCK_CHAT_RESPONSE and a placeholder KIRO_API_KEY, no network): the agent hooks userPromptSubmit, preToolUse, postToolUse and stop reach the ingress with the sandbox token and an idempotency key, a BLOCKME shell call is denied (exit 2 from preToolUse; Kiro reports the tool as failed) and an allowed one runs, also with a hookless user agent, a relocated KIRO_HOME, BASH_ENV and ENV files and a PATH of planted tools, and the launcher refuses a shadowing project agent; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness, scripted mode) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, with the shell tool on DefenseClaw's block list the DCBLOCK call gets the real gateway's block verdict and never runs, a tool call's plain curl reaches example.org through the proxy the launcher exports, the proxy blocks webhook.site, a connection around the proxy is refused; a model through KIRO_API_KEY (Kiro Pro) or an in-sandbox login is unverified (no Kiro account)",
+		Reason: "hook-fire probe (host and relay network modes) with Kiro's own scripted-response mode (KIRO_MOCK_CHAT_RESPONSE and a placeholder KIRO_API_KEY, no network): the agent hooks userPromptSubmit, preToolUse, postToolUse and stop reach the ingress with the sandbox token and an idempotency key, a BLOCKME shell call is denied (exit 2 from preToolUse; Kiro reports the tool as failed) and an allowed one runs, also with hookless agents named defenseclaw in ~/.kiro/agents (defenseclaw.json and a.json, which sorts first) and in the project (defenseclaw.json and project.json), the user settings' default agent switched to Kiro's built-in one, hookless agents behind KIRO_HOME, KIRO_AGENT_CONFIG_DIR and KIRO_TEST_AGENTS_DIR, a planted KIRO_CHAT_SHELL and AMAZON_Q_CHAT_SHELL, BASH_ENV and ENV files and a PATH of planted tools; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness, scripted mode) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, with the shell tool on DefenseClaw's block list the DCBLOCK call gets the real gateway's block verdict and never runs, a tool call's plain curl reaches example.org through the proxy the launcher exports, the proxy blocks webhook.site, a connection around the proxy is refused; a model through KIRO_API_KEY (Kiro Pro) or an in-sandbox login is unverified (no Kiro account)",
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/kiro-cli-chat", "--version"},
@@ -111,9 +113,8 @@ readlink -f /usr/local/bin/kiro-cli`,
 		{Host: ".kiro/skills", Sandbox: "/sandbox/.kiro/skills", Dir: true, Note: "user skills"},
 	},
 	preseedRefresh: []string{
-		"restore ~/.kiro/agents/" + connector.KiroSandboxAgentName + ".json from the root-owned template (the agent can edit or remove it, and Kiro runs without hooks when the selected agent fails to load)",
-		"refuse to start beside a project .kiro/agents/" + connector.KiroSandboxAgentName + ".json in the working directory (Kiro prefers it over the global agent)",
-		"pin HOME and drop KIRO_HOME, which relocate the agents directory, and select the DefenseClaw agent with --agent (a caller --agent is refused)",
+		"force " + connector.KiroSandboxAgentDirEnv + " to the root-owned " + connector.KiroSandboxAgentDir + ", which holds only the DefenseClaw agent (Kiro picks an agent by the name inside any file of ~/.kiro/agents or the project's .kiro/agents, and reads neither with the variable set), and refuse to start when the agent is missing",
+		"pin HOME and drop every KIRO_*, Q_*, AMAZON_Q_*, ASBX_KIRO_* and KAS_* variable but KIRO_API_KEY and KIRO_MOCK_CHAT_RESPONSE (they relocate the agents, settings and data and replace the shell tool's shell), and select the DefenseClaw agent with --agent (a caller --agent is refused)",
 		"select the local V2 agent engine with --v2, whose agent hooks the image verifies, and refuse --v3, --agent-engine, --cloud and --repo (the V3 engine replays no scripted response and was not measured; a cloud session runs outside the sandbox)",
 	},
 })
@@ -121,18 +122,43 @@ readlink -f /usr/local/bin/kiro-cli`,
 // KiroLauncherPath is the in-image Kiro CLI launcher.
 const KiroLauncherPath = LauncherDir + "/kiro-launch"
 
+// kiroLauncherKeptEnv are the only Kiro variables the launcher passes on: the
+// API key, and the scripted-response file the image's hook-fire probe drives
+// Kiro with (every scripted tool call still goes through the hooks).
+var kiroLauncherKeptEnv = []string{"KIRO_API_KEY", "KIRO_MOCK_CHAT_RESPONSE"}
+
+// kiroLauncherDroppedEnv are the patterns of the variables Kiro CLI 2.24.1
+// reads to relocate or replace what it runs with. Measured: KIRO_HOME,
+// KIRO_TEST_AGENTS_DIR and KIRO_AGENT_CONFIG_DIR move the agents it reads
+// (and with them the hooks), and KIRO_CHAT_SHELL and AMAZON_Q_CHAT_SHELL run
+// every approved shell command through a program of the caller's choosing.
+// The binary also reads settings, data, recording, engine and agent-server
+// paths from KIRO_*, Q_*, AMAZON_Q_*, ASBX_KIRO_* and KAS_* variables.
+var kiroLauncherDroppedEnv = []string{"KIRO_*", "Q_*", "AMAZON_Q_*", "ASBX_KIRO_*", "KAS_*"}
+
 var kiroLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw Kiro CLI launcher (OpenShell sandbox images, root-owned). Kiro
-# reads the DefenseClaw hooks from the agent it runs with, so the launcher
-# restores that agent from its root-owned template, refuses a project agent
-# that would shadow it, and starts the pinned kiro-cli-chat with it selected
-# and the caller's chat arguments.
+# reads the DefenseClaw hooks from the agent it runs with, and picks an agent
+# by the name inside any file of its agents directories, so the launcher
+# points Kiro at the root-owned directory that holds only the DefenseClaw
+# agent, drops the other variables Kiro relocates itself with, and starts the
+# pinned kiro-cli-chat with that agent selected and the caller's chat
+# arguments.
 set -u
 ` + launcherPreamble + `refuse() {
   echo "defenseclaw: refusing to start Kiro: $1. $2" >&2
   exit 2
 }
+# Kiro relocates its agents, settings, data and shell through these.
+for name in $(compgen -e); do
+  case "$name" in
+    ` + strings.Join(kiroLauncherKeptEnv, "|") + `) ;;
+    ` + strings.Join(kiroLauncherDroppedEnv, "|") + `) unset -v "$name" ;;
+  esac
+done
+HOME=` + connector.SandboxHomeDir + `
+export HOME
 for arg in "$@"; do
   case "$arg" in
     --agent|--agent=*)
@@ -145,25 +171,12 @@ for arg in "$@"; do
       ;;
   esac
 done
-# KIRO_HOME moves the directory Kiro reads its agents from.
-unset KIRO_HOME
-HOME=` + connector.SandboxHomeDir + `
-export HOME
-agents="$HOME/.kiro/agents"
-agent="$agents/` + connector.KiroSandboxAgentName + `.json"
-/bin/mkdir -p "$agents" 2>/dev/null || refuse "$agents cannot be created" "The DefenseClaw agent lives there."
-[ -d "$agents" ] && [ ! -L "$agents" ] || refuse "$agents is not a directory" "The DefenseClaw agent lives there."
-/bin/rm -f "$agent" 2>/dev/null
-/bin/cp "` + connector.KiroSandboxAgentTemplatePath + `" "$agent" 2>/dev/null && /bin/chmod 0644 "$agent" 2>/dev/null ||
-  refuse "the DefenseClaw agent could not be restored to $agent" "Kiro runs without hooks when its agent is missing."
-# A project agent of the same name in the working directory wins over the
-# global one (Kiro 2.24.1 reads .kiro/agents in the working directory only).
-dir="$(pwd -P 2>/dev/null)" || refuse "the working directory cannot be resolved" "A project agent there could replace the DefenseClaw agent."
-home_real="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_real="$HOME"
-if [ "$dir" != "$home_real" ]; then
-  shadow="${dir%/}/.kiro/agents/` + connector.KiroSandboxAgentName + `.json"
-  if [ -e "$shadow" ] || [ -L "$shadow" ]; then
-    refuse "$shadow replaces the DefenseClaw agent" "Remove it and start Kiro again."
-  fi
-fi
+# With ` + connector.KiroSandboxAgentDirEnv + ` set, Kiro reads agents from that directory alone
+# (neither ~/.kiro/agents nor the project's .kiro/agents), so no agent file
+# the workload or a repository adds can take the DefenseClaw agent's name.
+` + connector.KiroSandboxAgentDirEnv + `="` + connector.KiroSandboxAgentDir + `"
+export ` + connector.KiroSandboxAgentDirEnv + `
+agent="$` + connector.KiroSandboxAgentDirEnv + `/` + connector.KiroSandboxAgentName + `.json"
+[ -f "$agent" ] && [ -r "$agent" ] ||
+  refuse "the DefenseClaw agent $agent is missing" "Kiro runs without hooks when its agent is missing."
 ` + launcherExec(`/usr/local/bin/kiro-cli-chat chat --v2 --agent `+connector.KiroSandboxAgentName+` "$@"`)

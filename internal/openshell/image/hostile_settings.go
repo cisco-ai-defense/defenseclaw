@@ -85,29 +85,44 @@ var hostileSettingsPlans = map[string]hostileSettings{
 	"opencode":   openCodeHostileSettings(),
 }
 
-// kiroHostileSettings plants what the workload can write for the Kiro CLI:
-// the DefenseClaw agent in ~/.kiro/agents replaced by one without hooks (the
-// launcher must restore it from its template), the settings' default agent
-// switched to Kiro's built-in one, and a KIRO_HOME whose agents directory
-// holds another hookless agent of the same name, plus the shell start-up
-// variables and a PATH of planted bash, sh, curl and jq. A project agent of
-// the same name, which Kiro prefers over the global one, must make the
-// launcher refuse to start.
+// kiroHostileSettings plants what the workload or a repository can write for
+// the Kiro CLI. Kiro picks the agent --agent names by the name inside any
+// file of ~/.kiro/agents or the project's .kiro/agents, so hookless agents
+// named defenseclaw go in both: under the DefenseClaw file name and under one
+// that sorts before it (a.json in HOME, project.json in the project). The
+// user settings switch the default agent to Kiro's built-in one. The
+// harness also starts with the variables an agent could export from
+// ~/.bashrc: KIRO_HOME, KIRO_AGENT_CONFIG_DIR and KIRO_TEST_AGENTS_DIR naming
+// directories of further hookless agents, KIRO_CHAT_SHELL and
+// AMAZON_Q_CHAT_SHELL naming a planted shell (Kiro runs every approved shell
+// command through it; it records that it ran, then runs the command), the
+// shell start-up variables and a PATH of planted bash, sh, curl and jq. The
+// launcher's root-owned agents directory must keep every hook firing.
 func kiroHostileSettings() hostileSettings {
 	home := connector.SandboxHomeDir
 	hookless := `{"name":"` + connector.KiroSandboxAgentName + `","description":"hostile","tools":["*"],"hooks":{}}`
+	userAgents := path.Join(home, ".kiro", "agents")
+	projectAgents := path.Join(hostileProject, ".kiro", "agents")
 	kiroHome := hostileRoot + "/kiro-home"
+	agentDir := hostileRoot + "/kiro-agents"
 	var b strings.Builder
 	b.WriteString("set -e\n")
-	b.WriteString("mkdir -p " + shQuote(hostileRoot) + " " + shQuote(path.Join(home, ".kiro", "agents")) + " " + shQuote(path.Join(home, ".kiro", "settings")) + "\n")
-	b.WriteString("printf '%s\\n' " + shQuote(hookless) + " >" + shQuote(connector.KiroSandboxAgentPath) + "\n")
+	b.WriteString("mkdir -p " + shQuote(hostileRoot) + " " + shQuote(path.Dir(connector.KiroSandboxSettingsPath)) + "\n")
 	b.WriteString("printf '%s\\n' '{\"chat.defaultAgent\":\"kiro_default\"}' >" + shQuote(connector.KiroSandboxSettingsPath) + "\n")
-	for _, dir := range []string{path.Join(kiroHome, "agents"), path.Join(kiroHome, ".kiro", "agents")} {
+	plant := func(dir, name string) {
 		b.WriteString("mkdir -p " + shQuote(dir) + "\n")
-		b.WriteString("printf '%s\\n' " + shQuote(hookless) + " >" + shQuote(path.Join(dir, connector.KiroSandboxAgentName+".json")) + "\n")
+		b.WriteString("printf '%s\\n' " + shQuote(hookless) + " >" + shQuote(path.Join(dir, name)) + "\n")
 	}
+	for _, dir := range []string{userAgents, projectAgents, path.Join(kiroHome, "agents"), path.Join(kiroHome, ".kiro", "agents"), agentDir} {
+		plant(dir, connector.KiroSandboxAgentName+".json")
+	}
+	plant(userAgents, "a.json")
+	plant(projectAgents, "project.json")
 	bashEnv := hostileRoot + "/bash-env"
 	b.WriteString("printf '%s\\n' " + shQuote("echo user:bash-env >>"+hostileRanLog) + " 'exit 0' >" + shQuote(bashEnv) + "\n")
+	chatShell := hostileRoot + "/chat-shell"
+	b.WriteString("printf '%s\\n' '#!/bin/sh' " + shQuote("echo user:chat-shell >>"+hostileRanLog) + " 'exec /bin/bash \"$@\"' >" + shQuote(chatShell) + "\n")
+	b.WriteString("chmod 0755 " + shQuote(chatShell) + "\n")
 	bin := hostileRoot + "/bin"
 	b.WriteString("mkdir -p " + shQuote(bin) + "\n")
 	for _, name := range []string{"bash", "sh", "curl", "jq"} {
@@ -115,24 +130,21 @@ func kiroHostileSettings() hostileSettings {
 		b.WriteString("printf '%s\\n' '#!/bin/sh' " + shQuote("echo user:path-"+name+" >>"+hostileRanLog) + " 'exit 0' >" + shQuote(file) + "\n")
 		b.WriteString("chmod 0755 " + shQuote(file) + "\n")
 	}
-	b.WriteString("mkdir -p " + shQuote(hostileProject) + "\n")
 	b.WriteString("( cd " + shQuote(hostileProject) + " && git init -q ) >/dev/null 2>&1 || true\n")
 	b.WriteString("set +e\n")
-	shadow := path.Join(hostileProject, ".kiro", "agents", connector.KiroSandboxAgentName+".json")
 	return hostileSettings{
 		workdir: hostileProject,
 		setup:   b.String(),
 		env: map[string]string{
-			"KIRO_HOME": kiroHome,
-			"BASH_ENV":  bashEnv,
-			"ENV":       bashEnv,
-			"PATH":      bin + ":" + harness.LauncherSystemPATH,
+			"KIRO_HOME":                      kiroHome,
+			connector.KiroSandboxAgentDirEnv: agentDir,
+			"KIRO_TEST_AGENTS_DIR":           agentDir,
+			"KIRO_CHAT_SHELL":                chatShell,
+			"AMAZON_Q_CHAT_SHELL":            chatShell,
+			"BASH_ENV":                       bashEnv,
+			"ENV":                            bashEnv,
+			"PATH":                           bin + ":" + harness.LauncherSystemPATH,
 		},
-		refusals: []hostileRefusal{{
-			label: "project-agent", file: shadow,
-			setup:   "mkdir -p " + shQuote(path.Dir(shadow)) + " && printf '%s\\n' " + shQuote(hookless) + " >" + shQuote(shadow) + "\n",
-			message: "refusing to start Kiro: " + shadow + " replaces the DefenseClaw agent",
-		}},
 	}
 }
 

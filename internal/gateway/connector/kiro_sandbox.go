@@ -24,19 +24,27 @@ import (
 )
 
 // In-image Kiro CLI layout (measured on kiro-cli 2.24.1, Linux). Kiro CLI
-// reads agent configurations, hooks included, only from ~/.kiro/agents and a
-// project's .kiro/agents, so the hook registration is user scope (tamper tier
-// user). The launcher restores the agent from the root-owned template on
-// every start and refuses a project agent of the same name in the working
-// directory, which Kiro would otherwise prefer.
+// reads agent configurations, hooks included, from ~/.kiro/agents and a
+// project's .kiro/agents, and picks the agent --agent names by the `name`
+// field of any file there, so a file of any name the workload or a repository
+// adds can replace the DefenseClaw agent. KIRO_AGENT_CONFIG_DIR replaces both
+// directories: with it set, Kiro reads agents only from that directory. The
+// DefenseClaw agent therefore lives alone in a root-owned directory, which
+// the launcher forces KIRO_AGENT_CONFIG_DIR to on every start (the sandbox
+// env sets it as well, for a `kiro-cli chat` started without the launcher).
+// Kiro has no system settings tier and still reads user and project settings
+// and MCP servers, so the tamper tier stays user.
 const (
 	// KiroSandboxAgentName is the agent every sandbox launch selects.
 	KiroSandboxAgentName = kiroManagedAgentName
-	// KiroSandboxAgentPath is the agent configuration in the image HOME.
-	KiroSandboxAgentPath = SandboxHomeDir + "/.kiro/agents/" + kiroManagedAgentName + ".json"
-	// KiroSandboxAgentTemplatePath is the root-owned copy the launcher
-	// restores KiroSandboxAgentPath from.
-	KiroSandboxAgentTemplatePath = SandboxLibDir + "/kiro/" + kiroManagedAgentName + ".json"
+	// KiroSandboxAgentDirEnv is the Kiro CLI variable that sets the one
+	// directory Kiro reads agents from.
+	KiroSandboxAgentDirEnv = "KIRO_AGENT_CONFIG_DIR"
+	// KiroSandboxAgentDir is the root-owned agents directory; it holds only
+	// the DefenseClaw agent.
+	KiroSandboxAgentDir = SandboxLibDir + "/kiro"
+	// KiroSandboxAgentPath is the root-owned DefenseClaw agent.
+	KiroSandboxAgentPath = KiroSandboxAgentDir + "/" + kiroManagedAgentName + ".json"
 	// KiroSandboxSettingsPath makes the DefenseClaw agent Kiro's default, so
 	// a `kiro-cli chat` started without the launcher selects it as well.
 	KiroSandboxSettingsPath = SandboxHomeDir + "/.kiro/settings/cli.json"
@@ -61,7 +69,7 @@ func kiroSandboxHookContracts() []HookContract {
 		ContractID:              "kiro-cli-hooks-v1",
 		ExactAgentVersions:      []string{"2.24.1"},
 		HookScriptVersion:       "v1",
-		HookConfigPathTemplates: []string{"~/.kiro/agents/" + kiroManagedAgentName + ".json"},
+		HookConfigPathTemplates: []string{KiroSandboxAgentPath},
 		ResponseFieldName:       "hook_output",
 		Events:                  append([]string(nil), kiroSandboxHookEvents...),
 		AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
@@ -70,20 +78,20 @@ func kiroSandboxHookContracts() []HookContract {
 			BlockEvents:        KiroBlockEventsForSurface(KiroHookSurfaceV2),
 			SupportsFailClosed: true,
 			Scope:              "user",
-			ConfigPath:         "~/.kiro/agents/" + kiroManagedAgentName + ".json",
+			ConfigPath:         KiroSandboxAgentPath,
 		},
 		SupportsTraceparent: true,
 		Notes: []string{
 			"Sandbox-only contract for the pinned Kiro CLI 2.24.1 (kiro-cli-chat) running headless with --agent defenseclaw: the agent-hook triggers userPromptSubmit, preToolUse, postToolUse and stop fire, and exit 2 from preToolUse is the only veto (every other exit code is a warning and the tool runs).",
-			"The registration is user scope. Kiro prefers a project .kiro/agents agent of the same name and runs without hooks when the selected agent fails to load, so the launcher restores the agent from its root-owned template and refuses to start beside a shadowing project agent.",
+			"Kiro selects an agent by its name field from any file in ~/.kiro/agents or a project's .kiro/agents, and runs without hooks when the selected agent fails to load, so the agent lives alone in a root-owned directory the launcher forces KIRO_AGENT_CONFIG_DIR to (Kiro then reads no other agents directory).",
 		},
 	}}
 }
 
 // SandboxArtifacts renders the Kiro CLI overlay: the sandbox hook scripts,
-// the DefenseClaw agent (hooks on every tool call and prompt) in the image
-// HOME together with its root-owned template, and the settings that make it
-// the default agent.
+// the DefenseClaw agent (hooks on every tool call and prompt) alone in its
+// root-owned agents directory, the sandbox env that points Kiro at that
+// directory, and the settings that make the agent the default.
 func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
 	rt, err := resolveSandboxTarget(c.Name(), target)
 	if err != nil {
@@ -105,8 +113,7 @@ func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArt
 		return SandboxArtifacts{}, fmt.Errorf("marshal Kiro sandbox settings: %w", err)
 	}
 	files := append(hookFiles,
-		SandboxFile{Path: KiroSandboxAgentTemplatePath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: agent},
-		SandboxFile{Path: KiroSandboxAgentPath, Mode: 0o644, Owner: SandboxOwnerUser, Data: agent},
+		SandboxFile{Path: KiroSandboxAgentPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: agent},
 		SandboxFile{Path: KiroSandboxSettingsPath, Mode: 0o644, Owner: SandboxOwnerUser, Data: append(settings, '\n')},
 	)
 	return finalizeSandboxArtifacts(SandboxArtifacts{
@@ -114,7 +121,7 @@ func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArt
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,
 		Files:        files,
-		Env:          map[string]string{},
+		Env:          map[string]string{KiroSandboxAgentDirEnv: KiroSandboxAgentDir},
 		Binaries:     append(sandboxHookRuntimeBinaries(), harnessBinary("kiro-cli-chat")),
 	})
 }

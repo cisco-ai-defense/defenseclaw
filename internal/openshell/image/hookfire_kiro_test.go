@@ -44,8 +44,8 @@ type kiroSim struct {
 	port int
 	// skip drops these hooks from every run.
 	skip map[string]bool
-	// refusalOutput is appended to the hostile-settings run's output.
-	refusalOutput string
+	// hostileOutput is appended to the hostile-settings run's output.
+	hostileOutput string
 }
 
 var kiroScriptRE = regexp.MustCompile(`(?m)^printf '%s' '(.*)' >'/tmp/dc-hookfire-kiro-mock\.json' \|\| exit 96$`)
@@ -115,21 +115,21 @@ func (s kiroSim) handle(args []string) (string, int) {
 		out += "::side-effect=present\n"
 	}
 	if strings.Contains(script, hostileRanLog) {
-		out += s.refusalOutput
+		out += s.hostileOutput
 	}
 	return out + "::output-begin\nok\n::output-end\n", 0
 }
 
 func TestHookFireScriptedMockDrivesKiro(t *testing.T) {
 	c := hookFireContextFor(t, harness.Kiro)
-	refused := "::refusal=project-agent 2 1\n"
 	for name, tc := range map[string]struct {
 		sim  kiroSim
 		want string
 	}{
-		"enforcing":          {sim: kiroSim{refusalOutput: refused}},
-		"no-pretooluse":      {sim: kiroSim{skip: map[string]bool{"preToolUse": true}, refusalOutput: refused}, want: "hook preToolUse never fired"},
-		"shadow-not-refused": {sim: kiroSim{refusalOutput: "::refusal=project-agent 0 0\n"}, want: "started the harness with the planted project-agent"},
+		"enforcing":     {},
+		"no-pretooluse": {sim: kiroSim{skip: map[string]bool{"preToolUse": true}}, want: "hook preToolUse never fired"},
+		// Kiro ran the approved command through the planted KIRO_CHAT_SHELL.
+		"planted-chat-shell": {sim: kiroSim{hostileOutput: "::planted-ran=user:chat-shell \n"}, want: "programs planted by hostile user and project settings ran: user:chat-shell"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sim := tc.sim
@@ -154,7 +154,7 @@ func TestHookFireScriptedMockDrivesKiro(t *testing.T) {
 	// The scripted mock runs without a model endpoint: no argv or env of the
 	// probe names one.
 	var sawScript bool
-	sim := kiroSim{t: t, port: c.Spec.IngressPort, refusalOutput: refused}
+	sim := kiroSim{t: t, port: c.Spec.IngressPort}
 	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "ANTHROPIC_BASE_URL") || strings.Contains(joined, "OPENAI_API_KEY") {
@@ -248,26 +248,49 @@ func TestKiroHostileSettingsPlants(t *testing.T) {
 		t.Skip("bash not available")
 	}
 	plan := hostileSettingsPlans["kiro"]
-	if plan.workdir != hostileProject || plan.env["KIRO_HOME"] == "" || plan.env["BASH_ENV"] == "" || len(plan.refusals) != 1 {
+	// With the launcher's agent directory pinned nothing is refused: every
+	// planting must leave the hooks firing.
+	if plan.workdir != hostileProject || len(plan.refusals) != 0 {
 		t.Fatalf("plan = %+v", plan)
+	}
+	for _, name := range []string{"KIRO_HOME", connector.KiroSandboxAgentDirEnv, "KIRO_TEST_AGENTS_DIR", "KIRO_CHAT_SHELL", "AMAZON_Q_CHAT_SHELL", "BASH_ENV", "ENV", "PATH"} {
+		if !strings.HasPrefix(plan.env[name], hostileRoot+"/") {
+			t.Errorf("hostile env %s = %q", name, plan.env[name])
+		}
 	}
 	root := t.TempDir()
 	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot, "'/sandbox/", "'"+root+"/sandbox/", "'/work/", "'"+root+"/work/")
 	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
 		t.Fatalf("setup: %v\n%s", err, out)
 	}
-	agent, err := readFile(root + connector.KiroSandboxAgentPath)
-	if err != nil || !strings.Contains(agent, `"hooks":{}`) {
-		t.Fatalf("the hookless agent was not planted: %q %v", agent, err)
+	// Hookless agents named defenseclaw under the DefenseClaw file name and
+	// under names that sort before it, in HOME, the project and every
+	// directory the hostile env names.
+	for _, file := range []string{
+		connector.SandboxHomeDir + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
+		connector.SandboxHomeDir + "/.kiro/agents/a.json",
+		hostileProject + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
+		hostileProject + "/.kiro/agents/project.json",
+		plan.env["KIRO_HOME"] + "/agents/" + connector.KiroSandboxAgentName + ".json",
+		plan.env["KIRO_HOME"] + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
+		plan.env[connector.KiroSandboxAgentDirEnv] + "/" + connector.KiroSandboxAgentName + ".json",
+		plan.env["KIRO_TEST_AGENTS_DIR"] + "/" + connector.KiroSandboxAgentName + ".json",
+	} {
+		agent, err := readFile(root + file)
+		if err != nil || !strings.Contains(agent, `"name":"`+connector.KiroSandboxAgentName+`"`) || !strings.Contains(agent, `"hooks":{}`) {
+			t.Errorf("no hookless agent at %s: %q %v", file, agent, err)
+		}
 	}
-	refusal := plan.refusals[0]
-	if !strings.HasPrefix(refusal.file, hostileProject+"/.kiro/agents/") || !strings.Contains(refusal.message, refusal.file) {
-		t.Fatalf("refusal = %+v", refusal)
+	if file := connector.KiroSandboxAgentPath; strings.Contains(plan.setup, file) {
+		t.Errorf("the plan writes the root-owned agent %s", file)
 	}
-	if out, err := exec.Command(bash, "-c", relocate.Replace(refusal.setup)).CombinedOutput(); err != nil {
-		t.Fatalf("refusal setup: %v\n%s", err, out)
+	// The planted chat shell records that it ran and still runs the command.
+	shell := strings.TrimPrefix(plan.env["KIRO_CHAT_SHELL"], hostileRoot)
+	out, err := exec.Command(root+hostileRoot+shell, "-c", "echo ran-command").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "ran-command" {
+		t.Fatalf("planted chat shell: %q %v", out, err)
 	}
-	if shadow, err := readFile(root + refusal.file); err != nil || !strings.Contains(shadow, connector.KiroSandboxAgentName) {
-		t.Fatalf("shadowing agent %q %v", shadow, err)
+	if ran, _ := readFile(root + hostileRanLog); !strings.Contains(ran, "user:chat-shell") {
+		t.Fatalf("the planted chat shell left no trace: %q", ran)
 	}
 }

@@ -282,7 +282,7 @@
         "supportsFailClosed": true,
         "scope": "workspace"
       },
-      "sandbox": { "status": "artifacts", "tamperTier": "user", "hookConfig": "/sandbox/.kiro/agents/defenseclaw.json", "harnessPin": "2.24.1" },
+      "sandbox": { "status": "artifacts", "tamperTier": "user", "hookConfig": "/usr/local/lib/defenseclaw/kiro/defenseclaw.json", "harnessPin": "2.24.1" },
       "hilt": "Kiro has no native ask verdict; policy confirms are recorded and downgraded to alerts. ACP permission requests stay native client interactions and may be denied before the client displays them.",
       "notes": "Native hooks are the enforcement boundary and are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root, so a project-local defenseclaw.json is required and the user-global ~/.kiro/hooks copy is inert. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x. defenseclaw-acp remains an optional second surface configured with `defenseclaw acp setup --agent kiro`."
     },

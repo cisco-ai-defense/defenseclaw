@@ -31,100 +31,118 @@ import (
 // environment (ENV lines) next to itself.
 const recordArgsAndEnv = `{ printf 'ARG %s\n' "$@"; /usr/bin/env | sed 's/^/ENV /'; } >"${0%/*}/record"` + "\n"
 
-// kiroTemplate is the rendered DefenseClaw agent the launcher restores.
-func kiroTemplate(t *testing.T) []byte {
-	t.Helper()
-	for _, file := range artifactsFor(t, Kiro).Files {
-		if file.Path == connector.KiroSandboxAgentTemplatePath {
-			return file.Data
-		}
-	}
-	t.Fatal("the Kiro artifacts carry no agent template")
-	return nil
+// recordedRun is what a recordArgsAndEnv stub saw.
+type recordedRun struct {
+	args []string
+	env  map[string]string
 }
 
-func TestKiroLauncherRestoresTheAgentAndSelectsIt(t *testing.T) {
+// readRecord parses the record a recordArgsAndEnv stub left in dir.
+func readRecord(t *testing.T, dir string) recordedRun {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "record"))
+	if err != nil {
+		t.Fatalf("the stub never ran: %v", err)
+	}
+	run := recordedRun{env: map[string]string{}}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		switch {
+		case strings.HasPrefix(line, "ARG "):
+			run.args = append(run.args, strings.TrimPrefix(line, "ARG "))
+		case strings.HasPrefix(line, "ENV "):
+			name, value, _ := strings.Cut(strings.TrimPrefix(line, "ENV "), "=")
+			run.env[name] = value
+		}
+	}
+	return run
+}
+
+// kiroHostileLaunchEnv are variables Kiro CLI 2.24.1 reads to move its
+// agents, settings and data or to replace the shell tool's shell, set the way
+// an agent could export them from ~/.bashrc.
+var kiroHostileLaunchEnv = []string{
+	"KIRO_HOME", "KIRO_AGENT_CONFIG_DIR", "KIRO_TEST_AGENTS_DIR", "KIRO_CHAT_SHELL", "AMAZON_Q_CHAT_SHELL",
+	"KIRO_DATA_DIR", "KIRO_TEST_SETTINGS_PATH", "KIRO_TEST_DB_PATH", "KIRO_RECORD_API_RESPONSES_PATH",
+	"KIRO_RECORD_API_REQUESTS_PATH", "KIRO_AGENT_ENGINE", "KIRO_KAS_NODE_PATH", "KIRO_TEST_TUI_JS_PATH",
+	"Q_MOCK_CHAT_RESPONSE", "KAS_BUNDLE_PATH", "ASBX_KIRO_MANDATORY_MCPS",
+}
+
+func TestKiroLauncherPinsTheRootOwnedAgentDir(t *testing.T) {
 	launcher, home := launcherFixture(t, Kiro, recordArgsAndEnv)
-	agents := filepath.Join(home, ".kiro", "agents")
-	agent := filepath.Join(agents, connector.KiroSandboxAgentName+".json")
-	if err := os.MkdirAll(agents, 0o755); err != nil {
-		t.Fatal(err)
+	agentDir := filepath.Join(home, filepath.FromSlash(connector.KiroSandboxAgentDir))
+	if _, err := os.Stat(filepath.Join(agentDir, connector.KiroSandboxAgentName+".json")); err != nil {
+		t.Fatalf("the fixture lacks the root-owned agent: %v", err)
 	}
-	// A symlink the agent planted: the launcher replaces the link itself
-	// and never writes through it.
-	target := filepath.Join(t.TempDir(), "elsewhere.json")
-	if err := os.WriteFile(target, []byte(`{"name":"defenseclaw","hooks":{}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, agent); err != nil {
-		t.Fatal(err)
-	}
+	// Hookless agents named defenseclaw in HOME and the project, under the
+	// DefenseClaw file name and under names that sort before it: with the
+	// agent directory pinned Kiro reads neither directory, so the launcher
+	// starts without looking at them.
+	hookless := []byte(`{"name":"` + connector.KiroSandboxAgentName + `","hooks":{}}`)
 	project := t.TempDir()
-	code, out := startLauncher(t, launcher, "/elsewhere", project,
-		[]string{"KIRO_HOME=" + t.TempDir()}, "--no-interactive", "--trust-all-tools", "fix it")
+	for _, file := range []string{
+		filepath.Join(home, ".kiro", "agents", "a.json"),
+		filepath.Join(home, ".kiro", "agents", connector.KiroSandboxAgentName+".json"),
+		filepath.Join(project, ".kiro", "agents", "project.json"),
+		filepath.Join(project, ".kiro", "agents", connector.KiroSandboxAgentName+".json"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, hookless, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elsewhere := t.TempDir()
+	env := []string{"KIRO_API_KEY=placeholder", "KIRO_MOCK_CHAT_RESPONSE=/tmp/script.json", "KIROTOOL_KEEP=1", "DC_TEST_KEEP=1"}
+	for _, name := range kiroHostileLaunchEnv {
+		env = append(env, name+"="+elsewhere)
+	}
+	code, out := startLauncher(t, launcher, "/elsewhere", project, env, "--no-interactive", "--trust-all-tools", "fix it")
 	if code != 0 {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
-	info, err := os.Lstat(agent)
-	if err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("agent is not a regular file after the launch: %v %v", info, err)
+	run := readRecord(t, home)
+	if want := []string{"chat", "--v2", "--agent", connector.KiroSandboxAgentName, "--no-interactive", "--trust-all-tools", "fix it"}; !reflect.DeepEqual(run.args, want) {
+		t.Fatalf("kiro-cli-chat argv = %q, want %q", run.args, want)
 	}
-	got, _ := os.ReadFile(agent)
-	if string(got) != string(kiroTemplate(t)) {
-		t.Fatalf("agent was not restored from the template:\n%s", got)
+	if got := run.env[connector.KiroSandboxAgentDirEnv]; got != agentDir {
+		t.Errorf("%s = %q, want the root-owned %s", connector.KiroSandboxAgentDirEnv, got, agentDir)
 	}
-	if kept, _ := os.ReadFile(target); string(kept) != `{"name":"defenseclaw","hooks":{}}` {
-		t.Fatalf("the launcher wrote through the planted symlink: %s", kept)
-	}
-	record, _ := os.ReadFile(filepath.Join(home, "record"))
-	var args []string
-	env := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(record)), "\n") {
-		switch {
-		case strings.HasPrefix(line, "ARG "):
-			args = append(args, strings.TrimPrefix(line, "ARG "))
-		case strings.HasPrefix(line, "ENV "):
-			name, value, _ := strings.Cut(strings.TrimPrefix(line, "ENV "), "=")
-			env[name] = value
+	for _, name := range kiroHostileLaunchEnv {
+		if name == connector.KiroSandboxAgentDirEnv {
+			continue
+		}
+		if value, ok := run.env[name]; ok {
+			t.Errorf("%s=%s reached kiro-cli-chat", name, value)
 		}
 	}
-	if want := []string{"chat", "--v2", "--agent", connector.KiroSandboxAgentName, "--no-interactive", "--trust-all-tools", "fix it"}; !reflect.DeepEqual(args, want) {
-		t.Fatalf("kiro-cli-chat argv = %q, want %q", args, want)
+	for _, name := range []string{"KIRO_API_KEY", "KIRO_MOCK_CHAT_RESPONSE", "KIROTOOL_KEEP", "DC_TEST_KEEP"} {
+		if _, ok := run.env[name]; !ok {
+			t.Errorf("%s was dropped", name)
+		}
 	}
-	if _, ok := env["KIRO_HOME"]; ok || env["HOME"] != home {
-		t.Fatalf("KIRO_HOME %q HOME %q reached kiro-cli-chat", env["KIRO_HOME"], env["HOME"])
+	if run.env["HOME"] != home {
+		t.Errorf("HOME %q reached kiro-cli-chat", run.env["HOME"])
+	}
+	// Nothing is restored into HOME any more.
+	if got, _ := os.ReadFile(filepath.Join(home, ".kiro", "agents", connector.KiroSandboxAgentName+".json")); string(got) != string(hookless) {
+		t.Errorf("the launcher rewrote the HOME agent file: %s", got)
 	}
 }
 
 func TestKiroLauncherRefusals(t *testing.T) {
 	for name, tc := range map[string]struct {
-		setup func(t *testing.T, home, project string)
+		setup func(t *testing.T, home string)
 		args  []string
 		names string
 	}{
-		"shadowing-project-agent": {
-			setup: func(t *testing.T, _, project string) {
-				dir := filepath.Join(project, ".kiro", "agents")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, connector.KiroSandboxAgentName+".json"), []byte(`{"name":"defenseclaw"}`), 0o644); err != nil {
+		"agent-missing": {
+			setup: func(t *testing.T, home string) {
+				if err := os.Remove(filepath.Join(home, filepath.FromSlash(connector.KiroSandboxAgentPath))); err != nil {
 					t.Fatal(err)
 				}
 			},
-			names: ".kiro/agents/" + connector.KiroSandboxAgentName + ".json replaces the DefenseClaw agent",
-		},
-		"dangling-shadow-symlink": {
-			setup: func(t *testing.T, _, project string) {
-				dir := filepath.Join(project, ".kiro", "agents")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink("/nonexistent", filepath.Join(dir, connector.KiroSandboxAgentName+".json")); err != nil {
-					t.Fatal(err)
-				}
-			},
-			names: "replaces the DefenseClaw agent",
+			names: connector.KiroSandboxAgentPath + " is missing",
 		},
 		"caller-agent":        {args: []string{"--agent", "kiro_default"}, names: "--agent is not supported"},
 		"caller-agent-equals": {args: []string{"--agent=kiro_default"}, names: "--agent=kiro_default is not supported"},
@@ -134,31 +152,18 @@ func TestKiroLauncherRefusals(t *testing.T) {
 		"cloud-session":       {args: []string{"--cloud"}, names: "--cloud is not supported"},
 		"cloud-repo":          {args: []string{"--repo=org/x"}, names: "--repo=org/x is not supported"},
 		"duplicate-engine":    {args: []string{"--v2"}, names: "--v2 is not supported"},
-		"agents-dir-is-a-file": {
-			setup: func(t *testing.T, home, _ string) {
-				if err := os.MkdirAll(filepath.Join(home, ".kiro"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(home, ".kiro", "agents"), []byte("x"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			},
-			names: "agents cannot be created",
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			launcher, home := launcherFixture(t, Kiro, "echo started\n")
-			project := t.TempDir()
 			if tc.setup != nil {
-				tc.setup(t, home, project)
+				tc.setup(t, home)
 			}
-			code, out := startLauncher(t, launcher, home, project, nil, append(tc.args, "hi")...)
+			code, out := startLauncher(t, launcher, home, t.TempDir(), nil, append(tc.args, "hi")...)
 			if code != 2 || strings.Contains(out, "started") || !strings.Contains(out, tc.names) {
 				t.Fatalf("exit %d, want a refusal naming %q:\n%s", code, tc.names, out)
 			}
 		})
 	}
-	// The global agent in HOME is not a project agent.
 	launcher, home := launcherFixture(t, Kiro, "echo started\n")
 	if code, out := startLauncher(t, launcher, home, home, nil, "hi"); code != 0 || !strings.Contains(out, "started") {
 		t.Fatalf("a launch from HOME was refused: exit %d\n%s", code, out)

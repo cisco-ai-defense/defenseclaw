@@ -539,7 +539,7 @@ func TestHookOnlyHarnessEnv(t *testing.T) {
 			"api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal"},
 		{Amp, profiles.AmpID, map[string]string{"AMP_SKIP_UPDATE_CHECK": "1"}, "ampcode.com,host.openshell.internal"},
 		{Cursor, profiles.CursorID, map[string]string{}, "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh"},
-		{Kiro, profiles.KiroID, map[string]string{},
+		{Kiro, profiles.KiroID, map[string]string{connector.KiroSandboxAgentDirEnv: connector.KiroSandboxAgentDir},
 			"host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev"},
 	}
 	for _, tc := range cases {

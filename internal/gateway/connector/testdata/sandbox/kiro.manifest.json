@@ -2,7 +2,9 @@
   "connector": "kiro",
   "hook_contract": "kiro-cli-hooks-v1",
   "tamper_tier": "user",
-  "env": {},
+  "env": {
+    "KIRO_AGENT_CONFIG_DIR": "/usr/local/lib/defenseclaw/kiro"
+  },
   "binaries": [
     {
       "Name": "bash",
@@ -74,11 +76,6 @@
     }
   ],
   "files": {
-    "/sandbox/.kiro/agents/defenseclaw.json": {
-      "mode": "-rw-r--r--",
-      "owner": "user",
-      "sha256": "2cbe2a98d245f82e08b155e3499f387bdfe8a568c3b7b48cfde9b76dd8d553ba"
-    },
     "/sandbox/.kiro/settings/cli.json": {
       "mode": "-rw-r--r--",
       "owner": "user",
