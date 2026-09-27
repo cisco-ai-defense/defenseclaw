@@ -192,6 +192,12 @@ type OpenShellEgressConfig struct {
 	LargeUploadMB int `mapstructure:"large_upload_mb" yaml:"large_upload_mb,omitempty"`
 	// Feed is "" (the pack's feeds), "builtin", or "none".
 	Feed string `mapstructure:"feed" yaml:"feed,omitempty"`
+	// Unblocked are the destinations the user unblocked or approved for
+	// every sandbox ("always" decisions, written by the daemon). Unlike
+	// Allow, which is operator configuration and may open a private address
+	// a listed name resolves to, an unblock only lifts blocklist-feed and
+	// allowlist refusals: the private-address guard still applies.
+	Unblocked []string `mapstructure:"unblocked" yaml:"unblocked,omitempty"`
 }
 
 // OpenShellImageConfig pins the overlay image inputs. An empty Base selects the
@@ -814,6 +820,7 @@ func (o *OpenShellConfig) Validate() error {
 	check(ValidateOpenShellProjectGlobs("workdir.unmask", o.Workdir.Unmask))
 	check(validateOpenShellEgressPatterns("egress.block", o.Egress.Block))
 	check(validateOpenShellEgressPatterns("egress.allow", o.Egress.Allow))
+	check(validateOpenShellEgressPatterns("egress.unblocked", o.Egress.Unblocked))
 	check(validateOpenShellNames("harnesses", o.Harnesses))
 	check(validateOpenShellNames("wrappers", o.Wrappers))
 	for name := range o.Image.HarnessVersions {

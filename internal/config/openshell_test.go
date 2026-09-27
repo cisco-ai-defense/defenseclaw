@@ -98,7 +98,7 @@ openshell:
   profile: strict
   yolo: false
   workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
-  egress: {block: [paste.example], allow: ['*.npmjs.org'], ports: [443, 8443], large_upload_mb: 10, feed: none}
+  egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
   approvals: {debounce_ms: 1500, agent_proposals: false}
   resources: {cpu: '2', memory: 4Gi}
@@ -137,7 +137,7 @@ openshell:
 		Profile:           "strict",
 		Yolo:              &f,
 		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
-		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
+		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},
 		Approvals:         OpenShellApprovalsConfig{DebounceMs: 1500, AgentProposals: &f},
 		Resources:         OpenShellResourcesConfig{CPU: "2", Memory: "4Gi"},
@@ -232,6 +232,7 @@ func TestOpenShellValidate(t *testing.T) {
 		{"block glob", func(o *OpenShellConfig) { o.Egress.Block = []string{"https://x.example"} }, "egress.block[0]"},
 		{"inner wildcard", func(o *OpenShellConfig) { o.Egress.Allow = []string{"a.*.example"} }, "egress.allow[0]"},
 		{"double wildcard", func(o *OpenShellConfig) { o.Egress.Allow = []string{"**.example"} }, "egress.allow[0]"},
+		{"unblocked glob", func(o *OpenShellConfig) { o.Egress.Unblocked = []string{"ok.example", "a.*.example"} }, "egress.unblocked[1]"},
 		{"harness", func(o *OpenShellConfig) { o.Harnesses = []string{"claude code"} }, "harnesses[0]"},
 		{"image harness", func(o *OpenShellConfig) { o.Image.HarnessVersions = map[string]string{"bad name": "1"} }, "image.harness_versions"},
 		{"cpu", func(o *OpenShellConfig) { o.Resources.CPU = "0" }, "resources.cpu"},

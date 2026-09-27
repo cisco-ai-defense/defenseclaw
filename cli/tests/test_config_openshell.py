@@ -77,6 +77,7 @@ _FULL_SECTION = {
         "ports": [443, 8443],
         "large_upload_mb": 10,
         "feed": "none",
+        "unblocked": ["webhook.site"],
     },
     "image": {"base": "registry.example/base@sha256:abc", "harness_versions": {"codex": "0.146.0"}},
     "approvals": {"debounce_ms": 1500, "agent_proposals": False},
@@ -147,6 +148,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.workdir.on_exit, "keep")
         self.assertEqual(oc.egress.ports, [443, 8443])
         self.assertEqual(oc.egress.feed, "none")
+        self.assertEqual(oc.egress.unblocked, ["webhook.site"])
         self.assertEqual(oc.image.harness_versions, {"codex": "0.146.0"})
         self.assertFalse(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.resources, OpenShellResourcesConfig(cpu="2", memory="4Gi"))

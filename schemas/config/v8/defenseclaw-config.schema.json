@@ -877,6 +877,9 @@
         "allow": {
           "$ref": "#/$defs/openShellEgressPatternList"
         },
+        "unblocked": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
         "ports": {
           "$ref": "#/$defs/openShellPortList"
         },

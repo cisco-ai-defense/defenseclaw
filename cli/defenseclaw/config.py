@@ -974,6 +974,9 @@ class OpenShellEgressConfig:
     ports: list[int] = field(default_factory=list)
     large_upload_mb: int = 0
     feed: str = ""
+    # "Always" unblock and approval decisions the daemon writes; they lift
+    # blocklist and allowlist refusals but never the private-address guard.
+    unblocked: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4981,6 +4984,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             ports=_openshell_int_list(egress.get("ports")),
             large_upload_mb=_openshell_int(egress.get("large_upload_mb")),
             feed=_openshell_str(egress.get("feed")),
+            unblocked=_openshell_str_list(egress.get("unblocked")),
         ),
         image=OpenShellImageConfig(
             base=_openshell_str(image.get("base")),

@@ -518,6 +518,7 @@ openshell:
   egress:
     block: []                  # host globs added to the pack's block list
     allow: []                  # host globs added to the allow list
+    unblocked: []              # "always" unblocks and approvals the daemon saves
     ports: []                  # replaces the pack's proxy ports when non-empty
     large_upload_mb: 0         # first-seen-host upload alert in MiB; 0 follows the pack
     feed: ""                   # "" follows the pack; builtin | none
@@ -564,6 +565,7 @@ openshell:
 | `workdir.on_exit` | `ask` | What happens to the agent's changes when a session ends: `ask`, `keep`, or `undo`. |
 | `egress.block` | `[]` | Host globs added to the pack's block list. |
 | `egress.allow` | `[]` | Host globs added to the allow list. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |
+| `egress.unblocked` | `[]` | Hosts the daemon saves when you choose "always" for an unblock or an approval. Validated like `egress.allow`, and ignored when `admin.allow_unblock` is `false`. Unlike `egress.allow`, an entry here never opens a private address the name resolves to. |
 | `egress.ports` | `[]` | Destination ports for the egress proxy, 1–65535, unique, at most 64. A non-empty list replaces the pack's ports. |
 | `egress.large_upload_mb` | `0` | Alert when a host the sandbox hasn't contacted before receives more than this many MiB, 0–1048576. `0` follows the pack. |
 | `egress.feed` | `""` | `builtin` turns the built-in blocklist feed on, `none` turns the feeds off. Empty follows the pack. |
