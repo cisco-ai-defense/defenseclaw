@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -404,6 +405,17 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	token, err := randomHex(24)
 	if err != nil {
 		return result, err
+	}
+	// p2-render-7: in host mode, serialize probes that bind the same address
+	// to prevent EADDRINUSE collisions.
+	var unlock func()
+	if netw.mode == HookFireNetworkHost {
+		lockPath := filepath.Join(filepath.Dir(b.Store.Path()), fmt.Sprintf("hookfire-%s-%d.lock", netw.bindHost, netw.sinkPort))
+		unlock, err = lockFile(lockPath)
+		if err != nil {
+			return result, fmt.Errorf("openshell image: hook-fire lock: %w", err)
+		}
+		defer unlock()
 	}
 	sink := &hookSink{token: "dcprobe-" + token}
 	sinkPort, stopSink, err := serveHTTP(netw.bindHost, netw.sinkPort, sink)
