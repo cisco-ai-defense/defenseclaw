@@ -406,7 +406,9 @@ func (c *cliEnv) liveEdit() {
 // form undo can see once it is quarantined) in the mounted project.
 func (c *cliEnv) nestedRepo() {
 	t := c.t
-	if _, code := c.execOut(c.claude, "mkdir", "-p", "sub/nested/.git/objects"); code != 0 {
+	// The guard may rename .git before mkdir -p creates objects/ in it; the
+	// failed mkdir is the guard winning the race.
+	if _, code := c.execOut(c.claude, "sh", "-c", "mkdir -p sub/nested/.git/objects || true"); code != 0 {
 		t.Fatal("could not create the nested repository")
 	}
 	if _, code := c.execOut(c.claude, "sh", "-c", "mkdir -p sub/pointer && printf 'gitdir: /tmp/dce2e-gitdir\\n' > sub/pointer/.git"); code != 0 {
