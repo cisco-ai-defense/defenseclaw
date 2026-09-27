@@ -214,7 +214,21 @@ func windowsCodexMachineHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func windowsCodexManagedHookCommand(hookBinary string) string {
+// windowsCodexMachineHookContract is the default contract for a machine-wide
+// Codex policy, which can serve multiple Codex versions on the same host.
+func windowsCodexMachineHookContract() string {
+	return resolveHookContractForOS("codex", "", "windows").Contract.ContractID
+}
+
+// windowsCodexManagedHookCommand binds the published command to its event and
+// default machine-wide contract, then waits for the GUI-subsystem launcher.
+func windowsCodexManagedHookCommand(hookBinary, event string) string {
+	return windowsCodexBoundManagedHookCommand(hookBinary, event, windowsCodexMachineHookContract())
+}
+
+// windowsCodexLegacyManagedHookCommand reconstructs the older unbound command
+// for exact ownership checks during repair and removal.
+func windowsCodexLegacyManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -264,10 +278,11 @@ func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) s
 // windowsCodexManagedHookCommandFor is the managed command opts publishes
 // for event.
 func windowsCodexManagedHookCommandFor(opts WindowsCodexMachineRequirementsOptions, event string) string {
-	if contract := strings.TrimSpace(opts.HookContractID); contract != "" {
-		return windowsCodexBoundManagedHookCommand(opts.HookBinary, event, contract)
+	contract := strings.TrimSpace(opts.HookContractID)
+	if contract == "" {
+		return windowsCodexManagedHookCommand(opts.HookBinary, event)
 	}
-	return windowsCodexManagedHookCommand(opts.HookBinary)
+	return windowsCodexBoundManagedHookCommand(opts.HookBinary, event, contract)
 }
 
 // windowsCodexMachineHandler is the one DefenseClaw handler a Windows managed
@@ -603,6 +618,26 @@ func mergeWindowsCodexRequirementsModel(
 				return plan, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
 			}
 		}
+		// Replace only the exact unbound group published by an earlier
+		// Secure Client release. Administrator groups remain untouched.
+		kept := make([]interface{}, 0, len(groups))
+		var legacy []int
+		for index, candidate := range groups {
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts) {
+				legacy = append(legacy, index)
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		if len(legacy) > 0 {
+			if plan.legacyGroups == nil {
+				plan.legacyGroups = map[string][]int{}
+				plan.legacyGroupCounts = map[string]int{}
+			}
+			plan.legacyGroups[expected.eventType] = legacy
+			plan.legacyGroupCounts[expected.eventType] = len(groups)
+			groups = kept
+		}
 		found := false
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
@@ -628,7 +663,19 @@ func verifyWindowsCodexRequirementsBytes(
 	if err != nil {
 		return fmt.Errorf("parse Codex requirements: %w", err)
 	}
-	return windowsCodexMachineLayout(opts).verify(cfg)
+	if err := windowsCodexMachineLayout(opts).verify(cfg); err != nil {
+		return err
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	for _, expected := range codexHookGroups {
+		groups, _ := hooks[expected.eventType].([]interface{})
+		for _, candidate := range groups {
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts) {
+				return fmt.Errorf("hooks.%s still has unbound DefenseClaw managed groups from an earlier release", expected.eventType)
+			}
+		}
+	}
+	return nil
 }
 
 func windowsCodexMachineGroupMatches(
@@ -641,6 +688,33 @@ func windowsCodexMachineGroupMatches(
 	opts WindowsCodexMachineRequirementsOptions,
 ) bool {
 	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommandFor(opts, expected.eventType))
+}
+
+// windowsCodexMachineGroupIsLegacy recognizes the exact non-waiting,
+// event-unbound command emitted by earlier Secure Client releases.
+func windowsCodexMachineGroupIsLegacy(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexLegacyManagedHookCommand(opts.HookBinary))
+}
+
+func windowsCodexMachineGroupOwned(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	opts WindowsCodexMachineRequirementsOptions,
+) bool {
+	return windowsCodexMachineGroupMatches(raw, expected, opts) ||
+		windowsCodexMachineGroupIsLegacy(raw, expected, opts)
 }
 
 func windowsCodexMachineGroupHasCommand(
@@ -682,7 +756,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
+			if windowsCodexMachineGroupOwned(candidate, expected, opts) {
 				return true, nil
 			}
 		}
@@ -740,13 +814,13 @@ func removeWindowsCodexRequirementsOwnedModel(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					currentCount++
 				}
 			}
@@ -758,7 +832,7 @@ func removeWindowsCodexRequirementsOwnedModel(
 			removed := make([]int, 0, removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts) {
+				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts) {
 					removeCount--
 					removed = append(removed, index)
 					continue

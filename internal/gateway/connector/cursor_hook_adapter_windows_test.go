@@ -96,6 +96,9 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	default:
+		if os.Getenv(codexMachineHookHelperMode) == "block" {
+			runCodexMachineHookHelper()
+		}
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
 		// teardown behavior without provisioning a real Codex installation.
 		// Dedicated production-path tests explicitly restore the native policy

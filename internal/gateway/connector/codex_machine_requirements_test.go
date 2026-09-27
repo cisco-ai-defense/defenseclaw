@@ -4,6 +4,7 @@
 package connector
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -234,5 +235,59 @@ timeout = 5
 	}
 	if references != 2 {
 		t.Fatalf("owned path references = %d, want 2", references)
+	}
+}
+
+// Each managed group runs the hook with its own event and the machine hook
+// contract through Start-Process -Wait. The hook refuses a Codex invocation
+// without both, and the PowerShell call operator does not wait for the
+// GUI-subsystem launcher, so the earlier command's exit code never reached
+// Codex.
+func TestWindowsCodexManagedHookCommandBindsEventAndContract(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	contractID := windowsCodexMachineHookContract()
+	if want := resolveHookContractForOS("codex", "", "windows").Contract.ContractID; contractID == "" || contractID != want {
+		t.Fatalf("machine hook contract = %q, want the Codex default %q", contractID, want)
+	}
+	contract, ok := hookContractByID("codex", contractID)
+	if !ok {
+		t.Fatalf("machine hook contract %q is not registered", contractID)
+	}
+	registered := map[string]bool{}
+	for _, event := range contract.Events {
+		registered[event] = true
+	}
+	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	commands := map[string]string{}
+	for _, group := range codexHookGroups {
+		if !registered[group.eventType] {
+			t.Errorf("machine hook contract %s does not register %s", contractID, group.eventType)
+		}
+		command := windowsCodexManagedHookCommand(opts.HookBinary, group.eventType)
+		if !strings.HasPrefix(command, prefix) {
+			t.Fatalf("%s command %q does not use the fixed system PowerShell", group.eventType, command)
+		}
+		want := "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; " +
+			"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " +
+			powershellQuoteLiteral(opts.HookBinary) +
+			" -ArgumentList @('hook','--connector','codex','--enterprise-managed','--event','" +
+			group.eventType + "','--hook-contract','" + contractID +
+			"') -NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode"
+		if got := decodePowerShellEncodedCommandForTest(t, command); got != want {
+			t.Fatalf("%s script\n got: %s\nwant: %s", group.eventType, got, want)
+		}
+		if previous, seen := commands[command]; seen {
+			t.Fatalf("%s and %s share one command", previous, group.eventType)
+		}
+		commands[command] = group.eventType
+	}
+
+	legacy := decodePowerShellEncodedCommandForTest(t, windowsCodexLegacyManagedHookCommand(opts.HookBinary))
+	if legacy != "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; & "+
+		powershellQuoteLiteral(opts.HookBinary)+" hook --connector codex --enterprise-managed; exit $LASTEXITCODE" {
+		t.Fatalf("legacy command no longer matches what earlier releases published: %s", legacy)
+	}
+	if _, bound := commands[windowsCodexLegacyManagedHookCommand(opts.HookBinary)]; bound {
+		t.Fatal("the legacy command is still a managed group command")
 	}
 }
