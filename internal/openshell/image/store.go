@@ -38,18 +38,20 @@ const (
 
 // Record is one verified overlay image.
 type Record struct {
-	Tag                string    `json:"tag"`
-	ImageID            string    `json:"image_id"`
-	ContentHash        string    `json:"content_hash"`
-	Connector          string    `json:"connector"`
-	HarnessVersion     string    `json:"harness_version"`
-	HookContract       string    `json:"hook_contract"`
-	BaseImage          string    `json:"base_image"`
-	UID                int       `json:"uid"`
-	GID                int       `json:"gid"`
-	IngressPort        int       `json:"ingress_port"`
-	DefenseClawVersion string    `json:"defenseclaw_version"`
-	BuiltAt            time.Time `json:"built_at"`
+	Tag                string `json:"tag"`
+	ImageID            string `json:"image_id"`
+	ContentHash        string `json:"content_hash"`
+	Connector          string `json:"connector"`
+	HarnessVersion     string `json:"harness_version"`
+	HookContract       string `json:"hook_contract"`
+	BaseImage          string `json:"base_image"`
+	UID                int    `json:"uid"`
+	GID                int    `json:"gid"`
+	IngressPort        int    `json:"ingress_port"`
+	DefenseClawVersion string `json:"defenseclaw_version"`
+	// FailMode is the fail mode baked into the image's hooks.
+	FailMode string    `json:"fail_mode"`
+	BuiltAt  time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
@@ -116,27 +118,44 @@ func (s *Store) Get(tag string) (Record, bool, error) {
 	return Record{}, false, nil
 }
 
-// Current returns the image a sandbox of an identity should run: the most
-// recently built record whose hooks were proven to fire (HookFireVerified).
-// A built but unverified image is never selected: Claude silently ignores a
-// managed-settings drop-in with one schema-invalid field, and only the
-// hook-fire probe can tell such an image apart from one that enforces.
-func (s *Store) Current(connectorName string, uid, gid, ingressPort int) (Record, bool, error) {
-	records, err := s.List()
-	if err != nil {
+// Current returns the image a sandbox built from want's spec must run: the
+// record of exactly want's tag and content hash, whose every recorded input
+// (connector, harness version, hook contract, base image, run-as identity,
+// ingress port, DefenseClaw version and fail mode) matches want, and whose
+// hooks were proven to fire (HookFireVerified). There is no fallback to an
+// older image: after an upgrade or a changed input the old image carries
+// stale hooks, so a missing or unverified exact match means build (or
+// verify) first. A built but unverified image is never selected either:
+// Claude silently ignores a managed-settings drop-in with one schema-invalid
+// field, and only the hook-fire probe tells such an image apart from one
+// that enforces.
+func (s *Store) Current(want *Context) (Record, bool, error) {
+	if want == nil {
+		return Record{}, false, errors.New("openshell image store: Current needs the expected build context")
+	}
+	r, ok, err := s.Get(want.Tag)
+	if err != nil || !ok {
 		return Record{}, false, err
 	}
-	var best Record
-	found := false
-	for _, r := range records {
-		if r.Connector != connectorName || r.UID != uid || r.GID != gid || r.IngressPort != ingressPort || !r.HookFireVerified {
-			continue
-		}
-		if !found || r.BuiltAt.After(best.BuiltAt) {
-			best, found = r, true
-		}
+	if !r.HookFireVerified || !recordMatches(r, want) {
+		return Record{}, false, nil
 	}
-	return best, found, nil
+	return r, true, nil
+}
+
+// recordMatches reports whether r was built from exactly c's inputs.
+func recordMatches(r Record, c *Context) bool {
+	return r.Tag == c.Tag &&
+		r.ContentHash == c.ContentHash &&
+		r.Connector == c.Spec.Harness.Name &&
+		r.HarnessVersion == c.HarnessVersion &&
+		r.HookContract == c.Contract &&
+		r.BaseImage == c.Spec.BaseImage &&
+		r.UID == c.Spec.UID &&
+		r.GID == c.Spec.GID &&
+		r.IngressPort == c.Spec.IngressPort &&
+		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
+		r.FailMode == c.Spec.FailMode
 }
 
 // Put inserts or replaces the record with r.Tag.

@@ -326,7 +326,7 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	opts := HookFireOptions{SinkHost: "127.0.0.1", Prompt: "write the marker"}
 	current := func() (Record, bool) {
 		t.Helper()
-		rec, ok, err := store.Current(c.Spec.Harness.Name, c.Spec.UID, c.Spec.GID, c.Spec.IngressPort)
+		rec, ok, err := store.Current(c)
 		if err != nil {
 			t.Fatal(err)
 		}

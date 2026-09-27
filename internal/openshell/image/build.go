@@ -57,7 +57,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 	if !opts.Force {
 		if rec, ok, err := b.Store.Get(c.Tag); err != nil {
 			return Record{}, err
-		} else if ok && rec.ContentHash == c.ContentHash {
+		} else if ok && recordMatches(rec, c) {
 			if id, err := b.imageID(ctx, c.Tag); err == nil && id == rec.ImageID {
 				return rec, nil
 			}
@@ -112,6 +112,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		GID:                c.Spec.GID,
 		IngressPort:        c.Spec.IngressPort,
 		DefenseClawVersion: c.Spec.DefenseClawVersion,
+		FailMode:           c.Spec.FailMode,
 		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
@@ -177,7 +178,8 @@ type PruneReport struct {
 
 // Prune removes DefenseClaw overlay images of one repository except, per
 // (connector, uid, gid, ingress port), the most recent image and the most
-// recent hook-verified one (the image Store.Current selects), plus
+// recent hook-verified one (what Store.Current selects for an unchanged
+// spec), plus
 // opts.Keep, and forgets store records whose image no longer exists.
 func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, error) {
 	repo := opts.Repository

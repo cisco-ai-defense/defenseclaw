@@ -130,7 +130,7 @@ func TestLiveOverlay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			current, ok, err := b.Store.Current(spec.Harness.Name, spec.UID, spec.GID, spec.IngressPort)
+			current, ok, err := b.Store.Current(c)
 			if err != nil || !ok || current.Tag != rec.Tag || !verified.HookFireVerified {
 				t.Fatalf("current = %+v %t %v after a passing hook-fire probe", current, ok, err)
 			}

@@ -292,15 +292,8 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 	if err != nil || len(records) != 3 || records[0].Tag != "r:a" || !records[1].HookFireVerifiedAt.Equal(b.HookFireVerifiedAt) {
 		t.Fatalf("records = %v %v", records, err)
 	}
-	cur, ok, err := store.Current("codex", 1, 1, 2)
-	if err != nil || !ok || cur.Tag != "r:b" {
-		t.Fatalf("current = %v %t %v, want the newest hook-verified record", cur, ok, err)
-	}
 	if raw, err := os.ReadFile(store.Path()); err != nil || strings.Count(string(raw), "hook_fire_verified_at") != 2 {
 		t.Fatalf("an unverified record must omit hook_fire_verified_at: %s %v", raw, err)
-	}
-	if _, ok, _ := store.Current("codex", 1, 1, 3); ok {
-		t.Fatal("current matched a different ingress port")
 	}
 	if err := store.Put(Record{}); err == nil {
 		t.Fatal("record without tag accepted")
@@ -333,5 +326,97 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 		if _, err := store.List(); err == nil {
 			t.Errorf("%s: corrupt store accepted", name)
 		}
+	}
+}
+
+// recordFor is the record Build writes for c.
+func recordFor(c *Context, builtAt time.Time, verified bool) Record {
+	r := Record{
+		Tag: c.Tag, ImageID: "sha256:" + strings.Repeat("1", 64), ContentHash: c.ContentHash,
+		Connector: c.Spec.Harness.Name, HarnessVersion: c.HarnessVersion, HookContract: c.Contract,
+		BaseImage: c.Spec.BaseImage, UID: c.Spec.UID, GID: c.Spec.GID, IngressPort: c.Spec.IngressPort,
+		DefenseClawVersion: c.Spec.DefenseClawVersion, FailMode: c.Spec.FailMode, BuiltAt: builtAt,
+		HookFireVerified: verified,
+	}
+	if verified {
+		r.HookFireVerifiedAt = builtAt
+	}
+	return r
+}
+
+// TestStoreCurrentSelectsOnlyTheExactVerifiedImage covers an upgrade: an
+// older verified image and a newer, not yet verified one coexist. Current
+// never falls back to the older image (its hooks may be stale), and never
+// selects a record whose recorded inputs drifted from the expected build.
+func TestStoreCurrentSelectsOnlyTheExactVerifiedImage(t *testing.T) {
+	store := NewStore(t.TempDir())
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	oldSpec := testSpec(harness.ClaudeCode)
+	newSpec := testSpec(harness.ClaudeCode)
+	newSpec.DefenseClawVersion = "1.2.4"
+	newHarness := testSpec(harness.ClaudeCode)
+	newHarness.HarnessVersion = "2.1.160"
+	oldCtx, newCtx, harnessCtx := mustContext(t, oldSpec), mustContext(t, newSpec), mustContext(t, newHarness)
+	for _, r := range []Record{
+		recordFor(oldCtx, t0, true),
+		recordFor(newCtx, t0.Add(time.Hour), false),
+		recordFor(harnessCtx, t0.Add(2*time.Hour), false),
+	} {
+		if err := store.Put(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := func(c *Context) (Record, bool) {
+		t.Helper()
+		r, ok, err := store.Current(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r, ok
+	}
+	if r, ok := current(newCtx); ok {
+		t.Fatalf("Current selected %s for the upgraded DefenseClaw version before its image was verified", r.Tag)
+	}
+	if r, ok := current(harnessCtx); ok {
+		t.Fatalf("Current selected %s for a new harness pin before its image was verified", r.Tag)
+	}
+	if r, ok := current(oldCtx); !ok || r.Tag != oldCtx.Tag {
+		t.Fatalf("Current(old) = %+v %t", r, ok)
+	}
+	if err := store.Put(recordFor(newCtx, t0.Add(time.Hour), true)); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := current(newCtx); !ok || r.Tag != newCtx.Tag || r.DefenseClawVersion != "1.2.4" || r.FailMode != "closed" {
+		t.Fatalf("Current(new) = %+v %t after verification", r, ok)
+	}
+
+	// A record under the expected tag whose recorded inputs differ (a
+	// legacy record without a fail mode, a hand-edited store) is not the
+	// expected image.
+	for name, mutate := range map[string]func(*Record){
+		"no-fail-mode": func(r *Record) { r.FailMode = "" },
+		"content-hash": func(r *Record) { r.ContentHash = strings.Repeat("0", 64) },
+		"dc-version":   func(r *Record) { r.DefenseClawVersion = "1.2.3" },
+		"harness":      func(r *Record) { r.HarnessVersion = "2.1.160" },
+		"contract":     func(r *Record) { r.HookContract = "claude-hooks-v0" },
+		"base-image":   func(r *Record) { r.BaseImage = "ghcr.io/example/base@sha256:" + strings.Repeat("a", 64) },
+		"uid":          func(r *Record) { r.UID = 1001 },
+		"ingress":      func(r *Record) { r.IngressPort = 18981 },
+		"connector":    func(r *Record) { r.Connector = "codex" },
+		"not-verified": func(r *Record) { r.HookFireVerified = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := recordFor(newCtx, t0.Add(time.Hour), true)
+			mutate(&r)
+			if err := store.Put(r); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := current(newCtx); ok {
+				t.Fatal("Current selected a record whose inputs drifted")
+			}
+		})
+	}
+	if _, _, err := store.Current(nil); err == nil {
+		t.Fatal("Current(nil) did not fail")
 	}
 }
