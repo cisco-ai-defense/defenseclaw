@@ -104,7 +104,11 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		if !b.op.TryLock() {
 			continue // an operation is running; the next pass decides
 		}
-		m.gc(ctx, gw, b)
+		// A delete may have finished (and a create of the same name
+		// started) while this pass was listing.
+		if m.current(b) {
+			m.gc(ctx, gw, b)
+		}
 		b.op.Unlock()
 	}
 
@@ -257,10 +261,14 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 		return
 	}
 	defer b.op.Unlock()
-	m.mu.Lock()
-	skip := b.creating || b.deleted
-	m.mu.Unlock()
-	if !skip {
+	if m.current(b) {
 		m.gc(ctx, gw, b)
 	}
+}
+
+// current reports whether b is still the live, settled box for its name.
+func (m *Manager) current(b *box) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !b.creating && !b.deleted && m.boxes[b.rec.Name] == b
 }

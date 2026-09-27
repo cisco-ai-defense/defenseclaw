@@ -78,23 +78,34 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.mu.Unlock()
 		return
 	}
+	reason := displayReason(d.Reason)
 	b.hooks.toolCalls++
 	if blocked {
 		b.hooks.toolBlocked++
-		b.hooks.lastBlocked = truncate(firstNonEmpty(d.Reason, d.Tool), 200)
+		b.hooks.lastBlocked = truncate(firstNonEmpty(reason, d.Tool), 200)
 	}
 	m.mu.Unlock()
 	if blocked {
-		msg := "✗ tool call blocked"
+		msg := "✗ tool call blocked by DefenseClaw"
 		if d.Tool != "" {
-			msg = "✗ " + d.Tool + " blocked"
+			msg = "✗ " + d.Tool + " blocked by DefenseClaw"
 		}
-		if d.Reason != "" {
-			msg += ": " + truncate(d.Reason, 200)
+		if reason != "" {
+			msg += ": " + truncate(reason, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
-			Event: d.Event, Severity: d.Severity, Reason: truncate(d.Reason, 300), Message: msg})
+			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
+}
+
+// displayReason drops a verdict reason the gateway already redacted (it
+// only carries a length and digest).
+func displayReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if strings.HasPrefix(reason, "<redacted") {
+		return ""
+	}
+	return reason
 }
 
 func isToolEvent(event string) bool {

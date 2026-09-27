@@ -212,3 +212,32 @@ func TestRecordsSkipOtherOwners(t *testing.T) {
 		t.Fatalf("boxes = %v", m.boxes)
 	}
 }
+
+// TestGarbageCollectionSkipsReplacedBoxes pins that a reconcile pass that
+// listed a sandbox before it was deleted and recreated under the same name
+// leaves the new sandbox's state alone.
+func TestGarbageCollectionSkipsReplacedBoxes(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "samename"})
+	e.m.mu.Lock()
+	stale := e.m.boxes["samename"]
+	e.m.mu.Unlock()
+	if !e.m.current(stale) {
+		t.Fatal("live box not current")
+	}
+	if _, err := e.m.Delete(context.Background(), "samename", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "samename"})
+	if e.m.current(stale) {
+		t.Fatal("a deleted box is still current")
+	}
+	released := len(e.ws.released)
+	e.m.reconcileOne(context.Background(), "samename")
+	if len(e.ws.released) != released {
+		t.Fatal("reconciling a live sandbox released its mount")
+	}
+	if _, err := e.store.Lookup("samename"); err != nil {
+		t.Fatalf("the new binding was revoked: %v", err)
+	}
+}
