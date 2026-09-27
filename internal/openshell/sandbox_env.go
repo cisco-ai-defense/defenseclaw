@@ -16,14 +16,14 @@
 
 package openshell
 
-// Environment variables DefenseClaw sets inside every sandbox it launches
-// (registered in internal/envvars/registry.json).
+// Environment variable names DefenseClaw sets inside every OpenShell sandbox
+// it launches (registered in internal/envvars/registry.json).
 const (
-	// EnvSandboxToken carries the per-sandbox ingress binding token. With
-	// openshell.token_delivery=provider it is an OpenShell provider
-	// credential, so the workload only sees a revision-scoped placeholder
-	// that the supervisor substitutes at the ingress endpoint; hooks must
-	// read it at request time.
+	// EnvSandboxToken carries the per-sandbox ingress binding token. By
+	// default (openshell.token_delivery=provider), it is delivered as an
+	// OpenShell provider credential, so the workload only sees a
+	// revision-scoped placeholder that the OpenShell supervisor substitutes
+	// at the ingress endpoint; hooks must read it at request time.
 	EnvSandboxToken = "DEFENSECLAW_SANDBOX_TOKEN"
 	// EnvSandboxID is the OpenShell sandbox id. Its presence also tells a
 	// nested `defenseclaw sandbox run` (or the shell wrapper) that it
