@@ -262,12 +262,19 @@ func (p *Proxy) refuseInTunnel(t *tunnel, client net.Conn, dec Decision, alert b
 // the tunnel as an HTTP response (what an HTTP client there reads, and a
 // readable first line for anything else), and the tunnel closes.
 func (p *Proxy) refuseTunnel(t *tunnel, client net.Conn, reason string) {
+	dec, status := p.recordTunnelRefusal(t, reason)
+	writeRaw(client, status, reasonPhrase(status, &dec), nil, p.blockResponse(t.principal, dec))
+}
+
+// recordTunnelRefusal marks t refused for its plaintext content and reports
+// the refusal.
+func (p *Proxy) recordTunnelRefusal(t *tunnel, reason string) (Decision, int) {
 	dec := blocked(Decision{Host: t.dec.Host, Port: t.dec.Port, Mode: t.dec.Mode}, CategoryInvalidDestination, SourceGuard, "")
 	dec.Reason = reason
 	t.refused.Store(true)
 	status := statusFor(dec)
 	p.recordRefusal(t.principal, t.method, dec, status, t.started, t.id)
-	writeRaw(client, status, reasonPhrase(status, &dec), nil, p.blockResponse(t.principal, dec))
+	return dec, status
 }
 
 // readClientHello reads the rest of a TLS ClientHello whose first bytes are

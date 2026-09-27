@@ -62,6 +62,15 @@ type httpSession struct {
 	lost     chan struct{}
 	lostOnce sync.Once
 	pending  chan pendingRequest
+
+	// outstanding counts forwarded requests whose response the download
+	// side has not finished copying; answered is signalled as each one
+	// finishes.
+	outstanding atomic.Int64
+	answered    chan struct{}
+	// clientMu serializes writes to the client between the download side
+	// and a refusal written into the tunnel.
+	clientMu sync.Mutex
 }
 
 // pendingRequest is a forwarded request whose response has not been read.
@@ -77,10 +86,35 @@ func newHTTPSession() *httpSession {
 		tracking: make(chan struct{}),
 		lost:     make(chan struct{}),
 		pending:  make(chan pendingRequest, pendingDepth),
+		answered: make(chan struct{}, 1),
 	}
 }
 
 func (hs *httpSession) markLost() { hs.lostOnce.Do(func() { close(hs.lost) }) }
+
+// finished records that a forwarded request's response was copied in full.
+func (hs *httpSession) finished() {
+	hs.outstanding.Add(-1)
+	select {
+	case hs.answered <- struct{}{}:
+	default:
+	}
+}
+
+// settle waits until the response to every forwarded request has been
+// copied to the client, and reports false when that can no longer happen
+// because the download side stopped following responses. A tunnel idle for
+// TunnelIdleTimeout is closed, which ends the wait too.
+func (hs *httpSession) settle() bool {
+	for hs.outstanding.Load() > 0 {
+		select {
+		case <-hs.answered:
+		case <-hs.lost:
+			return hs.outstanding.Load() == 0
+		}
+	}
+	return true
+}
 
 // start switches the download side from copying to following responses. It
 // interrupts the download side's pending read and waits until it follows.
@@ -94,6 +128,7 @@ func (hs *httpSession) start(upstream net.Conn) {
 }
 
 func (hs *httpSession) enqueue(e pendingRequest) {
+	hs.outstanding.Add(1)
 	select {
 	case hs.pending <- e:
 	case <-hs.lost:
@@ -132,7 +167,7 @@ func (p *Proxy) relayDown(t *tunnel, client, upstream net.Conn, touch func(), hs
 	// Bytes before the first request cannot be a response to it.
 	unsolicited := t.flow.down.Load() > 0
 	close(hs.tracking)
-	tee := &teeReader{src: upstream, dst: client, touch: touch, flow: t.flow}
+	tee := &teeReader{src: upstream, dst: client, mu: &hs.clientMu, touch: touch, flow: t.flow}
 	br := bufio.NewReaderSize(tee, relayBufferSize)
 	if !unsolicited {
 		trackResponses(br, hs)
@@ -169,6 +204,7 @@ func trackResponses(br *bufio.Reader, hs *httpSession) {
 				return
 			}
 			if resp.StatusCode == http.StatusSwitchingProtocols {
+				hs.finished()
 				if e.verdict != nil {
 					e.verdict <- true
 				}
@@ -185,15 +221,18 @@ func trackResponses(br *bufio.Reader, hs *httpSession) {
 			if err != nil {
 				return
 			}
+			hs.finished()
 			break
 		}
 	}
 }
 
 // teeReader copies what it reads from the upstream to the client, counting
-// it as download.
+// it as download. mu serializes its writes with a refusal written into the
+// tunnel.
 type teeReader struct {
 	src, dst net.Conn
+	mu       *sync.Mutex
 	touch    func()
 	flow     *flow
 	werr     error
@@ -204,7 +243,10 @@ func (r *teeReader) Read(b []byte) (int, error) {
 	if n > 0 {
 		r.touch()
 		r.flow.addDown(int64(n))
-		if _, werr := r.dst.Write(b[:n]); werr != nil {
+		r.mu.Lock()
+		_, werr := r.dst.Write(b[:n])
+		r.mu.Unlock()
+		if werr != nil {
 			r.werr = werr
 			return n, werr
 		}
@@ -237,7 +279,7 @@ func (p *Proxy) relayRequests(t *tunnel, client net.Conn, src io.Reader, upstrea
 				return nil
 			}
 			if errors.Is(err, errHeaderTooLarge) {
-				p.refuseTunnel(t, client, "The tunnel's HTTP request header is too large.")
+				p.refuseInSession(t, client, hs, "The tunnel's HTTP request header is too large.")
 				return errTunnelRefused
 			}
 			return err
@@ -250,11 +292,11 @@ func (p *Proxy) relayRequests(t *tunnel, client net.Conn, src io.Reader, upstrea
 			err = fmt.Errorf("egress: HTTP/%d.%d request in a tunnel", req.ProtoMajor, req.ProtoMinor)
 		}
 		if err != nil {
-			p.refuseTunnel(t, client, "The tunnel's HTTP request is malformed, not HTTP/1.x, too large or too slow to arrive.")
+			p.refuseInSession(t, client, hs, "The tunnel's HTTP request is malformed, not HTTP/1.x, too large or too slow to arrive.")
 			return errTunnelRefused
 		}
 		if reason, ok := tunnelRequestHost(req, t.dec); !ok {
-			p.refuseTunnel(t, client, reason)
+			p.refuseInSession(t, client, hs, reason)
 			return errTunnelRefused
 		}
 		if _, ok := req.Header["User-Agent"]; !ok {
@@ -273,6 +315,23 @@ func (p *Proxy) relayRequests(t *tunnel, client net.Conn, src io.Reader, upstrea
 			return pipe(upstream, br, touch, up)
 		}
 	}
+}
+
+// refuseInSession refuses a request in a tunnel carrying HTTP. Earlier
+// pipelined requests may still wait for their responses, and a client would
+// take a refusal written now for the answer to one of them, or read it
+// spliced into one. So the refusal waits until the response to every
+// forwarded request has been copied; when those responses can no longer be
+// followed, the tunnel closes without one. The refusal is reported either
+// way.
+func (p *Proxy) refuseInSession(t *tunnel, client net.Conn, hs *httpSession, reason string) {
+	if !hs.settle() {
+		p.recordTunnelRefusal(t, reason)
+		return // relay closes the tunnel on errTunnelRefused
+	}
+	hs.clientMu.Lock()
+	defer hs.clientMu.Unlock()
+	p.refuseTunnel(t, client, reason)
 }
 
 // tunnelRequestHost checks that a request read inside a tunnel is for the

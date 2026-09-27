@@ -337,6 +337,64 @@ func TestTunnelHTTPUpgrade(t *testing.T) {
 	readTunnelRefusal(t, br)
 }
 
+// A refused request pipelined behind allowed ones is answered only after
+// their responses, so the client never takes the refusal for the answer to
+// an earlier request; when the upstream's responses cannot be followed, the
+// tunnel closes without a refusal rather than splice one into them.
+func TestTunnelHTTPRefusalWaitsForPipelinedResponses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, "slow "+r.URL.Path)
+	}))
+	defer upstream.Close()
+	h := newHarness(t, nil)
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	_, br := h.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+
+		"GET /two HTTP/1.1\r\nHost: example.com\r\n\r\n"+
+		"GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"))
+	for _, path := range []string{"/one", "/two"} {
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("response for %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != "slow "+path {
+			t.Fatalf("the response read for %s is %d %q", path, resp.StatusCode, body)
+		}
+	}
+	readTunnelRefusal(t, br)
+
+	// Responses the proxy cannot follow: the tunnel just closes.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err == nil {
+			fmt.Fprint(c, "not a response\r\n")
+			time.Sleep(2 * time.Second)
+		}
+	}()
+	h2 := newHarness(t, nil)
+	h2.dialer.route(80, ln.Addr().String())
+	_, br = h2.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+
+		"GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"))
+	rest, _ := io.ReadAll(br)
+	if string(rest) != "not a response\r\n" {
+		t.Errorf("the client read %q; want the upstream's bytes and no refusal spliced in", rest)
+	}
+	if e := h2.sink.wait(t, EventBlocked, 1)[0]; e.TunnelID == "" || e.Category != CategoryInvalidDestination {
+		t.Errorf("blocked event = %+v", e)
+	}
+}
+
 // switchingUpstream answers every request with 101 Switching Protocols
 // whatever it asked for, then records everything else it receives.
 type switchingUpstream struct {
