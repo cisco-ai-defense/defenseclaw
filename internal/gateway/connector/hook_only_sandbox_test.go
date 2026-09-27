@@ -197,7 +197,9 @@ func TestVerifyCopilotSandboxPolicyRejectsTampering(t *testing.T) {
 
 func TestOpenCodeSandboxArtifactsShape(t *testing.T) {
 	artifacts := sandboxArtifactsFor(t, NewOpenCodeConnector(), "1.18.31")
-	if artifacts.HookContract != "opencode-hooks-v1" || artifacts.TamperTier != SandboxTamperTierManaged {
+	// The registration is managed, but plugins and custom tools the user or
+	// a project adds load into the same process, so the tier is user.
+	if artifacts.HookContract != "opencode-hooks-v1" || artifacts.TamperTier != SandboxTamperTierUser {
 		t.Fatalf("contract %s tier %s", artifacts.HookContract, artifacts.TamperTier)
 	}
 	if len(artifacts.Files) != 2 || !reflect.DeepEqual(artifacts.Binaries, []SandboxBinary{{Name: "opencode", Role: SandboxBinaryHarness}}) {

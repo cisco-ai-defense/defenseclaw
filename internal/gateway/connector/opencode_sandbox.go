@@ -27,7 +27,12 @@ import (
 // directory (/etc/opencode on Linux) after every user, project and
 // OPENCODE_CONFIG_CONTENT layer, and merges plugin lists across layers, so a
 // plugin registered there cannot be removed by user or project config and
-// runs last (its view of tool arguments is authoritative).
+// runs last (its view of tool arguments is authoritative). The tamper tier is
+// still user: OpenCode imports every other plugin and custom tool (from the
+// user's and the project's config directories, or named by any config layer)
+// into the same process, where it shares globals such as fetch with this
+// plugin and could answer for it. The image's launcher refuses to start
+// OpenCode when it finds one.
 const (
 	OpenCodeSandboxManagedConfigPath = "/etc/opencode/opencode.json"
 	// OpenCodeSandboxPluginPath is the root-owned bridge plugin.
@@ -62,7 +67,7 @@ func renderOpenCodeSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts,
 	return finalizeSandboxArtifacts(SandboxArtifacts{
 		Connector:    "opencode",
 		HookContract: rt.contract.ContractID,
-		TamperTier:   SandboxTamperTierManaged,
+		TamperTier:   SandboxTamperTierUser,
 		Files: []SandboxFile{
 			{Path: OpenCodeSandboxPluginPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: plugin},
 			{Path: OpenCodeSandboxManagedConfigPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: managed},

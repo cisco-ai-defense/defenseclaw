@@ -17,7 +17,10 @@
 package harness
 
 import (
+	"encoding/json"
+	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -47,16 +50,19 @@ const openCodeMantleConfig = `{"provider":{"mantle":{"npm":"@ai-sdk/anthropic","
 	`"model":"mantle/anthropic.claude-haiku-4-5"}`
 
 // OpenCode is the OpenCode harness. Its hooks are a root-owned bridge plugin
-// registered from the managed /etc/opencode/opencode.json (tamper tier
-// managed); `--pure` and OPENCODE_PURE, which load no external plugin at all,
-// are refused by the launcher, as is the managed-config test override.
+// registered from the managed /etc/opencode/opencode.json, which user and
+// project config cannot remove. The tier is still user: OpenCode imports
+// every other plugin and custom tool into the same process, where it could
+// answer for the bridge. The launcher refuses to start when it finds one
+// (see openCodeLauncher), and refuses `--pure` and OPENCODE_PURE, which load
+// no external plugin at all, as well as the managed-config test override.
 var OpenCode = register(&Spec{
 	Name:           "opencode",
 	DisplayName:    "OpenCode",
 	Command:        "opencode",
 	DefaultVersion: openCodePin.Version,
 	Provider:       connector.NewOpenCodeConnector(),
-	TamperTier:     connector.SandboxTamperTierManaged,
+	TamperTier:     connector.SandboxTamperTierUser,
 	Verification: Verification{
 		Status: Verified,
 		Reason: "hook-fire probe (built-in mock LLM through OpenCode's bundled Anthropic SDK): the managed plugin loads, tool.execute.before/after reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied and has no side effect, user and project config plugin:[] cannot remove it; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, the proxy allows example.org and blocks webhook.site, a connection around the proxy is refused",
@@ -118,6 +124,7 @@ var OpenCode = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"refuse --pure and drop OPENCODE_PURE and OPENCODE_TEST_MANAGED_CONFIG_DIR, which would load no external plugin or replace the managed /etc/opencode config",
+		"refuse to start while any other plugin or custom tool would load into the OpenCode process (plugin and tool directories of every config directory, plugin entries of every config layer, OPENCODE_CONFIG_CONTENT), naming the file",
 	},
 	env: map[string]string{
 		// OpenCode fetches the models.dev catalog on start; keep it (models
@@ -129,13 +136,66 @@ var OpenCode = register(&Spec{
 // OpenCodeLauncherPath is the in-image OpenCode launcher.
 const OpenCodeLauncherPath = LauncherDir + "/opencode-launch"
 
+// openCodeBundledProviderSDKs are the provider SDK packages OpenCode 1.18.31
+// ships inside its executable. A provider (in config or the model catalog)
+// that names any other package, or a file:// URL, makes OpenCode install and
+// import that code into its own process.
+var openCodeBundledProviderSDKs = []string{
+	"@ai-sdk/alibaba", "@ai-sdk/amazon-bedrock", "@ai-sdk/amazon-bedrock/mantle", "@ai-sdk/anthropic",
+	"@ai-sdk/azure", "@ai-sdk/cerebras", "@ai-sdk/cohere", "@ai-sdk/deepinfra", "@ai-sdk/gateway",
+	"@ai-sdk/github-copilot", "@ai-sdk/google", "@ai-sdk/google-vertex", "@ai-sdk/google-vertex/anthropic",
+	"@ai-sdk/groq", "@ai-sdk/mistral", "@ai-sdk/openai", "@ai-sdk/openai-compatible", "@ai-sdk/perplexity",
+	"@ai-sdk/togetherai", "@ai-sdk/vercel", "@ai-sdk/xai", "@openrouter/ai-sdk-provider",
+	"gitlab-ai-provider", "venice-ai-sdk-provider",
+}
+
+// jsonStringArray renders values as a JSON array that fits in a
+// single-quoted shell word.
+func jsonStringArray(values []string) string {
+	b, err := json.Marshal(values)
+	if err != nil || strings.Contains(string(b), "'") {
+		panic(fmt.Sprintf("harness: %v cannot be a single-quoted JSON array (%v)", values, err))
+	}
+	return string(b)
+}
+
+// openCodeLauncher refuses to start OpenCode when it would load code other
+// than the DefenseClaw plugin. OpenCode 1.18 imports every plugin and custom
+// tool into one process: the files matching {plugin,plugins}/*.{js,ts} and
+// {tool,tools}/*.{js,ts} in each config directory (the global
+// ~/.config/opencode, every .opencode from the working directory up to the
+// worktree root, ~/.opencode and OPENCODE_CONFIG_DIR), the plugin entries of
+// every config layer (global config.json, opencode.json[c] and tui.json[c],
+// OPENCODE_CONFIG, the opencode.json[c] and tui.json[c] found walking up
+// from the project, the config directories, OPENCODE_TUI_CONFIG and
+// OPENCODE_CONFIG_CONTENT), the provider SDK a config layer names when it is
+// not one OpenCode bundles, and the plugins of the remote config a
+// "wellknown" login entry fetches. Such code shares globals with the policy
+// plugin (the plugin reaches the ingress through the global fetch), so it
+// could answer for it. The launcher checks the superset (every ancestor up
+// to /, also of any directory argument) and names what it found.
+//
+// Config text is read the way OpenCode reads it: {env:NAME} is substituted
+// into the raw text first, JSONC comments and trailing commas are dropped,
+// and {file:...} is left alone (OpenCode inserts the file JSON-escaped, so it
+// cannot add keys). Text jq still cannot parse is refused when it mentions
+// plugin or npm, or has a \u escape that could spell either; a legacy TOML
+// config and anything else it cannot read are refused rather than guessed
+// at.
+//
+// The check covers starts through this launcher (every DefenseClaw launch)
+// and the directories they name. Starting the pinned binary directly or
+// nested inside the sandbox skips it, as it skips the --pure refusal, and so
+// do directories OpenCode opens later (a server's per-request directory) and
+// code added while it runs; so the tier stays user.
 var openCodeLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw OpenCode launcher (OpenShell sandbox images, root-owned).
 # The DefenseClaw policy plugin is registered from the managed
 # /etc/opencode/opencode.json. Refuse the switches that would run OpenCode
-# without it, then exec the pinned OpenCode binary with the caller's
-# arguments.
+# without it, and every other plugin, custom tool or provider SDK OpenCode
+# would load into the same process, then exec the pinned OpenCode binary
+# with the caller's arguments.
 set -u
 ` + launcherPreamble + `for arg in "$@"; do
   case "$arg" in
@@ -145,7 +205,122 @@ set -u
       ;;
   esac
 done
-unset OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR
+# OPENCODE_TEST_HOME moves the home OpenCode reads ~/.opencode from.
+unset OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR OPENCODE_TEST_HOME
 OPENCODE_DISABLE_AUTOUPDATE=1
 export OPENCODE_DISABLE_AUTOUPDATE
+
+refuse() {
+  echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. Remove it and start OpenCode again." >&2
+  exit 2
+}
+bundled='` + jsonStringArray(openCodeBundledProviderSDKs) + `'
+# config_verdict reads config text on stdin and prints ok, plugin, npm,
+# unchecked or error.
+config_verdict() {
+  /usr/bin/jq -Rrs --argjson bundled "$bundled" '
+    def outside_strings(re): gsub("(?<s>\"(?:[^\"\\\\]|\\\\.)*\")|" + re; .s // "");
+    gsub("\\{env:(?<n>[^}]+)\\}"; ($ENV[.n] // "")) as $t
+    | (try ($t | outside_strings("//[^\n]*|/\\*(?:[^*]|\\*+[^*/])*\\*+/") | outside_strings(",(?=\\s*[\\]}])") | fromjson) catch null) as $doc
+    | if ($doc | type) == "object" then
+        if (($doc.plugin // []) | length) > 0 then "plugin"
+        elif any($doc | .. | objects | select(has("npm")) | .npm; (type != "string") or (. as $n | any($bundled[]; . == $n) | not)) then "npm"
+        else "ok" end
+      elif ($t | test("plugin|npm|\\\\u"; "i")) then "unchecked"
+      else "ok" end' 2>/dev/null || echo error
+}
+config_refuse() {
+  case "$2" in
+    ok) ;;
+    plugin) refuse "$1" "registers plugins" ;;
+    npm) refuse "$1" "names a provider SDK OpenCode does not bundle" ;;
+    unchecked) refuse "$1" "could not be parsed to check it for plugins" ;;
+    *) refuse "$1" "could not be checked for plugins" ;;
+  esac
+}
+check_config_file() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    [ -x /usr/bin/jq ] || refuse "$1" "could not be checked for plugins (no jq)"
+    [ -f "$1" ] || refuse "$1" "is not a regular file"
+    config_refuse "$1" "$(config_verdict <"$1")"
+  fi
+}
+check_config_dir() {
+  local sub file name
+  for sub in plugin plugins tool tools; do
+    [ -d "$1/$sub" ] || continue
+    for file in "$1/$sub"/*.js "$1/$sub"/*.ts "$1/$sub"/.*.js "$1/$sub"/.*.ts; do
+      if [ -e "$file" ] || [ -L "$file" ]; then
+        refuse "$file" "is a plugin or custom tool"
+      fi
+    done
+  done
+  for name in opencode.json opencode.jsonc tui.json tui.jsonc; do
+    check_config_file "$1/$name"
+  done
+}
+check_tree() {
+  local d="$1" name
+  while :; do
+    for name in opencode.json opencode.jsonc tui.json tui.jsonc; do
+      check_config_file "${d%/}/$name"
+    done
+    check_config_dir "${d%/}/.opencode"
+    [ "$d" = / ] && break
+    d="${d%/*}"
+    [ -n "$d" ] || d=/
+  done
+}
+# auth_verdict reads OpenCode's login store on stdin and prints ok or
+# wellknown: a "wellknown" entry makes OpenCode fetch a remote config, whose
+# plugins this launcher cannot see. OpenCode ignores a store it cannot parse.
+auth_verdict() {
+  /usr/bin/jq -Rrs '(try fromjson catch null) as $d
+    | if ($d | type) == "object" and any($d[]; type == "object" and .type == "wellknown") then "wellknown" else "ok" end' 2>/dev/null || echo error
+}
+auth_refuse() {
+  case "$2" in
+    ok) ;;
+    wellknown) refuse "$1" "logs in to a remote OpenCode config (wellknown) whose plugins this launcher cannot check" ;;
+    *) refuse "$1" "could not be checked for a remote config" ;;
+  esac
+}
+
+home="${HOME:-` + connector.SandboxHomeDir + `}"
+global="${XDG_CONFIG_HOME:-$home/.config}/opencode"
+check_config_dir "$global"
+check_config_file "$global/config.json"
+if [ -e "$global/config" ] || [ -L "$global/config" ]; then
+  refuse "$global/config" "is a legacy TOML config this launcher cannot check"
+fi
+check_config_dir "$home/.opencode"
+if [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then check_config_dir "$OPENCODE_CONFIG_DIR"; fi
+if [ -n "${OPENCODE_CONFIG:-}" ]; then check_config_file "$OPENCODE_CONFIG"; fi
+if [ -n "${OPENCODE_TUI_CONFIG:-}" ]; then check_config_file "$OPENCODE_TUI_CONFIG"; fi
+if [ -n "${OPENCODE_CONFIG_CONTENT:-}" ]; then
+  [ -x /usr/bin/jq ] || refuse OPENCODE_CONFIG_CONTENT "could not be checked for plugins (no jq)"
+  config_refuse OPENCODE_CONFIG_CONTENT "$(printf '%s' "$OPENCODE_CONFIG_CONTENT" | config_verdict)"
+fi
+# OpenCode reads its login store from OPENCODE_AUTH_CONTENT when set.
+if [ -n "${OPENCODE_AUTH_CONTENT:-}" ]; then
+  [ -x /usr/bin/jq ] || refuse OPENCODE_AUTH_CONTENT "could not be checked for a remote config (no jq)"
+  auth_refuse OPENCODE_AUTH_CONTENT "$(printf '%s' "$OPENCODE_AUTH_CONTENT" | auth_verdict)"
+else
+  auth="${XDG_DATA_HOME:-$home/.local/share}/opencode/auth.json"
+  if [ -e "$auth" ] || [ -L "$auth" ]; then
+    [ -x /usr/bin/jq ] || refuse "$auth" "could not be checked for a remote config (no jq)"
+    [ -f "$auth" ] || refuse "$auth" "is not a regular file"
+    auth_refuse "$auth" "$(auth_verdict <"$auth")"
+  fi
+fi
+cwd="$(pwd -P 2>/dev/null)" || refuse "the working directory" "cannot be resolved"
+check_tree "$cwd"
+# A directory argument (the TUI's project, run --dir) is a project too.
+for arg in "$@"; do
+  value="${arg#--*=}"
+  if [ -d "$value" ]; then
+    project="$(cd "$value" 2>/dev/null && pwd -P)" || refuse "$value" "cannot be resolved"
+    check_tree "$project"
+  fi
+done
 ` + launcherExec(`/usr/local/bin/opencode "$@"`)

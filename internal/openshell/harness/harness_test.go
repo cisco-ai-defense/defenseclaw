@@ -95,7 +95,8 @@ func TestTamperTiersAndVerification(t *testing.T) {
 	}{
 		{ClaudeCode, connector.SandboxTamperTierManaged, Verified},
 		{Codex, connector.SandboxTamperTierManaged, Verified},
-		{OpenCode, connector.SandboxTamperTierManaged, Verified},
+		// Managed registration, but other plugins load into the same process.
+		{OpenCode, connector.SandboxTamperTierUser, Verified},
 		{Copilot, connector.SandboxTamperTierManaged, Verified},
 		{Amp, connector.SandboxTamperTierUser, Unverified},
 	} {
@@ -671,10 +672,10 @@ func runLauncherIn(t *testing.T, spec *Spec, binary, cwd string, vars []string, 
 }
 
 func TestOpenCodeLauncherRefusesPluginFreeRuns(t *testing.T) {
-	vars := []string{"OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR", "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_CONFIG_CONTENT"}
+	vars := []string{"OPENCODE_PURE", "OPENCODE_TEST_MANAGED_CONFIG_DIR", "OPENCODE_TEST_HOME", "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_CONFIG_CONTENT"}
 	code, got := runLauncher(t, OpenCode, "/usr/local/bin/opencode", vars,
-		[]string{"OPENCODE_PURE=1", "OPENCODE_TEST_MANAGED_CONFIG_DIR=/tmp/x", "OPENCODE_CONFIG_CONTENT={}"}, "run", "--auto", "hi")
-	want := "ARG run\nARG --auto\nARG hi\nENV OPENCODE_PURE=<unset>\nENV OPENCODE_TEST_MANAGED_CONFIG_DIR=<unset>\nENV OPENCODE_DISABLE_AUTOUPDATE=1\nENV OPENCODE_CONFIG_CONTENT={}\n"
+		[]string{"OPENCODE_PURE=1", "OPENCODE_TEST_MANAGED_CONFIG_DIR=/tmp/x", "OPENCODE_TEST_HOME=/tmp/y", "OPENCODE_CONFIG_CONTENT={}"}, "run", "--auto", "hi")
+	want := "ARG run\nARG --auto\nARG hi\nENV OPENCODE_PURE=<unset>\nENV OPENCODE_TEST_MANAGED_CONFIG_DIR=<unset>\nENV OPENCODE_TEST_HOME=<unset>\nENV OPENCODE_DISABLE_AUTOUPDATE=1\nENV OPENCODE_CONFIG_CONTENT={}\n"
 	if code != 0 || got != want {
 		t.Fatalf("exit %d\n%s\nwant\n%s", code, got, want)
 	}

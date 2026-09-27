@@ -57,8 +57,10 @@ const (
 	// system/managed policy tier, root-owned in the image, and user or
 	// project settings cannot switch it off.
 	SandboxTamperTierManaged = "managed"
-	// SandboxTamperTierUser: the hook registration lives in a user-scope file
-	// the agent can edit; hook-silence detection is the backstop.
+	// SandboxTamperTierUser: the agent or a repository can switch the hooks
+	// off, because the registration lives in a user-scope file the agent can
+	// edit, or because code they add runs beside the hooks (OpenCode's
+	// in-process plugins); hook-silence detection is the backstop.
 	SandboxTamperTierUser = "user"
 )
 

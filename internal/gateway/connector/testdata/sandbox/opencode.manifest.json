@@ -1,7 +1,7 @@
 {
   "connector": "opencode",
   "hook_contract": "opencode-hooks-v1",
-  "tamper_tier": "managed",
+  "tamper_tier": "user",
   "env": {
     "OPENCODE_DISABLE_AUTOUPDATE": "1"
   },
