@@ -227,9 +227,11 @@ asset declarations.
 sandbox on Linux or macOS: the agent sees only your project folder, and the
 DefenseClaw plugin gates every tool call. The [sandbox guide](/docs/setup/sandbox)
 covers setup, the session and every flag. The first run builds the OpenCode
-image; `defenseclaw sandbox image build opencode` builds it ahead of time
-(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
-you name OpenCode with `--harness opencode`).
+image; `defenseclaw sandbox image build opencode` builds it ahead of time.
+`defenseclaw sandbox setup` builds the images of the harnesses in
+`openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
+replaces that list, so name every harness you want:
+`defenseclaw sandbox setup --harness claudecode --harness codex --harness opencode`.
 
 - **User tier.** The hooks are a root-owned bridge plugin registered from
   OpenCode's managed config, `/etc/opencode/opencode.json`, which user and

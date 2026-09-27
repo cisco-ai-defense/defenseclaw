@@ -234,7 +234,8 @@ sandbox image; your own Claude Code configuration does not change.
   shell. OpenShell holds the secret, and the sandbox gets a placeholder that
   works only at `api.anthropic.com`. `--llm bedrock` shares a short-term Amazon
   Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle
-  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`). With
+  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then
+  `$AWS_DEFAULT_REGION`, then `us-east-1`). With
   `--llm none`, or when no key is found, log in inside the sandbox; that login
   stays in the sandbox home, where the agent can read it.
 - **Per-sandbox settings.** Each sandbox also gets a read-only drop-in,

@@ -84,9 +84,11 @@ direct-launch bypass boundary.
 Linux or macOS: the agent sees only your project folder, and DefenseClaw hooks
 gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
 the session and every flag. The first run builds the Kiro CLI image;
-`defenseclaw sandbox image build kiro` builds it ahead of time
-(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
-you name Kiro with `--harness kiro`).
+`defenseclaw sandbox image build kiro` builds it ahead of time.
+`defenseclaw sandbox setup` builds the images of the harnesses in
+`openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
+replaces that list, so name every harness you want:
+`defenseclaw sandbox setup --harness claudecode --harness codex --harness kiro`.
 
 - **User tier.** Kiro CLI reads hooks from the agent it runs with, and picks
   that agent by the name inside any file in `~/.kiro/agents` or the project's
@@ -105,8 +107,10 @@ you name Kiro with `--harness kiro`).
 - **Model sign-in.** `sandbox run` shares no model credential for Kiro; its
   `--llm` has no Kiro choice. Log in inside the sandbox: after the first run,
   open a shell in it with `defenseclaw sandbox connect <name> --shell`, run
-  `kiro-cli-chat login --use-device-flow` (an AWS Builder ID or IAM Identity
-  Center device-code login), then resume Kiro with
+  `/usr/local/lib/defenseclaw/bin/kiro-launch login --use-device-flow` (an
+  AWS Builder ID or IAM Identity Center device-code login; the launcher runs
+  `kiro-cli login` with the sandbox home pinned, Kiro's relocating variables
+  dropped and the egress proxy set), then resume Kiro with
   `defenseclaw sandbox connect <name>`. The token stays in the sandbox home,
   where the agent can read it and send it out, and a kept sandbox reuses it.
   The daemon's `defenseclaw-kiro` provider profile, which binds a Kiro API key

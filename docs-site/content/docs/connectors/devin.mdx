@@ -151,6 +151,13 @@ pasted-token flow) before any agent turn: without one it stops at "Login
 canceled" and fires no hook, and no API key or bring-your-own model skips the
 login. DefenseClaw's image check drives the harness with a mock model, so it
 cannot pass for Devin CLI until a check runs in a logged-in sandbox.
+
+`defenseclaw sandbox run devin` builds the whole image first (several GB) and
+only then refuses it. The unverified image stays:
+`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
+`defenseclaw sandbox image prune` keeps it because it is the newest Devin CLI
+image. Remove it with `docker image rm <tag>`; the next prune forgets its
+record.
 </Callout>
 
 The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
@@ -171,8 +178,10 @@ the Devin CLI image already holds:
   launcher always passes `--respect-workspace-trust false` and refuses that
   flag from you. The trade-off: a project's own Devin hooks
   (`.devin/hooks.v1.json`) load next to DefenseClaw's without a prompt.
-- **Sign-in.** A Devin account login inside the sandbox (paste the token from
-  the browser flow) is the only sign-in. The credential stays in the sandbox's
+- **Sign-in.** A Devin account login inside the sandbox
+  (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`,
+  which runs `devin auth login` through the launcher; paste the token from the
+  browser flow) is the only sign-in. The credential stays in the sandbox's
   `~/.local/share/devin`, where the agent can read it and send it out. It was
   not tested live.
 - **Image.** Devin CLI 3000.4.25 from its release archive, checked against the

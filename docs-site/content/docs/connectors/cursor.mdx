@@ -246,6 +246,13 @@ Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or
 bring-your-own model endpoint. DefenseClaw's image check drives the harness
 with a mock model, so it cannot pass for Cursor Agent until a check runs with
 a Cursor key.
+
+`defenseclaw sandbox run cursor` builds the whole image first (several GB) and
+only then refuses it. The unverified image stays:
+`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
+`defenseclaw sandbox image prune` keeps it because it is the newest Cursor Agent
+image. Remove it with `docker image rm <tag>`; the next prune forgets its
+record.
 </Callout>
 
 The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
@@ -266,7 +273,9 @@ the Cursor Agent image already holds:
   root-owned sources.
 - **Sign-in.** The daemon's `defenseclaw-cursor` provider profile binds a
   Cursor API key to Cursor's service, and the sandbox sees only a
-  placeholder. A browser login inside the sandbox (`cursor-agent login`)
+  placeholder. A browser login inside the sandbox
+  (`/usr/local/lib/defenseclaw/bin/cursor-launch login`, which runs
+  `cursor-agent login` through the launcher and its egress proxy settings)
   keeps a long-lived session in the sandbox home, where the agent can read it
   and send it out. Neither was tested live, and `sandbox run` has no `--llm`
   choice for Cursor Agent.

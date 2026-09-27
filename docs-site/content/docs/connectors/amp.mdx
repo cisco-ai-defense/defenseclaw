@@ -224,6 +224,13 @@ key (`AMP_API_KEY`) for every run: without one it stops at the account check
 before any agent turn, and it has no local or bring-your-own model endpoint.
 DefenseClaw's image check drives the harness with a mock model, so it cannot
 pass for Amp until a check runs with a real key.
+
+`defenseclaw sandbox run amp` builds the whole image first (several GB) and
+only then refuses it. The unverified image stays:
+`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
+`defenseclaw sandbox image prune` keeps it because it is the newest Amp
+image. Remove it with `docker image rm <tag>`; the next prune forgets its
+record.
 </Callout>
 
 The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What

@@ -252,9 +252,11 @@ OpenShell sandbox on Linux or macOS: the agent sees only your project folder,
 and DefenseClaw hooks gate every tool call. The
 [sandbox guide](/docs/setup/sandbox) covers setup, the session and every flag.
 The first run builds the Copilot CLI image;
-`defenseclaw sandbox image build copilot` builds it ahead of time
-(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
-you name Copilot CLI with `--harness copilot`).
+`defenseclaw sandbox image build copilot` builds it ahead of time.
+`defenseclaw sandbox setup` builds the images of the harnesses in
+`openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
+replaces that list, so name every harness you want:
+`defenseclaw sandbox setup --harness claudecode --harness codex --harness copilot`.
 
 - **Managed tier.** The hooks are in the root-owned policy document
   `/etc/github-copilot/policy.d/50-defenseclaw.json`, and the managed settings

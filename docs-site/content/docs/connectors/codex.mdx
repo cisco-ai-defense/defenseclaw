@@ -261,7 +261,8 @@ your own Codex configuration does not change.
   sign-in is not shared. OpenShell holds the secret, and the sandbox gets a
   placeholder that works only at `api.openai.com`. `--llm bedrock` shares a
   short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for a Codex
-  custom provider on the Bedrock Mantle endpoint in `--bedrock-region`, with
+  custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
+  (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`), with
   Codex's multi-agent and web search tools off.
 - **Per-sandbox settings.** Codex reads one `managed_config.toml` and one
   `requirements.toml`, so each sandbox gets both again, read-only, with its
