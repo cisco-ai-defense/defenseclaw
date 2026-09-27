@@ -92,7 +92,7 @@ func sandboxFlag(p Principal) string {
 // commands it names are the `defenseclaw sandbox unblock` surface.
 func DefaultUnblockHint(p Principal, d Decision) string {
 	switch {
-	case d.Category == CategoryIPLiteral:
+	case d.Category == CategoryIPLiteral && d.Unblockable:
 		return fmt.Sprintf("Retry with the site's host name instead of its IP address. If the IP address itself is needed, tell "+
 			"the user DefenseClaw blocked it; they can allow it with `defenseclaw sandbox unblock %s%s`. "+
 			"Do not try to reach it another way.", d.Host, sandboxFlag(p))
@@ -113,9 +113,18 @@ func DefaultUnblockHint(p Principal, d Decision) string {
 	case d.Category == CategoryPortNotAllowed:
 		return "Only the configured web ports are relayed. The operator can add ports with openshell.egress.ports in the " +
 			"DefenseClaw configuration; prefer an HTTPS alternative (for example an HTTPS git remote instead of SSH)."
+	case d.Category == CategoryAdminBlock || d.Category == CategoryAdminAllowOnly:
+		return "This destination is blocked by your organization's DefenseClaw policy and cannot be unblocked. " +
+			"Tell the user; only their administrator can allow it. Do not try to reach it another way."
 	case d.Category == CategoryOperatorBlock:
-		return "The operator blocked this destination (openshell.egress.block or firewall rules); only a DefenseClaw " +
-			"configuration change can allow it."
+		return "This destination is on the sandbox's block list (the sandbox pack's egress.block or " +
+			"openshell.egress.block in the DefenseClaw configuration). `defenseclaw sandbox unblock` does not lift it; " +
+			"only removing the entry allows it. Do not try to reach it another way."
+	case d.Source == SourceFeed || d.Source == SourceDefault || d.Category == CategoryLargeUpload:
+		// Unblockable in principle, but the administrator turned unblocking
+		// off (openshell.admin.allow_unblock: false).
+		return "This destination is blocked by your organization's DefenseClaw policy: blocked destinations cannot be " +
+			"unblocked. Tell the user; only their administrator can allow it. Do not try to reach it another way."
 	case d.Category == CategoryRateLimited:
 		return "Wait for open connections to finish, then retry with fewer parallel connections."
 	case d.Category == CategoryInvalidDestination:

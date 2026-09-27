@@ -40,6 +40,12 @@ type Principal struct {
 	SandboxName string
 	// Mode is the sandbox's decision mode; empty uses the Decider default.
 	Mode Mode
+	// Decider is the sandbox's own decider, built from its resolved policy
+	// (packs.Effective.EgressDecider), so one sandbox's pack, clamps and
+	// unblocks never decide another's egress. Nil uses the proxy's default
+	// (Options.Decider, SetDecider). Re-registering the credential with a
+	// new decider applies it to later tunnels and requests.
+	Decider *Decider
 }
 
 // Authenticator maps a proxy credential to its principal. Implementations

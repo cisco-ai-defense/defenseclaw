@@ -69,7 +69,8 @@ var errLargeUpload = errors.New("egress: large upload to a first-seen destinatio
 type Options struct {
 	// Auth maps proxy credentials to principals, usually a CredentialStore.
 	Auth Authenticator
-	// Decider makes the allow/block decisions; SetDecider swaps it live.
+	// Decider makes the allow/block decisions for principals without a
+	// decider of their own (Principal.Decider); SetDecider swaps it live.
 	Decider *Decider
 	// Sink receives events; nil discards them.
 	Sink EventSink
@@ -287,14 +288,26 @@ func (p *Proxy) newGeneration(d *Decider) *generation {
 	return &generation{decider: d, transport: p.upstream.Clone()}
 }
 
-// Decider returns the current decider.
+// Decider returns the current default decider.
 func (p *Proxy) Decider() *Decider { return p.gen.Load().decider }
 
-// SetDecider swaps the decider used for new tunnels and requests, for
-// example after a configuration reload. Open tunnels and in-flight requests
-// keep their decision. Upstream connections pooled under the old decider are
-// closed and never reused, so its successor's dial-time checks (CIDR blocks
-// on the resolved address) apply to every later request.
+// deciderFor is the decider that decides pr's requests: its own, else the
+// default of gen.
+func deciderFor(pr Principal, gen *generation) *Decider {
+	if pr.Decider != nil {
+		return pr.Decider
+	}
+	return gen.decider
+}
+
+// SetDecider swaps the default decider used for new tunnels and requests of
+// principals without their own, for example after a configuration reload.
+// Open tunnels and in-flight requests keep their decision. Upstream
+// connections pooled under the old generation are closed and never reused,
+// so the dial-time checks (CIDR blocks on the resolved address) in force
+// now apply to every later request. A sandbox manager that gives every
+// principal its own decider calls it after re-registering them, to retire
+// the pooled connections too.
 func (p *Proxy) SetDecider(d *Decider) error {
 	if d == nil {
 		return errors.New("egress: nil decider")
@@ -549,9 +562,9 @@ func (p *Proxy) challenged(presented bool, method, target string, start time.Tim
 }
 
 // admit applies the per-binding limits and the large-upload block to an
-// allowed decision, and attributes r's client connection to the binding.
-// It returns a release func, or a refusal.
-func (p *Proxy) admit(r *http.Request, pr Principal, dec Decision) (func(), *Decision) {
+// allowed decision d made, and attributes r's client connection to the
+// binding. It returns a release func, or a refusal.
+func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (func(), *Decision) {
 	release, why := p.limits.acquire(pr.BindingID)
 	if release == nil {
 		refused := blocked(dec, CategoryRateLimited, SourceLimit, "")
@@ -566,28 +579,29 @@ func (p *Proxy) admit(r *http.Request, pr Principal, dec Decision) (func(), *Dec
 	}
 	if !exemptFromUploadBlock(dec) && p.counter.uploadBlocked(pr, dec.Host) {
 		release()
-		refused := p.largeUploadRefusal(dec, "")
+		refused := p.largeUploadRefusal(d, dec, "")
 		return nil, &refused
 	}
 	return release, nil
 }
 
-// largeUploadRefusal is dec refused by the large-upload block; scope names
-// the domain or address total that crossed, empty for the destination's
-// own.
-func (p *Proxy) largeUploadRefusal(dec Decision, scope string) Decision {
+// largeUploadRefusal is dec, made by d, refused by the large-upload block;
+// scope names the domain or address total that crossed, empty for the
+// destination's own. An unblock of the destination lifts the block.
+func (p *Proxy) largeUploadRefusal(d *Decider, dec Decision, scope string) Decision {
 	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-	refused.Reason, refused.Unblockable = p.largeUploadReason(), true
+	refused.Reason, refused.Unblockable = p.largeUploadReason(), d.UnblocksAllowed()
 	if scope != "" {
 		refused.Reason = p.largeUploadScopeReason(scope)
 	}
 	return refused
 }
 
-// exemptFromUploadBlock: destinations the user unblocked or the operator
-// allowed are trusted enough that a large upload only raises the signal.
+// exemptFromUploadBlock: destinations the user unblocked, or the operator
+// or administrator allowed, are trusted enough that a large upload only
+// raises the signal.
 func exemptFromUploadBlock(dec Decision) bool {
-	return dec.Source == SourceUnblock || dec.Source == SourceOperator
+	return dec.Source == SourceUnblock || dec.Source == SourceOperator || dec.Source == SourceAdmin
 }
 
 func (p *Proxy) largeUploadReason() string {
@@ -631,7 +645,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 			http.Header{"Proxy-Authenticate": {proxyAuthenticate}}, authRequiredResponse())
 		return
 	}
-	d := p.gen.Load().decider
+	d := deciderFor(pr, p.gen.Load())
 	var dec Decision
 	if host, port, err := splitAuthority(target); err != nil {
 		dec = d.Decide(pr, target, 0)
@@ -642,7 +656,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		p.refuseRaw(conn, pr, http.MethodConnect, dec, start)
 		return
 	}
-	release, refusal := p.admit(r, pr, dec)
+	release, refusal := p.admit(r, pr, d, dec)
 	if refusal != nil {
 		p.refuseRaw(conn, pr, http.MethodConnect, *refusal, start)
 		return
@@ -651,7 +665,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 
 	upstream, remote, err := p.dialer.dial(p.ctx, dec.Host, dec.Port, d.dialRules(pr, dec))
 	if err != nil {
-		p.dialFailedRaw(conn, pr, dec, err, start)
+		p.dialFailedRaw(conn, pr, d, dec, err, start)
 		return
 	}
 	flow, first := p.counter.open(pr, dec.Host, remote.Addr())
@@ -663,7 +677,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		// refuse it now, with a body and an event, instead of cutting it
 		// silently after the 200.
 		_ = upstream.Close()
-		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(dec, scope), start)
+		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(d, dec, scope), start)
 		return
 	}
 	t := &tunnel{
@@ -747,10 +761,13 @@ func (p *Proxy) recordRefusal(pr Principal, method string, dec Decision, status 
 	p.emit(e)
 }
 
-// dialRefusal turns a policy refusal found at dial time into a decision.
-func dialRefusal(dec Decision, de *dialError) Decision {
+// dialRefusal turns a policy refusal found at dial time for a destination
+// d decided as dec into a decision.
+func dialRefusal(d *Decider, dec Decision, de *dialError) Decision {
 	source := SourceGuard
 	switch {
+	case de.category == CategoryAdminBlock:
+		source = SourceAdmin
 	case de.category == CategoryOperatorBlock:
 		source = SourceOperator
 	case de.feed != nil:
@@ -762,18 +779,18 @@ func dialRefusal(dec Decision, de *dialError) Decision {
 		// As for a feed match in Decide: an unblock of the name lifts it.
 		refused.Reason += " " + m.Entry.Reason
 		refused.Feed, refused.FeedVersion, refused.Entry = m.Feed.Name, m.Feed.Version, m.Entry.Name
-		refused.Unblockable = true
+		refused.Unblockable = d.UnblocksAllowed()
 	}
 	return refused
 }
 
-func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, dec Decision, err error, start time.Time) {
+func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, d *Decider, dec Decision, err error, start time.Time) {
 	var de *dialError
 	if !errors.As(err, &de) {
 		de = &dialError{status: http.StatusBadGateway, reason: "connecting to the destination failed"}
 	}
 	if de.category != "" {
-		p.refuseRaw(conn, pr, http.MethodConnect, dialRefusal(dec, de), start)
+		p.refuseRaw(conn, pr, http.MethodConnect, dialRefusal(d, dec, de), start)
 		return
 	}
 	p.emitFailed(pr, http.MethodConnect, dec, de.status, de.reason, "", start)
@@ -896,6 +913,7 @@ func (p *Proxy) event(kind EventKind, pr Principal, method string, dec Decision)
 		Method: method, Host: dec.Host, Port: dec.Port, Mode: dec.Mode,
 		Category: dec.Category, Reason: dec.Reason, Rule: dec.Rule, Source: dec.Source,
 		Feed: dec.Feed, FeedVersion: dec.FeedVersion, Entry: dec.Entry,
+		Unblockable: kind == EventBlocked && dec.Unblockable,
 	}
 }
 

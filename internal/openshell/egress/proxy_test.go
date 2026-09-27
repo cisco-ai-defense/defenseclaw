@@ -367,6 +367,67 @@ func TestProxyBlockedConnect(t *testing.T) {
 	}
 }
 
+// TestProxyPerPrincipalDeciders pins that every principal is decided by its
+// own decider (its sandbox's policy): one sandbox's block list, ports and
+// mode never reach another's requests, a principal without one gets the
+// default, and re-registering a credential with a new decider applies it to
+// the next request.
+func TestProxyPerPrincipalDeciders(t *testing.T) {
+	h := newHarness(t, nil)
+	echo := startEcho(t)
+	h.dialer.route(443, echo)
+	h.dialer.route(8443, echo)
+	h.resolver.set("other.example", []string{publicV4})
+	build := func(opts DeciderOptions) *Decider {
+		d := mustDecider(t, opts)
+		d.local = h.local
+		return d
+	}
+	balanced := build(DeciderOptions{Mode: ModeAllowlist, Allowlists: []*Feed{}, Allow: []string{"example.com"}})
+	custom := build(DeciderOptions{Ports: []int{443, 8443}, Block: []string{"example.com"}})
+	a := h.addPrincipal(Principal{BindingID: "b-a", SandboxID: "sb-a", SandboxName: "sb-a", Decider: balanced})
+	bPrincipal := Principal{BindingID: "b-b", SandboxID: "sb-b", SandboxName: "sb-b", Decider: custom}
+	b := h.addPrincipal(bPrincipal)
+	check := func(who string, c Credential, target string, want int, category Category) {
+		t.Helper()
+		conn, _, resp := h.connect(target, basicAuth(c), nil)
+		_ = conn.Close()
+		if resp.status != want {
+			t.Fatalf("%s CONNECT %s = %d, want %d", who, target, resp.status, want)
+		}
+		if want == http.StatusForbidden {
+			if body := decodeBlock(t, resp.body); body.Category != category {
+				t.Fatalf("%s CONNECT %s refused as %s, want %s", who, target, body.Category, category)
+			}
+		}
+	}
+	check("a", a, "example.com:443", http.StatusOK, "")
+	check("a", a, "other.example:443", http.StatusForbidden, CategoryNotAllowlisted)
+	check("a", a, "other.example:8443", http.StatusForbidden, CategoryPortNotAllowed)
+	check("b", b, "example.com:443", http.StatusForbidden, CategoryOperatorBlock)
+	check("b", b, "other.example:8443", http.StatusOK, "")
+	check("default", h.cred, "example.com:443", http.StatusOK, "")
+	check("default", h.cred, "other.example:8443", http.StatusForbidden, CategoryPortNotAllowed)
+	// Absolute-form requests are decided by the principal's decider too.
+	conn, br := h.dialProxy()
+	fmt.Fprintf(conn, "GET http://example.com:8443/ HTTP/1.1\r\nHost: example.com:8443\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(b))
+	if resp := readRawResponse(t, br); resp.status != http.StatusForbidden || decodeBlock(t, resp.body).Category != CategoryOperatorBlock {
+		t.Fatalf("absolute-form request of b = %d %s", resp.status, resp.body)
+	}
+
+	bPrincipal.Decider = build(DeciderOptions{Ports: []int{443, 8443}, Block: []string{"other.example"}})
+	if err := h.creds.Register(b, bPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	check("b after re-registering", b, "other.example:8443", http.StatusForbidden, CategoryOperatorBlock)
+	check("b after re-registering", b, "example.com:443", http.StatusOK, "")
+	for _, e := range h.sink.ofKind(EventBlocked) {
+		if e.BindingID == "b-b" && e.Category == CategoryOperatorBlock && e.Unblockable {
+			t.Fatalf("an operator block was reported unblockable: %+v", e)
+		}
+	}
+}
+
 func TestProxyBlockedAbsoluteForm(t *testing.T) {
 	h := newHarness(t, nil)
 	resp, err := h.clientFor(h.cred, nil).Get("http://pastebin.com/raw/abc")

@@ -91,36 +91,44 @@ type dialRules struct {
 // dialRules returns the dial-time rules for p's destination that Decide
 // allowed as dec.
 func (d *Decider) dialRules(p Principal, dec Decision) dialRules {
-	r := dialRules{d: d, p: p, feeds: dec.Source != SourceUnblock && dec.Source != SourceOperator}
+	r := dialRules{d: d, p: p, feeds: !d.liftsFeeds(dec)}
 	if _, err := netip.ParseAddr(dec.Host); err != nil {
 		r.nameAllowed = d.opensPrivateName(dec.Host)
 	}
 	return r
 }
 
-// opensPrivateName reports an operator allow rule that opens every private
-// address the name resolves to: an exact entry for the name, or a "*."
-// wildcard covering an intranet name (.internal, .corp and similar), which
-// only the operator's own DNS answers. A wildcard under a public domain also
-// covers names the operator does not control, some of which resolve to
-// private addresses (a cloud provider's internal load balancer names, for
-// example), so it opens only public answers; a private answer needs an
-// allow entry for the exact name or for the address.
+// liftsFeeds reports a decision that lifts the blocklist feeds, as Decide
+// lets unblocks and the operator allow list do unless unblocking is off.
+func (d *Decider) liftsFeeds(dec Decision) bool {
+	return !d.noUnblock && (dec.Source == SourceUnblock || dec.Source == SourceOperator)
+}
+
+// opensPrivateName reports an operator allow rule (or allow-only entry)
+// that opens every private address the name resolves to: an exact entry for
+// the name, or a "*." wildcard covering an intranet name (.internal, .corp
+// and similar), which only the operator's own DNS answers. A wildcard under
+// a public domain also covers names the operator does not control, some of
+// which resolve to private addresses (a cloud provider's internal load
+// balancer names, for example), so it opens only public answers; a private
+// answer needs an allow entry for the exact name or for the address.
 func (d *Decider) opensPrivateName(host string) bool {
-	if _, ok := d.allow.exact[host]; ok {
-		return true
-	}
-	if _, ok := d.allow.match(host, netip.Addr{}); !ok {
-		return false
-	}
 	_, intranet := intranetNames.match(host, netip.Addr{})
-	return intranet
+	for _, set := range d.openingSets() {
+		if _, ok := set.exact[host]; ok {
+			return true
+		}
+		if _, ok := set.match(host, netip.Addr{}); ok && intranet {
+			return true
+		}
+	}
+	return false
 }
 
 // mayOpenPrivate reports whether any private address can be open, which
 // needs the netguard policy that admits private ranges.
 func (r dialRules) mayOpenPrivate() bool {
-	return r.nameAllowed || (r.d != nil && len(r.d.allow.prefixes) > 0)
+	return r.nameAllowed || (r.d != nil && (len(r.d.allow.prefixes) > 0 || len(r.d.allowOnly.prefixes) > 0))
 }
 
 // guard applies the address guard to one address: this machine and what
@@ -147,10 +155,11 @@ func (r dialRules) guard(addr netip.Addr, local *localAddrs) *dialError {
 }
 
 // check applies every address rule to the address about to be dialed, in
-// Decide's order for an IP literal: the guard, the operator's CIDR blocks,
-// then the blocklist feeds' IP and CIDR entries unless an unblock or an
-// operator allow rule covers the address. Feeds match names only against
-// name patterns, so without this a feed CIDR would never apply to a name.
+// Decide's order for an IP literal: the guard, the administrator's and the
+// operator's CIDR blocks, then the blocklist feeds' IP and CIDR entries
+// unless an unblock or an operator allow rule covers the address. Feeds
+// match names only against name patterns, so without this a feed CIDR would
+// never apply to a name.
 func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
 	if de := r.guard(addr, local); de != nil {
 		return de
@@ -159,6 +168,12 @@ func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
 		return nil
 	}
 	addr = addr.Unmap()
+	if item, ok := r.d.adminBlock.match("", addr); ok {
+		return &dialError{
+			category: CategoryAdminBlock, status: http.StatusForbidden, rule: item.pattern,
+			reason: "the destination resolves to an address your organization's DefenseClaw policy blocks",
+		}
+	}
 	if item, ok := r.d.block.match("", addr); ok {
 		return &dialError{
 			category: CategoryOperatorBlock, status: http.StatusForbidden, rule: item.pattern,
@@ -178,8 +193,12 @@ func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
 	}
 }
 
-// addrLifted reports an unblock or operator allow rule covering addr.
+// addrLifted reports an unblock or operator allow rule covering addr;
+// nothing lifts a feed entry while unblocking is off.
 func (r dialRules) addrLifted(addr netip.Addr) bool {
+	if r.d.noUnblock {
+		return false
+	}
 	if _, ok := r.d.allow.match("", addr); ok {
 		return true
 	}
@@ -188,6 +207,67 @@ func (r dialRules) addrLifted(addr netip.Addr) bool {
 	}
 	_, ok := r.d.unblocks.Unblocked(r.p, addr.String())
 	return ok
+}
+
+// ErrNoAddresses reports a destination name that resolved to no address.
+var ErrNoAddresses = errors.New("egress: the destination name resolved to no address")
+
+// LookupHost resolves a destination the way the proxy's dial does: a name
+// fully qualified, never through the host's DNS search domains; an IP
+// literal is its own single address. The answers are not checked;
+// CheckAddrs applies the dial-time rules to them. A nil Resolver uses
+// net.DefaultResolver.
+func LookupHost(ctx context.Context, r Resolver, host string) ([]netip.Addr, error) {
+	h, literal, err := normalizeHost(host)
+	if err != nil {
+		return nil, err
+	}
+	if literal.IsValid() {
+		return []netip.Addr{literal}, nil
+	}
+	if r == nil {
+		r = net.DefaultResolver
+	}
+	ips, err := r.LookupIPAddr(ctx, rootedName(h))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		if addr, ok := netip.AddrFromSlice(ip.IP); ok {
+			out = append(out, addr.Unmap().WithZone(ip.Zone))
+		}
+	}
+	if len(out) == 0 {
+		return nil, ErrNoAddresses
+	}
+	return out, nil
+}
+
+// CheckAddrs applies the dial-time address rules of a destination that
+// Decide or DecideHost allowed for p as dec to the addresses it resolves
+// to, as the proxy checks every DNS answer before it connects: this machine
+// and what only it reaches are refused (CategoryHostInternal), private
+// networks unless an allow rule opens them for this name or address
+// (CategoryPrivateNetwork), then the administrator's and the operator's
+// CIDR blocks and, unless the decision lifts the feeds, the blocklist
+// feeds' IP entries. It returns dec when dec is a refusal or every address
+// passes, else dec refused for the first address that does not.
+//
+// Callers that open a path the proxy does not guard, such as a direct
+// OpenShell rule for an approved name, use it to hold the name to the same
+// rules at the time they decide.
+func (d *Decider) CheckAddrs(p Principal, dec Decision, addrs []netip.Addr) Decision {
+	if !dec.Allowed {
+		return dec
+	}
+	rules := d.dialRules(p, dec)
+	for _, addr := range addrs {
+		if de := rules.check(addr, d.local); de != nil {
+			return dialRefusal(d, dec, de)
+		}
+	}
+	return dec
 }
 
 // dialerFunc adapts a function to Dialer.

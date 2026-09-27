@@ -443,7 +443,7 @@ func TestGuardDialFeedCIDRs(t *testing.T) {
 	if !errors.As(err, &de) || de.category != CategoryFileDrop || de.rule != "8.8.4.0/24" || de.feed == nil || de.status != http.StatusForbidden {
 		t.Fatalf("dial into a feed CIDR = %v (%+v)", err, de)
 	}
-	refused := dialRefusal(Decision{Host: "cdn.example", Port: 443, Mode: ModeOpen}, de)
+	refused := dialRefusal(dec, Decision{Host: "cdn.example", Port: 443, Mode: ModeOpen}, de)
 	if refused.Source != SourceFeed || refused.Feed != "team" || refused.FeedVersion != "7" || refused.Entry != "Drop net" ||
 		!refused.Unblockable || !strings.Contains(refused.Reason, "blocklist") {
 		t.Errorf("refusal = %+v", refused)

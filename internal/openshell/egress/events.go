@@ -78,6 +78,9 @@ type Event struct {
 	Feed        string
 	FeedVersion string
 	Entry       string
+	// Unblockable reports a blocked event an unblock decision could lift
+	// (Decision.Unblockable).
+	Unblockable bool
 	// Status is the HTTP status the proxy returned to the sandbox (200 for
 	// an established tunnel, the upstream status for forwarded requests).
 	Status int

@@ -74,6 +74,10 @@ const (
 	// SourceGuard is destination validation, the SSRF policy and the port
 	// list. Guard blocks are never unblockable.
 	SourceGuard Source = "guard"
+	// SourceAdmin is the administrator's block and allow-only lists
+	// (openshell.admin.egress_block and egress_allow_only). Nothing lifts
+	// their blocks.
+	SourceAdmin Source = "admin"
 	// SourceOperator is the operator block and allow lists.
 	SourceOperator Source = "operator"
 	// SourceUnblock is a per-sandbox or persistent unblock decision.
@@ -114,8 +118,9 @@ type Decision struct {
 // Unblock lifts a block for one sandbox, or for every sandbox when
 // SandboxID is empty (a persistent "always" decision). Unblocks override the
 // blocklist feed, the mode defaults (allowlist mode, open-mode IP literals)
-// and the large-upload block, but never guard or operator blocks: private
-// networks open only through an operator allow rule.
+// and the large-upload block, but never guard, administrator or operator
+// blocks: private networks open only through an operator allow rule, and a
+// destination on a block list opens only by removing the entry.
 type Unblock struct {
 	// Pattern is an exact host, a "*." wildcard, an IP literal or a CIDR.
 	Pattern   string
@@ -147,15 +152,29 @@ type DeciderOptions struct {
 	// covers the name or the address.
 	Blocklists []*Feed
 	Allowlists []*Feed
-	// Block and Allow are operator patterns (openshell.egress.block/allow,
-	// firewall deny rules): exact hosts, "*." wildcards, IP literals or
-	// CIDRs. Block wins over everything except the guard; Allow overrides
-	// the blocklist feed and the mode defaults (allowlist mode, open-mode IP
+	// AdminBlock and AllowOnly are the administrator's patterns
+	// (openshell.admin.egress_block and egress_allow_only), in the same
+	// forms as Block. AdminBlock is refused before everything but the guard
+	// (CategoryAdminBlock). A non-empty AllowOnly refuses every destination
+	// outside it next (CategoryAdminAllowOnly); nothing lifts either
+	// refusal. A destination inside AllowOnly is still subject to the other
+	// layers, and when none of them decides it is allowed, in either mode.
+	// AllowOnly entries open private networks as Allow entries do, but do
+	// not exempt a destination from the blocklist feed. CIDR entries of
+	// AdminBlock are also enforced against the resolved address at dial
+	// time.
+	AdminBlock []string
+	AllowOnly  []string
+	// Block and Allow are operator patterns (the sandbox pack's and the
+	// user's openshell.egress.block/allow, firewall deny rules): exact hosts,
+	// "*." wildcards, IP literals or CIDRs. Block wins over everything
+	// except the guard and the administrator's lists; Allow overrides the
+	// blocklist feed and the mode defaults (allowlist mode, open-mode IP
 	// literals). CIDR blocks are also enforced against the resolved address
 	// at dial time.
 	//
-	// Allow is also the only way to open a private network destination
-	// (CategoryPrivateNetwork). An exact name opens every private address
+	// Allow (with AllowOnly) is also the only way to open a private network
+	// destination (CategoryPrivateNetwork). An exact name opens every private address
 	// it resolves to. A "*." wildcard opens the intranet names it covers
 	// (.internal, .corp and similar) and their private addresses, but not
 	// the private answers of names under a public domain: those are often
@@ -173,6 +192,10 @@ type DeciderOptions struct {
 	// operators at names and IP addresses only.
 	Block []string
 	Allow []string
+	// NoUnblock is openshell.admin.allow_unblock: false. Unblock decisions
+	// are ignored, no refusal is reported as unblockable, and the blocklist
+	// feed applies before Allow, so nothing lifts a feed entry.
+	NoUnblock bool
 	// Unblocks supplies unblock decisions; nil means none.
 	Unblocks Unblocks
 }
@@ -185,8 +208,11 @@ type Decider struct {
 	portSet    map[int]bool
 	blocklists []*Feed
 	allowlists []*Feed
+	adminBlock *hostSet[struct{}]
+	allowOnly  *hostSet[struct{}]
 	block      *hostSet[struct{}]
 	allow      *hostSet[struct{}]
+	noUnblock  bool
 	unblocks   Unblocks
 	// local is this machine's own addresses, refused as IP literals.
 	local *localAddrs
@@ -197,7 +223,7 @@ func DefaultPorts() []int { return []int{80, 443} }
 
 // NewDecider validates opts and builds a Decider.
 func NewDecider(opts DeciderOptions) (*Decider, error) {
-	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks, local: hostAddrs}
+	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks, noUnblock: opts.NoUnblock, local: hostAddrs}
 	if opts.Mode != "" {
 		mode, err := ParseMode(string(opts.Mode))
 		if err != nil {
@@ -222,6 +248,12 @@ func NewDecider(opts DeciderOptions) (*Decider, error) {
 		return nil, err
 	}
 
+	if d.adminBlock, err = operatorSet("admin block", opts.AdminBlock); err != nil {
+		return nil, err
+	}
+	if d.allowOnly, err = operatorSet("admin allow-only", opts.AllowOnly); err != nil {
+		return nil, err
+	}
 	if d.block, err = operatorSet("block", opts.Block); err != nil {
 		return nil, err
 	}
@@ -296,6 +328,10 @@ func (d *Decider) Mode() Mode { return d.mode }
 // Ports returns the destination port allowlist.
 func (d *Decider) Ports() []int { return slices.Clone(d.ports) }
 
+// UnblocksAllowed reports whether unblock decisions can lift refusals
+// (DeciderOptions.NoUnblock unset).
+func (d *Decider) UnblocksAllowed() bool { return !d.noUnblock }
+
 // FeedInfo identifies a feed a Decider applies.
 type FeedInfo struct {
 	Kind    string
@@ -315,17 +351,41 @@ func (d *Decider) Feeds() []FeedInfo {
 }
 
 // Decide returns the verdict for p reaching host:port. host may be a DNS
-// name or an IP literal (bracketed or not). Layers apply in order: guard
-// (validation, SSRF policy with private networks the operator allowed
-// opened, ports), operator block, unblock decisions, operator allow,
-// blocklist feed, then the mode default (open allows names and blocks IP
-// literals, allowlist allows only allowlist feed matches).
+// name or an IP literal (bracketed or not). Layers apply in order, and the
+// first that decides wins:
+//
+//  1. guard: validation and the SSRF policy (this machine never; private
+//     networks only where an Allow or AllowOnly entry opens them), then the
+//     port list;
+//  2. the administrator's block list, then, when set, its allow-only list;
+//  3. the operator block list (the pack's and the user's);
+//  4. unblock decisions, unless NoUnblock;
+//  5. the operator allow list (after the feed when NoUnblock);
+//  6. the blocklist feed;
+//  7. an allow-only entry allows;
+//  8. the mode default: open allows names and blocks IP literals, allowlist
+//     allows only allowlist feed matches.
+//
+// Only refusals from steps 6 and 8 are unblockable, and none when
+// NoUnblock is set.
 //
 // Decide never resolves DNS: the SSRF policy for names is enforced against
-// every resolved address at dial time. IP literals are also refused when they
-// are one of this machine's own interface addresses or another host on one
-// of its public subnets.
+// every resolved address at dial time (CheckAddrs). IP literals are also
+// refused when they are one of this machine's own interface addresses or
+// another host on one of its public subnets.
 func (d *Decider) Decide(p Principal, host string, port int) Decision {
+	return d.decide(p, host, port, true)
+}
+
+// DecideHost is Decide without the port list: the verdict for p reaching
+// host on a port the list carries. Policy checks that judge a host apart
+// from one connection (unblocks, approvals whose ports are checked on their
+// own) use it; Decision.Port is 0.
+func (d *Decider) DecideHost(p Principal, host string) Decision {
+	return d.decide(p, host, 0, false)
+}
+
+func (d *Decider) decide(p Principal, host string, port int, checkPort bool) Decision {
 	mode := d.mode
 	if p.Mode.valid() {
 		mode = p.Mode
@@ -335,7 +395,7 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 		return blocked(Decision{Host: sanitizeHost(host), Port: port, Mode: mode}, CategoryInvalidDestination, SourceGuard, "")
 	}
 	dec := Decision{Host: h, Port: port, Mode: mode}
-	if port < 1 || port > 65535 {
+	if checkPort && (port < 1 || port > 65535) {
 		return blocked(dec, CategoryInvalidDestination, SourceGuard, "")
 	}
 	g := classifyName(h)
@@ -360,34 +420,51 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 			return dec
 		}
 	}
-	if !d.portSet[port] {
+	if checkPort && !d.portSet[port] {
 		dec = blocked(dec, CategoryPortNotAllowed, SourceGuard, "")
 		dec.Reason = fmt.Sprintf("%s Allowed ports: %s.", CategoryPortNotAllowed.Reason(), joinPorts(d.ports))
 		return dec
 	}
+	if item, ok := d.adminBlock.match(h, addr); ok {
+		return blocked(dec, CategoryAdminBlock, SourceAdmin, item.pattern)
+	}
+	if d.allowOnly.len() > 0 {
+		if _, ok := d.allowOnly.match(h, addr); !ok {
+			return blocked(dec, CategoryAdminAllowOnly, SourceAdmin, "")
+		}
+	}
 	if item, ok := d.block.match(h, addr); ok {
 		return blocked(dec, CategoryOperatorBlock, SourceOperator, item.pattern)
 	}
-	if d.unblocks != nil {
+	if d.unblocks != nil && !d.noUnblock {
 		if u, ok := d.unblocks.Unblocked(p, h); ok {
 			dec.Allowed, dec.Source, dec.Rule = true, SourceUnblock, u.Pattern
 			return dec
 		}
 	}
-	if item, ok := d.allow.match(h, addr); ok {
-		dec.Allowed, dec.Source, dec.Rule = true, SourceOperator, item.pattern
+	allowItem, allowed := d.allow.match(h, addr)
+	if allowed && !d.noUnblock {
+		dec.Allowed, dec.Source, dec.Rule = true, SourceOperator, allowItem.pattern
 		return dec
 	}
 	if m, ok := matchFeeds(d.blocklists, h, addr); ok {
 		dec = blocked(dec, m.Entry.Category, SourceFeed, m.Pattern)
-		dec.Reason, dec.Unblockable = m.Entry.Reason, true
+		dec.Reason, dec.Unblockable = m.Entry.Reason, !d.noUnblock
 		dec.Feed, dec.FeedVersion, dec.Entry = m.Feed.Name, m.Feed.Version, m.Entry.Name
+		return dec
+	}
+	if allowed {
+		dec.Allowed, dec.Source, dec.Rule = true, SourceOperator, allowItem.pattern
+		return dec
+	}
+	if item, ok := d.allowOnly.match(h, addr); ok {
+		dec.Allowed, dec.Source, dec.Rule = true, SourceAdmin, item.pattern
 		return dec
 	}
 	if mode == ModeOpen {
 		if addr.IsValid() {
 			dec = blocked(dec, CategoryIPLiteral, SourceDefault, "")
-			dec.Unblockable = true
+			dec.Unblockable = !d.noUnblock
 			return dec
 		}
 		dec.Allowed, dec.Source = true, SourceDefault
@@ -399,7 +476,7 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 		return dec
 	}
 	dec = blocked(dec, CategoryNotAllowlisted, SourceDefault, "")
-	dec.Unblockable = true
+	dec.Unblockable = !d.noUnblock
 	return dec
 }
 

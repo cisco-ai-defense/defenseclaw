@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -423,6 +424,183 @@ func TestDecideOperatorLists(t *testing.T) {
 func withRule(w decisionWant, rule string) decisionWant {
 	w.rule = rule
 	return w
+}
+
+// TestDecideAdminLists pins where the administrator's lists sit: after the
+// guard and the ports, before the block list and every unblock, and never
+// unblockable.
+func TestDecideAdminLists(t *testing.T) {
+	unblocks, err := NewMemoryUnblocks(
+		Unblock{Pattern: "a.ngrok.io"}, Unblock{Pattern: "pypi.org"}, Unblock{Pattern: "x.pastebin.com"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mustDecider(t, DeciderOptions{
+		AdminBlock: []string{"*.ngrok.io", "8.8.4.0/24"},
+		AllowOnly:  []string{"*.ngrok.io", "*.pastebin.com", "git.corp", "8.8.8.8", "wiki.corp.example"},
+		Block:      []string{"wiki.corp.example"},
+		Allow:      []string{"a.ngrok.io"},
+		Unblocks:   unblocks,
+	})
+	admin := decisionWant{category: CategoryAdminBlock, source: SourceAdmin}
+	outside := decisionWant{category: CategoryAdminAllowOnly, source: SourceAdmin}
+	checkDecision(t, d, testPrincipal, "a.ngrok.io", 443, withRule(admin, "*.ngrok.io"))
+	checkDecision(t, d, testPrincipal, publicV4Alt, 443, withRule(admin, "8.8.4.0/24"))
+	checkDecision(t, d, testPrincipal, "pypi.org", 443, outside)
+	checkDecision(t, d, testPrincipal, "example.com", 443, outside)
+	// Inside the allow-only list the block list, the feed and the guard
+	// still apply; unblocks lift only the feed.
+	checkDecision(t, d, testPrincipal, "wiki.corp.example", 443, decisionWant{category: CategoryOperatorBlock, source: SourceOperator})
+	checkDecision(t, d, testPrincipal, "x.pastebin.com", 443, decisionWant{allowed: true, source: SourceUnblock})
+	checkDecision(t, d, testPrincipal, "y.pastebin.com", 443, decisionWant{category: CategoryPasteSite, source: SourceFeed, unblockable: true})
+	checkDecision(t, d, testPrincipal, "localhost", 443, decisionWant{category: CategoryHostInternal, source: SourceGuard})
+	checkDecision(t, d, testPrincipal, "git.corp", 22, decisionWant{category: CategoryPortNotAllowed, source: SourceGuard})
+	// An allow-only entry allows, opens the intranet name it names, and
+	// admits an IP literal in either mode.
+	checkDecision(t, d, testPrincipal, "git.corp", 443, decisionWant{allowed: true, source: SourceAdmin, rule: "git.corp"})
+	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{allowed: true, source: SourceAdmin, rule: "8.8.8.8"})
+	a := mustDecider(t, DeciderOptions{Mode: ModeAllowlist, AllowOnly: []string{"*.example.org"}, Allowlists: []*Feed{}})
+	checkDecision(t, a, testPrincipal, "docs.example.org", 443, decisionWant{allowed: true, source: SourceAdmin, rule: "*.example.org"})
+	checkDecision(t, a, testPrincipal, "registry.npmjs.org", 443, outside)
+	if got := d.Decide(testPrincipal, "a.ngrok.io", 443); !strings.Contains(got.Reason, "your organization's DefenseClaw policy") {
+		t.Errorf("admin block reason = %q", got.Reason)
+	}
+	if hint := DefaultUnblockHint(testPrincipal, d.Decide(testPrincipal, "pypi.org", 443)); !strings.Contains(hint, "organization") ||
+		strings.Contains(hint, "sandbox unblock") {
+		t.Errorf("admin hint = %q", hint)
+	}
+}
+
+// TestDecideNoUnblock pins openshell.admin.allow_unblock: false: unblocks
+// are ignored, nothing is reported unblockable, and the feed wins over the
+// allow list.
+func TestDecideNoUnblock(t *testing.T) {
+	unblocks, err := NewMemoryUnblocks(Unblock{Pattern: "webhook.site"}, Unblock{Pattern: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mustDecider(t, DeciderOptions{NoUnblock: true, Unblocks: unblocks, Allow: []string{"x.pastebin.com", "docs.example.org"}})
+	if d.UnblocksAllowed() {
+		t.Fatal("UnblocksAllowed with NoUnblock")
+	}
+	checkDecision(t, d, testPrincipal, "webhook.site", 443, decisionWant{category: CategoryWebhookCatcher, source: SourceFeed})
+	checkDecision(t, d, testPrincipal, "x.pastebin.com", 443, decisionWant{category: CategoryPasteSite, source: SourceFeed})
+	checkDecision(t, d, testPrincipal, "docs.example.org", 443, decisionWant{allowed: true, source: SourceOperator})
+	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{category: CategoryIPLiteral, source: SourceDefault})
+	a := mustDecider(t, DeciderOptions{Mode: ModeAllowlist, NoUnblock: true, Unblocks: unblocks})
+	checkDecision(t, a, testPrincipal, "example.com", 443, decisionWant{category: CategoryNotAllowlisted, source: SourceDefault})
+	hint := DefaultUnblockHint(testPrincipal, d.Decide(testPrincipal, "webhook.site", 443))
+	if strings.Contains(hint, "sandbox unblock") || !strings.Contains(hint, "organization") {
+		t.Errorf("hint without unblocking = %q", hint)
+	}
+	if hint := DefaultUnblockHint(testPrincipal, d.Decide(testPrincipal, publicV4, 443)); strings.Contains(hint, "sandbox unblock") {
+		t.Errorf("IP-literal hint without unblocking = %q", hint)
+	}
+	// Dial time: an allow entry no longer lifts a feed CIDR either.
+	withCIDR := mustDecider(t, DeciderOptions{NoUnblock: true, Blocklists: []*Feed{testFeedCIDR(t)}, Allow: []string{"cdn.example", publicV4Alt}})
+	dec := withCIDR.Decide(testPrincipal, "cdn.example", 443)
+	if !dec.Allowed {
+		t.Fatalf("cdn.example = %+v", dec)
+	}
+	if got := withCIDR.CheckAddrs(testPrincipal, dec, []netip.Addr{netip.MustParseAddr(publicV4Alt)}); got.Allowed || got.Unblockable {
+		t.Fatalf("feed CIDR at dial time without unblocking = %+v", got)
+	}
+}
+
+func TestDecideHostSkipsPorts(t *testing.T) {
+	d := mustDecider(t, DeciderOptions{Ports: []int{443}})
+	if got := d.DecideHost(testPrincipal, "example.com"); !got.Allowed || got.Port != 0 {
+		t.Fatalf("DecideHost = %+v", got)
+	}
+	if got := d.Decide(testPrincipal, "example.com", 80); got.Allowed || got.Category != CategoryPortNotAllowed {
+		t.Fatalf("Decide port 80 = %+v", got)
+	}
+	for host, want := range map[string]Category{
+		"webhook.site": CategoryWebhookCatcher, "localhost": CategoryHostInternal, "10.0.0.1": CategoryPrivateNetwork,
+		"intranet": CategoryInvalidDestination, publicV4: CategoryIPLiteral,
+	} {
+		if got := d.DecideHost(testPrincipal, host); got.Allowed || got.Category != want {
+			t.Errorf("DecideHost(%s) = %+v, want %s", host, got, want)
+		}
+	}
+}
+
+// TestCheckAddrs pins the dial-time rules callers apply to what a name
+// resolves to before they open a path the proxy does not guard.
+func TestCheckAddrs(t *testing.T) {
+	d := mustDecider(t, DeciderOptions{
+		Blocklists: []*Feed{testFeedCIDR(t)},
+		AdminBlock: []string{"8.8.8.0/29"},
+		Block:      []string{"1.1.1.0/24"},
+		Allow:      []string{"db.partner.example"},
+	})
+	addrs := func(list ...string) []netip.Addr {
+		var out []netip.Addr
+		for _, a := range list {
+			out = append(out, netip.MustParseAddr(a))
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		host   string
+		addrs  []netip.Addr
+		want   Category
+		source Source
+	}{
+		{"ok.example", addrs("9.9.9.9", "2620:fe::fe"), "", ""},
+		{"loop.example", addrs("9.9.9.9", "127.0.0.1"), CategoryHostInternal, SourceGuard},
+		{"meta.example", addrs("169.254.169.254"), CategoryHostInternal, SourceGuard},
+		{"zoned.example", []netip.Addr{netip.MustParseAddr("fe80::1").WithZone("eth0")}, CategoryHostInternal, SourceGuard},
+		{"lan.example", addrs("10.0.0.5"), CategoryPrivateNetwork, SourceGuard},
+		{"db.partner.example", addrs("10.0.0.6"), "", ""},
+		{"admin.example", addrs("8.8.8.3"), CategoryAdminBlock, SourceAdmin},
+		{"op.example", addrs("1.1.1.1"), CategoryOperatorBlock, SourceOperator},
+		{"drop.example", addrs(publicV4Alt), CategoryFileDrop, SourceFeed},
+	} {
+		dec := d.Decide(testPrincipal, tc.host, 443)
+		if !dec.Allowed {
+			t.Fatalf("Decide(%s) = %+v", tc.host, dec)
+		}
+		got := d.CheckAddrs(testPrincipal, dec, tc.addrs)
+		switch {
+		case tc.want == "" && !got.Allowed:
+			t.Errorf("CheckAddrs(%s) = %+v, want allowed", tc.host, got)
+		case tc.want != "" && (got.Allowed || got.Category != tc.want || got.Source != tc.source || got.Reason == ""):
+			t.Errorf("CheckAddrs(%s) = %+v, want %s from %s", tc.host, got, tc.want, tc.source)
+		}
+	}
+	// A refusal is returned as is.
+	refused := d.Decide(testPrincipal, "webhook.site", 443)
+	if got := d.CheckAddrs(testPrincipal, refused, addrs("9.9.9.9")); got != refused {
+		t.Fatalf("CheckAddrs of a refusal = %+v", got)
+	}
+}
+
+func TestLookupHost(t *testing.T) {
+	r := newFakeResolver()
+	r.set("cdn.example", []string{"9.9.9.9", "::ffff:8.8.8.8", "2620:fe::fe"})
+	r.fail("gone.example", errors.New("no such host"))
+	got, err := LookupHost(context.Background(), r, "CDN.Example.")
+	if err != nil || len(got) != 3 || got[1] != netip.MustParseAddr("8.8.8.8") {
+		t.Fatalf("LookupHost = %v, %v", got, err)
+	}
+	if names := r.names(); len(names) != 1 || names[0] != "cdn.example." {
+		t.Fatalf("looked up %v, want the fully qualified name", names)
+	}
+	if got, err := LookupHost(context.Background(), r, "[2001:4860:4860::8888]"); err != nil || len(got) != 1 || got[0] != netip.MustParseAddr(publicV6) {
+		t.Fatalf("LookupHost of a literal = %v, %v", got, err)
+	}
+	if _, err := LookupHost(context.Background(), r, "gone.example"); err == nil {
+		t.Fatal("a failed lookup succeeded")
+	}
+	if _, err := LookupHost(context.Background(), r, "bad host"); err == nil {
+		t.Fatal("an invalid host was looked up")
+	}
+	r.set("empty.example", nil)
+	if _, err := LookupHost(context.Background(), r, "empty.example"); !errors.Is(err, ErrNoAddresses) {
+		t.Fatalf("empty answer = %v", err)
+	}
 }
 
 func TestDecideUnblocks(t *testing.T) {

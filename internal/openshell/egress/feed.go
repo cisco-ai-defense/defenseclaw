@@ -68,11 +68,17 @@ const (
 	CategoryPrivateNetwork     Category = "private_network"
 	CategoryPortNotAllowed     Category = "port_not_allowed"
 	CategoryInvalidDestination Category = "invalid_destination"
-	CategoryOperatorBlock      Category = "operator_block"
-	CategoryNotAllowlisted     Category = "not_allowlisted"
-	CategoryRateLimited        Category = "rate_limited"
-	CategoryLargeUpload        Category = "large_upload"
-	CategoryIPLiteral          Category = "ip_literal"
+	// CategoryAdminBlock is openshell.admin.egress_block and
+	// CategoryAdminAllowOnly a destination outside a non-empty
+	// openshell.admin.egress_allow_only: the organization's policy, which
+	// nothing but the administrator lifts.
+	CategoryAdminBlock     Category = "admin_block"
+	CategoryAdminAllowOnly Category = "admin_allow_only"
+	CategoryOperatorBlock  Category = "operator_block"
+	CategoryNotAllowlisted Category = "not_allowlisted"
+	CategoryRateLimited    Category = "rate_limited"
+	CategoryLargeUpload    Category = "large_upload"
+	CategoryIPLiteral      Category = "ip_literal"
 )
 
 var categoryReasons = map[Category]string{
@@ -91,6 +97,8 @@ var categoryReasons = map[Category]string{
 	CategoryPrivateNetwork:     "Sandboxes reach private networks (RFC 1918, carrier-grade NAT and unique local addresses, this machine's own subnets, intranet names) only where the operator allowed them.",
 	CategoryPortNotAllowed:     "The egress proxy only relays the configured web ports.",
 	CategoryInvalidDestination: "The request target is not a valid host and port.",
+	CategoryAdminBlock:         "This destination is blocked by your organization's DefenseClaw policy.",
+	CategoryAdminAllowOnly:     "This destination is blocked by your organization's DefenseClaw policy, which allows only the destinations it lists.",
 	CategoryOperatorBlock:      "The operator blocked this destination in DefenseClaw configuration.",
 	CategoryNotAllowlisted:     "This sandbox's network profile only allows destinations on its allowlist.",
 	CategoryRateLimited:        "This sandbox has too many connections open or is opening them too fast.",

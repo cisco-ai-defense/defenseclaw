@@ -41,9 +41,10 @@ import (
 // ReverseProxy and Transport callbacks.
 type forwardState struct {
 	p *Proxy
-	// gen is the decider that decided the request and the transport it is
-	// sent on.
+	// gen is the generation whose transport the request is sent on, and
+	// decider the decider that decided it (the principal's own or gen's).
 	gen      *generation
+	decider  *Decider
 	tunnel   *tunnel
 	scheme   string
 	explicit bool // the request URL carried a port
@@ -101,7 +102,7 @@ func (st *forwardState) admitConn(addr netip.AddrPort) *dialError {
 		return &dialError{status: http.StatusBadGateway, reason: "connecting to the destination failed"}
 	}
 	t := st.tunnel
-	return st.gen.decider.dialRules(t.principal, t.dec).check(addr.Addr(), st.p.dialer.local)
+	return st.decider.dialRules(t.principal, t.dec).check(addr.Addr(), st.p.dialer.local)
 }
 
 func defaultPort(scheme string) int {
@@ -136,7 +137,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	gen := p.gen.Load()
-	d := gen.decider
+	d := deciderFor(pr, gen)
 	scheme := strings.ToLower(r.URL.Scheme)
 	port, explicit := defaultPort(scheme), r.URL.Port() != ""
 	if explicit {
@@ -157,7 +158,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		p.refuseForward(w, pr, r.Method, dec, start)
 		return
 	}
-	release, refusal := p.admit(r, pr, dec)
+	release, refusal := p.admit(r, pr, d, dec)
 	if refusal != nil {
 		p.refuseForward(w, pr, r.Method, *refusal, start)
 		return
@@ -180,7 +181,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.untrack(t)
 
-	st := &forwardState{p: p, gen: gen, tunnel: t, scheme: scheme, explicit: explicit}
+	st := &forwardState{p: p, gen: gen, decider: d, tunnel: t, scheme: scheme, explicit: explicit}
 	// A request that began before SetDecider hands its upstream connection
 	// back to the retired generation's pool once it is done; close it there.
 	defer func() {
@@ -300,7 +301,7 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 	if !ok || host != dec.Host || port != dec.Port {
 		return nil, fmt.Errorf("egress: upstream dial to %s does not match the decided destination", sanitizeHost(addr))
 	}
-	conn, remote, err := p.dialer.dial(ctx, host, port, st.gen.decider.dialRules(st.tunnel.principal, dec))
+	conn, remote, err := p.dialer.dial(ctx, host, port, st.decider.dialRules(st.tunnel.principal, dec))
 	if err != nil {
 		var de *dialError
 		if errors.As(err, &de) {
@@ -424,7 +425,7 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	t := st.tunnel
 	dec := t.dec
 	if t.cut.Load() {
-		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(dec, ""), t.started)
+		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(st.decider, dec, ""), t.started)
 		return
 	}
 	var de *dialError
@@ -432,7 +433,7 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 		de = st.lastDialErr()
 	}
 	if de != nil && de.category != "" {
-		p.refuseForward(w, t.principal, t.method, dialRefusal(dec, de), t.started)
+		p.refuseForward(w, t.principal, t.method, dialRefusal(st.decider, dec, de), t.started)
 		return
 	}
 	status, reason := http.StatusBadGateway, "the upstream request failed"

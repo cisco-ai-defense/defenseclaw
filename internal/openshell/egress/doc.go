@@ -48,8 +48,15 @@
 // abuse feed, and reaches IP-literal destinations only after an unblock (a
 // literal would sidestep the name-based feed); allowlist mode (the
 // "balanced" profile) allows only the curated allowlist.
-// Operator block and allow lists and per-sandbox or persistent unblock
-// decisions layer on top.
+// The administrator's block and allow-only lists, the operator block and
+// allow lists and per-sandbox or persistent unblock decisions layer on top
+// (Decider.Decide lists the order). Every sandbox's credential carries its
+// own Decider (Principal.Decider), built from the sandbox's resolved policy
+// by packs.Effective.EgressDecider, so the proxy never merges one
+// sandbox's policy into another's. Checks that open a path the proxy does
+// not guard, such as approving a direct OpenShell rule for a name, apply
+// the same dial-time address rules through LookupHost and
+// Decider.CheckAddrs.
 //
 // Hostnames are resolved on the proxy side as fully qualified names, never
 // through the host's DNS search domains. Every DNS answer is checked by
