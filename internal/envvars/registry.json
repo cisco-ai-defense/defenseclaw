@@ -3671,6 +3671,33 @@
       "security_note": "Never log or persist the value. Sandbox hooks must read it from the environment at request time; a placeholder baked into static config does not resolve."
     },
     {
+      "name": "DEFENSECLAW_NO_SANDBOX",
+      "category": "security_opt_out",
+      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`). The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/openshell/wrapper/wrapper.go",
+          "description": "Shell wrapper block bypass"
+        },
+        {
+          "location": "internal/openshell/sandboxcli/wrappers.go",
+          "description": "sandbox enable/disable wrapper management"
+        },
+        {
+          "location": "internal/openshell/sandboxcli/doctor.go",
+          "description": "Doctor reports an active bypass"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_UPDATE_GOLDEN",
       "category": "test_fixture",
       "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files instead of comparing against them.",
@@ -3735,6 +3762,47 @@
         {
           "location": "internal/openshell/image/integration_test.go",
           "description": "Live overlay build test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_BEDROCK",
+      "category": "test_fixture",
+      "purpose": "Set to 1 to add real-model runs on Amazon Bedrock to the OpenShell sandbox E2E script (needs AWS_BEARER_TOKEN_BEDROCK).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/test-e2e-openshell.sh",
+          "description": "OpenShell sandbox E2E script"
+        },
+        {
+          "location": ".github/workflows/openshell-integration.yml",
+          "description": "Opt-in OpenShell integration job"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_TIMEOUT",
+      "category": "test_fixture",
+      "purpose": "go test timeout for the OpenShell sandbox E2E script.",
+      "default": "120m",
+      "accepted_values": [
+        "Go duration"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/test-e2e-openshell.sh",
+          "description": "OpenShell sandbox E2E script"
         }
       ],
       "since": "0.9.0"
