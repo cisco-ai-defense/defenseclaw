@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -131,6 +132,19 @@ type HookFireOptions struct {
 	// ContainerPrefix names the probe containers (default
 	// defenseclaw-hookfire).
 	ContainerPrefix string
+	// RunFiles are bind-mounted read-only into every probe container, as
+	// the sandbox manager mounts a sandbox's per-run managed configuration
+	// (connector.SandboxRunFiles), so the probe proves the image enforces
+	// with them in place.
+	RunFiles []RunFile
+}
+
+// RunFile is a host file a probe container sees read-only at Path.
+type RunFile struct {
+	// HostPath is the file on the Docker host.
+	HostPath string
+	// Path is the absolute in-container path.
+	Path string
 }
 
 // builtin reports whether opts select the built-in mock LLM and scenarios.
@@ -205,7 +219,13 @@ type HookFireRun struct {
 	// PlantedRan lists the programs planted by hostile settings that ran
 	// (hostile-settings scenario only; always empty for an enforcing image).
 	PlantedRan []string `json:"planted_ran,omitempty"`
-	Output     string   `json:"output"`
+	// Markers reports, for scenarios that name marker files, whether each
+	// exists after the run.
+	Markers map[string]bool `json:"markers,omitempty"`
+	// Report holds the "::report=" lines a scenario's post-run checks
+	// print.
+	Report []string `json:"report,omitempty"`
+	Output string   `json:"output"`
 }
 
 // Hook-fire scenario names, as recorded in HookFireRun.Scenario.
@@ -225,6 +245,25 @@ type hookFireScenario struct {
 	// must exist.
 	sideEffect     string
 	wantSideEffect bool
+
+	// safe launches without skip-permissions; the built-in scenarios all
+	// run in skip-permissions mode.
+	safe bool
+	// extraArgs are appended to the launch argv as given, past the
+	// harness's bypass-flag filter (a hostile passthrough flag).
+	extraArgs []string
+	// env overrides the harness environment.
+	env map[string]string
+	// workdir, when set, is a project under the work root that setup
+	// creates (on a workload-owned tmpfs, as for hostile settings).
+	workdir string
+	// setup runs before the harness; post runs after it and reports with
+	// "::report=" lines.
+	setup, post string
+	// markers are absolute files whose presence is reported after the run.
+	markers []string
+	// mounts are extra read-only files for this scenario.
+	mounts []RunFile
 }
 
 // HookFireResult is the outcome of HookFireProbe.
@@ -527,12 +566,21 @@ func (b *Builder) hookFireRun(
 	ctx context.Context, c *Context, ref string, opts HookFireOptions, netw hookFireNet, sink *hookSink, sc hookFireScenario,
 ) (HookFireRun, error) {
 	run := HookFireRun{Scenario: sc.name}
-	argv, err := c.Spec.Harness.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: true, Prompt: sc.prompt, Args: opts.Args})
+	argv, err := c.Spec.Harness.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: !sc.safe, Prompt: sc.prompt, Args: opts.Args})
 	if err != nil {
 		return run, err
 	}
-	if sc.sideEffect != "" && !safePathRE.MatchString(sc.sideEffect) {
-		return run, fmt.Errorf("openshell image: side effect %q must be a plain absolute path", sc.sideEffect)
+	argv = append(argv, sc.extraArgs...)
+	for _, file := range append([]string{sc.sideEffect}, sc.markers...) {
+		if file != "" && !safePathRE.MatchString(file) {
+			return run, fmt.Errorf("openshell image: side effect or marker %q must be a plain absolute path", file)
+		}
+	}
+	mounts := append(append([]RunFile(nil), opts.RunFiles...), sc.mounts...)
+	for _, m := range mounts {
+		if !safePathRE.MatchString(m.Path) || path.Clean(m.Path) != m.Path || !filepath.IsAbs(m.HostPath) || strings.ContainsAny(m.HostPath, ",\n") {
+			return run, fmt.Errorf("openshell image: run file %q -> %q is not a plain absolute mount", m.HostPath, m.Path)
+		}
 	}
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
@@ -544,12 +592,22 @@ func (b *Builder) hookFireRun(
 		workdir = sc.hostile.workdir
 		script += sc.hostile.setup
 	}
+	if sc.workdir != "" {
+		workdir = sc.workdir
+		script += "mkdir -p " + shQuote(sc.workdir) + " || exit 97\n"
+	}
+	script += sc.setup
 	script += "cd " + shQuote(workdir) + " || exit 97\n"
 	if sc.sideEffect != "" {
 		script += "rm -f " + shQuote(sc.sideEffect) + "\n"
 	}
 	script += strings.Join(quoted, " ") + " </dev/null >/tmp/dc-hookfire.out 2>&1\n" +
 		"echo \"::rc=$?\"\n"
+	script += sc.post
+	for _, marker := range sc.markers {
+		script += "if [ -e " + shQuote(marker) + " ]; then echo " + shQuote("::marker="+marker+"=present") +
+			"; else echo " + shQuote("::marker="+marker+"=absent") + "; fi\n"
+	}
 	if sc.sideEffect != "" {
 		script += "if [ -e " + shQuote(sc.sideEffect) + " ]; then echo '::side-effect=present'; else echo '::side-effect=absent'; fi\n"
 	}
@@ -573,17 +631,23 @@ func (b *Builder) hookFireRun(
 		"-e", "HOME="+connector.SandboxHomeDir,
 		"-e", connector.SandboxTokenEnv+"="+sink.token,
 	)
-	if sc.hostile != nil {
+	if sc.hostile != nil || sc.workdir != "" {
 		// The image's work root is root-owned; a workload-owned tmpfs lets
 		// the probe create a project below it, where the pre-seeded trust
 		// applies as it does to a mounted repository.
 		args = append(args, "--tmpfs", fmt.Sprintf("%s:uid=%d,gid=%d,mode=0755", harness.WorkRoot, c.Spec.UID, c.Spec.GID))
+	}
+	for _, m := range mounts {
+		args = append(args, "--mount", "type=bind,source="+m.HostPath+",target="+m.Path+",readonly")
 	}
 	env := map[string]string{}
 	for key, value := range c.Artifacts.Env {
 		env[key] = value
 	}
 	for key, value := range opts.Env {
+		env[key] = value
+	}
+	for key, value := range sc.env {
 		env[key] = value
 	}
 	keys := make([]string, 0, len(env))
@@ -627,6 +691,14 @@ func (b *Builder) hookFireRun(
 			run.SideEffectPresent = &present
 		case strings.HasPrefix(line, "::planted-ran="):
 			run.PlantedRan = strings.Fields(strings.TrimPrefix(line, "::planted-ran="))
+		case strings.HasPrefix(line, "::marker="):
+			file, state, _ := strings.Cut(strings.TrimPrefix(line, "::marker="), "=")
+			if run.Markers == nil {
+				run.Markers = map[string]bool{}
+			}
+			run.Markers[file] = state == "present"
+		case strings.HasPrefix(line, "::report="):
+			run.Report = append(run.Report, strings.TrimPrefix(line, "::report="))
 		}
 	}
 	return run, nil

@@ -25,6 +25,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -719,4 +720,86 @@ func (r *responseRecorder) status() int {
 		return http.StatusOK
 	}
 	return r.code
+}
+
+// TestHookFireProbeMountsRunFiles pins that every probe container sees the
+// run files read-only, so VerifyHooks proves an image together with a
+// sandbox's per-run managed configuration.
+func TestHookFireProbeMountsRunFiles(t *testing.T) {
+	c := hookFireContext(t)
+	sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
+	file := filepath.Join(t.TempDir(), "run.json")
+	var runs int
+	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		runs++
+		if !containsSeq(args, "--mount", "type=bind,source="+file+",target="+connector.ClaudeCodeSandboxRunDropInPath+",readonly") {
+			t.Errorf("probe container without the run file: %v", args)
+		}
+		return sim.handle(args)
+	}}}
+	opts := hostOpts(true)
+	opts.RunFiles = []RunFile{{HostPath: file, Path: connector.ClaudeCodeSandboxRunDropInPath}}
+	if _, err := b.HookFireProbe(context.Background(), c, opts); err != nil {
+		t.Fatalf("HookFireProbe: %v", err)
+	}
+	if runs != 3 {
+		t.Fatalf("%d probe containers", runs)
+	}
+	for name, bad := range map[string]RunFile{
+		"relative host": {HostPath: "run.json", Path: "/etc/x.json"},
+		"relative path": {HostPath: file, Path: "etc/x.json"},
+		"comma":         {HostPath: file + ",x", Path: "/etc/x.json"},
+		"unclean":       {HostPath: file, Path: "/etc/../x.json"},
+	} {
+		opts.RunFiles = []RunFile{bad}
+		if _, err := b.HookFireProbe(context.Background(), c, opts); err == nil {
+			t.Errorf("%s run file accepted", name)
+		}
+	}
+}
+
+// TestHookFireScenarioChecks pins the scenario hooks the run-config probe
+// uses: a safe launch, raw extra flags, a work-root project, setup and post
+// scripts, markers and reports.
+func TestHookFireScenarioChecks(t *testing.T) {
+	c := hookFireContext(t)
+	var script string
+	var args []string
+	b := &Builder{Docker: &fakeDocker{handler: func(a []string, _ []byte) (string, int) {
+		args, script = a, a[len(a)-1]
+		return "::rc=0\n::marker=/tmp/m1=present\n::marker=/tmp/m2=absent\n::report=approval: on-request\n::output-begin\nok\n::output-end\n", 0
+	}}}
+	netw, err := resolveHookFireNet(HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"}, c.Spec.IngressPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := hookFireScenario{
+		name: "custom", prompt: "p", safe: true, extraArgs: []string{"--dangerously-skip-permissions"},
+		env: map[string]string{"MCP_TIMEOUT": "5000"}, workdir: "/work/proj", setup: "echo setup-ran\n", post: "echo '::report=x'\n",
+		markers: []string{"/tmp/m1", "/tmp/m2"},
+	}
+	run, err := b.hookFireRun(context.Background(), c, c.Tag, HookFireOptions{}, netw, &hookSink{token: "t"}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.Markers["/tmp/m1"] || run.Markers["/tmp/m2"] || len(run.Markers) != 2 || len(run.Report) != 1 || run.Report[0] != "approval: on-request" {
+		t.Fatalf("run = %+v", run)
+	}
+	launch := harness.ClaudeCodeLauncherPath + "' '-p' 'p'"
+	for _, want := range []string{"mkdir -p '/work/proj'", "echo setup-ran", "cd '/work/proj' || exit 97", launch, "'--dangerously-skip-permissions' </dev/null",
+		"echo '::report=x'", "if [ -e '/tmp/m1' ]"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Count(script, "--dangerously-skip-permissions") != 1 {
+		t.Fatalf("a safe launch added skip-permissions itself:\n%s", script)
+	}
+	if !containsSeq(args, "-e", "MCP_TIMEOUT=5000") || !containsSeq(args, "--tmpfs", fmt.Sprintf("%s:uid=%d,gid=%d,mode=0755", harness.WorkRoot, c.Spec.UID, c.Spec.GID)) {
+		t.Fatalf("argv = %v", args)
+	}
+	sc.markers = []string{"/tmp/a b"}
+	if _, err := b.hookFireRun(context.Background(), c, c.Tag, HookFireOptions{}, netw, &hookSink{token: "t"}, sc); err == nil {
+		t.Fatal("a marker path with a space was accepted")
+	}
 }
