@@ -1849,6 +1849,36 @@ class TestLegacyStandaloneAPIHost(unittest.TestCase):
         self.assertEqual(gateway_api_client_host(cfg), "127.0.0.2")
         self.assertEqual(gateway_api_client_host(self._cfg("", "10.200.0.1")), "127.0.0.1")
 
+    def test_api_bind_host_matches_the_shared_go_corpus(self):
+        from defenseclaw.config import api_bind_host
+
+        corpus_path = Path(__file__).resolve().parents[2] / "testdata" / "api_bind_host" / "cases.json"
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        self.assertEqual(corpus["schema_version"], 1)
+        for case in corpus["cases"]:
+            with self.subTest(case=case["name"]):
+                cfg = self._cfg(case["mode"], case["guardrail_host"])
+                cfg.gateway.api_bind = case["api_bind"]
+                self.assertEqual(api_bind_host(cfg), case["want"])
+        self.assertEqual(api_bind_host(None), "127.0.0.1")
+
+    def test_cli_sidecar_clients_honor_an_explicit_api_bind(self):
+        # A legacy host that pinned gateway.api_bind: 127.0.0.1 has its
+        # gateway there; plugin, skill, and status must not dial 10.200.0.1.
+        from defenseclaw.commands import cmd_plugin, cmd_skill, cmd_upgrade
+
+        cfg = self._cfg("standalone", "10.200.0.1")
+        cfg.gateway.api_bind = "127.0.0.1"
+        app = SimpleNamespace(cfg=cfg)
+        self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
+        self.assertEqual(cmd_skill._api_bind_host(app), "127.0.0.1")
+        self.assertEqual(cmd_upgrade._api_bind_host(cfg), "127.0.0.1")
+        cfg.gateway.api_bind = "0.0.0.0"
+        self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
+        self.assertEqual(cmd_upgrade._api_bind_host(cfg), "0.0.0.0")
+        cfg.gateway.api_bind = ""
+        self.assertEqual(cmd_skill._api_bind_host(app), "10.200.0.1")
+
 
 class TestWebhookConfig(unittest.TestCase):
     """Tests for WebhookConfig, _merge_webhooks, and resolved_secret."""

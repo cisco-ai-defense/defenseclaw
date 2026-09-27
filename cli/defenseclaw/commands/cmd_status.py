@@ -29,7 +29,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path, legacy_standalone_api_host, legacy_standalone_configured
+from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
@@ -319,9 +319,9 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Sidecar status
     ux.echo()
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = legacy_standalone_api_host(cfg) or "127.0.0.1"
+    bind = gateway_api_client_host(cfg)
     client = OrchestratorClient(
         host=bind,
         port=cfg.gateway.api_port,
@@ -1213,9 +1213,9 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    bind = legacy_standalone_api_host(cfg) or "127.0.0.1"
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
+    bind = gateway_api_client_host(cfg)
     try:
         client = OrchestratorClient(
             host=bind,

@@ -510,14 +510,15 @@ def _run_openclaw(*args: str) -> str | None:
 
 
 def _api_bind_host(app: AppContext) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go.
+    """Resolve the host to dial for the sidecar API (config.APIBindHost in Go).
 
-    A legacy standalone sandbox install keeps the API on guardrail.host
-    (the veth bridge IP) until ``defenseclaw sandbox legacy-cleanup``.
+    An explicit ``gateway.api_bind`` wins; a legacy standalone sandbox
+    install otherwise keeps the API on guardrail.host (the veth bridge IP)
+    until ``defenseclaw sandbox legacy-cleanup``.
     """
-    from defenseclaw.config import legacy_standalone_api_host
+    from defenseclaw.gateway import gateway_api_client_host
 
-    return legacy_standalone_api_host(app.cfg) or "127.0.0.1"
+    return gateway_api_client_host(app.cfg)
 
 
 def _sidecar_client(app: AppContext):

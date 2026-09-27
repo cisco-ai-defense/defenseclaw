@@ -1130,6 +1130,23 @@ def legacy_standalone_api_host(cfg: Any) -> str | None:
     return host
 
 
+def api_bind_host(cfg: Any) -> str:
+    """Return the address the gateway REST API listens on.
+
+    An explicit ``gateway.api_bind`` wins, then the legacy standalone host,
+    then loopback. Mirrors ``APIBindHost`` in internal/config/config.go, so
+    every CLI caller agrees with the listener. Clients dial
+    :func:`defenseclaw.gateway.gateway_api_client_host`, which maps an
+    unspecified bind to a loopback address.
+    """
+    if cfg is None:
+        return "127.0.0.1"
+    bind = str(getattr(getattr(cfg, "gateway", None), "api_bind", "") or "").strip()
+    if bind:
+        return bind
+    return legacy_standalone_api_host(cfg) or "127.0.0.1"
+
+
 @dataclass
 class WatchConfig:
     debounce_ms: int = 500

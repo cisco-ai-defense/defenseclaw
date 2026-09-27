@@ -3043,10 +3043,9 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
 
     if started:
-        from defenseclaw.config import legacy_standalone_api_host
+        from defenseclaw.gateway import gateway_api_client_host
 
-        bind = legacy_standalone_api_host(cfg) or "127.0.0.1"
-        _check_sidecar_health(cfg.gateway.api_port, bind=bind)
+        _check_sidecar_health(cfg.gateway.api_port, bind=gateway_api_client_host(cfg))
 
 
 def _get_gateway_version() -> str | None:
@@ -3146,7 +3145,8 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
     import urllib.error
     import urllib.request
 
-    url = f"http://{bind}:{api_port}/health"
+    host = f"[{bind}]" if ":" in bind and not bind.startswith("[") else bind
+    url = f"http://{host}:{api_port}/health"
     for i in range(retries):
         time.sleep(1)
         try:

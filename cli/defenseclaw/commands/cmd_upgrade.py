@@ -7970,15 +7970,12 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _api_bind_host(cfg) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go."""
+    """Resolve the API bind address (config.APIBindHost in Go)."""
     if not cfg:
         return "127.0.0.1"
-    api_bind = getattr(cfg.gateway, "api_bind", "")
-    if api_bind:
-        return api_bind
-    from defenseclaw.config import legacy_standalone_api_host
+    from defenseclaw.config import api_bind_host
 
-    return legacy_standalone_api_host(cfg) or "127.0.0.1"
+    return api_bind_host(cfg)
 
 
 def _download_file(url: str, dest: str) -> None:

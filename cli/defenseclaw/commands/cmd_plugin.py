@@ -58,10 +58,10 @@ if TYPE_CHECKING:
 
 
 def _api_bind_host(app: AppContext) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go."""
-    from defenseclaw.config import legacy_standalone_api_host
+    """Resolve the host to dial for the sidecar API (config.APIBindHost in Go)."""
+    from defenseclaw.gateway import gateway_api_client_host
 
-    return legacy_standalone_api_host(app.cfg) or "127.0.0.1"
+    return gateway_api_client_host(app.cfg)
 
 
 def _sidecar_client(app: AppContext):

@@ -17,6 +17,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -76,6 +77,38 @@ func TestAPIBindHostPrecedence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := APIBindHost(tt.cfg); got != tt.want {
 				t.Fatalf("APIBindHost() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The Python CLI dials the API through api_bind_host in
+// cli/defenseclaw/config.py; both read the same corpus so they cannot drift.
+func TestAPIBindHostSharedCorpus(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "api_bind_host", "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus struct {
+		SchemaVersion int `json:"schema_version"`
+		Cases         []struct {
+			Name          string `json:"name"`
+			Mode          string `json:"mode"`
+			GuardrailHost string `json:"guardrail_host"`
+			APIBind       string `json:"api_bind"`
+			Want          string `json:"want"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	if corpus.SchemaVersion != 1 || len(corpus.Cases) == 0 {
+		t.Fatalf("unexpected corpus: schema %d, %d cases", corpus.SchemaVersion, len(corpus.Cases))
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			if got := APIBindHost(legacyShimConfig(tc.Mode, tc.GuardrailHost, tc.APIBind)); got != tc.Want {
+				t.Fatalf("APIBindHost() = %q, want %q", got, tc.Want)
 			}
 		})
 	}

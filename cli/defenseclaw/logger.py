@@ -376,12 +376,9 @@ class Logger:
 
 
 def _gateway_api_host(cfg: Any) -> str:
-    from defenseclaw.config import legacy_standalone_api_host
+    from defenseclaw.config import api_bind_host
 
-    gateway = cfg.gateway
-    bind = str(getattr(gateway, "api_bind", "") or "").strip()
-    if not bind:
-        bind = legacy_standalone_api_host(cfg) or ""
+    bind = api_bind_host(cfg)
     if bind in {"", "0.0.0.0", "::", "[::]", "localhost"}:
         return "127.0.0.1"
     return bind
