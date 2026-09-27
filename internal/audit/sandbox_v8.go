@@ -1604,6 +1604,12 @@ func canonicalSandboxHost(value string) (string, bool) {
 	}
 	name := strings.TrimSuffix(value, ".")
 	if strings.IndexFunc(name, func(r rune) bool { return r >= utf8.RuneSelf }) >= 0 {
+		// idna's result for invalid UTF-8 varies with the Unicode tables the
+		// Go toolchain selects (older ones encode it into a punycode label),
+		// so reject it up front.
+		if !utf8.ValidString(name) {
+			return "", false
+		}
 		ascii, err := idna.Lookup.ToASCII(name)
 		if err != nil {
 			return "", false
