@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
@@ -133,6 +134,10 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	var ops []openshell.PolicyMergeOperation
 	var removed, rebound []string
 	pol := m.triagePolicy(b, eff)
+	// The DNS re-check runs on the reconcile path: a slow resolver skips
+	// the rest of it (keeping the rules) rather than stalling the loop.
+	dnsCtx, cancel := context.WithTimeout(ctx, enforceDNSBudget)
+	defer cancel()
 	for ruleName, rule := range cfg.Policy.NetworkPolicies {
 		if !strings.HasPrefix(ruleName, "allow_") {
 			continue
@@ -141,7 +146,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		switch {
 		case orgRefusal(triage.CheckProposal(eff, p, false)):
 			removed = append(removed, ruleName)
-		case triage.ResolvesToHost(ctx, p, pol):
+		case triage.ResolvesToHost(dnsCtx, p, pol):
 			rebound = append(rebound, ruleName)
 		default:
 			continue
@@ -189,6 +194,9 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 				"removed %d approved rule(s) whose destination now resolves to this machine: %s", len(rebound), strings.Join(rebound, ", "))})
 	}
 }
+
+// enforceDNSBudget bounds the DNS re-check of one sandbox's approved rules.
+const enforceDNSBudget = 20 * time.Second
 
 // orgRefusal reports a refusal by the administrator or a DefenseClaw
 // invariant, as opposed to the user's own pack or profile.
