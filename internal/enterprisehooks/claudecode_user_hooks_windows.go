@@ -32,7 +32,9 @@ type windowsClaudeUserHookCleanup struct {
 // A missing file, or one without DefenseClaw registrations, is left
 // untouched. A settings.json that is a link, has other hard links, exceeds the
 // size limit, is not one JSON object, or changes while it is being cleaned is
-// left as it was and reported as an error. The rest of the file, including
+// left as it was and reported as an error; a linked .claude folder or
+// settings.json, another hard link or a repeated key is reported only when
+// the file holds DefenseClaw registrations. The rest of the file, including
 // the env settings per-user setup wrote, stays as it was.
 func removeWindowsClaudePerUserHookRegistrations(home string, install connector.ClaudeCodePerUserInstall) (windowsClaudeUserHookCleanup, error) {
 	claudeDir := filepath.Join(home, ".claude")

@@ -402,6 +402,12 @@ func TestRemoveCursorPerUserHookRegistrationsLeavesFilesWithoutThem(t *testing.T
 		"registration outside hooks":       `{"version":1,"preToolUse":[{"command":` + cursorUserHooksJSONString(t, command) + `}]}`,
 		"registration in a grouped entry":  `{"version":1,"hooks":{"preToolUse":[{"matcher":"*","hooks":[{"command":` + cursorUserHooksJSONString(t, command) + `}]}]}}`,
 		"command with surrounding context": `{"version":1,"hooks":{"preToolUse":[{"command":` + cursorUserHooksJSONString(t, command+" && echo") + `}]}}`,
+		"top-level null":                   `null`,
+		// The managed Cursor hook reads a repeated key as its last value, so
+		// a file whose values hold no DefenseClaw entry is not why it denies,
+		// and the cleanup does not report it.
+		"repeated key":                          `{"version":1,"version":1,"hooks":{"preToolUse":[{"command":"node audit.js"}]}}`,
+		"repeated hooks key, last without them": `{"version":1,"hooks":{"preToolUse":[{"command":` + cursorUserHooksJSONString(t, command) + `}]},"hooks":{}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, removed, err := f.remove(t, []byte(data))

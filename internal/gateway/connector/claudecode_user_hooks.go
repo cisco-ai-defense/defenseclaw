@@ -52,6 +52,23 @@ type ClaudeCodePerUserInstall struct {
 // passes to the launcher (claudeCodeHookInvocation).
 var claudeCodePerUserHookArgs = [...]string{"hook", "--connector", "claudecode"}
 
+// claudeCodeGroupHandlerFields are the fields that make a matcher group a
+// handler of its own for the managed Cursor hook (foreignHookHasHandlerFields
+// in hookexec): Cursor, reading the group in its own layout, runs the group's
+// command and ignores its hooks array.
+var claudeCodeGroupHandlerFields = [...]string{"type", "command", "url", "prompt"}
+
+// claudeCodeGroupIsAHandler reports whether a decoded matcher group has
+// handler fields of its own, and so stays when its hooks array is emptied.
+func claudeCodeGroupIsAHandler(group map[string]interface{}) bool {
+	for _, key := range claudeCodeGroupHandlerFields {
+		if _, ok := group[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveClaudeCodePerUserHookRegistrations returns data without the Claude
 // Code hook handlers that per-user DefenseClaw setup writes on Windows: a
 // "command" handler that runs one of DefenseClaw's own launcher or gateway
@@ -65,17 +82,23 @@ var claudeCodePerUserHookArgs = [...]string{"hook", "--connector", "claudecode"}
 // matched.
 //
 // A matched handler is removed from its matcher group, and a group left with
-// no handlers is removed, as per-user teardown does. Every other byte of data
-// is kept, including the other groups and handlers, their order and the text
-// between them, so an event array whose groups were all removed stays as an
-// empty array. Only the event arrays of the top-level "hooks" object are
-// edited; "env" and every other setting stay.
+// no handlers is removed, as per-user teardown does. A group that also has
+// handler fields of its own (claudeCodeGroupHandlerFields) is kept with an
+// empty hooks array instead: Cursor runs such a group's own command, so the
+// managed Cursor hook checks it. Every other byte of data is kept, including
+// the other groups and handlers, their order and the text between them, so an
+// event array whose groups were all removed stays as an empty array. Only the
+// event arrays of the top-level "hooks" object are edited; "env" and every
+// other setting stay.
 //
-// With nothing to remove it returns data and no removals. It returns an error
-// when data is not one JSON object, repeats a key in the top-level or "hooks"
-// object or in a group it edits, or exceeds the Claude Code settings size
-// limit. Some executables are in the user's home, so a caller acting for
-// another user runs it inside WithUserHomeDir.
+// With nothing to remove it returns data and no removals. data is read as the
+// managed Cursor hook reads it, where a repeated key has its last value, so a
+// file that repeats a key but holds nothing to remove is returned as it is.
+// It returns an error when data is not one JSON object or exceeds the Claude
+// Code settings size limit, or when it holds a handler to remove and repeats
+// a key in the top-level or "hooks" object or in a group it edits. Some
+// executables are in the user's home, so a caller acting for another user
+// runs it inside WithUserHomeDir.
 func RemoveClaudeCodePerUserHookRegistrations(data []byte, install ClaudeCodePerUserInstall) ([]byte, []ClaudeCodeUserHookRemoval, error) {
 	return removeClaudeCodeHookRegistrations(data, newClaudeCodePerUserHookMatcher(append(
 		legacyNativeHookBinaries(),
@@ -158,9 +181,24 @@ func (matcher claudeCodePerUserHookMatcher) groupHasOwnedHandler(raw interface{}
 	return false
 }
 
+// holdsOwnedHandler reports whether a decoded settings document has a
+// handler matcher owns in an event array of its top-level "hooks" object.
+func (matcher claudeCodePerUserHookMatcher) holdsOwnedHandler(settings map[string]interface{}) bool {
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	for _, event := range hooks {
+		groups, _ := event.([]interface{})
+		for _, group := range groups {
+			if matcher.groupHasOwnedHandler(group) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // withoutOwnedHandlers is the decoded counterpart of the byte edit: the event
 // value raw without the handlers matcher owns and without the groups left
-// with no handlers.
+// with no handlers that are not handlers themselves.
 func (matcher claudeCodePerUserHookMatcher) withoutOwnedHandlers(raw interface{}) interface{} {
 	groups, ok := raw.([]interface{})
 	if !ok {
@@ -173,13 +211,13 @@ func (matcher claudeCodePerUserHookMatcher) withoutOwnedHandlers(raw interface{}
 			continue
 		}
 		group := rawGroup.(map[string]interface{})
-		var kept []interface{}
+		kept := []interface{}{}
 		for _, handler := range group["hooks"].([]interface{}) {
 			if _, owned := matcher.owns(handler); !owned {
 				kept = append(kept, handler)
 			}
 		}
-		if len(kept) == 0 {
+		if len(kept) == 0 && !claudeCodeGroupIsAHandler(group) {
 			continue
 		}
 		edited := make(map[string]interface{}, len(group))
@@ -207,6 +245,13 @@ func removeClaudeCodeHookRegistrations(data []byte, owned claudeCodePerUserHookM
 	original, err := decodeClaudeCodeSettings(body, "settings JSON")
 	if err != nil {
 		return nil, nil, err
+	}
+	// The checks below that the file can be edited exactly apply only to a
+	// file with something to remove. A file without DefenseClaw's handlers,
+	// decoded as the managed Cursor hook decodes it, is not why that hook
+	// denies, so it is not reported.
+	if !owned.holdsOwnedHandler(original) {
+		return data, nil, nil
 	}
 	members, err := jsonObjectMemberSpans(body)
 	if err != nil {
@@ -274,9 +319,10 @@ func removeClaudeCodeHookRegistrations(data []byte, owned claudeCodePerUserHookM
 }
 
 // removeClaudeCodeEventHandlers returns the event array array without the
-// handlers owned matches and without the groups left with no handlers. A
-// group it edits must not repeat a key. It returns no text and no removals
-// when nothing in array matches.
+// handlers owned matches and without the groups left with no handlers,
+// except a group that is a handler itself, which stays with an empty hooks
+// array. A group it edits must not repeat a key. It returns no text and no
+// removals when nothing in array matches.
 func removeClaudeCodeEventHandlers(event string, array []byte, owned claudeCodePerUserHookMatcher) ([]byte, []ClaudeCodeUserHookRemoval, error) {
 	groups, err := jsonArrayElementSpans(array)
 	if err != nil {
@@ -320,7 +366,7 @@ func removeClaudeCodeEventHandlers(event string, array []byte, owned claudeCodeP
 			}
 			kept++
 		}
-		if kept == 0 {
+		if kept == 0 && !claudeCodeGroupIsAHandler(value.(map[string]interface{})) {
 			keep[index] = false
 			continue
 		}

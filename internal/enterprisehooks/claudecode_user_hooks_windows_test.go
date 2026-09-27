@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -208,4 +209,103 @@ func TestRemoveWindowsClaudePerUserHookRegistrationsLeavesFilesItShouldNotRewrit
 		t.Fatalf("settings.json behind the link = %q, want it unchanged", got)
 	}
 	assertWindowsCursorTestFileAbsent(t, filepath.Join(elsewhere, windowsClaudeUserSettingsBackupName))
+}
+
+func createWindowsTestJunction(t *testing.T, link, target string) {
+	t.Helper()
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("create junction %s: %v: %s", link, err, output)
+	}
+}
+
+// A hook file the cleanup does not edit is reported in the guardian log only
+// when it holds a registration the cleanup would remove. A repeated key, a
+// linked folder or file, or another hard link is not why the managed Cursor
+// hook denies when the file holds none, so the log does not say it is. The
+// file is left as it was either way.
+func TestCleanupWindowsCursorPerUserHookRegistrationsReportsOnlyFilesThatHoldThem(t *testing.T) {
+	for _, label := range []string{"Claude Code", "Cursor"} {
+		t.Run(label, func(t *testing.T) {
+			f := newWindowsCursorUserHooksFixture(t)
+			target, localAppData, _, _ := windowsClaudeUserHooksTarget(t, f)
+			logged := redirectWindowsCursorTestStderr(t)
+			folder, name := filepath.Join(f.home, ".cursor"), "hooks.json"
+			owned := `{"version":1,"hooks":{"preToolUse":[` + f.entry(t) + `]}}`
+			foreign := `{"version":1,"hooks":{"preToolUse":[{"command":"node audit.js"}]}}`
+			repeated := `{"version":1,"version":1,"hooks":{"preToolUse":[{"command":"node audit.js"}]}}`
+			if label == "Claude Code" {
+				folder, name = filepath.Join(f.home, ".claude"), "settings.json"
+				launcher := filepath.Join(localAppData, "DefenseClaw", "HookRuntime", "defenseclaw-hook.exe")
+				owned = `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"` + windowsClaudeUserHooksJSONPath(launcher) +
+					`","args":["hook","--connector","claudecode"]}]}]}}`
+				foreign = `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify.cmd"}]}]}}`
+				repeated = `{"model":"a","model":"b","hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify.cmd"}]}]}}`
+			}
+			path := filepath.Join(folder, name)
+			warning := "[enterprise-hooks] WARN: " + label + ": per-user DefenseClaw hook registrations in " + path + " were not removed"
+			expect := func(step, body string, warned bool) {
+				t.Helper()
+				cleanupWindowsCursorPerUserHookRegistrations(target)
+				line := logged()
+				if strings.Contains(line, warning) != warned || !warned && line != "" {
+					t.Fatalf("%s: guardian log = %q, want a warning: %v", step, line, warned)
+				}
+				if body != "" {
+					if got := readWindowsCursorTestFile(t, path); got != body {
+						t.Fatalf("%s: %s = %q, want it unchanged", step, name, got)
+					}
+				}
+			}
+
+			f.write(t, path, repeated)
+			expect("a repeated key", repeated, false)
+
+			f.write(t, path, foreign)
+			other := filepath.Join(f.home, "other.json")
+			if err := os.Link(path, other); err != nil {
+				t.Fatal(err)
+			}
+			expect("another hard link, without them", foreign, false)
+			f.write(t, path, owned)
+			expect("another hard link, with them", owned, true)
+			if err := os.Remove(other); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			elsewhere := filepath.Join(f.home, "elsewhere")
+			if err := os.Rename(folder, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			createWindowsTestJunction(t, folder, elsewhere)
+			expect("a linked folder without the file", "", false)
+			f.write(t, filepath.Join(elsewhere, name), foreign)
+			expect("a linked folder, without them", foreign, false)
+			f.write(t, filepath.Join(elsewhere, name), owned)
+			expect("a linked folder, with them", owned, true)
+			assertWindowsCursorTestFileAbsent(t, filepath.Join(elsewhere, name+".defenseclaw-backup"))
+			if err := os.Remove(folder); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(elsewhere, folder); err != nil {
+				t.Fatal(err)
+			}
+
+			linked := filepath.Join(f.home, "linked.json")
+			f.write(t, linked, foreign)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(linked, path); err != nil {
+				t.Logf("symbolic link not created (%v); skipping the linked file case", err)
+				return
+			}
+			expect("a linked file, without them", foreign, false)
+			f.write(t, linked, owned)
+			expect("a linked file, with them", owned, true)
+			assertWindowsCursorTestFileAbsent(t, path+".defenseclaw-backup")
+		})
+	}
 }

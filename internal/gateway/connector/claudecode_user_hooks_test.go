@@ -165,6 +165,49 @@ func TestManagedCursorCheckAllowsOnceThePerUserClaudeCodeRegistrationsAreRemoved
 	}
 }
 
+// A matcher group that also has handler fields of its own (type, command, url
+// or prompt) is a handler the managed Cursor hook checks, because Cursor runs
+// the group's own command from a Claude-format file. Removing DefenseClaw's
+// handler from such a group keeps the group with an empty hooks array, so the
+// managed hook still denies it until an administrator approves it.
+func TestRemoveClaudeCodePerUserHookRegistrationsKeepsAGroupThatIsAHandlerItself(t *testing.T) {
+	f := newClaudeCodeUserHooksFixture(t)
+	handler := f.handler(t)
+	if err := os.MkdirAll(filepath.Dir(f.settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, field := range map[string]string{
+		"type":    `"type":"command"`,
+		"command": `"type":"command","command":"C:\\tools\\audit.exe"`,
+		"url":     `"url":"https://audit.example/hook"`,
+		"prompt":  `"prompt":"review the tool call"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := `{"hooks":{"PreToolUse":[{"matcher":"*",` + field + `,"hooks":[` + handler + `]}]}}`
+			want := `{"hooks":{"PreToolUse":[{"matcher":"*",` + field + `,"hooks":[]}]}}`
+			got, removed, err := f.remove(t, []byte(data), f.install())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want || len(removed) != 1 || removed[0].Command != f.launcher {
+				t.Fatalf("got (%s, %#v), want %s and the launcher's removal", got, removed, want)
+			}
+			if err := os.WriteFile(f.settingsPath, got, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			permission, requests, message := f.cursor.managedPreToolUse(t)
+			if permission != "deny" || requests != 0 || !strings.Contains(message, f.settingsPath) {
+				t.Fatalf("after removal: permission=%q gateway requests=%d message=%q, want the group still denied",
+					permission, requests, message)
+			}
+			again, removed, err := f.remove(t, got, f.install())
+			if err != nil || len(removed) != 0 || !bytes.Equal(again, got) {
+				t.Fatalf("second removal = (%q, %v, %v), want the cleaned file unchanged", again, removed, err)
+			}
+		})
+	}
+}
+
 // Only DefenseClaw's own handlers, and the groups they leave empty, go;
 // every other byte of the file stays.
 func TestRemoveClaudeCodePerUserHookRegistrationsKeepsEveryOtherByte(t *testing.T) {
@@ -343,6 +386,13 @@ func TestRemoveClaudeCodePerUserHookRegistrationsLeavesFilesWithoutThem(t *testi
 		"handler outside a group":     `{"hooks":{"PreToolUse":[` + handler + `]}}`,
 		"group hooks is not an array": `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":` + handler + `}]}}`,
 		"registration in env":         `{"env":{"hooks":{"PreToolUse":[` + group + `]}}}`,
+		"top-level null":              `null`,
+		// The managed Cursor hook reads a repeated key as its last value, so
+		// a file whose values hold no DefenseClaw handler is not why it
+		// denies, and the cleanup does not report it.
+		"repeated key":                          `{"model":"a","model":"b","hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify.cmd"}]}]}}`,
+		"repeated hooks key, last without them": `{"hooks":{"PreToolUse":[` + group + `]},"hooks":{}}`,
+		"repeated event key, last without them": `{"hooks":{"PreToolUse":[` + group + `],"PreToolUse":[]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, removed, err := f.remove(t, []byte(data), f.install())
@@ -364,7 +414,6 @@ func TestRemoveClaudeCodePerUserHookRegistrationsRefusesFilesItCannotEditExactly
 		"invalid JSON":                    `{"hooks":{"PreToolUse":[` + group + `]}`,
 		"trailing data":                   `{"hooks":{"PreToolUse":[` + group + `]}} {}`,
 		"top-level array":                 `[{"hooks":{"PreToolUse":[` + group + `]}}]`,
-		"top-level null":                  `null`,
 		"repeated hooks key":              `{"hooks":{},"hooks":{"PreToolUse":[` + group + `]}}`,
 		"repeated event key":              `{"hooks":{"PreToolUse":[],"PreToolUse":[` + group + `]}}`,
 		"repeated key in an edited group": `{"hooks":{"PreToolUse":[{"hooks":[],"hooks":[` + handler + `]}]}}`,
