@@ -376,8 +376,9 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 	if len(starts) != 2 || strings.Contains(string(starts[1].Body), "snapshot") {
 		t.Fatalf("second start = %s", starts[1].Body)
 	}
-	if out := ta.output(); !strings.Contains(out, "kept the undo point from ") || !strings.Contains(out, "kept → `defenseclaw sandbox undo box` reverts every session since") {
-		t.Fatalf("output:\n%s", out)
+	if out := ta.output(); !strings.Contains(out, "kept the undo point from ") || !strings.Contains(out, "`defenseclaw sandbox undo box` still reverts them") ||
+		strings.Contains(out, "reverts every session since") {
+		t.Fatalf("output (one line on the kept undo point):\n%s", out)
 	}
 	// --new-snapshot accepts them.
 	ta.out.Reset()

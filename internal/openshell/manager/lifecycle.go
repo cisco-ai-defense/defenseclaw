@@ -353,7 +353,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: rec.Name, Reason: "snapshot_kept",
-				Message: "kept the pre-session snapshot: " + why + "; undo still reverts them (`defenseclaw sandbox start --new-snapshot` accepts them)"})
+				Message: "sandbox " + rec.Name + " kept its undo point: " + why + ", which undo still reverts (`defenseclaw sandbox start " +
+					rec.Name + " --new-snapshot` accepts the changes instead)"})
 		} else {
 			if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
@@ -427,7 +428,11 @@ func (m *Manager) keepSnapshot(ctx context.Context, name string, newSnapshot boo
 		return false, ""
 	}
 	if n := max(rep.FilesChanged, len(rep.Changes)); n > 0 {
-		return true, fmt.Sprintf("the folder still holds %d changed file(s) from an earlier session", n)
+		files := "changed files"
+		if n == 1 {
+			files = "changed file"
+		}
+		return true, fmt.Sprintf("the folder still holds %d %s from an earlier session", n, files)
 	}
 	return true, "the folder still holds changes from an earlier session"
 }

@@ -162,7 +162,9 @@ func TestStartKeepsTheSnapshotOfPendingChanges(t *testing.T) {
 	}
 	kept := false
 	for _, ev := range e.m.ActivitySince(0, "keepsnap") {
-		kept = kept || (ev.Kind == sandboxapi.ActivityWorkspace && ev.Reason == "snapshot_kept")
+		kept = kept || (ev.Kind == sandboxapi.ActivityWorkspace && ev.Reason == "snapshot_kept" &&
+			strings.Contains(ev.Message, "sandbox keepsnap kept its undo point: the folder still holds 2 changed files") &&
+			strings.Contains(ev.Message, "`defenseclaw sandbox start keepsnap --new-snapshot`"))
 	}
 	if !kept {
 		t.Fatal("no notice that the snapshot was kept")

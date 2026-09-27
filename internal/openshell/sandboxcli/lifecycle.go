@@ -483,7 +483,8 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 		return err
 	}
 	a.ok(sb.Name + " is " + sb.Phase + " → attach with `" + CommandName + " connect " + sb.Name + "`")
-	if sb.WorkdirMode == config.OpenShellWorkdirMount && sb.Snapshot != nil {
+	// A kept undo point was explained as the start kept it.
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && sb.Snapshot != nil && (!kept || o.NoSnapshot) {
 		a.note(a.undoPointText(sb, kept))
 	}
 	return nil
