@@ -199,8 +199,13 @@ type Manager struct {
 	approvals     map[string]*approval
 	proxy         ProxyControl
 	lastReconcile time.Time
-	cfgSeen       *config.Config
-	reconcileMu   sync.Mutex
+	// cfgSeen is the configuration the egress deciders were last built
+	// from (refreshEgress); cfgEnforced the one configLoop last enforced
+	// on approved rules (enforceAll). refreshEgress also runs after creates
+	// and deletes, so it cannot tell configLoop what was enforced.
+	cfgSeen     *config.Config
+	cfgEnforced *config.Config
+	reconcileMu sync.Mutex
 	// profileMu serializes this daemon's provider profile imports, so
 	// concurrent creates do not race each other to import the same one.
 	profileMu sync.Mutex
@@ -536,11 +541,19 @@ func (m *Manager) configLoop(ctx context.Context) {
 		case <-t.C:
 			cfg := m.opts.Config()
 			m.mu.Lock()
-			changed := cfg != m.cfgSeen
+			refresh, enforce := cfg != m.cfgSeen, cfg != m.cfgEnforced
 			m.mu.Unlock()
-			if changed {
+			if refresh {
 				m.refreshEgress()
-				m.enforceAll(ctx)
+			}
+			// Approved rules bypass the egress proxy, so a change must reach
+			// them even when a create or delete rebuilt the deciders first.
+			// While the gateway is down the reconcile after it reconnects
+			// enforces, and so does the next tick here.
+			if enforce && m.gatewayUp() && m.enforceAll(ctx) {
+				m.mu.Lock()
+				m.cfgEnforced = cfg
+				m.mu.Unlock()
 			}
 		}
 	}

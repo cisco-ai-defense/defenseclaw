@@ -152,11 +152,12 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 // the current policy (enforceApprovedRules). A sandbox whose own policy
 // cannot be resolved has its rules judged by the organization's policy
 // alone (orgPolicy), so an administrator's tightening still reaches them;
-// when even that cannot be resolved, every triaged rule is removed.
-func (m *Manager) enforceAll(ctx context.Context) {
+// when even that cannot be resolved, every triaged rule is removed. It
+// reports whether it reached the gateway and checked every ready sandbox.
+func (m *Manager) enforceAll(ctx context.Context) bool {
 	gw, err := m.gateway(ctx)
 	if err != nil {
-		return
+		return false
 	}
 	m.mu.Lock()
 	var ready []*box
@@ -168,7 +169,7 @@ func (m *Manager) enforceAll(ctx context.Context) {
 	m.mu.Unlock()
 	for _, b := range ready {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		eff, err := m.resolveBox(b)
 		if err != nil {
@@ -183,6 +184,7 @@ func (m *Manager) enforceAll(ctx context.Context) {
 		}
 		m.enforceApprovedRules(ctx, gw, b, eff)
 	}
+	return true
 }
 
 // Unblock lifts an egress block for one sandbox or, with Always, for every
