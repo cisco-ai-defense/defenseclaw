@@ -63,6 +63,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
@@ -880,9 +881,17 @@ func joinInts(values []int) string {
 	return strings.Join(parts, ", ")
 }
 
+// truncate cuts s to at most n bytes, plus an ellipsis, without splitting a
+// UTF-8 sequence: the policy advisor's notes and the rule names it quotes
+// can hold any text.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for i := n; i > 0 && i > n-utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			return s[:i] + "…"
+		}
 	}
 	return s[:n] + "…"
 }

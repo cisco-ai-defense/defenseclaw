@@ -39,6 +39,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -557,9 +558,16 @@ func (nopTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspa
 	return nil
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so
+// valid text stays valid in the telemetry, feed and API fields it bounds.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for i := n; i > 0 && i > n-utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			return s[:i]
+		}
 	}
 	return s[:n]
 }

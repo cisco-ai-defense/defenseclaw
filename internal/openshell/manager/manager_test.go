@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
@@ -862,5 +863,38 @@ func TestCreateRunsAsTheImageIdentity(t *testing.T) {
 	}
 	if _, err := e.client.GetSandbox(context.Background(), "uid-foreign"); !openshell.IsNotFound(err) {
 		t.Fatalf("sandbox created with a foreign-uid image: %v", err)
+	}
+}
+
+// TestTruncateKeepsRunesWhole pins that a byte limit never splits a UTF-8
+// sequence: operator reject reasons, OpenShell errors and project paths can
+// hold any text.
+func TestTruncateKeepsRunesWhole(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"short", 16, "short"},
+		{"exact", 5, "exact"},
+		{"abcdef", 3, "abc"},
+		{"aé", 2, "a"},          // a 2-byte rune cut after its first byte
+		{"aéb", 3, "aé"},        // a cut right after a rune
+		{"ab→", 4, "ab"},        // a 3-byte rune cut inside
+		{"a\U0001F600", 4, "a"}, // a 4-byte rune cut after three bytes
+		{"a\U0001F600b", 5, "a\U0001F600"},
+		{"\xff\xfe\xfd\xfc", 2, "\xff\xfe"}, // not UTF-8: a plain byte cut
+		{"a\x80\x80\x80\x80\x80", 5, "a\x80\x80\x80\x80"},
+	} {
+		got := truncate(tc.in, tc.n)
+		if got != tc.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
+		if len(got) > tc.n {
+			t.Errorf("truncate(%q, %d) is %d bytes", tc.in, tc.n, len(got))
+		}
+		if utf8.ValidString(tc.in) && !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q splits a rune", tc.in, tc.n, got)
+		}
 	}
 }

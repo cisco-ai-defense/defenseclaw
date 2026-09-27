@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
@@ -209,6 +210,15 @@ func TestClassifySecurityNotesAsk(t *testing.T) {
 	got := Classify(context.Background(), p, testPolicy(open))
 	if got.Verdict != Ask || got.Reason != ReasonSecurityFlagged {
 		t.Fatalf("flagged proposal = %+v, want an ask", got)
+	}
+
+	// Long notes are cut on a character boundary: the 300-byte limit falls
+	// inside the two-byte é.
+	p.SecurityNotes = strings.Repeat("a", 299) + "é and more"
+	got = Classify(context.Background(), p, testPolicy(open))
+	want := "OpenShell's policy advisor flagged this proposal: " + strings.Repeat("a", 299) + "…"
+	if got.Message != want || !utf8.ValidString(got.Message) {
+		t.Fatalf("flagged proposal message = %q, want %q", got.Message, want)
 	}
 }
 
