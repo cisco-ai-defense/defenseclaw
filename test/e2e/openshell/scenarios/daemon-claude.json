@@ -1,0 +1,77 @@
+{
+  "scenarios": [
+    {
+      "name": "dc-deny-marker",
+      "match": "DCE2E-DENY",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt",
+              "description": "Write the marker the test guardrail rule blocks"
+            }
+          }
+        },
+        {
+          "text": "The command was blocked by DefenseClaw."
+        }
+      ]
+    },
+    {
+      "name": "project-edit",
+      "match": "DCE2E-EDIT",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo dce2e-edited >> README.md",
+              "description": "Edit a project file"
+            }
+          }
+        },
+        {
+          "text": "Edited the project."
+        }
+      ]
+    },
+    {
+      "name": "fetch-through-proxy",
+      "match": "DCE2E-FETCH",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://example.org > /tmp/dce2e-fetch.txt; cat /tmp/dce2e-fetch.txt",
+              "description": "Fetch a public page"
+            }
+          }
+        },
+        {
+          "text": "Fetched."
+        }
+      ]
+    },
+    {
+      "name": "default",
+      "match": "",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo dce2e-allowed > /tmp/dce2e-allowed.txt && cat /tmp/dce2e-allowed.txt",
+              "description": "Write a marker file"
+            }
+          }
+        },
+        {
+          "text": "Done: the marker file was written."
+        }
+      ]
+    }
+  ],
+  "aux_text": "Mock session"
+}

@@ -1,0 +1,16 @@
+# Test-only guardrail rule for the sandbox daemon E2E (daemon_e2e_test.go).
+# The test copies the default rule pack into its own data directory and adds
+# this file, so a harmless marker command is the one tool call a DefenseClaw
+# verdict must deny. Never install it in a real rule pack.
+version: 1
+category: e2e-marker
+rules:
+  - id: E2E-SANDBOX-MARKER
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program == 'echo' && 'DCE2E-BLOCK-MARKER' in c.argv)
+    pattern: 'DCE2E-BLOCK-MARKER'
+    title: "E2E sandbox marker command"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [e2e]

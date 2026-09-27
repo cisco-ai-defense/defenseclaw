@@ -3742,7 +3742,7 @@
     {
       "name": "DEFENSECLAW_OPENSHELL_GATEWAY",
       "category": "test_fixture",
-      "purpose": "OpenShell gateway name the live workspace mount and copy test drives instead of the active gateway.",
+      "purpose": "OpenShell gateway name the live workspace mount and copy test and the live sandbox daemon test drive instead of the active gateway.",
       "default": "unset",
       "accepted_values": [
         "registered OpenShell gateway name",
@@ -3754,6 +3754,10 @@
         {
           "location": "internal/openshell/workspace/live_integration_test.go",
           "description": "Live workspace mount and copy test"
+        },
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test"
         }
       ],
       "since": "0.9.0"
@@ -3811,6 +3815,101 @@
         {
           "location": "internal/openshell/image/integration_test.go",
           "description": "Live relay-mode hook-fire probe"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_WORK_DIR",
+      "category": "test_fixture",
+      "purpose": "Opts into the live sandbox daemon test and names the directory it keeps the daemon's data directory, the test project and the daemon and mock logs under.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test (openshell_integration build tag)"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_PREFIX",
+      "category": "test_fixture",
+      "purpose": "Name of the sandbox the live sandbox daemon test creates; every provider it creates starts with it, and leftovers carrying it are deleted.",
+      "default": "unset",
+      "accepted_values": [
+        "DNS label",
+        "unset (dc-e2e)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_API_PORT",
+      "category": "test_fixture",
+      "purpose": "API port of the daemon the live sandbox daemon test starts; its hook ingress and egress proxy take the next two ports.",
+      "default": "unset",
+      "accepted_values": [
+        "TCP port",
+        "unset (28970)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_MOCK_PORT",
+      "category": "test_fixture",
+      "purpose": "Loopback port of the mock Anthropic server the live sandbox daemon test points Claude Code at.",
+      "default": "unset",
+      "accepted_values": [
+        "TCP port",
+        "unset (28921)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_KEEP_IMAGE",
+      "category": "test_fixture",
+      "purpose": "Keeps the overlay image the live sandbox daemon test built instead of removing it at the end.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset (remove)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon test cleanup"
         }
       ],
       "since": "0.9.0"
