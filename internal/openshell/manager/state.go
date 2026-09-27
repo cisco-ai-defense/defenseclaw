@@ -122,7 +122,8 @@ type record struct {
 	Warnings   []string                     `json:"warnings,omitempty"`
 
 	// Guard is the nested-repository guard state of the current session
-	// (mount mode).
+	// (mount mode). Copies of a record share it, so it is replaced, never
+	// changed in place.
 	Guard *guardRecord `json:"guard,omitempty"`
 }
 

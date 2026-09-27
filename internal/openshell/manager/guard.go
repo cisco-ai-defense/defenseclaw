@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -174,11 +175,16 @@ func (m *Manager) guardLoop(ctx context.Context, b *box) {
 // on the activity feed (the run UI and the TUI show it).
 func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection) {
 	m.mu.Lock()
-	if b.rec.Guard == nil {
-		b.rec.Guard = &guardRecord{TakenAt: m.now().UTC()}
-	}
-	if len(b.rec.Guard.Detections) < maxGuardDetections {
-		b.rec.Guard.Detections = append(b.rec.Guard.Detections, d)
+	if g := b.rec.Guard; g == nil || len(g.Detections) < maxGuardDetections {
+		// Record copies taken under the lock share the guard record and
+		// are saved after it is released, so a detection replaces the
+		// guard record instead of writing through that shared pointer.
+		next := guardRecord{TakenAt: m.now().UTC()}
+		if g != nil {
+			next = *g
+		}
+		next.Detections = append(slices.Clip(next.Detections), d)
+		b.rec.Guard = &next
 	}
 	rec := b.rec
 	id := b.identity()

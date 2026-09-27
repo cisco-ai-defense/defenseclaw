@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -184,5 +185,58 @@ func TestGuardSkipsCopyMode(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if _, ok := e.guard.active(e.project); ok {
 		t.Fatal("the guard runs for a copy-mode sandbox")
+	}
+}
+
+// TestGuardDetectionLeavesRecordCopiesAlone: the guard reports on its own
+// goroutine while other paths (the watch cursor, lifecycle, unblocks) copy
+// the record under the lock and save the copy after releasing it. A
+// detection must not write through state those copies share; with -race the
+// concurrent loop below also catches it.
+func TestGuardDetectionLeavesRecordCopiesAlone(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "copies"})
+	opts := e.guard.waitActive(t, e.project, true)
+	b, err := e.m.box(sb.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC)
+	detect := func(i int) {
+		dir := "nested/" + strconv.Itoa(i)
+		opts.OnDetect(nestguard.Detection{Kind: nestguard.KindRepository, Dir: dir, Quarantined: dir + "/.git.q", At: at})
+	}
+
+	e.m.mu.Lock()
+	before := b.rec
+	e.m.mu.Unlock()
+	detect(0)
+	if before.Guard == nil || len(before.Guard.Detections) != 0 {
+		t.Fatalf("a detection changed a record copy taken before it: %+v", before.Guard)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 32 {
+			if err := e.m.saveCursor(b, "cursor-"+strconv.Itoa(i)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for i := 1; i <= 32; i++ {
+		detect(i)
+	}
+	wg.Wait()
+
+	got, err := e.m.Get(context.Background(), sb.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.NestedRepos) != 33 || got.NestedRepos[32].Path != "nested/32/.git" {
+		t.Fatalf("nested repos = %+v", got.NestedRepos)
 	}
 }
