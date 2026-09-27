@@ -42,11 +42,15 @@ type Dialer = netguard.V8Dialer
 // sandbox and to put in events.
 type dialError struct {
 	// category is set for policy refusals (host_internal, private_network,
-	// operator_block); empty for plain failures.
+	// operator_block, or a blocklist feed's category); empty for plain
+	// failures.
 	category Category
 	status   int
 	reason   string
 	rule     string
+	// feed is the blocklist feed entry whose IP or CIDR pattern covers the
+	// resolved address.
+	feed *FeedMatch
 	// retry marks connection failures worth one attempt on the other
 	// address family.
 	retry bool
@@ -74,14 +78,20 @@ type guardDialer struct {
 // zero value applies the guard alone.
 type dialRules struct {
 	d *Decider
+	p Principal
 	// nameAllowed reports an operator allow rule covering the destination
 	// name: the private addresses it resolves to are open.
 	nameAllowed bool
+	// feeds applies the blocklist feeds' IP and CIDR entries to the address;
+	// off when an unblock or an operator allow rule admitted the
+	// destination, which lifts the feeds as it does in Decide.
+	feeds bool
 }
 
-// dialRules returns the dial-time rules for a destination Decide allowed.
-func (d *Decider) dialRules(dec Decision) dialRules {
-	r := dialRules{d: d}
+// dialRules returns the dial-time rules for p's destination that Decide
+// allowed as dec.
+func (d *Decider) dialRules(p Principal, dec Decision) dialRules {
+	r := dialRules{d: d, p: p, feeds: dec.Source != SourceUnblock && dec.Source != SourceOperator}
 	if _, err := netip.ParseAddr(dec.Host); err != nil {
 		_, r.nameAllowed = d.allow.match(dec.Host, netip.Addr{})
 	}
@@ -116,8 +126,11 @@ func (r dialRules) guard(addr netip.Addr, local *localAddrs) *dialError {
 	return nil
 }
 
-// check applies every address rule to the address about to be dialed: the
-// guard, then the operator's CIDR blocks.
+// check applies every address rule to the address about to be dialed, in
+// Decide's order for an IP literal: the guard, the operator's CIDR blocks,
+// then the blocklist feeds' IP and CIDR entries unless an unblock or an
+// operator allow rule covers the address. Feeds match names only against
+// name patterns, so without this a feed CIDR would never apply to a name.
 func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
 	if de := r.guard(addr, local); de != nil {
 		return de
@@ -125,13 +138,36 @@ func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
 	if r.d == nil {
 		return nil
 	}
-	if item, ok := r.d.block.match("", addr.Unmap()); ok {
+	addr = addr.Unmap()
+	if item, ok := r.d.block.match("", addr); ok {
 		return &dialError{
 			category: CategoryOperatorBlock, status: http.StatusForbidden, rule: item.pattern,
 			reason: "the destination resolves to an address the operator blocked",
 		}
 	}
-	return nil
+	if !r.feeds {
+		return nil
+	}
+	m, ok := matchFeeds(r.d.blocklists, "", addr)
+	if !ok || r.addrLifted(addr) {
+		return nil
+	}
+	return &dialError{
+		category: m.Entry.Category, status: http.StatusForbidden, rule: m.Pattern, feed: &m,
+		reason: "the destination resolves to an address the " + m.Feed.Name + " blocklist lists (" + m.Entry.Name + ")",
+	}
+}
+
+// addrLifted reports an unblock or operator allow rule covering addr.
+func (r dialRules) addrLifted(addr netip.Addr) bool {
+	if _, ok := r.d.allow.match("", addr); ok {
+		return true
+	}
+	if r.d.unblocks == nil {
+		return false
+	}
+	_, ok := r.d.unblocks.Unblocked(r.p, addr.String())
+	return ok
 }
 
 // dialerFunc adapts a function to Dialer.

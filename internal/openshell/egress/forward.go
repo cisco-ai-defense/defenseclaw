@@ -262,7 +262,7 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 	if !ok || host != dec.Host || port != dec.Port {
 		return nil, fmt.Errorf("egress: upstream dial to %s does not match the decided destination", sanitizeHost(addr))
 	}
-	conn, remote, err := p.dialer.dial(ctx, host, port, st.gen.decider.dialRules(dec))
+	conn, remote, err := p.dialer.dial(ctx, host, port, st.gen.decider.dialRules(st.tunnel.principal, dec))
 	if err != nil {
 		var de *dialError
 		if errors.As(err, &de) {

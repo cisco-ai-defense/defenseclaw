@@ -631,7 +631,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	upstream, remote, err := p.dialer.dial(p.ctx, dec.Host, dec.Port, d.dialRules(dec))
+	upstream, remote, err := p.dialer.dial(p.ctx, dec.Host, dec.Port, d.dialRules(pr, dec))
 	if err != nil {
 		p.dialFailedRaw(conn, pr, dec, err, start)
 		return
@@ -722,11 +722,20 @@ func (p *Proxy) recordRefusal(pr Principal, method string, dec Decision, status 
 // dialRefusal turns a policy refusal found at dial time into a decision.
 func dialRefusal(dec Decision, de *dialError) Decision {
 	source := SourceGuard
-	if de.category == CategoryOperatorBlock {
+	switch {
+	case de.category == CategoryOperatorBlock:
 		source = SourceOperator
+	case de.feed != nil:
+		source = SourceFeed
 	}
 	refused := blocked(dec, de.category, source, de.rule)
 	refused.Reason = strings.ToUpper(de.reason[:1]) + de.reason[1:] + "."
+	if m := de.feed; m != nil {
+		// As for a feed match in Decide: an unblock of the name lifts it.
+		refused.Reason += " " + m.Entry.Reason
+		refused.Feed, refused.FeedVersion, refused.Entry = m.Feed.Name, m.Feed.Version, m.Entry.Name
+		refused.Unblockable = true
+	}
 	return refused
 }
 

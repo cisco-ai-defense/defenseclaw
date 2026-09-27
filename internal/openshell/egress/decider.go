@@ -142,7 +142,9 @@ type DeciderOptions struct {
 	Ports []int
 	// Blocklists and Allowlists are the feeds to apply; the first matching
 	// feed wins. Nil uses the built-in feed; an empty non-nil slice uses
-	// none.
+	// none. A blocklist's IP and CIDR entries also apply at dial time to the
+	// address a name resolves to, unless an unblock or operator allow rule
+	// covers the name or the address.
 	Blocklists []*Feed
 	Allowlists []*Feed
 	// Block and Allow are operator patterns (openshell.egress.block/allow,

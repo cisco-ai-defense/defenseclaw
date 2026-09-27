@@ -865,6 +865,31 @@ func TestProxyUnblockAndSetDecider(t *testing.T) {
 	}
 }
 
+// A custom feed's CIDR entry blocks names that resolve into it, with the
+// feed's provenance and the usual unblock path.
+func TestProxyFeedCIDRBlocksNames(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) { c.decider.Blocklists = []*Feed{testFeedCIDR(t)} })
+	h.dialer.route(443, startEcho(t))
+	h.resolver.set("drop.example.org", []string{publicV4Alt})
+	_, _, resp := h.connect("drop.example.org:443", basicAuth(h.cred), nil)
+	b := decodeBlock(t, resp.body)
+	if resp.status != http.StatusForbidden || b.Category != CategoryFileDrop || b.Source != SourceFeed || b.Feed != "team" ||
+		b.Rule != "8.8.4.0/24" || !b.Unblockable || !strings.Contains(b.HowToUnblock, "sandbox unblock drop.example.org") {
+		t.Fatalf("CONNECT into a feed CIDR = %d %+v", resp.status, b)
+	}
+	if e := h.sink.wait(t, EventBlocked, 1)[0]; e.Category != CategoryFileDrop || e.Feed != "team" || e.Entry != "Drop net" {
+		t.Errorf("blocked event = %+v", e)
+	}
+	if err := h.unblocks.Add(Unblock{Pattern: "drop.example.org", SandboxID: "sb-1"}); err != nil {
+		t.Fatal(err)
+	}
+	conn, _, resp := h.connect("drop.example.org:443", basicAuth(h.cred), nil)
+	if resp.status != http.StatusOK {
+		t.Fatalf("CONNECT after the unblock = %d %s", resp.status, resp.body)
+	}
+	_ = conn.Close()
+}
+
 func TestProxyWebSocketUpgrade(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Upgrade") != "websocket" {

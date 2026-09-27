@@ -256,7 +256,7 @@ func TestGuardDialOperatorCIDRBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = g.dial(context.Background(), "cdn.example", 443, d2.dialRules(Decision{Host: "cdn.example"}))
+	_, _, err = g.dial(context.Background(), "cdn.example", 443, d2.dialRules(testPrincipal, Decision{Host: "cdn.example"}))
 	var de *dialError
 	if !errors.As(err, &de) || de.category != CategoryOperatorBlock || de.rule != "8.8.8.0/24" || de.status != http.StatusForbidden {
 		t.Fatalf("dial = %v (%+v)", err, de)
@@ -369,7 +369,7 @@ func TestGuardDialOperatorOpensPrivate(t *testing.T) {
 		{host: "192.168.8.8", category: CategoryPrivateNetwork},
 	}
 	for _, tt := range tests {
-		conn, _, err := g.dial(context.Background(), tt.host, 443, dec.dialRules(Decision{Host: tt.host}))
+		conn, _, err := g.dial(context.Background(), tt.host, 443, dec.dialRules(testPrincipal, Decision{Host: tt.host}))
 		if tt.category == "" {
 			if err != nil {
 				t.Errorf("dial(%s) = %v, want success", tt.host, err)
@@ -391,4 +391,70 @@ func TestGuardDialOperatorOpensPrivate(t *testing.T) {
 	if _, _, err := g.dial(context.Background(), "artifactory.corp.example", 443, dialRules{}); !isCategory(err, CategoryPrivateNetwork) {
 		t.Errorf("dial without rules = %v", err)
 	}
+}
+
+// testFeedCIDR is a blocklist feed whose only entry is a CIDR.
+func testFeedCIDR(t *testing.T) *Feed {
+	t.Helper()
+	feed, err := ParseFeed([]byte("schema_version: 1\nkind: blocklist\nname: team\nfeed_version: \"7\"\nentries:\n" +
+		"  - {name: Drop net, category: file_drop, hosts: [\"8.8.4.0/24\"]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return feed
+}
+
+// A blocklist feed's IP and CIDR entries apply to the address a name
+// resolves to, not only to IP-literal destinations; an unblock or operator
+// allow of the name, or of the address, lifts them as in Decide.
+func TestGuardDialFeedCIDRs(t *testing.T) {
+	g, r, d := newTestGuard(t)
+	r.set("cdn.example", []string{publicV4Alt})
+	r.set("clean.example", []string{publicV4})
+	unblocks, err := NewMemoryUnblocks(Unblock{Pattern: publicV4Alt, SandboxID: "sb-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecider(DeciderOptions{Blocklists: []*Feed{testFeedCIDR(t)}, Unblocks: unblocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = g.dial(context.Background(), "cdn.example", 443, dec.dialRules(testPrincipal, dec.Decide(testPrincipal, "cdn.example", 443)))
+	var de *dialError
+	if !errors.As(err, &de) || de.category != CategoryFileDrop || de.rule != "8.8.4.0/24" || de.feed == nil || de.status != http.StatusForbidden {
+		t.Fatalf("dial into a feed CIDR = %v (%+v)", err, de)
+	}
+	refused := dialRefusal(Decision{Host: "cdn.example", Port: 443, Mode: ModeOpen}, de)
+	if refused.Source != SourceFeed || refused.Feed != "team" || refused.FeedVersion != "7" || refused.Entry != "Drop net" ||
+		!refused.Unblockable || !strings.Contains(refused.Reason, "blocklist") {
+		t.Errorf("refusal = %+v", refused)
+	}
+	if n := len(d.addresses()); n != 0 {
+		t.Errorf("a feed-blocked address reached the dialer %d times", n)
+	}
+
+	lifted := []dialRules{
+		dec.dialRules(testPrincipal, Decision{Host: "cdn.example", Source: SourceUnblock}),
+		dec.dialRules(testPrincipal, Decision{Host: "cdn.example", Source: SourceOperator}),
+		dec.dialRules(Principal{BindingID: "b-2", SandboxID: "sb-2"}, Decision{Host: "cdn.example", Source: SourceDefault}),
+	}
+	withAllow, err := NewDecider(DeciderOptions{Blocklists: []*Feed{testFeedCIDR(t)}, Allow: []string{"8.8.4.4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifted = append(lifted, withAllow.dialRules(testPrincipal, Decision{Host: "cdn.example", Source: SourceDefault}))
+	for i, rules := range lifted {
+		conn, _, err := g.dial(context.Background(), "cdn.example", 443, rules)
+		if err != nil {
+			t.Errorf("lifted dial %d = %v", i, err)
+			continue
+		}
+		_ = conn.Close()
+	}
+	conn, _, err := g.dial(context.Background(), "clean.example", 443, dec.dialRules(testPrincipal, Decision{Host: "clean.example"}))
+	if err != nil {
+		t.Fatalf("dial outside the feed CIDR = %v", err)
+	}
+	_ = conn.Close()
 }
