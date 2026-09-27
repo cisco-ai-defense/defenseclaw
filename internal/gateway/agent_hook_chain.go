@@ -326,7 +326,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			req.Payload,
 		)
 		readPathDigest, readValueDigests :=
-			toolValueLineageSuccessfulReadResult(req, outcome)
+			toolValueLineageSuccessfulReadResult(ctx, req, outcome)
 		var (
 			sqlSource                  audit.ToolChainPendingSQLValueSource
 			sqlProjection              toolValueLineageSQLSuccessfulProjection
@@ -2048,6 +2048,7 @@ func projectToolValueLineageSink(
 }
 
 func toolValueLineageSuccessfulReadResult(
+	ctx context.Context,
 	req agentHookRequest,
 	outcome connector.ToolLifecycleOutcome,
 ) (string, guardrail.ToolChainValueJoinDigests) {
@@ -2075,7 +2076,7 @@ func toolValueLineageSuccessfulReadResult(
 		Tool:       req.ToolName,
 		Args:       args,
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: hookActiveHome(ctx),
 	})
 	pathDigest, exact := exactSingleReadPathDigest(facts)
 	kind, supported := toolValueLineageSourceKindForSensitiveRead(facts)

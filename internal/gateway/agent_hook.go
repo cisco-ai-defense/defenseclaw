@@ -1915,7 +1915,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				Tool:                     actionTool,
 				Args:                     req.ToolArgs,
 				CWD:                      req.CWD,
-				ActiveHome:               trustedSameHostHome(),
+				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},

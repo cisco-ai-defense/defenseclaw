@@ -241,7 +241,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 				Tool:                     actionTool,
 				Args:                     toolArgs,
 				CWD:                      req.CWD,
-				ActiveHome:               trustedSameHostHome(),
+				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
@@ -1525,7 +1525,7 @@ func codexObserveWorkspaceSourceProofForRequest(req codexHookRequest) codexObser
 	}
 	commandText := codexExactMapString(req.ToolInput, "command", "cmd", "script")
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		commandText, facts, req.CWD, toolName,
+		commandText, facts, req.CWD, toolName, "",
 	); candidate {
 		if codexStaticPowerShellReaderSourceScopeWithTarget(
 			powerShellFacts, req.CWD, trustedCodexObserveSourceTarget,
@@ -1903,7 +1903,7 @@ func codexStaticSafeReaderSourceScope(
 	toolName string,
 ) bool {
 	if powerShellFacts, candidate := codexStaticPowerShellReaderFacts(
-		command, facts, cwd, toolName,
+		command, facts, cwd, toolName, "",
 	); candidate {
 		return codexStaticPowerShellReaderSourceScope(powerShellFacts, cwd)
 	}
@@ -1966,11 +1966,15 @@ func codexStaticSafeReaderSourceScope(
 // explicit PowerShell/CMD tool or for a generic execution envelope running on
 // Windows. This preserves Unix `type`/`gc` semantics while covering the same
 // generic exec_command envelope Codex uses on Windows.
+// codexStaticPowerShellReaderFacts re-parses a short PowerShell reader.
+// activeHome is the home "~" means for the request; empty means the host
+// user's.
 func codexStaticPowerShellReaderFacts(
 	command string,
 	facts actionfacts.Facts,
 	cwd string,
 	toolName string,
+	activeHome string,
 ) (actionfacts.Facts, bool) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -2006,7 +2010,7 @@ func codexStaticPowerShellReaderFacts(
 		Tool:        "powershell",
 		Command:     command,
 		CWD:         cwd,
-		ActiveHome:  trustedSameHostHome(),
+		ActiveHome:  firstNonEmpty(activeHome, trustedSameHostHome()),
 		DialectHint: actionfacts.DialectPowerShell,
 	}), true
 }

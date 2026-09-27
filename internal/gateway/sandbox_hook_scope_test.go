@@ -315,6 +315,57 @@ func TestSandboxWatchPathsUseSandboxNamespace(t *testing.T) {
 	}
 }
 
+// TestSandboxToolCallsResolveHomeInTheSandbox pins the home "~" means in a
+// sandboxed tool call: the sandbox HOME, never the host user's home, for
+// the policy input and for the tool-chain facts built from it.
+func TestSandboxToolCallsResolveHomeInTheSandbox(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	p := newSandboxProject(t)
+	api := activeClaudeCodeTestAPI()
+	hostHome := trustedSameHostHome()
+	if hostHome == "" || hostHome == sandboxauth.SandboxHome {
+		t.Skipf("host home %q cannot be told apart from the sandbox home", hostHome)
+	}
+	facts := func(ctx context.Context) actionfacts.Facts {
+		t.Helper()
+		capture := toolChainHookCapture{}
+		ctx = withToolChainHookCapture(withAuthenticatedHookConnector(ctx, "claudecode"), &capture)
+		api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "home-s", CWD: p.root, ToolName: "Bash",
+			ToolInput: map[string]interface{}{"command": "cat ~/.ssh/config"},
+			Payload:   map[string]interface{}{"tool_name": "Bash"},
+		})
+		if !capture.recorded {
+			t.Fatal("trusted action facts were not captured")
+		}
+		return capture.facts
+	}
+	resolved := func(f actionfacts.Facts) []string {
+		var out []string
+		for _, path := range f.Paths {
+			out = append(out, path.Resolved)
+		}
+		return out
+	}
+	sandbox := facts(sandboxCtx(p.mount))
+	if sandbox.ActiveHome != sandboxauth.SandboxHome ||
+		!slices.Contains(resolved(sandbox), "/sandbox/.ssh/config") {
+		t.Fatalf("sandbox facts home=%q paths=%v", sandbox.ActiveHome, resolved(sandbox))
+	}
+	for _, path := range resolved(sandbox) {
+		if strings.HasPrefix(path, hostHome+string(filepath.Separator)) {
+			t.Fatalf("sandbox tool call resolved to the host home: %v", resolved(sandbox))
+		}
+	}
+	host := facts(context.Background())
+	if host.ActiveHome != hostHome || !slices.Contains(resolved(host), filepath.Join(hostHome, ".ssh", "config")) {
+		t.Fatalf("host facts home=%q paths=%v", host.ActiveHome, resolved(host))
+	}
+	if got := hookActiveHome(sandboxCtx(p.copy)); got != sandboxauth.SandboxHome {
+		t.Fatalf("copy-mode home = %q", got)
+	}
+}
+
 func TestSandboxPromotedArtifactReadsOnlyProject(t *testing.T) {
 	p := newSandboxProject(t)
 	inside := p.write(t, "build.sh", "#!/bin/sh\necho hi\n", 0o755)

@@ -141,7 +141,7 @@ func promotedArtifactFindings(
 			Tool:                                     "shell",
 			Command:                                  string(analysisBody),
 			CWD:                                      facts.CWD,
-			ActiveHome:                               trustedSameHostHome(),
+			ActiveHome:                               hookActiveHome(ctx),
 			ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
 			ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
 			ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,

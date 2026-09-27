@@ -82,6 +82,20 @@ func hookCWDForContext(ctx context.Context, cwd string) string {
 	return sanitizeHookCWD(cwd)
 }
 
+// hookActiveHome is the directory "~" names in a request's tool calls: the
+// host user's home for host traffic and the fixed sandbox HOME for a
+// sandbox, whose agent has no access to the host home. The sandbox working
+// directory is still mapped to its host project (hookCWDForContext), so
+// project-relative operands resolve where the gateway can inspect them,
+// while "~/.ssh" is matched as the agent's /sandbox/.ssh and never as a host
+// path the command cannot reach.
+func hookActiveHome(ctx context.Context) string {
+	if isSandboxHookRequest(ctx) {
+		return sandboxauth.SandboxHome
+	}
+	return trustedSameHostHome()
+}
+
 // sandboxHookCWD maps a sandbox working directory to the real host
 // directory it is mounted from, or "" when it has no host counterpart.
 func sandboxHookCWD(view *sandboxauth.FSView, cwd string) string {

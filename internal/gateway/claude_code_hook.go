@@ -170,7 +170,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				Tool:                                     actionTool,
 				Args:                                     toolArgs,
 				CWD:                                      req.CWD,
-				ActiveHome:                               trustedSameHostHome(),
+				ActiveHome:                               hookActiveHome(ctx),
 				ToolResourceIdentity:                     resourceIdentity,
 				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
