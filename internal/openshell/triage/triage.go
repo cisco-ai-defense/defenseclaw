@@ -60,6 +60,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +121,10 @@ const (
 	// rule, or asks for rule features triage never approves (layer-7
 	// rules, access presets, credential handling).
 	ReasonRuleShape Reason = "unsupported_rule"
+	// ReasonMultipleHosts: the proposal's endpoints name more than one
+	// destination host. Approving a proposal opens all of it, but an ask
+	// shows the user one destination, so each host must be its own rule.
+	ReasonMultipleHosts Reason = "multiple_hosts"
 )
 
 // Flood limits the sandbox manager applies to triage decisions.
@@ -405,10 +410,11 @@ type Decision struct {
 	Violation *packs.Violation
 }
 
-// Classify judges a proposal. The rule itself is judged first (its name
-// and features), then its allowed_ips and every endpoint: any rejection
-// rejects the proposal, then an endpoint that could not be checked defers
-// it, then any ask asks, otherwise it is approved. Destination names are
+// Classify judges a proposal. The rule itself is judged first (its name,
+// its features, one destination host), then its allowed_ips and every
+// endpoint: any rejection rejects the proposal, then an endpoint that could
+// not be checked defers it, then any ask asks, otherwise it is approved. An
+// ask for more than one port names them all. Destination names are
 // resolved (bounded by ctx and a per-name timeout) and held to the proxy's
 // dial-time address rules.
 func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
@@ -434,6 +440,21 @@ func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 		d.Host, d.Port = firstEndpoint(p)
 		return d
 	}
+	if hosts := destinationHosts(p); len(hosts) > 1 {
+		host, port := firstEndpoint(p)
+		shown := hosts
+		if len(shown) > 3 {
+			shown = append(slices.Clip(shown[:3]), fmt.Sprintf("%d more", len(hosts)-3))
+		}
+		return Decision{Verdict: Reject, Reason: ReasonMultipleHosts, Kind: KindNetworkRule, Host: host, Port: port,
+			Message: fmt.Sprintf("the proposal names %d destination hosts (%s); propose each host as its own rule", len(hosts),
+				truncate(strings.Join(shown, ", "), 200))}
+	}
+	return withPorts(classifyEndpoints(ctx, p, pol, decider), p)
+}
+
+// classifyEndpoints judges a proposal's allowed_ips and endpoints.
+func classifyEndpoints(ctx context.Context, p Proposal, pol Policy, decider *egress.Decider) Decision {
 	var ipAsk *Decision
 	for _, entry := range p.AllowedIPs {
 		d := judgeAllowedIP(pol.Effective, entry)
@@ -513,6 +534,36 @@ func judgeRule(p Proposal) (Decision, bool) {
 			", which DefenseClaw never approves; propose a plain host and port"), true
 	}
 	return Decision{}, false
+}
+
+// destinationHosts are the distinct destination hosts of a proposal's
+// endpoints, in order.
+func destinationHosts(p Proposal) []string {
+	var out []string
+	for _, ep := range p.Endpoints {
+		if host := NormalizeHost(ep.Host); !slices.Contains(out, host) {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+// withPorts names every port of an ask for more than one: the ask shows
+// one destination and port, and approving opens all of them.
+func withPorts(d Decision, p Proposal) Decision {
+	if d.Verdict != Ask || len(p.Endpoints) < 2 {
+		return d
+	}
+	var ports []int
+	for _, ep := range p.Endpoints {
+		if !containsInt(ports, ep.Port) {
+			ports = append(ports, ep.Port)
+		}
+	}
+	if len(ports) > 1 {
+		d.Message += "; approving opens ports " + joinInts(ports)
+	}
+	return d
 }
 
 func firstEndpoint(p Proposal) (string, int) {

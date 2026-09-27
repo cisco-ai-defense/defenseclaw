@@ -422,27 +422,37 @@ func TestApprovalShowsAndChecksTheWholeProposal(t *testing.T) {
 	e.run()
 	sb := e.create(sandboxapi.CreateRequest{Name: "wholebox"})
 	e.watch.waitStarted(t, sb.Name)
+	// A proposal naming a second host is rejected: the ask would show the
+	// user one destination while approving opens both.
+	two := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
+	two.ProposedRule.Endpoints = append(two.ProposedRule.Endpoints, types.PolicyNetworkEndpoint{Host: "10.1.2.3", Port: 443})
+	twoID := addChunk(e, sb.Name, two)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "the two-host proposal rejected", func() bool { return chunkStatus(e, sb.Name, twoID) == "rejected" })
+
 	c := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
 	c.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
-	c.ProposedRule.Endpoints = append(c.ProposedRule.Endpoints, types.PolicyNetworkEndpoint{Host: "10.1.2.3", Port: 443})
 	id := addChunk(e, sb.Name, c)
 	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
 	asks := waitAsks(t, e, sb.Name, 1)
 	got := asks[0]
-	want := []sandboxapi.ApprovalEndpoint{{Host: "host.openshell.internal", Port: 3000}, {Host: "host.openshell.internal", Port: 22}, {Host: "10.1.2.3", Port: 443}}
+	want := []sandboxapi.ApprovalEndpoint{{Host: "host.openshell.internal", Port: 3000}, {Host: "host.openshell.internal", Port: 22}}
 	if !slices.Equal(got.Endpoints, want) || got.RuleName != "allow_host_openshell_internal_3000" || !slices.Equal(got.Binaries, []string{"/usr/bin/curl"}) {
 		t.Fatalf("ask = %+v", got)
 	}
-	// The administrator now forbids unblocking, which refuses the private
-	// address — the second destination, not the one that decided the ask.
-	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	// The ask names every port approving opens.
+	if !strings.Contains(got.Reason, "3000, 22") {
+		t.Fatalf("ask reason = %q, want both ports", got.Reason)
+	}
+	// The whole proposal is judged again at the decision.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = boolPtr(false) })
 	_, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve"})
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
 	if s := chunkStatus(e, sb.Name, id); s != "pending" {
 		t.Fatalf("refused proposal = %s", s)
 	}
 	// Always is refused for proposals that reach this machine.
-	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = nil })
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = nil })
 	if _, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
 		t.Fatalf("approve always: %v", err)
 	}

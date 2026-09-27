@@ -192,14 +192,44 @@ func TestClassify(t *testing.T) {
 func TestClassifyWorstEndpointWins(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
 	p := Proposal{Sandbox: "s", ChunkID: "c", RuleName: "allow_multi", Endpoints: []Endpoint{
-		{Host: "ok.example.org", Port: 443}, {Host: "host.openshell.internal", Port: 8080}, {Host: "webhook.site", Port: 443},
+		{Host: "host.openshell.internal", Port: 8080}, {Host: "host.openshell.internal", Port: 5432}, {Host: "host.openshell.internal", Port: 18971},
 	}}
-	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Reject || got.Host != "webhook.site" {
-		t.Fatalf("mixed proposal = %+v, want the blocklisted endpoint to reject it", got)
+	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Reject || got.Port != 18971 {
+		t.Fatalf("mixed proposal = %+v, want the reserved port to reject it", got)
 	}
 	p.Endpoints = p.Endpoints[:2]
-	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Ask || got.Kind != KindHostPort {
+	got := Classify(context.Background(), p, testPolicy(open))
+	if got.Verdict != Ask || got.Kind != KindHostPort || got.Port != 8080 {
 		t.Fatalf("mixed proposal = %+v, want the host port to ask", got)
+	}
+	// The ask shows one destination; it names every port approving opens.
+	if !strings.Contains(got.Message, "approving opens ports 8080, 5432") {
+		t.Fatalf("ask message = %q, want every port", got.Message)
+	}
+}
+
+// TestClassifyOneHostPerProposal pins that a proposal naming more than one
+// destination host is rejected: approving opens every endpoint of it, but
+// an ask shows the user one destination.
+func TestClassifyOneHostPerProposal(t *testing.T) {
+	open := effective(t, nil, packs.Flags{})
+	balanced := effective(t, nil, packs.Flags{Profile: "balanced"})
+	for _, eff := range []*packs.Effective{open, balanced} {
+		p := Proposal{Sandbox: "s", ChunkID: "c", RuleName: "allow_docs_example_org_443", Endpoints: []Endpoint{
+			{Host: "docs.example.org", Port: 443}, {Host: "Hidden.Example.NET.", Port: 443},
+		}}
+		got := Classify(context.Background(), p, testPolicy(eff))
+		if got.Verdict != Reject || got.Reason != ReasonMultipleHosts || got.Host != "docs.example.org" ||
+			!strings.Contains(got.Message, "hidden.example.net") {
+			t.Fatalf("two-host proposal (%s) = %+v", eff.Profile, got)
+		}
+	}
+	// The same host twice (another port, another spelling) is one host.
+	p := Proposal{Sandbox: "s", ChunkID: "c", RuleName: "allow_docs_example_org_443", Endpoints: []Endpoint{
+		{Host: "docs.example.org", Port: 443}, {Host: "DOCS.example.org.", Port: 80},
+	}}
+	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Approve {
+		t.Fatalf("one-host proposal = %+v", got)
 	}
 }
 
@@ -548,7 +578,9 @@ func TestClassifyDefersTransientLookups(t *testing.T) {
 		})
 	}
 	// Endpoint order: a rejection anywhere wins over a deferral, and a
-	// deferral wins over an ask or an approval.
+	// deferral wins over an ask or an approval. Classify refuses proposals
+	// naming several hosts first, so the order is pinned on the endpoint
+	// judgement itself, and across the ports of one host.
 	multi := func(hosts ...string) Proposal {
 		p := proposal(hosts[0], 443)
 		for _, h := range hosts[1:] {
@@ -556,14 +588,26 @@ func TestClassifyDefersTransientLookups(t *testing.T) {
 		}
 		return p
 	}
-	if got := Classify(ctx, multi("timeout.example.org", "webhook.site"), pol); got.Verdict != Reject {
+	decider, err := pol.decider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := classifyEndpoints(ctx, multi("timeout.example.org", "webhook.site"), pol, decider); got.Verdict != Reject {
 		t.Fatalf("deferred + blocklisted = %+v, want a rejection", got)
 	}
-	if got := Classify(ctx, multi("ok.example.org", "timeout.example.org"), pol); got.Verdict != Defer {
+	if got := classifyEndpoints(ctx, multi("ok.example.org", "timeout.example.org"), pol, decider); got.Verdict != Defer {
 		t.Fatalf("approved + deferred = %+v, want a deferral", got)
 	}
-	if got := Classify(ctx, multi("wiki.corp", "timeout.example.org"), pol); got.Verdict != Defer {
+	if got := classifyEndpoints(ctx, multi("wiki.corp", "timeout.example.org"), pol, decider); got.Verdict != Defer {
 		t.Fatalf("ask + deferred = %+v, want a deferral", got)
+	}
+	if got := Classify(ctx, multi("ok.example.org", "timeout.example.org"), pol); got.Verdict != Reject || got.Reason != ReasonMultipleHosts {
+		t.Fatalf("two-host proposal = %+v, want a rejection", got)
+	}
+	ports := proposal("timeout.example.org", 443)
+	ports.Endpoints = append(ports.Endpoints, Endpoint{Host: "timeout.example.org", Port: 22})
+	if got := Classify(ctx, ports, pol); got.Verdict != Reject || got.Reason != ReasonPortNotAllowed {
+		t.Fatalf("deferred port + refused port = %+v, want a rejection", got)
 	}
 }
 

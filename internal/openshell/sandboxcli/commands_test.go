@@ -151,6 +151,15 @@ func TestApprovalsAndDecisions(t *testing.T) {
 		t.Fatalf("approvals:\n%s", out)
 	}
 	ta.out.Reset()
+	// An ask for several ports shows every one approving opens.
+	ta.daemon.approvals[0].Endpoints = []sandboxapi.ApprovalEndpoint{{Host: "127.0.0.1", Port: 5432}, {Host: "127.0.0.1", Port: 6379}}
+	if err := ta.Approvals(context.Background(), ApprovalsOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if out := ta.output(); !strings.Contains(out, "127.0.0.1:5432,6379") {
+		t.Fatalf("approvals with two ports:\n%s", out)
+	}
+	ta.out.Reset()
 	if err := ta.Approvals(context.Background(), ApprovalsOptions{Output: OutputJSON}); err != nil {
 		t.Fatal(err)
 	}

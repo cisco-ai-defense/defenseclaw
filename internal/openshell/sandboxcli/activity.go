@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -167,10 +168,7 @@ func (a *App) Approvals(ctx context.Context, o ApprovalsOptions) error {
 		}
 		rows := make([][]string, 0, len(list))
 		for _, ap := range list {
-			dest := ap.Host
-			if ap.Port != 0 {
-				dest += ":" + strconv.Itoa(ap.Port)
-			}
+			dest := approvalDestination(ap)
 			risk := ""
 			if ap.Risky {
 				risk = "risky"
@@ -197,6 +195,25 @@ func (a *App) Approvals(ctx context.Context, o ApprovalsOptions) error {
 		return apiError(err)
 	}
 	return nil
+}
+
+// approvalDestination is what approving an ask opens: its host with every
+// port the proposal names (the daemon rejects proposals naming a second
+// host).
+func approvalDestination(ap sandboxapi.Approval) string {
+	var ports []string
+	for _, ep := range ap.Endpoints {
+		if p := strconv.Itoa(ep.Port); ep.Port != 0 && !slices.Contains(ports, p) {
+			ports = append(ports, p)
+		}
+	}
+	if len(ports) == 0 && ap.Port != 0 {
+		ports = append(ports, strconv.Itoa(ap.Port))
+	}
+	if len(ports) == 0 {
+		return ap.Host
+	}
+	return ap.Host + ":" + strings.Join(ports, ",")
 }
 
 // DecideOptions are the `sandbox approve|reject` arguments.

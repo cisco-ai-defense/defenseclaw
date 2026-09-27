@@ -202,6 +202,10 @@ OpenShell, which then files a draft policy proposal. `internal/openshell/triage`
 judges each proposal against the sandbox's own proxy decider, because
 approving one adds a direct OpenShell rule that bypasses the proxy:
 
+- A proposal naming more than one destination host is rejected: approving
+  it opens every endpoint, while an ask shows one destination, so each host
+  must be its own proposal. An ask for several ports of one host names them
+  all.
 - What the proxy refuses and no unblock lifts is rejected: the
   administrator's lists, the block list, the blocklist feed, this machine,
   link-local and metadata addresses.
