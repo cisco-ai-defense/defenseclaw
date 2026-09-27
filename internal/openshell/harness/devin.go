@@ -37,7 +37,9 @@ var devinPin = tarballPin{
 
 // Devin is the Devin CLI harness. Its hooks live in the user config.json
 // (tamper tier user); the launcher restores them from a root-owned template
-// on every start.
+// on every start and skips Devin's workspace trust check, whose declined
+// prompt (Restricted Mode) runs without hooks and which stops a headless run
+// outright.
 //
 // Devin requires a Devin account login before any agent turn, including with
 // its OpenAI-compatible backend (ACP_BACKEND=openai), and its login is an
@@ -53,7 +55,7 @@ var Devin = register(&Spec{
 	TamperTier:     connector.SandboxTamperTierUser,
 	Verification: Verification{
 		Status: Unverified,
-		Reason: "the Devin CLI needs a Devin account login (`devin auth login`, a browser or pasted-token flow) before any agent turn: without one `devin -p` stops at \"Login canceled\" and fires no hook, also with ACP_BACKEND=openai pointed at a mock, and there is no API-key or bring-your-own-model path that skips the login. Measured on the pin: the archive matches the vendor manifest, the binary runs in the community base, and --permission-mode dangerous is the skip-permissions mode; hook firing at the ingress, blocking and the Devin endpoint set need a logged-in sandbox",
+		Reason: "the Devin CLI needs a Devin account login (`devin auth login`, a browser or pasted-token flow) before any agent turn: without one `devin -p` stops at \"Login canceled\" and fires no hook, also with ACP_BACKEND=openai pointed at a mock, and there is no API-key or bring-your-own-model path that skips the login. Measured on the pin: the archive matches the vendor manifest, the binary runs in the community base, and --permission-mode dangerous is the skip-permissions mode. The launcher passes --respect-workspace-trust false (accepted before a prompt and before a subcommand): Devin's bundled docs say --print fails in an untrusted directory, and a declined trust prompt runs Restricted Mode without hooks; the trade-off is that a project's own hooks (.devin/hooks.v1.json) load beside DefenseClaw's without a prompt, which the user tier leaves open. Hook firing at the ingress, blocking, the trust bypass in a real turn and the Devin endpoint set need a logged-in sandbox",
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/devin", "--version"},
@@ -103,6 +105,7 @@ var Devin = register(&Spec{
 	preseedRefresh: []string{
 		"put the DefenseClaw hooks back into ~/.config/devin/config.json from the root-owned template, keeping the other settings (the agent can edit or remove them)",
 		"pin HOME and drop XDG_CONFIG_HOME, which move the config Devin reads, and refuse a caller --config",
+		"skip the workspace trust check with --respect-workspace-trust false (a headless --print run fails in an untrusted directory, and a declined trust prompt runs Restricted Mode without hooks), refuse a caller --respect-workspace-trust and drop the respect_workspace_trust and skip_workspace_trust config keys; the project's own .devin hooks then load beside DefenseClaw's without a prompt",
 	},
 })
 
@@ -114,7 +117,8 @@ var devinLauncher = `#!/bin/bash -p
 # DefenseClaw Devin CLI launcher (OpenShell sandbox images, root-owned). Devin
 # reads the DefenseClaw hooks from the user config.json, so the launcher puts
 # them back from the root-owned template, pins the config location, and
-# execs the pinned Devin CLI with the caller's arguments.
+# execs the pinned Devin CLI with the workspace trust check off (a declined
+# trust prompt runs Devin without hooks) and the caller's arguments.
 set -u
 ` + launcherPreamble + `refuse() {
   echo "defenseclaw: refusing to start Devin: $1. $2" >&2
@@ -124,6 +128,9 @@ for arg in "$@"; do
   case "$arg" in
     --config|--config=*)
       refuse "$arg is not supported in a DefenseClaw sandbox" "The DefenseClaw hooks live in the default config."
+      ;;
+    --respect-workspace-trust|--respect-workspace-trust=*)
+      refuse "$arg is not supported in a DefenseClaw sandbox" "Devin runs without hooks in an untrusted workspace, so the launcher skips the trust check."
       ;;
   esac
 done
@@ -136,11 +143,12 @@ template="` + connector.DevinSandboxConfigTemplatePath + `"
 [ -x /usr/bin/jq ] || refuse "jq is missing" "The DefenseClaw hooks cannot be restored without it."
 /bin/mkdir -p "${cfg%/*}" 2>/dev/null || refuse "${cfg%/*} cannot be created" "The DefenseClaw hooks live there."
 tmp="$(/usr/bin/mktemp "$cfg.XXXXXX" 2>/dev/null)" || refuse "$cfg cannot be updated" "The DefenseClaw hooks live there."
-# Keep the user's other settings; a config that is missing, unreadable or
-# not exactly one JSON object (comments included) is replaced by the
-# template.
+# Keep the user's other settings, less the workspace trust keys, which could
+# otherwise turn the trust check the launcher skips back on; a config that is
+# missing, unreadable or not exactly one JSON object (comments included) is
+# replaced by the template.
 if [ -f "$cfg" ] && [ ! -L "$cfg" ] &&
-  /usr/bin/jq -s --slurpfile t "$template" 'if length == 1 and (.[0] | type) == "object" then .[0] | .hooks = $t[0].hooks else error("not one object") end' "$cfg" >"$tmp" 2>/dev/null; then
+  /usr/bin/jq -s --slurpfile t "$template" 'if length == 1 and (.[0] | type) == "object" then .[0] | .hooks = $t[0].hooks | del(.respect_workspace_trust, .skip_workspace_trust) else error("not one object") end' "$cfg" >"$tmp" 2>/dev/null; then
   :
 elif ! /bin/cp "$template" "$tmp" 2>/dev/null; then
   /bin/rm -f "$tmp"
@@ -148,4 +156,4 @@ elif ! /bin/cp "$template" "$tmp" 2>/dev/null; then
 fi
 /bin/chmod 0600 "$tmp" 2>/dev/null
 /bin/mv -f "$tmp" "$cfg" 2>/dev/null || { /bin/rm -f "$tmp"; refuse "the DefenseClaw hooks could not be restored to $cfg" "Devin runs without hooks when they are missing."; }
-` + launcherExec(`/usr/local/bin/devin "$@"`)
+` + launcherExec(`/usr/local/bin/devin --respect-workspace-trust false "$@"`)

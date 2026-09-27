@@ -199,13 +199,15 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 		existing  string
 		keepOther bool
 	}{
-		"hooks-removed":  {existing: `{"model":"opus","hooks":{}}`, keepOther: true},
-		"hooks-replaced": {existing: `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/bin/true"}]}]}}`, keepOther: true},
-		"not-json":       {existing: `{"model":`},
-		"not-an-object":  {existing: `["x"]`},
-		"two-documents":  {existing: `{"model":"opus"} {"hooks":{}}`},
-		"comments":       {existing: "{\n  // the user's note\n  \"model\": \"opus\"\n}"},
-		"missing":        {},
+		"hooks-removed": {existing: `{"model":"opus","hooks":{}}`, keepOther: true},
+		// The agent turns the trust check the launcher skips back on.
+		"trust-reenabled": {existing: `{"model":"opus","respect_workspace_trust":true,"skip_workspace_trust":false,"hooks":{}}`, keepOther: true},
+		"hooks-replaced":  {existing: `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/bin/true"}]}]}}`, keepOther: true},
+		"not-json":        {existing: `{"model":`},
+		"not-an-object":   {existing: `["x"]`},
+		"two-documents":   {existing: `{"model":"opus"} {"hooks":{}}`},
+		"comments":        {existing: "{\n  // the user's note\n  \"model\": \"opus\"\n}"},
+		"missing":         {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			launcher, home := launcherFixture(t, Devin, recordArgsAndEnv)
@@ -233,17 +235,28 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 			if tc.keepOther && cfg["model"] != "opus" {
 				t.Fatalf("the user's other settings were dropped:\n%s", raw)
 			}
+			for _, key := range []string{"respect_workspace_trust", "skip_workspace_trust"} {
+				if _, ok := cfg[key]; ok {
+					t.Fatalf("the config keeps %s:\n%s", key, raw)
+				}
+			}
 			if info, _ := os.Stat(cfgPath); info.Mode().Perm() != 0o600 {
 				t.Fatalf("config mode %v", info.Mode())
 			}
-			record, _ := os.ReadFile(filepath.Join(home, "record"))
-			if strings.Contains(string(record), "ENV XDG_CONFIG_HOME=") || !strings.Contains(string(record), "ARG -p\nARG hi\n") {
-				t.Fatalf("devin record:\n%s", record)
+			// The workspace trust check is off: a headless --print run fails
+			// in an untrusted directory, and a declined trust prompt runs
+			// Devin without hooks.
+			run := readRecord(t, home)
+			if _, ok := run.env["XDG_CONFIG_HOME"]; ok || !reflect.DeepEqual(run.args, []string{"--respect-workspace-trust", "false", "-p", "hi"}) {
+				t.Fatalf("devin argv %q, env %v", run.args, run.env)
 			}
 		})
 	}
 	launcher, home := launcherFixture(t, Devin, "echo started\n")
-	for _, args := range [][]string{{"--config", "/tmp/x.json"}, {"--config=/tmp/x.json"}} {
+	for _, args := range [][]string{
+		{"--config", "/tmp/x.json"}, {"--config=/tmp/x.json"},
+		{"--respect-workspace-trust", "true", "-p", "hi"}, {"--respect-workspace-trust=true"},
+	} {
 		if code, out := startLauncher(t, launcher, home, home, nil, args...); code != 2 || strings.Contains(out, "started") || !strings.Contains(out, "is not supported") {
 			t.Fatalf("%v: exit %d\n%s", args, code, out)
 		}
