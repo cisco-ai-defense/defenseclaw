@@ -24,9 +24,9 @@ every action taken while one runs, and a user who tries to go past them is
 told which setting stopped them.
 
 To see the policy a run would get, and where each setting comes from, run
-`defenseclaw sandbox policy explain` in the project folder. The
-[Sandbox guide](/docs/setup/sandbox) walks through a session, and
-[Sandbox CLI](/docs/reference/sandbox-cli) lists every command and flag.
+`defenseclaw sandbox policy explain` in the project folder.
+[Sandbox CLI](/docs/reference/sandbox-cli) lists every command and flag; see
+also [Sandbox](/docs/setup/sandbox).
 
 <Callout title="Sandboxes and managed installs">
 Sandboxes run on Linux and macOS, as your own user. A `managed_enterprise`
@@ -52,6 +52,10 @@ enforced but advisory. See
 | Host ports for MCP servers | Can be opened | Can be opened | Never |
 | Hook failure | Tool call denied | Tool call denied | Tool call denied |
 | Hook tamper | Reported, sandbox keeps running | Sandbox stopped | Sandbox stopped |
+
+The large-upload alert is the one row that doesn't follow each sandbox's
+pack: the daemon uses one threshold for all its sandboxes, taken from the
+configured pack (see [Large-upload alert](#large-upload-alert-threshold)).
 
 All three packs use the built-in blocklist feed, hide the same list of secret
 files, and flag the same list of files that can run code on your machine.
@@ -162,7 +166,9 @@ These are the settings each pack controls. The
   the only ports a connection request can open.
 - **Large-upload alert** (`egress.large_upload_mb`): report an upload of more
   than this many MiB to a host the sandbox hasn't contacted before. `0` turns
-  the report off. The upload itself is not cut off.
+  the report off. The upload itself is not cut off. Only the configured
+  pack's value counts; see
+  [Large-upload alert](#large-upload-alert-threshold).
 - **Workspace mode** (`workspace.mode`): `mount` shares the project folder
   live. `copy` gives the agent a copy, and its changes come back as a patch or
   branch.
@@ -494,6 +500,20 @@ The size keys `openshell.workdir.max_upload_mb` and
 `openshell.egress.large_upload_mb` replace the pack's value when they are above
 0. `openshell.workdir.git_depth` and `openshell.workdir.on_exit` are not part of
 a pack.
+
+### Large-upload alert threshold
+
+The egress proxy has one large-upload threshold for every sandbox of the
+daemon: `openshell.egress.large_upload_mb` when it is above 0, else the
+`egress.large_upload_mb` of the configured pack (`openshell.pack`, or the pack
+`openshell.admin` requires). A run's `--pack` or `--profile` doesn't change
+it, so `sandbox run --pack balanced` on an `open` configuration still
+reports uploads over 25 MiB, not 10 MiB. (Under the `strict` profile traffic
+doesn't pass the proxy, so there is nothing to report.) The daemon reads the threshold when its
+sandbox runtime starts. A change to either key takes effect when the daemon
+restarts, or when the API listener restarts with the sandbox runtime (for
+example after `openshell.enabled` or a listener port changes), not on a config
+reload.
 
 Because `openshell.profile` replaces the pack's profile, it can loosen a pack
 as well as tighten it. For example, `profile: open` on the `strict` pack turns
@@ -969,9 +989,10 @@ What developers get:
 - Every sandbox gets at most 4 CPUs and 8 GiB of memory. A run that asks for
   nothing gets exactly that.
 - A run can choose the `strict` profile or a stricter pack, but never `open`.
-  Locking `pack` keeps the balanced pack's lower upload alert and other
-  settings. Without the lock, a run could choose the `open` pack, which
-  `min_profile` would still hold to the balanced allowlist.
+  Locking `pack` keeps the balanced pack's other settings. Without the lock,
+  a run could choose the `open` pack, which `min_profile` would still hold to
+  the balanced allowlist. The upload alert is the configured pack's 10 MiB
+  either way.
 
 ## Example: a strict organization
 
@@ -1021,6 +1042,6 @@ What developers get:
   lists every `openshell` key.
 - [Enterprise deployment](/docs/setup/enterprise-deployment) covers
   administrator-owned configuration.
-- The [Sandbox guide](/docs/setup/sandbox) walks through setup and a session.
+- [Sandbox](/docs/setup/sandbox), the sandbox setup page.
 - [Sandbox CLI](/docs/reference/sandbox-cli) lists every `sandbox` command and
   flag, including `policy explain` and the `pack` commands.

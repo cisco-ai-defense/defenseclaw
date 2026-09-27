@@ -477,8 +477,8 @@ edit it by hand. `sandbox setup` writes `enabled`, `harnesses`, and
 `upstream_telemetry`, and `sandbox enable` and `disable` keep `wrappers` in
 step with your shell rc files. `sandbox policy allow` and `block` edit the
 egress lists, and "always" answers to an unblock or an ask are saved to
-`egress.unblocked` or `egress.block`. The [Sandbox guide](/docs/setup/sandbox)
-walks through a session. Policy packs, how the layers combine, and the
+`egress.unblocked` or `egress.block`. See also
+[Sandbox](/docs/setup/sandbox). Policy packs, how the layers combine, and the
 administrator's `openshell.admin` limits are explained in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
 
@@ -575,7 +575,7 @@ openshell:
 | `egress.allow` | `[]` | Host patterns added to the allow list. An entry exempts the host from the blocklist feed, and one that names a private host (an exact name, an intranet wildcard such as `*.corp`, or an address) opens it. Under `strict`, a direct connection to an entry is approved without asking. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |
 | `egress.unblocked` | `[]` | Hosts the daemon saves when you choose "always" for an unblock or an approval. Validated like `egress.allow`, and ignored when `admin.allow_unblock` is `false`. Unlike `egress.allow`, an entry here lifts only blocklist-feed and allowlist refusals: it never opens a private address the name resolves to. |
 | `egress.ports` | `[]` | Destination ports for the egress proxy, 1–65535, unique, at most 64. A non-empty list replaces the pack's ports. |
-| `egress.large_upload_mb` | `0` | Report an upload of more than this many MiB to a host the sandbox hasn't contacted before, 0–1048576. `0` follows the pack. |
+| `egress.large_upload_mb` | `0` | Report an upload of more than this many MiB to a host the sandbox hasn't contacted before, 0–1048576. `0` follows the configured pack. One threshold covers every sandbox of the gateway, whatever pack a run chose, and a change applies when the sandbox runtime restarts. |
 | `egress.feed` | `""` | `builtin` turns the built-in blocklist feed on, `none` turns the feeds off. Empty follows the pack. |
 | `image.base` | `""` | A bring-your-own base image. The image build refuses a base that isn't pinned by digest (`<image>@sha256:<64 hex digits>`). Empty selects the pinned NVIDIA OpenShell community base image. |
 | `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
@@ -755,7 +755,12 @@ The gateway reloads the `openshell` block in place, with either
 `gateway.config_reload.mode`. A change that fails these checks is rejected,
 and the running config stays in place. A reload re-resolves the egress policy
 of every running sandbox, so changes to the egress keys reach them within
-seconds. Turning `enabled` on or off, or moving `ingress_port` or
+seconds. The large-upload threshold is the exception: it is read when the
+sandbox runtime starts, so a change to `egress.large_upload_mb`, or to the
+`pack` it comes from, takes effect when the gateway or its API listener
+restarts (see
+[Large-upload alert threshold](/docs/setup/sandbox-policy#large-upload-alert-threshold)).
+Turning `enabled` on or off, or moving `ingress_port` or
 `egress_port` while `enabled` is `true`, restarts the API listener inside the
 running gateway. The one exception is entering or leaving the legacy
 standalone mode (`openshell.mode`), which needs a gateway restart.
