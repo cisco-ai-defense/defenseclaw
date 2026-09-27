@@ -159,6 +159,95 @@ try {
             }
         }
 
+        # #899 review: like pathidentity.Same in the gateway, Status matches a
+        # handler command to the hook binary by file identity, so another
+        # spelling of the installed binary is the DefenseClaw handler, both
+        # inside the matrix (carried) and outside it (refused).
+        $hookDir = [IO.Path]::Combine($Root, 'bin')
+        [void][IO.Directory]::CreateDirectory($hookDir)
+        $realHook = [IO.Path]::Combine($hookDir, 'defenseclaw-hook.exe')
+        [IO.File]::WriteAllBytes($realHook, [byte[]]@(0x4d, 0x5a))
+        $copyHook = [IO.Path]::Combine($Root, 'copy-hook.exe')
+        [IO.File]::Copy($realHook, $copyHook)
+        $junction = [IO.Path]::Combine($Root, 'bin-junction')
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $junction -Value $hookDir)
+        $hardLink = [IO.Path]::Combine($Root, 'hook-link.exe')
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType HardLink -Path $hardLink -Value $realHook)
+        $missingHook = [IO.Path]::Combine($hookDir, 'missing-hook.exe')
+        $handlerFor = {
+            param([string]$Command)
+            '{"type":"command","timeout":30,"command":' +
+                ($Command | Microsoft.PowerShell.Utility\ConvertTo-Json) +
+                ',"args":["hook","--connector","claudecode","--enterprise-managed"]}'
+        }
+        $realHandler = & $handlerFor $realHook
+        [IO.File]::WriteAllText(
+            $policyPath,
+            ('{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[' + $realHandler + ']}],"Stop":[{"hooks":[' + $realHandler + ']}]}}'),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $spellings = [ordered]@{
+            'a junction' = @([IO.Path]::Combine($junction, 'defenseclaw-hook.exe'), $true)
+            'a hard link' = @($hardLink, $true)
+            'the extended-length form' = @(('\\?\' + $realHook), $true)
+            'forward slashes' = @($realHook.Replace('\', '/'), $true)
+            'another case' = @($realHook.ToUpperInvariant(), $true)
+            'a copy of the binary' = @($copyHook, $false)
+            'a missing file' = @($missingHook, $false)
+        }
+        $shortHook = ''
+        try {
+            $shortHook = [string](Microsoft.PowerShell.Utility\New-Object -ComObject Scripting.FileSystemObject).GetFile($realHook).ShortPath
+        }
+        catch {
+            $shortHook = ''
+        }
+        if (-not [string]::IsNullOrEmpty($shortHook) -and $shortHook -cne $realHook) {
+            $spellings['the short name'] = @($shortHook, $true)
+        }
+        if ($realHook -cmatch '^([A-Za-z]):\\(.+)$') {
+            $share = '\\localhost\' + $Matches[1] + '$\' + $Matches[2]
+            if ([IO.File]::Exists($share)) {
+                $spellings['an administrative share'] = @($share, $true)
+            }
+        }
+        foreach ($spelling in $spellings.Keys) {
+            $alias = & $handlerFor $spellings[$spelling][0]
+            $isHook = [bool]$spellings[$spelling][1]
+            $checks = @(
+                @(('{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[' + $alias + ']}],"Stop":[{"hooks":[' + $realHandler + ']}]}}'), $isHook, 'in the matrix'),
+                @(('{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[' + $realHandler + ']}],"Stop":[{"hooks":[' + $realHandler + ']}],"Notification":[{"hooks":[' + $alias + ']}]}}'), (-not $isHook), 'outside the matrix')
+            )
+            foreach ($check in $checks) {
+                try {
+                    $got = Test-DefenseClawClaudeHKLMCarriesInstalledHooks `
+                        -Settings ($check[0] | Microsoft.PowerShell.Utility\ConvertFrom-Json) `
+                        -Layout $layout
+                    if ([bool]$got -ne [bool]$check[1]) {
+                        $failures.Add("handler through $spelling $($check[2]): carries=$got, want $($check[1])")
+                    }
+                }
+                catch {
+                    $failures.Add("handler through $spelling $($check[2]): threw $($_.Exception.Message)")
+                }
+            }
+        }
+        $absent = [IO.Path]::Combine($Root, 'absent\defenseclaw-hook.exe')
+        foreach ($pair in @(
+            @($absent, $absent.ToUpperInvariant(), $true, 'two spellings of one missing path'),
+            @($absent, [IO.Path]::Combine($Root, 'absent\other.exe'), $false, 'two missing paths'),
+            @($realHook, $absent, $false, 'an existing and a missing path'),
+            @($realHook, '', $false, 'an empty path'),
+            @($realHook, 'C:\bad|name.exe', $false, 'an invalid path')
+        )) {
+            $got = Test-DefenseClawSamePathIdentity -Left $pair[0] -Right $pair[1]
+            if ([bool]$got -ne [bool]$pair[2]) {
+                $failures.Add("path identity for $($pair[3]) = $got, want $($pair[2])")
+            }
+        }
+        [IO.Directory]::Delete($junction)
+        [IO.File]::WriteAllText($policyPath, $installed, [Text.UTF8Encoding]::new($false))
+
         # Admission: the gateway also requires the managed-hooks-only lock to
         # survive the outranking policy unless the administrator opted out,
         # which the installed policy records by omitting the key.

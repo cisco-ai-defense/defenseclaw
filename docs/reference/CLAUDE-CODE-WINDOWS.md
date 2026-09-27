@@ -157,7 +157,9 @@ carry the DefenseClaw hooks) and
 `agent_application_control_claude_minimum_version` (the floor the
 application-control evidence was attested at). Status applies the same
 admission rules as enrollment (a covering matcher and any matching handler in
-an entry carry a hook; the timeout does not matter), so a policy enrollment
+an entry carry a hook; the timeout does not matter; a handler is the
+DefenseClaw hook when its command opens the installed hook binary, however
+the path is spelled), so a policy enrollment
 refuses, such as one that carries the hooks without the lock, reports
 `claude_policy_shadowed_by_hklm=true`. A shadowed policy, or a merge
 policy whose floor is not attested, reports

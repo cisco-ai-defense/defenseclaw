@@ -18235,16 +18235,81 @@ function Test-DefenseClawClaudeHandlerTargetsHook {
             return $false
         }
     }
+    return Test-DefenseClawSamePathIdentity `
+        -Left ([string]$commandProperty.Value) `
+        -Right $Command
+}
+
+function Get-DefenseClawPathIdentityForComparison {
+    param(
+        [Parameter(Mandatory)][Type]$NativeSecurityType,
+        [Parameter(Mandatory)][string]$Path
+    )
+    # The volume serial and file index of the object at Path (reparse points
+    # followed, as os.Stat does), '' when it does not exist, and $null when
+    # the lookup fails any other way.
     try {
+        return ([string]$NativeSecurityType::GetFileIdentity($Path)).ToLowerInvariant()
+    }
+    catch {
+        $exception = $_.Exception
+        while ($null -ne $exception -and
+            $exception -isnot [ComponentModel.Win32Exception]) {
+            $exception = $exception.InnerException
+        }
+        # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND and ERROR_BAD_NETPATH,
+        # the codes Go reports as os.ErrNotExist.
+        if ($null -ne $exception -and
+            [int]$exception.NativeErrorCode -in @(2, 3, 53)) {
+            return ''
+        }
+        return $null
+    }
+}
+
+function Test-DefenseClawSamePathIdentity {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Left,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Right
+    )
+    # Mirrors internal/pathidentity.Same, which the gateway uses to match a
+    # handler command to the hook binary. Two existing paths match only when
+    # they open the same file, so a junction, hard link, short name, or
+    # extended-length or UNC spelling of the hook binary matches it. Two
+    # missing paths match when their full paths are equal ignoring case. An
+    # existing and a missing path, or any other lookup failure, never match.
+    $paths = [Collections.Generic.List[string]]::new()
+    foreach ($value in @($Left, $Right)) {
+        try {
+            $full = [IO.Path]::GetFullPath($value)
+            $root = [IO.Path]::GetPathRoot($full)
+        }
+        catch {
+            return $false
+        }
+        if ($null -ne $root -and $full.Length -gt $root.Length) {
+            $full = $full.TrimEnd('\')
+        }
+        $paths.Add($full)
+    }
+    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
+    $leftIdentity = Get-DefenseClawPathIdentityForComparison `
+        -NativeSecurityType $nativeSecurityType `
+        -Path $paths[0]
+    $rightIdentity = Get-DefenseClawPathIdentityForComparison `
+        -NativeSecurityType $nativeSecurityType `
+        -Path $paths[1]
+    if ($null -eq $leftIdentity -or $null -eq $rightIdentity) {
+        return $false
+    }
+    if ($leftIdentity.Length -eq 0 -and $rightIdentity.Length -eq 0) {
         return [string]::Equals(
-            [IO.Path]::GetFullPath([string]$commandProperty.Value).TrimEnd('\'),
-            [IO.Path]::GetFullPath($Command).TrimEnd('\'),
+            $paths[0],
+            $paths[1],
             [StringComparison]::OrdinalIgnoreCase
         )
     }
-    catch {
-        return $false
-    }
+    return [bool]($leftIdentity.Length -ne 0 -and $leftIdentity -ceq $rightIdentity)
 }
 
 function Test-DefenseClawClaudeHandlerMatchesContract {
