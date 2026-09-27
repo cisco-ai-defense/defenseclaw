@@ -25,7 +25,8 @@ const (
 	// revision-scoped placeholder that the OpenShell supervisor substitutes
 	// at the ingress endpoint; hooks must read it at request time.
 	EnvSandboxToken = "DEFENSECLAW_SANDBOX_TOKEN"
-	// EnvSandboxID is the OpenShell sandbox id. Its presence also tells a
+	// EnvSandboxID is the sandbox's DefenseClaw ingress binding id (not the
+	// OpenShell sandbox id). Its presence also tells a
 	// nested `defenseclaw sandbox run` (or the shell wrapper) that it
 	// already runs sandboxed.
 	EnvSandboxID = "DEFENSECLAW_SANDBOX_ID"
