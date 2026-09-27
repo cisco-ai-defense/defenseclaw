@@ -1,0 +1,783 @@
+[
+  {
+    "path": "sandbox activity",
+    "use": "activity",
+    "short": "Show the live activity feed: destinations, blocks, asks, tool blocks, findings",
+    "flags": [
+      {
+        "name": "follow",
+        "shorthand": "f",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      },
+      {
+        "name": "since",
+        "type": "uint64",
+        "default": "0"
+      }
+    ]
+  },
+  {
+    "path": "sandbox approvals",
+    "use": "approvals",
+    "short": "List the asks waiting for you (doors into your machine or network)",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      },
+      {
+        "name": "watch",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox approve",
+    "use": "approve \u003cname\u003e \u003cid\u003e",
+    "short": "Approve an ask",
+    "flags": [
+      {
+        "name": "always",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "reason",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox connect",
+    "use": "connect \u003cname\u003e [-- harness-args...]",
+    "short": "Resume a sandbox: start it if stopped and attach the harness",
+    "flags": [
+      {
+        "name": "refresh",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "rm",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "shell",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox delete",
+    "use": "delete \u003cname\u003e...",
+    "short": "Delete sandboxes with their providers, credentials and snapshots",
+    "flags": [
+      {
+        "name": "keep-snapshot",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox disable",
+    "use": "disable \u003charness\u003e",
+    "short": "Stop the harness command from running sandboxed (removes the shell wrapper)",
+    "flags": [
+      {
+        "name": "rc",
+        "type": "string"
+      },
+      {
+        "name": "shell",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox doctor",
+    "use": "doctor",
+    "short": "Check that this machine can run sandboxes",
+    "flags": [
+      {
+        "name": "fix",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox enable",
+    "use": "enable \u003charness\u003e",
+    "short": "Make the harness command run sandboxed (a marked block in your shell rc)",
+    "flags": [
+      {
+        "name": "rc",
+        "type": "string"
+      },
+      {
+        "name": "shell",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox exec",
+    "use": "exec \u003cname\u003e -- \u003ccommand\u003e [args...]",
+    "short": "Run a command in a sandbox",
+    "flags": [
+      {
+        "name": "no-tty",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "tty",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "workdir",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox image",
+    "use": "image",
+    "short": "Build, list and prune the harness images"
+  },
+  {
+    "path": "sandbox image build",
+    "use": "build [harness...]",
+    "short": "Build and hook-verify harness images (default: the configured harnesses)",
+    "flags": [
+      {
+        "name": "force",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "verbose",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox image list",
+    "use": "list",
+    "short": "List the harness images",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox image prune",
+    "use": "prune",
+    "short": "Remove superseded harness images",
+    "flags": [
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox list",
+    "use": "list",
+    "short": "List sandboxes",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox logs",
+    "use": "logs \u003cname\u003e",
+    "short": "Show the output of a sandbox's detached run",
+    "flags": [
+      {
+        "name": "follow",
+        "shorthand": "f",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "lines",
+        "shorthand": "n",
+        "type": "int",
+        "default": "200"
+      }
+    ]
+  },
+  {
+    "path": "sandbox pack",
+    "use": "pack",
+    "short": "Inspect sandbox policy packs"
+  },
+  {
+    "path": "sandbox pack list",
+    "use": "list",
+    "short": "List the built-in and custom packs with their sha256 digests",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox pack show",
+    "use": "show \u003cpack\u003e",
+    "short": "Print a pack and its sha256 digest (for openshell.admin.required_pack_digest)",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox pack validate",
+    "use": "validate \u003cpath\u003e",
+    "short": "Validate a pack file strictly"
+  },
+  {
+    "path": "sandbox policy",
+    "use": "policy",
+    "short": "Show, explain and adjust the sandbox policy"
+  },
+  {
+    "path": "sandbox policy allow",
+    "use": "allow \u003chost\u003e...",
+    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)"
+  },
+  {
+    "path": "sandbox policy block",
+    "use": "block \u003chost\u003e...",
+    "short": "Add hosts to openshell.egress.block"
+  },
+  {
+    "path": "sandbox policy explain",
+    "use": "explain",
+    "short": "Show every resolved setting and where it comes from (pack, config, flag, organization)",
+    "flags": [
+      {
+        "name": "copy",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "harness",
+        "type": "string"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "pack",
+        "type": "string"
+      },
+      {
+        "name": "profile",
+        "type": "string"
+      },
+      {
+        "name": "safe",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]"
+      }
+    ]
+  },
+  {
+    "path": "sandbox policy show",
+    "use": "show",
+    "short": "Show the effective sandbox policy",
+    "flags": [
+      {
+        "name": "copy",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "harness",
+        "type": "string"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "pack",
+        "type": "string"
+      },
+      {
+        "name": "profile",
+        "type": "string"
+      },
+      {
+        "name": "safe",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]"
+      }
+    ]
+  },
+  {
+    "path": "sandbox policy suggest",
+    "use": "suggest",
+    "short": "Suggest an egress allowlist from the destinations sandboxes reached",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox pull",
+    "use": "pull \u003cname\u003e",
+    "short": "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
+    "flags": [
+      {
+        "name": "accept-sensitive",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "apply",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "branch",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "branch-name",
+        "type": "string"
+      },
+      {
+        "name": "force",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "patch-out",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox reject",
+    "use": "reject \u003cname\u003e \u003cid\u003e",
+    "short": "Reject an ask",
+    "flags": [
+      {
+        "name": "always",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "reason",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox review",
+    "use": "review \u003cname\u003e",
+    "short": "Review the session's changes, flagging files that can run code on this machine",
+    "flags": [
+      {
+        "name": "diff",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox run",
+    "use": "run \u003charness\u003e [flags] [-- harness-args...]",
+    "short": "Run a harness in a sandbox on this folder",
+    "flags": [
+      {
+        "name": "bedrock-region",
+        "type": "string"
+      },
+      {
+        "name": "context",
+        "type": "stringArray",
+        "default": "[]"
+      },
+      {
+        "name": "copy",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "cpu",
+        "type": "string"
+      },
+      {
+        "name": "credential",
+        "type": "stringArray",
+        "default": "[]"
+      },
+      {
+        "name": "detach",
+        "shorthand": "d",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "env",
+        "type": "stringArray",
+        "default": "[]"
+      },
+      {
+        "name": "github-write",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "host-port",
+        "type": "intSlice",
+        "default": "[]"
+      },
+      {
+        "name": "llm",
+        "type": "string",
+        "default": "auto"
+      },
+      {
+        "name": "memory",
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "name": "new",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "no-build",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "no-mcp",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "no-snapshot",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "pack",
+        "type": "string"
+      },
+      {
+        "name": "profile",
+        "type": "string"
+      },
+      {
+        "name": "prompt",
+        "shorthand": "p",
+        "type": "string"
+      },
+      {
+        "name": "refresh",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "rm",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "safe",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox setup",
+    "use": "setup",
+    "short": "One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, images",
+    "flags": [
+      {
+        "name": "harness",
+        "type": "stringSlice",
+        "default": "[]"
+      },
+      {
+        "name": "install-openshell",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "no-mounts",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "no-wrappers",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "non-interactive",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "skip-images",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "upstream-telemetry",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "wrappers",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox start",
+    "use": "start \u003cname\u003e",
+    "short": "Start a stopped sandbox (a new session, with a fresh snapshot)",
+    "flags": [
+      {
+        "name": "no-snapshot",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox status",
+    "use": "status [name]",
+    "short": "Show the sandbox subsystem, or one sandbox in detail",
+    "flags": [
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox stop",
+    "use": "stop \u003cname\u003e",
+    "short": "Stop a sandbox (it is kept for start or connect)"
+  },
+  {
+    "path": "sandbox teardown",
+    "use": "teardown",
+    "short": "Remove every DefenseClaw sandbox, provider, profile, image, gateway change and wrapper",
+    "flags": [
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "keep-images",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox unblock",
+    "use": "unblock \u003chost\u003e",
+    "short": "Lift an egress block for one sandbox or for every sandbox",
+    "flags": [
+      {
+        "name": "always",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox undo",
+    "use": "undo \u003cname\u003e",
+    "short": "Restore the project folder to its pre-session snapshot",
+    "flags": [
+      {
+        "name": "keep-refs",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "preview",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "restart",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  }
+]
