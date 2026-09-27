@@ -141,6 +141,33 @@ may still recognize its old receipt and restore only the previously managed
 hook entries before publishing canonical Devin state. Full uninstall retains
 the same receipt-bound cleanup so unrelated legacy configuration is preserved.
 
+## OpenShell sandbox
+
+<Callout type="info" title="In development">
+No command launches Devin CLI in an OpenShell sandbox yet. The
+[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
+they ship; today it covers legacy cleanup.
+</Callout>
+
+DefenseClaw can render the files it adds to a Devin CLI OpenShell overlay
+image. The files exist only in the image and nothing on your host changes:
+
+- **Hooks in the user tier.** Devin has no system hook tier, so the hooks are
+  registered in `~/.config/devin/config.json` inside the image, a file the
+  agent can edit. The sandbox launcher puts the DefenseClaw hooks back from a
+  root-owned template on every start.
+- **Fail closed.** Devin blocks only on exit code 2 and lets every other hook
+  failure through, so the sandbox hook exits 2 on every failure, and each
+  hook gets a 30-second timeout.
+- **Launch flags.** Skip-permissions mode starts Devin with
+  `--permission-mode dangerous`; Devin's `autonomous` mode needs its own
+  sandbox, which cannot run inside OpenShell.
+- **Image pin.** The image installs Devin CLI 3000.4.25 from its release
+  archive, checked against the SHA-256 in Devin's release manifest.
+- **Not verified yet.** Devin needs a Devin account login
+  (`devin auth login`) before any agent turn, so its image has not passed the
+  hook-fire check and is never selected for use.
+
 ## Disable
 
 ```bash

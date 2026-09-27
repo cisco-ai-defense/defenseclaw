@@ -235,6 +235,36 @@ exact pre-DefenseClaw config or removes only DefenseClaw-owned entries, then
 removes only managed adapter files; it does not rely on an undocumented cached
 hook process.
 
+## OpenShell sandbox
+
+<Callout type="info" title="In development">
+No command launches Cursor Agent in an OpenShell sandbox yet. The
+[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
+they ship; today it covers legacy cleanup.
+</Callout>
+
+DefenseClaw can render the files it adds to a Cursor Agent OpenShell overlay
+image. The files exist only in the image and nothing on your host changes:
+
+- **Hooks in the managed tier.** The hooks are registered in root-owned
+  `/etc/cursor/hooks.json`, Cursor's enterprise hooks file, with
+  `failClosed` on every event. Cursor runs team, user and project hooks as
+  well, but the enterprise response wins, so they cannot answer allow over a
+  DefenseClaw deny.
+- **Fail closed.** The hook scripts live in root-owned
+  `/usr/local/lib/defenseclaw/hooks`, reach the gateway through the
+  [hook ingress](/docs/reference/gateway-api#hook-ingress) with a per-sandbox
+  token, and deny the action on every failure.
+- **Launch flags.** Cursor's own sandbox cannot run inside OpenShell, so the
+  agent starts with `--sandbox disabled` and `--trust`; skip-permissions mode
+  adds `--force`.
+- **Image pin.** The image installs Cursor Agent 2026.07.23-e383d2b, the
+  build the hook contract reviewed, from its release archive with a pinned
+  SHA-256.
+- **Not verified yet.** Cursor Agent needs a Cursor account
+  (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn, so its
+  image has not passed the hook-fire check and is never selected for use.
+
 ## Disable
 
 ```bash
