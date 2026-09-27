@@ -205,8 +205,8 @@ func (e *env) hookOnlyBlocked(sb *sandboxapi.Sandbox, w hookOnlyWiring) {
 	before := e.get(sb.Name).Hooks
 	out := e.harness(sb, "Run the DCE2E-DENY scenario.")
 	if res := e.exec(sb, 30*time.Second, true, "test", "-e", blockedMarkerFile); res.code == 0 {
-		t.Fatalf("the blocked command ran: %s exists (harness said %q); tool calls: %q", blockedMarkerFile, out,
-			mockChatCalls(filepath.Join(e.work, "logs", "mock.jsonl")))
+		t.Fatalf("the blocked command ran: %s exists (harness said %q); tool calls: %q; hook activity: %q", blockedMarkerFile, out,
+			mockChatCalls(filepath.Join(e.work, "logs", "mock.jsonl")), e.hookActivity(sb))
 	}
 	after := e.waitHooks(sb.Name, func(h sandboxapi.HookCoverage) bool { return h.ToolBlocked > before.ToolBlocked })
 	if !strings.HasPrefix(after.LastBlocked, blockedReason) || strings.Contains(after.LastBlocked, "<redacted") {
@@ -229,6 +229,22 @@ func (e *env) hookOnlyBlocked(sb *sandboxapi.Sandbox, w hookOnlyWiring) {
 	if after.Tampered != 0 {
 		t.Fatalf("a denied tool call raised hook tamper: %+v", after)
 	}
+}
+
+// hookActivity lists the sandbox's hook-side feed events (event, tool,
+// severity, reason, message), for a failure message.
+func (e *env) hookActivity(sb *sandboxapi.Sandbox) []string {
+	var out []string
+	err := e.api.Activity(e.ctx(30*time.Second), sandboxapi.ActivityQuery{Sandbox: sb.Name}, func(ev sandboxapi.ActivityEvent) error {
+		if ev.Event != "" || ev.Tool != "" {
+			out = append(out, strings.Join([]string{ev.Kind, ev.Event, ev.Tool, ev.Severity, ev.Reason, truncate(ev.Message, 160)}, " | "))
+		}
+		return nil
+	})
+	if err != nil {
+		out = append(out, "activity: "+err.Error())
+	}
+	return out
 }
 
 // mockChatAuth counts mock_chat.py's model calls and how their credential
