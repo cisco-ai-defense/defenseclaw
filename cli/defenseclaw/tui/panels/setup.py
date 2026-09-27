@@ -1368,8 +1368,13 @@ class SetupPanelModel:
             if len(command) > best_len:
                 best = wizard
                 best_len = len(command)
-        if best is None and tuple(args[:1]) == ("sandbox",):
-            # The Sandbox wizard also runs ``sandbox doctor``.
+        if (
+            best is None
+            and tuple(args[:2]) == ("sandbox", "doctor")
+            and self.wizard_status.get(SetupWizard.SANDBOX) == "running..."
+        ):
+            # The Sandbox wizard's doctor action; other sandbox commands
+            # (enable, disable, ...) never mark the wizard.
             best = SetupWizard.SANDBOX
         if best is None:
             return
@@ -2717,6 +2722,11 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
     SetupWizard.REDACTION: lambda overrides, _cfg: _redaction_wizard_fields_for(overrides),
+    SetupWizard.SANDBOX: lambda overrides, cfg: _apply_dynamic_fields(
+        sandbox_wizard_fields(cfg),
+        overrides,
+        {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+    ),
 }
 
 
@@ -4463,7 +4473,7 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
         f"Claude Code: {claude} found" if claude else "Claude Code: none found (log in inside the sandbox)",
         f"Codex: {codex} found" if codex else "Codex: none found (log in inside the sandbox)",
     ]
-    return "Credentials  " + " · ".join(parts)
+    return " · ".join(parts)
 
 
 def sandbox_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:

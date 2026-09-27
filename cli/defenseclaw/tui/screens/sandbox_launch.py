@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
@@ -109,6 +109,7 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
     #sandbox-launch-dialog {{
         width: 84;
         height: auto;
+        max-height: 95%;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
@@ -161,7 +162,7 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
         self.folder = folder or os.getcwd()
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="sandbox-launch-dialog"):
+        with VerticalScroll(id="sandbox-launch-dialog"):
             yield Static("New sandboxed run", id="sandbox-launch-title")
             yield Static(
                 "The harness gets this terminal; the TUI comes back when it exits.",

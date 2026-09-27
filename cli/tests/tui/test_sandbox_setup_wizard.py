@@ -114,6 +114,21 @@ def test_every_wizard_argv_parses_with_the_click_stubs(monkeypatch) -> None:
     assert len(ran) == len(variants)
 
 
+def test_doctor_hides_the_setup_rows_and_setup_brings_them_back() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.form_fields = _set(model.form_fields, "Codex", "no")
+    model.form_fields = _set(model.form_fields, "Action", "doctor")
+    model.recompute_dependent_fields()
+    assert [field.label for field in model.form_fields] == ["Action"]
+    assert model.wizard_command_preview() == "defenseclaw sandbox doctor"
+    model.form_fields = _set(model.form_fields, "Action", "setup")
+    model.recompute_dependent_fields()
+    labels = [field.label for field in model.form_fields]
+    assert "Claude Code" in labels and "Build Images Now" in labels
+    assert model.wizard_command_preview().startswith("defenseclaw sandbox setup --non-interactive")
+
+
 def test_a_harness_is_required() -> None:
     model = SetupPanelModel({}, os_name="linux")
     model.open_goal_menu(SetupWizard.SANDBOX)
@@ -145,6 +160,13 @@ def test_either_action_clears_the_running_badge() -> None:
         model.wizard_status[SetupWizard.SANDBOX] = "running..."
         model.mark_wizard_complete(args, success=True)
         assert model.wizard_status[SetupWizard.SANDBOX] == "done", args
+
+
+def test_other_sandbox_commands_never_mark_the_wizard() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    for args in (("sandbox", "enable", "claude"), ("sandbox", "doctor")):
+        model.mark_wizard_complete(args, success=True)
+        assert SetupWizard.SANDBOX not in model.wizard_status, args
 
 
 def test_credential_summary_names_sources_never_values(tmp_path: Path) -> None:

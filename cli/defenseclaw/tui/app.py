@@ -264,6 +264,8 @@ _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
     # ``--judge-provider`` by the arg builder), so it must be matched by label.
     SetupWizard.GUARDRAIL: frozenset({"Provider", "Scope"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"Action"}),
+    # setup shows the harness and consent rows; doctor hides them.
+    SetupWizard.SANDBOX: frozenset({"Action"}),
 }
 
 

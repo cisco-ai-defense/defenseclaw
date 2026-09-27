@@ -901,3 +901,37 @@ def test_the_stream_loop_resumes_after_the_last_sequence(monkeypatch) -> None:
     app._sandbox_stream_loop()  # noqa: SLF001
     assert opened == [8]
     assert [(events[0]["seq"], toast) for events, toast in delivered] == [(8, False), (9, True)]
+
+
+@pytest.mark.asyncio
+async def test_the_launch_dialog_returns_a_run_and_refuses_a_bad_folder(tmp_path: Path) -> None:
+    from defenseclaw.tui.screens.sandbox_launch import SandboxLaunchScreen
+    from textual.app import App
+    from textual.widgets import Checkbox, Input, Static
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    results: list[Any] = []
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(
+                SandboxLaunchScreen((("Codex", "codex"), ("Claude Code", "claudecode")), folder=str(tmp_path / "gone")),
+                results.append,
+            )
+
+    app = Host()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app.screen is screen, "a missing folder keeps the dialog open"
+        assert "is not a folder" in str(screen.query_one("#sandbox-launch-status", Static).render())
+        screen.query_one("#sandbox-launch-folder", Input).value = str(project)
+        screen.query_one("#sandbox-launch-copy", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    assert results == [
+        SandboxLaunch(("sandbox", "run", "codex", "--copy"), str(project), f"sandbox run codex in {project}")
+    ]
