@@ -117,6 +117,8 @@ type App struct {
 	Executable func() (string, error)
 	Now        func() time.Time
 	GOOS       string
+	// WSL reports a Linux kernel running under Windows (WSL2).
+	WSL func() bool
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 
@@ -209,6 +211,9 @@ func (a *App) defaults() {
 		if a.Sleep == nil {
 			a.Sleep = sleepCtx
 		}
+		if a.WSL == nil {
+			a.WSL = IsWSL
+		}
 		if a.ConfigPath == "" && a.Cfg != nil {
 			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)
 		}
@@ -248,6 +253,17 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// IsWSL reports whether this Linux kernel is WSL's (its release names
+// Microsoft).
+func IsWSL() bool {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(string(data))
+	return strings.Contains(s, "microsoft") || strings.Contains(s, "wsl")
+}
+
 func executable() (string, error) {
 	p, err := os.Executable()
 	if err != nil {
@@ -280,7 +296,7 @@ func (a *App) api() (API, error) {
 // with the reason.
 func (a *App) CheckSupported() error {
 	a.defaults()
-	if err := openshell.CheckPlatform(a.GOOS); err != nil {
+	if err := openshell.CheckPlatform(a.GOOS); err != nil || (a.GOOS == "linux" && a.WSL()) {
 		return fmt.Errorf("%w: OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported", ErrUnsupported)
 	}
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {

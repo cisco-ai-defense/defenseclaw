@@ -530,6 +530,7 @@ func newTestApp(t *testing.T, input string) *testApp {
 		Executable: func() (string, error) { return "/usr/local/bin/defenseclaw-gateway", nil },
 		Now:        func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) },
 		GOOS:       "linux",
+		WSL:        func() bool { return false },
 		Sleep:      func(context.Context, time.Duration) error { return nil },
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {
 			return nil, nil, io.ErrClosedPipe

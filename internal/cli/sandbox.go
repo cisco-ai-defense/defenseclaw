@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -64,6 +65,9 @@ in a project folder.`,
 }
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
+	if err := openshell.CheckPlatform(runtime.GOOS); err != nil {
+		return withExitCode(errors.New("OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"), 3)
+	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
 	if cmd.Name() == "run" && os.Getenv(openshell.EnvSandboxID) != "" {

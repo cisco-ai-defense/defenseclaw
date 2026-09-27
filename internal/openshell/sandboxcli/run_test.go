@@ -216,6 +216,7 @@ func TestRunRefusals(t *testing.T) {
 		}, "blocked by your organization's DefenseClaw policy: harness"},
 		{"daemon down", RunOptions{Harness: "claude"}, func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") }, "daemon is not running"},
 		{"windows", RunOptions{Harness: "claude"}, func(ta *testApp) { ta.GOOS = "windows" }, "Windows and WSL2 are not supported"},
+		{"wsl2", RunOptions{Harness: "claude"}, func(ta *testApp) { ta.WSL = func() bool { return true } }, "Windows and WSL2 are not supported"},
 		{"bad credential", RunOptions{Harness: "claude", Credentials: []string{"NOPE=api.x.com"}}, nil, "is not set in this shell"},
 		{"bad name", RunOptions{Harness: "claude", Name: "Bad_Name"}, nil, "--name"},
 	}
