@@ -755,6 +755,49 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 		t.Errorf("egress proxy events: allowed example.org %t, blocked webhook.site %t", sawAllowed, sawBlocked)
 	}
 
+	// 5. Shells the launcher does not start: a login shell (what `sandbox
+	//    connect` opens; /etc/profile.d) and a --no-login-shell command
+	//    through the sandbox-env wrapper (what `defenseclaw-gateway sandbox
+	//    exec` runs) get the proxy and the harness shim, and a plain curl in
+	//    them reaches example.org through the proxy. A bare
+	//    --no-login-shell command stays without proxy settings.
+	shellProbe := `printf '%s %s ' "${HTTPS_PROXY:+proxy}" "$(command -v ` + h.Command + `)"; ` +
+		`curl -s -m 20 -o /dev/null -w '%{http_code}' https://example.org/`
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"login shell", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--", "/bin/sh", "-c", shellProbe}},
+		{"sandbox-env", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--", harness.SandboxEnvPath, "/bin/sh", "-c", shellProbe}},
+	} {
+		egressMu.Lock()
+		from := len(egressEvents)
+		egressMu.Unlock()
+		out, err := liveOpenShell(t, time.Minute, nil, tc.args...)
+		got := strings.Fields(out)
+		if len(got) > 3 {
+			// Anything a login shell's start-up files print comes first.
+			got = got[len(got)-3:]
+		}
+		t.Logf("%s: %v", tc.name, got)
+		if err != nil || len(got) != 3 || got[0] != "proxy" || got[1] != h.ShimPath() || got[2] != "200" {
+			t.Errorf("%s: proxy, %s, curl = %q (%v), want proxy %s 200", tc.name, h.Command, got, err, h.ShimPath())
+		}
+		egressMu.Lock()
+		through := false
+		for _, e := range egressEvents[from:] {
+			through = through || (e.Host == "example.org" && e.Kind == egress.EventAllowed)
+		}
+		egressMu.Unlock()
+		if !through {
+			t.Errorf("%s: the plain curl never reached the DefenseClaw proxy", tc.name)
+		}
+	}
+	if out, _ := liveOpenShell(t, time.Minute, nil, "sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--",
+		"/bin/sh", "-c", `printf '%s' "${HTTPS_PROXY:+proxy}"`); strings.TrimSpace(out) != "" {
+		t.Errorf("a bare --no-login-shell command has proxy settings")
+	}
+
 	// Destinations OpenShell refused (the harness's own traffic that did not
 	// use the proxy): the empirical stray-outbound set of this run.
 	if logs, err := liveOpenShell(t, time.Minute, nil, "logs", sandboxName, "-n", "1000", "--source", "sandbox"); err == nil {

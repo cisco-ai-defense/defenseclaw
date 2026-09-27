@@ -46,6 +46,7 @@ import (
 //     the ingress, a DefenseClaw-blocked marker command is denied, the live
 //     project edit is visible on the host and the masked .env is empty;
 //   - egress: a blocklisted host is refused until `unblock --sandbox`;
+//   - `sandbox exec` commands get the egress proxy and the harness shim;
 //   - the nested-repository guard quarantines a .git created in the mount;
 //   - review, undo (the project is restored), approvals, delete;
 //   - `run codex --detach` with the mock Responses server: the marker
@@ -89,6 +90,7 @@ func TestSandboxCLI(t *testing.T) {
 	e.step("run claude detached", c.runClaude)
 	e.step("blocked marker command", c.blockedCommand)
 	e.step("egress block and unblock", c.egress)
+	e.step("exec gets the egress proxy", c.execProxy)
 	e.step("terminal attach", c.terminalAttach)
 	e.step("masked secret and live edit", c.liveEdit)
 	e.step("nested repository guard", c.nestedRepo)
@@ -422,6 +424,21 @@ func (c *cliEnv) egress() {
 	}
 	if got := c.proxyConnect(c.claude, "https://"+blockedHost+"/dce2e"); got != "200" {
 		t.Fatalf("%s after the unblock = %q", blockedHost, got)
+	}
+}
+
+// execProxy: a `sandbox exec` command runs through the image's sandbox-env
+// wrapper, so it has the egress proxy settings (a plain curl reaches the
+// allowed host through the proxy) and `claude` is the shim that starts the
+// launcher.
+func (c *cliEnv) execProxy() {
+	t := c.t
+	out, code := c.execOut(c.claude, "sh", "-c", `printf '%s %s ' "${HTTPS_PROXY:+proxy}" "$(command -v claude)"; `+
+		`curl -sS -o /dev/null --max-time 20 -w '%{http_code}' 'https://`+allowedHost+`/' 2>/dev/null; true`)
+	got := strings.Fields(out)
+	t.Logf("sandbox exec: %v (exit %d)", got, code)
+	if code != 0 || len(got) != 3 || got[0] != "proxy" || got[1] != harness.ClaudeCode.ShimPath() || got[2] != "200" {
+		t.Fatalf("sandbox exec: proxy, harness command, curl = %v (exit %d), want proxy %s 200", got, code, harness.ClaudeCode.ShimPath())
 	}
 }
 

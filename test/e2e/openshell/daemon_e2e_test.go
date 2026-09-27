@@ -43,6 +43,9 @@
 //   - egress through the DefenseClaw proxy: an allowed host, a blocklisted
 //     host, a sandbox-scoped unblock, and a direct connection OpenShell
 //     denies until triage approves the proposal;
+//   - login shells (/etc/profile.d) and commands started through the
+//     image's sandbox-env wrapper get the egress proxy and the harness shim
+//     without --proxy, and a plain curl in them goes through the proxy;
 //   - stop, start (with a rotated ingress binding), review, undo;
 //   - hook tamper in a second sandbox whose custom pack sets
 //     hooks.on_tamper: stop, which DefenseClaw stops;
@@ -177,6 +180,7 @@ func TestSandboxDaemon(t *testing.T) {
 	e.step("DefenseClaw blocks the marker command", func() { e.blockedToolCall(sb) })
 	e.step("hook tamper raises an alert", func() { e.tamperAlert(sb) })
 	e.step("egress through the proxy", func() { e.egressThroughProxy(sb) })
+	e.step("shells get the egress proxy", func() { e.shellEnvironment(sb) })
 	e.step("direct connection and triage", func() { e.directConnection(sb) })
 	e.step("stop and start", func() { e.stopStart(sb) })
 	e.step("review and undo", func() { e.reviewUndo(sb) })
@@ -772,6 +776,63 @@ func (e *env) egressThroughProxy(sb *sandboxapi.Sandbox) {
 		t.Fatalf("egress stats %+v → %+v", before, after)
 	}
 	t.Logf("egress: %+v", after)
+}
+
+// shellEnvironment checks the proxy reaches the shells the launcher does not
+// start: a login shell (what `sandbox connect --shell` and `openshell sandbox
+// exec` open) through /etc/profile.d, and a command started through the
+// sandbox-env wrapper (what `defenseclaw-gateway sandbox exec` runs). In both
+// the harness command is the shim that starts its launcher, and a plain curl
+// (no --proxy) reaches the allowed host through the DefenseClaw proxy. A
+// bare --no-login-shell exec stays without proxy settings (the documented
+// limit).
+func (e *env) shellEnvironment(sb *sandboxapi.Sandbox) {
+	t := e.t
+	probe := `printf '%s %s ' "${HTTPS_PROXY:+proxy}${HTTPS_PROXY:-none}" "$(command -v claude)"; ` +
+		`curl -sS -o /dev/null --max-time 20 -w '%{http_code}' 'https://` + allowedHost + `/' 2>/dev/null; echo " $?"`
+	// Never log the proxy URL: it carries the sandbox's proxy credential.
+	redact := func(out string) []string {
+		f := strings.Fields(out)
+		if len(f) > 0 && strings.HasPrefix(f[0], "proxy") {
+			f[0] = "proxy"
+		}
+		return f
+	}
+	before := e.get(sb.Name).Egress
+	for _, tc := range []struct {
+		name  string
+		login bool
+		argv  []string
+	}{
+		{"login shell", true, []string{"sh", "-c", probe}},
+		{"sandbox-env", false, []string{harness.SandboxEnvPath, "sh", "-c", probe}},
+	} {
+		res, err := e.gw.Exec(e.ctx(2*time.Minute), sb.Name, tc.argv, openshell.ExecOptions{
+			WorkDir: sb.Workdir, Timeout: time.Minute, Idempotent: true, LoginShell: tc.login,
+		})
+		if err != nil {
+			t.Fatalf("%s exec: %v", tc.name, err)
+		}
+		got := redact(string(res.Stdout))
+		t.Logf("%s: %v", tc.name, got)
+		if len(got) != 4 || got[0] != "proxy" || got[1] != harness.ClaudeCode.ShimPath() || got[2] != "200" {
+			t.Fatalf("%s: proxy, harness command, curl = %v, want proxy %s 200", tc.name, got, harness.ClaudeCode.ShimPath())
+		}
+	}
+	res, err := e.gw.Exec(e.ctx(2*time.Minute), sb.Name, []string{"sh", "-c", `printf '%s' "${HTTPS_PROXY:-none}" | cut -c1-4`},
+		openshell.ExecOptions{WorkDir: sb.Workdir, Timeout: time.Minute, Idempotent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(res.Stdout)); got != "none" {
+		t.Fatalf("a bare --no-login-shell exec has proxy settings (%q)", got)
+	}
+	waitFor(t, 30*time.Second, "the plain curls at the proxy", func() error {
+		if after := e.get(sb.Name).Egress; after.BytesUp <= before.BytesUp {
+			return fmt.Errorf("egress %+v → %+v", before, after)
+		}
+		return nil
+	})
 }
 
 func (e *env) directConnection(sb *sandboxapi.Sandbox) {
