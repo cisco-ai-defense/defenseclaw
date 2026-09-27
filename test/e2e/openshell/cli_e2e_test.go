@@ -74,6 +74,8 @@ func TestSandboxCLI(t *testing.T) {
 		t: t, root: t, prefix: envOr("DEFENSECLAW_E2E_PREFIX", "dc-e2e") + "-cli",
 		apiPort: envInt(t, "DEFENSECLAW_E2E_API_PORT", 28970) + 100,
 		mock:    envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921) + 100,
+
+		tokenDelivery: e2eTokenDelivery(t),
 	}
 	e.repo = repoRoot(t)
 	e.work = filepath.Join(work, e.prefix)
