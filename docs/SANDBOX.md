@@ -836,7 +836,11 @@ on a copy, and changes come back only through a verified pull.
    reading it. The size is checked first (`max_upload_mb`, 500 MiB in the
    `open` pack).
 2. **Upload.** The copy goes to `/sandbox/work/<repo>`, which the sandbox user
-   can write, and `refs/defenseclaw/baseline` marks the starting point.
+   can write, and `refs/defenseclaw/baseline` marks the starting point. The
+   upload creates the harness's workdir, so `sandbox run` creates the
+   sandbox, uploads, sets the baseline, and only then probes the workdir and
+   starts the harness; `connect --refresh` probes outside the workdir before
+   it replaces the copy.
 3. **Pull.** A capture in the sandbox writes `refs/defenseclaw/result` (HEAD
    plus uncommitted work) and streams it back as a git bundle, capped at 1 GiB
    by bytes received. The bundle is verified against the staged history,
@@ -999,6 +1003,34 @@ running sandbox's ledger is partial until its next start, and only denials
 seen since the restart count. The workload can still forge hook requests of
 its own; the detector catches a killed or bypassed hook, not a workload that
 imitates one.
+
+### Hooks that do not reach DefenseClaw
+
+Sandbox hooks fail closed, so a session whose hooks cannot reach the ingress
+blocks every tool call while the harness may still exit 0
+(`internal/openshell/manager/reach.go`). The manager flags a session (the
+time since the sandbox last became ready) once, as a HIGH `hook_silence`
+finding and a `finding` activity entry with reason `hooks_unreachable`, when:
+
+- OpenShell refuses a hook's connection or request to the ingress port: the
+  sandbox's policy does not allow it. This is reported at once, also after
+  hooks that got through.
+- OpenShell lets a hook connect but no authenticated request follows within
+  15 seconds: the ingress does not answer, or the sandbox token did not reach
+  the hook.
+- The harness works (a model call, a local model endpoint, OTLP, egress) for
+  `HookReachWindow` (30 seconds) without one authenticated hook.
+
+An authenticated hook clears the flag (`hooks_restored` on the feed). The
+sandbox's hook coverage carries `unreachable`, `unreachable_reason` and
+`ingress_refused`, which `sandbox status`, `sandbox list` ("unreachable!")
+and the "Sandbox hooks" check of `sandbox doctor` show. The run itself warns
+live (the daemon's line, or its own once no hook arrived in the session's
+first 45 seconds), ends the summary with "DefenseClaw hooks are not reaching
+the daemon; every tool call is being blocked … Run: defenseclaw sandbox
+doctor", and exits 69 when not one hook of the session got through (the
+harness's own non-zero status wins). `sandbox logs` does the same for a
+finished detached run with no hook since it started.
 
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
