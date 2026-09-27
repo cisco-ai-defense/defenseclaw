@@ -132,6 +132,32 @@ var hookFireContracts = map[string]hookFireContract{
 			return map[string]interface{}{"action": "block", "reason": reason}
 		},
 	},
+	// The events Cursor's agent-cli-local build of the pinned release fired
+	// for a headless shell call; beforeSubmitPrompt and stop do not fire in
+	// print mode.
+	"cursor": {
+		required: []string{"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
+		preTool:  "preToolUse",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{
+				"permission": "deny", "user_message": reason, "agent_message": reason,
+			}}
+		},
+	},
+	"devin": {
+		required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+		preTool:  "PreToolUse",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "block", "reason": reason}}
+		},
+	},
+	"kiro": {
+		required: []string{"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
+		preTool:  "preToolUse",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "block", "reason": reason}}
+		},
+	},
 }
 
 // claudeCodexDeny is the PreToolUse deny Claude Code and Codex hooks print.
@@ -270,6 +296,57 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 	},
 }
 
+// scriptedMock drives a harness that replays scripted model responses from a
+// file itself instead of calling a model endpoint. Before each run the probe
+// writes the scenario's script into the container, so such a probe needs no
+// mock server either.
+type scriptedMock struct {
+	// path is the in-container file the harness reads the script from.
+	path string
+	// launch returns the harness env and extra arguments that select the
+	// scripted mode.
+	launch func() (map[string]string, []string)
+	// render is the script that answers the scenario's prompt with its one
+	// shell call and closing text (sc nil: a plain text answer).
+	render func(sc *mockScenario) ([]byte, error)
+}
+
+// scriptedMockFile is one scenario's script.
+type scriptedMockFile struct {
+	path string
+	data []byte
+}
+
+// builtinScriptedMocks are the harnesses the built-in probe drives through
+// their own scripted-response mode.
+var builtinScriptedMocks = map[string]scriptedMock{
+	// Kiro CLI replays KIRO_MOCK_CHAT_RESPONSE (a list of turns, each a list
+	// of text and tool-use events) in place of the Kiro service; the
+	// placeholder KIRO_API_KEY only has to be present, and the run needs no
+	// network.
+	"kiro": {
+		path: "/tmp/dc-hookfire-kiro-mock.json",
+		launch: func() (map[string]string, []string) {
+			return map[string]string{
+				"KIRO_MOCK_CHAT_RESPONSE": "/tmp/dc-hookfire-kiro-mock.json",
+				"KIRO_API_KEY":            "dcprobe-kiro-0123456789abcdefghij",
+			}, nil
+		},
+		render: func(sc *mockScenario) ([]byte, error) {
+			turns := []interface{}{[]interface{}{mockAuxText}}
+			if sc != nil {
+				turns = []interface{}{
+					[]interface{}{"Running the DefenseClaw hook-fire probe command.", map[string]interface{}{
+						"tool_use_id": "dcprobe-1", "name": "shell", "args": map[string]string{"command": sc.command},
+					}},
+					[]interface{}{sc.done},
+				}
+			}
+			return json.Marshal(turns)
+		},
+	},
+}
+
 // HookEvent is one request the stand-in ingress received.
 type HookEvent struct {
 	Path           string `json:"path"`
@@ -349,6 +426,8 @@ type hookFireScenario struct {
 	markers []string
 	// mounts are extra read-only files for this scenario.
 	mounts []RunFile
+	// mockScript, for a scripted-mock harness, is written before the run.
+	mockScript *scriptedMockFile
 }
 
 // HookFireResult is the outcome of HookFireProbe.
@@ -532,7 +611,8 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		return result, err
 	}
 	var launch func(baseURL string) (map[string]string, []string)
-	if builtin {
+	scripted, isScripted := builtinScriptedMocks[c.Spec.Harness.Name]
+	if builtin && !isScripted {
 		if launch, ok = builtinMockLaunch[c.Spec.Harness.Name]; !ok {
 			reason := "no built-in mock LLM wiring"
 			if v := c.Spec.Harness.Verification; v.Status == harness.Unverified && v.Reason != "" {
@@ -560,17 +640,28 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	defer stopSink()
 	netw.sinkPort = sinkPort
 	if builtin {
-		mockPort, stopMock, err := serveHTTP(netw.bindHost, 0, newMockLLM(builtinMockScenarios...))
-		if err != nil {
-			return result, fmt.Errorf("openshell image: hook-fire mock LLM: %w", err)
+		if isScripted {
+			opts.Env, opts.Args = scripted.launch()
+		} else {
+			mockPort, stopMock, err := serveHTTP(netw.bindHost, 0, newMockLLM(builtinMockScenarios...))
+			if err != nil {
+				return result, fmt.Errorf("openshell image: hook-fire mock LLM: %w", err)
+			}
+			defer stopMock()
+			opts.Env, opts.Args = launch("http://" + net.JoinHostPort(netw.containerHost, strconv.Itoa(mockPort)))
 		}
-		defer stopMock()
-		opts.Env, opts.Args = launch("http://" + net.JoinHostPort(netw.containerHost, strconv.Itoa(mockPort)))
 		opts.Prompt, opts.AllowSideEffect = builtinAllowPrompt, builtinAllowSideEffect
 		opts.Block = &BlockScenario{Prompt: builtinBlockPrompt, Marker: builtinBlockMarker, SideEffect: builtinBlockSideEffect}
 	}
 
 	run := func(sc hookFireScenario) (HookFireRun, error) {
+		if builtin && isScripted {
+			script, err := scripted.render(newMockLLM(builtinMockScenarios...).pick(sc.prompt))
+			if err != nil {
+				return HookFireRun{Scenario: sc.name}, err
+			}
+			sc.mockScript = &scriptedMockFile{path: scripted.path, data: script}
+		}
 		r, err := b.hookFireRun(ctx, c, ref, opts, netw, sink, sc)
 		result.Runs = append(result.Runs, r)
 		return r, err
@@ -717,6 +808,12 @@ func (b *Builder) hookFireRun(
 	harnessCmd := strings.Join(quoted, " ")
 	workdir := connector.SandboxHomeDir
 	script := netw.scriptPrefix(c.Spec.IngressPort)
+	if sc.mockScript != nil {
+		if !safePathRE.MatchString(sc.mockScript.path) {
+			return run, fmt.Errorf("openshell image: scripted mock path %q must be a plain absolute path", sc.mockScript.path)
+		}
+		script += "printf '%s' " + shQuote(string(sc.mockScript.data)) + " >" + shQuote(sc.mockScript.path) + " || exit 96\n"
+	}
 	if sc.hostile != nil {
 		workdir = sc.hostile.workdir
 		script += sc.hostile.setup

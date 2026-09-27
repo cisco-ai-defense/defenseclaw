@@ -25,15 +25,18 @@ package image
 //	DEFENSECLAW_E2E_IMAGE_REPO=e-defenseclaw-sandbox \
 //	go test -tags openshell_integration ./internal/openshell/image/ -run TestLiveOverlay -v -timeout 60m
 //
-// Build runs the hook-fire probe itself against the built-in mock LLM
-// (allow, BLOCKME and, for Claude Code, Copilot CLI and OpenCode, hostile
-// user and project settings) on the platform's default network, so no model
-// or mock server is needed. Harnesses the mock cannot drive (Amp) must build
-// and pass the static probe but stay unverified. Select harnesses with
+// Build runs the hook-fire probe itself against the built-in mock LLM (Kiro
+// CLI: its own scripted-response mode) with allow, BLOCKME and, for Claude
+// Code, Codex, Copilot CLI, OpenCode and Kiro, hostile user and project
+// settings, on the platform's default network, so no model or mock server is
+// needed. Harnesses the mock cannot drive (Amp, Cursor Agent, Devin) must
+// build and pass the static probe but stay unverified. Select harnesses with
 // -run 'TestLiveOverlay/(opencode|copilot)'.
 // DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK=<address> (for example the Linux
 // docker0 gateway 172.17.0.1) additionally re-verifies each image in relay
 // mode, the Docker Desktop default, with the sink bound on that address.
+// DEFENSECLAW_E2E_CONTAINER_PREFIX names the probe containers (default
+// e-hookfire).
 
 import (
 	"context"
@@ -66,6 +69,10 @@ func TestLiveOverlay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
 	relaySink := os.Getenv("DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK")
+	containerPrefix := os.Getenv("DEFENSECLAW_E2E_CONTAINER_PREFIX")
+	if containerPrefix == "" {
+		containerPrefix = "e-hookfire"
+	}
 
 	for _, name := range harness.Names() {
 		h, _ := harness.Get(name)
@@ -78,7 +85,7 @@ func TestLiveOverlay(t *testing.T) {
 				DefenseClawVersion: "0.0.0-e2e",
 				Repository:         repo,
 			}
-			rec, err := b.Build(ctx, spec, BuildOptions{HookFire: HookFireOptions{ContainerPrefix: "e-hookfire"}})
+			rec, err := b.Build(ctx, spec, BuildOptions{HookFire: HookFireOptions{ContainerPrefix: containerPrefix}})
 			pretty, _ := json.MarshalIndent(rec, "", "  ")
 			t.Logf("build record:\n%s", pretty)
 			if h.Verification.Status == harness.Unverified {
@@ -111,7 +118,7 @@ func TestLiveOverlay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			verified, res, err := b.VerifyHooks(ctx, c, HookFireOptions{Network: HookFireNetworkRelay, SinkHost: relaySink, ContainerPrefix: "e-hookfire"})
+			verified, res, err := b.VerifyHooks(ctx, c, HookFireOptions{Network: HookFireNetworkRelay, SinkHost: relaySink, ContainerPrefix: containerPrefix})
 			report, _ := json.MarshalIndent(res, "", "  ")
 			t.Logf("relay-mode hook-fire result:\n%s", report)
 			if err != nil || !verified.HookFireVerified {
