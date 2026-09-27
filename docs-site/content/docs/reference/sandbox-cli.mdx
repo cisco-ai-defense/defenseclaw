@@ -108,7 +108,7 @@ defenseclaw sandbox setup --non-interactive --skip-images
 {/* AUTOGEN-BEGIN: sandbox-flags setup */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `--harness` | text, repeatable or comma-separated |  | Harness to set up (repeatable; default: claude and codex). |
+| `--harness` | text, repeatable or comma-separated |  | Harness to set up (repeatable; default: openshell.harnesses, else claude and codex). |
 | `--install-openshell` | switch |  | Install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo). |
 | `--no-mounts` | switch |  | Leave bind mounts off; every run then works on a copy. |
 | `--no-wrappers` | switch |  | Do not offer the shell wrappers. |
@@ -354,16 +354,16 @@ A few rules the flags follow:
 {/* AUTOGEN-BEGIN: sandbox-flags run */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `--bedrock-region` | text |  | Amazon Bedrock region for --llm bedrock (default `$AWS_REGION`). |
+| `--bedrock-region` | text |  | Amazon Bedrock region for --llm bedrock (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then us-east-1). |
 | `--context` | text, repeatable |  | Extra folder mounted read-only (repeatable). |
 | `--copy` | switch |  | Work on a copy of the folder with secrets held back; bring changes back with pull. |
 | `--cpu` | text |  | CPU limit, for example 2 or 500m. |
 | `--credential` | text, repeatable |  | NAME=host[:port]: give the sandbox a placeholder for `$NAME` that works only against that host (repeatable). |
 | `-d`, `--detach` | switch |  | Run in the background (needs --prompt); follow with sandbox logs -f. |
 | `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
-| `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so the agent can push and open pull requests. |
+| `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests). |
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
-| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock. |
+| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
 | `--name` | text |  | Sandbox name (default `dc-<harness>-<folder>-<random>`). |
 | `--new` | switch |  | Start a new sandbox even when one already holds this folder. |
