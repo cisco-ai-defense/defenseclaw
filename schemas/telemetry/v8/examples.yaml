@@ -963,12 +963,12 @@ examples:
   valid: true
   signal: logs
   family: log.sandbox.workspace
-  description: The end-of-session review reports the diffstat and flags changed files that can run code on the host.
+  description: The end-of-session review reports the diffstat and flags changed files that can run code on the host; a flagged review is an enforced outcome, so it is mandatory.
   builder_context:
     inheritance: {mode: explicit}
     occurrence: {timestamp: '2026-09-26T12:30:00Z', record_id: rec-sandbox-workspace-001}
     condition_facts: {}
-    mandatory_facts: {}
+    mandatory_facts: {enforced_outcome: true, enforcement_state_change: false}
   record:
     schema_version: 1
     bucket_catalog_version: 1
@@ -981,7 +981,7 @@ examples:
     source: gateway
     connector: claudecode
     outcome: completed
-    mandatory: false
+    mandatory: true
     correlation:
       connector_id: claudecode
     provenance:
@@ -1008,6 +1008,54 @@ examples:
       /defenseclaw.sandbox.workspace.flagged_count: metadata
       /defenseclaw.sandbox.workspace.paths/0: content
       /defenseclaw.sandbox.workspace.paths/1: content
+- id: valid-sandbox-workspace-undo
+  valid: true
+  signal: logs
+  family: log.sandbox.workspace
+  description: The operator's undo restores the pre-session git snapshot; it writes the host workspace, so it is a mandatory enforcement state change.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-09-26T12:35:00Z', record_id: rec-sandbox-workspace-002}
+    condition_facts: {}
+    mandatory_facts: {enforced_outcome: false, enforcement_state_change: true}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:35:00Z'
+    record_id: rec-sandbox-workspace-002
+    bucket: enforcement.action
+    signal: logs
+    event_name: sandbox.workspace
+    severity: INFO
+    source: gateway
+    connector: claudecode
+    outcome: applied
+    mandatory: true
+    correlation:
+      connector_id: claudecode
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    body:
+      defenseclaw.sandbox.name: dc-claudecode-myapp-7f3a
+      defenseclaw.sandbox.workdir.mode: mount
+      defenseclaw.enforcement.effective_action: undo
+      defenseclaw.enforcement.initiator: operator
+      defenseclaw.sandbox.workspace.operation: undo
+      defenseclaw.sandbox.workspace.snapshot.kind: git
+      defenseclaw.sandbox.workspace.snapshot.ref: refs/defenseclaw/pre/dc-claudecode-myapp-7f3a
+      defenseclaw.sandbox.workspace.file_count: 8
+    field_classes:
+      /defenseclaw.sandbox.name: identifier
+      /defenseclaw.sandbox.workdir.mode: metadata
+      /defenseclaw.enforcement.effective_action: metadata
+      /defenseclaw.enforcement.initiator: identifier
+      /defenseclaw.sandbox.workspace.operation: metadata
+      /defenseclaw.sandbox.workspace.snapshot.kind: metadata
+      /defenseclaw.sandbox.workspace.snapshot.ref: identifier
+      /defenseclaw.sandbox.workspace.file_count: metadata
 - id: valid-sandbox-transition-metric
   valid: true
   signal: metrics

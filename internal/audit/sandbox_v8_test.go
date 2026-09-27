@@ -1110,19 +1110,31 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 	harness := newSandboxHarness(t)
 	count := func(value int64) *int64 { return &value }
 	for _, test := range []struct {
-		name     string
-		input    SandboxWorkspaceEvent
-		outcome  observability.Outcome
-		severity observability.Severity
-		body     map[string]any
+		name      string
+		input     SandboxWorkspaceEvent
+		outcome   observability.Outcome
+		severity  observability.Severity
+		mandatory bool
+		body      map[string]any
 	}{
+		{
+			name: "snapshot before the session",
+			input: SandboxWorkspaceEvent{
+				Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit,
+				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
+			},
+			outcome: observability.OutcomeCompleted, severity: observability.SeverityInfo,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.operation": "snapshot", "defenseclaw.sandbox.workspace.snapshot.kind": "git",
+			},
+		},
 		{
 			name: "review flags host-executable changes",
 			input: SandboxWorkspaceEvent{
 				Operation: SandboxWorkspaceReview, FileCount: count(8), LinesAdded: count(212), LinesRemoved: count(37),
 				FlaggedCount: count(2), Paths: []string{"package.json", ".envrc"},
 			},
-			outcome: observability.OutcomeCompleted, severity: observability.SeverityMedium,
+			outcome: observability.OutcomeCompleted, severity: observability.SeverityMedium, mandatory: true,
 			body: map[string]any{
 				"defenseclaw.sandbox.workspace.operation": "review", "defenseclaw.sandbox.workspace.file_count": int64(8),
 				"defenseclaw.sandbox.workspace.flagged_count": int64(2), "defenseclaw.sandbox.workspace.lines_added": int64(212),
@@ -1135,7 +1147,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 				Operation: SandboxWorkspaceUndo, SnapshotKind: SandboxSnapshotGit, Initiator: "operator",
 				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a", FileCount: count(0),
 			},
-			outcome: observability.OutcomeApplied, severity: observability.SeverityInfo,
+			outcome: observability.OutcomeApplied, severity: observability.SeverityInfo, mandatory: true,
 			body: map[string]any{
 				"defenseclaw.sandbox.workspace.snapshot.kind": "git", "defenseclaw.enforcement.initiator": "operator",
 				"defenseclaw.sandbox.workspace.snapshot.ref": "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
@@ -1148,7 +1160,7 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 				Operation: SandboxWorkspacePull, PullMode: SandboxPullApply, Result: SandboxWorkspaceFailed,
 				FailureClass: "merge_conflict", ByteCount: count(4096),
 			},
-			outcome: observability.OutcomeFailed, severity: observability.SeverityHigh,
+			outcome: observability.OutcomeFailed, severity: observability.SeverityHigh, mandatory: true,
 			body: map[string]any{
 				"defenseclaw.sandbox.workspace.pull.mode": "apply", "defenseclaw.enforcement.failure_class": "merge_conflict",
 				"defenseclaw.sandbox.workspace.byte_count": int64(4096),
@@ -1166,8 +1178,9 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 			severity, _ := record.Severity()
 			if record.EventName() != observability.EventName(observability.TelemetryEventSandboxWorkspace) ||
 				record.Bucket() != observability.BucketEnforcementAction || record.Outcome() != test.outcome ||
-				severity != test.severity || record.Mandatory() {
-				t.Fatalf("workspace record identity=%#v outcome=%q severity=%q", record.Identity(), record.Outcome(), severity)
+				severity != test.severity || record.Mandatory() != test.mandatory {
+				t.Fatalf("workspace record identity=%#v outcome=%q severity=%q mandatory=%v",
+					record.Identity(), record.Outcome(), severity, record.Mandatory())
 			}
 			body := sandboxBody(t, record)
 			assertSandboxCorrelation(t, body, test.input.Sandbox)
@@ -1199,6 +1212,72 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 			t.Fatalf("paths kept=%d want %d", len(kept), maxSandboxWorkspacePaths)
 		}
 	})
+}
+
+// TestSandboxWorkspaceMandatoryFloor pins which workspace records no route
+// can drop: operations that change the host workspace or what the sandbox
+// can read (enforcement_state_change) unless they changed nothing, and
+// records that flag host-executable changes (enforced_outcome). A mandatory
+// record keeps a content-free floor record and refuses a drop; any other
+// record takes neither path.
+func TestSandboxWorkspaceMandatoryFloor(t *testing.T) {
+	harness := newSandboxHarness(t)
+	count := func(value int64) *int64 { return &value }
+	for _, test := range []struct {
+		name      string
+		input     SandboxWorkspaceEvent
+		mandatory bool
+	}{
+		{"undo applied", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUndo}, true},
+		{"undo partial", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUndo, Result: SandboxWorkspacePartial}, true},
+		{"undo failed", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUndo, Result: SandboxWorkspaceFailed, FailureClass: "checkout_failed"}, true},
+		{"undo with nothing to restore", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUndo, Result: SandboxWorkspaceNoChange}, false},
+		{"undo skipped", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUndo, Result: SandboxWorkspaceSkipped}, false},
+		{"mask applied", SandboxWorkspaceEvent{Operation: SandboxWorkspaceMask, FileCount: count(2)}, true},
+		{"pull applied", SandboxWorkspaceEvent{Operation: SandboxWorkspacePull, PullMode: SandboxPullApply}, true},
+		{"pull to a branch", SandboxWorkspaceEvent{Operation: SandboxWorkspacePull, PullMode: SandboxPullBranch}, true},
+		{"pull to a patch file", SandboxWorkspaceEvent{Operation: SandboxWorkspacePull, PullMode: SandboxPullPatch}, false},
+		{"pull without a mode", SandboxWorkspaceEvent{Operation: SandboxWorkspacePull}, false},
+		{"flagged patch pull", SandboxWorkspaceEvent{Operation: SandboxWorkspacePull, PullMode: SandboxPullPatch, FlaggedCount: count(1)}, true},
+		{"review with flags", SandboxWorkspaceEvent{Operation: SandboxWorkspaceReview, FlaggedCount: count(1)}, true},
+		{"review without flags", SandboxWorkspaceEvent{Operation: SandboxWorkspaceReview, FlaggedCount: count(0)}, false},
+		{"snapshot", SandboxWorkspaceEvent{Operation: SandboxWorkspaceSnapshot}, false},
+		{"upload", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUpload, ByteCount: count(1 << 20)}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.input.Sandbox = testSandboxIdentity()
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); err != nil {
+				t.Fatalf("ordinary: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeContract(t, record)
+			if record.Mandatory() != test.mandatory {
+				t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
+			}
+
+			runtime, recorder = harness.bind(t, router.AdmissionFloor)
+			err := recorder.RecordSandboxWorkspace(context.Background(), test.input)
+			if !test.mandatory {
+				if err == nil {
+					t.Fatal("an ordinary workspace record took the mandatory floor")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("floor: %v", err)
+				}
+				_, floor := onlySandboxRecord(t, runtime)
+				if !floor.IsFloorOnly() || !floor.Mandatory() || floor.Bucket() != observability.BucketEnforcementAction {
+					t.Fatalf("floor record floor=%v mandatory=%v bucket=%q", floor.IsFloorOnly(), floor.Mandatory(), floor.Bucket())
+				}
+			}
+
+			_, recorder = harness.bind(t, router.AdmissionDrop)
+			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); (err != nil) != test.mandatory {
+				t.Fatalf("drop admission err=%v, want an error only for a mandatory record", err)
+			}
+		})
+	}
 }
 
 func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {

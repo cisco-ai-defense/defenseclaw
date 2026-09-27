@@ -10107,7 +10107,9 @@ groups:
     - partial
     - skipped
     route_selector: true
-    mandatory_floor: []
+    mandatory_floor:
+    - enforced_outcome
+    - enforcement_state_change
     compatibility_profiles:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
@@ -14966,7 +14968,9 @@ producer_mappings:
   event_name_policy: context_required
   allowed_context_identity_set: identity_set.sandbox_workspace
   severity_policy: canonical_or_info
-  mandatory_rules: []
+  mandatory_rules:
+  - enforced_outcome
+  - enforcement_state_change
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2

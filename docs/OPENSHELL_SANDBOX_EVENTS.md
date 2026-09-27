@@ -36,7 +36,7 @@ plus `creating` (before the gateway accepts the sandbox) and `deleted`.
 | Producer | Audit action | Family | Notes |
 | --- | --- | --- | --- |
 | `RecordSandboxLifecycle` | `sandbox-lifecycle` | `log.sandbox.lifecycle` (agent.lifecycle) | Phase, previous phase, trigger, exit code, OpenShell condition |
-| `RecordSandboxWorkspace` | `sandbox-workspace` | `log.sandbox.workspace` (enforcement.action) | Snapshot, undo, mask, review, upload, pull |
+| `RecordSandboxWorkspace` | `sandbox-workspace` | `log.sandbox.workspace` (enforcement.action) | Snapshot, undo, mask, review, upload, pull; undo, mask, and `pull --apply`/`--branch` are mandatory unless they changed nothing (`enforcement_state_change`), as is any record that flags host-executable changes (`enforced_outcome`) |
 | `RecordSandboxEgress` | `sandbox-egress` | `log.egress.allowed` / `log.egress.blocked` | `defenseclaw.network.source` is `openshell` or `dc-egress-proxy`; blocked is mandatory |
 | `RecordSandboxApproval` | `sandbox-approval` | `log.approval.requested` / `log.approval.resolved` | `defenseclaw.sandbox.approval.kind` and `.scope`; resolution is mandatory |
 | `RecordSandboxPolicy` | `sandbox-policy` | `log.policy.updated` | Control-plane mutation (mandatory) |

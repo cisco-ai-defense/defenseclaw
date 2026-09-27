@@ -427,6 +427,12 @@ const (
 
 // SandboxWorkspaceEvent is one snapshot, undo, mask, review, upload, or pull.
 // Nil counts are omitted; zero is a reported value.
+//
+// Two kinds of record are mandatory, so no route's collection settings can
+// drop them: an undo, a mask, or a pull applied to the working tree or to a
+// branch (enforcement_state_change) unless its result is no_change or
+// skipped, and any record that flags changed files that can run code on the
+// host (enforced_outcome).
 type SandboxWorkspaceEvent struct {
 	Sandbox   SandboxIdentity
 	Operation SandboxWorkspaceOperation
@@ -1036,7 +1042,8 @@ func (recorder *SandboxRecorder) RecordSandboxFinding(ctx context.Context, input
 }
 
 // RecordSandboxWorkspace emits log.sandbox.workspace in the
-// enforcement.action bucket.
+// enforcement.action bucket. State-changing operations and flagged reviews
+// are mandatory; see SandboxWorkspaceEvent.
 func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, input SandboxWorkspaceEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -1086,11 +1093,16 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 		}
 	}
 	paths := sandboxWorkspacePaths(input.Paths)
+	flagged := input.FlaggedCount != nil && *input.FlaggedCount > 0
+	// A failed or partial state change may have written part of the change
+	// before it stopped, so only a no-op result is exempt.
+	stateChange := input.Operation.changesState(input.PullMode) &&
+		result != SandboxWorkspaceNoChange && result != SandboxWorkspaceSkipped
 	defaultSeverity := "INFO"
 	switch {
 	case result == SandboxWorkspaceFailed:
 		defaultSeverity = "HIGH"
-	case input.FlaggedCount != nil && *input.FlaggedCount > 0:
+	case flagged:
 		defaultSeverity = "MEDIUM"
 	}
 	severity, err := sandboxSeverity(input.Severity, defaultSeverity)
@@ -1102,6 +1114,8 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 	log := sandboxV8Log{
 		action: ActionSandboxWorkspace, event: event, bucket: observability.BucketEnforcementAction,
 		eventName: observability.TelemetryEventSandboxWorkspace, phase: "workspace", outcome: outcome,
+		mandatory: flagged || stateChange,
+		facts:     observability.MandatoryFacts{EnforcedOutcome: flagged, EnforcementStateChange: stateChange},
 		build: func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput,
 			severity observability.Optional[observability.Severity], logLevel observability.Optional[observability.LogLevel],
 		) (observability.Record, error) {
@@ -1125,6 +1139,8 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 				DefenseClawSandboxWorkspaceFlaggedCount: optionalSandboxCount(input.FlaggedCount),
 				DefenseClawSandboxWorkspaceByteCount:    optionalSandboxCount(input.ByteCount),
 				DefenseClawSandboxWorkspacePaths:        paths,
+				MandatoryEnforcedOutcome:                flagged,
+				MandatoryEnforcementStateChange:         stateChange,
 			})
 		},
 	}
@@ -1423,6 +1439,22 @@ func (operation SandboxWorkspaceOperation) valid() bool {
 	case SandboxWorkspaceSnapshot, SandboxWorkspaceUndo, SandboxWorkspaceMask,
 		SandboxWorkspaceReview, SandboxWorkspaceUpload, SandboxWorkspacePull:
 		return true
+	default:
+		return false
+	}
+}
+
+// changesState reports whether the operation changes what the host or the
+// sandbox holds: undo restores host files, a mask hides secret files from the
+// sandbox, and a pull applied to the working tree or to a branch writes the
+// host repository. A patch pull writes only the patch file the operator asked
+// for.
+func (operation SandboxWorkspaceOperation) changesState(pullMode string) bool {
+	switch operation {
+	case SandboxWorkspaceUndo, SandboxWorkspaceMask:
+		return true
+	case SandboxWorkspacePull:
+		return pullMode == SandboxPullApply || pullMode == SandboxPullBranch
 	default:
 		return false
 	}
