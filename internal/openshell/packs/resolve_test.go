@@ -19,13 +19,16 @@ package packs
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	sandboxpolicies "github.com/defenseclaw/defenseclaw/policies/sandbox"
 )
 
 func boolPtr(v bool) *bool { return &v }
@@ -1389,5 +1392,129 @@ func TestRequireCopyForMatching(t *testing.T) {
 	}
 	if eff.requiresCopy("") != "" {
 		t.Fatal("an empty path must not match (Resolve handles a missing project)")
+	}
+}
+
+// TestResolveLockedKeysHoldAgainstPack: a --pack is checked against every
+// locked key the pack decides, not only when "pack" itself is locked.
+func TestResolveLockedKeysHoldAgainstPack(t *testing.T) {
+	root := t.TempDir()
+	writePack(t, root, "fewer-masks", strings.Replace(customPack("fewer-masks"), "network: {mode: open}",
+		"network: {mode: deny}\negress: {ports: [443]}", 1))
+	for _, tc := range []struct {
+		name   string
+		locked string
+		edit   func(*config.OpenShellConfig)
+		flags  Flags
+		key    string // the refused key, or "" when the --pack applies
+		detail string
+	}{
+		{"yolo", "yolo", nil, Flags{Pack: "open"}, "yolo", "in harness.yolo"},
+		{"workdir.mode", "workdir.mode", nil, Flags{Pack: "open"}, "workdir.mode", "in workspace.mode"},
+		{"mcp.import", "mcp.import", nil, Flags{Pack: "open"}, "mcp.import", "in mcp.import"},
+		{"mcp.host_ports", "mcp.host_ports", nil, Flags{Pack: "open"}, "mcp.host_ports", "in mcp.host_ports"},
+		{"profile", "profile", nil, Flags{Pack: "balanced"}, "profile", "in network.mode"},
+		{"workdir.unmask", "workdir.unmask", func(o *config.OpenShellConfig) { o.PackDir = root }, Flags{Pack: "fewer-masks"},
+			"workdir.unmask", "in workspace.masks"},
+		// The user's own key, or a tightening flag, decides instead of the
+		// pack, so the --pack loosens nothing locked.
+		{"yolo set by the user", "yolo", func(o *config.OpenShellConfig) { o.Yolo = boolPtr(false) }, Flags{Pack: "open"}, "", ""},
+		{"yolo with --safe", "yolo", nil, Flags{Pack: "open", Safe: true}, "", ""},
+		{"workdir.mode with --copy", "workdir.mode", nil, Flags{Pack: "open", Copy: true}, "", ""},
+		{"workdir.mode set by the user", "workdir.mode", func(o *config.OpenShellConfig) { o.Workdir.Mode = "copy" }, Flags{Pack: "open"}, "", ""},
+		{"mcp.import with --no-mcp", "mcp.import", nil, Flags{Pack: "open", NoMCP: true}, "", ""},
+		{"profile set by the user", "profile", func(o *config.OpenShellConfig) { o.Profile = "strict" }, Flags{Pack: "open"}, "", ""},
+		{"profile with a stricter --profile", "profile", nil, Flags{Pack: "open", Profile: "strict"}, "", ""},
+		{"workdir.unmask with the user's masks", "workdir.unmask", func(o *config.OpenShellConfig) {
+			o.PackDir, o.Workdir.Masks = root, packMasks(t, "strict")
+		}, Flags{Pack: "fewer-masks"}, "", ""},
+		{"resources", "resources", nil, Flags{Pack: "open"}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(func(o *config.OpenShellConfig) {
+				o.Pack, o.Admin.Locked = "strict", []string{tc.locked}
+				if tc.edit != nil {
+					tc.edit(o)
+				}
+			})
+			eff, violations := mustResolve(t, cfg, tc.flags)
+			if tc.key == "" {
+				if len(violations) != 0 || eff.Pack.Name != tc.flags.Pack {
+					t.Fatalf("violations %+v pack %s", violations, eff.Pack.Name)
+				}
+				return
+			}
+			got := lockedViolations(t, violations)
+			if len(got) != 1 || got[tc.key] != "--pack "+tc.flags.Pack {
+				t.Fatalf("locked violations = %v, want %s", got, tc.key)
+			}
+			if v := violations[0]; !strings.Contains(v.Detail, "looser than the configured strict pack "+tc.detail) {
+				t.Fatalf("detail %q", v.Detail)
+			}
+			if eff.Pack.Name != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
+				eff.MCP.HostPortAccess || eff.Profile != "strict" {
+				t.Fatalf("a locked key was loosened: %+v", eff)
+			}
+		})
+	}
+
+	// Under a required pack --pack never applies; the required-pack
+	// violation is the only one.
+	cfg := testConfig(func(o *config.OpenShellConfig) {
+		o.Admin.RequiredPack, o.Admin.Locked = "strict", []string{"yolo"}
+	})
+	eff, violations := mustResolve(t, cfg, Flags{Pack: "open"})
+	if v := onlyViolation(t, violations); v.Constraint != requiredPackConstraint || eff.Pack.Name != "strict" || eff.Yolo {
+		t.Fatalf("violation %+v pack %s yolo %v", v, eff.Pack.Name, eff.Yolo)
+	}
+}
+
+func packMasks(t *testing.T, name string) []string {
+	t.Helper()
+	pack, err := Builtin(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pack.Workspace.Masks
+}
+
+// TestResolveRunsTheComparedPack: the --pack that the locked check compared
+// with the configured pack is the one that runs, even when the file changes
+// between the check and the run.
+func TestResolveRunsTheComparedPack(t *testing.T) {
+	builtinBytes := func(name string) string {
+		t.Helper()
+		data, err := fs.ReadFile(sandboxpolicies.BuiltinPacks(), path.Join(name, PackFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Replace(string(data), "name: "+name, "name: mine", 1)
+	}
+	root := t.TempDir()
+	file := filepath.Join(writePack(t, root, "mine", builtinBytes("strict")), PackFileName)
+	loose := builtinBytes("open")
+
+	// Each LoadFile checks the pack directory's owner before it reads the
+	// file; the second check of "mine" swaps in the loose content.
+	checks := 0
+	fakeOwners(t, func(info fs.FileInfo) int {
+		if info.IsDir() && info.Name() == "mine" {
+			if checks++; checks == 2 {
+				if err := os.WriteFile(file, []byte(loose), 0o644); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		return testUID
+	})
+	cfg := testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.PackDir, o.Admin.Locked = "strict", root, []string{"pack"}
+	})
+	eff, violations := mustResolve(t, cfg, Flags{Pack: "mine"})
+	if len(violations) != 0 || eff.Pack.Name != "mine" || eff.Profile != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" {
+		t.Fatalf("violations %+v effective %s/%s yolo %v mode %s", violations, eff.Pack.Name, eff.Profile, eff.Yolo, eff.Workspace.Mode)
+	}
+	if checks != 1 {
+		t.Fatalf("the --pack was read %d times, want once", checks)
 	}
 }

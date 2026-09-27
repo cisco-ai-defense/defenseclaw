@@ -30,10 +30,11 @@ const lockedConstraint = "openshell.admin.locked"
 // and the user's openshell keys without flags) against every flag that would
 // loosen it, and each dropped flag is a Violation. Flags that only tighten a
 // locked key still apply: --safe, --copy and --no-mcp; a --pack at least as
-// strict as the configured pack in every setting (looserPackKey); a
-// --profile at least as strict as the configured profile; --cpu and
-// --memory at or below the configured request; and --unmask and --host-port
-// entries the configuration already has.
+// strict as the configured pack in every setting (looserPackKey) when "pack"
+// is locked, and otherwise in every setting of a locked key the pack decides
+// (lockedPackKeys); a --profile at least as strict as the configured
+// profile; --cpu and --memory at or below the configured request; and
+// --unmask and --host-port entries the configuration already has.
 func (r *resolver) dropLockedFlags(o config.OpenShellConfig, flags Flags) Flags {
 	if len(r.admin.Locked) == 0 {
 		return flags
@@ -72,9 +73,9 @@ func (r *resolver) dropLockedFlags(o config.OpenShellConfig, flags Flags) Flags 
 			flags.Profile = ""
 		}
 	}
-	if ref := strings.TrimSpace(flags.Pack); ref != "" && locked("pack") {
-		if reason, ok := r.packTightens(o, flags, ref, baseline); !ok {
-			refuse("pack", "--pack "+flags.Pack, reason)
+	if ref := strings.TrimSpace(flags.Pack); ref != "" {
+		if key, reason, ok := r.packFlagAllowed(o, flags, ref, baseline); !ok {
+			refuse(key, "--pack "+flags.Pack, reason)
 			flags.Pack = ""
 		}
 	}
@@ -142,37 +143,139 @@ func (r *resolver) dropLockedFlags(o config.OpenShellConfig, flags Flags) Flags 
 // when openshell.admin sets one, else openshell.pack.
 func (r *resolver) configuredPack(o config.OpenShellConfig) (*Pack, error) {
 	if required := strings.TrimSpace(r.admin.RequiredPack); required != "" {
-		if r.managed {
-			return LoadTrusted(required, o.PackDir)
-		}
-		return Load(required, o.PackDir)
+		return r.loadPack(required, o.PackDir, r.managed)
 	}
-	return Load(o.Pack, o.PackDir)
+	return r.loadPack(o.Pack, o.PackDir, false)
 }
 
-// packTightens reports whether running --pack ref instead of the configured
-// pack loosens nothing and, when it does, why.
-func (r *resolver) packTightens(o config.OpenShellConfig, flags Flags, ref string, baseline *Pack) (string, bool) {
-	if baseline == nil {
-		return "", false
+// loadPack loads a pack reference at most once per Resolve (LoadTrusted when
+// trusted). dropLockedFlags compares the configured pack with a --pack, and
+// selectPack must run exactly the pack that was compared, not a second read
+// of a file the user can rewrite in between.
+func (r *resolver) loadPack(ref, packDir string, trusted bool) (*Pack, error) {
+	key := packCacheKey{ref: strings.TrimSpace(ref), trusted: trusted}
+	if pack, ok := r.loaded[key]; ok {
+		return pack, nil
 	}
-	candidate, err := Load(ref, o.PackDir)
+	load := Load
+	if trusted {
+		load = LoadTrusted
+	}
+	pack, err := load(key.ref, packDir)
 	if err != nil {
-		return "the pack could not be loaded to compare it with the configured " + baseline.Name + " pack", false
+		return nil, err
 	}
-	if candidate.Digest == baseline.Digest {
-		return "", true
+	if r.loaded == nil {
+		r.loaded = make(map[packCacheKey]*Pack)
 	}
-	profile := candidate.Profile()
-	for _, chosen := range []string{o.Profile, flags.Profile} {
-		if chosen = strings.TrimSpace(chosen); chosen != "" {
-			profile = chosen
+	r.loaded[key] = pack
+	return pack, nil
+}
+
+type packCacheKey struct {
+	ref     string
+	trusted bool
+}
+
+// lockedPackKeys returns the locked keys whose configured value the pack
+// decides for this run: "pack" itself, and "profile", "yolo",
+// "workdir.mode" and "mcp.import" while neither the user's openshell key nor
+// a tightening flag sets them. The pack always decides what
+// "workdir.unmask" and "mcp.host_ports" protect (its masks and its host-port
+// access); "resources" is never the pack's.
+func (r *resolver) lockedPackKeys(o config.OpenShellConfig, flags Flags) []string {
+	candidates := []struct {
+		key     string
+		decides bool
+	}{
+		{"pack", true},
+		{"profile", strings.TrimSpace(o.Profile) == "" && strings.TrimSpace(flags.Profile) == ""},
+		{"yolo", o.Yolo == nil && !flags.Safe},
+		{"workdir.mode", o.Workdir.Mode == "" && !flags.Copy},
+		{"workdir.unmask", true},
+		{"mcp.import", o.MCP.Import == nil && !flags.NoMCP},
+		{"mcp.host_ports", true},
+	}
+	var keys []string
+	for _, c := range candidates {
+		if c.decides && r.admin.IsLocked(c.key) {
+			keys = append(keys, c.key)
 		}
 	}
-	if key := looserPackKey(candidate, baseline, networkForProfile(profile)); key != "" {
-		return fmt.Sprintf("the %s pack is looser than the configured %s pack in %s", candidate.Name, baseline.Name, key), false
+	return keys
+}
+
+// packFlagAllowed reports whether --pack ref may replace the configured
+// pack, and otherwise the locked key it would loosen and why. With "pack"
+// locked the candidate must be at least as strict in every setting; with
+// other keys locked, in the settings behind those keys. The candidate is
+// loaded once, and selectPack runs that load.
+func (r *resolver) packFlagAllowed(o config.OpenShellConfig, flags Flags, ref string, baseline *Pack) (string, string, bool) {
+	keys := r.lockedPackKeys(o, flags)
+	if len(keys) == 0 || (keys[0] != "pack" && strings.TrimSpace(r.admin.RequiredPack) != "") {
+		// Nothing locked depends on the pack, or a required pack runs
+		// whatever --pack says (selectPack reports that).
+		return "", "", true
 	}
-	return "", true
+	if baseline == nil {
+		return keys[0], "", false
+	}
+	candidate, err := r.loadPack(ref, o.PackDir, false)
+	if err != nil {
+		return keys[0], "the pack could not be loaded to compare it with the configured " + baseline.Name + " pack", false
+	}
+	if candidate.Digest == baseline.Digest {
+		return "", "", true
+	}
+	looser := func(key, setting string) (string, string, bool) {
+		return key, fmt.Sprintf("the %s pack is looser than the configured %s pack in %s", candidate.Name, baseline.Name, setting), false
+	}
+	c, b := candidate, baseline
+	for _, key := range keys {
+		switch key {
+		case "pack":
+			profile := candidate.Profile()
+			for _, chosen := range []string{o.Profile, flags.Profile} {
+				if chosen = strings.TrimSpace(chosen); chosen != "" {
+					profile = chosen
+				}
+			}
+			if setting := looserPackKey(c, b, networkForProfile(profile)); setting != "" {
+				return looser(key, setting)
+			}
+			// Every other locked key is covered.
+			return "", "", true
+		case "profile":
+			if networkRank(c.Network.Mode) < networkRank(b.Network.Mode) {
+				return looser(key, "network.mode")
+			}
+		case "yolo":
+			if c.Harness.Yolo && !b.Harness.Yolo {
+				return looser(key, "harness.yolo")
+			}
+		case "workdir.mode":
+			if c.Workspace.Mode == config.OpenShellWorkdirMount && b.Workspace.Mode == config.OpenShellWorkdirCopy {
+				return looser(key, "workspace.mode")
+			}
+		case "workdir.unmask":
+			// The user's own masks and unmask entries apply over either pack.
+			if !containsAll(mergeLists(c.Workspace.Masks, o.Workdir.Masks), b.Workspace.Masks) {
+				return looser(key, "workspace.masks")
+			}
+			if len(b.Workspace.Masks) > 0 && !containsAll(mergeLists(b.Workspace.Unmask, o.Workdir.Unmask), c.Workspace.Unmask) {
+				return looser(key, "workspace.unmask")
+			}
+		case "mcp.import":
+			if c.MCP.Import && !b.MCP.Import {
+				return looser(key, "mcp.import")
+			}
+		case "mcp.host_ports":
+			if c.MCP.HostPorts && !b.MCP.HostPorts {
+				return looser(key, "mcp.host_ports")
+			}
+		}
+	}
+	return "", "", true
 }
 
 // looserPackKey returns the first pack key in which candidate is looser than

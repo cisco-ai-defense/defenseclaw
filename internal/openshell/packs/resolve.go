@@ -331,6 +331,8 @@ type resolver struct {
 	// administrator-owned file.
 	managed    bool
 	violations []Violation
+	// loaded caches the packs this Resolve read (loadPack).
+	loaded map[packCacheKey]*Pack
 }
 
 const requiredPackConstraint = "openshell.admin.required_pack"
@@ -582,13 +584,9 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 		ref, from = strings.TrimSpace(o.Pack), layer{SourceUser, "openshell.pack"}
 	}
 	if required := strings.TrimSpace(r.admin.RequiredPack); required != "" {
-		load := Load
-		if r.managed {
-			// config.yaml is administrator-owned here; a pack file the
-			// user can write must not stand in for it.
-			load = LoadTrusted
-		}
-		pack, err := load(required, o.PackDir)
+		// In managed_enterprise config.yaml is administrator-owned; a pack
+		// file the user can write must not stand in for it (LoadTrusted).
+		pack, err := r.loadPack(required, o.PackDir, r.managed)
 		if err != nil {
 			return nil, fmt.Errorf("sandbox policy: openshell.admin.required_pack: %w", err)
 		}
@@ -601,7 +599,7 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 		if ref != "" && ref != required {
 			// Another reference to the same content (a path to the
 			// required file) is not a loosening.
-			chosen, err := Load(ref, o.PackDir)
+			chosen, err := r.loadPack(ref, o.PackDir, false)
 			if err != nil || chosen.Digest != pack.Digest {
 				r.violate(Violation{
 					Key: "pack", Source: from.source, Attempted: ref, Enforced: pack.Name,
@@ -613,7 +611,7 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 		r.setClamped("pack", pack.Name, ref, requiredPackConstraint)
 		return pack, nil
 	}
-	pack, err := Load(ref, o.PackDir)
+	pack, err := r.loadPack(ref, o.PackDir, false)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox policy: %s: %w", from.origin, err)
 	}
