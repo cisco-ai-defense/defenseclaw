@@ -81,6 +81,26 @@ const (
 	// Mantle OpenAI-compatible route for a Codex custom provider, imported
 	// as BedrockProfileID(CodexBedrockMantleID, region).
 	CodexBedrockMantleID = "defenseclaw-codex-bedrock-mantle"
+	// OpenCodeAnthropicID binds ANTHROPIC_API_KEY (x-api-key) to
+	// api.anthropic.com for OpenCode.
+	OpenCodeAnthropicID = "defenseclaw-opencode-anthropic"
+	// OpenCodeOpenAIID binds OPENAI_API_KEY (bearer) to api.openai.com for
+	// OpenCode.
+	OpenCodeOpenAIID = "defenseclaw-opencode-openai"
+	// OpenCodeBedrockMantleID binds BEDROCK_MANTLE_API_KEY (x-api-key) to the
+	// Mantle Anthropic route for an OpenCode custom provider.
+	OpenCodeBedrockMantleID = "defenseclaw-opencode-bedrock-mantle"
+	// CopilotGitHubID binds COPILOT_GITHUB_TOKEN to GitHub and the Copilot
+	// API.
+	CopilotGitHubID = "defenseclaw-copilot-github"
+	// CopilotAnthropicID binds COPILOT_PROVIDER_API_KEY (x-api-key) to
+	// api.anthropic.com for a Copilot CLI custom provider.
+	CopilotAnthropicID = "defenseclaw-copilot-anthropic"
+	// CopilotBedrockMantleID binds COPILOT_PROVIDER_API_KEY (x-api-key) to
+	// the Mantle Anthropic route for a Copilot CLI custom provider.
+	CopilotBedrockMantleID = "defenseclaw-copilot-bedrock-mantle"
+	// AmpID binds AMP_API_KEY (bearer) to the Amp service.
+	AmpID = "defenseclaw-amp"
 )
 
 // LegacyIngressID is the gateway-wide ingress profile of earlier releases,
@@ -163,6 +183,14 @@ var catalog = map[string]profileKind{
 	ClaudeBedrockMantleID: kindBedrock,
 	OpenAIID:              kindHarness,
 	CodexBedrockMantleID:  kindBedrock,
+
+	OpenCodeAnthropicID:     kindHarness,
+	OpenCodeOpenAIID:        kindHarness,
+	OpenCodeBedrockMantleID: kindBedrock,
+	CopilotGitHubID:         kindHarness,
+	CopilotAnthropicID:      kindHarness,
+	CopilotBedrockMantleID:  kindBedrock,
+	AmpID:                   kindHarness,
 }
 
 // IDs lists every profile template, sorted.

@@ -1,0 +1,19 @@
+id: defenseclaw-copilot-anthropic
+display_name: Anthropic API for Copilot CLI BYOK (DefenseClaw)
+description: Binds COPILOT_PROVIDER_API_KEY to the Anthropic Messages API as x-api-key for a Copilot CLI custom provider; only the Copilot CLI binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key
+    env_vars: [COPILOT_PROVIDER_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/copilot/cache/pkg/linux-arm64/1.0.88/prebuilds/linux-arm64/copilot-runtime", "/opt/defenseclaw-harness/copilot/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot"]

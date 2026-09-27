@@ -26,11 +26,16 @@ import (
 )
 
 const (
-	claudeRealpath = "/opt/defenseclaw-harness/claudecode/bin/claude"
-	codexRealpath  = "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+	claudeRealpath         = "/opt/defenseclaw-harness/claudecode/bin/claude"
+	codexRealpath          = "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+	openCodeRealpath       = "/opt/defenseclaw-harness/opencode/lib/node_modules/opencode-ai/bin/opencode.exe"
+	copilotRealpath        = "/opt/defenseclaw-harness/copilot/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot"
+	copilotRuntimeRealpath = "/opt/defenseclaw-harness/copilot/cache/pkg/linux-arm64/1.0.88/prebuilds/linux-arm64/copilot-runtime"
+	ampRealpath            = "/opt/defenseclaw-harness/amp/lib/node_modules/@ampcode/cli/bin/amp.exe"
 )
 
 func goldenInputs() map[string]Input {
+	copilot := []string{copilotRealpath, copilotRuntimeRealpath}
 	return map[string]Input{
 		IngressID:             {IngressPort: 18971},
 		AnthropicID:           {Binaries: []string{claudeRealpath}},
@@ -38,6 +43,14 @@ func goldenInputs() map[string]Input {
 		ClaudeBedrockMantleID: {Binaries: []string{claudeRealpath}},
 		OpenAIID:              {Binaries: []string{codexRealpath}},
 		CodexBedrockMantleID:  {Binaries: []string{codexRealpath}, BedrockRegion: "us-west-2"},
+
+		OpenCodeAnthropicID:     {Binaries: []string{openCodeRealpath}},
+		OpenCodeOpenAIID:        {Binaries: []string{openCodeRealpath}},
+		OpenCodeBedrockMantleID: {Binaries: []string{openCodeRealpath}},
+		CopilotGitHubID:         {Binaries: copilot},
+		CopilotAnthropicID:      {Binaries: copilot},
+		CopilotBedrockMantleID:  {Binaries: copilot, BedrockRegion: "eu-west-1"},
+		AmpID:                   {Binaries: []string{ampRealpath}},
 	}
 }
 
@@ -206,6 +219,61 @@ func TestProfileIDHelpers(t *testing.T) {
 		if !IsDefenseClaw(p.ID) {
 			t.Errorf("rendered %s is not recognised as DefenseClaw's", p.ID)
 		}
+	}
+}
+
+// TestRenderHookOnlyHarnessProfiles pins the credential, endpoints and
+// binaries of the OpenCode, Copilot CLI and Amp profiles.
+func TestRenderHookOnlyHarnessProfiles(t *testing.T) {
+	copilot := []string{copilotRealpath, copilotRuntimeRealpath}
+	cases := []struct {
+		id       string
+		in       Input
+		env      string
+		style    string
+		header   string
+		hosts    []string
+		binaries []string
+	}{
+		{OpenCodeAnthropicID, Input{Binaries: []string{openCodeRealpath}}, "ANTHROPIC_API_KEY", "header", "x-api-key", []string{"api.anthropic.com"}, []string{openCodeRealpath}},
+		{OpenCodeOpenAIID, Input{Binaries: []string{openCodeRealpath}}, "OPENAI_API_KEY", "bearer", "authorization", []string{"api.openai.com"}, []string{openCodeRealpath}},
+		{OpenCodeBedrockMantleID, Input{Binaries: []string{openCodeRealpath}, BedrockRegion: "us-west-2"}, "BEDROCK_MANTLE_API_KEY", "header", "x-api-key", []string{"bedrock-mantle.us-west-2.api.aws"}, []string{openCodeRealpath}},
+		{CopilotGitHubID, Input{Binaries: copilot}, "COPILOT_GITHUB_TOKEN", "bearer", "authorization",
+			[]string{"api.github.com", "api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com"}, []string{copilotRuntimeRealpath, copilotRealpath}},
+		{CopilotAnthropicID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"api.anthropic.com"}, []string{copilotRuntimeRealpath, copilotRealpath}},
+		{CopilotBedrockMantleID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"bedrock-mantle.us-east-1.api.aws"}, []string{copilotRuntimeRealpath, copilotRealpath}},
+		{AmpID, Input{Binaries: []string{ampRealpath}}, "AMP_API_KEY", "bearer", "authorization", []string{"ampcode.com"}, []string{ampRealpath}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			p, err := Render(tc.id, tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := p.Spec
+			if !s.InferenceCapable || len(s.Credentials) != 1 {
+				t.Fatalf("spec = %#v", s)
+			}
+			if c := s.Credentials[0]; len(c.EnvVars) != 1 || c.EnvVars[0] != tc.env || c.AuthStyle != tc.style || c.HeaderName != tc.header {
+				t.Fatalf("credential = %#v", c)
+			}
+			var hosts, binaries []string
+			for _, ep := range s.Endpoints {
+				if ep.Port != 443 || ep.Protocol != "rest" {
+					t.Fatalf("endpoint %#v", ep)
+				}
+				hosts = append(hosts, ep.Host)
+			}
+			for _, b := range s.Binaries {
+				binaries = append(binaries, b.Path)
+			}
+			if strings.Join(hosts, ",") != strings.Join(tc.hosts, ",") || strings.Join(binaries, ",") != strings.Join(tc.binaries, ",") {
+				t.Fatalf("hosts %v binaries %v", hosts, binaries)
+			}
+			if _, err := Render(tc.id, Input{Binaries: []string{"/**"}}); err == nil {
+				t.Fatal("an inference credential rendered for every binary")
+			}
+		})
 	}
 }
 
