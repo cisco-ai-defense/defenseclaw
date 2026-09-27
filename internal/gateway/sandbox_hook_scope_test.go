@@ -510,3 +510,106 @@ func TestSandboxCodeGuardScanGoesThroughTheView(t *testing.T) {
 		t.Fatalf("copy-mode scan = %+v", got)
 	}
 }
+
+// TestSandboxToolResultsSkipHostSourceProofs covers Observe mode's
+// source-scope downgrade for tool results. On the host it verifies a git
+// diff by reading the current file under the working directory. For a
+// sandbox that file may be masked (the agent sees it empty), so a verdict
+// that depended on the file's real lines would be an oracle on the secret.
+// Sandbox tool results must be inspected as untrusted, without the host
+// read, whatever the file holds.
+func TestSandboxToolResultsSkipHostSourceProofs(t *testing.T) {
+	root, err := filepath.EvalSymlinks(codexObserveTestWorkspace(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := codexObserveSourceTrustLiteral()
+	// The masked file's real content matches the diff the agent reports.
+	if err := os.WriteFile(filepath.Join(root, "internal", "gateway", "rules.go"),
+		[]byte("package gateway\n"+literal+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diff := strings.Join([]string{
+		"diff --git a/internal/gateway/rules.go b/internal/gateway/rules.go",
+		"index 1111111..2222222 100644",
+		"--- a/internal/gateway/rules.go",
+		"+++ b/internal/gateway/rules.go",
+		"@@ -1 +1,2 @@",
+		" package gateway",
+		"+" + literal,
+	}, "\n")
+	input := map[string]interface{}{"command": "git diff -- internal/gateway/rules.go"}
+	output := map[string]interface{}{"stdout": diff}
+
+	for _, connectorName := range []string{"codex", "claudecode"} {
+		t.Run(connectorName, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.Connector = connectorName
+			api := &APIServer{scannerCfg: cfg}
+			binding := sandboxauth.Binding{
+				ID:             "sb_00000000000000000000000000000003",
+				SandboxName:    "dc-" + connectorName + "-masked",
+				Connector:      connectorName,
+				AgentVersion:   "0.128.0",
+				HookContractID: "codex-hooks-v1",
+				Routes:         []sandboxauth.Route{sandboxauth.RouteHook},
+				Workdir: sandboxauth.Workdir{
+					Mode:   sandboxauth.WorkdirMount,
+					Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: root}},
+					Masks:  []string{"/work/app/internal/gateway/rules.go"},
+				},
+			}
+			if connectorName == "claudecode" {
+				binding.AgentVersion, binding.HookContractID = "2.1.156", "claudecode-hooks-v1"
+			}
+			fsys := &countingFS{}
+			view := sandboxauth.NewFSView(binding, fsys)
+			sandbox := withAuthenticatedHookConnector(sandboxauth.WithRequest(t.Context(), binding, view), connectorName)
+			// The working directory is already mapped to the host, exactly as
+			// the request decoders leave it.
+			evaluate := func(ctx context.Context, session string) string {
+				if connectorName == "codex" {
+					return api.evaluateCodexHook(ctx, codexHookRequest{
+						HookEventName: "PostToolUse", SessionID: session, ToolName: "Bash",
+						ToolInput: input, ToolResponse: output, CWD: root,
+						sandboxView: viewFor(ctx),
+					}).Severity
+				}
+				return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "PostToolUse", SessionID: session, ToolName: "Bash",
+					ToolInput: input, ToolResponse: output, CWD: root,
+					sandboxView: viewFor(ctx),
+				}).Severity
+			}
+			// On the host the physical proof downgrades the verified line.
+			if got := evaluate(t.Context(), "host-diff"); got != "LOW" {
+				t.Fatalf("host severity = %s, want the source-scope LOW", got)
+			}
+			if got := evaluate(sandbox, "sandbox-diff"); severityRank[got] < severityRank["HIGH"] {
+				t.Fatalf("sandbox severity = %s, want the untrusted verdict", got)
+			}
+			if fsys.calls != 0 {
+				t.Fatalf("tool-result inspection used the sandbox view %d times", fsys.calls)
+			}
+			// The verdict is the same whatever the masked file holds.
+			if err := os.WriteFile(filepath.Join(root, "internal", "gateway", "rules.go"),
+				[]byte("package gateway\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			first := evaluate(sandbox, "sandbox-diff-2")
+			if err := os.WriteFile(filepath.Join(root, "internal", "gateway", "rules.go"),
+				[]byte("package gateway\n"+literal+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if second := evaluate(sandbox, "sandbox-diff-3"); first != second {
+				t.Fatalf("sandbox verdict depends on the masked file: %s vs %s", first, second)
+			}
+		})
+	}
+}
+
+func viewFor(ctx context.Context) *sandboxauth.FSView {
+	view, _ := sandboxauth.ViewFromContext(ctx)
+	return view
+}

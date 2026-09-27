@@ -839,6 +839,9 @@ func (a *APIServer) inspectCodexToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := codexToolResponseString(req.ToolResponse)
+	if sandboxToolResultUntrusted(ctx) {
+		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
+	}
 	strictScope := codexToolResultContentScope(req)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, strictScope))

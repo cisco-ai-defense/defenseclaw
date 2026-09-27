@@ -41,6 +41,8 @@ import (
 //     actually edited), and in copy mode it becomes empty. Absolute paths the
 //     agent names elsewhere stay in the sandbox namespace and reach the host
 //     only through FSView.
+//   - Tool results never take the source-scope proofs that read the host
+//     tree (sandboxToolResultUntrusted).
 //   - Nothing runs git or a subprocess scanner against the agent-writable
 //     tree on the host. The agent controls .git internals other than hooks
 //     and config (for example .git/commondir and nested repositories), so
@@ -81,6 +83,20 @@ func sandboxHookCWD(view *sandboxauth.FSView, cwd string) string {
 		return ""
 	}
 	return host
+}
+
+// sandboxToolResultUntrusted reports whether a tool result must skip the
+// source-scope proofs and stay in the untrusted detector scope. Those proofs
+// (codexToolResultContentScope, codexObserveWorkspaceSourceProofForRequest
+// and the git-diff line verifier) stat, open, walk and compare files on the
+// host under the payload's working directory. For a sandbox that tree is
+// agent-writable and may hold masked secrets the agent was shown as empty
+// files: comparing agent-supplied diff text with a masked file's real lines
+// turns the verdict scope into an oracle on the secret, and a swapped-in
+// FIFO could park the read. Sandbox tool results therefore never earn the
+// source-scope downgrade; they are inspected like any other untrusted output.
+func sandboxToolResultUntrusted(ctx context.Context) bool {
+	return isSandboxHookRequest(ctx)
 }
 
 // sandboxHookAuditExtra is the sandbox identity stamped onto hook audit
