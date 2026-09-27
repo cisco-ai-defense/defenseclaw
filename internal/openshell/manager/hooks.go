@@ -142,9 +142,16 @@ func displayReason(reason string) string {
 	return reason
 }
 
+// isToolEvent reports whether a hook event is a harness's pre-tool call,
+// which the session summary counts (every sandboxed harness's spelling).
 func isToolEvent(event string) bool {
-	e := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(event))
-	return e == "pretooluse" || e == "beforetooluse" || e == "pretoolcall"
+	switch strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(event)) {
+	case "pretooluse", "beforetooluse", "pretoolcall",
+		// OpenCode's tool.execute.before and Amp's tool.call plugin events.
+		"toolexecutebefore", "toolcall":
+		return true
+	}
+	return false
 }
 
 func isBlockAction(action string) bool {

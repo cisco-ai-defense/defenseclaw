@@ -1051,7 +1051,11 @@ compromised hook shows:
   and a count in the sandbox's hook coverage (`tampered`,
   `last_tamper_at`). Claude Code's `PostToolUseFailure` and `PermissionDenied`
   close a call but never prove tamper: Claude can report a failure before
-  `PreToolUse` ran.
+  `PreToolUse` ran. The pairing reads only events named exactly
+  `PreToolUse` and `PostToolUse` that carry a per-call ID. Copilot CLI,
+  Cursor Agent, Kiro CLI, OpenCode and Amp name their events differently, so
+  for them hook silence is the backstop; their pre-tool events still count
+  in the session summary's tool calls and blocks.
 
 The pack's `hooks.on_tamper` picks the response: `stop` (the default in
 `balanced` and `strict`) stops the sandbox once per session; `alert` (the
