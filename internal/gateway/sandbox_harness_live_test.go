@@ -26,7 +26,9 @@ package gateway
 // binding token, the DefenseClaw hook ingress and egress proxy in this
 // process, and the E2E mock Anthropic server as the model (or, with a
 // Bedrock API key, the harness's curated Bedrock Mantle profile and a real
-// model).
+// model). Kiro CLI, which has no model endpoint of its own to point at a
+// mock, replays the same E2E scenarios through its scripted-response mode.
+// Select harnesses with -run 'TestLiveSandboxHookOnlyHarness/(kiro)'.
 //
 //	DEFENSECLAW_E2E_DATA_DIR=<image store data dir> \
 //	DEFENSECLAW_E2E_IMAGE_REPO=<repo> DEFENSECLAW_E2E_INGRESS_PORT=<baked port> \
@@ -38,7 +40,8 @@ package gateway
 // token and an idempotency key, an allowed tool call runs, a tool call
 // DefenseClaw blocks (the mock's DCBLOCK scenario, with the shell tool on
 // DefenseClaw's block list) gets the real gateway's block verdict, has no
-// side effect and the harness passes the reason on,
+// side effect and the harness passes the reason on (to the model; a scripted
+// run has none),
 // the harness's own tools reach the web through the DefenseClaw proxy the
 // launcher exports (OpenShell drops HTTPS_PROXY given at create), a
 // blocklisted destination is refused by the proxy, and a connection that
@@ -101,6 +104,61 @@ var liveMockEnv = map[string]func(baseURL string) map[string]string{
 			"COPILOT_PROVIDER_API_KEY": "sk-ant-e2e-mock", "COPILOT_MODEL": "claude-sonnet-4.6", "COPILOT_OFFLINE": "true",
 		}
 	},
+}
+
+// liveScripted drives a harness through its own scripted-response mode
+// instead of the E2E mock server (Kiro CLI replays KIRO_MOCK_CHAT_RESPONSE
+// with a placeholder KIRO_API_KEY and needs no model endpoint). Before each
+// run the E2E scenario the prompt selects is written to path as the script.
+var liveScripted = map[string]struct {
+	path   string
+	env    map[string]string
+	render func(command, done string) []byte
+}{
+	"kiro": {
+		path: "/tmp/dc-live-kiro-mock.json",
+		env:  map[string]string{"KIRO_MOCK_CHAT_RESPONSE": "/tmp/dc-live-kiro-mock.json", "KIRO_API_KEY": "dclive-kiro-0123456789abcdefghij"},
+		render: func(command, done string) []byte {
+			out, _ := json.Marshal([]interface{}{
+				[]interface{}{"Running the DefenseClaw live check.", map[string]interface{}{
+					"tool_use_id": "dclive-1", "name": "shell", "args": map[string]string{"command": command},
+				}},
+				[]interface{}{done},
+			})
+			return out
+		},
+	},
+}
+
+// liveScriptFor is the scripted response for prompt: the first scenario of
+// the (renamed) E2E mock script whose match the prompt contains, as the mock
+// server selects it.
+func liveScriptFor(t *testing.T, harnessName string, scenarios []byte, prompt string) []byte {
+	t.Helper()
+	var doc struct {
+		Scenarios []struct {
+			Match string `json:"match"`
+			Turns []struct {
+				ToolUse *struct {
+					Input struct {
+						Command string `json:"command"`
+					} `json:"input"`
+				} `json:"tool_use"`
+				Text string `json:"text"`
+			} `json:"turns"`
+		} `json:"scenarios"`
+	}
+	if err := json.Unmarshal(liveScenarios(t, scenarios, liveShellTools[harnessName]), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range doc.Scenarios {
+		if !strings.Contains(prompt, sc.Match) || len(sc.Turns) < 2 || sc.Turns[0].ToolUse == nil {
+			continue
+		}
+		return liveScripted[harnessName].render(sc.Turns[0].ToolUse.Input.Command, sc.Turns[1].Text)
+	}
+	t.Fatalf("no E2E scenario matches %q", prompt)
+	return nil
 }
 
 // liveMantleProfiles names each harness's Bedrock Mantle profile and the
@@ -292,7 +350,7 @@ func TestLiveSandboxHookOnlyHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"opencode", "copilot"} {
+	for _, name := range []string{"opencode", "copilot", "kiro"} {
 		h, _ := harness.Get(name)
 		t.Run(name, func(t *testing.T) {
 			runLiveHookOnlyHarness(t, h, dataDir, repo, ingressPort, prefix, scenarios)
@@ -317,7 +375,7 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	}
 	// OpenShell 0.1.1 caps sandbox names at 19 characters.
 	suffix := liveRandom(t)
-	sandboxName := prefix + "-" + map[string]string{"opencode": "oc", "copilot": "cp"}[h.Name] + suffix[:4]
+	sandboxName := prefix + "-" + map[string]string{"opencode": "oc", "copilot": "cp", "kiro": "ki"}[h.Name] + suffix[:4]
 	if len(sandboxName) > 19 {
 		t.Fatalf("sandbox name %q exceeds OpenShell's 19 characters; shorten DC_OPENSHELL_SMOKE_PREFIX", sandboxName)
 	}
@@ -414,7 +472,7 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	// exists once the blocked command has run.
 	mockPort := liveFreePort(t)
 	script := filepath.Join(t.TempDir(), "scenarios.json")
-	if err := os.WriteFile(script, liveScenarios(t, scenarios), 0o600); err != nil {
+	if err := os.WriteFile(script, liveScenarios(t, scenarios, liveShellTools[h.Name]), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	mockLog := filepath.Join(t.TempDir(), "mock.jsonl")
@@ -438,6 +496,9 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	pol, err := policy.Render(policy.Input{
 		Profile: policy.ProfileOpen, Harness: h.Name, Workdir: "/work/proj", WorkdirMode: policy.WorkdirMount,
 		RunAsUser: uid, RunAsGroup: gid, IngressPort: ingressPort, EgressPort: egressPort,
+		// This process serves no main API; the defaults are what the
+		// policy keeps a sandbox from reaching.
+		APIPort: policy.DefaultAPIPort, GatewayPort: policy.DefaultGatewayPort,
 		HarnessReadOnly: []string{h.InstallRoot()},
 		ExtraRules:      map[string]v1.NetworkPolicyRule{"e2e_mock_llm": mockRule},
 		HostPorts:       []int{mockPort},
@@ -485,6 +546,12 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	}
 	providers := []string{providerName}
 	mantleKey := os.Getenv("DC_E2E_BEDROCK_API_KEY")
+	scripted, isScripted := liveScripted[h.Name]
+	if isScripted {
+		// A scripted harness has no Mantle profile; its scripted mode is
+		// the model.
+		mantleKey = ""
+	}
 	if mantleKey != "" {
 		opts.CredentialProfile = liveMantleProfiles[h.Name].profile
 		opts.BedrockRegion = os.Getenv("DC_E2E_BEDROCK_REGION")
@@ -494,7 +561,11 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mantleKey == "" {
+	if isScripted {
+		for k, v := range scripted.env {
+			env[k] = v
+		}
+	} else if mantleKey == "" {
 		for k, v := range liveMockEnv[h.Name]("http://" + connector.SandboxIngressHost + ":" + strconv.Itoa(mockPort)) {
 			env[k] = v
 		}
@@ -533,9 +604,14 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 			t.Fatal(err)
 		}
 		shell := append([]string{"/bin/bash", "-c", `cd /work/proj && "$@" </dev/null 2>&1; echo "::rc=$?"`, "run"}, argv...)
+		if isScripted {
+			// Write the scenario's script first; the argv carries no secret.
+			shell = append([]string{"/bin/bash", "-c", `printf '%s' "$1" >"$2" || exit 96; shift 2; cd /work/proj && "$@" </dev/null 2>&1; echo "::rc=$?"`, "run",
+				string(liveScriptFor(t, h.Name, scenarios, prompt)), scripted.path}, argv...)
+		}
 		return liveExec(t, sandboxName, 4*time.Minute, shell...)
 	}
-	preTool := map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse"}[h.Name]
+	preTool := map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse", "kiro": "preToolUse"}[h.Name]
 	verdicts := func(from int) []liveHookEvent {
 		var out []liveHookEvent
 		for _, ev := range recorder.snapshot()[from:] {
@@ -578,12 +654,12 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	var blockedVerdicts []liveHookEvent
 	if mantleKey == "" {
 		engine := enforce.NewPolicyEngine(auditStore)
-		if err := engine.Block("tool", liveShellTool, "DefenseClaw live check: the shell tool is blocked"); err != nil {
+		if err := engine.Block("tool", liveShellTools[h.Name], "DefenseClaw live check: the shell tool is blocked"); err != nil {
 			t.Fatal(err)
 		}
 		from := len(recorder.snapshot())
 		out := run("DefenseClaw live check: " + liveBlockPrompt)
-		if err := engine.Unblock("tool", liveShellTool); err != nil {
+		if err := engine.Unblock("tool", liveShellTools[h.Name]); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("block run:\n%s", liveTail(out, 1500))
@@ -598,11 +674,17 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 			// The harness may shorten or wrap a long reason; its opening
 			// words are enough to tell DefenseClaw's reason apart.
 			reason := liveReasonHead(blockedVerdicts[0].Reason)
-			if !strings.Contains(out, reason) {
-				t.Errorf("the harness output does not show DefenseClaw's reason %q", reason)
-			}
-			if !liveDumpContains(t, mockDump, reason) {
-				t.Errorf("no model request carried DefenseClaw's reason %q back to the model", reason)
+			if isScripted {
+				// A scripted run has no model to hand the reason to, and
+				// Kiro prints only that the tool failed.
+				t.Logf("scripted %s run; DefenseClaw's reason %q", h.Name, reason)
+			} else {
+				if !strings.Contains(out, reason) {
+					t.Errorf("the harness output does not show DefenseClaw's reason %q", reason)
+				}
+				if !liveDumpContains(t, mockDump, reason) {
+					t.Errorf("no model request carried DefenseClaw's reason %q back to the model", reason)
+				}
 			}
 		}
 	}
@@ -698,18 +780,21 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	fmt.Fprintf(os.Stderr, "LIVE-SUMMARY %s\n", summary)
 }
 
-// The DCBLOCK scenario of the E2E mock, the marker its command writes once
-// it runs, and the hook-only harnesses' shell tool it calls.
+// The DCBLOCK scenario of the E2E mock and the marker its command writes once
+// it runs.
 const (
 	liveBlockPrompt = "DCBLOCK"
 	liveBlockMarker = "/tmp/dcblock.txt"
-	liveShellTool   = "bash"
 )
 
+// liveShellTools is each hook-only harness's shell tool, which the scenarios
+// call and the block list names.
+var liveShellTools = map[string]string{"opencode": "bash", "copilot": "bash", "kiro": "shell"}
+
 // liveScenarios is the E2E mock script with every Bash tool call renamed to
-// the hook-only harnesses' bash tool and the DCBLOCK scenario's key read
-// redirected into liveBlockMarker.
-func liveScenarios(t *testing.T, scenarios []byte) []byte {
+// the harness's shell tool and the DCBLOCK scenario's key read redirected
+// into liveBlockMarker.
+func liveScenarios(t *testing.T, scenarios []byte, shellTool string) []byte {
 	t.Helper()
 	var doc map[string]interface{}
 	if err := json.Unmarshal(scenarios, &doc); err != nil {
@@ -726,7 +811,7 @@ func liveScenarios(t *testing.T, scenarios []byte) []byte {
 			if !ok || use["name"] != "Bash" {
 				continue
 			}
-			use["name"] = liveShellTool
+			use["name"] = shellTool
 			if sc["match"] == liveBlockPrompt {
 				input, _ := use["input"].(map[string]interface{})
 				command, _ := input["command"].(string)
