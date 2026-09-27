@@ -11,6 +11,7 @@ keywords:
   - privileged service
   - hook guardian
   - config.yaml
+  - OpenShell sandbox policy
 ---
 
 Enterprise deployment is for centrally managed endpoints where DefenseClaw policy must remain under administrator control instead of the interactive user running Codex, Claude Code, Cursor, Antigravity, or another AI agent. Start with the rollout sequence below, then follow the platform section for Linux, Windows, or macOS.
@@ -1583,6 +1584,64 @@ The hardened gateway runs at system scope, but Codex, Claude Code, Cursor, and s
 
 Do not use the service account's home directory as the hook target for user protection. The hook script may live in the user's DefenseClaw home or another managed per-user location, but it must post only to the local gateway hook endpoint using a hook-scoped token. The gateway accepts that token only for the matching connector hook/notify routes; it does not authorize status, policy reload, config mutation, scans, or other sidecar APIs. Standard users can still edit files they own; preventing hook removal requires the enterprise guardian, MDM profile, filesystem ACL policy, or equivalent endpoint-control mechanism.
 
+## Sandbox policy pushdown
+
+Developers may run agents inside NVIDIA OpenShell sandboxes. The
+`openshell.admin` block of the managed config sets organization-wide limits
+for those sandboxes, such as the pack every run must use, the loosest network
+profile, and whether skip-permissions mode, live project mounts, host ports, or
+unblocking are allowed. With `deployment_mode: managed_enterprise`, users
+can't write `config.yaml`, so the admin block is **authoritative**. On any
+other install it is enforced but advisory, because the user owns the file.
+
+```yaml
+deployment_mode: managed_enterprise
+openshell:
+  enabled: true
+  admin:
+    required_pack: balanced
+    allow_unblock: false
+    allowed_harnesses: [claudecode, codex]
+    egress_block:
+      - files.example.net
+    require_copy_for:
+      - ~/code/customers
+    max_resources:
+      cpu: "4"
+      memory: 8Gi
+    locked: [workdir.unmask, mcp.host_ports]
+```
+
+Push it the same way as any other managed change: edit the administrator-owned
+config through the platform channel under
+[Restart-required controls](#restart-required-controls). The gateway reloads the
+`openshell` block without a restart, and each sandbox reads the settings when
+it starts.
+
+When a user asks for something the admin block forbids, DefenseClaw replaces
+it with the allowed value, or refuses the action, and says
+"blocked by your organization's DefenseClaw policy", naming the setting and
+the reason.
+
+To require your own pack instead of a built-in one, set `required_pack` to an
+absolute path and pin its content with `required_pack_digest`. In
+`managed_enterprise`, DefenseClaw loads a custom required pack only when the
+file and every directory above it are owned by root, not writable by group or
+others, and free of symbolic links. For example, use
+`/etc/defenseclaw/sandbox/acme-dev/pack.yaml` on Linux. The default pack
+directory inside the service's data directory doesn't qualify. Built-in packs
+are always trusted.
+
+<Callout title="Where sandboxes run">
+OpenShell sandboxes run under the developer's own account, because OpenShell's
+gateway is a per-user service. Check the [Sandbox guide](/docs/setup/sandbox)
+for the deployments that can run them.
+</Callout>
+
+Every admin key, the built-in packs, custom packs, and two complete
+organization examples are in
+[Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
+
 ## Day-2 operations
 
 ### Add a user or connector
@@ -1721,4 +1780,5 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 - [ ] Status and central monitoring alert on guardian errors, connector errors, repeated repair, and enforcement downgrade.
 - [ ] Allow/block tests and adversarial tamper tests are recorded for the deployed version.
 - [ ] MDM/EDR controls cover native config immutability if bounded repair is not sufficient.
+- [ ] If developers use OpenShell sandboxes, the managed config sets `openshell.admin`, and any custom required pack is root-owned and pinned with `required_pack_digest`.
 - [ ] Upgrade and incident-response procedures use an administrator channel unavailable to the AI agent.
