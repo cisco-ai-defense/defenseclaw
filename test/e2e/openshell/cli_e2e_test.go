@@ -50,6 +50,13 @@ import (
 //   - review, undo (the project is restored), approvals, delete;
 //   - `run codex --detach` with the mock Responses server: the marker
 //     command is denied;
+//   - copy mode (`--copy`) with a git project: the run uploads before it
+//     probes, the agent's edit stays in the copy, held-back secrets are not
+//     in it, and `pull --branch`, `--patch-out` and `--apply` (a conflict
+//     first, which falls back to a branch and a patch) bring it back; then
+//     `connect --refresh` resumes the stopped sandbox with a fresh copy;
+//   - copy mode with a plain folder: the hidden git dir stays outside the
+//     folder, `pull --branch` is refused and `--apply` lands the edit;
 //   - the shell wrapper toggles in a scratch rc file, and teardown plans
 //     (dry run only: the gateway is shared).
 //
@@ -72,6 +79,7 @@ func TestSandboxCLI(t *testing.T) {
 	e.work = filepath.Join(work, e.prefix)
 	c := &cliEnv{env: e, openaiPort: e.mock + 1}
 	c.claude, c.codex = e.prefix+"-c", e.prefix+"-x"
+	c.copyGit, c.copyPlain = e.prefix+"-cg", e.prefix+"-cp"
 
 	e.step("setup", func() { e.setup(); c.setupCLI() })
 	e.step("start daemon", e.startDaemon)
@@ -87,6 +95,12 @@ func TestSandboxCLI(t *testing.T) {
 	e.step("delete claude", func() { c.delete(c.claude) })
 	e.step("run codex detached", c.runCodex)
 	e.step("delete codex", func() { c.delete(c.codex) })
+	e.step("copy mode: git project run", c.copyGitRun)
+	e.step("copy mode: pull back", c.copyGitPull)
+	e.step("copy mode: resume with refresh", c.copyGitRefresh)
+	e.step("delete copy-mode git sandbox", func() { c.delete(c.copyGit) })
+	e.step("copy mode: plain folder", c.copyPlainRun)
+	e.step("delete copy-mode plain sandbox", func() { c.delete(c.copyPlain) })
 	if os.Getenv("DEFENSECLAW_E2E_BEDROCK") == "1" {
 		e.step("bedrock claude", c.bedrockClaude)
 		e.step("bedrock codex", c.bedrockCodex)
@@ -100,6 +114,10 @@ type cliEnv struct {
 	openaiPort    int
 	claude, codex string
 	environ       []string
+	// The copy-mode sandboxes and their projects: a git repository and a
+	// plain folder, each with a held-back secret.
+	copyGit, copyPlain         string
+	copyGitProj, copyPlainProj string
 }
 
 func (c *cliEnv) setupCLI() {
@@ -125,13 +143,27 @@ func (c *cliEnv) setupCLI() {
 		}
 		return err
 	})
+	// The copy-mode projects: a git repository and a plain folder (no
+	// repository anywhere above it), each with a secret-looking file the
+	// copy must hold back.
+	c.copyGitProj = filepath.Join(c.work, "proj", c.prefix+"-copy")
+	c.copyPlainProj = filepath.Join(c.work, "proj", c.prefix+"-plain")
+	for _, dir := range []string{c.copyGitProj, c.copyPlainProj} {
+		writeFile(t, filepath.Join(dir, "README.md"), []byte(c.readme), 0o644)
+		writeFile(t, filepath.Join(dir, ".env"), []byte("DCE2E_PLACEHOLDER=not-a-secret\n"), 0o600)
+	}
+	writeFile(t, filepath.Join(c.copyGitProj, "src", "app.txt"), []byte("app\n"), 0o644)
+	c.gitIn(c.copyGitProj, "init", "-q", "-b", "main")
+	c.gitIn(c.copyGitProj, "add", "README.md", "src/app.txt")
+	c.gitIn(c.copyGitProj, "commit", "-q", "-m", "initial")
+
 	// The daemon stops before this cleanup runs (it was started later), so
 	// leftovers go through the gateway; e.sweep then deletes the providers
 	// named after the prefix.
 	c.root.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		for _, name := range []string{c.claude, c.codex, c.prefix + "-bc", c.prefix + "-bx"} {
+		for _, name := range []string{c.claude, c.codex, c.copyGit, c.copyPlain, c.prefix + "-bc", c.prefix + "-bx"} {
 			if _, err := c.gw.GetSandbox(ctx, name); err != nil {
 				continue
 			}
@@ -147,6 +179,12 @@ func (c *cliEnv) setupCLI() {
 
 // cli runs `defenseclaw-gateway sandbox args...` in the project folder.
 func (c *cliEnv) cli(timeout time.Duration, args ...string) (string, string, int) {
+	c.t.Helper()
+	return c.cliIn(c.project, timeout, args...)
+}
+
+// cliIn runs `defenseclaw-gateway sandbox args...` in dir.
+func (c *cliEnv) cliIn(dir string, timeout time.Duration, args ...string) (string, string, int) {
 	c.t.Helper()
 	if c.environ == nil {
 		real, _ := os.UserHomeDir()
@@ -169,7 +207,7 @@ func (c *cliEnv) cli(timeout time.Duration, args ...string) (string, string, int
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(c.work, "bin", "defenseclaw-gateway"), append([]string{"sandbox"}, args...)...)
-	cmd.Dir = c.project
+	cmd.Dir = dir
 	cmd.Env = c.environ
 	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
@@ -197,11 +235,47 @@ func errorsAs(err error, target **exec.ExitError) bool {
 // ok runs a command that must succeed.
 func (c *cliEnv) ok(timeout time.Duration, args ...string) string {
 	c.t.Helper()
-	out, errOut, code := c.cli(timeout, args...)
+	return c.okIn(c.project, timeout, args...)
+}
+
+// okIn runs a command in dir that must succeed.
+func (c *cliEnv) okIn(dir string, timeout time.Duration, args ...string) string {
+	c.t.Helper()
+	out, errOut, code := c.cliIn(dir, timeout, args...)
 	if code != 0 {
 		c.t.Fatalf("sandbox %s exited %d:\n%s\n%s", strings.Join(args, " "), code, truncate(out, 3000), truncate(errOut, 3000))
 	}
 	return out
+}
+
+// gitIn runs a fixture git command in dir and returns its output.
+func (c *cliEnv) gitIn(dir string, args ...string) string {
+	c.t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.name=dce2e", "-c", "user.email=dce2e@example.invalid"}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		c.t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, truncate(string(out), 1000))
+	}
+	return string(out)
+}
+
+func (c *cliEnv) readFile(path string) string {
+	c.t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return string(data)
+}
+
+func wantAll(t *testing.T, what, got string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Fatalf("%s lacks %q:\n%s", what, w, truncate(got, 3000))
+		}
+	}
 }
 
 func (c *cliEnv) doctor() {
@@ -530,6 +604,159 @@ func (c *cliEnv) runCodex() {
 		}
 		return nil
 	})
+}
+
+// runCopy starts a detached copy-mode Claude Code run of prompt in dir
+// with the mock model, waits for it and checks that its hooks reached the
+// ingress (`logs` fails a run none of whose hooks did).
+func (c *cliEnv) runCopy(dir, name, prompt string) string {
+	t := c.t
+	started := time.Now()
+	out := c.okIn(dir, 45*time.Minute, "run", "claude", "--copy", "--detach", "--name", name, "--llm", "none",
+		"--credential", "ANTHROPIC_API_KEY=host.openshell.internal:"+strconv.Itoa(c.mock),
+		"--env", "ANTHROPIC_BASE_URL=http://host.openshell.internal:"+strconv.Itoa(c.mock),
+		"--", "-p", prompt)
+	t.Logf("run --copy (%s):\n%s", time.Since(started).Round(time.Second), truncate(out, 3000))
+	wantAll(t, "run output", out, "Sandbox "+name+" · Claude Code", "→ /sandbox/work/"+filepath.Base(dir)+" (copy)",
+		"Uploading the copy", "held back: .env", "running in the background")
+	code, logs := c.waitRun(name, 5*time.Minute)
+	if code != 0 {
+		t.Fatalf("the detached copy-mode harness exited %d:\n%s", code, logs)
+	}
+	sb := c.status(name)
+	if sb.WorkdirMode != "copy" || sb.Workdir != "/sandbox/work/"+filepath.Base(dir) || sb.Hooks.HookRequests == 0 || sb.Hooks.Unreachable {
+		t.Fatalf("copy-mode sandbox: mode %s, workdir %s, hooks %+v", sb.WorkdirMode, sb.Workdir, sb.Hooks)
+	}
+	return out
+}
+
+func (c *cliEnv) copyGitRun() {
+	t := c.t
+	c.runCopy(c.copyGitProj, c.copyGit, "Run the DCE2E-EDIT scenario.")
+	// The edit is in the copy; the secret never left the host; the host
+	// folder is untouched.
+	inside, code := c.execOut(c.copyGit, "sh", "-c", "cat README.md; test -e .env || echo no-env; git rev-parse --is-inside-work-tree")
+	if code != 0 {
+		t.Fatalf("inside the copy (exit %d): %s", code, inside)
+	}
+	wantAll(t, "the copy", inside, "dce2e-edited", "no-env", "true")
+	if got := c.readFile(filepath.Join(c.copyGitProj, "README.md")); got != c.readme {
+		t.Fatalf("the host README changed during a copy-mode run: %q", got)
+	}
+}
+
+func (c *cliEnv) copyGitPull() {
+	t := c.t
+	dir, name := c.copyGitProj, c.copyGit
+	readme := filepath.Join(dir, "README.md")
+	out := c.okIn(dir, 5*time.Minute, "pull", name)
+	wantAll(t, "pull", out, "M README.md", "bring it back with --apply, --branch or --patch-out FILE")
+
+	// --branch: dc/<name> holds the edit, the checkout stays as it was.
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--branch")
+	wantAll(t, "pull --branch", out, "the changes are on branch dc/"+name)
+	wantAll(t, "the dc/ branch", c.gitIn(dir, "show", "dc/"+name+":README.md"), "dce2e-edited")
+	if got := c.readFile(readme); got != c.readme {
+		t.Fatalf("pull --branch changed the checkout: %q", got)
+	}
+
+	// --patch-out: the edit, and nothing of the held-back secret.
+	patch := filepath.Join(c.work, name+".patch")
+	c.okIn(dir, 5*time.Minute, "pull", name, "--patch-out", patch)
+	data := c.readFile(patch)
+	wantAll(t, "the patch", data, "README.md", "+dce2e-edited")
+	if strings.Contains(data, ".env") || strings.Contains(data, "DCE2E_PLACEHOLDER") {
+		t.Fatalf("the patch carries the held-back secret:\n%s", truncate(data, 2000))
+	}
+
+	// --apply over a conflicting host edit leaves the folder alone and
+	// falls back to a branch and a patch.
+	writeFile(t, readme, []byte("host edit during the session\n"), 0o644)
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	t.Logf("pull --apply over a conflict:\n%s", truncate(out, 2000))
+	wantAll(t, "pull --apply (conflict)", out, "the 3-way apply conflicted in README.md", "the changes are on branch dc/"+name+"-2", "and in ")
+	if got := c.readFile(readme); got != "host edit during the session\n" {
+		t.Fatalf("a conflicting apply changed README: %q", got)
+	}
+
+	// --apply on a clean checkout lands the edit.
+	c.gitIn(dir, "checkout", "--", "README.md")
+	out = c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	wantAll(t, "pull --apply", out, "applied 1 change to")
+	wantAll(t, "README after --apply", c.readFile(readme), "dce2e-edited")
+	if got := c.readFile(filepath.Join(dir, ".env")); got != "DCE2E_PLACEHOLDER=not-a-secret\n" {
+		t.Fatalf("the held-back .env changed: %q", got)
+	}
+}
+
+// copyGitRefresh resumes the stopped copy-mode sandbox with `connect
+// --refresh` on a terminal (script(1)): the fresh copy carries a file
+// created on the host since, and still not the secret.
+func (c *cliEnv) copyGitRefresh() {
+	t := c.t
+	script, err := exec.LookPath("script")
+	if err != nil || runtime.GOOS != "linux" {
+		t.Skip("util-linux script(1) is needed to give the CLI a terminal")
+	}
+	dir, name := c.copyGitProj, c.copyGit
+	c.okIn(dir, 5*time.Minute, "stop", name)
+	writeFile(t, filepath.Join(dir, "refreshed.txt"), []byte("new on the host\n"), 0o644)
+	bin := filepath.Join(c.work, "bin", "defenseclaw-gateway")
+	inner := shellJoin(bin, "sandbox", "connect", name, "--refresh", "--yes", "--", "-p", "Write the allowed marker file.")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, script, "-q", "-e", "-f", "-c", inner, "/dev/null")
+	cmd.Dir, cmd.Env = dir, c.environ
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
+	t.Logf("connect --refresh:\n%s", truncate(out, 3000))
+	if err != nil {
+		t.Fatalf("connect --refresh: %v", err)
+	}
+	wantAll(t, "connect --refresh", out, "starting "+name, "refreshing the project copy in "+name, "Session ended")
+	if strings.Contains(out, "not reaching the daemon") {
+		t.Fatal("the resumed session's hooks did not reach DefenseClaw")
+	}
+	// The session stopped the sandbox; start it to look at the new copy.
+	c.okIn(dir, 5*time.Minute, "start", name)
+	inside, code := c.execOut(name, "sh", "-c", "cat refreshed.txt; test -e .env || echo no-env; grep -c dce2e-edited README.md")
+	if code != 0 {
+		t.Fatalf("inside the refreshed copy (exit %d): %s", code, inside)
+	}
+	wantAll(t, "the refreshed copy", inside, "new on the host", "no-env", "1")
+}
+
+// copyPlainRun runs a folder that is not a git repository in copy mode:
+// the hidden git dir stays outside it, there is no branch to pull to, and
+// --apply lands the edit without creating a repository on the host.
+func (c *cliEnv) copyPlainRun() {
+	t := c.t
+	dir, name := c.copyPlainProj, c.copyPlain
+	c.runCopy(dir, name, "Run the DCE2E-EDIT scenario.")
+	inside, code := c.execOut(name, "sh", "-c", "cat README.md; test -e .git || echo no-git; test -e .env || echo no-env; test -f /sandbox/.dc/git/HEAD && echo hidden-git")
+	if code != 0 {
+		t.Fatalf("inside the plain copy (exit %d): %s", code, inside)
+	}
+	wantAll(t, "the plain copy", inside, "dce2e-edited", "no-git", "no-env", "hidden-git")
+	if got := c.readFile(filepath.Join(dir, "README.md")); got != c.readme {
+		t.Fatalf("the host README changed during a copy-mode run: %q", got)
+	}
+	_, errOut, code := c.cliIn(dir, 5*time.Minute, "pull", name, "--branch")
+	if code == 0 || !strings.Contains(errOut, "not a git repository") || !strings.Contains(errOut, "--apply or --patch-out") {
+		t.Fatalf("pull --branch of a plain folder exited %d: %s", code, truncate(errOut, 1000))
+	}
+	patch := filepath.Join(c.work, name+".patch")
+	c.okIn(dir, 5*time.Minute, "pull", name, "--patch-out", patch)
+	wantAll(t, "the plain patch", c.readFile(patch), "+dce2e-edited")
+	out := c.okIn(dir, 5*time.Minute, "pull", name, "--apply")
+	wantAll(t, "pull --apply", out, "applied 1 change to")
+	wantAll(t, "README after --apply", c.readFile(filepath.Join(dir, "README.md")), "dce2e-edited")
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		t.Fatal("copy mode created a git repository in the plain folder")
+	}
+	if got := c.readFile(filepath.Join(dir, ".env")); got != "DCE2E_PLACEHOLDER=not-a-secret\n" {
+		t.Fatalf("the held-back .env changed: %q", got)
+	}
 }
 
 func (c *cliEnv) bedrockClaude() {

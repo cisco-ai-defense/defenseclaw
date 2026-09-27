@@ -1133,8 +1133,17 @@ func (e *env) removeImages() {
 		e.t.Logf("cleanup: %v", err)
 		return
 	}
+	recs, err := image.NewStore(filepath.Join(e.work, "dc")).List()
+	if err != nil {
+		e.t.Logf("cleanup: read the run's image store: %v", err)
+		return
+	}
+	ours := map[string]bool{}
+	for _, r := range recs {
+		ours[r.Tag] = true
+	}
 	for tag := range now {
-		if e.imagesBefore[tag] {
+		if e.imagesBefore[tag] || !ours[tag] {
 			continue
 		}
 		if out, err := exec.Command("docker", "image", "rm", tag).CombinedOutput(); err != nil {
