@@ -155,6 +155,9 @@ func TestCreateMountMode(t *testing.T) {
 	if ingress.Type != profiles.IngressProfileID(testIngressPort) || ingress.Labels[LabelSandbox] != sb.Name {
 		t.Fatalf("ingress provider = %+v", ingress)
 	}
+	if _, ok := pol.NetworkPolicies[policy.IngressRuleName]; ok {
+		t.Fatal("the ingress provider's rule opens the ingress; the policy needs no rule of its own")
+	}
 	matched, err := e.store.Match(ingress.Spec.Credentials[openshell.EnvSandboxToken])
 	if err != nil || matched.ID != binding.ID {
 		t.Fatalf("ingress token does not authenticate the binding: %v", err)
@@ -284,6 +287,16 @@ func TestCreateTokenDeliveryEnv(t *testing.T) {
 	}
 	if names := e.providers(); len(names) != 0 {
 		t.Fatalf("providers = %v", names)
+	}
+	if len(e.importer.imported) != 0 {
+		t.Fatalf("imported profiles = %v, want none (no provider uses the ingress profile)", e.importer.imported)
+	}
+	// Without an ingress provider the policy opens the ingress itself, or
+	// no hook could reach DefenseClaw.
+	pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	rule, ok := pol.NetworkPolicies[policy.IngressRuleName]
+	if !ok || len(rule.Endpoints) != 1 || rule.Endpoints[0].Host != policy.EgressHost || rule.Endpoints[0].Port != testIngressPort {
+		t.Fatalf("ingress rule = %#v (present %t)", rule, ok)
 	}
 }
 

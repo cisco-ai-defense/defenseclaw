@@ -216,6 +216,66 @@ func TestRenderProfileNetworkRules(t *testing.T) {
 	}
 }
 
+// TestRenderIngressRule pins the ingress rule of a sandbox without an
+// ingress provider (token_delivery: env): in every profile, plain HTTP to
+// the ingress port only, for every binary, in keys OpenShell accepted.
+func TestRenderIngressRule(t *testing.T) {
+	for _, profile := range []Profile{ProfileOpen, ProfileBalanced, ProfileStrict} {
+		in := baseInput(profile, "claudecode")
+		p, err := Render(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := p.NetworkPolicies[IngressRuleName]; ok {
+			t.Fatalf("%s: ingress rule without IngressRule", profile)
+		}
+		in.IngressRule = true
+		if p, err = Render(in); err != nil {
+			t.Fatal(err)
+		}
+		rule, ok := p.NetworkPolicies[IngressRuleName]
+		if !ok || rule.Name != IngressRuleName || len(rule.Endpoints) != 1 || len(rule.Binaries) != 1 || rule.Binaries[0].Path != AnyBinary {
+			t.Fatalf("%s: ingress rule = %#v", profile, rule)
+		}
+		ep := rule.Endpoints[0]
+		if ep.Host != EgressHost || ep.Port != 18971 || len(ep.Ports) != 0 || ep.Protocol != "rest" ||
+			ep.Access != v1.NetworkAccessPresetFull || ep.Enforcement != v1.NetworkEnforcementModeEnforce || ep.TLS != v1.NetworkTLSModeUnspecified {
+			t.Fatalf("%s: ingress endpoint = %#v", profile, ep)
+		}
+		out, err := MarshalYAML(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var node yaml.Node
+		if err := yaml.Unmarshal(out, &node); err != nil {
+			t.Fatal(err)
+		}
+		keys := map[string]bool{}
+		collectKeys(t, &node, false, keys)
+		for key := range keys {
+			if !acceptedKeys[key] {
+				t.Errorf("%s: key %q was never validated against OpenShell", profile, key)
+			}
+		}
+		back, err := ParseYAML(out)
+		if err != nil {
+			t.Fatalf("%s: the rendered policy does not parse back: %v", profile, err)
+		}
+		if _, ok := back.NetworkPolicies[IngressRuleName]; !ok {
+			t.Fatalf("%s: the ingress rule did not survive YAML", profile)
+		}
+	}
+	// An extra rule may not take the ingress rule's name.
+	in := baseInput(ProfileOpen, "codex")
+	in.ExtraRules = map[string]v1.NetworkPolicyRule{IngressRuleName: {
+		Endpoints: []v1.PolicyNetworkEndpoint{{Host: "example.org", Port: 443, Protocol: "rest"}},
+		Binaries:  []v1.PolicyNetworkBinary{{Path: AnyBinary}},
+	}}
+	if _, err := Render(in); err == nil {
+		t.Fatal("an extra rule took the ingress rule's name")
+	}
+}
+
 func TestRenderFilesystem(t *testing.T) {
 	p, err := Render(goldenCases()["balanced-claudecode-context"])
 	if err != nil {

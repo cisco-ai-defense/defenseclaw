@@ -399,6 +399,8 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		WorkdirMode: policy.WorkdirMode(in.mode), RunAsUser: strconv.Itoa(img.UID), RunAsGroup: strconv.Itoa(img.GID),
 		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort, HarnessReadOnly: []string{spec.InstallRoot()},
 		HostPorts: eff.MCP.HostPorts, APIPort: m.opts.APIPort, GatewayPort: policyGatewayPort(gw.Port),
+		// Without an ingress provider nothing else opens the ingress.
+		IngressRule: rec.TokenDelivery == config.OpenShellTokenDeliveryEnv,
 	}
 	if plan != nil {
 		for _, p := range plan.ReadWrite {

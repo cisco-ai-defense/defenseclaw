@@ -19,9 +19,12 @@
 // identity and the network rules for the open, balanced and strict profiles.
 //
 // Credentialed endpoints (the DefenseClaw hook ingress and the harness LLM
-// providers) are deliberately absent: OpenShell adds a `_provider_<id>` rule
-// for every attached provider profile, and only those rules carry credential
-// placeholder substitution. The renderer owns the rest, and output is
+// providers) are deliberately absent: OpenShell adds a `_provider_<name>`
+// rule for every provider attached to the sandbox, and only those rules
+// carry credential placeholder substitution. The one exception is the
+// ingress of a sandbox that gets its token as a plain variable
+// (token_delivery: env) and so has no ingress provider (Input.IngressRule).
+// The renderer owns the rest, and output is
 // deterministic so it can be golden-tested and compared across restarts
 // (every OpenShell policy reload closes in-flight connections).
 package policy
@@ -113,6 +116,9 @@ type Mount struct {
 const (
 	// EgressRuleName is the network_policies key of the proxy relay rule.
 	EgressRuleName = "defenseclaw_egress"
+	// IngressRuleName is the network_policies key of the hook ingress rule
+	// of a sandbox without an ingress provider (Input.IngressRule).
+	IngressRuleName = "defenseclaw_ingress"
 	// EgressHost is how the workload reaches host loopback.
 	EgressHost = "host.openshell.internal"
 	// SandboxHome is the workload HOME in the community base image.
@@ -162,10 +168,16 @@ type Input struct {
 	// refused.
 	RunAsUser  string
 	RunAsGroup string
-	// IngressPort is the host-loopback hook ingress. It is reached through
-	// the defenseclaw-ingress provider rule, never a policy rule; the renderer
-	// only checks it cannot collide with the egress port.
+	// IngressPort is the host-loopback hook ingress. With the default
+	// token_delivery (provider) it is reached through the rule of the
+	// sandbox's ingress provider (profiles.IngressProfileID), which carries
+	// the token substitution, and the renderer only checks it cannot
+	// collide with the egress port.
 	IngressPort int
+	// IngressRule opens the ingress with a policy rule of its own
+	// (IngressRuleName) for a sandbox without an ingress provider
+	// (token_delivery: env, where the token is a plain variable).
+	IngressRule bool
 	// EgressPort is the DefenseClaw egress proxy (required unless strict).
 	EgressPort int
 	// HarnessReadOnly lists harness install roots outside the system base.
@@ -285,6 +297,22 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 				Port:     uint32(in.EgressPort),
 				Protocol: "tcp",
 				TLS:      v1.NetworkTLSModeSkip,
+			}},
+			Binaries: []v1.PolicyNetworkBinary{{Path: AnyBinary}},
+		}
+	}
+	if in.IngressRule {
+		// What the ingress provider's rule opens, without the credential
+		// substitution: plain HTTP to the ingress from every binary (hooks
+		// post with curl, the harness exports OTLP), in every profile.
+		rules[IngressRuleName] = v1.NetworkPolicyRule{
+			Name: IngressRuleName,
+			Endpoints: []v1.PolicyNetworkEndpoint{{
+				Host:        EgressHost,
+				Port:        uint32(in.IngressPort),
+				Protocol:    "rest",
+				Access:      v1.NetworkAccessPresetFull,
+				Enforcement: v1.NetworkEnforcementModeEnforce,
 			}},
 			Binaries: []v1.PolicyNetworkBinary{{Path: AnyBinary}},
 		}
