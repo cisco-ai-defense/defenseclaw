@@ -1519,6 +1519,64 @@ func TestProxySetDeciderRetiresPooledUpstreams(t *testing.T) {
 	}
 }
 
+// The upstream Transport pools connections by destination alone, so a
+// pooled connection must not carry a request its own dial-time rules would
+// refuse: here a feed CIDR that one sandbox's unblock of the address lifts,
+// reused by another sandbox and after the unblock is revoked.
+func TestProxyPooledUpstreamsKeepPerSandboxDialRules(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) { c.decider.Blocklists = []*Feed{testFeedCIDR(t)} })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.resolver.set("cdn.example.org", []string{publicV4Alt})
+	if err := h.unblocks.Add(Unblock{Pattern: publicV4Alt, SandboxID: "sb-1"}); err != nil {
+		t.Fatal(err)
+	}
+	a := h.clientFor(h.cred, nil)
+	b := h.clientFor(h.addPrincipal(Principal{BindingID: "binding-two", SandboxID: "sb-2", SandboxName: "sb-two"}), nil)
+	refused := func(client *http.Client, who string) {
+		t.Helper()
+		resp, err := client.Get("http://cdn.example.org/")
+		if err != nil {
+			t.Fatalf("%s: %v", who, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s = %d %q; want 403 (a pooled connection skipped its dial-time rules)", who, resp.StatusCode, body)
+		}
+		if blk := decodeBlock(t, body); blk.Category != CategoryFileDrop || blk.Feed != "team" || blk.Rule != "8.8.4.0/24" {
+			t.Errorf("%s block = %+v", who, blk)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		if status, err := getStatus(a, "http://cdn.example.org/"); err != nil || status != http.StatusOK {
+			t.Fatalf("unblocked sandbox request %d = %d, %v", i, status, err)
+		}
+	}
+	if n := len(h.dialer.addresses()); n != 1 {
+		t.Fatalf("upstream dialed %d times, want 1 (the second request reuses the pooled connection)", n)
+	}
+	refused(b, "another sandbox on the pooled connection")
+
+	// The refusal closed the pooled connection; the unblocked sandbox warms
+	// a new one, which must not outlive the unblock.
+	if status, err := getStatus(a, "http://cdn.example.org/"); err != nil || status != http.StatusOK {
+		t.Fatalf("unblocked sandbox after the refusal = %d, %v", status, err)
+	}
+	if n := len(h.dialer.addresses()); n != 2 {
+		t.Fatalf("upstream dialed %d times, want 2", n)
+	}
+	if !h.unblocks.Remove("sb-1", publicV4Alt) {
+		t.Fatal("unblock not removed")
+	}
+	refused(a, "the same sandbox after its unblock was revoked")
+	if n := len(h.dialer.addresses()); n != 2 {
+		t.Errorf("upstream dialed %d times; refused requests must not reach the dialer", n)
+	}
+}
+
 // A forwarded response whose upstream stalls after the headers is cut after
 // TunnelIdleTimeout instead of holding the client, the tunnel slot and the
 // upstream connection indefinitely.

@@ -89,6 +89,21 @@ func (st *forwardState) lastDialErr() *dialError {
 	return st.dialErr
 }
 
+// admitConn applies the request's dial-time rules to the address of the
+// upstream connection the Transport handed it. The Transport pools
+// connections by destination alone, so the connection may have been dialed
+// for another sandbox's request (whose unblock lifted a feed CIDR this
+// sandbox's do not), under an unblock revoked since, or for another request
+// that no longer needed it. Every request is held to its own rules, as a
+// dial for it would be.
+func (st *forwardState) admitConn(addr netip.AddrPort) *dialError {
+	if !addr.IsValid() {
+		return &dialError{status: http.StatusBadGateway, reason: "connecting to the destination failed"}
+	}
+	t := st.tunnel
+	return st.gen.decider.dialRules(t.principal, t.dec).check(addr.Addr(), st.p.dialer.local)
+}
+
 func defaultPort(scheme string) int {
 	switch scheme {
 	case "http":
@@ -181,12 +196,29 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			remote := info.Conn.RemoteAddr().String()
+			addr, _ := netip.ParseAddrPort(remote)
+			ic := asIdleConn(info.Conn)
+			if de := st.admitConn(addr); de != nil {
+				// Closing it fails the request before a byte is written. The
+				// Transport retries a request it has not sent on a reused
+				// connection on another one, checked the same way (a fresh
+				// dial applies the same rules); otherwise forwardError
+				// reports this refusal.
+				st.setDialErr(de)
+				if ic != nil {
+					_ = ic.Conn.Close()
+				} else {
+					_ = info.Conn.Close()
+				}
+				return
+			}
+			// A refusal of an earlier connection attempt no longer applies.
+			st.setDialErr(nil)
 			st.setRemote(remote)
-			if ic := asIdleConn(info.Conn); ic != nil {
+			if ic != nil {
 				ic.owner.Store(t)
 				st.upstream.Store(ic)
 			}
-			addr, _ := netip.ParseAddrPort(remote)
 			flow.openAt(addr.Addr())
 		},
 	})
