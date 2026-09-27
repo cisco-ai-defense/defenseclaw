@@ -40,7 +40,11 @@ import (
 //
 // SandboxProfilePath and SandboxEnvPath also put ShimDir first on PATH,
 // where the harness command starts its launcher, so typing the harness name
-// in a connect or exec shell gets the launcher's protections. A process
+// in a connect or exec shell gets the launcher's protections. A user
+// start-up file can reset PATH after the profile ran (the community base
+// image's ~/.bashrc does), so for bash the profile also defines, and
+// exports, a function of the harness command's name that runs the shim. A
+// process
 // started by absolute path, from an emptied environment (env -i) or through
 // `openshell sandbox exec --no-login-shell` directly gets neither, and a
 // harness run nested inside a tool call inherits the proxy but not the
@@ -88,11 +92,22 @@ const shimPathScript = `case ":${PATH:-}:" in
 esac
 `
 
-const sandboxProfile = `# defenseclaw-sandbox-profile v1
+// profile is the login-shell profile fragment: the egress proxy, the shim
+// directory first on PATH, and for bash (outside POSIX mode, which refuses
+// command names like cursor-agent as function names) an exported function
+// of the harness command's name, which survives a later PATH reset and
+// reaches child bash shells. The launchers run under bash -p, which imports
+// no functions.
+func (s *Spec) profile() string {
+	return `# defenseclaw-sandbox-profile v1
 # DefenseClaw sandbox shell environment (OpenShell sandbox images,
 # root-owned). Login shells get the egress proxy settings every harness
-# launcher exports, and the harness command on PATH starts its launcher.
-` + egressEnvScript + shimPathScript
+# launcher exports, and the harness command starts its launcher.
+` + egressEnvScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
+  eval '` + s.Command + `() { ` + s.ShimPath() + ` "$@"; }; export -f ` + s.Command + `' 2>/dev/null || true
+fi
+`
+}
 
 var sandboxEnvLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-env v1
@@ -114,7 +129,7 @@ fi
 // wrapper and the harness command's shim.
 func (s *Spec) ShellFiles() []connector.SandboxFile {
 	return []connector.SandboxFile{
-		{Path: SandboxProfilePath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: []byte(sandboxProfile)},
+		{Path: SandboxProfilePath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: []byte(s.profile())},
 		{Path: SandboxEnvPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(sandboxEnvLauncher)},
 		{Path: s.ShimPath(), Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(s.shim())},
 	}

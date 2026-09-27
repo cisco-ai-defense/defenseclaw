@@ -180,7 +180,11 @@ The profile fragment and `sandbox-env` also put
 `/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
 after the harness command (`claude`, `codex`, `opencode`, `copilot`, …) that
 starts the launcher, so typing the harness name in a connect or exec shell
-gets the launcher's protections too. What none of them covers: a program
+gets the launcher's protections too. The community base image's
+`~/.bashrc` resets `PATH` after the profile ran, so for bash the profile also
+defines and exports a function of the harness command's name that runs the
+shim; it survives the reset and reaches child bash shells (the launchers run
+under `bash -p`, which imports no functions). What none of them covers: a program
 started by its absolute path (`/usr/local/bin/<command>`), a child started
 with an emptied environment (`env -i`), `openshell sandbox exec
 --no-login-shell` used directly, and a harness run nested inside a tool

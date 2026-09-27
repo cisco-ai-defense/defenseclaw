@@ -761,14 +761,21 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	//    exec` runs) get the proxy and the harness shim, and a plain curl in
 	//    them reaches example.org through the proxy. A bare
 	//    --no-login-shell command stays without proxy settings.
-	shellProbe := `printf '%s %s ' "${HTTPS_PROXY:+proxy}" "$(command -v ` + h.Command + `)"; ` +
-		`curl -s -m 20 -o /dev/null -w '%{http_code}' https://example.org/`
+	//    In the login shell the harness command is the profile's exported
+	//    bash function (the base image's ~/.bashrc resets PATH after the
+	//    profile ran); through sandbox-env it is the shim on PATH.
+	shellProbe := func(command string) string {
+		return `printf '%s %s ' "${HTTPS_PROXY:+proxy}" "$(` + command + `)"; ` +
+			`curl -s -m 20 -o /dev/null -w '%{http_code}' https://example.org/`
+	}
 	for _, tc := range []struct {
-		name string
-		args []string
+		name, want string
+		args       []string
 	}{
-		{"login shell", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--", "/bin/sh", "-c", shellProbe}},
-		{"sandbox-env", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--", harness.SandboxEnvPath, "/bin/sh", "-c", shellProbe}},
+		{"login shell", "function", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--", "/bin/sh", "-c",
+			shellProbe("/bin/bash -c 'type -t " + h.Command + "'")}},
+		{"sandbox-env", h.ShimPath(), []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--", harness.SandboxEnvPath, "/bin/sh", "-c",
+			shellProbe("command -v " + h.Command)}},
 	} {
 		egressMu.Lock()
 		from := len(egressEvents)
@@ -780,8 +787,8 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 			got = got[len(got)-3:]
 		}
 		t.Logf("%s: %v", tc.name, got)
-		if err != nil || len(got) != 3 || got[0] != "proxy" || got[1] != h.ShimPath() || got[2] != "200" {
-			t.Errorf("%s: proxy, %s, curl = %q (%v), want proxy %s 200", tc.name, h.Command, got, err, h.ShimPath())
+		if err != nil || len(got) != 3 || got[0] != "proxy" || got[1] != tc.want || got[2] != "200" {
+			t.Errorf("%s: proxy, %s, curl = %q (%v), want proxy %s 200", tc.name, h.Command, got, err, tc.want)
 		}
 		egressMu.Lock()
 		through := false

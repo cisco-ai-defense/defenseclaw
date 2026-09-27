@@ -782,14 +782,16 @@ func (e *env) egressThroughProxy(sb *sandboxapi.Sandbox) {
 // start: a login shell (what `sandbox connect --shell` and `openshell sandbox
 // exec` open) through /etc/profile.d, and a command started through the
 // sandbox-env wrapper (what `defenseclaw-gateway sandbox exec` runs). In both
-// the harness command is the shim that starts its launcher, and a plain curl
+// the harness command starts its launcher, and a plain curl
 // (no --proxy) reaches the allowed host through the DefenseClaw proxy. A
 // bare --no-login-shell exec stays without proxy settings (the documented
 // limit).
 func (e *env) shellEnvironment(sb *sandboxapi.Sandbox) {
 	t := e.t
-	probe := `printf '%s %s ' "${HTTPS_PROXY:+proxy}${HTTPS_PROXY:-none}" "$(command -v claude)"; ` +
-		`curl -sS -o /dev/null --max-time 20 -w '%{http_code}' 'https://` + allowedHost + `/' 2>/dev/null; echo " $?"`
+	probe := func(command string) string {
+		return `printf '%s %s ' "${HTTPS_PROXY:+proxy}${HTTPS_PROXY:-none}" "$(` + command + `)"; ` +
+			`curl -sS -o /dev/null --max-time 20 -w '%{http_code}' 'https://` + allowedHost + `/' 2>/dev/null; echo " $?"`
+	}
 	// Never log the proxy URL: it carries the sandbox's proxy credential.
 	redact := func(out string) []string {
 		f := strings.Fields(out)
@@ -799,13 +801,16 @@ func (e *env) shellEnvironment(sb *sandboxapi.Sandbox) {
 		return f
 	}
 	before := e.get(sb.Name).Egress
+	// In the login shell `claude` is the profile's exported bash function
+	// (the base image's ~/.bashrc resets PATH after the profile ran);
+	// through sandbox-env it is the shim on PATH.
 	for _, tc := range []struct {
-		name  string
-		login bool
-		argv  []string
+		name, want string
+		login      bool
+		argv       []string
 	}{
-		{"login shell", true, []string{"sh", "-c", probe}},
-		{"sandbox-env", false, []string{harness.SandboxEnvPath, "sh", "-c", probe}},
+		{"login shell", "function", true, []string{"sh", "-c", probe("bash -c 'type -t claude'")}},
+		{"sandbox-env", harness.ClaudeCode.ShimPath(), false, []string{harness.SandboxEnvPath, "sh", "-c", probe("command -v claude")}},
 	} {
 		res, err := e.gw.Exec(e.ctx(2*time.Minute), sb.Name, tc.argv, openshell.ExecOptions{
 			WorkDir: sb.Workdir, Timeout: time.Minute, Idempotent: true, LoginShell: tc.login,
@@ -815,8 +820,8 @@ func (e *env) shellEnvironment(sb *sandboxapi.Sandbox) {
 		}
 		got := redact(string(res.Stdout))
 		t.Logf("%s: %v", tc.name, got)
-		if len(got) != 4 || got[0] != "proxy" || got[1] != harness.ClaudeCode.ShimPath() || got[2] != "200" {
-			t.Fatalf("%s: proxy, harness command, curl = %v, want proxy %s 200", tc.name, got, harness.ClaudeCode.ShimPath())
+		if len(got) != 4 || got[0] != "proxy" || got[1] != tc.want || got[2] != "200" {
+			t.Fatalf("%s: proxy, harness command, curl = %v, want proxy %s 200", tc.name, got, tc.want)
 		}
 	}
 	res, err := e.gw.Exec(e.ctx(2*time.Minute), sb.Name, []string{"sh", "-c", `printf '%s' "${HTTPS_PROXY:-none}" | cut -c1-4`},

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -85,6 +86,10 @@ func TestShellFilesParse(t *testing.T) {
 				}
 			}
 		}
+		// The command becomes a file name and a shell function name.
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(spec.Command) {
+			t.Errorf("%s command %q is not a plain name", name, spec.Command)
+		}
 		shim := shellFile(t, spec, spec.ShimPath())
 		if spec.ShimPath() != ShimDir+"/"+spec.Command || !strings.Contains(string(shim.Data), "\nexec "+spec.LauncherPath()+" \"$@\"\n") {
 			t.Errorf("%s shim does not start %s:\n%s", name, spec.LauncherPath(), shim.Data)
@@ -122,6 +127,31 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 	} {
 		if got[key] != want {
 			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+	// Sourcing prints nothing (a POSIX sh, or bash in POSIX mode, never sees
+	// the function definition).
+	quiet := exec.Command("/bin/sh", "-c", ". "+profile)
+	quiet.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := quiet.CombinedOutput(); err != nil || len(out) != 0 {
+		t.Errorf("sourcing the profile under /bin/sh: %v %q", err, out)
+	}
+	// Bash: the harness command is a function that runs the shim, survives
+	// a start-up file that resets PATH, and reaches child bash shells.
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		for _, name := range Names() {
+			spec, _ := Get(name)
+			file := filepath.Join(t.TempDir(), "profile.sh")
+			if err := os.WriteFile(file, shellFile(t, spec, SandboxProfilePath).Data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script := ". " + file + "\nPATH=/usr/bin:/bin\ntype -t " + spec.Command + "; /bin/bash -c 'type -t " + spec.Command + "; declare -f " + spec.Command + "'"
+			cmd := exec.Command("/bin/bash", "-c", script)
+			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.HasPrefix(string(out), "function\nfunction\n") || !strings.Contains(string(out), spec.ShimPath()+" \"$@\"") {
+				t.Errorf("%s: bash login shell: %v\n%s", name, err, out)
+			}
 		}
 	}
 	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != connector.SandboxIngressHost {
