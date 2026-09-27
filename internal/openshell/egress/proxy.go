@@ -84,8 +84,9 @@ type Options struct {
 	// tunnels are never terminated). Nil uses the system roots, TLS 1.2+.
 	UpstreamTLS *tls.Config
 
-	// HeaderTimeout bounds reading a request's headers (slowloris), and
-	// reading a tunnel's TLS ClientHello once its first byte arrived.
+	// HeaderTimeout bounds reading a request's headers (slowloris), and,
+	// once their first byte arrived, a tunnel's first flight (a TLS
+	// ClientHello or HTTP request line) and each HTTP request head in it.
 	HeaderTimeout time.Duration
 	// IdleTimeout closes keep-alive client connections idle between
 	// requests, and idle pooled upstream connections.
@@ -100,7 +101,8 @@ type Options struct {
 	// ResponseHeaderTimeout bounds waiting for an absolute-form upstream's
 	// response headers.
 	ResponseHeaderTimeout time.Duration
-	// MaxHeaderBytes bounds request headers; larger requests get a 431.
+	// MaxHeaderBytes bounds request headers; larger requests get a 431 (a
+	// 400 inside a tunnel carrying HTTP).
 	MaxHeaderBytes int
 	// MaxConns bounds concurrent client connections across all listeners.
 	// With all of them taken, the connection idle longest between
@@ -139,8 +141,10 @@ type Proxy struct {
 	dialer  *guardDialer
 	hint    func(Principal, Decision) string
 	idle    time.Duration
-	// helloTimeout bounds reading a tunnel's ClientHello.
-	helloTimeout time.Duration
+	// headerTimeout bounds reading a tunnel's first flight and the head of
+	// each HTTP request inside it; maxHeaderBytes bounds those heads.
+	headerTimeout  time.Duration
+	maxHeaderBytes int
 
 	srv *http.Server
 	// upstream is the template each generation's transport is cloned from.
@@ -215,17 +219,18 @@ func New(opts Options) (*Proxy, error) {
 	}
 
 	p := &Proxy{
-		auth:         opts.Auth,
-		sink:         opts.Sink,
-		counter:      opts.Counter,
-		dialer:       &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
-		hint:         opts.UnblockHint,
-		idle:         opts.TunnelIdleTimeout,
-		helloTimeout: opts.HeaderTimeout,
-		limits:       newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
-		sem:          make(chan struct{}, opts.MaxConns),
-		conns:        newConnTracker(opts.MaxConnsPerBinding),
-		tunnels:      map[*tunnel]struct{}{},
+		auth:           opts.Auth,
+		sink:           opts.Sink,
+		counter:        opts.Counter,
+		dialer:         &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
+		hint:           opts.UnblockHint,
+		idle:           opts.TunnelIdleTimeout,
+		headerTimeout:  opts.HeaderTimeout,
+		maxHeaderBytes: opts.MaxHeaderBytes,
+		limits:         newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
+		sem:            make(chan struct{}, opts.MaxConns),
+		conns:          newConnTracker(opts.MaxConnsPerBinding),
+		tunnels:        map[*tunnel]struct{}{},
 	}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
@@ -421,8 +426,8 @@ type tunnel struct {
 	cut       atomic.Bool
 	// idled marks a tunnel or request ended by TunnelIdleTimeout.
 	idled atomic.Bool
-	// refused marks a CONNECT tunnel ended for its TLS server name or for
-	// not starting with TLS.
+	// refused marks a CONNECT tunnel ended for its TLS server name or its
+	// plaintext content.
 	refused atomic.Bool
 
 	closeMu sync.Mutex
@@ -740,7 +745,8 @@ func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, dec Decision, err err
 
 // relay copies bytes both ways until both directions finish, one fails, or
 // the tunnel is idle for TunnelIdleTimeout. The client's first flight is
-// screened for its TLS server name before anything reaches the upstream.
+// screened before anything reaches the upstream (screenFirstFlight); a
+// tunnel carrying HTTP/1.x has its requests inspected one by one.
 func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Reader, upstream net.Conn) {
 	var last atomic.Int64
 	touch := func() { last.Store(time.Now().UnixNano()) }
@@ -759,9 +765,10 @@ func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Re
 		}
 		return true
 	}
+	hs := newHTTPSession()
 	errc := make(chan error, 2)
 	go func() {
-		first, err := p.screenFirstFlight(t, d, client, clientReader)
+		first, kind, err := p.screenFirstFlight(t, d, client, clientReader)
 		if err != nil {
 			errc <- err
 			return
@@ -770,13 +777,15 @@ func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Re
 		if len(first) > 0 {
 			src = io.MultiReader(bytes.NewReader(first), clientReader)
 		}
+		if kind == flightHTTP {
+			hs.start(upstream)
+			errc <- p.relayRequests(t, client, src, upstream, touch, up, hs)
+			return
+		}
 		errc <- pipe(upstream, src, touch, up)
 	}()
 	go func() {
-		errc <- pipe(client, upstream, touch, func(n int) bool {
-			t.flow.addDown(int64(n))
-			return true
-		})
+		errc <- p.relayDown(t, client, upstream, touch, hs)
 	}()
 	for range 2 {
 		if err := <-errc; err != nil {

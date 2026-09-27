@@ -17,12 +17,14 @@
 package egress
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -53,56 +55,163 @@ const (
 
 var (
 	errMalformedClientHello = errors.New("egress: malformed TLS ClientHello")
-	errServerNameRefused    = errors.New("egress: tunnel refused for its TLS server name")
-	errNotTLS               = errors.New("egress: tunnel refused: it did not start with TLS")
+	errFlightTooLong        = errors.New("egress: first flight too long to classify")
+	errTunnelRefused        = errors.New("egress: tunnel refused")
+)
+
+// flightKind classifies a tunnel's first flight.
+type flightKind int
+
+const (
+	flightUnknown flightKind = iota // not classifiable yet
+	flightEmpty                     // the client closed without sending
+	flightTLS                       // a TLS ClientHello, screened for its server name
+	flightHTTP                      // an HTTP request line: inspected request by request
+	flightOpaque                    // anything else
 )
 
 // screenFirstFlight reads the client's first bytes in an established CONNECT
-// tunnel and returns them for relaying. The proxy never terminates TLS, but a
-// tunnel that opens with a ClientHello naming another host than the CONNECT
-// target is decided again for that server name (SNI). Otherwise a CONNECT to
-// an allowed name or address followed by SNI pastebin.com would reach any
-// blocked site served from the same CDN addresses, in open and allowlist mode
-// alike. A refused tunnel gets a fatal TLS alert and errServerNameRefused.
-// A tunnel whose first bytes are not a TLS handshake is refused as well
-// (refuseNonTLS): plain HTTP inside it could name any such site in its Host
-// header.
+// tunnel, classifies them, and returns them for relaying:
 //
-// Only the visible server name is checked: an Encrypted Client Hello's outer
-// name and a Host header inside the TLS session are out of reach without
-// terminating TLS.
-func (p *Proxy) screenFirstFlight(t *tunnel, d *Decider, client net.Conn, r io.Reader) ([]byte, error) {
+//   - A TLS ClientHello naming another host than the CONNECT target is
+//     decided again for that server name (SNI). Otherwise a CONNECT to an
+//     allowed name or address followed by SNI pastebin.com would reach any
+//     blocked site served from the same CDN addresses, in open and
+//     allowlist mode alike. A refused tunnel gets a fatal TLS alert.
+//   - An HTTP request line (flightHTTP) makes the tunnel carry HTTP/1.x
+//     requests that relayRequests checks one by one, since a Host header
+//     could front for another site the same way.
+//   - Anything else is relayed only on a port the operator added to the
+//     port list (a database, SSH): the CONNECT target decided the
+//     destination and no name inside can select another. On the web ports
+//     it is refused, and so is HTTP/2 without TLS, whose request names
+//     cannot be read without decoding it.
+//
+// Bytes are buffered until they can be classified, for at most
+// HeaderTimeout and maxFirstFlight. Only the visible server name is
+// checked: an Encrypted Client Hello's outer name and a Host header inside
+// the TLS session are out of reach without terminating TLS.
+func (p *Proxy) screenFirstFlight(t *tunnel, d *Decider, client net.Conn, r io.Reader) ([]byte, flightKind, error) {
 	buf := make([]byte, firstReadSize)
 	n, err := r.Read(buf)
 	if n == 0 {
 		if errors.Is(err, io.EOF) {
-			return nil, nil // pipe sees the EOF again and half-closes upstream
+			return nil, flightEmpty, nil // pipe sees the EOF again and half-closes upstream
 		}
-		return nil, err
+		return nil, flightUnknown, err
 	}
+	// A client sends its whole ClientHello or request line at once; one that
+	// stalls halfway is holding the tunnel open without a checkable name.
+	_ = client.SetReadDeadline(time.Now().Add(p.headerTimeout))
+	defer func() { _ = client.SetReadDeadline(time.Time{}) }()
 	if buf[0] != tlsRecordHandshake {
-		p.refuseNonTLS(t, client)
-		return nil, errNotTLS
+		flight, kind, err := readUntilClassified(buf[:n], r)
+		switch {
+		case err != nil:
+			p.refuseTunnel(t, client, "The tunnel's first bytes did not arrive in full in time, or are too long, to tell TLS, "+
+				"HTTP/1.x and other protocols apart.")
+			return nil, flightUnknown, errTunnelRefused
+		case kind == flightOpaque && isWebPort(t.dec.Port):
+			p.refuseTunnel(t, client, fmt.Sprintf("The tunnel to port %d carried neither TLS nor an HTTP/1.x request. "+
+				"Tunnels to the web ports carry only TLS or HTTP/1.x requests for the tunnel's own host (HTTP/2 needs TLS); "+
+				"other protocols need a port the operator adds to openshell.egress.ports.", t.dec.Port))
+			return nil, flightUnknown, errTunnelRefused
+		}
+		return flight, kind, nil
 	}
-	// A TLS client sends its whole ClientHello at once; one that stalls
-	// halfway is holding the tunnel open without a checkable name.
-	_ = client.SetReadDeadline(time.Now().Add(p.helloTimeout))
 	flight, name, err := readClientHello(buf[:n], r)
-	_ = client.SetReadDeadline(time.Time{})
 	if errors.Is(err, errMalformedClientHello) {
 		dec := blocked(Decision{Host: t.dec.Host, Port: t.dec.Port, Mode: t.dec.Mode}, CategoryInvalidDestination, SourceGuard, "")
 		dec.Reason = "The tunnel's TLS ClientHello is malformed or too large for its server name to be checked."
 		p.refuseInTunnel(t, client, dec, tlsAlertDecodeError)
-		return nil, errServerNameRefused
+		return nil, flightUnknown, errTunnelRefused
 	}
 	if err != nil {
-		return nil, err
+		return nil, flightUnknown, err
 	}
 	if dec, refused := serverNameRefusal(t, d, name); refused {
 		p.refuseInTunnel(t, client, dec, tlsAlertAccessDenied)
-		return nil, errServerNameRefused
+		return nil, flightUnknown, errTunnelRefused
 	}
-	return flight, nil
+	return flight, flightTLS, nil
+}
+
+// isWebPort reports the default web ports, where only TLS and HTTP/1.x are
+// relayed.
+func isWebPort(port int) bool { return slices.Contains(DefaultPorts(), port) }
+
+// readUntilClassified reads more of a non-TLS first flight until
+// classifyFlight can tell what it is, within maxFirstFlight.
+func readUntilClassified(data []byte, r io.Reader) ([]byte, flightKind, error) {
+	for {
+		if kind := classifyFlight(data); kind != flightUnknown {
+			return data, kind, nil
+		}
+		if len(data) >= maxFirstFlight {
+			return data, flightUnknown, errFlightTooLong
+		}
+		data = slices.Grow(data, firstReadSize)
+		m, err := r.Read(data[len(data):min(cap(data), maxFirstFlight)])
+		data = data[:len(data)+m]
+		if err != nil && m == 0 {
+			if errors.Is(err, io.EOF) {
+				return data, flightUnknown, io.ErrUnexpectedEOF
+			}
+			return data, flightUnknown, err
+		}
+	}
+}
+
+// classifyFlight tells an HTTP request line from other protocols. HTTP is
+// recognized generously (leading empty lines, any whitespace, any case of
+// "HTTP/", any version) so that nothing a lenient server would take for a
+// request escapes inspection; flightUnknown means the bytes so far could
+// still be the start of a request line.
+func classifyFlight(data []byte) flightKind {
+	rest := bytes.TrimLeft(data, "\r\n")
+	if len(rest) == 0 {
+		return flightUnknown
+	}
+	line, complete := rest, false
+	if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+		line, complete = rest[:i], true
+	}
+	method := line
+	if i := bytes.IndexAny(line, " \t"); i >= 0 {
+		method = line[:i]
+	}
+	for _, c := range method {
+		if !isTokenChar(c) {
+			return flightOpaque
+		}
+	}
+	for _, c := range line {
+		if (c < 0x20 && c != '\t' && c != '\r') || c == 0x7f {
+			return flightOpaque
+		}
+	}
+	if !complete {
+		return flightUnknown
+	}
+	fields := strings.Fields(string(line))
+	if len(fields) == 3 && fields[0] == "PRI" && fields[1] == "*" && fields[2] == "HTTP/2.0" {
+		return flightOpaque // HTTP/2 prior knowledge
+	}
+	for _, f := range fields[min(1, len(fields)):] {
+		if len(f) >= 5 && strings.EqualFold(f[:5], "HTTP/") {
+			return flightHTTP
+		}
+	}
+	return flightOpaque
+}
+
+// isTokenChar reports an RFC 9110 tchar.
+func isTokenChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
 }
 
 // serverNameRefusal decides the server name a tunnel's ClientHello asked
@@ -147,17 +256,14 @@ func (p *Proxy) refuseInTunnel(t *tunnel, client net.Conn, dec Decision, alert b
 	}
 }
 
-// refuseNonTLS ends an established tunnel whose first bytes are not a TLS
-// ClientHello. CONNECT tunnels carry TLS only: plain HTTP in a tunnel could
-// reach any site served from the tunnel's address through its Host header,
-// unseen, so plain HTTP must arrive in absolute form, where every request
-// is decided. The client already has its 200, so the refusal is written into
+// refuseTunnel ends an established tunnel whose plaintext content was
+// refused: bytes the port does not carry, or an HTTP request for another
+// host. The client already has its 200, so the JSON refusal is written into
 // the tunnel as an HTTP response (what an HTTP client there reads, and a
 // readable first line for anything else), and the tunnel closes.
-func (p *Proxy) refuseNonTLS(t *tunnel, client net.Conn) {
+func (p *Proxy) refuseTunnel(t *tunnel, client net.Conn, reason string) {
 	dec := blocked(Decision{Host: t.dec.Host, Port: t.dec.Port, Mode: t.dec.Mode}, CategoryInvalidDestination, SourceGuard, "")
-	dec.Reason = "The tunnel did not start with a TLS ClientHello. CONNECT tunnels carry TLS only; send plain HTTP " +
-		"to the proxy as absolute-form requests (GET http://host/path), which are checked one by one."
+	dec.Reason = reason
 	t.refused.Store(true)
 	status := statusFor(dec)
 	p.recordRefusal(t.principal, t.method, dec, status, t.started, t.id)

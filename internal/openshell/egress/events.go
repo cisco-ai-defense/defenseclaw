@@ -29,7 +29,8 @@ const (
 	// got a 403 (or 429) JSON body. When an established CONNECT tunnel is
 	// refused for its TLS server name, the event carries the tunnel's
 	// TunnelID and the refused name as Host, and the client got a TLS alert
-	// instead. A tunnel refused for not starting with TLS carries its
+	// instead. A tunnel refused for its plaintext content (an HTTP request
+	// for another host, or a protocol its port does not carry) carries its
 	// TunnelID too; its client got a 400 JSON response inside the tunnel.
 	EventBlocked EventKind = "blocked"
 	// EventClosed: an allowed tunnel or request finished; carries byte
@@ -86,7 +87,8 @@ type Event struct {
 	// large upload happened (large_upload).
 	FirstSeen bool
 	// Terminated marks a tunnel or request cut by the large-upload block, by
-	// the tunnel idle timeout, or for its TLS server name or non-TLS data.
+	// the tunnel idle timeout, or refused inside the tunnel (its TLS server
+	// name or its plaintext content).
 	Terminated bool
 	// Error is a bounded failure description for failed events.
 	Error string
