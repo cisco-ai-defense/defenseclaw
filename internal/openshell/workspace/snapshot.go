@@ -17,6 +17,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -770,8 +771,10 @@ func ListSnapshots(dataDir string) ([]*SnapshotRecord, error) {
 	return out, nil
 }
 
-// DeleteSnapshot forgets a snapshot: its record, copy, shadow refs and the
-// project ref. The shadow git dir goes when no other snapshot uses it.
+// DeleteSnapshot forgets a snapshot: its record, copy, shadow refs, the
+// project refs and the branch tips its undos saved in the project
+// (refs/defenseclaw/post-refs/<name>/). The shadow git dir goes when no
+// other snapshot uses it.
 func DeleteSnapshot(ctx context.Context, dataDir, name string) error {
 	lay, err := newLayout(dataDir)
 	if err != nil {
@@ -802,10 +805,18 @@ func removeSnapshotData(ctx context.Context, lay layout, name string, keepShadow
 			}
 			unlock()
 		}
-		if gs.ProjectRef && gitDirUnchanged(gs) {
+		if gitDirUnchanged(gs) {
 			proj := gitCmd{dir: rec.Project, gitDir: gs.GitDir}
-			for _, ref := range []string{gs.Ref, "refs/defenseclaw/post/" + name} {
-				_ = proj.run(ctx, "update-ref", "-d", ref)
+			if gs.ProjectRef {
+				for _, ref := range []string{gs.Ref, "refs/defenseclaw/post/" + name} {
+					_ = proj.run(ctx, "update-ref", "-d", ref)
+				}
+			}
+			if !keepShadow {
+				// The branch tips earlier undos saved go with the sandbox
+				// (a replaced snapshot keeps them: they are the only copy
+				// of that session's branch work).
+				deleteRefsUnder(ctx, proj, "refs/defenseclaw/post-refs/"+name+"/")
 			}
 		}
 	}
@@ -817,6 +828,27 @@ func removeSnapshotData(ctx context.Context, lay layout, name string, keepShadow
 		_ = os.Remove(rec.Git.Shadow + ".lock")
 	}
 	return nil
+}
+
+// deleteRefsUnder deletes every ref below prefix (which ends in "/") in
+// one update-ref transaction, best effort.
+func deleteRefsUnder(ctx context.Context, g gitCmd, prefix string) {
+	out, err := g.output(ctx, "for-each-ref", "--format=%(objectname) %(refname)", prefix)
+	if err != nil {
+		return
+	}
+	var stdin bytes.Buffer
+	for _, line := range strings.Split(string(out), "\n") {
+		oid, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok && isOID(oid) && strings.HasPrefix(ref, prefix) {
+			fmt.Fprintf(&stdin, "delete %s %s\n", ref, oid)
+		}
+	}
+	if stdin.Len() == 0 {
+		return
+	}
+	g.stdin = &stdin
+	_ = g.run(ctx, "update-ref", "--stdin")
 }
 
 // ownShadow reports whether dir is a shadow git dir DefenseClaw created:

@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -181,6 +182,65 @@ func (s recordStore) remove(name string) error {
 		return err
 	}
 	return nil
+}
+
+func (s recordStore) has(name string) bool {
+	p, err := s.path(name)
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(p)
+	return err == nil
+}
+
+// OrphanedSandboxData lists the sandboxes that have data under
+// <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
+// files) but no daemon record: an interrupted create or delete, or an
+// older build, left it. RemoveOrphanedSandboxData removes it.
+func OrphanedSandboxData(dataDir string) []string {
+	entries, err := os.ReadDir(filepath.Join(dataDir, "sandboxes"))
+	if err != nil {
+		return nil
+	}
+	records := newRecordStore(dataDir)
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == recordDirName || !openshell.ValidSandboxName(name) || records.has(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RemoveOrphanedSandboxData releases and removes the data an orphaned
+// sandbox left (see OrphanedSandboxData): its mount pins and mask files,
+// its copy-mode state and its run files, then the directory. A sandbox the
+// daemon still records is refused, and a directory that holds anything
+// else is left in place.
+func RemoveOrphanedSandboxData(dataDir, name string) error {
+	if !openshell.ValidSandboxName(name) || name == recordDirName {
+		return fmt.Errorf("invalid sandbox name %q", name)
+	}
+	if newRecordStore(dataDir).has(name) {
+		return fmt.Errorf("sandbox %s is still recorded; delete it with `defenseclaw sandbox delete %s`", name, name)
+	}
+	var errs []error
+	keep := func(err error) {
+		if err != nil && !errors.Is(err, openshell.ErrInvalidName) {
+			errs = append(errs, err)
+		}
+	}
+	keep(workspace.ReleaseMount(dataDir, name))
+	keep(workspace.DeleteCopy(dataDir, name))
+	dir := filepath.Join(dataDir, "sandboxes", name)
+	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
+	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir))
+	}
+	return errors.Join(errs...)
 }
 
 // loadAll reads every record; unreadable files are reported and skipped.

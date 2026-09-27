@@ -422,6 +422,29 @@ func TestRunCopyUploadFailureDeletesSandbox(t *testing.T) {
 	}
 }
 
+// A create the daemon refuses leaves no staged copy behind, unless the
+// name belongs to a sandbox that exists: its copy is not this run's.
+func TestRunCopyCreateFailureDiscardsTheStagedCopy(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "no verified image"}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "copybox"}); err == nil {
+		t.Fatal("Run succeeded")
+	}
+	if !slices.Equal(ta.copy.steps, []string{"stage copybox", "discard copybox"}) {
+		t.Fatalf("steps = %v", ta.copy.steps)
+	}
+
+	ta = newTestApp(t, "")
+	ta.daemon.add(copySandbox("copybox"))
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "a sandbox named copybox already exists"}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "copybox"}); err == nil {
+		t.Fatal("Run succeeded")
+	}
+	if slices.Contains(ta.copy.steps, "discard copybox") {
+		t.Fatalf("the existing sandbox's copy was discarded: %v", ta.copy.steps)
+	}
+}
+
 type failingUpload struct{ *fakeCopy }
 
 func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader) (*workspace.CopyRecord, error) {

@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
@@ -566,13 +568,19 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 			warnings = append(warnings, err.Error())
 		}
 	}
-	for _, p := range m.sandboxProviders(ctx, gw, rec) {
+	names, profileOf := m.sandboxProviders(ctx, gw, rec)
+	var credProfiles []string
+	for _, p := range names {
 		if _, err := gw.Client.DeleteProvider(ctx, p); err != nil && !openshell.IsNotFound(err) {
 			warn(err)
 			continue
 		}
 		providers = append(providers, p)
+		if id := profileOf[p]; strings.HasPrefix(id, credentialProfilePrefix) {
+			credProfiles = append(credProfiles, id)
+		}
 	}
+	m.releaseCredentialProfiles(ctx, gw, credProfiles)
 	if rec.BindingID != "" {
 		warn(m.revokeBinding(rec.BindingID))
 		m.creds.Revoke(rec.BindingID)
@@ -597,21 +605,27 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	warn(m.removeRunConfig(rec.Name))
 	if !retained {
 		warn(m.removeRecord(b))
+		m.removeSandboxDir(rec.Name)
 	}
 	return providers, warnings, retained
 }
 
 // sandboxProviders lists the providers DefenseClaw created for a sandbox:
-// those recorded plus any labelled for it.
-func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record) []string {
+// those recorded plus any labelled for it, with the provider profile each
+// was created from (when the gateway lists it).
+func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record) ([]string, map[string]string) {
 	set := map[string]bool{}
 	for _, p := range rec.Providers {
 		set[p] = true
 	}
+	profileOf := map[string]string{}
 	if list, err := gw.Client.ListProviders(ctx); err == nil {
 		for _, p := range list {
 			if p.Labels[LabelManaged] == "true" && p.Labels[LabelOwner] == m.opts.Owner && p.Labels[LabelSandbox] == rec.Name {
 				set[p.Name] = true
+			}
+			if set[p.Name] {
+				profileOf[p.Name] = p.Type
 			}
 		}
 	}
@@ -620,7 +634,55 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 		out = append(out, p)
 	}
 	sort.Strings(out)
-	return out
+	return out, profileOf
+}
+
+// releaseCredentialProfiles deletes the --credential provider profiles
+// (dc-cred-*) a deleted sandbox's providers were created from, once no
+// provider on the gateway uses them any more. They are gateway-global and
+// shared by every sandbox, of any DefenseClaw daemon, that binds the same
+// variable to the same endpoint, so one still in use stays: this daemon's
+// creates hold credentialGC while they import a profile and create its
+// provider, and OpenShell itself refuses to delete a profile a provider
+// uses. A create by another daemon that loses the race imports the profile
+// again (see providers).
+func (m *Manager) releaseCredentialProfiles(ctx context.Context, gw *Gateway, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.credentialGC.Lock()
+	defer m.credentialGC.Unlock()
+	list, err := gw.Client.ListProviders(ctx)
+	if err != nil {
+		return
+	}
+	used := map[string]bool{}
+	for _, p := range list {
+		used[p.Type] = true
+	}
+	for _, id := range dedupeSorted(ids) {
+		if used[id] {
+			continue
+		}
+		if _, err := gw.Client.DeleteProfile(ctx, id); err != nil && !openshell.IsNotFound(err) {
+			m.logf("provider profile %s is kept: %v", id, err)
+		}
+	}
+}
+
+func dedupeSorted(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// removeSandboxDir removes <data>/sandboxes/<name> once everything the
+// sandbox kept there is gone (never while it holds anything). A retired
+// sandbox keeps it until its snapshot is dropped too.
+func (m *Manager) removeSandboxDir(name string) {
+	if openshell.ValidSandboxName(name) && name != recordDirName {
+		_ = os.Remove(filepath.Join(m.opts.DataDir, "sandboxes", name))
+	}
 }
 
 // retire keeps a gone sandbox's box for its pre-session snapshot only: the

@@ -381,6 +381,9 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/copybox/start")); n != 1 {
 		t.Fatalf("a stopped sandbox was not started for the pull (%d)", n)
 	}
+	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/copybox/stop")); n != 1 || !strings.Contains(ta.output(), "stopped copybox again") {
+		t.Fatalf("the sandbox the pull started was not stopped again (%d):\n%s", n, ta.output())
+	}
 	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "apply branch"}) {
 		t.Fatalf("steps = %v", ta.copy.steps)
 	}

@@ -296,9 +296,20 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if _, err := wrapper.Enable(wrapper.Bash, rc, "/usr/local/bin/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
 	}
+	// A staged copy an interrupted create left, which no record names.
+	leftover := filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale", "copy", "stage", "proj", "README.md")
+	if err := os.MkdirAll(filepath.Dir(leftover), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftover, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := ta.Teardown(ctx, TeardownOptions{DryRun: true}); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(ta.output(), "leftover data     dc-claude-stale") {
+		t.Fatalf("dry run plan does not list the leftover data:\n%s", ta.output())
 	}
 	if !strings.Contains(ta.output(), "dc-claude-live, dc-claude-orphan") || strings.Contains(ta.output(), "dc-claude-theirs") {
 		t.Fatalf("dry run plan:\n%s", ta.output())
@@ -316,6 +327,9 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	}
 	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")); n != 1 {
 		t.Fatalf("daemon deletes = %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale")); !os.IsNotExist(err) {
+		t.Fatalf("the leftover data is still there: %v", err)
 	}
 	if _, err := client.GetSandbox(ctx, "dc-claude-orphan"); !openshell.IsNotFound(err) {
 		t.Fatalf("orphan sandbox left: %v", err)

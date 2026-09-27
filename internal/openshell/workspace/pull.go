@@ -923,8 +923,10 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	return out, nil
 }
 
-// fallback leaves the working tree alone and hands the result over as a
-// branch (git projects) and a patch file.
+// fallback leaves the tracked files alone and hands the result over as a
+// branch (git projects) and a patch file in the project folder, where the
+// interactive patch choice writes it too, so deleting the sandbox never
+// takes it along.
 func fallback(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, opts ApplyOptions, out *ApplyResult, conflicts []string) (*ApplyResult, error) {
 	out.Applied = false
 	out.Conflicts = conflicts
@@ -935,11 +937,34 @@ func fallback(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, 
 		}
 		out.Branch = branch
 	}
-	patch := filepath.Join(lay.copyDir(rec.Name), rec.Name+".patch")
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
-	if err := writePatch(ctx, base, rec.Baseline, pr.Effective, patch, true); err != nil {
+	patch, err := writeFreePatch(ctx, base, rec.Baseline, pr.Effective, rec.Project, rec.Name)
+	if err != nil {
 		return nil, err
 	}
 	out.PatchPath = patch
 	return out, nil
+}
+
+// writeFreePatch writes the from..to patch to <dir>/<name>.patch, or the
+// first of <name>-2.patch, <name>-3.patch, ... that does not exist yet.
+func writeFreePatch(ctx context.Context, base gitCmd, from, to, dir, name string) (string, error) {
+	for i := 1; i <= 100; i++ {
+		file := name + ".patch"
+		if i > 1 {
+			file = fmt.Sprintf("%s-%d.patch", name, i)
+		}
+		p := filepath.Join(dir, file)
+		if pathExists(p) {
+			continue
+		}
+		err := writePatch(ctx, base, from, to, p, false)
+		if err == nil {
+			return p, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("workspace: no free patch file name for %s in %s", name, dir)
 }

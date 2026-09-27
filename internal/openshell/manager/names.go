@@ -128,8 +128,11 @@ func providerName(sandbox, role string, i int) string {
 // the profile holds (variable, host, port), so sharing it re-points nothing.
 func credentialProfileID(name, host string, port int) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", name, host, port)))
-	return "dc-cred-" + hex.EncodeToString(sum[:6])
+	return credentialProfilePrefix + hex.EncodeToString(sum[:6])
 }
+
+// credentialProfilePrefix starts every --credential provider profile id.
+const credentialProfilePrefix = "dc-cred-"
 
 var imageVersionUnsafe = regexp.MustCompile(`[^A-Za-z0-9.+_-]+`)
 

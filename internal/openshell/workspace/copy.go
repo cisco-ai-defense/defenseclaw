@@ -264,6 +264,7 @@ func DeleteCopy(dataDir, name string) error {
 			return err
 		}
 	}
+	_ = os.Remove(lay.sandboxDir(name)) // only once nothing else is in it
 	return nil
 }
 

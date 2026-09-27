@@ -216,6 +216,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		sb, err = api.Create(ctx, req)
 	}
 	if err != nil {
+		if copyRec != nil {
+			a.discardStagedCopy(ctx, api, req.Name)
+		}
 		return apiError(err)
 	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
@@ -444,6 +447,19 @@ func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name s
 		return nil, fmt.Errorf("stage the project copy: %w", err)
 	}
 	return rec, nil
+}
+
+// discardStagedCopy removes the copy staged for a sandbox the daemon did
+// not create, unless a sandbox of that name exists (its copy is not this
+// run's to remove).
+func (a *App) discardStagedCopy(ctx context.Context, api API, name string) {
+	ctx = context.WithoutCancel(ctx)
+	if _, err := api.Get(ctx, name); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return
+	}
+	if err := a.Workspace.Discard(a.dataDir(), name); err != nil {
+		a.warn("could not remove the staged copy of " + name + ": " + err.Error())
+	}
 }
 
 // copyStageOptions stages flags.Project for sandbox name with the effective

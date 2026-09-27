@@ -52,15 +52,19 @@ type teardownPlan struct {
 	// providers are deleted.
 	ownIngress map[string]bool
 	images     []string
-	gateway    []receiptFile
-	changed    []receiptFile
-	wrappers   []wrapper.Installed
-	gwErr      error
-	client     openshell.Client
+	// orphans are sandboxes whose data under <data_dir>/sandboxes the
+	// daemon has no record of.
+	orphans  []string
+	gateway  []receiptFile
+	changed  []receiptFile
+	wrappers []wrapper.Installed
+	gwErr    error
+	client   openshell.Client
 }
 
 // Teardown removes everything DefenseClaw created for sandboxes: its
-// sandboxes, providers and provider profiles, its images, the gateway
+// sandboxes, providers and provider profiles, the data sandboxes it no
+// longer knows left under the data dir, its images, the gateway
 // configuration it changed (restored from the backup when nobody changed
 // it since) and the shell wrappers. OpenShell itself stays installed.
 func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
@@ -99,7 +103,7 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 
 func (p *teardownPlan) empty() bool {
 	return len(p.sandboxes) == 0 && len(p.providers) == 0 && len(p.profiles) == 0 && len(p.images) == 0 &&
-		len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
+		len(p.orphans) == 0 && len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
 }
 
 // owner is this data dir's sandbox owner label, "" when it never had one
@@ -155,6 +159,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
+	p.orphans = manager.OrphanedSandboxData(a.dataDir())
 	if !o.KeepImages {
 		if tags, err := a.Images.Remove(ctx, true); err == nil {
 			p.images = tags
@@ -241,6 +246,7 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 	list("providers", p.providers)
 	list("provider profiles", p.profiles)
 	list("images", p.images)
+	list("leftover data", p.orphans)
 	for _, f := range p.gateway {
 		how := "restore the backup " + f.Backup
 		if f.Backup == "" {
@@ -320,6 +326,15 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 			}
 			a.ok("deleted provider profile " + id)
 		}
+	}
+	// Data of sandboxes the daemon no longer knew: mount pins and masks,
+	// copy-mode state and run files an interrupted create or delete left.
+	for _, name := range p.orphans {
+		if err := manager.RemoveOrphanedSandboxData(a.dataDir(), name); err != nil {
+			fail("remove the leftover data of "+name, err)
+			continue
+		}
+		a.ok("removed the leftover data of " + name)
 	}
 	if !o.KeepImages && len(p.images) > 0 {
 		removed, err := a.Images.Remove(ctx, false)

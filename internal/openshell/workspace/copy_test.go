@@ -459,10 +459,21 @@ func TestCopyApplyConflictFallsBackToBranchAndPatch(t *testing.T) {
 	if got := e.git(e.project, "show", "dc/c1:README.md"); got != "agent version" {
 		t.Fatalf("fallback branch content = %q", got)
 	}
-	// A second conflicting apply picks a fresh branch name.
+	// The patch sits in the project folder, so deleting the sandbox does
+	// not take it along.
+	if res.PatchPath != filepath.Join(e.project, "c1.patch") || !strings.Contains(readFile(t, e.project, "c1.patch"), "+agent version") {
+		t.Fatalf("fallback patch at %s", res.PatchPath)
+	}
+	// A second conflicting apply picks a fresh branch and patch name.
 	res, err = apply(e, "c1", ApplyMerge, nil)
-	if err != nil || res.Branch != "dc/c1-2" {
+	if err != nil || res.Branch != "dc/c1-2" || res.PatchPath != filepath.Join(e.project, "c1-2.patch") {
 		t.Fatalf("second fallback: %+v, %v", res, err)
+	}
+	if err := DeleteCopy(e.data, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(filepath.Join(e.project, "c1.patch")) || !pathExists(filepath.Join(e.project, "c1-2.patch")) {
+		t.Fatal("deleting the copy removed the fallback patches")
 	}
 }
 
@@ -1067,6 +1078,9 @@ func (f failingExec) Exec(ctx context.Context, sandbox string, req ExecRequest) 
 func copyLeftovers(t *testing.T, e *env, name string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(e.data, "sandboxes", name))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1229,6 +1243,9 @@ func TestStageReplaceKeepsTheUploadedCopyGuarded(t *testing.T) {
 	}
 	if left := copyLeftovers(t, e, "c1"); len(left) > 0 || pathExists(filepath.Join(e.data, "sandboxes", "c1", "copy")) {
 		t.Fatalf("DeleteCopy left %v", left)
+	}
+	if pathExists(filepath.Join(e.data, "sandboxes", "c1")) {
+		t.Fatal("DeleteCopy left the empty sandbox directory")
 	}
 }
 

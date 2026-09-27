@@ -219,6 +219,11 @@ type Manager struct {
 	// profileMu serializes this daemon's provider profile imports, so
 	// concurrent creates do not race each other to import the same one.
 	profileMu sync.Mutex
+	// credentialGC keeps a delete from removing a --credential profile
+	// between a create's import of it and the provider that uses it:
+	// creates hold it shared from import to provider, the collection of
+	// unused profiles exclusively.
+	credentialGC sync.RWMutex
 }
 
 // New validates opts and returns a Manager. Run must be running for

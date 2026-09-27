@@ -39,6 +39,8 @@ type CopyWorkspace interface {
 	Pull(ctx context.Context, opts workspace.PullOptions) (*workspace.PullResult, error)
 	Apply(ctx context.Context, opts workspace.ApplyOptions) (*workspace.ApplyResult, error)
 	UndoApply(ctx context.Context, opts workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error)
+	// Discard removes a staged copy no sandbox was created for.
+	Discard(dataDir, name string) error
 }
 
 type defaultCopyWorkspace struct{}
@@ -63,6 +65,9 @@ func (defaultCopyWorkspace) Apply(ctx context.Context, o workspace.ApplyOptions)
 }
 func (defaultCopyWorkspace) UndoApply(ctx context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
 	return workspace.UndoApply(ctx, o)
+}
+func (defaultCopyWorkspace) Discard(dataDir, name string) error {
+	return workspace.DeleteCopy(dataDir, name)
 }
 
 // UndoOptions are the `sandbox undo` flags.
@@ -447,6 +452,14 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
+		// Leave it as it was found.
+		defer func() {
+			if _, err := api.Stop(context.WithoutCancel(ctx), o.Name); err != nil {
+				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())
+				return
+			}
+			a.note("stopped " + o.Name + " again")
+		}()
 	}
 	res, err := a.pull(ctx, api, cli, sb)
 	if err != nil {

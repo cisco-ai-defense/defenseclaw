@@ -663,10 +663,10 @@ func (s Summary) Lines() []string {
 	return lines
 }
 
-// ReleaseMount removes the protection pins PlanMount created for name and
-// its mask files. Call it when the sandbox is deleted (not when it is only
-// stopped: a restart reuses the same mounts). Pins that changed since they
-// were created are left in place.
+// ReleaseMount removes the protection pins PlanMount created for name, its
+// mask files and its mount state directory. Call it when the sandbox is
+// deleted (not when it is only stopped: a restart reuses the same mounts).
+// Pins that changed since they were created are left in place.
 func ReleaseMount(dataDir, name string) error {
 	if err := ValidateName(name); err != nil {
 		return err
@@ -678,7 +678,9 @@ func ReleaseMount(dataDir, name string) error {
 	var state mountState
 	if err := readJSON(lay.mountState(name), &state); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			// Nothing was pinned, but a plan that stopped part way may
+			// have left its mask files.
+			return removeMountDir(lay, name)
 		}
 		return err
 	}
@@ -692,6 +694,12 @@ func ReleaseMount(dataDir, name string) error {
 		}
 	}
 	releasePins(mine)
+	return removeMountDir(lay, name)
+}
+
+// removeMountDir removes name's mask files and mount state, then its
+// workspace directory once that left it empty.
+func removeMountDir(lay layout, name string) error {
 	if err := os.RemoveAll(lay.maskDir(name)); err != nil {
 		if chmodTree(lay.maskDir(name)) == nil {
 			err = os.RemoveAll(lay.maskDir(name))
@@ -700,7 +708,11 @@ func ReleaseMount(dataDir, name string) error {
 			return fmt.Errorf("workspace: remove mask files: %w", err)
 		}
 	}
-	return os.Remove(lay.mountState(name))
+	if err := os.Remove(lay.mountState(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	_ = os.Remove(lay.workspaceDir(name)) // only once empty
+	return nil
 }
 
 // sourcesInUse collects the bind sources of every other sandbox's mount

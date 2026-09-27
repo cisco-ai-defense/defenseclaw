@@ -19,11 +19,13 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -556,6 +558,124 @@ func TestDeleteReleasesEverything(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.dataDir, "sandboxes", "manager", "delbox.json")); !os.IsNotExist(err) {
 		t.Fatalf("record left: %v", err)
+	}
+}
+
+func TestDeleteCollectsUnusedCredentialProfilesAndItsDirectory(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	ctx := context.Background()
+	stripe := []sandboxapi.CredentialBinding{{Name: "STRIPE_API_KEY", Value: "stripe-secret", Host: "api.stripe.com"}}
+	e.create(sandboxapi.CreateRequest{Name: "cred-a", Credentials: stripe})
+	e.create(sandboxapi.CreateRequest{Name: "cred-b", Credentials: stripe, Project: e.otherProject("cred-b")})
+	p, err := e.client.GetProvider(ctx, "cred-a-cred-0")
+	if err != nil || !strings.HasPrefix(p.Type, "dc-cred-") {
+		t.Fatalf("credential provider = %+v, %v", p, err)
+	}
+	profile := p.Type
+	dir := filepath.Join(e.dataDir, "sandboxes", "cred-a")
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the sandbox has no data directory to clean up: %v", err)
+	}
+
+	// cred-b still uses the shared profile.
+	if _, err := e.m.Delete(ctx, "cred-a", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.GetProfile(ctx, profile); err != nil {
+		t.Fatalf("a profile another sandbox uses was deleted: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the sandbox's data directory is left: %v", err)
+	}
+	// The last user takes it along; the ingress profile stays.
+	if _, err := e.m.Delete(ctx, "cred-b", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.GetProfile(ctx, profile); !openshell.IsNotFound(err) {
+		t.Fatalf("the unused credential profile is left: %v", err)
+	}
+	if _, err := e.client.GetProfile(ctx, profiles.IngressProfileID(testIngressPort)); err != nil {
+		t.Fatalf("the ingress profile went too: %v", err)
+	}
+}
+
+func TestOrphanedSandboxData(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "live"})
+	root := filepath.Join(e.dataDir, "sandboxes")
+	mk := func(rel string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What an interrupted create leaves: a staged copy, run files, masks.
+	mk("orphan-a/copy/stage/myapp/README.md")
+	mk("orphan-a/run-config/settings.json")
+	mk("orphan-a/workspace/masks/empty")
+	mk("orphan-b/notes.txt")
+	mk("live/run-config/extra.json")
+
+	if got := OrphanedSandboxData(e.dataDir); !slices.Equal(got, []string{"orphan-a", "orphan-b"}) {
+		t.Fatalf("orphans = %v", got)
+	}
+	if err := RemoveOrphanedSandboxData(e.dataDir, "orphan-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "orphan-a")); !os.IsNotExist(err) {
+		t.Fatalf("orphan-a is left: %v", err)
+	}
+	// Anything DefenseClaw does not write there stays.
+	if err := RemoveOrphanedSandboxData(e.dataDir, "orphan-b"); err == nil || !strings.Contains(err.Error(), "left in place") {
+		t.Fatalf("orphan-b = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "orphan-b", "notes.txt")); err != nil {
+		t.Fatalf("a foreign file was removed: %v", err)
+	}
+	// A recorded sandbox and the record store are never touched.
+	for _, name := range []string{"live", "manager"} {
+		if err := RemoveOrphanedSandboxData(e.dataDir, name); err == nil {
+			t.Fatalf("RemoveOrphanedSandboxData(%s) succeeded", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "live", "run-config", "extra.json")); err != nil {
+		t.Fatalf("a live sandbox's data was removed: %v", err)
+	}
+}
+
+func TestCreateImportsACredentialProfileThatVanished(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	// Another daemon collects the profile between this create's import and
+	// its provider; OpenShell then refuses the provider.
+	var fired atomic.Bool
+	e.fake.Intercept(func(method string) error {
+		if method != openshelltest.MethodCreateProvider || fired.Load() {
+			return nil
+		}
+		list, _ := e.client.ListProfiles(ctx)
+		for _, pf := range list {
+			if strings.HasPrefix(pf.ID, "dc-cred-") {
+				fired.Store(true)
+				_, _ = e.client.DeleteProfile(ctx, pf.ID)
+				return fmt.Errorf("provider type %q is not registered", pf.ID)
+			}
+		}
+		return nil
+	})
+	sb := e.create(sandboxapi.CreateRequest{Name: "cred-race",
+		Credentials: []sandboxapi.CredentialBinding{{Name: "STRIPE_API_KEY", Value: "s", Host: "api.stripe.com"}}})
+	p, err := e.client.GetProvider(ctx, sb.Name+"-cred-0")
+	if err != nil {
+		t.Fatalf("the credential provider was not created: %v", err)
+	}
+	if _, err := e.client.GetProfile(ctx, p.Type); err != nil {
+		t.Fatalf("the profile was not imported again: %v", err)
 	}
 }
 

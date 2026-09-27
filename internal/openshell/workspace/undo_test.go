@@ -456,6 +456,62 @@ func TestDeleteSnapshotRemovesRefsAndShadow(t *testing.T) {
 	}
 }
 
+func TestDeleteSnapshotRemovesSavedRefTips(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "agent.txt", "agent\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "agent commit")
+	mustUndo(t, e, "s1", false)
+	// Another sandbox whose name starts the same keeps its saved tips.
+	e.git(e.project, "update-ref", "refs/defenseclaw/post-refs/s10/x/refs/heads/main", "HEAD")
+	saved := func(name string) string {
+		return e.git(e.project, "for-each-ref", "--format=%(refname)", "refs/defenseclaw/post-refs/"+name+"/")
+	}
+	if saved("s1") == "" {
+		t.Fatal("undo saved no branch tips")
+	}
+	// A new session (the snapshot replaced) keeps them: they are the only
+	// copy of the earlier session's branch work.
+	opts := e.snapOpts("s1")
+	opts.Replace = true
+	if _, err := Snapshot(bg, opts); err != nil {
+		t.Fatal(err)
+	}
+	if saved("s1") == "" {
+		t.Fatal("replacing the snapshot dropped the saved branch tips")
+	}
+	if err := DeleteSnapshot(bg, e.data, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := saved("s1"); got != "" {
+		t.Fatalf("deleting the snapshot left %s", got)
+	}
+	if saved("s10") == "" {
+		t.Fatal("deleting s1 removed s10's saved branch tips")
+	}
+}
+
+func TestReleaseMountRemovesItsDirectory(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".env", "SECRET=1\n")
+	if _, err := PlanMount(bg, e.mountOpts("m1")); err != nil {
+		t.Fatal(err)
+	}
+	lay, _ := newLayout(e.data)
+	if !pathExists(lay.workspaceDir("m1")) {
+		t.Fatal("PlanMount wrote no mount state")
+	}
+	if err := ReleaseMount(e.data, "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(lay.workspaceDir("m1")) {
+		t.Fatal("ReleaseMount left the workspace directory")
+	}
+}
+
 func TestPlainSnapshotUndo(t *testing.T) {
 	e := newEnv(t)
 	writeFile(t, e.project, "doc.md", "one\ntwo\n")

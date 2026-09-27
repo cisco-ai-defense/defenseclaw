@@ -526,6 +526,11 @@ type fakeCopy struct {
 	undoErr error
 }
 
+func (f *fakeCopy) Discard(_, name string) error {
+	f.step("discard " + name)
+	return nil
+}
+
 func (f *fakeCopy) UndoApply(_ context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
 	f.step(fmt.Sprintf("undo-apply %s preview=%v", o.Name, o.Preview))
 	if f.undoErr != nil {

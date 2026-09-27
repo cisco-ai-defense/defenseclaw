@@ -601,15 +601,37 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 		}
 	}
 	for i, c := range creds {
-		if err := m.ensureProfile(ctx, gw, c.profile, nil); err != nil {
-			return nil, nil, err
-		}
-		if err := create(roleCredential, i, c.profile.ID, map[string]string{c.binding.Name: c.binding.Value}); err != nil {
+		if err := m.credentialProvider(ctx, gw, c, func() error {
+			return create(roleCredential, i, c.profile.ID, map[string]string{c.binding.Name: c.binding.Value})
+		}); err != nil {
 			return nil, nil, err
 		}
 	}
 	rec.Providers = names
 	return names, env, nil
+}
+
+// credentialProvider imports a --credential profile and creates the
+// provider that uses it (create), holding credentialGC shared in between so
+// this daemon's collection of unused profiles never removes it under the
+// create. Another daemon on the gateway may still delete it in that window
+// (it saw no provider using it); the create then imports it again, once.
+func (m *Manager) credentialProvider(ctx context.Context, gw *Gateway, c credentialPlan, create func() error) error {
+	m.credentialGC.RLock()
+	defer m.credentialGC.RUnlock()
+	for attempt := 0; ; attempt++ {
+		if err := m.ensureProfile(ctx, gw, c.profile, nil); err != nil {
+			return err
+		}
+		err := create()
+		if err == nil || attempt > 0 {
+			return err
+		}
+		if _, gerr := gw.Client.GetProfile(ctx, c.profile.ID); !openshell.IsNotFound(gerr) {
+			return err
+		}
+		m.logf("provider profile %s went away while its provider was created; importing it again", c.profile.ID)
+	}
 }
 
 // image resolves the harness overlay image for this host user.
