@@ -532,6 +532,7 @@ func (m *Manager) deleteRetained(ctx context.Context, b *box, req sandboxapi.Del
 	if err := m.removeRecord(b); err != nil {
 		resp.Warnings = append(resp.Warnings, err.Error())
 	}
+	m.removeSandboxDir(name)
 	m.forget(b)
 	return resp, nil
 }

@@ -529,6 +529,26 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	}
 }
 
+// A copy-mode fallback whose create the daemon then refuses too removes the
+// copy it staged, like an explicit --copy run.
+func TestRunCopyFallbackCreateFailureDiscardsTheStagedCopy(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["OPENAI_API_KEY"] = "sk-openai-test"
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		if req.Copy {
+			return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "no verified image"}
+		}
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: "the git directory is outside the project (a linked worktree)"}
+	}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "codex", Name: "wt"}); err == nil {
+		t.Fatalf("Run succeeded:\n%s", ta.output())
+	}
+	if !slices.Equal(ta.copy.steps, []string{"stage wt", "discard wt"}) {
+		t.Fatalf("copy steps = %v, want the fallback's stage discarded", ta.copy.steps)
+	}
+}
+
 func TestRunOffersResume(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-claude-proj-old", Harness: "claudecode", HarnessName: "Claude Code", Phase: "stopped",

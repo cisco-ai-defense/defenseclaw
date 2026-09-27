@@ -688,6 +688,18 @@ func TestDeleteKeepSnapshot(t *testing.T) {
 	if slices.Contains(e.ws.deleted, "keepbox") {
 		t.Fatal("snapshot deleted despite keep_snapshot")
 	}
+	// The retained record is no leftover for teardown to sweep, and its
+	// sandbox directory stays until the snapshot is dropped.
+	dir := filepath.Join(e.dataDir, "sandboxes", "keepbox")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(OrphanedSandboxData(e.dataDir), "keepbox") {
+		t.Fatal("the retained sandbox is listed as leftover data")
+	}
+	if err := RemoveOrphanedSandboxData(e.dataDir, "keepbox"); err == nil {
+		t.Fatal("RemoveOrphanedSandboxData removed the retained sandbox's data")
+	}
 	// The kept snapshot is reachable under the sandbox's name, across a
 	// daemon restart too, until the box is deleted.
 	e.m = e.newManager()
@@ -721,6 +733,9 @@ func TestDeleteKeepSnapshot(t *testing.T) {
 	}
 	if p, _ := e.m.records.path("keepbox"); fileExists(p) {
 		t.Fatal("the record survived the delete")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dropping the kept snapshot left the sandbox directory: %v", err)
 	}
 }
 
