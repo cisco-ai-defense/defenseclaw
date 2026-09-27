@@ -60,7 +60,32 @@ var (
 	ErrNotGitProject = errors.New("workspace: the project is not a git repository")
 	// ErrNoChanges: the sandbox result equals the baseline.
 	ErrNoChanges = errors.New("workspace: no changes to bring back")
+	// ErrScanIncomplete: the secret scan could not look at the whole
+	// folder, so a live mount is refused rather than showing files nobody
+	// checked.
+	ErrScanIncomplete = errors.New("workspace: the secret scan could not check the whole folder")
 )
+
+// ScanIncompleteError reports a secret scan that stopped at its entry
+// limit before it had seen the whole folder.
+type ScanIncompleteError struct {
+	Path  string
+	Limit int
+	// Git is set for a git project, which copy mode can still share: it
+	// copies what git lists instead of walking the folder.
+	Git bool
+}
+
+func (e *ScanIncompleteError) Error() string {
+	hint := "raise the scan's entry limit or launch from a smaller folder"
+	if e.Git {
+		hint += ", or run with --copy"
+	}
+	return fmt.Sprintf("workspace: refusing to mount %s: it has more than %d files and directories, so the secret scan could not check all of it "+
+		"and the rest would be visible unmasked (%s)", e.Path, e.Limit, hint)
+}
+
+func (e *ScanIncompleteError) Unwrap() error { return ErrScanIncomplete }
 
 // SourceError explains why a folder cannot be mounted.
 type SourceError struct {

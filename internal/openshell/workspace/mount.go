@@ -89,6 +89,8 @@ type MountOptions struct {
 	// Detector overrides DefaultSecretDetector.
 	Detector SecretDetector
 	// MaxWalkEntries bounds the secret scan walk (default 250k entries).
+	// A folder with more is refused (*ScanIncompleteError): past the
+	// limit nothing would be masked.
 	MaxWalkEntries int
 	// MaxContentScanFiles bounds content scanning (default 2k files).
 	MaxContentScanFiles int

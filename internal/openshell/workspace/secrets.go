@@ -272,7 +272,8 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 		return nil, fmt.Errorf("workspace: scan %s for secrets: %w", root, err)
 	}
 	if truncated {
-		res.warnings = append(res.warnings, fmt.Sprintf("secret scan of %s stopped after %d entries; files beyond that are not masked", root, opts.maxEntries))
+		// A live mount would show every file past the limit unmasked.
+		return nil, &ScanIncompleteError{Path: root, Limit: walkLimit(opts.maxEntries), Git: opts.tracked != nil}
 	}
 	if opts.contentScan && scanBudget <= 0 {
 		res.warnings = append(res.warnings, "secret content scan reached its file budget; remaining files were checked by name only")

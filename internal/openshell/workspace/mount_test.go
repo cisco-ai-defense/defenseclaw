@@ -19,6 +19,7 @@ package workspace
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -512,5 +513,52 @@ func TestPlanMountRefusesAndRollsBack(t *testing.T) {
 	}
 	if pathExists(filepath.Join(e.project, ".git", "commondir")) {
 		t.Fatal("failed plan left its commondir pin behind")
+	}
+}
+
+// TestPlanMountRefusesAFolderTheScanCannotFinish: past the walk limit no
+// file would be masked, so the mount is refused instead of starting with
+// a warning, and nothing is left behind.
+func TestPlanMountRefusesAFolderTheScanCannotFinish(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	for i := 0; i < 8; i++ {
+		writeFile(t, e.project, fmt.Sprintf("pkg%d/file.go", i), "package p\n")
+	}
+	writeFile(t, e.project, "zz/.env", "TOKEN=marker\n")
+	opts := e.mountOpts("s1")
+	opts.MaxWalkEntries = 6
+	_, err := PlanMount(bg, opts)
+	var incomplete *ScanIncompleteError
+	if !errors.As(err, &incomplete) || !errors.Is(err, ErrScanIncomplete) || !incomplete.Git || incomplete.Limit != 6 {
+		t.Fatalf("err = %v, want a *ScanIncompleteError for a git project", err)
+	}
+	if !strings.Contains(err.Error(), "--copy") {
+		t.Fatalf("the refusal does not name copy mode: %v", err)
+	}
+	if pathExists(filepath.Join(e.data, "sandboxes", "s1", "workspace", "mount.json")) || pathExists(filepath.Join(e.project, ".git", "commondir")) {
+		t.Fatal("a refused plan left state behind")
+	}
+
+	// Context folders are held to the same rule (the project itself now
+	// fits: about half a dozen entries).
+	for i := 0; i < 8; i++ {
+		if err := os.RemoveAll(filepath.Join(e.project, fmt.Sprintf("pkg%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := filepath.Join(e.home, "code", "lib")
+	for i := 0; i < 8; i++ {
+		writeFile(t, lib, fmt.Sprintf("d%d/x.txt", i), "x\n")
+	}
+	opts = e.mountOpts("s2")
+	opts.Context = []string{lib}
+	opts.MaxWalkEntries = 30
+	if _, err := PlanMount(bg, opts); err != nil {
+		t.Fatalf("folders within the limit: %v", err)
+	}
+	opts.Name, opts.MaxWalkEntries = "s3", 12
+	if _, err := PlanMount(bg, opts); !errors.As(err, &incomplete) || incomplete.Path != lib || incomplete.Git {
+		t.Fatalf("context folder past the limit: %v", err)
 	}
 }
