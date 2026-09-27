@@ -1356,6 +1356,28 @@ func (h *SidecarHealth) HasConnectorSource(name, source string) bool {
 	return s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource)
 }
 
+// ConnectorsWithSource lists the running connectors registered with source
+// (for example "automatic"), sorted.
+func (h *SidecarHealth) ConnectorsWithSource(source string) []string {
+	if h == nil {
+		return nil
+	}
+	wantSource := strings.ToLower(strings.TrimSpace(source))
+	if wantSource == "" {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var names []string
+	for key, s := range h.connStats {
+		if s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource) {
+			names = append(names, key)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // statsFor returns the counter bucket for a connector, lazily creating it so
 // counts are never lost if a hook fires before the connector is registered.
 // An empty name routes to the primary connector (back-compat).

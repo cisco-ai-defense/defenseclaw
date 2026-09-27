@@ -431,7 +431,9 @@ func TestManagedInspectionPostureFollowsTheConnectorMode(t *testing.T) {
 		name   string
 		action string
 		mutate func(*config.Config)
-		want   string
+		// automatic names a connector application protection registered.
+		automatic string
+		want      string
 	}{
 		{name: "observe", action: config.AIDUnavailableActionBlock, want: config.AIDUnavailableActionAllow},
 		{name: "action", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) { c.Guardrail.Mode = "action" }, want: config.AIDUnavailableActionBlock},
@@ -453,6 +455,39 @@ func TestManagedInspectionPostureFollowsTheConnectorMode(t *testing.T) {
 			c.Guardrail.Connector = ""
 			c.Guardrail.Mode = "action"
 		}, want: config.AIDUnavailableActionBlock},
+		// The hook handlers also evaluate connectors outside the active
+		// list: connector_hooks.<name>.enabled and application protection.
+		{name: "connector hooks enable an action-mode connector outside the list", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connector = "claudecode"
+			c.ConnectorHooks = map[string]config.AgentHookConfig{"codex": {Enabled: true, Mode: "action"}}
+		}, want: config.AIDUnavailableActionBlock},
+		{name: "legacy codex hook block enabled in action mode", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connector = "claudecode"
+			c.Codex = config.AgentHookConfig{Enabled: true, Mode: "action"}
+		}, want: config.AIDUnavailableActionBlock},
+		{name: "connector hook in action mode but not enabled", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.ConnectorHooks = map[string]config.AgentHookConfig{"cursor": {Mode: "action"}}
+		}, want: config.AIDUnavailableActionAllow},
+		{name: "connector hooks enable a disabled connector", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &disabled}, "claudecode": {}}
+			c.ConnectorHooks = map[string]config.AgentHookConfig{"codex": {Enabled: true, Mode: "action"}}
+		}, want: config.AIDUnavailableActionAllow},
+		{name: "application protection connector in action mode", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.ApplicationProtection = config.ApplicationProtectionConfig{Enabled: true, Guardrail: config.PerConnectorGuardrailConfig{Mode: "action"}}
+		}, automatic: "cursor", want: config.AIDUnavailableActionBlock},
+		{name: "application protection off for the registered connector", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.ApplicationProtection = config.ApplicationProtectionConfig{
+				Enabled:   true,
+				Guardrail: config.PerConnectorGuardrailConfig{Mode: "action"},
+				Connectors: map[string]config.ApplicationProtectionConnectorConfig{"cursor": {
+					Enabled:   &disabled,
+					Guardrail: config.PerConnectorGuardrailConfig{Mode: "action"},
+				}},
+			}
+		}, automatic: "cursor", want: config.AIDUnavailableActionAllow},
+		{name: "application protection connector in observe mode", action: config.AIDUnavailableActionBlock, mutate: func(c *config.Config) {
+			c.ApplicationProtection = config.ApplicationProtectionConfig{Enabled: true}
+		}, automatic: "cursor", want: config.AIDUnavailableActionAllow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := managedInspectionSidecar(t)
@@ -460,6 +495,9 @@ func TestManagedInspectionPostureFollowsTheConnectorMode(t *testing.T) {
 			s.cfg.CiscoAIDefense.UnavailableAction = tc.action
 			if tc.mutate != nil {
 				tc.mutate(s.cfg)
+			}
+			if tc.automatic != "" {
+				s.health.RegisterConnectorWithSource(tc.automatic, connector.ToolModeBoth, connector.SubprocessNone, "automatic")
 			}
 			s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
 			if got := s.health.Snapshot().ManagedInspection; got == nil || got.UnavailableAction != tc.want {

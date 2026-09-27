@@ -26,8 +26,8 @@ import (
 // while Cisco AI Defense cannot be reached (no credential provider, no token,
 // no inspector); UnavailableAction says whether those requests are currently
 // being allowed or blocked: block when cisco_ai_defense.unavailable_action is
-// block (or the build has no managed-cloud support) and an active connector
-// is in action mode to enforce it, otherwise allow (see
+// block (or the build has no managed-cloud support) and a connector the hook
+// handlers evaluate is in action mode to enforce it, otherwise allow (see
 // managedAIDUnavailablePosture).
 type ManagedInspectionHealth struct {
 	Available         bool      `json:"available"`
@@ -157,7 +157,7 @@ func (s *Sidecar) publishManagedInspectionHealth() {
 		return
 	}
 	available, detail := s.managedInspectionState()
-	action := managedAIDUnavailablePosture(cfg)
+	action := managedAIDUnavailablePosture(cfg, s.health)
 	if hook := managedInspectionPublishTestHook; hook != nil {
 		hook()
 	}

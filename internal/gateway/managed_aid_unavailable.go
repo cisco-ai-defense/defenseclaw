@@ -96,41 +96,73 @@ func managedAIDEffectiveUnavailableAction(cfg *config.Config) string {
 // Defense could not inspect, as /health and the Secure Client availability
 // report it. Only a connector in action mode enforces the block; observe
 // mode records it as would-block and lets the call run uninspected. So
-// while no active connector is in action mode the posture is allow,
-// whatever managedAIDEffectiveUnavailableAction says.
-func managedAIDUnavailablePosture(cfg *config.Config) string {
+// while no connector the hook handlers evaluate is in action mode the
+// posture is allow, whatever managedAIDEffectiveUnavailableAction says.
+// health supplies the connectors application protection registered; nil
+// means none.
+func managedAIDUnavailablePosture(cfg *config.Config, health *SidecarHealth) string {
 	action := managedAIDEffectiveUnavailableAction(cfg)
-	if action == config.AIDUnavailableActionBlock && !managedAIDHookLaneEnforces(cfg) {
+	if action == config.AIDUnavailableActionBlock && !managedAIDHookLaneEnforces(cfg, health) {
 		return config.AIDUnavailableActionAllow
 	}
 	return action
 }
 
-// managedAIDHookLaneEnforces reports whether any enabled active connector
-// runs its hooks in action mode, resolved the way the hook handlers do
-// (connector_hooks.<name>.mode, then the connector's guardrail mode). With
-// no connector selected, the generic inspect routes follow guardrail.mode.
-func managedAIDHookLaneEnforces(cfg *config.Config) bool {
+// managedAIDHookLaneEnforces reports whether any connector the hook
+// handlers evaluate runs its hooks in action mode, with both resolved the
+// way the handlers resolve them (agentHookEnabled, codexEnabled,
+// claudeCodeEnabled and agentHookMode). A connector is evaluated when it is
+// active (guardrail.connectors, guardrail.connector or claw.mode), when
+// connector_hooks.<name>.enabled is set, or when application protection
+// registered it and is enabled for it; a manual connector that was disabled
+// is not. Its mode is connector_hooks.<name>.mode, then the connector's
+// guardrail mode. With no connector selected, the generic inspect routes
+// follow guardrail.mode.
+func managedAIDHookLaneEnforces(cfg *config.Config, health *SidecarHealth) bool {
 	if cfg == nil {
 		return false
 	}
-	names := cfg.ActiveConnectors()
-	if len(names) == 0 {
-		return inspectMode(cfg) == "action"
+	active := cfg.ActiveConnectors()
+	if len(active) == 0 && inspectMode(cfg) == "action" {
+		return true
 	}
-	for _, name := range names {
-		if !cfg.Guardrail.EffectiveEnabled(name) {
+	for _, name := range active {
+		if cfg.Guardrail.EffectiveEnabled(name) && managedAIDHookMode(cfg, name) == "action" {
+			return true
+		}
+	}
+	// Connectors the handlers evaluate outside the active list: an enabled
+	// connector_hooks entry (or the legacy claude_code / codex block), and
+	// connectors application protection registered.
+	extra := []string{"claudecode", "codex"}
+	for name := range cfg.ConnectorHooks {
+		extra = append(extra, name)
+	}
+	if health != nil {
+		extra = append(extra, health.ConnectorsWithSource("automatic")...)
+	}
+	for _, name := range extra {
+		if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
 			continue
 		}
-		mode := strings.TrimSpace(cfg.ConnectorHookConfig(name).Mode)
-		if mode == "" || strings.EqualFold(mode, "inherit") {
-			mode = cfg.EffectiveGuardrailModeForConnector(name)
-		}
-		if normalizeAgentHookMode(mode) == "action" {
+		evaluated := cfg.ConnectorHookConfig(name).Enabled ||
+			(health != nil && health.HasConnectorSource(name, "automatic") &&
+				cfg.ApplicationProtection.EffectiveEnabled(name))
+		if evaluated && managedAIDHookMode(cfg, name) == "action" {
 			return true
 		}
 	}
 	return false
+}
+
+// managedAIDHookMode resolves a connector's hook mode the way agentHookMode
+// does: connector_hooks.<name>.mode, then the connector's guardrail mode.
+func managedAIDHookMode(cfg *config.Config, name string) string {
+	mode := strings.TrimSpace(cfg.ConnectorHookConfig(name).Mode)
+	if mode == "" || strings.EqualFold(mode, "inherit") {
+		mode = cfg.EffectiveGuardrailModeForConnector(name)
+	}
+	return normalizeAgentHookMode(mode)
 }
 
 // managedAIDUnavailableReasonBlockable reports whether a managed fail-open
@@ -305,7 +337,7 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	s.publishManagedInspectionHealth()
 	available, cause := s.managedInspectionState()
 	cfg := s.currentConfig()
-	action := managedAIDUnavailablePosture(cfg)
+	action := managedAIDUnavailablePosture(cfg, s.health)
 	detail["inspection_available"] = available
 	detail["inspection_unavailable_action"] = action
 	if available {
