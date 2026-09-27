@@ -31,8 +31,8 @@ exist yet:
   import, the REST API under `/api/v1/sandbox/`, the TUI and macOS surfaces,
   and the shell wrapper.
 - **Commands.** `defenseclaw sandbox legacy-cleanup` is the only `sandbox`
-  command. The egress proxy's block message already names the planned
-  `sandbox unblock` command.
+  command. The egress proxy's block messages already name two planned
+  commands, `sandbox unblock` and `sandbox run --host-port PORT`.
 - **Harnesses.** Only `claudecode` and `codex` have harness specs and sandbox
   artifacts.
 
@@ -46,8 +46,10 @@ argue or code its way around.
   Landlock filesystem policy, seccomp, and a non-root user. A supervisor
   outside the workload is the only way out. It applies per-endpoint,
   per-binary network rules and swaps credential placeholders for real values
-  only on the endpoints they are bound to. Static binaries, raw system calls
-  and obfuscated commands meet the same kernel-enforced limits.
+  only on the endpoints they are bound to. Because these limits sit in the
+  kernel and in the supervisor, static binaries, raw system calls and
+  obfuscated commands are expected to meet them too. That was not tested
+  separately (see [not measured](#not-measured)).
 - **Qpoint qcontrol**, the alternative considered, hooks functions inside the
   agent process. That gives visibility and soft control, but the agent still
   runs with the user's full privileges, and in-process hooks can be bypassed.
@@ -314,18 +316,19 @@ category, a reason, whether it can be unblocked, and how to ask. Limits get a
    (RFC 1918, carrier-grade NAT, IPv6 unique local, the other hosts on this
    machine's subnets, intranet names) are reachable only where an operator
    allow rule names them (`private_network`). The port must be on the port
-   list (80 and 443 by default). Guard blocks are never unblockable.
+   list (80 and 443 by default). Guard blocks cannot be unblocked.
 2. **Operator block list**, for example `openshell.egress.block` and the host
-   firewall's deny rules.
+   firewall's deny rules. It is checked before unblock decisions, so an
+   unblock cannot lift an operator block; only a configuration change can.
 3. **Unblock decisions**, for one sandbox or for every sandbox.
 4. **Operator allow list**, for example `openshell.egress.allow`.
-5. **Blocklist feed.** Unblockable.
+5. **Blocklist feed.** A feed block can be unblocked.
 6. **Mode default.** Open mode (the `open` profile) allows host names and
    blocks IP literals as `ip_literal`, because a literal would sidestep the
-   name-based feed; that block is unblockable. Allowlist mode (the `balanced`
-   profile) allows only allowlist-feed matches and blocks the rest as
-   `not_allowlisted`, also unblockable. The `strict` profile runs without the
-   proxy.
+   name-based feed; that block can be unblocked. Allowlist mode (the
+   `balanced` profile) allows only allowlist-feed matches and blocks the rest
+   as `not_allowlisted`, which can also be unblocked. The `strict` profile
+   runs without the proxy.
 
 Host names are resolved on the proxy side as fully qualified names, never
 through the host's search domains. Every DNS answer passes the SSRF policy
@@ -383,11 +386,20 @@ and `log.egress.blocked` records (source `dc-egress-proxy`) and
 
 ### Relation to the pack posture
 
-`packs.Effective.DecideEgress` answers the same question at policy level (admin
-block, admin allow-only list, ports, deny mode, block list, feeds, mode) for
-explaining decisions and checking runtime actions. The proxy's `Decider`
-enforces per connection. Building a `Decider` from an `Effective` posture is
-the manager's job.
+`packs.Effective.DecideEgress` answers a similar question at policy level
+(admin block, admin allow-only list, ports, deny mode, block list, feeds,
+mode) for explaining decisions and checking runtime actions. The proxy's
+`Decider` enforces per connection. Building a `Decider` from an `Effective`
+posture is the manager's job.
+
+The two disagree on one point today. `DecideEgress` reports a match on the
+block list (the pack's entries plus `openshell.egress.block`) as a block that
+can be unblocked (unless `openshell.admin.allow_unblock` is false), and
+`Allow(ActionUnblock)` permits that unblock. The proxy checks the operator block list before unblock
+decisions, and its block message says only a configuration change can allow
+the host. So an approved unblock of a host the user blocked would never take
+effect. The manager's mapping, or `DecideEgress`, has to settle which rule
+wins.
 
 ## Provider credentials and LLM traffic
 
@@ -449,13 +461,15 @@ it into docker-driver bind mounts:
 | --- | --- | --- |
 | The project | `/work/<repo>` | read-write |
 | The git directory and up to 32 submodule git directories, each bound onto itself so it cannot be renamed away and replaced | same paths | read-write |
-| In each of those, `config`, `hooks` and `commondir`; also a `core.hooksPath` inside the project, config include files, the worktrees admin directory and a `.git` pointer file | same paths | read-only |
+| In each of those, `config`, `config.worktree`, `hooks` and `commondir`; also a `core.hooksPath` inside the project, config include files, the worktrees admin directory and a `.git` pointer file | same paths | read-only |
 | Each detected secret file or directory | same path | read-only empty file or directory |
 | Each extra reference folder | beside the project under `/work` | read-only |
 
-Missing protection targets (an empty hooks directory, a `commondir` file
-that makes git use the git directory itself) are created on the host so they
-can be bound, and removed again by `ReleaseMount`. The manager must call
+Missing protection targets (an empty `config` or `config.worktree` file, an
+empty hooks directory, a `commondir` file that makes git use the git directory
+itself) are created on the host so they can be bound, and removed again by
+`ReleaseMount`. `config.worktree` is bound even when the project has none, so
+the agent cannot plant one for host git to read. The manager must call
 `ReleaseMount` when a sandbox is deleted, not when it stops, because a
 restart reuses them.
 
@@ -504,13 +518,21 @@ another name.
 `Snapshot` records the folder before the session.
 
 - **Git projects.** The whole working tree, tracked and untracked (ignored
-  files are left alone), is committed into a DefenseClaw-owned shadow git
-  directory, `<data_dir>/snapshots/git/<project-key>.git`, under
+  files are left alone, but their paths are recorded), is committed into a
+  DefenseClaw-owned shadow git directory,
+  `<data_dir>/shadows/<project-key>.git`, under
   `refs/defenseclaw/pre/<name>`. The ref is also written into the project
   unless disabled. HEAD, the branch, other refs, the staging area and the git
-  control files the agent could write are recorded. The shadow keeps its own
-  copy of the project's objects (hard links where possible), so the snapshot
-  survives the agent deleting `.git/objects`.
+  control files the agent could write are recorded.
+- **The shadow's own objects.** The shadow keeps a private copy of the
+  project's git object files, so the snapshot survives the agent deleting or
+  rewriting `.git/objects`. Each file is cloned where the filesystem supports
+  it (reflink, APFS `clonefile`) and byte-copied otherwise, up to 1 GiB of
+  copies. Past that cap the rest is shared with the project through git
+  alternates and the snapshot records a warning: if the session deletes or
+  rewrites those objects, undo cannot bring back the history they hold. Hard
+  links are never used, because a hard link shares the file the agent can
+  rewrite.
 - **Other folders.** A copy under `<data_dir>/snapshots/<name>/tree/`, using
   file clones where the filesystem supports them, capped at 1 GiB and 250,000
   entries. A larger folder is refused, because a partial snapshot would make
@@ -520,12 +542,37 @@ another name.
   directories, so the review sees changes git ignores.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
-preview mode. It restores the working tree, HEAD and the branch, branches and
-tags, the staging area and the git control files; removes nested
-repositories created during the session; copies back commits deleted during
-the session; and removes files the session hid with changed ignore rules
-(they stay recoverable from `refs/defenseclaw/post-hidden/<name>`). The
-folder as the session left it is kept as a shadow commit, and as
+preview mode. In a git project it:
+
+- restores the working tree, HEAD and the branch, the staging area and the
+  git control files the agent could write;
+- resets branches and tags to their pre-session values (unless `KeepRefs` is
+  set). First it saves every tip the session created or moved in the project,
+  under `refs/defenseclaw/post-refs/<name>/<ref>` (for example
+  `refs/defenseclaw/post-refs/<name>/refs/heads/main`), and its warnings list
+  the saved refs;
+- copies back pre-session commits whose objects were deleted during the
+  session;
+- removes the `.git` of each repository the session created inside the
+  folder;
+- keeps ignored files that existed before the session, even when the session
+  removed the rule that ignored them. Up to 128 MiB of them are kept; past
+  that cap the rest are removed like other new files (they remain in the
+  post-session commit) and undo warns;
+- removes files the session hid with changed ignore rules. They stay
+  recoverable from `refs/defenseclaw/post-hidden/<name>` in DefenseClaw's
+  shadow git directory, not in the project, so git run in the project does
+  not see that ref.
+
+Undo refuses to run when the project's git directory was replaced during the
+session (`ErrGitDirReplaced`), because the new one may carry a planted
+configuration. The error names the shadow git directory and the pre-session
+commit, which stay available for inspecting the folder by hand.
+
+In a folder without git, undo copies the snapshot back and removes the `.git`
+of every repository the session created, including a new top-level `.git`.
+
+The folder as the session left it is kept as a shadow commit, and as
 `refs/defenseclaw/post/<name>` in the project where possible, so an undo can
 itself be reverted.
 
@@ -541,9 +588,12 @@ never consulted.
 reports a diffstat and flags, most severe first, the changes that can run
 code on your machine:
 
-- **Critical:** a new nested git repository, a symbolic link that points
-  outside the project (host tools follow it to your files), and a new or
-  changed submodule URL in `.gitmodules`.
+- **Critical:** a new nested git repository, a `.git` directory created in a
+  folder that had no git, a replaced git directory (undo then refuses to run),
+  a changed git control file inside the git directory that the agent can
+  write (such as `info/attributes` or `objects/info/alternates`; undo restores
+  it), a symbolic link that points outside the project (host tools follow it
+  to your files), and a new or changed submodule URL in `.gitmodules`.
 - **High:** changed npm lifecycle scripts (`postinstall` and the like), new
   filter, diff or merge drivers in `.gitattributes`, files that run
   implicitly (`.envrc`, editor tasks and settings, IDE run configurations,
@@ -552,8 +602,11 @@ code on your machine:
   the pack's `workspace.review` globs.
 - **Medium:** other npm scripts and dependency changes, CI definitions,
   container builds, version-manager files, a secret-like file created or
-  changed, and a changed dependency directory (packages installed in the
-  sandbox run on the host when you use them).
+  changed, a changed dependency directory (packages installed in the
+  sandbox run on the host when you use them), changed ignore rules that newly
+  hide paths from the diff, and a git file that is read-only in the sandbox
+  (such as `.git/config`, `config.worktree` or the hooks) but changed anyway,
+  which means the change was made on the host.
 
 Host-executable files that git ignores are found by re-walking the folder.
 The ClawShield secret rules and CodeGuard also scan the changed files (files
@@ -608,9 +661,19 @@ on a copy, and changes come back only through a verified pull.
 4. **Apply.** `apply` merges the result into the working tree three ways (git
    2.38 or newer; older git, or a conflict, falls back to a `dc/<name>`
    branch for git projects plus a patch file), `branch` creates `dc/<name>`,
-   and `patch` writes a patch file. A refused pull, or a review with a high or
-   critical flag or a critical secret, stops `apply` and `branch` until the
-   operator overrides it.
+   and `patch` writes a patch file. `branch` needs a git project; a plain
+   folder cannot use it. Three gates apply:
+   - A pull that was refused outright has no result, and nothing can apply
+     it, not even as a patch.
+   - Blocking reasons (a rewritten history, a new or changed remote, a
+     submodule change) stop `apply` and `branch` until the operator forces
+     them (`Force`).
+   - A review with a high or critical flag or a critical secret stops `apply`
+     and `branch` until the operator accepts the sensitive changes
+     (`AcceptSensitive`), a separate confirmation.
+
+   `patch` only writes the patch file, so the last two gates do not apply to
+   it.
 
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
@@ -623,7 +686,7 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 ```text
 <data_dir>/snapshots/<name>/snapshot.json    snapshot record
 <data_dir>/snapshots/<name>/tree/            non-git snapshot copy
-<data_dir>/snapshots/git/<project-key>.git   shadow git directory
+<data_dir>/shadows/<project-key>.git         shadow git directory
 <data_dir>/sandboxes/<name>/workspace/       mask files and mount state
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
 <data_dir>/sandboxes/bindings.json           ingress bindings
@@ -631,7 +694,8 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 ```
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
-digits and `-`, at most 63 characters), and `git` is reserved.
+digits and `-`, at most 63 characters, starting and ending with a letter or
+digit), and `git` is reserved.
 
 ## Overlay images
 
@@ -753,9 +817,11 @@ plus `{{if .Sandbox}}` branches) differs from the host hooks:
 - Inherited variables the hooks do not read are dropped and `PATH` is pinned
   before any child process starts, because the workload shapes the hook
   environment. No Python interpreter is started.
-- Requests use `curl -q --noproxy '*'`: 2 seconds to connect, 9 seconds in
-  total, 1 second for `SessionEnd`. A transport failure or a 502, 503 or 504
-  is retried once, within 12 seconds, with the same idempotency key.
+- Requests use `curl -q --noproxy '*'` with 2 seconds to connect and 9
+  seconds in total. A transport failure or a 502, 503 or 504 is retried once
+  with the same idempotency key, and the retry gets its own 12-second limit,
+  so one hook can wait about 21 seconds. Codex's `SessionEnd` gets 1 second
+  per attempt, because Codex caps that hook at three seconds.
 
 ## Policy packs and admin constraints
 
@@ -779,8 +845,9 @@ All three mask the same secret files and review the same host-executable
 paths.
 
 Custom packs are `<pack_dir>/<name>/pack.yaml` (default
-`<policy_dir>/sandbox`) or an absolute path, loaded with the same strict rules
-as guardrail rule packs. A pack's digest is `sha256:` over the file's bytes.
+`<data_dir>/policies/sandbox`) or an absolute path, loaded with the same strict
+rules as guardrail rule packs. A pack's digest is `sha256:` over the file's
+bytes.
 
 `packs.Resolve` layers the pack, then the user's `openshell` keys, then the
 run inputs (`packs.Flags`, which the future run command will fill), and clamps
@@ -792,14 +859,21 @@ the result by `openshell.admin`. Along the way:
   `balanced` pack's curated allowlist.
 - Allow entries that cover every host or a whole top-level domain are
   ignored.
-- Every refused loosening is returned as a `Violation` with the message
-  `blocked by your organization's DefenseClaw policy: <key>`, and every
-  setting records where its value came from (`Effective.Explain`).
+- Every refused loosening is returned as a `Violation` that names the key,
+  the attempted value and the refusing constraint, and every setting records
+  where its value came from (`Effective.Explain`). Refusals by
+  `openshell.admin` (a required pack's floor included) say
+  `blocked by your organization's DefenseClaw policy: <key>`. A pack or
+  profile that refuses a runtime action says
+  `not allowed by the <pack> sandbox pack: <key>` or
+  `not allowed by the <profile> sandbox profile: <key>`. Ignored broad allow
+  entries, reserved host ports and never-approved addresses have messages of
+  their own.
 
 `openshell.admin` holds the administrator's constraints: `required_pack` (its
 posture becomes a floor) and `required_pack_digest`, `min_profile`,
 `allow_yolo`, `allow_mount`, `allow_host_ports`, `allow_unblock`,
-`allow_learn_mode`, `allowed_harnesses`, `egress_block` (never unblockable),
+`allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked),
 `egress_allow_only` (forces an allowlist profile), `require_copy_for`,
 `max_resources`, and `locked` (keys run inputs may not loosen). In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the
@@ -809,8 +883,12 @@ the user can edit the file.
 
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
-harness. Approvals must pass the proxy's feed matcher, or they fail closed
-when `allow_unblock` is false.
+harness. The administrator's block list and allow-only list apply to every
+unblock and approval, and link-local, cloud metadata, multicast and reserved
+addresses are never approved. Only with `allow_unblock: false` is an
+approval also checked against the block list, the blocklist feed and private
+networks; the caller must then pass the proxy's feed matcher, and without one
+the approval fails closed.
 
 No policy, input or approval ever opens these host ports to a sandbox:
 DefenseClaw's API, sandbox ingress, egress proxy, guardrail proxy and model
@@ -891,6 +969,17 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
 
+### Not measured
+
+These were not measured, so the design does not rely on a result for them:
+
+- static binaries and programs that make raw system calls (the kernel
+  limits are expected to hold for them, but no separate run checked);
+- data leaving through DNS lookups;
+- children started with an emptied environment (`env -i`);
+- deleting files in the sandbox HOME (`/sandbox`, which is local to the
+  sandbox).
+
 ### CLI and streams
 
 | Behaviour | Design consequence |
@@ -908,9 +997,12 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
   0.0.37 must be cleaned up with the old CLI first; later ones upgrade in
   place.
 - A local gateway only, registered with mTLS. Remote gateways and plaintext,
-  unauthenticated, OIDC or Cloudflare registrations are refused, and so are
-  mTLS files that other users can read or write and a registration that
-  another user could change.
+  unauthenticated, OIDC or Cloudflare registrations are refused. So are a
+  private key other users can access, world-writable or foreign-owned mTLS
+  files and registration entries, and registration entries below the
+  OpenShell config directory that are symbolic links. The CA and client
+  certificate may be readable by others, and group-writable files and entries
+  only produce a warning.
 - Linux amd64 and arm64. macOS arm64 on Docker Desktop is a preview. Windows,
   WSL2 and Intel macOS are unsupported.
 - The daemon and the gateway run as the same non-root user.
@@ -951,6 +1043,11 @@ go test ./internal/openshell/... ./internal/sandboxauth/...
 go test -run Sandbox ./internal/gateway/ ./internal/gateway/connector/ \
   ./internal/audit/
 ```
+
+On macOS, `TestSandboxHooksScrubInheritedEnvironment` in
+`internal/gateway/connector` currently fails: the hook request loses the
+allowlisted trace context. Run the connector sandbox hook tests on Linux
+until that is fixed.
 
 Policy, provider-profile, sandbox-artifact and hook golden files are
 regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
