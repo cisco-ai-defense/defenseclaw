@@ -3536,7 +3536,7 @@
     {
       "name": "DEFENSECLAW_SANDBOX_ID",
       "category": "hook_internal",
-      "purpose": "OpenShell sandbox id DefenseClaw sets inside every sandbox it launches. Sandbox hooks stamp it on hook requests, and a nested `defenseclaw sandbox run` (or the shell wrapper) seeing it knows it already runs sandboxed and runs the harness natively.",
+      "purpose": "OpenShell sandbox id that the planned sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It is meant to tell a nested DefenseClaw launch that it already runs sandboxed; the planned sandbox command and shell wrapper do not exist yet. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "opaque OpenShell sandbox id",
@@ -3559,7 +3559,7 @@
     {
       "name": "DEFENSECLAW_SANDBOX_NAME",
       "category": "hook_internal",
-      "purpose": "Human-readable DefenseClaw sandbox name (`dc-<harness>-<repo>-<rand>`) set inside every sandbox; hooks and telemetry use it for display and correlation.",
+      "purpose": "Human-readable DefenseClaw sandbox name that the planned sandbox manager sets inside every sandbox it launches, through the harness spec's environment. Sandbox hooks drop it, and the gateway takes the sandbox name from the ingress binding instead.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "sandbox name",
