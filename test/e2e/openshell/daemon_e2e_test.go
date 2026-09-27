@@ -809,7 +809,9 @@ func (e *env) shellEnvironment(sb *sandboxapi.Sandbox) {
 		login      bool
 		argv       []string
 	}{
-		{"login shell", "function", true, []string{"sh", "-c", probe("bash -c 'type -t claude'")}},
+		// Probed in bash: dash drops exported functions (BASH_FUNC_*) from
+		// the environment it passes on.
+		{"login shell", "function", true, []string{"bash", "-c", probe("type -t claude")}},
 		{"sandbox-env", harness.ClaudeCode.ShimPath(), false, []string{harness.SandboxEnvPath, "sh", "-c", probe("command -v claude")}},
 	} {
 		res, err := e.gw.Exec(e.ctx(2*time.Minute), sb.Name, tc.argv, openshell.ExecOptions{

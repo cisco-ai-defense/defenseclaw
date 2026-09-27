@@ -184,7 +184,10 @@ gets the launcher's protections too. The community base image's
 `~/.bashrc` resets `PATH` after the profile ran, so for bash the profile also
 defines and exports a function of the harness command's name that runs the
 shim; it survives the reset and reaches child bash shells (the launchers run
-under `bash -p`, which imports no functions). What none of them covers: a program
+under `bash -p`, which imports no functions; dash drops exported functions,
+so a `sh` started in between loses it). OpenShell runs a login-shell exec
+as `bash -lc` and a `--no-login-shell` one as `bash -c`. What none of them
+covers: a program
 started by its absolute path (`/usr/local/bin/<command>`), a child started
 with an emptied environment (`env -i`), `openshell sandbox exec
 --no-login-shell` used directly, and a harness run nested inside a tool
@@ -1637,7 +1640,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted but covers only hosts with three or more labels. | The egress rule allows every binary; there is no catch-all host rule. |
 | curl, Node `fetch` (with `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS and Python urllib all honour `HTTPS_PROXY` through the relay. | The proxy environment covers the common tools. |
 | `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | DefenseClaw also passes the proxy URL and bypass list as `DEFENSECLAW_EGRESS_URL` and `DEFENSECLAW_EGRESS_BYPASS`, which do arrive, and one shell fragment exports the standard variables from them in every launcher, the login-shell profile and the `sandbox exec` wrapper (see [paths out of the workload](#paths-out-of-the-workload)). |
-| `openshell sandbox exec` sources the login and profile files by default; `--no-login-shell` skips them. `sandbox connect` opens a login shell. | DefenseClaw's own execs pass `--no-login-shell`; the proxy for interactive shells comes from `/etc/profile.d`, and `defenseclaw-gateway sandbox exec` wraps its command instead. |
+| `openshell sandbox exec` runs the command through `bash -lc` by default, sourcing `/etc/profile`, `/etc/profile.d` and the user's `~/.profile` (which in the community base sources a `~/.bashrc` that resets `PATH`); `--no-login-shell` runs it through `bash -c`. | DefenseClaw's own execs pass `--no-login-shell`; the proxy for interactive shells comes from `/etc/profile.d`, and `defenseclaw-gateway sandbox exec` wraps its command instead. |
 | A direct connection to an unknown host is refused (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`) and a draft proposal is filed. The metadata address is denied. | Non-proxy-aware clients surface as proposals for triage. |
 
 ### Credentials

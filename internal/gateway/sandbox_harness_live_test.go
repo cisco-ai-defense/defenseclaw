@@ -65,6 +65,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -772,8 +773,10 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 		name, want string
 		args       []string
 	}{
-		{"login shell", "function", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--", "/bin/sh", "-c",
-			shellProbe("/bin/bash -c 'type -t " + h.Command + "'")}},
+		// Probed in bash: dash drops exported functions (BASH_FUNC_*) from
+		// the environment it passes on.
+		{"login shell", "function", []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--", "/bin/bash", "-c",
+			shellProbe("type -t " + h.Command)}},
 		{"sandbox-env", h.ShimPath(), []string{"sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--", harness.SandboxEnvPath, "/bin/sh", "-c",
 			shellProbe("command -v " + h.Command)}},
 	} {
@@ -803,6 +806,25 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	if out, _ := liveOpenShell(t, time.Minute, nil, "sandbox", "exec", "-n", sandboxName, "--no-tty", "--no-login-shell", "--",
 		"/bin/sh", "-c", `printf '%s' "${HTTPS_PROXY:+proxy}"`); strings.TrimSpace(out) != "" {
 		t.Errorf("a bare --no-login-shell command has proxy settings")
+	}
+	// The `sandbox connect` shell: attach to the sandbox's interactive shell
+	// under script(1), print what it has, and detach with Ctrl-P Ctrl-Q.
+	if scriptBin, err := exec.LookPath("script"); err == nil && runtime.GOOS == "linux" {
+		cctx, ccancel := context.WithTimeout(ctx, 90*time.Second)
+		connect := exec.CommandContext(cctx, scriptBin, "-qec", "openshell sandbox connect "+sandboxName, "/dev/null")
+		connect.Stdin = strings.NewReader("printf 'DCCONNECT=%s:%s:%s\\n' \"${HTTPS_PROXY:+proxy}\" \"$(type -t " + h.Command +
+			")\" \"$(command -v " + h.Command + ")\"\n\x10\x11")
+		out, err := connect.CombinedOutput()
+		ccancel()
+		m := regexp.MustCompile(`DCCONNECT=([a-z]*):([a-z]*):(\S*)`).FindStringSubmatch(string(out))
+		if m == nil {
+			t.Errorf("sandbox connect printed no probe line (%v):\n%s", err, liveTail(string(out), 600))
+		} else {
+			t.Logf("sandbox connect shell: proxy %q, %s is a %q (%s)", m[1], h.Command, m[2], m[3])
+			if m[1] != "proxy" {
+				t.Errorf("the sandbox connect shell has no proxy settings")
+			}
+		}
 	}
 
 	// Destinations OpenShell refused (the harness's own traffic that did not
