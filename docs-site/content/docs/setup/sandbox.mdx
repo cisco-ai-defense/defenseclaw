@@ -559,6 +559,17 @@ moved, and it keeps the folder as the session left it in a commit, so an
 undo can be undone too. It removes nested repositories the session created.
 A folder without git is restored from a copy taken before the session.
 
+The snapshot keeps no copy of the files git ignores, such as
+`node_modules/`, `.venv/`, `__pycache__/` and build output (in a folder
+without git, the dependency directories), so undo cannot restore them. Many
+of them run on your machine: your shell sources `.venv/bin/activate`, npm
+runs `node_modules/.bin`, and Python loads cached bytecode instead of the
+source. DefenseClaw records those files by their metadata when the session
+starts, so the review flags the ones the session added or changed, and undo
+names each directory it cannot restore with what to do about it: delete
+`node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
+session wrote to Python bytecode caches, which Python rebuilds.
+
 | Flag | Effect |
 | --- | --- |
 | `--preview` | Only show what undo would change. |
@@ -605,6 +616,15 @@ defenseclaw sandbox pull dc-codex-myapp-1c2d --patch-out fix.patch
 
 Without a mode, `pull` shows the review and the changes only. A folder
 without git has no branches, so use `--apply` or `--patch-out` there.
+The patch file of a conflicting `--apply` is `<name>.patch` in your folder,
+so deleting the sandbox does not take it along. A pull from a stopped
+sandbox starts it to read its work and stops it again.
+
+A copy-mode sandbox changes your folder only through `pull --apply`, so for
+such a sandbox `undo` reverts its last apply, after a preview. Edits you
+made since the apply stay; when they overlap the apply, undo changes nothing
+and names the files. The folder as it was before each apply stays reachable
+at `refs/defenseclaw/copy/<name>/pre-apply` and in its reflog.
 `defenseclaw sandbox connect <name> --refresh` copies the folder into a kept
 copy-mode sandbox again.
 
