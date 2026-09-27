@@ -68,8 +68,12 @@ defenseclaw_harden_env
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
-{{if .Sandbox}}# OpenShell sandbox images bake the fail mode; no environment override.
-FAIL_MODE="{{.FailMode}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status (a garbage DEFENSECLAW_SANDBOX_TOKEN earns a 401, a request flood a
+# 429, an unversioned placeholder a relay 500), so no failed, refused or
+# unparseable reply may ever turn into an allow.
+FAIL_MODE="closed"
 readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Bail early on missing token: see codex-hook.sh +

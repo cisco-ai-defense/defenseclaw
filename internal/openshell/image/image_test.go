@@ -115,7 +115,6 @@ func TestContentHashCoversEveryInput(t *testing.T) {
 		"uid":        func(s *BuildSpec) { s.UID = 1001 },
 		"gid":        func(s *BuildSpec) { s.GID = 1001 },
 		"ingress":    func(s *BuildSpec) { s.IngressPort = 18981 },
-		"fail-mode":  func(s *BuildSpec) { s.FailMode = "open" },
 		"dc-version": func(s *BuildSpec) { s.DefenseClawVersion = "1.2.4" },
 		"base":       func(s *BuildSpec) { s.BaseImage = "ghcr.io/example/base@sha256:" + strings.Repeat("a", 64) },
 		"harness":    func(s *BuildSpec) { s.HarnessVersion = "2.1.160" },
@@ -156,6 +155,8 @@ func TestNewContextRefusesUnsafeSpecs(t *testing.T) {
 		"bad-dc-version":     {func(s *BuildSpec) { s.DefenseClawVersion = "1.0 beta" }, nil},
 		"missing-dc-version": {func(s *BuildSpec) { s.DefenseClawVersion = "" }, nil},
 		"bad-ingress":        {func(s *BuildSpec) { s.IngressPort = 0 }, nil},
+		"fail-open":          {func(s *BuildSpec) { s.FailMode = "open" }, nil},
+		"unknown-fail-mode":  {func(s *BuildSpec) { s.FailMode = "observe" }, nil},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -127,7 +127,8 @@ defenseclaw_sandbox_idempotency_key() {
 # defenseclaw_sandbox_post PATH BODY MAX_TIME RETRY_MAX_TIME [CURL_ARGS...]
 #
 # POSTs BODY to the baked ingress and prints "<response body>\n<http code>",
-# the same shape the host hooks read from curl -w. A transport failure (no
+# the same shape the host hooks read from curl -w; output without a
+# three-digit status fails without a retry. A transport failure (no
 # connection, empty reply, timeout) or a relay 502/503/504 is retried exactly
 # once with the same X-DefenseClaw-Hook-Idempotency-Key: the OpenShell relay
 # occasionally drops a request, possibly after the ingress acted on it, and the
@@ -157,6 +158,10 @@ defenseclaw_sandbox_post() {
       --data-binary @- 2>/dev/null)" || status=$?
     if [ "$status" -eq 0 ]; then
       code="${out##*$'\n'}"
+      case "$code" in
+        [0-9][0-9][0-9]) ;;
+        *) return 1 ;;
+      esac
       case "$code" in
         502|503|504) status=1 ;;
       esac

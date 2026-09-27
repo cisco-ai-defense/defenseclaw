@@ -42,6 +42,8 @@ const (
 	SandboxHookPATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 	// SandboxHomeDir is the workload HOME in the OpenShell community base.
 	SandboxHomeDir = "/sandbox"
+	// SandboxFailMode is the only fail mode a sandbox hook set renders with.
+	SandboxFailMode = "closed"
 	// SandboxTokenEnv carries the per-sandbox binding token. OpenShell
 	// delivers it as a revision-scoped provider placeholder and substitutes
 	// the real value only on the ingress endpoint, so it can never be baked
@@ -119,9 +121,11 @@ type SandboxRenderTarget struct {
 	// IngressPort is the host-loopback hook ingress port the sandbox reaches
 	// as host.openshell.internal:<IngressPort>. Required.
 	IngressPort int
-	// FailMode is baked into the hooks ("closed" unless exactly "open").
-	// Transport failures are always fail-closed in the sandbox because the
-	// hooks run in managed mode.
+	// FailMode must be empty or "closed": sandbox hooks always fail closed.
+	// Every request crosses the OpenShell relay and carries a token from the
+	// workload's environment, so the workload can make the ingress answer
+	// any status, and a fail-open image would let it turn a deny into an
+	// allow. "open" (and any other value) is refused.
 	FailMode string
 	// AgentVersion is the exact harness version installed in the image. It
 	// must resolve to a Known Linux hook contract.
@@ -226,9 +230,15 @@ func resolveSandboxTarget(connectorName string, target SandboxRenderTarget) (res
 			connectorName, version, resolution.Contract.ContractID, pinned,
 		)
 	}
+	if mode := strings.TrimSpace(target.FailMode); mode != "" && mode != SandboxFailMode {
+		return resolvedSandboxTarget{}, fmt.Errorf(
+			"%s sandbox hooks always fail closed: fail mode %q is refused (the workload can make the ingress answer any status)",
+			connectorName, target.FailMode,
+		)
+	}
 	return resolvedSandboxTarget{
 		ingressAddr: ingress,
-		failMode:    normalizeHookFailMode(target.FailMode),
+		failMode:    SandboxFailMode,
 		contract:    resolution.Contract,
 		opts: SetupOpts{
 			// DataDir anchors the existing hook-matrix verifiers: they expect
@@ -237,7 +247,7 @@ func resolveSandboxTarget(connectorName string, target SandboxRenderTarget) (res
 			APIAddr:           ingress,
 			AgentVersion:      version,
 			HookContractID:    resolution.Contract.ContractID,
-			HookFailMode:      normalizeHookFailMode(target.FailMode),
+			HookFailMode:      SandboxFailMode,
 			ManagedEnterprise: true,
 		},
 	}, nil

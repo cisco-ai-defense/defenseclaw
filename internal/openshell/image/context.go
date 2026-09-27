@@ -83,7 +83,8 @@ type BuildSpec struct {
 	GID int
 	// IngressPort is baked into the hooks.
 	IngressPort int
-	// FailMode is baked into the hooks ("closed" unless exactly "open").
+	// FailMode must be empty or "closed": sandbox hooks always fail closed,
+	// and any other value is refused (see connector.SandboxRenderTarget).
 	FailMode string
 	// DefenseClawVersion is part of the content hash.
 	DefenseClawVersion string
@@ -165,8 +166,11 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	if !versionRE.MatchString(spec.DefenseClawVersion) {
 		return nil, fmt.Errorf("openshell image: DefenseClaw version %q is invalid", spec.DefenseClawVersion)
 	}
-	if spec.FailMode != "open" {
-		spec.FailMode = "closed"
+	switch strings.TrimSpace(spec.FailMode) {
+	case "", connector.SandboxFailMode:
+		spec.FailMode = connector.SandboxFailMode
+	default:
+		return nil, fmt.Errorf("openshell image: sandbox hooks always fail closed; fail mode %q is refused", spec.FailMode)
 	}
 	version := strings.TrimSpace(spec.HarnessVersion)
 	if version == "" {

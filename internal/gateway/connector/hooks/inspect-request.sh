@@ -57,9 +57,12 @@ DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-request"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if .Sandbox}}# OpenShell sandbox images run exactly one harness: the connector identity
-# and fail mode are baked at image build, never read from the environment.
+# is baked at image build, never read from the environment. Sandbox hooks
+# always fail closed: the workload can make the ingress, or the relay in
+# front of it, answer any status (401, 429, a relay 500), so no failed,
+# refused or unparseable reply may ever turn into an allow.
 RUNTIME_CONNECTOR="{{.ConnectorName}}"
-FAIL_MODE="{{.FailMode}}"
+FAIL_MODE="closed"
 readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
 FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}
 
@@ -165,10 +168,16 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
+# action-less reply from the sandbox ingress is not a verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-if [ "$ACTION" = "block" ]; then
+[ -n "$ACTION" ] || fail_response "missing action in ingress response"
+{{else}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+{{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2
   exit 2

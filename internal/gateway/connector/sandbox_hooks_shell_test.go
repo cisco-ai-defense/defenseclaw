@@ -98,10 +98,16 @@ func newSandboxHookHarness(t *testing.T, provider SandboxArtifactProvider, versi
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newSandboxHookHarnessFiles(t, artifacts.Files)
+}
+
+// newSandboxHookHarnessFiles materializes an explicit sandbox file set.
+func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile) *sandboxHookHarness {
+	t.Helper()
 	h := &sandboxHookHarness{root: t.TempDir(), stubDir: t.TempDir()}
 	stubPath := h.stubDir + ":/usr/bin:/bin:/usr/sbin:/sbin"
 	h.bakedPATH = stubPath
-	for _, file := range artifacts.Files {
+	for _, file := range files {
 		data := file.Data
 		switch filepath.Base(file.Path) {
 		case "_hardening.sh":
@@ -302,6 +308,101 @@ func TestSandboxClaudeHookFailsClosedWithoutEnvOverrides(t *testing.T) {
 			t.Fatalf("authorization = %q, want the sandbox token only", got)
 		}
 	})
+}
+
+// TestSandboxHooksFailClosedOnEveryBadReply pins that no reply the workload
+// can provoke turns into an allow: a garbage DEFENSECLAW_SANDBOX_TOKEN earns a
+// 401, a request flood a 429, an unversioned placeholder a relay 500, and a
+// relay can garble the body. The hook templates are rendered with an "open"
+// fail mode forced into the template data (resolveSandboxTarget refuses it),
+// so the test also proves the sandbox branches never consult it.
+func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required")
+	}
+	replies := map[string][]string{
+		"unauthorized":   {`401|{"error":"bad token"}`},
+		"forbidden":      {`403|{"error":"route not allowed"}`},
+		"not-found":      {`404|{"error":"no route"}`},
+		"too-large":      {`413|{"error":"payload too large"}`},
+		"rate-limited":   {`429|{"error":"slow down"}`},
+		"relay-500":      {`500|placeholder did not resolve`},
+		"relay-502":      {`502|{}`, `502|{}`},
+		"no-status":      {`|`},
+		"garbled-status": {`2x0|{"action":"allow"}`},
+		"not-json":       {`200|<html>proxy</html>`},
+		"empty-2xx":      {`204|`},
+		"no-action":      {`200|{"ok":true}`},
+	}
+	// Inspect verdicts other than block (allow, alert) allow; the lifecycle
+	// hooks accept only allow, block and confirm.
+	lifecycle := map[string]string{"unknown-action": `200|{"action":"maybe"}`}
+	for _, tc := range []struct {
+		connector string
+		version   string
+		script    string
+		args      []string
+		stdin     string
+		lifecycle bool
+	}{
+		{"claudecode", "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, true},
+		{"codex", "0.146.0", "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, true},
+		{"claudecode", "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, false},
+		{"claudecode", "2.1.156", "inspect-tool-response.sh", nil, `{"output":"ok"}`, false},
+		{"codex", "0.146.0", "inspect-request.sh", nil, `{"content":"hi"}`, false},
+		{"codex", "0.146.0", "inspect-response.sh", nil, `{"content":"hi"}`, false},
+	} {
+		rt, err := resolveSandboxTarget(tc.connector, SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt.failMode = "open"
+		files, err := renderSandboxHookFiles(tc.connector, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := newSandboxHookHarnessFiles(t, files)
+		cases := map[string][]string{}
+		for name, r := range replies {
+			cases[name] = r
+		}
+		if tc.lifecycle {
+			for name, r := range lifecycle {
+				cases[name] = []string{r}
+			}
+		}
+		env := map[string]string{SandboxTokenEnv: "garbage", "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_FAIL_MODE": "open"}
+		for name, responses := range cases {
+			t.Run(tc.script+"/"+name, func(t *testing.T) {
+				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, responses)
+				if run.exitCode != 2 {
+					t.Fatalf("exit %d, want 2 (blocked); stdout=%q stderr=%s", run.exitCode, run.stdout, run.stderr)
+				}
+				if len(run.calls) == 0 {
+					t.Fatal("the hook never asked the ingress")
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxArtifactsRefuseOpenFailMode(t *testing.T) {
+	for _, tc := range sandboxGoldenTargets {
+		for _, mode := range []string{"open", " open ", "OPEN", "fail-open", "observe"} {
+			_, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version, FailMode: mode})
+			if err == nil || !strings.Contains(err.Error(), "always fail closed") {
+				t.Fatalf("%s fail mode %q: err = %v, want a refusal", tc.connector, mode, err)
+			}
+		}
+		for _, mode := range []string{"", "closed", " closed "} {
+			if _, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version, FailMode: mode}); err != nil {
+				t.Fatalf("%s fail mode %q: %v", tc.connector, mode, err)
+			}
+		}
+	}
 }
 
 func TestSandboxClaudeHookRendersBlockVerdict(t *testing.T) {
