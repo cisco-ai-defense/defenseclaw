@@ -1374,8 +1374,11 @@ These were measured on the pinned releases inside the community base image
   shadowing project agent. `--v3` and `--agent-engine` select a different
   engine that was not measured, and `--cloud` runs the session in a remote
   sandbox; the launcher pins `--v2` and refuses those switches.
-  `telemetry.enabled false` and `app.disableAutoupdates true` are valid
-  settings and are in the image. `KIRO_MOCK_CHAT_RESPONSE` (a file of
+  The image settings select the DefenseClaw agent by default and set
+  `telemetry.enabled false`, `app.disableAutoupdates true`,
+  `chat.greeting.enabled false` and `chat.disableTrustAllConfirmation true`
+  (an interactive `--trust-all-tools` start then asks nothing); all are valid
+  2.24.1 settings and the hooks fire with them. `KIRO_MOCK_CHAT_RESPONSE` (a file of
   scripted turns) with any `KIRO_API_KEY` value runs a turn with no network
   or account; the hook-fire probe and the live run use it. The user tier
   leaves open: an edit to the agent file during a session, `/agent` in an
