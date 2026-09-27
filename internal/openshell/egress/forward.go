@@ -142,7 +142,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		p.refuseForward(w, pr, r.Method, dec, start)
 		return
 	}
-	release, refusal := p.admit(pr, dec)
+	release, refusal := p.admit(r, pr, dec)
 	if refusal != nil {
 		p.refuseForward(w, pr, r.Method, *refusal, start)
 		return
@@ -214,9 +214,13 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	p.forwarder.ServeHTTP(cw, out)
 }
 
+// refuseForward answers a refused request and ends its client connection,
+// so the connection cannot sit idle holding a slot (and a refusal costs the
+// client a new connection).
 func (p *Proxy) refuseForward(w http.ResponseWriter, pr Principal, method string, dec Decision, start time.Time) {
 	status := statusFor(dec)
 	p.recordRefusal(pr, method, dec, status, start, "")
+	w.Header().Set("Connection", "close")
 	writeJSON(w, status, p.blockResponse(pr, dec))
 }
 

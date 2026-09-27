@@ -17,6 +17,7 @@
 package egress
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -370,8 +371,10 @@ func TestProxyBlockedAbsoluteForm(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status %d", resp.StatusCode)
+	// A refusal also ends the connection, so it cannot sit idle holding a
+	// connection slot.
+	if resp.StatusCode != http.StatusForbidden || !resp.Close {
+		t.Fatalf("status %d close=%v", resp.StatusCode, resp.Close)
 	}
 	if b := decodeBlock(t, body); b.Category != CategoryPasteSite || b.Port != 80 || !b.Unblockable {
 		t.Errorf("block body = %+v", b)
@@ -1229,5 +1232,151 @@ func TestProxyForwardSlowUpstreamIsNotIdle(t *testing.T) {
 	}
 	if closed := h.sink.wait(t, EventClosed, 1)[0]; closed.Terminated {
 		t.Errorf("closed event = %+v", closed)
+	}
+}
+
+// keepAliveGet sends an absolute-form GET on a new client connection and
+// reads the response, leaving the connection open for more requests.
+func (h *harness) keepAliveGet(cred Credential) (net.Conn, *bufio.Reader) {
+	h.t.Helper()
+	conn, br := h.dialProxy()
+	fmt.Fprintf(conn, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(cred))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		h.t.Fatalf("keep-alive GET: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Close {
+		h.t.Fatalf("keep-alive GET = %d close=%v", resp.StatusCode, resp.Close)
+	}
+	return conn, br
+}
+
+// waitIdle waits until binding has n idle keep-alive connections.
+func (h *harness) waitIdle(binding string, n int) {
+	h.t.Helper()
+	eventually(h.t, fmt.Sprintf("%d idle connections of %s", n, binding), func() bool {
+		tr := h.proxy.conns
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		idle := 0
+		for c := range tr.byBinding[binding] {
+			if !c.idleSince.IsZero() {
+				idle++
+			}
+		}
+		return idle == n
+	})
+}
+
+// closedByProxy reports whether the proxy closed a client connection within
+// wait.
+func closedByProxy(conn net.Conn, br *bufio.Reader, wait time.Duration) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(wait))
+	_, err := br.ReadByte()
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// When every connection slot is taken, the connection idle longest is
+// closed to admit a new one, so one sandbox's idle keep-alive connections
+// cannot keep another sandbox out.
+func TestProxyReclaimsIdleConnectionsWhenFull(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxConns = 2 })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+
+	c1, b1 := h.keepAliveGet(h.cred)
+	h.waitIdle("binding-one", 1)
+	c2, b2 := h.keepAliveGet(h.cred)
+	h.waitIdle("binding-one", 2)
+	other := h.addPrincipal(Principal{BindingID: "binding-two"})
+	h.keepAliveGet(other)
+	if !closedByProxy(c1, b1, 5*time.Second) {
+		t.Error("the longest-idle connection was not closed to make room")
+	}
+	if closedByProxy(c2, b2, 100*time.Millisecond) {
+		t.Error("more connections were closed than needed")
+	}
+}
+
+// One binding's connections are capped: over MaxConnsPerBinding its
+// longest-idle keep-alive connections are closed, and with none idle a new
+// request is refused, so a sandbox cannot hoard the proxy's connection
+// slots. Other bindings are unaffected.
+func TestProxyPerBindingConnectionCap(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxConnsPerBinding = 2 })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.dialer.route(443, startEcho(t))
+
+	// The server marks a connection idle only after writing its response,
+	// so wait for that before the next one to keep the idle order fixed.
+	c1, b1 := h.keepAliveGet(h.cred)
+	h.waitIdle("binding-one", 1)
+	c2, b2 := h.keepAliveGet(h.cred)
+	h.waitIdle("binding-one", 2)
+	h.keepAliveGet(h.cred) // over the cap: c1, idle longest, is closed
+	if !closedByProxy(c1, b1, 5*time.Second) {
+		t.Fatal("the longest-idle connection was left open over the cap")
+	}
+	if closedByProxy(c2, b2, 100*time.Millisecond) {
+		t.Fatal("a connection within the cap was closed")
+	}
+	h.waitIdle("binding-one", 2)
+
+	// Open tunnels count too and are never closed for the cap: two of them
+	// displace both idle connections, and a third finds nothing idle.
+	for i := 0; i < 2; i++ {
+		if _, _, resp := h.connect("example.com:443", basicAuth(h.cred), nil); resp.status != http.StatusOK {
+			t.Fatalf("tunnel %d = %d %s", i, resp.status, resp.body)
+		}
+	}
+	if !closedByProxy(c2, b2, 5*time.Second) {
+		t.Error("an idle connection survived tunnels taking its place")
+	}
+	_, _, resp := h.connect("example.com:443", basicAuth(h.cred), nil)
+	if b := decodeBlock(t, resp.body); resp.status != http.StatusTooManyRequests || b.Category != CategoryRateLimited ||
+		!strings.Contains(b.Reason, "2 connections") {
+		t.Errorf("tunnel over the cap = %d %+v", resp.status, b)
+	}
+
+	other := h.addPrincipal(Principal{BindingID: "binding-two"})
+	h.keepAliveGet(other)
+}
+
+// A connection no request was admitted on is closed as soon as it goes
+// idle, and claims move a connection between bindings.
+func TestConnTracker(t *testing.T) {
+	tr := newConnTracker(1)
+	newConn := func() *limitConn {
+		a, b := net.Pipe()
+		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+		return &limitConn{Conn: a, tracker: tr, release: func() {}}
+	}
+	anon := newConn()
+	if !tr.setIdle(anon, true) {
+		t.Error("an unattributed idle connection is kept")
+	}
+	c := newConn()
+	if n, ok := tr.claim(c, "b-1"); !ok || n != 1 || tr.setIdle(c, true) {
+		t.Fatalf("claim = %d, %v", n, ok)
+	}
+	if n, ok := tr.claim(c, "b-2"); !ok || n != 1 || len(tr.byBinding["b-1"]) != 0 || !c.idleSince.IsZero() {
+		t.Errorf("moving a connection: %d, %v, %v", n, ok, tr.byBinding)
+	}
+	busy := newConn()
+	if _, ok := tr.claim(busy, "b-2"); ok {
+		t.Error("claim over the cap succeeded with nothing idle")
+	}
+	if busy.binding != "" || len(tr.byBinding["b-2"]) != 1 {
+		t.Errorf("refused claim left state behind: %+v", tr.byBinding)
+	}
+	_ = c.Close()
+	if len(tr.byBinding) != 0 || len(tr.idle) != 0 || tr.reclaimIdle() {
+		t.Errorf("closed connection still tracked: %v %v", tr.byBinding, tr.idle)
 	}
 }

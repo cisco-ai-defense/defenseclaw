@@ -46,6 +46,7 @@ const (
 	DefaultResponseHeaderTimeout = 2 * time.Minute
 	DefaultMaxHeaderBytes        = 32 << 10
 	DefaultMaxConns              = 1024
+	DefaultMaxConnsPerBinding    = 256
 	DefaultMaxTunnelsPerBinding  = 256
 	DefaultTunnelsPerSecond      = 50
 	DefaultTunnelBurst           = 200
@@ -102,7 +103,17 @@ type Options struct {
 	// MaxHeaderBytes bounds request headers; larger requests get a 431.
 	MaxHeaderBytes int
 	// MaxConns bounds concurrent client connections across all listeners.
+	// With all of them taken, the connection idle longest between
+	// keep-alive requests is closed to admit a new one.
 	MaxConns int
+	// MaxConnsPerBinding bounds one binding's client connections, counted
+	// once a request on them is admitted: open tunnels plus idle keep-alive
+	// connections. Over it the binding's longest-idle connections are
+	// closed; a request that would exceed it with none idle gets a 429.
+	// Negative disables the limit. A connection no request was admitted on
+	// (unauthenticated or refused) is closed after its response, so before
+	// authenticating it holds a slot for at most HeaderTimeout.
+	MaxConnsPerBinding int
 	// MaxTunnelsPerBinding bounds concurrent tunnels and requests per
 	// binding; negative disables the limit.
 	MaxTunnelsPerBinding int
@@ -137,6 +148,7 @@ type Proxy struct {
 	forwarder *httputil.ReverseProxy
 	limits    *bindingLimits
 	sem       chan struct{}
+	conns     *connTracker
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -169,6 +181,9 @@ func New(opts Options) (*Proxy, error) {
 	}
 	if opts.MaxConns <= 0 {
 		opts.MaxConns = DefaultMaxConns
+	}
+	if opts.MaxConnsPerBinding == 0 {
+		opts.MaxConnsPerBinding = DefaultMaxConnsPerBinding
 	}
 	if opts.MaxTunnelsPerBinding == 0 {
 		opts.MaxTunnelsPerBinding = DefaultMaxTunnelsPerBinding
@@ -209,6 +224,7 @@ func New(opts Options) (*Proxy, error) {
 		helloTimeout: opts.HeaderTimeout,
 		limits:       newBindingLimits(opts.MaxTunnelsPerBinding, opts.TunnelsPerSecond, opts.TunnelBurst),
 		sem:          make(chan struct{}, opts.MaxConns),
+		conns:        newConnTracker(opts.MaxConnsPerBinding),
 		tunnels:      map[*tunnel]struct{}{},
 	}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
@@ -245,6 +261,8 @@ func New(opts Options) (*Proxy, error) {
 		ErrorLog:          opts.ErrorLog,
 		Protocols:         protocols,
 		BaseContext:       func(net.Listener) context.Context { return p.ctx },
+		ConnContext:       withConn,
+		ConnState:         p.connState,
 	}
 	return p, nil
 }
@@ -308,7 +326,7 @@ func (p *Proxy) Serve(ln net.Listener) error {
 	if closing {
 		return http.ErrServerClosed
 	}
-	return p.srv.Serve(&limitListener{Listener: ln, sem: p.sem, done: make(chan struct{})})
+	return p.srv.Serve(&limitListener{Listener: ln, sem: p.sem, conns: p.conns, done: make(chan struct{})})
 }
 
 // Shutdown stops accepting connections, closes idle ones, and waits for
@@ -523,10 +541,17 @@ func (p *Proxy) challenged(presented bool, method, target string, start time.Tim
 }
 
 // admit applies the per-binding limits and the large-upload block to an
-// allowed decision. It returns a release func, or a refusal.
-func (p *Proxy) admit(pr Principal, dec Decision) (func(), *Decision) {
+// allowed decision, and attributes r's client connection to the binding.
+// It returns a release func, or a refusal.
+func (p *Proxy) admit(r *http.Request, pr Principal, dec Decision) (func(), *Decision) {
 	release, why := p.limits.acquire(pr.BindingID)
 	if release == nil {
+		refused := blocked(dec, CategoryRateLimited, SourceLimit, "")
+		refused.Reason = why
+		return nil, &refused
+	}
+	if why, ok := p.claimConn(r, pr); !ok {
+		release()
 		refused := blocked(dec, CategoryRateLimited, SourceLimit, "")
 		refused.Reason = why
 		return nil, &refused
@@ -594,7 +619,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		p.refuseRaw(conn, pr, http.MethodConnect, dec, start)
 		return
 	}
-	release, refusal := p.admit(pr, dec)
+	release, refusal := p.admit(r, pr, dec)
 	if refusal != nil {
 		p.refuseRaw(conn, pr, http.MethodConnect, *refusal, start)
 		return
@@ -863,54 +888,3 @@ func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e.Duration = time.Since(t.started)
 	p.emit(e)
 }
-
-// ---- limits ----------------------------------------------------------------
-
-// limitListener bounds concurrent connections and drops non-loopback
-// peers, which can only appear if someone bypasses Listen.
-type limitListener struct {
-	net.Listener
-	sem  chan struct{}
-	done chan struct{}
-	once sync.Once
-}
-
-func (l *limitListener) Accept() (net.Conn, error) {
-	for {
-		select {
-		case l.sem <- struct{}{}:
-		case <-l.done:
-			return nil, net.ErrClosed
-		}
-		c, err := l.Listener.Accept()
-		if err != nil {
-			<-l.sem
-			return nil, err
-		}
-		if addr, ok := c.RemoteAddr().(*net.TCPAddr); ok && !addr.IP.IsLoopback() {
-			_ = c.Close()
-			<-l.sem
-			continue
-		}
-		return &limitConn{Conn: c, release: func() { <-l.sem }}, nil
-	}
-}
-
-func (l *limitListener) Close() error {
-	l.once.Do(func() { close(l.done) })
-	return l.Listener.Close()
-}
-
-type limitConn struct {
-	net.Conn
-	once    sync.Once
-	release func()
-}
-
-func (c *limitConn) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(c.release)
-	return err
-}
-
-func (c *limitConn) CloseWrite() error { return closeWrite(c.Conn) }
