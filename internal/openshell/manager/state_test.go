@@ -17,11 +17,18 @@
 package manager
 
 import (
+	"context"
+	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -81,6 +88,105 @@ func TestRecordSavesNeverGoBack(t *testing.T) {
 	}
 	if got.Cursor != "v1:new" {
 		t.Fatalf("record on disk has cursor %q, want the newest, v1:new", got.Cursor)
+	}
+}
+
+// TestRecordTooLargeToReadBackIsNotWritten pins that the daemon never
+// writes a record a restart would skip: the last one that fits stays.
+func TestRecordTooLargeToReadBackIsNotWritten(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "bigbox"})
+	e.m.mu.Lock()
+	b := e.m.boxes["bigbox"]
+	b.rec.Warnings = append(slices.Clip(b.rec.Warnings), strings.Repeat("w", recordMaxBytes))
+	e.m.mu.Unlock()
+	if err := e.m.saveRecord(b); err == nil {
+		t.Fatal("a record over the read limit was written")
+	}
+	got := loadRecord(t, e, "bigbox")
+	if got == nil || slices.ContainsFunc(got.Warnings, func(w string) bool { return len(w) == recordMaxBytes }) {
+		t.Fatal("the record on disk is not the last one that fits")
+	}
+}
+
+// TestSandboxWithoutRecordFailsClosed pins that a live sandbox the daemon
+// has no readable record of is not rebuilt under the default policy: its
+// egress credential stays unregistered and it cannot be started, and its
+// labels are never written as its record.
+func TestSandboxWithoutRecordFailsClosed(t *testing.T) {
+	e := newEnv(t, nil)
+	sb := e.create(sandboxapi.CreateRequest{Name: "lostbox", Profile: "balanced"})
+	live, _ := e.client.GetSandbox(context.Background(), sb.Name)
+	proxy, _ := url.Parse(live.Spec.Environment["HTTPS_PROXY"])
+	pass, _ := proxy.User.Password()
+	p, _ := e.m.records.path("lostbox")
+	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new daemon process over the same data dir and gateway.
+	e.m = e.newManager()
+	e.run()
+	eventually(t, "startup reconcile", func() bool {
+		st, _ := e.m.Status(context.Background())
+		return !st.LastReconcile.IsZero()
+	})
+	if pr, ok := e.m.creds.Authenticate(proxy.User.Username(), pass); ok {
+		t.Fatalf("the sandbox without a record got egress under the default policy: %+v", pr)
+	}
+	got, err := e.m.Get(context.Background(), "lostbox")
+	if err != nil || !slices.ContainsFunc(got.Warnings, func(w string) bool { return strings.Contains(w, "no readable record") }) {
+		t.Fatalf("sandbox = %+v, %v", got, err)
+	}
+	if _, err := e.m.Stop(context.Background(), "lostbox"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.m.Start(context.Background(), "lostbox", sandboxapi.StartRequest{})
+	wantCode(t, err, sandboxapi.CodeConflict)
+	if data, _ := os.ReadFile(p); string(data) != "{not json" {
+		t.Fatalf("the unreadable record was replaced by the labels: %q", data)
+	}
+	// Delete still releases it.
+	if _, err := e.m.Delete(context.Background(), "lostbox", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGuardBaselineIsBounded pins that a project listing a huge number of
+// gitlinks cannot push its sandbox's record past what a restart reads
+// back: the baseline is cut (and marked truncated), the project's own
+// repository kept.
+func TestGuardBaselineIsBounded(t *testing.T) {
+	e := newEnv(t, nil)
+	if err := os.MkdirAll(filepath.Join(e.project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	links := make([]string, 0, 200_000)
+	for i := range 200_000 {
+		links = append(links, fmt.Sprintf("third_party/%s/module-%06d", strings.Repeat("x", 40), i))
+	}
+	e.m.opts.GuardGitlinks = func(context.Context, string) ([]string, error) { return links, nil }
+	e.create(sandboxapi.CreateRequest{Name: "linkbox"})
+	got := loadRecord(t, e, "linkbox")
+	if got == nil || got.Guard == nil {
+		t.Fatalf("record = %v", got)
+	}
+	if !got.Guard.Baseline.Truncated || len(got.Guard.Baseline.Gitlinks) >= len(links) || !slices.Contains(got.Guard.Baseline.Repos, ".") {
+		t.Fatalf("baseline kept %d gitlinks, truncated %t, repos %v", len(got.Guard.Baseline.Gitlinks),
+			got.Guard.Baseline.Truncated, got.Guard.Baseline.Repos)
+	}
+}
+
+func TestBoundBaseline(t *testing.T) {
+	small := nestguard.Baseline{Repos: []string{"vendor/a", "."}, Gitlinks: []string{"sub"}}
+	if got := boundBaseline(small, 1<<10); !slices.Equal(got.Repos, small.Repos) || got.Truncated {
+		t.Fatalf("a baseline within the limit changed: %+v", got)
+	}
+	big := nestguard.Baseline{Repos: []string{"a/" + strings.Repeat("r", 100), ".", "b/" + strings.Repeat("r", 100)},
+		Gitlinks: []string{strings.Repeat("g", 100)}}
+	got := boundBaseline(big, 150)
+	if !got.Truncated || !slices.Equal(got.Repos, []string{".", big.Repos[0]}) || len(got.Gitlinks) != 0 {
+		t.Fatalf("bounded baseline = %+v", got)
 	}
 }
 

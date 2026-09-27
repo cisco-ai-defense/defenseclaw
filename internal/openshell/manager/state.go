@@ -34,9 +34,11 @@ import (
 )
 
 const (
-	recordVersion  = 1
-	recordDirName  = "manager"
-	recordMaxBytes = 1 << 20
+	recordVersion = 1
+	recordDirName = "manager"
+	// recordMaxBytes bounds one record file, read and written alike: save
+	// refuses a record a restart could not read back.
+	recordMaxBytes = 8 << 20
 )
 
 // runFlags are the `sandbox run` inputs a sandbox was created with. They
@@ -153,6 +155,11 @@ func (s recordStore) save(r *record) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(data)+1 > recordMaxBytes {
+		// A restart would skip the file and adopt the sandbox without its
+		// run flags; keep the last record that fits instead.
+		return fmt.Errorf("the record of sandbox %s would be %d bytes, more than the %d a restart reads back", r.Name, len(data)+1, recordMaxBytes)
 	}
 	if s.beforeWrite != nil {
 		s.beforeWrite(r.Name)

@@ -195,11 +195,14 @@ func (m *Manager) adopt(sb *openshell.Sandbox) *box {
 	m.mu.Lock()
 	b := m.boxes[sb.Name]
 	if b == nil {
+		// No readable record: the labels name the harness, profile and
+		// pack, but not the run flags or the project, so the sandbox's
+		// policy cannot be rebuilt. It fails closed (errUnrecorded).
 		b = &box{rec: record{
 			Name: sb.Name, ID: sb.ID, Harness: sb.Labels[LabelHarness], Owner: m.opts.Owner,
 			Profile: sb.Labels[LabelProfile], Pack: sb.Labels[LabelPack], WorkdirMode: sb.Labels[LabelWorkdirMode],
 			CreatedAt: sb.CreatedAt, Image: templateImage(sb),
-		}, seenChunks: map[string]struct{}{}}
+		}, seenChunks: map[string]struct{}{}, unrecorded: true}
 		m.boxes[sb.Name] = b
 	}
 	if b.creating {

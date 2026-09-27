@@ -62,8 +62,13 @@ func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
 // again (policyRestored).
 func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
 	m.mu.Lock()
-	rec := b.rec
+	rec, unrecorded := b.rec, b.unrecorded
 	m.mu.Unlock()
+	if unrecorded {
+		err := errUnrecorded(rec.Name)
+		m.policyUnresolved(b, err)
+		return nil, nil, err
+	}
 	cfg := m.config()
 	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
 	if err == nil {
@@ -86,6 +91,15 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		m.policyRestored(b, eff)
 	}
 	return eff, violations, nil
+}
+
+// errUnrecorded is why a sandbox adopted without a record has no policy:
+// resolving it under the default pack would silently drop the pack,
+// profile and flags it was created with (a stricter posture among them).
+func errUnrecorded(name string) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "DefenseClaw has no readable record of sandbox " + name + ", so the policy it was created with is unknown",
+		Detail:  "the pack, profile and run flags it was created with are lost; delete it and run a new sandbox"}
 }
 
 // checkPolicySources refuses a policy the sandbox could rewrite. In mount

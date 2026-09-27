@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"time"
@@ -28,8 +29,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
-// maxGuardDetections bounds the detections a record keeps per session.
-const maxGuardDetections = 64
+// maxGuardDetections bounds the detections a record keeps per session, and
+// maxDetectionText each text field of one.
+const (
+	maxGuardDetections = 64
+	maxDetectionText   = 1024
+)
+
+// guardBaselineBytes bounds what a baseline adds to its sandbox's record
+// (JSON bytes of its paths), well under recordMaxBytes: the project decides
+// how many repositories and gitlinks it lists, and a record too large to
+// read back would lose the sandbox's policy on the next restart.
+const guardBaselineBytes = 4 << 20
 
 // guardRestart paces restarting a guard that failed.
 const guardRestart = 30 * time.Second
@@ -75,10 +86,48 @@ func (m *Manager) takeGuardBaseline(ctx context.Context, rec *record) {
 	if err != nil {
 		m.logf("nested-repository guard for %s: baseline: %v", rec.Name, err)
 	}
+	b = boundBaseline(b, guardBaselineBytes)
 	if b.Truncated {
 		m.logf("nested-repository guard for %s: the project is too large to list every existing repository", rec.Name)
 	}
 	rec.Guard = &guardRecord{Baseline: b, TakenAt: m.now().UTC()}
+}
+
+// boundBaseline keeps the repositories and gitlinks of b that fit in limit
+// JSON bytes, marking a cut baseline Truncated. What it leaves out errs on
+// the safe side, as a failed baseline does: a repository missing from the
+// baseline is quarantined when the guard sees it, a gitlink is reported.
+// The project's own repository (".") is always kept.
+func boundBaseline(b nestguard.Baseline, limit int) nestguard.Baseline {
+	size := func(p string) int {
+		n, _ := json.Marshal(p)
+		return len(n) + 8 // separator and indent
+	}
+	total := 0
+	for _, p := range append(slices.Clip(b.Repos), b.Gitlinks...) {
+		total += size(p)
+	}
+	if total <= limit {
+		return b
+	}
+	budget := limit
+	keep := func(list []string) []string {
+		for i, p := range list {
+			if budget -= size(p); budget < 0 {
+				b.Truncated = true
+				return slices.Clip(list[:i])
+			}
+		}
+		return list
+	}
+	own := slices.Contains(b.Repos, ".")
+	repos := keep(slices.DeleteFunc(slices.Clone(b.Repos), func(r string) bool { return r == "." }))
+	if own {
+		repos = append([]string{"."}, repos...)
+	}
+	b.Repos = repos
+	b.Gitlinks = keep(b.Gitlinks)
+	return b
 }
 
 // syncGuard runs the guard while a mounted sandbox is ready and stops it
@@ -182,7 +231,10 @@ func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection)
 		if g != nil {
 			next = *g
 		}
-		next.Detections = append(slices.Clip(next.Detections), d)
+		kept := d
+		kept.Dir, kept.Quarantined = truncate(d.Dir, maxDetectionText), truncate(d.Quarantined, maxDetectionText)
+		kept.Error = truncate(d.Error, maxDetectionText)
+		next.Detections = append(slices.Clip(next.Detections), kept)
 		b.rec.Guard = &next
 	}
 	rec := b.rec

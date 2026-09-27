@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +55,12 @@ type box struct {
 	deleted   bool
 	orphaned  bool
 	missing   bool
-	started   time.Time
+	// unrecorded marks a live sandbox adopted from its labels because the
+	// daemon has no readable record of it: the pack, profile and run flags
+	// it was created with are unknown, so it fails closed (see
+	// errUnrecorded) and its record is never written.
+	unrecorded bool
+	started    time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -109,8 +115,13 @@ func (m *Manager) saveRecord(b *box) error {
 		return nil
 	}
 	m.mu.Lock()
-	rec := b.rec
+	rec, unrecorded := b.rec, b.unrecorded
 	m.mu.Unlock()
+	if unrecorded {
+		// Its labels are all there is: writing them as its record would
+		// make the next restart run it under the default policy.
+		return nil
+	}
 	return m.records.save(&rec)
 }
 
@@ -220,7 +231,9 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.logf("lifecycle telemetry for %s: %v", rec.Name, err)
 	}
 	if phase != audit.SandboxPhaseDeleted {
-		_ = m.saveRecord(b)
+		if err := m.saveRecord(b); err != nil {
+			m.logf("save the record of %s: %v", rec.Name, err)
+		}
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{
 		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
@@ -334,5 +347,9 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.Blocked = b.blocked
+	if b.unrecorded {
+		v.Warnings = append(slices.Clip(v.Warnings),
+			"DefenseClaw has no readable record of this sandbox; it has no web egress and cannot start again until you delete it")
+	}
 	return v
 }
