@@ -4307,8 +4307,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [snapshot, undo, mask, review, upload, pull]}
-    notes: snapshot and undo protect the mounted folder; mask hides secret files; review scans the session's changes; upload and pull are the copy-mode transfer
+    overrides: {enum: [snapshot, undo, mask, review, upload, pull, quarantine]}
+    notes: snapshot and undo protect the mounted folder; mask hides secret files; review scans the session's changes; upload and pull are the copy-mode transfer; quarantine renames the .git entry of a nested repository that appeared in the mounted folder during a session
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.workspace.snapshot.kind
   type: string
@@ -4364,7 +4364,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 0, max: 9223372036854775807}
-    notes: Changed files for review, undo, and pull; masked files for mask; snapshotted files for snapshot
+    notes: Changed files for review, undo, and pull; masked files for mask; snapshotted files for snapshot; quarantined .git entries for quarantine
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.workspace.lines_added
   type: int64
@@ -10031,7 +10031,7 @@ groups:
     requirement_level: recommended
 - id: body.sandbox.workspace
   type: body_group
-  brief: Sandbox workspace protection body for snapshots, undo, secret masks, change review, and copy-mode transfer.
+  brief: Sandbox workspace protection body for snapshots, undo, secret masks, change review, copy-mode transfer, and nested-repository quarantine.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends:
@@ -10086,7 +10086,7 @@ groups:
     - local-observability-v1
 - id: log.sandbox.workspace
   type: log
-  brief: Canonical sandbox.workspace log identity for snapshot, undo, mask, review, upload, and pull operations.
+  brief: Canonical sandbox.workspace log identity for snapshot, undo, mask, review, upload, pull, and quarantine operations.
   stability: stable
   introduced_in: telemetry-registry-v2
   extends:

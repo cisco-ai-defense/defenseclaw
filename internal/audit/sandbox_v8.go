@@ -376,6 +376,11 @@ const (
 	SandboxFindingHookTamper SandboxFindingKind = "hook_tamper"
 	// SandboxFindingLargeUpload is a large upload to a first-seen host.
 	SandboxFindingLargeUpload SandboxFindingKind = "large_upload"
+	// SandboxFindingNestedRepo is a repository (a .git entry or an index
+	// gitlink) that appeared inside a live-mounted project during a session;
+	// its configuration could run code when version control runs there on
+	// the host.
+	SandboxFindingNestedRepo SandboxFindingKind = "nested_repo"
 )
 
 // SandboxFindingEvent is one sandbox security observation, emitted as
@@ -413,6 +418,10 @@ const (
 	SandboxWorkspaceReview   SandboxWorkspaceOperation = "review"
 	SandboxWorkspaceUpload   SandboxWorkspaceOperation = "upload"
 	SandboxWorkspacePull     SandboxWorkspaceOperation = "pull"
+	// SandboxWorkspaceQuarantine renames the .git entry of a nested
+	// repository that appeared in a live-mounted project during a session,
+	// so nothing on the host reads its configuration.
+	SandboxWorkspaceQuarantine SandboxWorkspaceOperation = "quarantine"
 )
 
 // SandboxWorkspaceResult is the observed result of a workspace operation.
@@ -437,12 +446,13 @@ const (
 	SandboxPullPatch  = "patch"
 )
 
-// SandboxWorkspaceEvent is one snapshot, undo, mask, review, upload, or pull.
+// SandboxWorkspaceEvent is one snapshot, undo, mask, review, upload, pull, or
+// quarantine.
 // Nil counts are omitted; zero is a reported value.
 //
 // Two kinds of record are mandatory, so no route's collection settings can
-// drop them: an undo, a mask, or a pull applied to the working tree or to a
-// branch (enforcement_state_change) unless its result is no_change or
+// drop them: an undo, a mask, a quarantine, or a pull applied to the working
+// tree or to a branch (enforcement_state_change) unless its result is no_change or
 // skipped, and any record that flags changed files that can run code on the
 // host (enforced_outcome).
 type SandboxWorkspaceEvent struct {
@@ -1444,7 +1454,7 @@ func (operation SandboxPolicyOperation) valid() bool {
 func (kind SandboxFindingKind) valid() bool {
 	switch kind {
 	case SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload:
+		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload, SandboxFindingNestedRepo:
 		return true
 	default:
 		return false
@@ -1460,7 +1470,7 @@ func (kind SandboxFindingKind) defaultRuleID() string {
 func (operation SandboxWorkspaceOperation) valid() bool {
 	switch operation {
 	case SandboxWorkspaceSnapshot, SandboxWorkspaceUndo, SandboxWorkspaceMask,
-		SandboxWorkspaceReview, SandboxWorkspaceUpload, SandboxWorkspacePull:
+		SandboxWorkspaceReview, SandboxWorkspaceUpload, SandboxWorkspacePull, SandboxWorkspaceQuarantine:
 		return true
 	default:
 		return false
@@ -1469,12 +1479,12 @@ func (operation SandboxWorkspaceOperation) valid() bool {
 
 // changesState reports whether the operation changes what the host or the
 // sandbox holds: undo restores host files, a mask hides secret files from the
-// sandbox, and a pull applied to the working tree or to a branch writes the
-// host repository. A patch pull writes only the patch file the operator asked
-// for.
+// sandbox, a quarantine renames a nested repository's .git entry, and a pull
+// applied to the working tree or to a branch writes the host repository. A
+// patch pull writes only the patch file the operator asked for.
 func (operation SandboxWorkspaceOperation) changesState(pullMode string) bool {
 	switch operation {
-	case SandboxWorkspaceUndo, SandboxWorkspaceMask:
+	case SandboxWorkspaceUndo, SandboxWorkspaceMask, SandboxWorkspaceQuarantine:
 		return true
 	case SandboxWorkspacePull:
 		return pullMode == SandboxPullApply || pullMode == SandboxPullBranch
@@ -1485,7 +1495,7 @@ func (operation SandboxWorkspaceOperation) changesState(pullMode string) bool {
 
 func (operation SandboxWorkspaceOperation) defaultResult() SandboxWorkspaceResult {
 	switch operation {
-	case SandboxWorkspaceUndo, SandboxWorkspaceMask, SandboxWorkspacePull:
+	case SandboxWorkspaceUndo, SandboxWorkspaceMask, SandboxWorkspacePull, SandboxWorkspaceQuarantine:
 		return SandboxWorkspaceApplied
 	default:
 		return SandboxWorkspaceCompleted

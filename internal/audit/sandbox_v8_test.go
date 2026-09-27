@@ -1132,7 +1132,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 	harness := newSandboxHarness(t)
 	for _, kind := range []SandboxFindingKind{
 		SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload,
+		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload, SandboxFindingNestedRepo,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
 			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
@@ -1210,6 +1210,18 @@ func TestSandboxWorkspaceOperations(t *testing.T) {
 				"defenseclaw.sandbox.workspace.snapshot.kind": "git", "defenseclaw.enforcement.initiator": "operator",
 				"defenseclaw.sandbox.workspace.snapshot.ref": "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
 				"defenseclaw.sandbox.workspace.file_count":   int64(0),
+			},
+		},
+		{
+			name: "quarantine of a nested repository",
+			input: SandboxWorkspaceEvent{
+				Operation: SandboxWorkspaceQuarantine, Initiator: "defenseclaw", FileCount: count(1), FlaggedCount: count(1),
+				Paths: []string{"vendor/evil/.git"}, Severity: "HIGH",
+			},
+			outcome: observability.OutcomeApplied, severity: observability.SeverityHigh, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.operation": "quarantine", "defenseclaw.sandbox.workspace.file_count": int64(1),
+				"defenseclaw.enforcement.initiator": "defenseclaw",
 			},
 		},
 		{
@@ -1300,6 +1312,8 @@ func TestSandboxWorkspaceMandatoryFloor(t *testing.T) {
 		{"review with flags", SandboxWorkspaceEvent{Operation: SandboxWorkspaceReview, FlaggedCount: count(1)}, true},
 		{"review without flags", SandboxWorkspaceEvent{Operation: SandboxWorkspaceReview, FlaggedCount: count(0)}, false},
 		{"snapshot", SandboxWorkspaceEvent{Operation: SandboxWorkspaceSnapshot}, false},
+		{"quarantine applied", SandboxWorkspaceEvent{Operation: SandboxWorkspaceQuarantine, FileCount: count(1)}, true},
+		{"quarantine failed", SandboxWorkspaceEvent{Operation: SandboxWorkspaceQuarantine, Result: SandboxWorkspaceFailed, FailureClass: "rename_failed"}, true},
 		{"upload", SandboxWorkspaceEvent{Operation: SandboxWorkspaceUpload, ByteCount: count(1 << 20)}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
