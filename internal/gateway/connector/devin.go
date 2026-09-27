@@ -67,13 +67,28 @@ func NewDevinConnector() *hookOnlyConnector {
 }
 
 func devinConfigRoot(opts SetupOpts) string {
+	return devinConfigRootFor(runtime.GOOS, opts)
+}
+
+// devinConfigRootFor is devinConfigRoot for an explicit GOOS so the macOS
+// rule is covered by tests on every host.
+func devinConfigRootFor(goos string, opts SetupOpts) string {
 	if root := strings.TrimSpace(opts.ConfigHome); root != "" {
 		return filepath.Clean(root)
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		if root := strings.TrimSpace(os.Getenv("APPDATA")); root != "" {
 			return filepath.Join(filepath.Clean(root), "devin")
 		}
+	}
+	if goos == "darwin" {
+		// The Devin CLI keeps its config under the XDG directory on macOS
+		// too (~/.config/devin/config.json), not ~/Library/Application
+		// Support, which os.UserConfigDir returns there.
+		if root := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); filepath.IsAbs(root) {
+			return filepath.Join(filepath.Clean(root), "devin")
+		}
+		return homePath(".config", "devin")
 	}
 	if root, err := os.UserConfigDir(); err == nil && strings.TrimSpace(root) != "" {
 		return filepath.Join(filepath.Clean(root), "devin")
