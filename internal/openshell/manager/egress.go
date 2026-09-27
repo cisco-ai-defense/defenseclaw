@@ -62,9 +62,12 @@ func (m *Manager) Decider() (*egress.Decider, error) {
 		return nil, err
 	}
 	opts := egress.DeciderOptions{
-		Mode:     egress.ModeOpen,
-		Ports:    base.Egress.Ports,
-		Unblocks: unblockIndex{m: m},
+		Mode:  egress.ModeOpen,
+		Ports: base.Egress.Ports,
+		// "Always" decisions are unblocks, never operator allows: an allow
+		// entry opens the private addresses its name resolves to, an
+		// unblock only lifts blocklist and allowlist refusals.
+		Unblocks: unblockIndex{m: m, always: proxyPatterns(cfg.OpenShell.Egress.Unblocked)},
 	}
 	if base.NetworkMode == packs.NetworkAllowlist {
 		opts.Mode = egress.ModeAllowlist
@@ -157,10 +160,14 @@ func (m *Manager) refreshEgress() {
 }
 
 // unblockIndex serves the Decider's unblock lookups: sandbox-scoped and
-// persistent unblocks, and each sandbox's own pack allow list. Nothing is
-// unblocked when the administrator forbids unblocking, and nothing outside
-// an administrator allow-only list.
-type unblockIndex struct{ m *Manager }
+// persistent unblocks (always, openshell.egress.unblocked), and each
+// sandbox's own pack allow list. Nothing is unblocked when the
+// administrator forbids unblocking, and nothing outside an administrator
+// allow-only list.
+type unblockIndex struct {
+	m      *Manager
+	always []string
+}
 
 func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock, bool) {
 	m := u.m
@@ -186,6 +193,11 @@ func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock
 	if ub, ok := m.unblocks.Unblocked(p, host); ok {
 		return ub, true
 	}
+	for _, glob := range u.always {
+		if packs.MatchHost(glob, host) {
+			return egress.Unblock{Pattern: glob}, true
+		}
+	}
 	for _, glob := range eff.Egress.Allow {
 		if packs.MatchHost(glob, host) {
 			return egress.Unblock{Pattern: glob, SandboxID: p.SandboxID}, true
@@ -195,7 +207,7 @@ func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock
 }
 
 // Unblock lifts an egress block for one sandbox or, with Always, for every
-// sandbox (the host joins openshell.egress.allow).
+// sandbox (the host joins openshell.egress.unblocked).
 func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error) {
 	host := triage.NormalizeHost(req.Host)
 	if host == "" || strings.ContainsAny(host, "/ \t") {
@@ -252,7 +264,7 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "%v", err)
 		}
 		resp.Scope, resp.Persisted = string(audit.SandboxApprovalScopeAlways), true
-		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.allow)"
+		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.unblocked)"
 	} else {
 		m.mu.Lock()
 		sandboxID := scopeID(b.rec.ID, b.rec.Name)

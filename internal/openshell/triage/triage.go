@@ -680,10 +680,14 @@ func truncate(s string, n int) string {
 }
 
 // Persister keeps "always" decisions for future sandboxes in the
-// DefenseClaw configuration (openshell.egress.allow and
-// openshell.egress.block), through the gateway's ConfigManager so the
+// DefenseClaw configuration, through the gateway's ConfigManager so the
 // running daemon reloads them.
 type Persister interface {
+	// AllowAlways adds host to openshell.egress.unblocked. It must not
+	// write openshell.egress.allow: an allow entry is operator
+	// configuration that also opens the private addresses the name
+	// resolves to, which one click on an agent-chosen name must never do.
 	AllowAlways(ctx context.Context, host string) error
+	// BlockAlways adds host to openshell.egress.block.
 	BlockAlways(ctx context.Context, host string) error
 }

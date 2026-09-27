@@ -476,3 +476,40 @@ func TestGuardDialFeedCIDRs(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+// An unblock of a name (the sandbox manager's "always" decisions) lifts
+// blocklist and allowlist refusals only: the private addresses the name
+// resolves to stay closed, so a DNS answer the name's owner controls cannot
+// reach the user's network. Only an operator allow entry for the exact name
+// opens them.
+func TestGuardDialUnblockKeepsPrivateAddressesClosed(t *testing.T) {
+	g, r, _ := newTestGuard(t)
+	r.set("cdn.example", []string{"10.0.0.7"})
+	unblocks, err := NewMemoryUnblocks(Unblock{Pattern: "cdn.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecider(DeciderOptions{Mode: ModeAllowlist, Allowlists: []*Feed{}, Unblocks: unblocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := dec.Decide(testPrincipal, "cdn.example", 443)
+	if !decision.Allowed || decision.Source != SourceUnblock {
+		t.Fatalf("decision = %+v, want allowed by the unblock", decision)
+	}
+	_, _, err = g.dial(context.Background(), "cdn.example", 443, dec.dialRules(testPrincipal, decision))
+	var de *dialError
+	if !errors.As(err, &de) || de.category != CategoryPrivateNetwork {
+		t.Fatalf("unblocked name resolving to a private address = %v, want a private-network refusal", err)
+	}
+
+	allowed, err := NewDecider(DeciderOptions{Mode: ModeAllowlist, Allowlists: []*Feed{}, Allow: []string{"cdn.example"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, err := g.dial(context.Background(), "cdn.example", 443, allowed.dialRules(testPrincipal, allowed.Decide(testPrincipal, "cdn.example", 443)))
+	if err != nil {
+		t.Fatalf("operator allow of the name = %v", err)
+	}
+	_ = conn.Close()
+}

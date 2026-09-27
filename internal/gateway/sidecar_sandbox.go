@@ -286,14 +286,16 @@ func (rt *sandboxRuntime) serveEgress(ctx context.Context) error {
 }
 
 // sandboxConfigPersister keeps "always" sandbox decisions in config.yaml
-// (openshell.egress.allow / block) through the same write transaction the
-// guardrail config API uses, so the ConfigManager reloads them.
+// (openshell.egress.unblocked / block) through the same write transaction
+// the guardrail config API uses, so the ConfigManager reloads them. Always
+// approvals and unblocks never go to openshell.egress.allow: an allow entry
+// lets its name resolve to private addresses, an unblock does not.
 type sandboxConfigPersister struct {
 	api *APIServer
 }
 
 func (p sandboxConfigPersister) AllowAlways(ctx context.Context, host string) error {
-	return p.api.appendSandboxConfigList(ctx, "openshell.egress.allow", host)
+	return p.api.appendSandboxConfigList(ctx, "openshell.egress.unblocked", host)
 }
 
 func (p sandboxConfigPersister) BlockAlways(ctx context.Context, host string) error {
@@ -314,9 +316,14 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
 			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
 	}
-	list := current.OpenShell.Egress.Allow
-	if key == "openshell.egress.block" {
+	var list []string
+	switch key {
+	case "openshell.egress.unblocked":
+		list = current.OpenShell.Egress.Unblocked
+	case "openshell.egress.block":
 		list = current.OpenShell.Egress.Block
+	default:
+		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
 	}
 	for _, have := range list {
 		if strings.EqualFold(strings.TrimSpace(have), host) {

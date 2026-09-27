@@ -57,9 +57,11 @@ func TestSandboxConfigPersister(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := api.runtimeConfigSnapshot()
-	if !slices.Equal(live.OpenShell.Egress.Allow, []string{"registry.example.org", "docs.example.org"}) ||
-		!slices.Equal(live.OpenShell.Egress.Block, []string{"paste.example.net"}) {
-		t.Fatalf("persisted allow %v block %v", live.OpenShell.Egress.Allow, live.OpenShell.Egress.Block)
+	// Always decisions are unblocks: they never become allow entries,
+	// which would open the private addresses the names resolve to.
+	if !slices.Equal(live.OpenShell.Egress.Unblocked, []string{"registry.example.org", "docs.example.org"}) ||
+		len(live.OpenShell.Egress.Allow) != 0 || !slices.Equal(live.OpenShell.Egress.Block, []string{"paste.example.net"}) {
+		t.Fatalf("persisted unblocked %v allow %v block %v", live.OpenShell.Egress.Unblocked, live.OpenShell.Egress.Allow, live.OpenShell.Egress.Block)
 	}
 	raw, err := os.ReadFile(configFilePathForSnapshot(live))
 	if err != nil || !strings.Contains(string(raw), "registry.example.org") {

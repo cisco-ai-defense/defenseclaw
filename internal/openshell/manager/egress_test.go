@@ -342,3 +342,31 @@ func TestRecoverCredential(t *testing.T) {
 		t.Fatal("recovered from nothing")
 	}
 }
+
+// TestAlwaysDecisionsAreUnblocks pins that saved "always" decisions
+// (openshell.egress.unblocked) reach the proxy as unblocks, which lift the
+// blocklist and allowlist but never open the private addresses a name
+// resolves to, and that they stop counting once unblocking is forbidden.
+func TestAlwaysDecisionsAreUnblocks(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) {
+		c.OpenShell.Profile = config.OpenShellProfileBalanced
+		c.OpenShell.Egress.Unblocked = []string{"cdn.example.org", "webhook.site"}
+	})
+	proxy := &fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})}
+	e.m.AttachProxy(proxy)
+	e.create(sandboxapi.CreateRequest{Name: "alwaysbox"})
+	p := principalOf(t, e, "alwaysbox")
+	for _, host := range []string{"cdn.example.org", "webhook.site"} {
+		if dec := proxy.current().Decide(p, host, 443); !dec.Allowed || dec.Source != egress.SourceUnblock {
+			t.Fatalf("%s = %+v, want allowed by an unblock (not an operator allow)", host, dec)
+		}
+	}
+	if dec := proxy.current().Decide(p, "other.example.org", 443); dec.Allowed {
+		t.Fatalf("unlisted host allowed in allowlist mode: %+v", dec)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	e.m.refreshEgress()
+	if dec := proxy.current().Decide(p, "cdn.example.org", 443); dec.Allowed {
+		t.Fatalf("saved unblock applied after allow_unblock=false: %+v", dec)
+	}
+}

@@ -416,7 +416,7 @@ const (
 type ApprovalDecision struct {
 	Decision string `json:"decision"`
 	// Always keeps the decision for future sandboxes (approve: the hosts
-	// join openshell.egress.allow; reject: openshell.egress.block).
+	// join openshell.egress.unblocked; reject: openshell.egress.block).
 	Always bool   `json:"always,omitempty"`
 	Reason string `json:"reason,omitempty"`
 }
