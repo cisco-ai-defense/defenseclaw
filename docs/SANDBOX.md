@@ -557,8 +557,18 @@ ahead of time):
 The Copilot GitHub-token, Amp, Cursor and Kiro endpoint sets come from the
 pinned CLIs, not from a live run (no account was available). Devin CLI has no
 provider profile: it authenticates with an interactive login inside the
-sandbox, whose credential stays in the sandbox HOME, and its traffic goes
-through the egress proxy.
+sandbox.
+
+An in-sandbox vendor login (`cursor-launch login`, `kiro-launch login
+--use-device-flow`, `devin-launch auth login --force-manual-token-flow`;
+`HarnessSpec.Login`) runs through the harness launcher, which exports the
+egress proxy, so its traffic goes through the proxy (OpenShell refuses a
+connection around it). The login stores a long-lived vendor account token in
+the sandbox HOME. Unlike a provider placeholder, the workload can read that
+token and send it out through any destination the profile allows, and a kept
+sandbox reuses it. Prefer the API-key provider profile where there is one
+(`defenseclaw-cursor`, `defenseclaw-kiro`); Devin has none, so log out or
+delete the sandbox after use.
 
 LLM profiles are pinned to the realpaths of the harness binaries that the
 image probe recorded, so no other program in the sandbox can use the key; an
@@ -1203,9 +1213,9 @@ images stay unverified, so they are never selected for a sandbox.
 | OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
 | Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |
-| Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-agent login` inside the sandbox | unverified |
-| Kiro CLI | 2.24.1 (release archive, vendor sha256) | User-owned agent `~/.kiro/agents/defenseclaw.json`, restored from a root-owned template on every start; the launcher refuses a shadowing project agent | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-cli login --use-device-flow` inside the sandbox | verified (hooks and blocking; no real model) |
-| Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start | user | `--permission-mode dangerous` | `devin auth login` inside the sandbox | unverified |
+| Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |
+| Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
+| Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
 
 OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
 (`TestLiveSandboxHookOnlyHarness` in `internal/gateway`), with the project
@@ -1355,23 +1365,41 @@ These were measured on the pinned releases inside the community base image
   CLI at startup. `--sandbox disabled` switches Cursor's own sandbox off (it
   cannot nest), `--trust` skips the workspace prompt, and `--force` is the
   skip-permissions mode. Hook firing and blocking with the pinned build, and
-  the `CURSOR_API_KEY` endpoint set, need a Cursor key.
+  the `CURSOR_API_KEY` endpoint set, need a Cursor key. The `cursor-agent`
+  wrapper sets `NODE_COMPILE_CACHE` to `~/.cache/cursor-compile-cache` when it
+  is unset. Measured with the bundled Node 24.5.0: a second start reads the
+  cache there, V8 accepts it, and it runs that code in place of the
+  root-owned `index.js` chunks. So every launcher exports
+  `NODE_DISABLE_COMPILE_CACHE=1` (Node then reports the cache disabled and
+  reads nothing) and drops `NODE_OPTIONS` and `NODE_PATH`.
 - **Kiro CLI 2.24.1.** Kiro's release manifest publishes SHA-256 digests for
   its headless Linux archives. `kiro-cli` is a front end that starts
   `kiro-cli-chat` from `PATH`; the launcher starts the pinned `kiro-cli-chat`
-  directly. Kiro reads hooks from the agent it runs with:
-  `~/.kiro/agents/<name>.json`, or a project `.kiro/agents/<name>.json` of the
-  same name in the working directory (not a parent), which wins. There is no
-  system tier, so the tier is user. Headless with `--agent defenseclaw`, the
+  directly. Kiro reads hooks from the agent it runs with, and picks the agent
+  `--agent` names by the `name` field of any file in `~/.kiro/agents` or the
+  working directory's `.kiro/agents` (not a parent's), a project file
+  winning, so a file of any name (`a.json` sorts before `defenseclaw.json`)
+  replaces the agent. `KIRO_HOME`, `KIRO_TEST_AGENTS_DIR` and
+  `KIRO_AGENT_CONFIG_DIR` move the agents; with `KIRO_AGENT_CONFIG_DIR` set,
+  Kiro reads agents from that directory alone (neither `~/.kiro/agents` nor
+  the project's). `KIRO_CHAT_SHELL` and `AMAZON_Q_CHAT_SHELL` run every
+  approved shell command through a program of the caller's choosing. There
+  is no system settings tier, and Kiro still reads user and project settings
+  and MCP servers, so the tier is user. Headless with `--agent defenseclaw`, the
   triggers `userPromptSubmit`, `preToolUse`, `postToolUse` and `stop` fire
   (`agentSpawn` fires only for the default agent). The matcher `*` matches
   every tool; `.*` matches none, so tool hooks with it never fire. Exit code
   2 from `preToolUse` blocks the tool (Kiro reports it as failed); any other
   exit code shows as a warning and the tool runs. A missing or unparseable
-  agent file, or a `KIRO_HOME` pointing elsewhere, makes Kiro run its default
-  agent with no hooks, so the launcher restores the agent from its root-owned
-  template on every start, drops `KIRO_HOME`, pins `HOME` and refuses a
-  shadowing project agent. `--v3` and `--agent-engine` select a different
+  agent file makes Kiro print only `failed to set agent` and run the tool
+  with no hooks. So the DefenseClaw agent lives alone in root-owned
+  `/usr/local/lib/defenseclaw/kiro`, which the launcher forces
+  `KIRO_AGENT_CONFIG_DIR` to on every start (the sandbox env sets it too, for
+  a `kiro-cli chat` started without the launcher); the hooks fire from that
+  read-only directory, and the launcher refuses to start when the agent is
+  missing. The launcher pins `HOME` and drops every `KIRO_*`, `Q_*`,
+  `AMAZON_Q_*`, `ASBX_KIRO_*` and `KAS_*` variable except `KIRO_API_KEY` and
+  `KIRO_MOCK_CHAT_RESPONSE`. `--v3` and `--agent-engine` select a different
   engine that was not measured, and `--cloud` runs the session in a remote
   sandbox; the launcher pins `--v2` and refuses those switches.
   The image settings select the DefenseClaw agent by default and set
@@ -1380,10 +1408,16 @@ These were measured on the pinned releases inside the community base image
   (an interactive `--trust-all-tools` start then asks nothing); all are valid
   2.24.1 settings and the hooks fire with them. `KIRO_MOCK_CHAT_RESPONSE` (a file of
   scripted turns) with any `KIRO_API_KEY` value runs a turn with no network
-  or account; the hook-fire probe and the live run use it. The user tier
-  leaves open: an edit to the agent file during a session, `/agent` in an
-  interactive session, and a nested `kiro-cli-chat` started from a tool call,
-  which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
+  or account; the hook-fire probe and the live run use it. The hostile-settings
+  probe plants hookless agents named `defenseclaw` in `~/.kiro/agents`
+  (`defenseclaw.json`, `a.json`) and the project (`defenseclaw.json`,
+  `project.json`), and behind `KIRO_HOME`, `KIRO_AGENT_CONFIG_DIR` and
+  `KIRO_TEST_AGENTS_DIR`, and a recording `KIRO_CHAT_SHELL`; every hook must
+  still fire and the planted shell must not run. `kiro-launch login` runs
+  `kiro-cli login` with the proxy exported. The user tier leaves open:
+  `/agent` in an interactive session (it can switch to Kiro's built-in
+  agent), project MCP servers, and a nested `kiro-cli-chat` started from a
+  tool call, which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
   a device-flow login is unverified.
 - **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
   SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
@@ -1399,10 +1433,17 @@ These were measured on the pinned releases inside the community base image
   Devin's own bubblewrap sandbox, which cannot nest. Devin fails open on any
   hook error other than exit code 2, and on a hook timeout, so the sandbox
   hook exits 2 on every failure and the image sets 30-second hook timeouts
-  (the host's 10 seconds is shorter than two relay attempts). Headless runs
-  refuse an untrusted workspace, and Restricted Mode (trust declined) runs
-  without hooks; trust is the first interactive prompt, and no preseed was
-  verified.
+  (the host's 10 seconds is shorter than two relay attempts). Devin's bundled
+  docs say `--print` fails in an untrusted workspace, and Restricted Mode
+  (trust declined at the first interactive prompt) runs without hooks. The
+  launcher therefore always passes `--respect-workspace-trust false` (the
+  pinned CLI accepts it before a prompt and before a subcommand such as
+  `auth`) and refuses a caller `--respect-workspace-trust`. The trade-off: a
+  trusted workspace loads the project's own `.devin/hooks.v1.json` beside the
+  DefenseClaw hooks without asking, which the user tier already leaves open.
+  The login check comes before the trust check, so the bypass is unverified
+  in a real turn. The login credential lands in
+  `~/.local/share/devin/credentials.toml`.
 
 ## Policy packs and admin constraints
 

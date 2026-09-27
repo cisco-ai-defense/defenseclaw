@@ -162,8 +162,20 @@ image. The files exist only in the image and nothing on your host changes:
 - **Launch flags.** Skip-permissions mode starts Devin with
   `--permission-mode dangerous`; Devin's `autonomous` mode needs its own
   sandbox, which cannot run inside OpenShell.
+- **Workspace trust is skipped.** A headless Devin run fails in an untrusted
+  folder, and a declined trust prompt runs Devin without hooks. The launcher
+  therefore always passes `--respect-workspace-trust false` and refuses that
+  flag from you. The trade-off: a project's own Devin hooks
+  (`.devin/hooks.v1.json`) also load, without a prompt, next to the
+  DefenseClaw hooks.
 - **Image pin.** The image installs Devin CLI 3000.4.25 from its release
   archive, checked against the SHA-256 in Devin's release manifest.
+- **Credentials.** Devin has no API-key option, so the only way to
+  authenticate is a login inside the sandbox (`devin-launch auth login`,
+  which sends its traffic through the DefenseClaw proxy). The login stores a
+  long-lived Devin account credential in the sandbox home. The agent can read
+  that credential and send it out, and a kept sandbox reuses it. Log out
+  (`devin-launch auth logout`) or delete the sandbox when you are done.
 - **Not verified yet.** Devin needs a Devin account login
   (`devin auth login`) before any agent turn, so its image has not passed the
   hook-fire check and is never selected for use.

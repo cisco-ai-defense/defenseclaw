@@ -90,11 +90,15 @@ DefenseClaw can render the files it adds to a Kiro CLI OpenShell overlay
 image. The files exist only in the image and nothing on your host changes:
 
 - **Hooks in the user tier.** Kiro CLI reads hooks from the agent it runs
-  with and has no system tier, so the hooks live in a DefenseClaw agent in
-  `~/.kiro/agents` inside the image. The sandbox launcher restores that agent
-  from a root-owned template on every start, selects it, and refuses to start
-  when the project carries an agent of the same name, which Kiro would
-  prefer.
+  with. It picks that agent by the name inside any file in `~/.kiro/agents`
+  or the project's `.kiro/agents`, so any agent file there could replace the
+  DefenseClaw one. The DefenseClaw agent therefore lives alone in root-owned
+  `/usr/local/lib/defenseclaw/kiro`. The sandbox launcher sets
+  `KIRO_AGENT_CONFIG_DIR` to that folder on every start, and Kiro then reads
+  no other agents. The launcher also drops the other Kiro variables that move
+  Kiro's agents, settings or shell. Kiro has no system settings tier and
+  still loads user and project settings and MCP servers, so the tier is
+  user.
 - **Fail closed.** Kiro vetoes a tool only on exit code 2 from `preToolUse`,
   so the sandbox hook exits 2 on every failure. The hooks reach the gateway
   through the [hook ingress](/docs/reference/gateway-api#hook-ingress) with a
@@ -103,6 +107,12 @@ image. The files exist only in the image and nothing on your host changes:
   DefenseClaw agent; skip-permissions mode adds `--trust-all-tools`.
 - **Image pin.** The image installs Kiro CLI 2.24.1 from its release archive,
   checked against the SHA-256 in Kiro's release manifest.
+- **Credentials.** Use the `defenseclaw-kiro` provider profile with a Kiro
+  API key when you can: OpenShell injects the key, so the sandbox only sees a
+  placeholder. A login inside the sandbox (`kiro-launch login
+  --use-device-flow`, which sends its traffic through the DefenseClaw proxy)
+  stores a long-lived Kiro token in the sandbox home. The agent can read that
+  token and send it out, and a kept sandbox reuses it.
 - **Checked before use.** The image is verified with Kiro's own
   scripted-response mode: every required hook fired, a blocked tool call did
   not run, and hostile settings changed nothing. A real model through a Kiro

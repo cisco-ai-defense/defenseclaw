@@ -258,9 +258,19 @@ image. The files exist only in the image and nothing on your host changes:
 - **Launch flags.** Cursor's own sandbox cannot run inside OpenShell, so the
   agent starts with `--sandbox disabled` and `--trust`; skip-permissions mode
   adds `--force`.
+- **No code from the agent's home.** The `cursor-agent` wrapper keeps Node's
+  compile cache in `~/.cache`, and Node runs the code cached there in place
+  of the root-owned sources. The sandbox launcher turns that cache off and
+  drops `NODE_OPTIONS` and `NODE_PATH`.
 - **Image pin.** The image installs Cursor Agent 2026.07.23-e383d2b, the
   build the hook contract reviewed, from its release archive with a pinned
   SHA-256.
+- **Credentials.** Use the `defenseclaw-cursor` provider profile with a
+  Cursor API key when you can: OpenShell injects the key, so the sandbox only
+  sees a placeholder. A login inside the sandbox (`cursor-launch login`,
+  which sends its traffic through the DefenseClaw proxy) stores a long-lived
+  Cursor session in the sandbox home. The agent can read that session and
+  send it out, and a kept sandbox reuses it.
 - **Not verified yet.** Cursor Agent needs a Cursor account
   (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn, so its
   image has not passed the hook-fire check and is never selected for use.

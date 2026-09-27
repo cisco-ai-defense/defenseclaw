@@ -101,7 +101,8 @@ DefenseClaw can already render the sandbox image files for
 CLI, Amp, Cursor Agent, Kiro CLI and Devin CLI, but no command launches a
 sandbox yet. Claude Code, Codex, Copilot CLI and Cursor Agent register their
 hooks in a root-owned managed policy, so user and project settings cannot
-switch them off; the others use a file or plugin the agent can reach. Every
+switch them off. The others are in the user tier: the agent can edit their
+hook file, or code the agent or a repository adds runs beside the hooks. Every
 other connector is pending; the [capability matrix](/docs/capability-matrix)
 shows the status per connector.
 
