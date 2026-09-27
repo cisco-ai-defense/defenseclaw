@@ -207,7 +207,12 @@ func TestWatcherEventsAndGC(t *testing.T) {
 	e.watch.end(sb.Name, stream.ErrSandboxNotFound)
 	eventually(t, "garbage collection", func() bool {
 		got, err := e.m.Get(context.Background(), sb.Name)
-		return err == nil && got.Phase == "deleted"
+		if err != nil || got.Phase != "deleted" {
+			return false
+		}
+		// The record is written last; a read racing the write is retried.
+		recs, errs := e.m.records.loadAll()
+		return len(errs) == 0 && slices.ContainsFunc(recs, func(r *record) bool { return r.Name == sb.Name && r.Retained })
 	})
 	if names := e.providers(); len(names) != 0 {
 		t.Fatalf("providers left: %v", names)
