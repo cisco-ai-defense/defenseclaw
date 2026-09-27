@@ -157,7 +157,7 @@ func TestHermesTrustedShellArgs(t *testing.T) {
 	})
 }
 
-func TestTrustedShellWorkdirArgs(t *testing.T) {
+func TestTrustedShellArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, tool, args, want, cwd string
 		ok                                     bool
@@ -166,7 +166,24 @@ func TestTrustedShellWorkdirArgs(t *testing.T) {
 			`{"command":"echo hi > /tmp/x","timeout":120000}`, "/work/app/sub", true},
 		{"opencode-relative", "opencode", "bash", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
 		{"hermes-terminal", "hermes", "terminal", `{"command":"ls","workdir":"/tmp","background":false}`,
-			`{"background":false,"command":"ls"}`, "/tmp", true},
+			`{"command":"ls"}`, "/tmp", true},
+		{"hermes-controls", "hermes", "terminal",
+			`{"command":"ls","background":true,"timeout":60,"pty":true,"notify":true,"notify_on_complete":false,"watch_patterns":["done"]}`,
+			`{"command":"ls"}`, "", true},
+		{"hermes-notify-patterns", "hermes", "terminal", `{"command":"ls","notify":["a","b"]}`, `{"command":"ls"}`, "", true},
+		{"amp-timeout", "amp", "shell_command", `{"command":"ls","workdir":"/w","timeout_ms":10000}`, `{"command":"ls"}`, "/w", true},
+		{"devin-controls", "devin", "exec", `{"command":"ls","timeout":0,"tty":false}`, `{"command":"ls"}`, "", true},
+		{"kiro-summary", "kiro", "execute_bash", `{"command":"ls","summary":"list","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		{"copilot-sync", "copilot", "bash", `{"command":"ls","description":"list","mode":"sync","initial_wait":30}`, `{"command":"ls"}`, "", true},
+		{"copilot-async", "copilot", "powershell", `{"command":"ls","description":"list","mode":"async","detach":true}`, `{"command":"ls"}`, "", true},
+		// Arguments that change where or how the command runs stay for the
+		// parser, which does not prove them.
+		{"devin-shell-and-env", "devin", "exec", `{"command":"ls","shell_id":"s1","env":{"A":"1"},"shell_flavor":"zsh","timeout":5}`,
+			`{"command":"ls","env":{"A":"1"},"shell_flavor":"zsh","shell_id":"s1"}`, "", true},
+		{"copilot-reused-shell", "copilot", "bash", `{"command":"ls","mode":"sync","shellId":"s1"}`, `{"command":"ls","shellId":"s1"}`, "", true},
+		{"control-wrong-type", "hermes", "terminal", `{"command":"ls","background":"yes"}`, "", "", false},
+		{"notify-wrong-type", "hermes", "terminal", `{"command":"ls","notify":[1]}`, "", "", false},
+		{"label-wrong-type", "copilot", "bash", `{"command":"ls","description":["x"]}`, "", "", false},
 		{"amp-shell-command", "amp", "shell_command", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"cursor-shell", "cursor", "Shell", `{"command":"ls","cwd":"/w","timeout":30000}`, `{"command":"ls","timeout":30000}`, "/w", true},
 		// Cursor reports "" when the model named no directory.
@@ -189,7 +206,7 @@ func TestTrustedShellWorkdirArgs(t *testing.T) {
 		{"openhands", "openhands", "terminal", `{"command":"ls","cwd":"/w"}`, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, cwd, ok := TrustedShellWorkdirArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
+			got, cwd, ok := TrustedShellArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
 			if ok != tc.ok {
 				t.Fatalf("ok = %t, want %t (%s)", ok, tc.ok, got)
 			}

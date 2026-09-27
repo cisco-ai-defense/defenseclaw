@@ -50,7 +50,7 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		{"antigravity-other-cwd", "antigravity", "run_command",
 			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/tmp"}`},
 		// The working-directory argument of the other shell tools that have
-		// one (connector.TrustedShellWorkdirArgs).
+		// one, and their control arguments (connector.TrustedShellArgs).
 		{"opencode-bash-workdir", "opencode", "bash",
 			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","timeout":120000,"workdir":"/tmp"}`},
 		{"hermes-terminal-workdir", "hermes", "terminal",
@@ -65,6 +65,18 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","workdir":"/tmp"}`},
 		{"kiro-shell-working-dir", "kiro", "shell",
 			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","working_dir":"/tmp"}`},
+		{"hermes-terminal-controls", "hermes", "terminal",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","background":true,"timeout":60,"pty":false,"notify":["done"]}`},
+		{"amp-shell-command-timeout", "amp", "shell_command",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","workdir":"/tmp","timeout_ms":10000}`},
+		{"devin-exec-controls", "devin", "exec",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","timeout":0,"tty":false}`},
+		{"kiro-execute-bash-summary", "kiro", "execute_bash",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","summary":"write marker","working_dir":"/tmp"}`},
+		{"copilot-bash-controls", "copilot", "bash",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","description":"write marker","mode":"sync","initial_wait":30}`},
+		{"copilot-bash-async", "copilot", "bash",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","description":"write marker","mode":"async","detach":true}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const sessionCWD = "/work/app/sub"

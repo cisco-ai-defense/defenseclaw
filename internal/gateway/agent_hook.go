@@ -2102,18 +2102,19 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // sees. OpenHands' terminal tool and agy's run_command report execution
 // controls and model labels next to the command;
 // connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
-// project them onto the plain shell shape when that is exact. Text a tool
-// sends to a running process (OpenHands terminal input, agy
-// send_command_input, Hermes process write and submit) is projected the same
-// way, so it is judged as shell input rather than not at all. The recorded
-// ToolArgs never change.
+// project them onto the plain shell shape when that is exact, and
+// connector.TrustedShellArgs takes the working directory and control
+// arguments out of the other harnesses' shell tools. Text a tool sends to a
+// running process (OpenHands terminal input, agy send_command_input, Hermes
+// process write and submit) is projected the same way, so it is judged as
+// shell input rather than not at all. The recorded ToolArgs never change.
 //
 // cwd is the directory the tool call names for its command (agy's Cwd, and
-// the working-directory argument of the shell tools that have one, see
-// connector.TrustedShellWorkdirArgs), or "". It is the command's working
-// directory, so the caller uses it in place of the session's; left in the
-// arguments, any directory other than the workspace conflicted with the
-// request's working directory and the parse was ambiguous.
+// the working-directory argument of the shell tools that have one), or "".
+// It is the command's working directory, so the caller uses it in place of
+// the session's; left in the arguments, any directory other than the
+// workspace conflicted with the request's working directory and the parse
+// was ambiguous.
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "openhands":
@@ -2129,7 +2130,7 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 			return out, ""
 		}
 	}
-	if out, dir, ok := connector.TrustedShellWorkdirArgs(connectorName, toolName, args); ok {
+	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
 		return out, dir
 	}
 	return args, ""

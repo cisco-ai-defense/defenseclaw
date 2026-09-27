@@ -48,8 +48,9 @@ type workdirShellCall struct {
 // Hermes 0.21 terminal workdir, Amp shell_command workdir, Cursor Agent
 // preToolUse Shell cwd and beforeShellExecution cwd, Devin 3000.10 exec
 // workdir, Kiro CLI 2.24 shell/execute_bash working_dir, agy run_command
-// Cwd), and, as controls, those of the harnesses whose shell tool names
-// none.
+// Cwd), with and without the control arguments those tools also report
+// (timeouts, background and run modes, labels), and those of the harnesses
+// whose shell tool names none.
 func workdirShellCalls() []workdirShellCall {
 	const c = workdirMarkerCommand
 	return []workdirShellCall{
@@ -102,6 +103,28 @@ func workdirShellCalls() []workdirShellCall {
 			body: `{"hook_event_name":"preToolUse","cwd":"/work/app","session_id":"s1","tool_name":"execute_bash","tool_input":{"command":"` + c + `","working_dir":"{DIR}"}}`,
 			dirs: []string{"/work/app/sub"},
 		},
+		// The same tools with the control arguments they also report.
+		{
+			name: "hermes-terminal-controls", connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + c + `","workdir":"{DIR}","background":false,"timeout":60},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`,
+			dirs: []string{"/work/app/sub"},
+		},
+		{
+			name: "amp-shell-command-timeout", connector: "amp", version: "0.0.1785334225", contract: "amp-plugin-v1", path: "/api/v1/amp/hook",
+			body: `{"hook_event_name":"tool.call","tool_name":"shell_command","tool_input":{"command":"` + c + `","workdir":"{DIR}","timeout_ms":10000},"session_id":"T-1","cwd":"/work/app"}`,
+			dirs: []string{"/work/app/sub"},
+		},
+		{
+			name: "devin-exec-timeout", connector: "devin", version: "3000.4.25", contract: "devin-hooks-v1", path: "/api/v1/devin/hook",
+			body: `{"hook_event_name":"PreToolUse","session_id":"s1","prompt_id":"p1","cwd":"/work/app","tool_name":"exec","tool_input":{"command":"` + c + `","workdir":"{DIR}","timeout":30000}}`,
+			dirs: []string{"/work/app/sub"},
+		},
+		{
+			name: "kiro-execute-bash-summary", connector: "kiro", version: "2.24.1", contract: "kiro-cli-hooks-v1", path: "/api/v1/kiro/hook",
+			body: `{"hook_event_name":"preToolUse","cwd":"/work/app","session_id":"s1","tool_name":"execute_bash","tool_input":{"command":"` + c + `","summary":"write marker","working_dir":"{DIR}"}}`,
+			dirs: []string{"/work/app/sub"},
+		},
 		{
 			name: "antigravity-run-command", connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook",
 			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
@@ -128,6 +151,14 @@ func workdirShellCalls() []workdirShellCall {
 			headers: []string{"X-DefenseClaw-Copilot-Event", "preToolUse"},
 			body:    `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/app","toolName":"bash","toolArgs":{"command":"` + c + `","description":"write marker"}}`,
 			dirs:    []string{""},
+		},
+		{
+			// Copilot CLI 1.0.8x bash also reports its run mode and wait.
+			name: "copilot-bash-mode", connector: "copilot", version: "1.0.40", contract: "copilot-hooks-v1", path: "/api/v1/copilot/hook",
+			headers: []string{"X-DefenseClaw-Copilot-Event", "preToolUse"},
+			body: `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/app","toolName":"bash","toolArgs":{"command":"` + c + `",` +
+				`"description":"write marker","mode":"sync","initial_wait":30}}`,
+			dirs: []string{""},
 		},
 		{
 			name: "openhands-terminal", connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook",
