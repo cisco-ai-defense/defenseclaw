@@ -1571,3 +1571,34 @@ func TestResolvePolicySources(t *testing.T) {
 		t.Fatalf("nil Effective: %v", got)
 	}
 }
+
+func TestResolveReservesPrometheusListeners(t *testing.T) {
+	plan, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Destinations: []config.ObservabilityV8DestinationSource{
+			{Name: "metrics", Kind: config.ObservabilityV8DestinationPrometheus, Listen: "127.0.0.1:9464", Path: "/metrics"},
+			{Name: "all-interfaces", Kind: config.ObservabilityV8DestinationPrometheus, Listen: ":9465", Path: "/metrics"},
+			{Name: "off", Kind: config.ObservabilityV8DestinationPrometheus, Listen: "127.0.0.1:9466", Path: "/metrics",
+				Enabled: boolPtr(false)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, violations := mustResolve(t, testConfig(nil), Flags{HostPorts: []int{9464, 9465, 9466}, Observability: plan})
+	if len(violations) != 2 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{9466}) {
+		t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
+	}
+	for _, v := range violations {
+		if v.Constraint != "defenseclaw" || !strings.Contains(v.Message, "Prometheus exporter") {
+			t.Fatalf("violation %+v", v)
+		}
+	}
+	if err := eff.Allow(Action{Kind: ActionApprove, Host: OpenShellHostAlias, Port: 9464}); err == nil {
+		t.Fatal("approving the Prometheus listener was allowed")
+	}
+	// Without the plan nothing is known about the listeners.
+	eff, violations = mustResolve(t, testConfig(nil), Flags{HostPorts: []int{9464}})
+	if len(violations) != 0 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{9464}) {
+		t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
+	}
+}

@@ -96,6 +96,11 @@ type Flags struct {
 	// reserved like DefenseClaw's own listeners; 0 reserves the default
 	// OpenShellGatewayPort instead.
 	OpenShellGatewayPort int
+	// Observability is not a flag either: the compiled observability plan
+	// of the gateway the sandbox reports to. The listener port of each of
+	// its enabled Prometheus destinations is reserved. config.Config does
+	// not carry that plan, so a caller that has it must pass it.
+	Observability *config.ObservabilityV8Plan
 }
 
 // Authority says how far the admin block can be trusted to bind the user.
@@ -376,7 +381,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 			home:          home,
 			hostNames:     ownHostNames(),
 			settings:      make(map[string]Setting),
-			reservedPorts: reservedPorts(cfg, flags.OpenShellGatewayPort),
+			reservedPorts: reservedPorts(cfg, flags),
 		},
 	}
 	flags = r.dropLockedFlags(o, flags)
@@ -501,9 +506,10 @@ func ownHostNames() []string {
 
 // reservedPorts are the host listeners no policy, flag or approval ever
 // opens to a sandbox: DefenseClaw's own (API, sandbox ingress, egress proxy,
-// guardrail proxy, managed model router), the OpenClaw gateway, and the
-// OpenShell gateway the run is registered with.
-func reservedPorts(cfg *config.Config, openShellGatewayPort int) map[int]string {
+// guardrail proxy, managed model router, Prometheus exporters), the OpenClaw
+// gateway, and the OpenShell gateway the run is registered with.
+func reservedPorts(cfg *config.Config, flags Flags) map[int]string {
+	openShellGatewayPort := flags.OpenShellGatewayPort
 	ports := map[int]string{}
 	reserve := func(port int, what string) {
 		if _, taken := ports[port]; port > 0 && !taken {
@@ -528,6 +534,31 @@ func reservedPorts(cfg *config.Config, openShellGatewayPort int) map[int]string 
 	reserve(routerPort(cfg.Routing), "DefenseClaw's model router")
 	reserve(openShellGatewayPort, "the OpenShell gateway")
 	reserve(gatewayPort, "the OpenClaw gateway")
+	for _, port := range prometheusPorts(flags.Observability) {
+		reserve(port, "DefenseClaw's Prometheus exporter")
+	}
+	return ports
+}
+
+// prometheusPorts returns the listener ports of a plan's enabled Prometheus
+// destinations.
+func prometheusPorts(plan *config.ObservabilityV8Plan) []int {
+	if plan == nil {
+		return nil
+	}
+	var ports []int
+	for _, d := range plan.Destinations() {
+		if d.Kind != config.ObservabilityV8DestinationPrometheus || !d.Enabled {
+			continue
+		}
+		_, port, err := net.SplitHostPort(strings.TrimSpace(d.Transport.Listen))
+		if err != nil {
+			continue
+		}
+		if n, err := strconv.Atoi(port); err == nil && n > 0 && n <= 65535 {
+			ports = append(ports, n)
+		}
+	}
 	return ports
 }
 
