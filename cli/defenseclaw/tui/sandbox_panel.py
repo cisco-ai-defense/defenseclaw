@@ -75,7 +75,7 @@ SANDBOX_BUTTON_KEYS: dict[str, str] = {
     "sandboxes-unblock": "u",
     "sandboxes-approve": "a",
     "sandboxes-always": "A",
-    "sandboxes-reject": "r",
+    "sandboxes-reject": "x",
     "sandboxes-wrappers": "w",
     "sandboxes-refresh": "r",
     "sandboxes-detail": "enter",
@@ -433,7 +433,7 @@ class SandboxPanelMixin:
             "sandboxes-delete": ready and selected is not None,
             "sandboxes-undo": ready and selected is not None and selected.undo_available,
             "sandboxes-review": ready and selected is not None and selected.workdir_mode != "copy",
-            "sandboxes-unblock": ready and model.unblock_target() is not None,
+            "sandboxes-unblock": ready and self._sandbox_can_unblock(),
             "sandboxes-approve": ready and view == "asks" and model.selected_ask() is not None,
             "sandboxes-always": ready and view == "asks" and model.selected_ask() is not None,
             "sandboxes-reject": ready and view == "asks" and model.selected_ask() is not None,
@@ -441,6 +441,11 @@ class SandboxPanelMixin:
         }
         for button_id, show in visible.items():
             self._set_button_visible(f"#{button_id}", show)  # type: ignore[attr-defined]
+
+    def _sandbox_can_unblock(self) -> bool:
+        model = self.sandbox_model
+        target = model.unblock_target()
+        return target is not None and target.unblockable and not model.admin.unblock_refused
 
     def _handle_sandbox_control(self, button_id: str) -> None:
         key = SANDBOX_BUTTON_KEYS.get(button_id)
@@ -556,8 +561,8 @@ class SandboxPanelMixin:
         actions.append(
             MenuAction(
                 "always",
-                "In every sandbox (always)",
-                "Adds the host to openshell.egress.unblocked; private networks stay closed.",
+                "In every sandbox (always)…",
+                "Adds the host to openshell.egress.unblocked (asks first); private networks stay closed.",
             )
         )
         actions.append(MenuAction("cancel", "Cancel"))
@@ -567,9 +572,24 @@ class SandboxPanelMixin:
         if choice not in {"sandbox", "always"}:
             self._set_status("Unblock cancelled.")  # type: ignore[attr-defined]
             return
+        always = choice == "always"
+        if always:
+            # As approve-always and the macOS app do: every sandbox, now and
+            # later, may reach the host.
+            confirmed = await self._confirm(
+                f"Unblock {host} in every sandbox?",
+                "Every sandbox, now and future, may reach it (openshell.egress.unblocked). "
+                "Private networks and this machine stay closed.",
+                MenuAction("always", "Unblock everywhere", variant="warning"),
+            )
+            if not confirmed:
+                self._set_status("Unblock cancelled.")  # type: ignore[attr-defined]
+                return
         result = await self._sandbox_call(
-            "unblock_sandbox_egress", host, sandbox=sandbox if choice == "sandbox" else "", always=choice == "always"
+            "unblock_sandbox_egress", host, sandbox="" if always else sandbox, always=always
         )
+        # The daemon's egress.unblocked event says the same; do not wait for it.
+        self.sandbox_model.mark_unblocked(sandbox, host, always=always)
         message = str(result.get("message") or f"{host} unblocked")
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
@@ -627,6 +647,14 @@ class SandboxPanelMixin:
         await self.push_screen_wait(DetailScreen(f"Review {name}", review_pairs(result)))  # type: ignore[attr-defined]
 
     async def _sandbox_stop(self, name: str) -> None:
+        confirmed = await self._confirm(
+            f"Stop {name}?",
+            "Ends the harness session running in it. The sandbox is kept: connect (c) resumes it.",
+            MenuAction("stop", "Stop", variant="warning"),
+        )
+        if not confirmed:
+            self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
+            return
         self._set_status(f"Stopping {name}...")  # type: ignore[attr-defined]
         await self._sandbox_call("stop_sandbox", name)
         message = f"{name} stopped; it is kept for connect (c)"

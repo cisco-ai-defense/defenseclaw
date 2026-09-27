@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -91,6 +91,31 @@ def host_port(host: str, port: int) -> str:
     if port and port not in (80, 443):
         return f"{host}:{port}"
     return host
+
+
+def normalize_host(host: str) -> str:
+    """triage.NormalizeHost: lower case, no brackets, no trailing dot."""
+    text = host.strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text.removesuffix(".")
+
+
+def host_matches(pattern: str, host: str) -> bool:
+    """Whether an unblock pattern covers ``host`` (exact, or ``*.`` for subdomains)."""
+    pattern, host = normalize_host(pattern), normalize_host(host)
+    if not pattern or not host:
+        return False
+    if pattern.startswith("*."):
+        return host.endswith(pattern[1:])
+    return pattern == host
+
+
+def fit(text: str, width: int) -> str:
+    """``text`` cut to ``width`` characters with an ellipsis (0 keeps it whole)."""
+    if width <= 0 or len(text) <= width:
+        return text
+    return text[: max(0, width - 1)].rstrip() + "…"
 
 
 @dataclass(frozen=True)
@@ -270,6 +295,8 @@ class ActivityRow:
     tool: str = ""
     severity: str = ""
     bytes_up: int = 0
+    # An egress.unblocked event lifted this block since it happened.
+    unblocked: bool = False
 
     @property
     def blocked_destination(self) -> bool:
@@ -305,7 +332,9 @@ class ActivityRow:
             why = self.category or self.reason
             return host_port(self.host, self.port) + (f" ({why})" if why else "")
         if self.kind == "approval.requested":
-            return "asks to reach " + (text or host_port(self.host, self.port))
+            # The daemon's message is a whole sentence ("the sandbox asks to
+            # reach port 5432 on your machine"), as the Go CLI prints it.
+            return text or "asks to reach " + (host_port(self.host, self.port) or "a destination")
         if self.kind == "tool.blocked":
             line = f"{self.tool or 'tool call'} blocked"
             return line + (f": {self.reason}" if self.reason else "")
@@ -595,6 +624,9 @@ class SandboxesPanelModel:
                     continue
                 else:
                     self.last_seq = max(self.last_seq, row.seq)
+            if row.kind == "egress.unblocked" and row.host:
+                # Scope "always" lifts the host in every sandbox.
+                self.mark_unblocked(row.sandbox, row.host, always=row.reason == "always")
             self.feed.append(row)
             if toast:
                 notice = self._notice_for(row, now=now)
@@ -604,6 +636,30 @@ class SandboxesPanelModel:
                 self._apply_ask_event(row)
         self._clamp()
         return notices
+
+    def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False) -> None:
+        """Mark the feed's earlier blocks of ``host`` as lifted.
+
+        ``always`` covers every sandbox; otherwise only ``sandbox``'s blocks.
+        A later block of the same host (say, on another port) arrives as a
+        new event and is unblockable again.
+        """
+        if not host:
+            return
+        changed = False
+        rows: list[ActivityRow] = []
+        for row in self.feed:
+            if (
+                row.blocked_destination
+                and not row.unblocked
+                and (always or row.sandbox == sandbox)
+                and host_matches(host, row.host)
+            ):
+                row = replace(row, unblocked=True, unblockable=False)
+                changed = True
+            rows.append(row)
+        if changed:
+            self.feed = deque(rows, maxlen=FEED_LIMIT)
 
     def _apply_ask_event(self, row: ActivityRow) -> None:
         if row.kind == "approval.resolved" and row.approval_id:
@@ -623,9 +679,8 @@ class SandboxesPanelModel:
                 "warn", f"✗ {host_port(row.host, row.port)} blocked{where}{why}. Sandboxes panel (7): u to unblock"
             )
         if row.kind == "approval.requested":
-            where = f"{row.sandbox} asks" if row.sandbox else "A sandbox asks"
-            target = row.message or host_port(row.host, row.port) or "a destination"
-            return SandboxNotice("warn", f"? {where} to reach {target}. Sandboxes panel (7): t for Asks")
+            where = f"{row.sandbox}: " if row.sandbox else ""
+            return SandboxNotice("warn", f"? {where}{row.summary}. Sandboxes panel (7): press a to review")
         if row.kind == "finding" and row.reason == "hooks_unreachable":
             return SandboxNotice("error", f"{row.sandbox}: {row.summary}")
         if row.kind == "finding" and row.reason == "hooks_restored":
@@ -685,27 +740,52 @@ class SandboxesPanelModel:
             return self.asks[self.cursor]
         return None
 
+    def _sandbox_exists(self, name: str) -> bool:
+        # Before the first list read nothing is known to be gone.
+        return not name or not self.status.loaded or any(row.name == name for row in self.rows)
+
+    def current_blocks(self, sandbox: str = "") -> tuple[ActivityRow, ...]:
+        """Blocked destinations still in force, newest first.
+
+        Blocks an unblock lifted, and blocks of sandboxes that no longer
+        exist, are history only.
+        """
+        return tuple(
+            row
+            for row in reversed(self.feed)
+            if row.blocked_destination
+            and not row.unblocked
+            and (not sandbox or row.sandbox == sandbox)
+            and self._sandbox_exists(row.sandbox)
+        )
+
     def latest_unblockable(self, sandbox: str = "") -> ActivityRow | None:
-        for row in reversed(self.feed):
-            if row.blocked_destination and row.unblockable and (not sandbox or row.sandbox == sandbox):
-                return row
-        return None
+        return next((row for row in self.current_blocks(sandbox) if row.unblockable), None)
+
+    def _unblock_scope(self) -> tuple[bool, str]:
+        """(scoped, sandbox): the sandbox ``u`` is limited to, when one is selected."""
+        if self.view == "sandboxes":
+            row = self.selected_sandbox()
+            return (row is not None, row.name if row is not None else "")
+        if self.view == "asks":
+            ask = self.selected_ask()
+            return (ask is not None and bool(ask.sandbox), ask.sandbox if ask is not None else "")
+        return (False, "")
 
     def unblock_target(self) -> ActivityRow | None:
         """The blocked destination ``u`` acts on.
 
-        The selected feed row when it is a blocked destination; otherwise the
-        most recent unblockable block (of the selected sandbox, when one is
-        selected), so a toast's "press u" works from any view.
+        In Activity, the selected feed row when it is a blocked destination.
+        Elsewhere, the newest unblockable block of the selected sandbox (the
+        ask's sandbox in Asks); never another sandbox's block. With no
+        sandbox selected, the newest unblockable block.
         """
-        event = self.selected_event()
-        if event is not None and event.blocked_destination:
-            return event
-        selected = self.selected_sandbox() if self.view == "sandboxes" else None
-        if selected is not None:
-            own = self.latest_unblockable(selected.name)
-            if own is not None:
-                return own
+        if self.view == "activity":
+            event = self.selected_event()
+            return event if event is not None and event.blocked_destination else None
+        scoped, sandbox = self._unblock_scope()
+        if scoped:
+            return self.latest_unblockable(sandbox)
         return self.latest_unblockable()
 
     # ---- keys -------------------------------------------------------------
@@ -733,9 +813,10 @@ class SandboxesPanelModel:
             return SandboxPanelAction()
         if key == "u":
             return self._unblock_action()
-        if key in {"a", "A"} or (key == "r" and self.view == "asks"):
+        if key in {"a", "A"} or (key == "x" and self.view == "asks"):
             return self._ask_action(key)
         if key == "r":
+            # Refresh in every view, as in every other panel; x rejects an ask.
             return SandboxPanelAction("refresh")
         if key == "n":
             return SandboxPanelAction("new_run")
@@ -746,8 +827,31 @@ class SandboxesPanelModel:
         return SandboxPanelAction()
 
     def _unblock_action(self) -> SandboxPanelAction:
+        # openshell.admin.allow_unblock: false makes the daemon report every
+        # block as not unblockable, so say why before looking at the flag.
+        if self.admin.unblock_refused and self.current_blocks():
+            return SandboxPanelAction("hint", hint=f"Unblocking is {ADMIN_MESSAGE}.")
+        if self.view == "activity":
+            event = self.selected_event()
+            if event is None or not event.blocked_destination:
+                return SandboxPanelAction("hint", hint="Select a blocked destination (✗) to unblock it.")
+            if event.unblocked:
+                where = f" for {event.sandbox}" if event.sandbox else ""
+                return SandboxPanelAction("hint", hint=f"{event.host} is already unblocked{where}.")
+            if not self._sandbox_exists(event.sandbox):
+                return SandboxPanelAction("hint", hint=f"{event.sandbox} no longer exists.")
         target = self.unblock_target()
         if target is None:
+            scoped, sandbox = self._unblock_scope()
+            other = self.latest_unblockable() if scoped else None
+            if other is not None and other.sandbox != sandbox:
+                return SandboxPanelAction(
+                    "hint",
+                    hint=f"No blocked destination in {sandbox}. {other.host} was blocked in {other.sandbox}: "
+                    "select that sandbox, or press t for Activity.",
+                )
+            if scoped:
+                return SandboxPanelAction("hint", hint=f"No blocked destination in {sandbox} to unblock.")
             return SandboxPanelAction("hint", hint="No blocked destination to unblock.")
         if not target.unblockable:
             return SandboxPanelAction(
@@ -755,8 +859,6 @@ class SandboxesPanelModel:
                 hint=f"{target.host} cannot be unblocked here "
                 "(private networks, metadata and your organization's blocks stay closed).",
             )
-        if self.admin.unblock_refused:
-            return SandboxPanelAction("hint", hint=f"Unblocking is {ADMIN_MESSAGE}.")
         return SandboxPanelAction("unblock", sandbox=target.sandbox, host=target.host)
 
     def _ask_action(self, key: str) -> SandboxPanelAction:
@@ -767,9 +869,9 @@ class SandboxesPanelModel:
             self.view = "asks"
             self.cursor = 0
             return SandboxPanelAction(
-                "view", hint="Review the ask, then press a to approve, A to always approve, r to reject."
+                "view", hint="Review the ask, then press a to approve, A to always approve, x to reject."
             )
-        if key == "r":
+        if key == "x":
             return SandboxPanelAction("reject", sandbox=ask.sandbox, approval_id=ask.id)
         if key == "A" and self.admin.unblock_refused:
             return SandboxPanelAction("hint", hint=f"Always-approve is {ADMIN_MESSAGE}; press a to approve once.")
@@ -857,7 +959,7 @@ class SandboxesPanelModel:
                     row.time_text,
                     row.sandbox or "-",
                     row.glyph,
-                    row.summary + ("  (u unblocks)" if row.unblockable else ""),
+                    row.summary + ("  (unblocked)" if row.unblocked else "  (u unblocks)" if row.unblockable else ""),
                 )
                 for row in self.feed_rows()
             )
@@ -921,7 +1023,15 @@ class SandboxesPanelModel:
             if event.reason:
                 pairs.append(("Reason", event.reason))
             if event.blocked_destination:
-                pairs.append(("Unblock", "press u" if event.unblockable else "not unblockable here"))
+                if event.unblocked:
+                    unblock = "unblocked since"
+                elif self.admin.unblock_refused:
+                    unblock = ADMIN_MESSAGE
+                elif event.unblockable:
+                    unblock = "press u"
+                else:
+                    unblock = "not unblockable here (private networks, metadata and your organization's blocks)"
+                pairs.append(("Unblock", unblock))
             return "Activity", tuple(pairs)
         if self.view == "asks":
             ask = self.selected_ask()
@@ -943,7 +1053,7 @@ class SandboxesPanelModel:
                     pairs.append((label, value))
             if ask.hit_count:
                 pairs.append(("Attempts", str(ask.hit_count)))
-            pairs.append(("Decide", "a approve · A always approve · r reject"))
+            pairs.append(("Decide", "a approve · A always approve · x reject"))
             return "Ask", tuple(pairs)
         row = self.selected_sandbox()
         if row is None:
@@ -973,8 +1083,9 @@ class SandboxesPanelModel:
         return f"Sandbox {row.name}", tuple(pairs)
 
     def total_count(self) -> int:
-        """Tab-badge count: asks waiting plus unblockable blocks in the feed."""
-        return len(self.asks) + sum(1 for row in self.feed if row.blocked_destination)
+        """Tab-badge count: asks waiting plus distinct destinations ``u`` could lift."""
+        blocks = {(row.sandbox, normalize_host(row.host)) for row in self.current_blocks() if row.unblockable}
+        return len(self.asks) + len(blocks)
 
     def overview_line(self) -> str:
         """One line for Overview; empty when sandboxes were never set up."""

@@ -274,13 +274,32 @@ def test_asks_toast_and_leave_when_resolved() -> None:
                 "kind": "approval.requested",
                 "sandbox": "myapp-claude-7f3a",
                 "approval_id": "ask-1",
-                "message": "host.openshell.internal:5432",
+                "host": "host.openshell.internal",
+                "port": 5432,
+                # triage.go's sentence, as the daemon sends it.
+                "message": "the sandbox asks to reach port 5432 on your machine",
             }
         ]
     )
-    assert notices and "myapp-claude-7f3a asks to reach host.openshell.internal:5432" in notices[0].message
+    assert [n.message for n in notices] == [
+        "? myapp-claude-7f3a: the sandbox asks to reach port 5432 on your machine. "
+        "Sandboxes panel (7): press a to review"
+    ]
     model.add_events([{"seq": 21, "kind": "approval.resolved", "approval_id": "ask-1"}])
     assert model.asks == ()
+
+
+def test_ask_rows_show_the_daemons_sentence_once() -> None:
+    model = SandboxesPanelModel()
+    model.add_events(
+        [
+            {"seq": 1, "kind": "approval.requested", "sandbox": "x", "message": "the sandbox asks to reach 10.0.0.5"},
+            {"seq": 2, "kind": "approval.requested", "sandbox": "x", "host": "10.0.0.5", "port": 22},
+        ]
+    )
+    summaries = [row.summary for row in model.feed]
+    assert summaries == ["the sandbox asks to reach 10.0.0.5", "asks to reach 10.0.0.5:22"]
+    assert all(summary.count("asks to reach") == 1 for summary in summaries)
 
 
 def test_a_planted_repository_raises_a_toast() -> None:
@@ -360,7 +379,10 @@ def test_u_respects_the_organization_policy() -> None:
 
 
 def test_u_without_blocks() -> None:
-    assert _model().handle_key("u").hint == "No blocked destination to unblock."
+    assert _model().handle_key("u").hint == "No blocked destination in fix-tests to unblock."
+    empty = SandboxesPanelModel()
+    empty.set_snapshot(STATUS, [], [])
+    assert empty.handle_key("u").hint == "No blocked destination to unblock."
 
 
 def test_ask_keys() -> None:
@@ -369,9 +391,12 @@ def test_ask_keys() -> None:
     assert first.kind == "view" and model.view == "asks" and "a to approve" in first.hint
     assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")
     assert model.handle_key("A").always is True
-    assert model.handle_key("r") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-1")
+    assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-1")
+    # r refreshes in every view, as in every other panel; it never rejects.
+    assert model.handle_key("r").kind == "refresh"
     model.view = "sandboxes"
     assert model.handle_key("r").kind == "refresh"
+    assert model.handle_key("x").kind == "none"
 
 
 def test_always_approve_respects_the_organization_policy() -> None:
@@ -483,6 +508,7 @@ def test_detail_pairs_for_each_view() -> None:
     model.view = "asks"
     title, pairs = model.detail_pairs()
     assert title == "Ask" and dict(pairs)["Decide"].startswith("a approve")
+    assert "x reject" in dict(pairs)["Decide"] and "r reject" not in dict(pairs)["Decide"]
     model.add_events([BLOCKED])
     model.view = "activity"
     assert dict(model.detail_pairs()[1])["Unblock"] == "press u"
@@ -663,7 +689,8 @@ async def test_unblock_asks_for_the_scope(fetch, monkeypatch, choice, expected) 
     app = DefenseClawTUI(config=_config())
     calls = _Calls({"message": "webhook.site unblocked for myapp-claude-7f3a"})
     monkeypatch.setattr(app, "_sandbox_call", calls)
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers(choice))
+    # "always" then confirms, as approve-always does.
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers(choice, "always"))
     async with app.run_test(size=(160, 44)):
         await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
     assert calls.calls == ([expected] if expected else [])
@@ -742,6 +769,7 @@ async def test_api_refusals_become_plain_toasts(fetch, monkeypatch) -> None:
 
     monkeypatch.setattr(app, "_sandbox_call", refuse)
     monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("stop"))
     async with app.run_test(size=(160, 44)):
         await app._guarded_sandbox_action(app._sandbox_stop("docs"))  # noqa: SLF001
     assert toasts[-1] == ("warn", f"{ADMIN_MESSAGE}: unblocking is not allowed")
@@ -974,3 +1002,106 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     )
     assert [n.level for n in notices] == ["error", "success"]
     assert notices[0].message.startswith("x: DefenseClaw hooks are not reaching the daemon")
+
+
+# --- review fixes: unblock state, scope and policy ------------------------------
+
+
+UNBLOCKED_MYAPP = {
+    "seq": 30,
+    "kind": "egress.unblocked",
+    "sandbox": "myapp-claude-7f3a",
+    "host": "webhook.site",
+    "reason": "sandbox",
+    "message": "unblocked webhook.site for sandbox myapp-claude-7f3a",
+}
+
+
+def test_an_unblock_event_lifts_the_block_it_covers() -> None:
+    model = _model()
+    elsewhere = {**BLOCKED, "seq": 7, "sandbox": "fix-tests"}
+    model.add_events([BLOCKED, elsewhere])
+    assert model.total_count() == 1 + 2  # the ask plus two blocked destinations
+    model.add_events([{**UNBLOCKED_MYAPP, "host": "WEBHOOK.site."}])
+    assert [(row.sandbox, row.host) for row in model.current_blocks()] == [("fix-tests", "webhook.site")]
+    model.cursor = 1  # myapp-claude-7f3a
+    action = model.handle_key("u")
+    assert action.kind == "hint" and "No blocked destination in myapp-claude-7f3a" in action.hint
+    assert model.total_count() == 1 + 1
+    model.view = "activity"
+    rows = model.data_table_rows()
+    assert any(row[3] == "webhook.site (exfil destination)  (unblocked)" for row in rows)
+    model.cursor = len(rows) - 1  # the oldest: myapp's lifted block
+    assert "already unblocked for myapp-claude-7f3a" in model.handle_key("u").hint
+    # "always" lifts it everywhere; a later block is offered again.
+    model.add_events([{**UNBLOCKED_MYAPP, "seq": 31, "sandbox": "", "reason": "always"}])
+    assert model.current_blocks() == ()
+    model.add_events([{**BLOCKED, "seq": 32}])
+    assert [row.seq for row in model.current_blocks()] == [32]
+
+
+def test_blocks_of_deleted_sandboxes_are_history() -> None:
+    model = _model()
+    model.add_events([{**BLOCKED, "sandbox": "gone"}])
+    assert model.current_blocks() == () and model.total_count() == 1
+
+
+def test_u_never_reaches_into_another_sandbox() -> None:
+    model = _model()
+    model.add_events([BLOCKED])  # blocked in myapp-claude-7f3a
+    model.cursor = 0  # fix-tests is selected
+    assert model.unblock_target() is None
+    action = model.handle_key("u")
+    assert action.kind == "hint"
+    assert action.hint == (
+        "No blocked destination in fix-tests. webhook.site was blocked in myapp-claude-7f3a: "
+        "select that sandbox, or press t for Activity."
+    )
+    # Asks use the ask's sandbox.
+    model.view = "asks"
+    assert model.handle_key("u") == SandboxPanelAction("unblock", sandbox="myapp-claude-7f3a", host="webhook.site")
+
+
+def test_u_names_the_organization_policy_when_unblocking_is_refused() -> None:
+    # allow_unblock: false makes the daemon report every block as not unblockable.
+    model = _model(admin=AdminPolicy(allow_unblock=False))
+    model.add_events([{**BLOCKED, "unblockable": False}])
+    model.cursor = 1
+    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
+    model.cursor = 0
+    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
+    model.view = "activity"
+    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
+    assert dict(model.detail_pairs()[1])["Unblock"] == ADMIN_MESSAGE
+
+
+# --- review fixes: detail keys, review scrolling, confirmations -----------------
+
+
+@pytest.mark.asyncio
+async def test_stop_asks_first(fetch, monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls()
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "stop"))
+    async with app.run_test(size=(160, 44)):
+        await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
+        assert calls.calls == []
+        await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
+    assert calls.calls == [("stop_sandbox", ("myapp-claude-7f3a",), {})]
+
+
+@pytest.mark.asyncio
+async def test_always_unblock_confirms_and_a_done_unblock_is_no_longer_offered(fetch, monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"message": "unblocked webhook.site for every sandbox"})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("always", "cancel", "sandbox"))
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        app.sandbox_model.add_events([BLOCKED])
+        await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
+        assert calls.calls == [], "cancelling the confirmation unblocks nothing"
+        await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
+        assert app.sandbox_model.current_blocks() == ()
+    assert calls.calls == [("unblock_sandbox_egress", ("webhook.site",), {"sandbox": "myapp-claude-7f3a", "always": False})]
