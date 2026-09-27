@@ -881,6 +881,49 @@ func TestProxyLargeUploadBlock(t *testing.T) {
 	}
 }
 
+// Rotating subdomains of one domain, or names of different domains that
+// all point at one server, share one large-upload budget: each fresh name is
+// first-seen, but the domain or the address is not.
+func TestProxyLargeUploadAcrossNames(t *testing.T) {
+	for name, hostFor := range map[string]func(i int) (string, string){
+		"subdomains": func(i int) (string, string) {
+			return fmt.Sprintf("c%d.attacker.example", i), fmt.Sprintf("1.1.1.%d", 10+i)
+		},
+		"one address": func(i int) (string, string) { return fmt.Sprintf("drop%d.example", i), publicV4 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, func(c *harnessConfig) {
+				c.counter = &CounterOptions{LargeUploadBytes: 1024, BlockLargeUploads: true}
+			})
+			sinkAddr, received := startSink(t)
+			h.dialer.route(443, sinkAddr)
+			for i := 0; i < 8; i++ {
+				host, addr := hostFor(i)
+				h.resolver.set(host, []string{addr})
+				conn, br, resp := h.connect(host+":443", basicAuth(h.cred), helloFor(host))
+				if resp.status != http.StatusOK {
+					if b := decodeBlock(t, resp.body); b.Category != CategoryLargeUpload {
+						t.Fatalf("CONNECT %s = %d %+v", host, resp.status, b)
+					}
+					continue
+				}
+				_, _ = conn.Write(bytes.Repeat([]byte("u"), 256))
+				_ = conn.(interface{ CloseWrite() error }).CloseWrite()
+				_, _ = io.Copy(io.Discard, br)
+				_ = conn.Close()
+			}
+			eventually(t, "every tunnel to close", func() bool { return len(h.proxy.Tunnels()) == 0 })
+			if got := received(); got > 1024 {
+				t.Errorf("the sink received %d bytes across fresh names past the 1024-byte block", got)
+			}
+			e := h.sink.wait(t, EventLargeUpload, 1)[0]
+			if !e.Terminated || !strings.Contains(e.Reason, "destinations") {
+				t.Errorf("large_upload event = %+v", e)
+			}
+		})
+	}
+}
+
 func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	var got atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

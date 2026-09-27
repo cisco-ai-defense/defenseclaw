@@ -45,7 +45,11 @@ const (
 	// normal first leg of the handshake for clients such as git.
 	EventAuthFailed EventKind = "auth_failed"
 	// EventLargeUpload: bytes sent to a first-seen destination crossed the
-	// large-upload threshold. Emitted once per binding and destination.
+	// large-upload threshold, counted per host and, across a binding's
+	// first-seen hosts, per registrable domain and per resolved address.
+	// Emitted once per binding and host, domain or address; Reason names
+	// the domain or address when one of those crossed, and BytesUp is the
+	// total that did.
 	EventLargeUpload EventKind = "large_upload"
 )
 

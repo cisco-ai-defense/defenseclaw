@@ -639,7 +639,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		p.dialFailedRaw(conn, pr, dec, err, start)
 		return
 	}
-	flow, first := p.counter.open(pr, dec.Host)
+	flow, first := p.counter.open(pr, dec.Host, remote.Addr())
 	defer flow.close()
 	t := &tunnel{
 		id: newTunnelID(), principal: pr, method: http.MethodConnect, dec: dec, started: start,
@@ -901,6 +901,10 @@ func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e := p.event(EventLargeUpload, t.principal, t.method, t.dec)
 	e.TunnelID = t.id
 	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason()
+	if v.scope != "" {
+		e.Reason = fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
+			formatBytes(p.counter.LargeUploadBytes()), v.scope)
+	}
 	e.BytesUp = v.total
 	if d := t.flow.dest.Load(); d != nil {
 		e.BytesDown = d.down.Load()

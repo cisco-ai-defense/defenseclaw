@@ -180,12 +180,14 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), forwardKey{}, st)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			st.setRemote(info.Conn.RemoteAddr().String())
+			remote := info.Conn.RemoteAddr().String()
+			st.setRemote(remote)
 			if ic := asIdleConn(info.Conn); ic != nil {
 				ic.owner.Store(t)
 				st.upstream.Store(ic)
 			}
-			flow.open()
+			addr, _ := netip.ParseAddrPort(remote)
+			flow.openAt(addr.Addr())
 		},
 	})
 	defer func() {
