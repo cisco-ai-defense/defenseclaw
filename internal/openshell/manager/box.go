@@ -263,6 +263,26 @@ func lifecycleMessage(name string, phase audit.SandboxPhase) string {
 	}
 }
 
+// displaySafe makes the text of a view that a sandbox or its project can
+// shape (warnings naming project files, OpenShell's endpoint reports, the
+// last blocked tool, the workspace summary) safe to print on the user's
+// terminal. The nested-repository paths are cleaned by nestedView.
+func displaySafe(v *sandboxapi.Sandbox) {
+	v.Warnings = sandboxapi.DisplayTexts(v.Warnings)
+	v.Hooks.LastBlocked = sandboxapi.DisplayText(v.Hooks.LastBlocked)
+	for i := range v.Endpoints {
+		ep := &v.Endpoints[i]
+		ep.Host, ep.Path, ep.Result = sandboxapi.DisplayText(ep.Host), sandboxapi.DisplayText(ep.Path), sandboxapi.DisplayText(ep.Result)
+	}
+	if w := v.Workspace; w != nil {
+		clean := *w
+		clean.Project = sandboxapi.DisplayText(w.Project)
+		clean.Hidden, clean.Protected = sandboxapi.DisplayTexts(w.Hidden), sandboxapi.DisplayTexts(w.Protected)
+		clean.Context, clean.Warnings = sandboxapi.DisplayTexts(w.Context), sandboxapi.DisplayTexts(w.Warnings)
+		v.Workspace = &clean
+	}
+}
+
 // viewOf renders the API form of a box.
 func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	m.mu.Lock()
@@ -353,6 +373,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.Blocked = b.blocked
+	displaySafe(&v)
 	if b.unrecorded {
 		v.Warnings = append(slices.Clip(v.Warnings),
 			"DefenseClaw has no readable record of this sandbox; it has no web egress and cannot start again until you delete it")

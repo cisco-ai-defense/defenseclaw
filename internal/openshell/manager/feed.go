@@ -63,8 +63,15 @@ func NewFeed(size int, now func() time.Time) *Feed {
 }
 
 // Publish stamps ev with the next sequence number (and the time, when
-// unset), buffers it and hands it to every matching subscriber.
+// unset), buffers it and hands it to every matching subscriber. Its text
+// is made safe to print first (sandboxapi.DisplayText): events carry what a
+// sandbox controls (tool names, directory names, hosts), and the CLI and
+// the TUI print them on the user's terminal.
 func (f *Feed) Publish(ev sandboxapi.ActivityEvent) sandboxapi.ActivityEvent {
+	for _, s := range []*string{&ev.Sandbox, &ev.Host, &ev.Method, &ev.Source, &ev.Category, &ev.Rule, &ev.ApprovalID,
+		&ev.Tool, &ev.Event, &ev.Phase, &ev.Severity, &ev.Reason, &ev.Message} {
+		*s = sandboxapi.DisplayText(*s)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seq++

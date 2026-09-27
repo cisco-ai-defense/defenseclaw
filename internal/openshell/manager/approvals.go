@@ -126,9 +126,16 @@ func (a *approval) wire() sandboxapi.Approval {
 		if protocol == "" && host == a.decision.Host {
 			protocol = ep.Protocol
 		}
-		out.Endpoints = append(out.Endpoints, sandboxapi.ApprovalEndpoint{Host: host, Port: ep.Port, Protocol: ep.Protocol})
+		out.Endpoints = append(out.Endpoints, sandboxapi.ApprovalEndpoint{Host: sandboxapi.DisplayText(host), Port: ep.Port,
+			Protocol: sandboxapi.DisplayText(ep.Protocol)})
 	}
-	out.Protocol = protocol
+	out.Protocol = sandboxapi.DisplayText(protocol)
+	// The proposal is the agent's (and the policy advisor's) text; the CLI
+	// prints it on the user's terminal.
+	for _, s := range []*string{&out.Host, &out.Binary, &out.Reason, &out.Rationale, &out.SecurityNotes, &out.RuleName} {
+		*s = sandboxapi.DisplayText(*s)
+	}
+	out.AllowedIPs, out.Binaries = sandboxapi.DisplayTexts(out.AllowedIPs), sandboxapi.DisplayTexts(out.Binaries)
 	return out
 }
 

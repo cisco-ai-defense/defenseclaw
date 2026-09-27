@@ -245,7 +245,10 @@ func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection)
 	}
 	ctx = context.WithoutCancel(ctx)
 	one := int64(1)
-	label := d.Label()
+	// The names are the agent's: made safe to print before they reach
+	// the finding, the feed and the terminal.
+	label := sandboxapi.DisplayText(d.Label())
+	d.Dir, d.Quarantined, d.Error = sandboxapi.DisplayText(d.Dir), sandboxapi.DisplayText(d.Quarantined), sandboxapi.DisplayText(d.Error)
 	severity, title, description, remediation := "HIGH", "", "", ""
 	switch {
 	case d.Kind == nestguard.KindGitlink:
@@ -301,7 +304,8 @@ func nestedView(g *guardRecord) []sandboxapi.NestedRepo {
 	out := make([]sandboxapi.NestedRepo, 0, len(g.Detections))
 	for _, d := range g.Detections {
 		out = append(out, sandboxapi.NestedRepo{
-			Kind: string(d.Kind), Path: d.Label(), Quarantined: d.Quarantined, Error: d.Error, At: d.At,
+			Kind: string(d.Kind), Path: sandboxapi.DisplayText(d.Label()), Quarantined: sandboxapi.DisplayText(d.Quarantined),
+			Error: sandboxapi.DisplayText(d.Error), At: d.At,
 		})
 	}
 	return out
