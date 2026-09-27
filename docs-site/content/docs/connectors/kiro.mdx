@@ -78,42 +78,47 @@ Kiro surface the editor launches. See the
 configuration, supported agents, observability attributes, and the
 direct-launch bypass boundary.
 
-## OpenShell sandbox
+## In an OpenShell sandbox
 
-<Callout type="info" title="In development">
-No command launches Kiro CLI in an OpenShell sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
-they ship; today it covers legacy cleanup.
-</Callout>
+`defenseclaw sandbox run kiro` runs Kiro CLI in an NVIDIA OpenShell sandbox on
+Linux or macOS: the agent sees only your project folder, and DefenseClaw hooks
+gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
+the session and every flag. The first run builds the Kiro CLI image;
+`defenseclaw sandbox image build kiro` builds it ahead of time
+(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
+you name Kiro with `--harness kiro`).
 
-DefenseClaw can render the files it adds to a Kiro CLI OpenShell overlay
-image. The files exist only in the image and nothing on your host changes:
-
-- **Hooks in the user tier.** Kiro CLI reads hooks from the agent it runs
-  with. It picks that agent by the name inside any file in `~/.kiro/agents`
-  or the project's `.kiro/agents`, so any agent file there could replace the
-  DefenseClaw one. The DefenseClaw agent therefore lives alone in root-owned
-  `/usr/local/lib/defenseclaw/kiro`. The sandbox launcher sets
-  `KIRO_AGENT_CONFIG_DIR` to that folder on every start, and Kiro then reads
-  no other agents. The launcher also drops the other Kiro variables that move
-  Kiro's agents, settings or shell. Kiro has no system settings tier and
-  still loads user and project settings and MCP servers, so the tier is
-  user.
-- **Fail closed.** Kiro vetoes a tool only on exit code 2 from `preToolUse`,
-  so the sandbox hook exits 2 on every failure. The hooks reach the gateway
-  through the [hook ingress](/docs/reference/gateway-api#hook-ingress) with a
-  per-sandbox token.
-- **Launch flags.** The launcher runs Kiro's local V2 agent engine with the
-  DefenseClaw agent; skip-permissions mode adds `--trust-all-tools`.
-- **Image pin.** The image installs Kiro CLI 2.24.1 from its release archive,
-  checked against the SHA-256 in Kiro's release manifest.
-- **Credentials.** Use the `defenseclaw-kiro` provider profile with a Kiro
-  API key when you can: OpenShell injects the key, so the sandbox only sees a
-  placeholder. A login inside the sandbox (`kiro-launch login
-  --use-device-flow`, which sends its traffic through the DefenseClaw proxy)
-  stores a long-lived Kiro token in the sandbox home. The agent can read that
-  token and send it out, and a kept sandbox reuses it.
-- **Checked before use.** The image is verified with Kiro's own
-  scripted-response mode: every required hook fired, a blocked tool call did
-  not run, and hostile settings changed nothing. A real model through a Kiro
-  API key or login has not been tested.
+- **User tier.** Kiro CLI reads hooks from the agent it runs with, and picks
+  that agent by the name inside any file in `~/.kiro/agents` or the project's
+  `.kiro/agents`. The DefenseClaw agent therefore lives alone in root-owned
+  `/usr/local/lib/defenseclaw/kiro`, and the launcher points
+  `KIRO_AGENT_CONFIG_DIR` there on every start, so Kiro reads no other agent.
+  It also drops the other Kiro variables that move Kiro's agents, settings or
+  shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
+  `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
+  verified. Kiro has no system settings tier and still loads user and project
+  settings and MCP servers, so the tier is user. Kiro vetoes a tool only on
+  exit code 2 from `preToolUse`, so the sandbox hook exits 2 on every failure.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs): Kiro
+  starts with `--trust-all-tools`. `--safe`, or the `strict` pack, keeps its
+  prompts and drops `--trust-all-tools` from the arguments you pass.
+- **Model sign-in.** `sandbox run` shares no model credential for Kiro; its
+  `--llm` has no Kiro choice. Log in inside the sandbox: after the first run,
+  open a shell in it with `defenseclaw sandbox connect <name> --shell`, run
+  `kiro-cli-chat login --use-device-flow` (an AWS Builder ID or IAM Identity
+  Center device-code login), then resume Kiro with
+  `defenseclaw sandbox connect <name>`. The token stays in the sandbox home,
+  where the agent can read it and send it out, and a kept sandbox reuses it.
+  The daemon's `defenseclaw-kiro` provider profile, which binds a Kiro API key
+  (`KIRO_API_KEY`) as a placeholder, is not offered by `sandbox run`. Neither
+  sign-in was tested live: no Kiro account was available.
+- **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
+  and Codex sandboxes only.
+- **Image and verification.** The image installs Kiro CLI 2.24.1 from its
+  release archive, checked against the SHA-256 in Kiro's release manifest.
+  Verified end to end with Kiro's own scripted-response mode instead of a
+  model: every required hook reached DefenseClaw, a blocked shell call did not
+  run and an allowed one did, also with hookless agents planted in the home
+  and the project, and a live sandbox run with the DefenseClaw daemon got the
+  gateway's block verdict and had its egress proxy block an exfiltration
+  destination.

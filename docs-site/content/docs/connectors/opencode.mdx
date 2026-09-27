@@ -221,6 +221,47 @@ asset declarations.
 
 <HookEventsList connector="opencode" />
 
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run opencode` runs OpenCode in an NVIDIA OpenShell
+sandbox on Linux or macOS: the agent sees only your project folder, and the
+DefenseClaw plugin gates every tool call. The [sandbox guide](/docs/setup/sandbox)
+covers setup, the session and every flag. The first run builds the OpenCode
+image; `defenseclaw sandbox image build opencode` builds it ahead of time
+(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
+you name OpenCode with `--harness opencode`).
+
+- **User tier.** The hooks are a root-owned bridge plugin registered from
+  OpenCode's managed config, `/etc/opencode/opencode.json`, which user and
+  project config cannot remove. The tier is still user: OpenCode loads every
+  other plugin and custom tool into the same process, where one could answer
+  for the bridge. So the launcher refuses to start, naming the file, while
+  any other plugin or custom tool would load, and refuses `--pure`, which
+  loads none. DefenseClaw also reports a sandbox whose hooks go silent while
+  the harness is active.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs):
+  OpenCode starts with `--auto`, which approves every permission OpenCode's
+  config does not deny. `--safe`, or the `strict` pack, keeps OpenCode's
+  prompts and drops `--auto` from the arguments you pass.
+- **Model sign-in.** `--llm auto` (the default) shares `ANTHROPIC_API_KEY`
+  from your shell for OpenCode's built-in `anthropic` provider (pick a model
+  with `-- -m anthropic/<model>`), or else `OPENAI_API_KEY` for its `openai`
+  provider (`-m openai/<model>`). OpenShell holds the secret, and the sandbox
+  gets a placeholder that works only at that provider's API. `--llm bedrock`
+  shares a short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK`
+  for a custom provider on the Bedrock Mantle Anthropic endpoint (default
+  model `anthropic.claude-haiku-4-5`).
+- **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
+  and Codex sandboxes only.
+- **Image and verification.** The image installs OpenCode 1.18.31, replacing
+  the base image's OpenCode 1.2.18, which no hook contract covers. Verified
+  end to end: against a mock model the plugin's hooks reached DefenseClaw and
+  a blocked tool call had no effect, also with `plugin: []` in user and
+  project config, and the launcher refused planted plugins. In a live sandbox
+  run with the DefenseClaw daemon, a blocked tool call got the gateway's
+  verdict and OpenCode showed the reason, the egress proxy blocked an
+  exfiltration destination, and a connection around the proxy was refused.
+
 ## Disable
 
 ```bash

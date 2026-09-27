@@ -235,45 +235,44 @@ exact pre-DefenseClaw config or removes only DefenseClaw-owned entries, then
 removes only managed adapter files; it does not rely on an undocumented cached
 hook process.
 
-## OpenShell sandbox
+## In an OpenShell sandbox
 
-<Callout type="info" title="In development">
-No command launches Cursor Agent in an OpenShell sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
-they ship; today it covers legacy cleanup.
+<Callout type="warn" title="Cursor Agent cannot run in a sandbox yet">
+DefenseClaw builds a Cursor Agent sandbox image, but Cursor Agent is
+**unverified**, so `defenseclaw sandbox run cursor` refuses the image. The
+Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or
+`cursor-agent login`) before any agent turn: without one it stops with
+"Authentication required" and fires no hook, and it has no local or
+bring-your-own model endpoint. DefenseClaw's image check drives the harness
+with a mock model, so it cannot pass for Cursor Agent until a check runs with
+a Cursor key.
 </Callout>
 
-DefenseClaw can render the files it adds to a Cursor Agent OpenShell overlay
-image. The files exist only in the image and nothing on your host changes:
+The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
+the Cursor Agent image already holds:
 
-- **Hooks in the managed tier.** The hooks are registered in root-owned
-  `/etc/cursor/hooks.json`, Cursor's enterprise hooks file, with
-  `failClosed` on every event. Cursor runs team, user and project hooks as
-  well, but the enterprise response wins, so they cannot answer allow over a
-  DefenseClaw deny.
-- **Fail closed.** The hook scripts live in root-owned
-  `/usr/local/lib/defenseclaw/hooks`, reach the gateway through the
-  [hook ingress](/docs/reference/gateway-api#hook-ingress) with a per-sandbox
-  token, and deny the action on every failure.
+- **Managed tier.** The hooks are in root-owned `/etc/cursor/hooks.json`,
+  Cursor's enterprise hooks file, with `failClosed` on every event. Cursor
+  still runs team, user and project hooks, but the enterprise answer wins, so
+  they cannot allow what DefenseClaw denies. On Cursor's authless local build
+  of the same release (not the build the image ships), the enterprise hooks
+  fired and blocked a shell call, and user and project `hooks.json` files
+  answering allow changed nothing.
 - **Launch flags.** Cursor's own sandbox cannot run inside OpenShell, so the
-  agent starts with `--sandbox disabled` and `--trust`; skip-permissions mode
-  adds `--force`.
-- **No code from the agent's home.** The `cursor-agent` wrapper keeps Node's
-  compile cache in `~/.cache`, and Node runs the code cached there in place
-  of the root-owned sources. The sandbox launcher turns that cache off and
-  drops `NODE_OPTIONS` and `NODE_PATH`.
-- **Image pin.** The image installs Cursor Agent 2026.07.23-e383d2b, the
-  build the hook contract reviewed, from its release archive with a pinned
-  SHA-256.
-- **Credentials.** Use the `defenseclaw-cursor` provider profile with a
-  Cursor API key when you can: OpenShell injects the key, so the sandbox only
-  sees a placeholder. A login inside the sandbox (`cursor-launch login`,
-  which sends its traffic through the DefenseClaw proxy) stores a long-lived
-  Cursor session in the sandbox home. The agent can read that session and
-  send it out, and a kept sandbox reuses it.
-- **Not verified yet.** Cursor Agent needs a Cursor account
-  (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn, so its
-  image has not passed the hook-fire check and is never selected for use.
+  agent starts with `--sandbox disabled` and `--trust`. Skip-permissions mode
+  adds `--force`; `--safe` drops `--force` from the arguments you pass. The
+  launcher also turns Node's compile cache off and drops `NODE_OPTIONS` and
+  `NODE_PATH`, so no code in the agent's home runs in place of the
+  root-owned sources.
+- **Sign-in.** The daemon's `defenseclaw-cursor` provider profile binds a
+  Cursor API key to Cursor's service, and the sandbox sees only a
+  placeholder. A browser login inside the sandbox (`cursor-agent login`)
+  keeps a long-lived session in the sandbox home, where the agent can read it
+  and send it out. Neither was tested live, and `sandbox run` has no `--llm`
+  choice for Cursor Agent.
+- **Image.** Cursor Agent 2026.07.23-e383d2b, the build the hook contract
+  reviewed, from its release archive with a SHA-256 DefenseClaw measured
+  (Cursor publishes no digests).
 
 ## Disable
 

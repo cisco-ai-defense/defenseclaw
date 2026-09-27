@@ -245,6 +245,53 @@ audit, alert, webhook, and configured export destinations.
 GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials cannot be enforced on Windows. Hook enforcement remains event-specific; do not treat Copilot's Windows sandbox as per-path filesystem containment.
 </Callout>
 
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA
+OpenShell sandbox on Linux or macOS: the agent sees only your project folder,
+and DefenseClaw hooks gate every tool call. The
+[sandbox guide](/docs/setup/sandbox) covers setup, the session and every flag.
+The first run builds the Copilot CLI image;
+`defenseclaw sandbox image build copilot` builds it ahead of time
+(`defenseclaw sandbox setup` builds images for Claude Code and Codex unless
+you name Copilot CLI with `--harness copilot`).
+
+- **Managed tier.** The hooks are in the root-owned policy document
+  `/etc/github-copilot/policy.d/50-defenseclaw.json`, and the managed settings
+  admit only managed hooks, so a user `disableAllHooks` and user or repository
+  hooks change nothing. The hooks fail closed and authenticate with a
+  per-sandbox token. The image pre-extracts the pinned CLI into a root-owned
+  package cache that the launcher pins, so a newer package planted in the
+  agent's home cannot replace the running CLI.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs):
+  Copilot CLI starts with `--yolo`. `--safe`, or the `strict` pack, keeps its
+  prompts and drops `--yolo`, `--allow-all` and `--allow-all-tools` from the
+  arguments you pass. A safe headless run (`--prompt`) still adds
+  `--allow-all-tools`, because Copilot's non-interactive mode refuses to run
+  without tool approval.
+- **Model sign-in.** `sandbox run` uses Copilot's bring-your-own-provider
+  mode. `--llm auto` (the default) shares `ANTHROPIC_API_KEY` from your shell
+  as Copilot's provider key for the Anthropic Messages API (pick a model with
+  `-- --model <model>`); `--llm bedrock` shares a short-term Amazon Bedrock API
+  key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic
+  endpoint (default model Claude Haiku 4.5). OpenShell holds the secret, and
+  the sandbox gets a placeholder that works only at that endpoint. Both run
+  Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools,
+  the GitHub MCP server and updates. Copilot's own models through a
+  Copilot-entitled GitHub token (`COPILOT_GITHUB_TOKEN`) have no `--llm`
+  choice and were not tested live.
+- **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
+  and Codex sandboxes only.
+- **Image and verification.** The image installs Copilot CLI 1.0.88,
+  replacing the base image's 1.0.16, which no hook contract covers. Verified
+  end to end: against a mock model
+  through Copilot's bring-your-own-provider mode, every hook reached
+  DefenseClaw and a blocked tool call was denied, also with hostile settings,
+  planted packages and shell start-up files. In a live sandbox run with the
+  DefenseClaw daemon, a blocked tool call got the gateway's verdict, the
+  egress proxy blocked an exfiltration destination, and a connection around
+  the proxy was refused.
+
 ## Disable
 
 ```bash

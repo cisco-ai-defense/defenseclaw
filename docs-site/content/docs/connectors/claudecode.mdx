@@ -207,67 +207,51 @@ block, ask, or decision authority.
   <Edge from="otel" to="gateway" />
 </Flow>
 
-## OpenShell sandbox
+## In an OpenShell sandbox
 
-<Callout type="info" title="In development">
-No command launches Claude Code in an OpenShell sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
-they ship; today it covers legacy cleanup.
-</Callout>
+`defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
+sandbox on Linux or macOS: the agent sees only your project folder, and
+DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox)
+covers setup, the session and every flag. The files below exist only in the
+sandbox image; your own Claude Code configuration does not change.
 
-DefenseClaw can already render the files it will add to a Claude Code
-OpenShell overlay image; no image is built yet. When one is, the files exist
-only in the image and nothing on your host changes:
-
-- **Hooks in the managed tier.** The hooks are registered in the root-owned
-  managed policy drop-in
+- **Managed tier.** The hooks are in the root-owned managed policy drop-in
   `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
-  `allowManagedHooksOnly` set. User and project settings cannot add hooks or
-  switch DefenseClaw's off.
-- **Settings pinned for the sandbox.** The same drop-in switches off Claude
-  Code's own sandbox (it cannot run inside OpenShell), disables the
-  auto-updater and non-essential traffic, and sends Claude Code's native OTel
-  to the [hook ingress](/docs/reference/gateway-api#hook-ingress).
-- **Fail closed.** The hook scripts live in root-owned
-  `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
-  gateway through the hook ingress with a per-sandbox token, never the host
-  gateway token.
-- **Checked before use.** An image counts as verified only after Claude Code
-  ran in it against a mock model, every required hook fired, and a blocked
-  tool call did not run. A second run with hostile user and project settings
-  planted, including `disableAllHooks`, must show the same result. Only
-  verified images are selected for use. A live probe runs the same checks
-  with the per-sandbox drop-in mounted, and shows that the provider pin, the
-  MCP lockdown and the bypass refusal hold against hostile project settings.
-- **Per-sandbox settings.** Each sandbox also gets its own read-only managed
-  drop-in, `/etc/claude-code/managed-settings.d/60-defenseclaw-run.json`,
-  which sorts after the image's and wins over it:
-  - It pins the model provider the run chose (`ANTHROPIC_BASE_URL` and the
-    other provider variables; the ones the run does not use are pinned to
-    empty). A repository's committed `.claude/settings.json` cannot send the
-    conversation to another endpoint.
-  - Unless the sandbox pack sets
-    [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox),
-    it sets `allowManagedMcpServersOnly` and an `allowedMcpServers` list of
-    your imported servers, matched by exact command or URL. A read-only
-    `/etc/claude-code/managed-mcp.json` lists the same servers, which puts
-    Claude Code in its exclusive MCP mode, so a repository's `.mcp.json`
-    servers never start. Neither does `--mcp-config`: Claude Code refuses it
-    while `managed-mcp.json` is present.
-  - Without skip-permissions it sets
-    `permissions.disableBypassPermissionsMode: "disable"` and turns the
-    pre-accepted bypass prompt off. Claude Code then refuses
-    `bypassPermissions` from a flag or from any settings file.
-- **Launch flags.** In skip-permissions mode
-  ([`openshell.yolo`](/docs/reference/configuration#openshell-sandbox-settings),
-  on in the `open` and `balanced` packs) Claude Code starts with
-  `--dangerously-skip-permissions`; otherwise it keeps its permission prompts,
-  and `--dangerously-skip-permissions`,
-  `--allow-dangerously-skip-permissions` and
+  `allowManagedHooksOnly` set, so user and project settings cannot add hooks
+  or switch DefenseClaw's off. The same drop-in turns off Claude Code's own
+  sandbox (it cannot run inside OpenShell), the auto-updater and non-essential
+  traffic, and sends Claude Code's OTel to DefenseClaw. The hooks fail closed
+  and authenticate with a per-sandbox token, never the host gateway token.
+- **Skip-permissions.** On by default (the `open` and `balanced` packs):
+  Claude Code starts with `--dangerously-skip-permissions`. `--safe`, or the
+  `strict` pack, keeps its permission prompts. The sandbox's managed settings
+  then refuse `bypassPermissions` from a flag or any settings file, and
+  `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` and
   `--permission-mode bypassPermissions` are dropped from the arguments you
-  pass. DefenseClaw hooks gate every tool call in both modes.
-- **Image pin.** The image installs Claude Code 2.1.156 by default. The build
-  refuses a Claude Code version that has no reviewed Linux hook contract.
+  pass.
+- **Model sign-in.** `--llm auto` (the default) shares `ANTHROPIC_API_KEY`,
+  or else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), from your
+  shell. OpenShell holds the secret, and the sandbox gets a placeholder that
+  works only at `api.anthropic.com`. `--llm bedrock` shares a short-term Amazon
+  Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle
+  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`). With
+  `--llm none`, or when no key is found, log in inside the sandbox; that login
+  stays in the sandbox home, where the agent can read it.
+- **Per-sandbox settings.** Each sandbox also gets a read-only drop-in,
+  `60-defenseclaw-run.json`, that wins over the image's. It pins the model
+  provider the run chose, so a repository's `.claude/settings.json` cannot
+  send the conversation to another endpoint. It admits only the MCP servers
+  DefenseClaw brought along from your Claude Code setup; a read-only
+  `/etc/claude-code/managed-mcp.json` lists them, so a repository's
+  `.mcp.json` servers never start unless the sandbox pack sets
+  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox).
+  `--no-mcp` leaves your servers behind.
+- **Image and verification.** The image installs Claude Code 2.1.156 by
+  default and refuses a version without a reviewed Linux hook contract.
+  Verified end to end: against a mock model every required hook fired and a
+  blocked tool call did not run, also with hostile user and project settings
+  such as `disableAllHooks`, and a live sandbox run showed a
+  DefenseClaw-blocked command denied and the egress block list holding.
 
 ## Disable
 
