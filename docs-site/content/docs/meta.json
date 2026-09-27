@@ -4,6 +4,7 @@
     "index",
     "command-generator",
     "tui",
+    "macos-app",
     "get-started",
     "setup",
     "connectors",
