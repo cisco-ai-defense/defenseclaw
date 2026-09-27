@@ -305,3 +305,67 @@ func TestValidateNameMatchesOpenShell(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateSourceRefusesXDGAndLinkedConfigDirs: the credential and
+// OpenShell state directories are refused wherever they really live (a
+// symlinked ~/.config, the XDG base directories, the OpenShell config dir)
+// and in both directions: a share may neither be inside one nor contain
+// one. Not parallel: it sets XDG variables.
+func TestValidateSourceRefusesXDGAndLinkedConfigDirs(t *testing.T) {
+	if !platformSupported() {
+		t.Skip("workspaces are Linux/macOS only")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	dotfiles := filepath.Join(home, "dotfiles")
+	mustMkdir(t, filepath.Join(dotfiles, "config", "nvim"))
+	mustMkdir(t, filepath.Join(dotfiles, "notes"))
+	if err := os.Symlink(filepath.Join(dotfiles, "config"), filepath.Join(home, ".config")); err != nil {
+		t.Fatal(err)
+	}
+	xdgConfig, xdgData, xdgState := filepath.Join(root, "xdg", "config"), filepath.Join(root, "xdg-data"), filepath.Join(root, "xdg-state")
+	for _, d := range []string{
+		filepath.Join(xdgConfig, "openshell"), filepath.Join(xdgConfig, "app"),
+		filepath.Join(xdgData, "openshell", "gateways"), filepath.Join(xdgData, "keyrings"), filepath.Join(xdgData, "fonts"),
+		filepath.Join(xdgState, "openshell"), filepath.Join(xdgState, "app"),
+		filepath.Join(home, ".local", "share", "keyrings"), filepath.Join(home, "code", "app"),
+	} {
+		mustMkdir(t, d)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgConfig)
+	t.Setenv("XDG_DATA_HOME", xdgData)
+	t.Setenv("XDG_STATE_HOME", xdgState)
+
+	for _, tc := range []struct {
+		path, reason string
+	}{
+		{filepath.Join(dotfiles, "config", "nvim"), "inside ~/.config"},
+		{dotfiles, "contains ~/.config"},
+		{filepath.Join(xdgConfig, "app"), "inside " + xdgConfig},
+		{filepath.Join(root, "xdg"), "contains " + xdgConfig},
+		{filepath.Join(xdgData, "openshell", "gateways"), "inside " + filepath.Join(xdgData, "openshell")},
+		{xdgData, "contains " + filepath.Join(xdgData, "keyrings")},
+		{filepath.Join(xdgState, "openshell"), "inside " + filepath.Join(xdgState, "openshell")},
+		{xdgState, "contains " + filepath.Join(xdgState, "openshell")},
+		{filepath.Join(home, ".local"), "contains ~/.local/share/keyrings"},
+	} {
+		_, _, err := validateShareable(tc.path, SourceOptions{Home: home})
+		if !errors.Is(err, ErrUnsafeSource) || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("%s: err = %v, want a refusal saying %q", tc.path, err, tc.reason)
+		}
+	}
+	for _, ok := range []string{filepath.Join(home, "code", "app"), filepath.Join(dotfiles, "notes"), filepath.Join(xdgData, "fonts"), filepath.Join(xdgState, "app")} {
+		if _, _, err := validateShareable(ok, SourceOptions{Home: home}); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+
+	// Relative XDG values are ignored, as the XDG spec says.
+	t.Setenv("XDG_CONFIG_HOME", "relative")
+	if _, _, err := validateShareable(filepath.Join(home, "code", "app"), SourceOptions{Home: home}); err != nil {
+		t.Errorf("relative XDG_CONFIG_HOME: %v", err)
+	}
+}

@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // SourceOptions configures ValidateSource.
@@ -94,7 +96,9 @@ var refusedExact = []string{
 }
 
 // Home-relative locations that hold credentials or DefenseClaw/OpenShell
-// state. Sharing one of them, or a folder inside one, is refused.
+// state. Sharing one of them, a folder inside one, or a folder that
+// contains one (after symlink resolution) is refused; credentialTrees
+// adds their XDG variants.
 var refusedHomeTrees = []string{
 	".ssh", ".aws", ".config", ".gnupg", ".kube", ".docker", ".azure",
 	".password-store", ".local/share/keyrings", ".local/share/openshell",
@@ -185,11 +189,13 @@ func validateShareable(path string, opts SourceOptions) (string, []string, error
 		if within(home, real) {
 			return "", nil, &SourceError{Path: real, Reason: "it contains your home directory"}
 		}
-		for _, rel := range refusedHomeTrees {
-			p := filepath.Join(home, rel)
-			if within(real, p) {
-				return "", nil, &SourceError{Path: real, Reason: "it is inside " + abbreviateHome(p, home) + ", which holds credentials or sandbox state"}
-			}
+	}
+	for _, t := range credentialTrees(home) {
+		switch {
+		case within(real, t.path):
+			return "", nil, &SourceError{Path: real, Reason: "it is inside " + abbreviateHome(t.name, home) + ", which holds credentials or sandbox state"}
+		case within(t.path, real):
+			return "", nil, &SourceError{Path: real, Reason: "it contains " + abbreviateHome(t.name, home) + ", which holds credentials or sandbox state"}
 		}
 	}
 	protected := append([]string(nil), opts.Protected...)
@@ -214,6 +220,50 @@ func validateShareable(path string, opts SourceOptions) (string, []string, error
 		warnings = append(warnings, fmt.Sprintf("%s is owned by uid %d but the agent runs as uid %d; it may not be able to write there", real, uid, os.Getuid()))
 	}
 	return real, warnings, nil
+}
+
+// credentialTree is a refused credential or state directory: path is
+// compared, name is what the refusal shows.
+type credentialTree struct{ path, name string }
+
+// credentialTrees lists the directories no share may be inside of or
+// contain: refusedHomeTrees below home, their XDG base-directory homes
+// ($XDG_CONFIG_HOME stands for ~/.config, $XDG_DATA_HOME/{keyrings,
+// openshell} and $XDG_STATE_HOME/openshell for their ~/.local variants),
+// and the OpenShell config directory as openshell.UserConfigDir resolves
+// it. Each is listed as named and, when that differs, with its symbolic
+// links resolved: a dotfile manager may link ~/.config elsewhere, and the
+// share itself is always a resolved path.
+func credentialTrees(home string) []credentialTree {
+	var out []credentialTree
+	add := func(p string) {
+		if p == "" || !filepath.IsAbs(p) {
+			return
+		}
+		p = filepath.Clean(p)
+		out = append(out, credentialTree{path: p, name: p})
+		if r := resolveExisting(p); r != p {
+			out = append(out, credentialTree{path: r, name: p})
+		}
+	}
+	if home != "" {
+		for _, rel := range refusedHomeTrees {
+			add(filepath.Join(home, rel))
+		}
+	}
+	// The XDG spec ignores relative values; so does this.
+	add(os.Getenv("XDG_CONFIG_HOME"))
+	if data := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(data) {
+		add(filepath.Join(data, "keyrings"))
+		add(filepath.Join(data, "openshell"))
+	}
+	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
+		add(filepath.Join(state, "openshell"))
+	}
+	if dir, err := openshell.UserConfigDir(); err == nil {
+		add(dir)
+	}
+	return out
 }
 
 func resolveHome(home string) (string, error) {
