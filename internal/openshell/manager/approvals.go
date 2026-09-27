@@ -824,12 +824,12 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		// approving applies every endpoint, port and allowed IP in it.
 		if cur := triage.Classify(ctx, p, m.triagePolicy(b, eff)); cur.Verdict == triage.Reject {
 			if cur.Violation != nil {
-				return nil, m.violationError(ctx, cur.Violation, a.sandbox)
+				return nil, m.violationErrorFor(ctx, cur.Violation, a.sandbox, audit.SandboxPolicyRuleAdd, host)
 			}
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
 		}
 		if err := triage.CheckProposal(eff, p, d.Always); err != nil {
-			return nil, m.violationError(ctx, err, a.sandbox)
+			return nil, m.violationErrorFor(ctx, err, a.sandbox, audit.SandboxPolicyRuleAdd, host)
 		}
 		if d.Always {
 			for _, h := range hosts {

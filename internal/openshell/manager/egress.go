@@ -220,11 +220,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		return nil, err
 	}
 	if err := triage.CheckUnblock(eff, host); err != nil {
-		return nil, m.violationError(ctx, err, req.Sandbox)
+		return nil, m.violationErrorFor(ctx, err, req.Sandbox, audit.SandboxEgressUnblock, host)
 	}
 	if req.Always {
 		if err := triage.CheckApproval(eff, host, 0, true); err != nil && !triage.IsHostLocal(host) {
-			return nil, m.violationError(ctx, err, req.Sandbox)
+			return nil, m.violationErrorFor(ctx, err, req.Sandbox, audit.SandboxEgressUnblock, host)
 		}
 	}
 	resp := &sandboxapi.UnblockResponse{Host: host, Sandbox: req.Sandbox}

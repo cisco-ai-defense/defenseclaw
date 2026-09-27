@@ -195,13 +195,22 @@ func TestApprovalAdminDenials(t *testing.T) {
 	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
 		t.Fatalf("approve once: %v", err)
 	}
-	var adminHealth bool
+	// The refusal is a no-change policy record of the sandbox, not a
+	// degraded subsystem: a refused request degrades nothing.
+	e.tel.mu.Lock()
+	defer e.tel.mu.Unlock()
 	for _, h := range e.tel.health {
-		// The recorder carries gateway error codes as lower-case tokens.
-		adminHealth = adminHealth || h.ErrorCode == "openshell_admin_violation"
+		if h.ErrorCode == "openshell_admin_violation" {
+			t.Fatalf("a refused request was recorded as degraded subsystem health: %+v", h)
+		}
 	}
-	if !adminHealth {
-		t.Fatal("admin violation not logged")
+	var refused bool
+	for _, p := range e.tel.policy {
+		refused = refused || (p.Operation == audit.SandboxPolicyRuleAdd && p.NoChange && p.Reason == policyReasonAdminRefused &&
+			p.Target == "a.example.org" && p.Sandbox.Name == sb.Name)
+	}
+	if !refused {
+		t.Fatal("the admin refusal has no policy record")
 	}
 }
 

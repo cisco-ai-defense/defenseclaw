@@ -512,6 +512,9 @@ const (
 	// policyReasonAdmin: an approved rule the organization's policy now
 	// refuses was removed.
 	policyReasonAdmin = "admin_policy"
+	// policyReasonAdminRefused: the organization's policy refused the
+	// request (a create, start, unblock or approval); nothing changed.
+	policyReasonAdminRefused = "admin_refused"
 	// policyReasonBlocklist: an approved rule to a destination a block list
 	// or the blocklist feed now refuses was removed.
 	policyReasonBlocklist = "egress_blocklist"

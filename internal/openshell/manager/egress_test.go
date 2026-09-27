@@ -155,6 +155,22 @@ func TestUnblockAdminDenied(t *testing.T) {
 	if len(e.persist.allow) != 0 {
 		t.Fatal("persisted a refused unblock")
 	}
+	e.tel.mu.Lock()
+	var perSandbox, always int
+	for _, p := range e.tel.policy {
+		if p.Operation == audit.SandboxEgressUnblock && p.NoChange && p.Reason == policyReasonAdminRefused && p.Target == "webhook.site" {
+			switch p.Sandbox.Name {
+			case "admbox":
+				perSandbox++
+			case "all":
+				always++
+			}
+		}
+	}
+	e.tel.mu.Unlock()
+	if perSandbox != 1 || always != 1 {
+		t.Fatalf("refused unblock records: %d for the sandbox, %d for every sandbox", perSandbox, always)
+	}
 }
 
 func TestAdminAllowOnlyForcesAllowlist(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -434,9 +435,18 @@ func policyGatewayPort(port int) int {
 	return packs.OpenShellGatewayPort
 }
 
-// violationError turns a policy refusal into the API error, logging admin
-// refusals with their gateway error code.
+// violationError turns a policy refusal of a create or start into the API
+// error (violationErrorFor).
 func (m *Manager) violationError(ctx context.Context, err error, sandbox string) error {
+	return m.violationErrorFor(ctx, err, sandbox, audit.SandboxPolicyApply, "")
+}
+
+// violationErrorFor turns a policy refusal of op into the API error. An
+// admin refusal is logged with its gateway error code and recorded as a
+// no-change policy record of op on the sandbox, target naming what was
+// refused (the violated key when empty). A refused request degrades
+// nothing, so it is not recorded as subsystem health.
+func (m *Manager) violationErrorFor(ctx context.Context, err error, sandbox string, op audit.SandboxPolicyOperation, target string) error {
 	var v *packs.Violation
 	if !errors.As(err, &v) {
 		return &sandboxapi.Error{Code: sandboxapi.CodeInvalid, Message: err.Error()}
@@ -444,10 +454,10 @@ func (m *Manager) violationError(ctx context.Context, err error, sandbox string)
 	wire := wireViolation(*v)
 	if v.Admin() {
 		m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
-		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
-			State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellAdminViolation),
-			ErrorSummary: truncate(v.Key+": "+v.Constraint, 512), Timestamp: m.now(),
-		})
+		if target == "" {
+			target = v.Key
+		}
+		m.recordAdminRefusal(ctx, sandbox, op, target)
 		msg := v.Message
 		if msg == "" {
 			msg = sandboxapi.AdminMessage
@@ -455,6 +465,41 @@ func (m *Manager) violationError(ctx context.Context, err error, sandbox string)
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: msg, Detail: v.Detail, Violation: &wire}
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: v.Message, Detail: v.Detail, Violation: &wire}
+}
+
+// policyTarget is the shape of a policy record's target reference (the
+// audit recorder refuses anything else).
+var policyTarget = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+
+// recordAdminRefusal records a request the organization's policy refused as
+// a no-change policy record: of the sandbox when it exists (or is being
+// created), of every sandbox ("all") for an "always" unblock, and not at
+// all for a create that has no name yet (the log line stays).
+func (m *Manager) recordAdminRefusal(ctx context.Context, sandbox string, op audit.SandboxPolicyOperation, target string) {
+	var id audit.SandboxIdentity
+	m.mu.Lock()
+	if b := m.boxes[sandbox]; b != nil && !b.deleted {
+		id = b.identity()
+	}
+	m.mu.Unlock()
+	switch {
+	case id.Name != "":
+	case sandbox == "" && op == audit.SandboxEgressUnblock:
+		id = audit.SandboxIdentity{Name: "all", Runtime: audit.SandboxRuntimeOpenShell}
+	case openshell.ValidSandboxName(sandbox):
+		id = audit.SandboxIdentity{Name: sandbox, Runtime: audit.SandboxRuntimeOpenShell}
+	default:
+		return
+	}
+	if len(target) > 1024 || !policyTarget.MatchString(target) {
+		target = ""
+	}
+	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+		Sandbox: id, Operation: op, Actor: "operator", Origin: "api", Target: target, Reason: policyReasonAdminRefused,
+		NoChange: true, Timestamp: m.now(),
+	}); err != nil {
+		m.logf("policy telemetry for the refusal of %s: %v", sandbox, err)
+	}
 }
 
 func wireViolation(v packs.Violation) sandboxapi.Violation {
