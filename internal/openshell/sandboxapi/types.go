@@ -240,7 +240,8 @@ type HookCoverage struct {
 	// (rule ID, title and what to do instead; never matched content).
 	LastBlocked string `json:"last_blocked,omitempty"`
 	// Tampered counts tool calls that ran without a DefenseClaw verdict: a
-	// PostToolUse whose PreToolUse was denied or never arrived.
+	// post-tool event (PostToolUse, ...) whose pre-tool event was denied or
+	// never arrived.
 	Tampered     int64     `json:"tampered,omitempty"`
 	LastTamperAt time.Time `json:"last_tamper_at,omitzero"`
 	// Silent is set while the harness is active without hook traffic.
