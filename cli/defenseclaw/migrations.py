@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
+from defenseclaw import legacy_connector
 from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
@@ -3145,6 +3146,125 @@ def _line_ending(line: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Migration: retired Desktop connector ID → devin
+# ---------------------------------------------------------------------------
+
+
+def _migrate_retired_desktop_connector(ctx: MigrationContext) -> None:
+    """Persist the move of the retired Desktop connector ID to ``devin``.
+
+    Both config loaders already apply the rename in memory
+    (``legacy_connector.migrate_raw_config`` and the Go
+    ``legacyconnector.MigrateConnectorKeys``); this step writes it to
+    ``config.yaml`` so the file matches what runs. The gateway removes the
+    DefenseClaw hook entries an older release left on the host on its next
+    start.
+
+    The rewrite is surgical (values and one map key, comments kept) and is
+    accepted only when the result parses to exactly the migrated document;
+    otherwise the migrated document is written in full. A failure never
+    aborts the upgrade: the in-memory rename keeps both loaders working.
+    """
+    try:
+        _persist_retired_desktop_connector(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"retired connector ID migration step failed: {exc}", indent="    ")
+
+
+def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
+    cfg_path = ctx.active_config_path()
+    if not os.path.isfile(cfg_path):
+        return
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    raw = yaml.safe_load(text)
+    migrated, notices = legacy_connector.migrated_copy(raw, cfg_path)
+    if not notices:
+        return
+    new_text = _rewrite_retired_desktop_connector_text(text)
+    try:
+        surgical_ok = new_text != text and yaml.safe_load(new_text) == migrated
+    except yaml.YAMLError:
+        surgical_ok = False
+    if not surgical_ok:
+        new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+    ctx.changes.extend(notices)
+
+
+def _rewrite_retired_desktop_connector_text(text: str) -> str:
+    """Rename the retired ID in ``claw.mode``, ``guardrail.connector`` and the
+    ``guardrail.connectors`` map key, keeping every other byte."""
+    retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
+    replacement = legacy_connector.REPLACEMENT
+
+    def value_pattern(field_name: str) -> re.Pattern[str]:
+        return re.compile(
+            r"(?P<prefix>^[ \t]+" + field_name + r":[ \t]*)(?P<quote>[\"']?)"
+            + retired
+            + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+
+    for block_key, field_name in (("claw", "mode"), ("guardrail", "connector")):
+        block = _find_top_level_block(text, block_key)
+        if not block:
+            continue
+        body = value_pattern(field_name).sub(
+            lambda m: f"{m.group('prefix')}{m.group('quote')}{replacement}{m.group('quote')}{m.group('suffix')}",
+            block.group("body"),
+        )
+        text = text[: block.start("body")] + body + text[block.end("body") :]
+
+    block = _find_top_level_block(text, "guardrail")
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+
+    def indent_of(line: str) -> int:
+        return len(line) - len(line.lstrip(" \t"))
+
+    def is_blank(line: str) -> bool:
+        return not line.strip() or line.lstrip().startswith("#")
+
+    header = next((i for i, line in enumerate(lines) if re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)), None)
+    if header is None:
+        return text
+    parent = indent_of(lines[header])
+    end = header + 1
+    while end < len(lines) and (is_blank(lines[end]) or indent_of(lines[end]) > parent):
+        end += 1
+    children = [i for i in range(header + 1, end) if not is_blank(lines[i])]
+    if not children:
+        return text
+    child = indent_of(lines[children[0]])
+    key_re = re.compile(r"^[ \t]*(?P<quote>[\"']?)(?P<key>[^:\"'#]+)(?P=quote)[ \t]*:")
+    keyed = [i for i in children if indent_of(lines[i]) == child and key_re.match(lines[i])]
+    keys = {i: key_re.match(lines[i]).group("key").strip() for i in keyed}
+    retired_rows = [i for i in keyed if legacy_connector.is_retired(keys[i])]
+    if not retired_rows:
+        return text
+    explicit = any(keys[i].lower() == replacement for i in keyed if i not in retired_rows)
+    drop: set[int] = set()
+    for n, row in enumerate(retired_rows):
+        if explicit or n > 0:
+            stop = row + 1
+            while stop < end and (is_blank(lines[stop]) or indent_of(lines[stop]) > child):
+                stop += 1
+            drop.update(range(row, stop))
+        else:
+            match = key_re.match(lines[row])
+            lines[row] = (
+                lines[row][: match.start("key")] + replacement + lines[row][match.end("key") :]
+            )
+    body = "".join(line for i, line in enumerate(lines) if i not in drop)
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -3206,6 +3326,13 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         "validate it with the installed target gateway, and activate it "
         "transactionally during defenseclaw upgrade",
         _migrate_observability_v8,
+    ),
+    (
+        # Forward-keyed to the next stamped release; the upgrade manifest lists
+        # it as required once the release workflow stamps the checkout.
+        "0.8.11",
+        "Move the retired Desktop connector ID to devin in config.yaml",
+        _migrate_retired_desktop_connector,
     ),
 ]
 

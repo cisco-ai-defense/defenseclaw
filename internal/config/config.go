@@ -232,6 +232,10 @@ const CurrentConfigVersion = 7
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
+	// LegacyConnectorNotices records connector IDs this load moved to their
+	// replacement (see internal/legacyconnector). The gateway logs them once
+	// per boot and finishes the host-side cleanup. Never serialized.
+	LegacyConnectorNotices []string `mapstructure:"-" yaml:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
@@ -2834,6 +2838,9 @@ func loadConfigSource(
 		}
 	}
 	cfg.ConfigFilePath = configFile
+	// Move retired connector IDs to their replacement before any connector
+	// key is normalized or checked for duplicates.
+	migrateLegacyConnectorIDs(&cfg)
 
 	// Reinstate the dot-preserving OTel resource attributes that we
 	// stripped before handing bytes to Viper.

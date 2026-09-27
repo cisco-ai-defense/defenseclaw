@@ -1106,7 +1106,10 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			WritePaths:     devinSkillWritePaths(opts),
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
-			Notes:          []string{"Discovery covers Devin's user skills directory and the documented .agents/skills and .devin/skills project roots; installs use the native .devin/skills root."},
+			Notes: []string{
+				"Discovery covers Devin's user skills directory and the documented .agents/skills and .devin/skills project roots; installs use the native .devin/skills root.",
+				"Discovery also reads the pre-rename Devin Desktop skill locations the vendor still loads; DefenseClaw never writes there.",
+			},
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
@@ -1115,7 +1118,10 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			WritePaths:     []string{workspacePath(opts, ".devin", "rules")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
-			Notes:          []string{"Discovery covers AGENTS.md/AGENT.md and Markdown rules under .devin/rules without claiming cloud or managed-policy precedence."},
+			Notes: []string{
+				"Discovery covers AGENTS.md/AGENT.md and Markdown rules under .devin/rules without claiming cloud or managed-policy precedence.",
+				"Discovery also reads the pre-rename Devin Desktop rule locations the vendor still loads; DefenseClaw never writes there.",
+			},
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}

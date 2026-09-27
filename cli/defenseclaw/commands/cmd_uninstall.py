@@ -57,7 +57,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import config as config_module
-from defenseclaw import ux
+from defenseclaw import legacy_connector, ux
 from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -106,7 +106,9 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
     "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
     "devin": (os.path.join("connector_backups", "devin", "config.json"),),
-    "windsurf": (os.path.join("connector_backups", "windsurf", "config.json"),),
+    # A retired connector ID's setup backup still selects gateway teardown,
+    # which Go resolves through connector.RetiredConnector.
+    **legacy_connector.BACKUP_MARKERS,
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),

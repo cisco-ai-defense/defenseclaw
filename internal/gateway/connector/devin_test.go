@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func TestDevinPatchUserConfigAcceptsJSONCAndPreservesForeignHooks(t *testing.T) {
@@ -207,13 +209,48 @@ func TestDevinProfileUsesNativeLifecycleContract(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistryPublishesDevinNotRetiredWindsurf(t *testing.T) {
+func TestDefaultRegistryPublishesDevinAndRetiredIDCanonicalizesToDevin(t *testing.T) {
 	registry := NewDefaultRegistry()
 	if _, ok := registry.Get("devin"); !ok {
 		t.Fatal("default registry omitted Devin")
 	}
-	if _, ok := registry.Get("windsurf"); ok {
-		t.Fatal("retired Windsurf connector remains public")
+	if _, ok := registry.Get(legacyconnector.RetiredDesktopID); ok {
+		t.Fatal("the retired Desktop connector ID remains public")
+	}
+	if got, migrated := legacyconnector.Canonical(legacyconnector.RetiredDesktopID); got != "devin" || !migrated {
+		t.Fatalf("retired Desktop ID canonicalizes to %q (migrated=%v), want devin", got, migrated)
+	}
+}
+
+func TestDevinInventoryReadsDesktopLegacyPaths(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	configHome := filepath.Join(t.TempDir(), "devin")
+	if err := WithUserHomeDir(home, func() error {
+		opts := SetupOpts{ConfigHome: configHome, WorkspaceDir: workspace}
+		caps := NewDevinConnector().Capabilities(opts)
+		for _, want := range legacyconnector.DesktopLegacyRulePaths(home, workspace) {
+			if !slices.Contains(caps.Rules.ReadPaths, want) {
+				t.Errorf("rule read paths = %v, missing %q", caps.Rules.ReadPaths, want)
+			}
+		}
+		for _, want := range legacyconnector.DesktopLegacySkillPaths(home, workspace) {
+			if !slices.Contains(caps.Skills.ReadPaths, want) {
+				t.Errorf("skill read paths = %v, missing %q", caps.Skills.ReadPaths, want)
+			}
+		}
+		if !slices.Equal(caps.Skills.WritePaths, []string{filepath.Join(workspace, ".devin", "skills")}) {
+			t.Errorf("skill write paths changed: %v", caps.Skills.WritePaths)
+		}
+		if !slices.Equal(caps.Rules.WritePaths, []string{filepath.Join(workspace, ".devin", "rules")}) {
+			t.Errorf("rule write paths changed: %v", caps.Rules.WritePaths)
+		}
+		if !slices.Equal(caps.MCP.WritePaths, devinMCPWritePaths(opts)) {
+			t.Errorf("MCP write paths changed: %v", caps.MCP.WritePaths)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

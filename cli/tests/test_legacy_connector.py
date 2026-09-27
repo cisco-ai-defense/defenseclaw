@@ -1,0 +1,189 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""The retired Desktop connector ID moves to devin everywhere config is read."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import yaml
+
+from defenseclaw import legacy_connector, migrations
+from defenseclaw.commands import cmd_uninstall
+from defenseclaw.config import load
+
+RETIRED = legacy_connector.RETIRED_DESKTOP_ID
+DEVIN = legacy_connector.REPLACEMENT
+
+
+class MigrateRawConfigTests(unittest.TestCase):
+    def test_primary_and_claw_mode(self):
+        raw = {"claw": {"mode": RETIRED.upper()}, "guardrail": {"connector": f" {RETIRED} "}}
+        notices = legacy_connector.migrate_raw_config(raw, "/etc/dc/config.yaml")
+        self.assertEqual(raw["guardrail"]["connector"], DEVIN)
+        self.assertEqual(raw["claw"]["mode"], DEVIN)
+        self.assertEqual(len(notices), 1)
+        self.assertIn(legacy_connector.HEADLINE, notices[0])
+        self.assertIn("/etc/dc/config.yaml", notices[0])
+
+    def test_map_block_is_renamed_with_its_settings(self):
+        raw = {"guardrail": {"connector": "codex", "connectors": {"codex": {}, RETIRED: {"mode": "action"}}}}
+        legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["guardrail"]["connectors"], {"codex": {}, DEVIN: {"mode": "action"}})
+
+    def test_explicit_devin_block_wins(self):
+        raw = {"guardrail": {"connectors": {DEVIN: {"mode": "observe"}, RETIRED: {"mode": "action"}}}}
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["guardrail"]["connectors"], {DEVIN: {"mode": "observe"}})
+        self.assertIn(repr(RETIRED), notices[0])
+
+    def test_unaffected_config_is_untouched(self):
+        raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
+        before = yaml.safe_dump(raw)
+        self.assertEqual(legacy_connector.migrate_raw_config(raw), [])
+        self.assertEqual(yaml.safe_dump(raw), before)
+        self.assertEqual(legacy_connector.migrate_raw_config(None), [])
+
+    def test_canonical(self):
+        self.assertEqual(legacy_connector.canonical("Wind Surf"), (DEVIN, True))
+        self.assertEqual(legacy_connector.canonical("devin"), ("devin", False))
+        self.assertFalse(legacy_connector.is_retired("codeium"))
+
+
+class ConfigLoadTests(unittest.TestCase):
+    def _load(self, body: str):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            Path(data_dir, "config.yaml").write_text(
+                f"config_version: 8\ndata_dir: {data_dir}\n{body}", encoding="utf-8"
+            )
+            env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+            with patch.dict(os.environ, env, clear=True):
+                return load(data_dir=data_dir)
+
+    def test_load_sees_devin(self):
+        cfg = self._load(f"claw:\n  mode: {RETIRED}\nguardrail:\n  connector: {RETIRED}\n")
+        self.assertEqual(cfg.guardrail.connector, DEVIN)
+        self.assertEqual(cfg.claw.mode, DEVIN)
+
+    def test_save_persists_the_rename(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            path = Path(data_dir, "config.yaml")
+            path.write_text(
+                f"config_version: 8\ndata_dir: {data_dir}\nclaw:\n  mode: {RETIRED}\n"
+                f"guardrail:\n  connector: {RETIRED}\n  connectors:\n    {RETIRED}:\n      mode: action\n",
+                encoding="utf-8",
+            )
+            env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+            with patch.dict(os.environ, env, clear=True):
+                cfg = load(data_dir=data_dir)
+                cfg.save()
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["guardrail"]["connector"], DEVIN)
+        self.assertEqual(doc["claw"]["mode"], DEVIN)
+        self.assertEqual(set(doc["guardrail"]["connectors"]), {DEVIN})
+        self.assertEqual(doc["guardrail"]["connectors"][DEVIN]["mode"], "action")
+
+    def test_both_keys_present_is_not_a_duplicate_error(self):
+        cfg = self._load(
+            f"guardrail:\n  connector: {DEVIN}\n  connectors:\n    {DEVIN}:\n      mode: observe\n"
+            f"    {RETIRED}:\n      mode: action\n"
+        )
+        self.assertEqual(set(cfg.guardrail.connectors), {DEVIN})
+        self.assertEqual(cfg.guardrail.connectors[DEVIN].mode, "observe")
+
+
+class UpgradeMigrationTests(unittest.TestCase):
+    def _run(self, body: str) -> tuple[str, list[str]]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            ctx = migrations.MigrationContext(openclaw_home=tmpdir, data_dir=tmpdir, config_path=path)
+            migrations._migrate_retired_desktop_connector(ctx)
+            first_changes = list(ctx.changes)
+            migrations._migrate_retired_desktop_connector(ctx)
+            self.assertEqual(ctx.changes, first_changes, "second run must be a no-op")
+            with open(path, encoding="utf-8") as fh:
+                return fh.read(), first_changes
+
+    def test_migration_persists_and_reports_once(self):
+        body = (
+            "# operator comment kept\n"
+            f"claw:\n  mode: {RETIRED}  # inline kept\n"
+            "guardrail:\n"
+            f"  connector: '{RETIRED}'\n"
+            "  connectors:\n"
+            "    codex:\n      mode: observe\n"
+            f"    {RETIRED}:\n      mode: action\n      hook_fail_mode: open\n"
+            "gateway:\n  api_port: 18970\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertIn(legacy_connector.HEADLINE, changes[0])
+        self.assertIn("# operator comment kept", text)
+        self.assertIn("# inline kept", text)
+        self.assertNotIn(RETIRED, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["claw"]["mode"], DEVIN)
+        self.assertEqual(doc["guardrail"]["connector"], DEVIN)
+        self.assertEqual(doc["guardrail"]["connectors"][DEVIN], {"mode": "action", "hook_fail_mode": "open"})
+        self.assertEqual(doc["gateway"], {"api_port": 18970})
+
+    def test_migration_drops_retired_block_when_devin_exists(self):
+        body = (
+            "guardrail:\n  connector: devin\n  connectors:\n"
+            f"    devin:\n      mode: observe\n    {RETIRED}:\n      mode: action\n"
+            "    codex: {}\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"]["connectors"], {DEVIN: {"mode": "observe"}, "codex": {}})
+
+    def test_migration_leaves_unaffected_config_alone(self):
+        body = "guardrail:\n  connector: cursor\n"
+        text, changes = self._run(body)
+        self.assertEqual(text, body)
+        self.assertEqual(changes, [])
+
+    def test_registered_migration_row_does_not_name_the_old_id(self):
+        rows = [row for row in migrations.MIGRATIONS if row[2] is migrations._migrate_retired_desktop_connector]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn(RETIRED, rows[0][1].lower())
+
+
+class UninstallMarkerTests(unittest.TestCase):
+    def test_uninstall_includes_the_retired_marker(self):
+        self.assertEqual(
+            cmd_uninstall._CONNECTOR_BACKUP_MARKERS[RETIRED],
+            legacy_connector.BACKUP_MARKERS[RETIRED],
+        )
+        with tempfile.TemporaryDirectory() as data_dir:
+            marker = os.path.join(data_dir, legacy_connector.BACKUP_MARKERS[RETIRED][0])
+            os.makedirs(os.path.dirname(marker))
+            Path(marker).write_text("{}", encoding="utf-8")
+            selected = cmd_uninstall._teardown_connectors(
+                ("codex",),
+                data_dir=data_dir,
+                openclaw_config_file=os.path.join(data_dir, "openclaw.json"),
+                include_openclaw=False,
+            )
+        self.assertEqual(selected, ("codex", RETIRED))
+
+
+if __name__ == "__main__":
+    unittest.main()

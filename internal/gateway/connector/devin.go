@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -42,8 +43,9 @@ var devinBlockEvents = []string{
 }
 
 // NewDevinConnector integrates the native Devin CLI lifecycle-hook contract.
-// It intentionally has no relationship to the retired Cascade/Windsurf state:
-// the legacy connector remains available only to installer teardown code.
+// Devin Desktop's default agent, Devin Local, shares the Devin CLI harness and
+// its hook config, so this connector covers both. Devin Desktop's legacy
+// Cascade agent uses a different hook contract and is not covered.
 func NewDevinConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "devin",
@@ -79,6 +81,10 @@ func devinConfigRoot(opts SetupOpts) string {
 	return homePath(".config", "devin")
 }
 
+// DevinHooksConfigPath returns the Devin hook config file Setup writes for
+// opts. It is exported for operator-facing messages.
+func DevinHooksConfigPath(opts SetupOpts) string { return devinHooksPath(opts) }
+
 func devinHooksPath(opts SetupOpts) string {
 	if DevinHooksPathOverride != "" {
 		return DevinHooksPathOverride
@@ -109,12 +115,23 @@ func devinMCPWritePaths(opts SetupOpts) []string {
 }
 
 func devinSkillPaths(opts SetupOpts) []string {
-	return uniqueNonEmptyStrings([]string{
+	return uniqueNonEmptyStrings(append([]string{
 		filepath.Join(devinConfigRoot(opts), "skills"),
 		homePath(".agents", "skills"),
 		workspacePath(opts, ".devin", "skills"),
 		workspacePath(opts, ".agents", "skills"),
-	})
+	}, devinDesktopLegacySkillPaths(opts)...))
+}
+
+// devinDesktopLegacySkillPaths and devinDesktopLegacyRulePaths are the
+// pre-rename Devin Desktop locations the vendor still loads. They are
+// inventory inputs only; DefenseClaw never writes there.
+func devinDesktopLegacySkillPaths(opts SetupOpts) []string {
+	return legacyconnector.DesktopLegacySkillPaths(homePath(), workspaceRoot(opts))
+}
+
+func devinDesktopLegacyRulePaths(opts SetupOpts) []string {
+	return legacyconnector.DesktopLegacyRulePaths(homePath(), workspaceRoot(opts))
 }
 
 func devinSkillWritePaths(opts SetupOpts) []string {
@@ -133,7 +150,7 @@ func devinAgentPaths(opts SetupOpts) []string {
 }
 
 func devinRulePaths(opts SetupOpts) []string {
-	return uniqueNonEmptyStrings([]string{
+	return uniqueNonEmptyStrings(append([]string{
 		filepath.Join(devinConfigRoot(opts), "AGENTS.md"),
 		filepath.Join(devinConfigRoot(opts), "AGENT.md"),
 		workspacePath(opts, "AGENTS.md"),
@@ -141,7 +158,7 @@ func devinRulePaths(opts SetupOpts) []string {
 		workspacePath(opts, "AGENTS.local.md"),
 		workspacePath(opts, ".devin", "rules"),
 		workspacePath(opts, ".devin", "global_rules.md"),
-	})
+	}, devinDesktopLegacyRulePaths(opts)...))
 }
 
 func devinProfileDecode(payload map[string]interface{}) HookProfileRequest {

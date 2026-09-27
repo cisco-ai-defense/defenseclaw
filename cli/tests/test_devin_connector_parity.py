@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from defenseclaw import connector_paths, platform_support
+from defenseclaw import connector_paths, legacy_connector, platform_support
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.tui.services.cli_choices import CONNECTORS
 from defenseclaw.tui.services.overview_state import (
@@ -29,9 +29,10 @@ def test_devin_is_the_only_public_cognition_connector() -> None:
     assert "devin" in connector_paths.HOOK_ONLY_CONNECTORS
     assert "devin" in CONNECTORS
     assert "devin" in agent_discovery.DISCOVERY_PRECEDENCE
-    assert "windsurf" not in connector_paths.KNOWN_CONNECTORS
-    assert "windsurf" not in CONNECTORS
-    assert "windsurf" not in agent_discovery.DISCOVERY_PRECEDENCE
+    retired = legacy_connector.RETIRED_DESKTOP_ID
+    assert retired not in connector_paths.KNOWN_CONNECTORS
+    assert retired not in CONNECTORS
+    assert retired not in agent_discovery.DISCOVERY_PRECEDENCE
     assert friendly_connector_name("devin") == "Devin"
 
 
@@ -67,6 +68,8 @@ def test_devin_local_catalog_paths_match_the_documented_contract(
         str(home / ".agents" / "skills"),
         str(workspace / ".devin" / "skills"),
         str(workspace / ".agents" / "skills"),
+        # Pre-rename Devin Desktop locations the vendor still loads (read-only).
+        *legacy_connector.desktop_legacy_skill_paths(str(home), str(workspace)),
     ]
     assert connector_paths.skill_write_dirs("devin", workspace_dir=str(workspace)) == [
         str(workspace / ".devin" / "skills")

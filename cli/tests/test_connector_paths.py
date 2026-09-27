@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, legacy_connector
 from defenseclaw.connector_paths import MCPServerEntry
 
 
@@ -650,12 +650,14 @@ class TestClaudeAutoMemory:
         assert connector_paths.skill_dirs("devin") == [
             str(devin_config / "skills"),
             str(home / ".agents" / "skills"),
+            *legacy_connector.desktop_legacy_skill_paths(str(home), ""),
         ]
         assert connector_paths.skill_dirs("devin", workspace_dir=str(tmp_path)) == [
             str(devin_config / "skills"),
             str(home / ".agents" / "skills"),
             os.path.join(str(tmp_path), ".devin", "skills"),
             os.path.join(str(tmp_path), ".agents", "skills"),
+            *legacy_connector.desktop_legacy_skill_paths(str(home), str(tmp_path)),
         ]
         antigravity = connector_paths.skill_dirs("antigravity", workspace_dir=str(tmp_path))
         assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "skills") in antigravity

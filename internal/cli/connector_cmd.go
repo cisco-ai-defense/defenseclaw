@@ -841,10 +841,11 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
-	if !ok && name == "windsurf" {
-		// Retired Cascade is never selectable or reconcilable. It remains
-		// resolvable only here so upgrades can restore its exact managed backup.
-		conn, ok = connector.NewWindsurfConnector(), true
+	if !ok {
+		// A retired connector ID is never selectable or reconcilable. It
+		// resolves only here so upgrade and uninstall can remove what an older
+		// release wrote.
+		conn, ok = connector.RetiredConnector(name)
 	}
 	if !ok {
 		return fmt.Errorf("connector teardown: unknown connector %q (known: %s)",
@@ -903,9 +904,9 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
-	if !ok && name == "windsurf" {
-		// Private legacy verification pairs with the teardown compatibility path.
-		conn, ok = connector.NewWindsurfConnector(), true
+	if !ok {
+		// Legacy verification pairs with the retired teardown path above.
+		conn, ok = connector.RetiredConnector(name)
 	}
 	if !ok {
 		// Map "unknown connector" to exit code 2 (config error), distinct

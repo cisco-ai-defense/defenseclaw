@@ -77,6 +77,7 @@ except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
 
 import yaml
 
+from defenseclaw import legacy_connector
 from defenseclaw.file_permissions import (
     UnsafePathError,
     atomic_write_private_bytes,
@@ -2092,6 +2093,9 @@ def rule_dirs(
             [
                 devin_config_home(),
                 _workspace_path(workspace_dir, ".devin", "rules"),
+                # Pre-rename Devin Desktop rule locations the vendor still
+                # loads (read-only inventory).
+                *legacy_connector.desktop_legacy_rule_paths(str(Path.home()), _workspace_dir(workspace_dir)),
             ]
         )
     if name == "opencode":
@@ -2974,6 +2978,9 @@ def _devin_skill_dirs(workspace_dir: str | None = None) -> list[str]:
             os.path.join(home, ".agents", "skills"),
             _workspace_path(workspace_dir, ".devin", "skills"),
             _workspace_path(workspace_dir, ".agents", "skills"),
+            # Pre-rename Devin Desktop locations the vendor still loads
+            # (read-only inventory; installs use the native roots above).
+            *legacy_connector.desktop_legacy_skill_paths(home, _workspace_dir(workspace_dir)),
         ]
     )
 

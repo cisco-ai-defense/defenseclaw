@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -765,6 +766,19 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".windsurf", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
+	case "devin":
+		configHome, err := devinConfigHome()
+		if err != nil {
+			return nil
+		}
+		// Devin CLI and Devin Local share these roots; the pre-rename Devin
+		// Desktop locations the vendor still loads are read-only extras.
+		return dedupNonEmpty(append([]string{
+			filepath.Join(configHome, "skills"),
+			filepath.Join(home, ".agents", "skills"),
+			workspaceJoin(cwd, ".devin", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
+		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
 	case "opencode", "omnigent":
 		// These connectors have no documented local skills surface. Keep
 		// them isolated from OpenClaw's skill directories.

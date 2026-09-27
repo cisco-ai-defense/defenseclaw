@@ -29,6 +29,7 @@ from defenseclaw.migrations import (
     _run_observability_v8_bundle_upgrade_in_target,
     _valid_upgrade_mutation_token,
     _validate_observability_v8_candidate,
+    _ver_tuple,
     preflight_observability_v8_upgrade,
     preflight_required_migrations,
     run_migrations,
@@ -38,9 +39,17 @@ from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES
 from defenseclaw.observability.v8_migration import V8MigrationError
 from defenseclaw.upgrade_receipt import begin_upgrade_receipt
 
+# These tests cover the observability-v8 hard cut. Registry rows keyed after it
+# belong to later releases and have their own tests, so run_migrations sees only
+# the rows through the hard-cut release here.
+HARD_CUT_ROWS = [row for row in MIGRATIONS if _ver_tuple(row[0]) <= _ver_tuple("0.8.5")]
+
 
 class TestObservabilityV8UpgradeMigration(unittest.TestCase):
     def setUp(self) -> None:
+        registry = patch("defenseclaw.migrations.MIGRATIONS", HARD_CUT_ROWS)
+        registry.start()
+        self.addCleanup(registry.stop)
         self.root = tempfile.TemporaryDirectory(prefix="defenseclaw-v8-upgrade-")
         self.root_path = os.path.realpath(self.root.name)
         self.data_dir = os.path.join(self.root_path, "active-data")
@@ -1441,7 +1450,7 @@ audit_sinks:
     def test_strict_same_version_success_persists_deferred_bootstrap(self) -> None:
         cursor_dir = os.path.join(self.root.name, "strict-same-version-data")
         os.makedirs(cursor_dir)
-        required = tuple(version for version, _description, _migration in MIGRATIONS)
+        required = tuple(version for version, _description, _migration in HARD_CUT_ROWS)
 
         applied = run_migrations(
             "0.8.6",
@@ -1474,7 +1483,7 @@ audit_sinks:
     def test_strict_deferred_bootstrap_save_failure_is_fatal(self) -> None:
         cursor_dir = os.path.join(self.root.name, "strict-bootstrap-save-failure-data")
         os.makedirs(cursor_dir)
-        required = tuple(version for version, _description, _migration in MIGRATIONS)
+        required = tuple(version for version, _description, _migration in HARD_CUT_ROWS)
 
         with (
             patch("defenseclaw.migration_state.save", side_effect=OSError("synthetic write refusal")),
