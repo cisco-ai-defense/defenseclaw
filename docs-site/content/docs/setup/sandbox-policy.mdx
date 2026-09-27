@@ -442,7 +442,7 @@ The required pack's allow entries always apply, even when `allow_unblock` is
 ```yaml
 openshell:
   admin:
-    required_pack: /etc/defenseclaw/sandbox/acme-dev/pack.yaml
+    required_pack: /opt/acme/sandbox-packs/acme-dev/pack.yaml
     required_pack_digest: sha256:3f5c0e9b2d7a41c68e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f
 ```
 
@@ -672,8 +672,8 @@ protected as the config: the file and every directory above it must be owned
 by root, not writable by group or others, and free of symbolic links. The
 default `pack_dir` inside the data directory usually doesn't qualify, so give
 `required_pack` an absolute path in an administrator-owned directory, such as
-`/etc/defenseclaw/sandbox/acme-dev/pack.yaml`. Built-in packs are always
-trusted.
+`/opt/acme/sandbox-packs/acme-dev/pack.yaml`. Keep the file readable by the
+accounts that run sandboxes. Built-in packs are always trusted.
 
 See [Enterprise deployment](/docs/setup/enterprise-deployment#sandbox-policy-pushdown)
 for rolling the admin block out to managed machines.

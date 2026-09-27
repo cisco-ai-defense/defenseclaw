@@ -1627,10 +1627,10 @@ To require your own pack instead of a built-in one, set `required_pack` to an
 absolute path and pin its content with `required_pack_digest`. In
 `managed_enterprise`, DefenseClaw loads a custom required pack only when the
 file and every directory above it are owned by root, not writable by group or
-others, and free of symbolic links. For example, use
-`/etc/defenseclaw/sandbox/acme-dev/pack.yaml` on Linux. The default pack
-directory inside the service's data directory doesn't qualify. Built-in packs
-are always trusted.
+others, and free of symbolic links, such as
+`/opt/acme/sandbox-packs/acme-dev/pack.yaml`. Keep the file readable by the
+accounts that run sandboxes. The default pack directory inside the service's
+data directory doesn't qualify. Built-in packs are always trusted.
 
 <Callout title="Where sandboxes run">
 OpenShell sandboxes run under the developer's own account, because OpenShell's
