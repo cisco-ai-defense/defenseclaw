@@ -118,7 +118,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "MCP Actions",
         "Plugin Actions",
         "Watch",
-        "OpenShell (legacy - read-only)",
+        "OpenShell Sandboxes",
         "Inspect LLM (legacy - read-only)",
         "Cisco AI Defense",
         "Firewall",
@@ -1224,25 +1224,32 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
-    # The legacy openshell section is read-only: nothing there is editable.
+    # The OpenShell 0.1 section edits the openshell: keys; a legacy
+    # standalone marker stays visible read-only with its cleanup command.
     openshell = next(section for section in sections if section.name.startswith("OpenShell"))
-    assert openshell.name == "OpenShell (legacy - read-only)"
-    assert [(field.label, field.value, field.interactive) for field in openshell.fields] == [
-        ("Mode", "standalone", False),
-        ("Sandbox Home", "(unset)", False),
-    ]
+    assert openshell.name == "OpenShell Sandboxes"
+    legacy = next(field for field in openshell.fields if field.key == "openshell.mode")
+    assert legacy.interactive is False
+    assert "standalone" in legacy.value and "legacy-cleanup" in legacy.value
+    assert _field_by_key(sections, "openshell.enabled").kind == "bool"
+    assert _field_by_key(sections, "openshell.profile").options == ("inherit", "open", "balanced", "strict")
 
 
-def test_legacy_sandbox_wizard_slot_is_kept_but_unavailable() -> None:
-    from defenseclaw.tui.panels.setup import SANDBOX_WIZARD_REMOVED_REASON
+def test_sandbox_wizard_slot_runs_the_openshell_setup_on_linux_and_macos() -> None:
+    from defenseclaw.tui.panels.setup import SANDBOX_WIZARD_UNSUPPORTED_REASON
 
-    model = SetupPanelModel({})
     assert int(SetupWizard.SANDBOX) == 13
-    assert model.wizard_available(SetupWizard.SANDBOX) is False
-    assert model.wizard_unavailable_reason(SetupWizard.SANDBOX) == SANDBOX_WIZARD_REMOVED_REASON
-    assert model.open_goal_menu(SetupWizard.SANDBOX) is False
-    assert model.form_error == SANDBOX_WIZARD_REMOVED_REASON
-    assert model.wizard_infos()[13].status == "unsupported"
+    for os_name in ("linux", "darwin"):
+        model = SetupPanelModel({}, os_name=os_name)
+        assert model.wizard_available(SetupWizard.SANDBOX) is True
+        assert model.wizard_infos()[13].argv == ("defenseclaw", "sandbox", "setup")
+
+    windows = SetupPanelModel({}, os_name="windows")
+    assert windows.wizard_available(SetupWizard.SANDBOX) is False
+    assert windows.wizard_unavailable_reason(SetupWizard.SANDBOX) == SANDBOX_WIZARD_UNSUPPORTED_REASON
+    assert windows.open_goal_menu(SetupWizard.SANDBOX) is False
+    assert windows.form_error == SANDBOX_WIZARD_UNSUPPORTED_REASON
+    assert windows.wizard_infos()[13].status == "unsupported"
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -2500,8 +2507,8 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     cfg = _guardrail_on_cfg("openclaw")
     for wizard in SetupWizard:
         if not SetupPanelModel(cfg=cfg).wizard_available(wizard):
-            # An unavailable slot (the removed legacy sandbox wizard) never
-            # opens a form; test_legacy_sandbox_wizard_slot_is_kept_but_unavailable
+            # An unavailable slot (for example Sandbox on Windows) never
+            # opens a form; test_sandbox_wizard_slot_runs_the_openshell_setup_on_linux_and_macos
             # pins that behavior.
             continue
         goals = wizard_goals(wizard, cfg)

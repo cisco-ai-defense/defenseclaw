@@ -47,6 +47,7 @@ from defenseclaw.platform_support import (
     LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
     local_observability_stack_supported,
     local_splunk_stack_supported,
+    openshell_sandboxes_supported,
 )
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
@@ -79,6 +80,7 @@ from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
 from defenseclaw.tui.services.setup_state import (
+    OPENSHELL_INHERIT_CHOICE,
     ConfigDiffEntry,
     ConfigField,
     ConfigSection,
@@ -182,9 +184,8 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.SPLUNK: ("setup", "splunk"),
     SetupWizard.OBSERVABILITY: ("setup", "observability", "add"),
     SetupWizard.WEBHOOKS: ("setup", "webhook", "add"),
-    # Slot kept so wizard numbering stays stable. The legacy openshell-sandbox
-    # wizard was removed; the slot is unavailable and names the cleanup.
-    SetupWizard.SANDBOX: ("sandbox", "legacy-cleanup"),
+    # OpenShell 0.1 sandboxes (slot 13 held the removed legacy wizard).
+    SetupWizard.SANDBOX: ("sandbox", "setup"),
     SetupWizard.REGISTRIES: ("registry", "add"),
     # NOTIFICATIONS_ROUTING fan-outs to multiple
     # ``setup notifications-set <slot> <value>`` calls; the first
@@ -205,9 +206,13 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
 
-SANDBOX_WIZARD_REMOVED_REASON = (
-    "The legacy openshell-sandbox wizard was removed; OpenShell 0.1 sandbox support is being rebuilt. "
-    "To undo an old standalone install, run 'defenseclaw sandbox legacy-cleanup' on the Linux host."
+# The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
+ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# Choice value for pack-governed openshell keys left unset.
+OPENSHELL_INHERIT = OPENSHELL_INHERIT_CHOICE
+
+SANDBOX_WIZARD_UNSUPPORTED_REASON = (
+    "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported."
 )
 
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
@@ -234,7 +239,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Configure Splunk HEC or local Splunk integration.",
     "Add and manage canonical v8 observability destinations.",
     "Add chat or incident notifier webhooks.",
-    "Removed: the legacy openshell-sandbox setup. OpenShell 0.1 support is being rebuilt.",
+    "Run coding agents in OpenShell sandboxes: harnesses, folder mounts, telemetry, wrappers.",
     "Register an external skill or MCP catalog source.",
     "Toggle notification categories and event sources.",
     "Enable or tune the sidecar AI Discovery service.",
@@ -261,7 +266,8 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
     "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
-    "Unavailable. Undo an old standalone install on Linux with: defenseclaw sandbox legacy-cleanup --dry-run.",
+    "Runs: defenseclaw sandbox setup --non-interactive in this terminal (sudo prompts and image builds show). "
+    "Needs Docker; installs OpenShell only when you tick it.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",
@@ -730,14 +736,14 @@ class SetupPanelModel:
     def wizard_available(self, wizard: SetupWizard | int) -> bool:
         wizard = SetupWizard(wizard)
         if wizard == SetupWizard.SANDBOX:
-            return False
+            return openshell_sandboxes_supported(self.os_name)
         return not (wizard == SetupWizard.LOCAL_OBSERVABILITY and not local_observability_stack_supported(self.os_name))
 
     def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
         if self.wizard_available(wizard):
             return ""
         if SetupWizard(wizard) == SetupWizard.SANDBOX:
-            return SANDBOX_WIZARD_REMOVED_REASON
+            return SANDBOX_WIZARD_UNSUPPORTED_REASON
         return LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
@@ -1422,6 +1428,11 @@ class SetupPanelModel:
             if self.active_wizard == SetupWizard.REDACTION and redaction_action == "interactive"
             else "read-only"
         )
+        # Sandbox setup may call sudo (the OpenShell installer) and builds
+        # images for minutes: it runs in the real terminal (App.suspend).
+        terminal = self.active_wizard == SetupWizard.SANDBOX and tuple(args[:2]) == ("sandbox", "setup")
+        if terminal:
+            risk = "setup"
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
@@ -1436,6 +1447,7 @@ class SetupPanelModel:
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
                 risk=risk,
+                terminal=terminal,
             ),
         )
 
@@ -2653,19 +2665,6 @@ def wizard_form_defs(
         return observability_wizard_fields("splunk-o11y", cfg)
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
-    if wizard == SetupWizard.SANDBOX:
-        # The slot is unavailable (see SANDBOX_WIZARD_REMOVED_REASON); this
-        # single row documents the only command it names.
-        return (
-            WizardFormField(
-                "Dry Run",
-                "bool",
-                "--dry-run",
-                value="yes",
-                default="yes",
-                hint="Preview the legacy openshell-sandbox cleanup; run it on the Linux host.",
-            ),
-        )
     return ()
 
 
@@ -2692,6 +2691,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+    SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
 }
 
 
@@ -4428,6 +4428,158 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
     return WIZARD_COMMANDS[SetupWizard.NOTIFICATIONS_ROUTING]
 
 
+# --- Sandbox wizard (slot 13) ---------------------------------------------
+
+# (connector name, wizard label, command) for the harnesses the Go tree runs.
+SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = (
+    ("claudecode", "Claude Code", "claude"),
+    ("codex", "Codex", "codex"),
+)
+
+
+def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str | None = None) -> str:
+    """Which model credential each harness would share (names only, never values).
+
+    Mirrors ``sandboxcli.detectLLM``: environment variables, and for Codex
+    ~/.codex/auth.json.
+    """
+
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+
+    def first(*names: str) -> str:
+        return next((name for name in names if str(env.get(name, "")).strip()), "")
+
+    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK")
+    codex = first("OPENAI_API_KEY", "CODEX_API_KEY")
+    if not codex and os.path.isfile(os.path.join(home, ".codex", "auth.json")):
+        codex = "~/.codex/auth.json"
+    if not codex:
+        codex = first("AWS_BEARER_TOKEN_BEDROCK")
+    parts = [
+        f"Claude Code: {claude} found" if claude else "Claude Code: none found (log in inside the sandbox)",
+        f"Codex: {codex} found" if codex else "Codex: none found (log in inside the sandbox)",
+    ]
+    return "Credentials  " + " · ".join(parts)
+
+
+def sandbox_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+    """The OpenShell sandbox setup wizard (``defenseclaw sandbox setup``).
+
+    Every consent the interactive command asks for is a field here, so the
+    wizard runs the command with ``--non-interactive`` and explicit flags.
+    """
+
+    configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
+
+    def is_setup(values: Mapping[str, str]) -> bool:
+        return (values.get("action") or "setup") == "setup"
+
+    fields: list[WizardFormField] = [
+        WizardFormField(
+            "Action",
+            "choice",
+            value="setup",
+            default="setup",
+            options=("setup", "doctor"),
+            hint="setup: the one-time sandbox setup. doctor: only check this machine.",
+        ),
+        WizardFormField("Harnesses", "section", hint="The harnesses that run in sandboxes.", visible_when=is_setup),
+    ]
+    for name, label, command in SANDBOX_WIZARD_HARNESSES:
+        on = "yes" if not configured or name in configured else "no"
+        fields.append(
+            WizardFormField(
+                label,
+                "bool",
+                value=on,
+                default=on,
+                hint=f"Run `{command}` in a sandbox (--harness {name}).",
+                visible_when=is_setup,
+            )
+        )
+    fields += [
+        WizardFormField("Credentials", "section", hint=_sandbox_credential_summary(), visible_when=is_setup),
+        WizardFormField("This machine", "section", hint="Each change below asks for your consent.", visible_when=is_setup),
+        WizardFormField(
+            "Install OpenShell",
+            "bool",
+            "--install-openshell",
+            value="no",
+            default="no",
+            hint="Install OpenShell 0.1.1 with NVIDIA's pinned, sha256-verified installer if it is missing "
+            "(uses sudo; the terminal asks for your password).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Mount Project Folder",
+            "bool",
+            no_flag="--no-mounts",
+            value="yes",
+            default="yes",
+            hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
+            "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy.",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Disable OpenShell Telemetry",
+            "bool",
+            no_flag="--upstream-telemetry",
+            value="yes",
+            default="yes",
+            hint="Turn OpenShell's anonymous usage telemetry off.",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Shell Wrappers",
+            "bool",
+            "--wrappers",
+            "--no-wrappers",
+            value="no",
+            default="no",
+            hint="Make `claude` and `codex` run sandboxed when you type them (a marked block in your shell rc; "
+            "undo any time with defenseclaw sandbox disable <harness>).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Build Images Now",
+            "bool",
+            no_flag="--skip-images",
+            value="yes",
+            default="yes",
+            hint="Build the harness images now (the first build is about 3 GB). No: the first run builds them.",
+            visible_when=is_setup,
+        ),
+    ]
+    return tuple(fields)
+
+
+def _sandbox_selected_harnesses(fields: Sequence[WizardFormField]) -> list[str]:
+    return [
+        name
+        for name, label, _command in SANDBOX_WIZARD_HARNESSES
+        if wizard_bool_value(fields, label, "no") == "yes"
+    ]
+
+
+def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    if (wizard_field_value(fields, "Action") or "setup") == "doctor":
+        return ("sandbox", "doctor")
+    args = ["sandbox", "setup", "--non-interactive"]
+    for name in _sandbox_selected_harnesses(fields):
+        args.extend(("--harness", name))
+    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
+        args.append("--install-openshell")
+    if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
+        args.append("--no-mounts")
+    if wizard_bool_value(fields, "Disable OpenShell Telemetry", "yes") == "no":
+        args.append("--upstream-telemetry")
+    args.append("--wrappers" if wizard_bool_value(fields, "Shell Wrappers", "no") == "yes" else "--no-wrappers")
+    if wizard_bool_value(fields, "Build Images Now", "yes") == "no":
+        args.append("--skip-images")
+    return tuple(args)
+
+
 def _build_acp_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     args = ["acp", "setup"]
     for label, flag in (("Client", "--client"), ("Agent", "--agent"), ("Profile", "--profile")):
@@ -4623,8 +4775,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
     SetupWizard.OBSERVABILITY: lambda fields: _build_observability_args(fields),
     SetupWizard.WEBHOOKS: lambda fields: _build_webhook_args(fields),
-    # The slot is unavailable; its only argv is the read-only cleanup preview.
-    SetupWizard.SANDBOX: lambda fields: ("sandbox", "legacy-cleanup", "--dry-run"),
+    SetupWizard.SANDBOX: lambda fields: _build_sandbox_args(fields),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda fields: _build_notifications_routing_args(fields),
     SetupWizard.AI_DISCOVERY: lambda fields: _build_ai_discovery_args(fields),
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
@@ -4655,6 +4806,9 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.SANDBOX and (wizard_field_value(fields, "Action") or "setup") == "setup":
+        if not _sandbox_selected_harnesses(fields):
+            missing.append("a harness (Claude Code or Codex)")
     if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
         for label in ("Runtime Data Dir", "Token File"):
             if not wizard_field_value(fields, label):
@@ -6862,17 +7016,217 @@ def _watch_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     )
 
 
+def _openshell_admin(cfg: object | Mapping[str, Any] | None) -> Any:
+    return get_config_value(cfg, "openshell.admin", None)
+
+
+def _admin_value(admin: Any, name: str, default: Any = None) -> Any:
+    if admin is None:
+        return default
+    if isinstance(admin, Mapping):
+        return admin.get(name, default)
+    return getattr(admin, name, default)
+
+
+def openshell_managed(cfg: object | Mapping[str, Any] | None) -> bool:
+    """Whether config.yaml is administrator-owned (managed_enterprise)."""
+    mode = str(get_config_value(cfg, "deployment_mode", "") or "").strip().lower()
+    return mode in {"managed_enterprise", "managed"}
+
+
+# openshell.admin.locked entries and the config keys they pin.
+_OPENSHELL_LOCKED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "pack": ("openshell.pack", "openshell.pack_dir"),
+    "profile": ("openshell.profile",),
+    "yolo": ("openshell.yolo",),
+    "workdir.mode": ("openshell.workdir.mode",),
+    "workdir.unmask": ("openshell.workdir.unmask",),
+    "mcp.import": ("openshell.mcp.import",),
+    "mcp.host_ports": ("openshell.mcp.host_ports",),
+    "resources": ("openshell.resources.cpu", "openshell.resources.memory"),
+}
+
+
+def openshell_admin_locks(cfg: object | Mapping[str, Any] | None) -> dict[str, str]:
+    """The ``openshell.*`` keys an administrator constrains, with the reason.
+
+    Mirrors the openshell.admin switches the Go resolver (internal/openshell/
+    packs) enforces; the config editor shows these keys read-only. In
+    managed_enterprise the whole file is administrator-owned, which
+    :func:`_openshell_section` handles separately.
+    """
+
+    admin = _openshell_admin(cfg)
+    locks: dict[str, str] = {}
+    if admin is None:
+        return locks
+
+    def lock(keys: Sequence[str], reason: str) -> None:
+        for key in keys:
+            locks.setdefault(key, reason)
+
+    required = str(_admin_value(admin, "required_pack", "") or "").strip()
+    if required:
+        lock(("openshell.pack", "openshell.pack_dir"), f"your organization requires the {required} pack")
+    if _admin_value(admin, "allow_yolo") is False:
+        lock(("openshell.yolo",), "skip-permissions mode is not allowed")
+    if _admin_value(admin, "allow_mount") is False:
+        lock(("openshell.workdir.mode",), "your organization requires copy mode")
+    if _admin_value(admin, "allow_host_ports") is False:
+        lock(("openshell.mcp.host_ports",), "opening host ports is not allowed")
+    if _admin_value(admin, "allow_unblock") is False:
+        reason = "unblocking and allow entries are not allowed"
+        lock(("openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"), reason)
+    for entry in _admin_value(admin, "locked", ()) or ():
+        keys = _OPENSHELL_LOCKED_CONFIG_KEYS.get(str(entry).strip())
+        if keys:
+            lock(keys, f"locked by your organization (openshell.admin.locked: {str(entry).strip()})")
+    return locks
+
+
+def _openshell_inherit_value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
+    raw = _openshell_raw(cfg, key)
+    if raw is None or raw == "":
+        return OPENSHELL_INHERIT
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    return str(raw)
+
+
+def _openshell_raw(cfg: object | Mapping[str, Any] | None, key: str) -> Any:
+    if key == "openshell.mcp.import":
+        mcp = get_config_value(cfg, "openshell.mcp", None)
+        if isinstance(mcp, Mapping):
+            return mcp.get("import", mcp.get("import_"))
+        return getattr(mcp, "import_", None) if mcp is not None else None
+    return get_config_value(cfg, key, None)
+
+
+def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
+    admin = _openshell_admin(cfg)
+    if admin is None:
+        return "none"
+    parts: list[str] = []
+    for name in ("required_pack", "required_pack_digest", "min_profile"):
+        value = str(_admin_value(admin, name, "") or "").strip()
+        if value:
+            parts.append(f"{name}={value}")
+    for name in ("allow_yolo", "allow_mount", "allow_host_ports", "allow_unblock", "allow_learn_mode"):
+        value = _admin_value(admin, name)
+        if isinstance(value, bool):
+            parts.append(f"{name}={'true' if value else 'false'}")
+    for name in ("allowed_harnesses", "egress_block", "egress_allow_only", "require_copy_for", "locked"):
+        values = [str(item) for item in (_admin_value(admin, name, ()) or ()) if str(item).strip()]
+        if values:
+            parts.append(f"{name}={','.join(values)}")
+    resources = _admin_value(admin, "max_resources")
+    for name in ("cpu", "memory"):
+        value = str(_admin_value(resources, name, "") or "").strip()
+        if value:
+            parts.append(f"max_{name}={value}")
+    return "; ".join(parts) or "none"
+
+
 def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
-    # Read-only: the legacy openshell-sandbox integration was removed, and
-    # only its shim fields are still read (by legacy-cleanup and the bind shim).
-    return ConfigSection(
-        "OpenShell (legacy - read-only)",
-        (
-            _header("Mode", value=_value(cfg, "openshell.mode") or "(unset)"),
-            _header("Sandbox Home", value=_value(cfg, "openshell.sandbox_home") or "(unset)"),
+    """The ``openshell:`` keys (OpenShell 0.1 sandboxes).
+
+    Keys the selected sandbox policy pack governs stay "inherit" unless set.
+    Keys an administrator constrains (openshell.admin) are read-only with the
+    reason; in managed_enterprise every key is (the file is administrator-owned).
+    """
+
+    managed = openshell_managed(cfg)
+    locks = openshell_admin_locks(cfg)
+    min_profile = str(_admin_value(_openshell_admin(cfg), "min_profile", "") or "").strip()
+    profile_rank = {name: index for index, name in enumerate(dc_config.OPENSHELL_PROFILES)}
+    profiles = tuple(
+        name
+        for name in dc_config.OPENSHELL_PROFILES
+        if not min_profile or profile_rank.get(name, 0) >= profile_rank.get(min_profile, 0)
+    )
+
+    def field(label: str, key: str, kind: str = "string", options: Sequence[str] = (), hint: str = "") -> ConfigField:
+        inherit = kind == "choice" and OPENSHELL_INHERIT in options
+        value = _openshell_inherit_value(cfg, key) if inherit else _value(cfg, key)
+        reason = "config.yaml is administrator-owned (managed_enterprise)" if managed else locks.get(key, "")
+        if reason:
+            shown = value or "(unset)"
+            return _header(label, key, f"{shown}  — read-only: {ADMIN_POLICY_MESSAGE}; {reason}")
+        return ConfigField(
+            label=label, key=key, kind=kind, value=value, original=value, options=tuple(options), hint=hint
+        )
+
+    inherit_bool = (OPENSHELL_INHERIT, "true", "false")
+    fields: list[ConfigField] = [
+        field("Enabled", "openshell.enabled", "bool", hint="Sandbox listeners and API on the daemon (sandbox setup turns it on)."),
+        field("OpenShell Binary", "openshell.binary", hint="The upstream openshell CLI."),
+        field("Gateway Name", "openshell.gateway.name", hint="OpenShell gateway registration; empty uses the active one."),
+        field("Gateway Workspace", "openshell.gateway.workspace", hint="OpenShell workspace; empty is default."),
+        field("Ingress Port", "openshell.ingress_port", "int", hint="Sandbox hook ingress; 0 is api_port+1."),
+        field("Egress Port", "openshell.egress_port", "int", hint="DefenseClaw egress proxy; 0 is api_port+2."),
+        field("Pack", "openshell.pack", hint="Policy pack: open, balanced, strict, a custom pack, or a path."),
+        field("Pack Dir", "openshell.pack_dir", hint="Custom packs as <name>/pack.yaml."),
+        field(
+            "Profile",
+            "openshell.profile",
+            "choice",
+            (OPENSHELL_INHERIT, *profiles),
+            hint="Network profile; inherit takes the pack's."
+            + (f" Your organization requires at least {min_profile}." if min_profile else ""),
         ),
-        "Legacy openshell-sandbox (0.0.x) settings, read only by 'defenseclaw sandbox legacy-cleanup'. "
-        "OpenShell 0.1 support is being rebuilt.",
+        field("Skip-permissions (yolo)", "openshell.yolo", "choice", inherit_bool, hint="--dangerously-skip-permissions by default."),
+        field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder; copy: untrusted repos."),
+        field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
+        field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),
+        field("Max Upload MB", "openshell.workdir.max_upload_mb", "int", hint="Copy-mode upload cap; 0 inherits."),
+        field("Git Depth", "openshell.workdir.git_depth", "int", hint="Copy-mode history depth."),
+        field("On Exit", "openshell.workdir.on_exit", "choice", ("ask", "keep", "undo"), hint="End-of-session default."),
+        field("Egress Block", "openshell.egress.block", hint="Blocked hosts, comma-separated."),
+        field("Egress Allow", "openshell.egress.allow", hint="Allowlist for balanced/strict, comma-separated."),
+        field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),
+        field("Egress Ports", "openshell.egress.ports", hint="Proxy ports, comma-separated; empty inherits."),
+        field("Large Upload MB", "openshell.egress.large_upload_mb", "int", hint="First-seen-host upload alert; 0 inherits."),
+        field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
+        field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
+        field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),
+        field("Agent Proposals", "openshell.approvals.agent_proposals", "choice", inherit_bool, hint="Let the agent propose rules (default on)."),
+        field("CPU", "openshell.resources.cpu", hint="Per-sandbox CPU, for example 2 or 500m."),
+        field("Memory", "openshell.resources.memory", hint="Per-sandbox memory, for example 4Gi."),
+        field("Harnesses", "openshell.harnesses", hint="claudecode, codex (feeds the policy connectors)."),
+        _header(
+            "Shell Wrappers",
+            "openshell.wrappers",
+            (_value(cfg, "openshell.wrappers") or "none")
+            + "  — change with: defenseclaw sandbox enable|disable <harness> (Sandboxes panel: w)",
+        ),
+        field("MCP Import", "openshell.mcp.import", "choice", inherit_bool, hint="Bring the harness's MCP servers along."),
+        field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
+        field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
+        field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
+        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
+        _header(
+            "Organization Policy",
+            "openshell.admin",
+            _openshell_admin_summary(cfg)
+            + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
+        ),
+    ]
+    legacy_mode = _value(cfg, "openshell.mode")
+    if legacy_mode:
+        fields.append(
+            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
+        )
+    summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
+    if managed:
+        summary += " Administrator-owned (managed_enterprise): read-only."
+    elif locks:
+        summary += f" {len(locks)} key(s) are set by your organization's policy."
+    return ConfigSection(
+        "OpenShell Sandboxes",
+        tuple(fields),
+        summary,
+        "Pack-governed keys show 'inherit' until set. Run 'defenseclaw sandbox policy explain' to see every "
+        "resolved setting and where it comes from.",
     )
 
 

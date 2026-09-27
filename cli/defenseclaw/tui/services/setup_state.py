@@ -62,6 +62,10 @@ class SetupCommandIntent:
     # child asks for input. Never read this field alone to decide whether a
     # command needs confirmation.
     risk: SetupPreviewRisk = "read-only"
+    # Hand the terminal to the command (App.suspend) instead of capturing it:
+    # ``sandbox setup`` may run the OpenShell installer under sudo and builds
+    # images for minutes, which need a real terminal.
+    terminal: bool = False
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -495,6 +499,10 @@ def validate_config_field(field: ConfigField) -> ValidationResult:
         return ValidationResult("error", "expected true or false")
     if field.kind == "choice" and field.options and value not in field.options:
         return ValidationResult("error", "choose one of: " + ", ".join(field.options))
+    if field.key.startswith("openshell."):
+        openshell_result = _validate_openshell_field(field.key, value)
+        if openshell_result is not None:
+            return openshell_result
     if field.kind == "int":
         try:
             number = int(value)
@@ -659,6 +667,9 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         return
     if key.startswith("guardrail.judge.hook_connectors."):
         _apply_judge_hook_connector_toggle(cfg, key, value)
+        return
+    if key.startswith("openshell."):
+        _apply_openshell_field(cfg, key, value)
         return
     _apply_typed_field(cfg, key, value)
 
@@ -937,6 +948,112 @@ def _is_secret_name(name: str) -> bool:
         marker in lowered
         for marker in ("password", "secret", "token", "api_key", "apikey", "access_key", "private_key")
     )
+
+
+# --- openshell: (OpenShell 0.1 sandboxes) ------------------------------------
+#
+# Pack-governed keys use the "inherit" choice for unset (empty / nil). The
+# kinds mirror internal/config/openshell.go.
+
+OPENSHELL_INHERIT_CHOICE = "inherit"
+_OPENSHELL_TRISTATE_KEYS = frozenset(
+    {"openshell.yolo", "openshell.mcp.import", "openshell.approvals.agent_proposals"}
+)
+_OPENSHELL_INHERIT_STRING_KEYS = frozenset(
+    {"openshell.profile", "openshell.workdir.mode", "openshell.egress.feed"}
+)
+_OPENSHELL_BOOL_KEYS = frozenset(
+    {"openshell.enabled", "openshell.upstream_telemetry", "openshell.middleware.enabled"}
+)
+_OPENSHELL_INT_KEYS = frozenset(
+    {
+        "openshell.ingress_port",
+        "openshell.egress_port",
+        "openshell.workdir.max_upload_mb",
+        "openshell.workdir.git_depth",
+        "openshell.egress.large_upload_mb",
+        "openshell.approvals.debounce_ms",
+    }
+)
+_OPENSHELL_PORT_LIST_KEYS = frozenset({"openshell.egress.ports", "openshell.mcp.host_ports"})
+_OPENSHELL_STRING_LIST_KEYS = frozenset(
+    {
+        "openshell.workdir.masks",
+        "openshell.workdir.unmask",
+        "openshell.egress.block",
+        "openshell.egress.allow",
+        "openshell.egress.unblocked",
+        "openshell.harnesses",
+    }
+)
+# Keys only the daemon and the sandbox commands write.
+_OPENSHELL_READ_ONLY_KEYS = frozenset({"openshell.wrappers", "openshell.admin", "openshell.mode"})
+_OPENSHELL_CPU = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
+_OPENSHELL_MEMORY = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T|k)?$")
+
+
+def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
+    """Validation for ``openshell.*`` keys, or None to fall through."""
+
+    if key in {"openshell.ingress_port", "openshell.egress_port"}:
+        try:
+            port = int(value or "0")
+        except ValueError:
+            return ValidationResult("error", "expected a port number (0 derives it from gateway.api_port)")
+        if not 0 <= port <= 65535:
+            return ValidationResult("error", "port must be 0 (derived) or between 1 and 65535")
+        return ValidationResult()
+    if key in _OPENSHELL_INT_KEYS:
+        try:
+            number = int(value or "0")
+        except ValueError:
+            return ValidationResult("error", "expected an integer")
+        if number < 0:
+            return ValidationResult("error", "value must be zero or greater")
+        return ValidationResult()
+    if key in _OPENSHELL_PORT_LIST_KEYS:
+        for item in split_csv(value):
+            if not item.isdigit() or not 1 <= int(item) <= 65535:
+                return ValidationResult("error", f"{item!r} is not a port between 1 and 65535")
+        return ValidationResult()
+    if key == "openshell.resources.cpu" and value and not _OPENSHELL_CPU.match(value):
+        return ValidationResult("error", "CPU is cores or millicores, for example 2, 1.5 or 500m")
+    if key == "openshell.resources.memory" and value and not _OPENSHELL_MEMORY.match(value):
+        return ValidationResult("error", "memory is bytes with an optional suffix, for example 512Mi or 4Gi")
+    if key == "openshell.harnesses":
+        unknown = [name for name in split_csv(value) if name not in {"claudecode", "codex"}]
+        if unknown:
+            return ValidationResult("error", "supported harnesses: claudecode, codex")
+    return None
+
+
+def _apply_openshell_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Write one ``openshell.*`` editor value with its Go type."""
+
+    if key in _OPENSHELL_READ_ONLY_KEYS:
+        return
+    text = value.strip()
+    if key in _OPENSHELL_TRISTATE_KEYS:
+        parsed: Any = {"true": True, "false": False}.get(text.lower())
+    elif key in _OPENSHELL_INHERIT_STRING_KEYS:
+        parsed = "" if text in {"", OPENSHELL_INHERIT_CHOICE} else text
+    elif key in _OPENSHELL_BOOL_KEYS:
+        parsed = text.lower() == "true"
+    elif key in _OPENSHELL_INT_KEYS:
+        try:
+            parsed = int(text or "0")
+        except ValueError:
+            parsed = 0
+    elif key in _OPENSHELL_PORT_LIST_KEYS:
+        parsed = [int(item) for item in split_csv(text) if item.isdigit()]
+    elif key in _OPENSHELL_STRING_LIST_KEYS:
+        parsed = split_csv(text)
+    else:
+        parsed = text
+    if key == "openshell.mcp.import" and not isinstance(cfg, dict):
+        # The dataclass spells the YAML key ``import`` as ``import_``.
+        key = "openshell.mcp.import_"
+    set_config_value(cfg, key, parsed)
 
 
 def _looks_like_url_field(key: str) -> bool:
