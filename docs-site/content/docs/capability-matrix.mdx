@@ -32,7 +32,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
-  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image. managed tier = a root-owned system policy file that user and project settings cannot switch off. The image pin is the harness version the image installs by default. pending = DefenseClaw builds no sandbox image files for this connector yet." />
+  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image. managed tier = a root-owned system policy file that user and project settings cannot switch off. The image pin is the harness version the image installs by default. pending = DefenseClaw renders no sandbox image files for this connector yet." />
   <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
 </Cards>
 

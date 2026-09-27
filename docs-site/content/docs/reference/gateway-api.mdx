@@ -87,8 +87,8 @@ the master gateway token.
 
 A request that carries an OpenShell sandbox binding credential (a `dcsb_`
 value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
-token) gets 401 on every route of this API, before any other check. Those
-credentials are valid only on the [hook ingress](#hook-ingress).
+token) gets 401 on every authenticated route of this API, before any other
+check. Those credentials are valid only on the [hook ingress](#hook-ingress).
 
 The token is resolved from one of, in priority order:
 
@@ -583,10 +583,11 @@ form, which would put a credential in the URL.
 
 **Authentication.** A request must send exactly one
 `Authorization: Bearer dcsb_…` header with the sandbox's binding credential.
-The harness never sees the real value: OpenShell gives the sandbox a
-placeholder and substitutes the credential only on the way to the ingress. The
-master gateway token, connector hook tokens and OTLP path tokens are never
-accepted here.
+With the default `openshell.token_delivery: provider`, the harness never sees
+the real value: OpenShell gives the sandbox a placeholder and substitutes the
+credential only on the way to the ingress. (`token_delivery: env` puts the
+real value in the sandbox environment instead.) The master gateway token,
+connector hook tokens and OTLP path tokens are never accepted here.
 
 | Response | When |
 | --- | --- |

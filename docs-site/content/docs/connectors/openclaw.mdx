@@ -248,6 +248,12 @@ the gateway's tool-inspection endpoint before running the real binary. Shims
 inspect those command paths only; they do not provide syscall, filesystem, or
 network isolation.
 
+OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox
+that used to run it as a separate Linux user was removed; a host that still
+carries it should run the [legacy cleanup](/docs/setup/sandbox). OpenShell 0.1
+support for OpenClaw is pending in the
+[capability matrix](/docs/capability-matrix).
+
 ## Disable
 
 ```bash
