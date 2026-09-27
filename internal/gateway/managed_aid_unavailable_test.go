@@ -222,6 +222,57 @@ func TestHookManagedAIDUnavailableActionFollowsLiveConfig(t *testing.T) {
 	}
 }
 
+// scan_hook_surface and unavailable_action come from the same live snapshot:
+// a reload that changes scan_hook_surface reaches the managed hook lane with
+// the unavailable_action it was reloaded with, instead of pairing the
+// construction-time scan_hook_surface with the live unavailable_action.
+func TestHookManagedAIDScanHookSurfaceFollowsLiveConfig(t *testing.T) {
+	enabled, disabled := true, false
+	req := &ToolInspectRequest{Tool: "run_shell", Args: json.RawMessage(`{"command":"ls"}`)}
+	for _, tc := range []struct {
+		name          string
+		boot, live    *bool
+		verdict       *ScanVerdict
+		wantAction    string
+		wantAIDCalls  int
+		wantAIDBlocks bool
+	}{
+		// Hook traffic excluded by the reload is neither sent to AI
+		// Defense nor blocked as uninspected.
+		{name: "reload excludes the hook surface", boot: &enabled, live: &disabled, wantAction: "allow"},
+		// Hook traffic included by the reload is sent to AI Defense, and
+		// blocked under unavailable_action=block when no verdict comes back.
+		{name: "reload includes the hook surface, no verdict", boot: &disabled, live: &enabled, wantAIDCalls: 1, wantAIDBlocks: true},
+		{name: "reload includes the hook surface, AI Defense allows", boot: &disabled, live: &enabled,
+			verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}, wantAction: "allow", wantAIDCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAIDInspector{verdict: tc.verdict}
+			a := managedHookServer(stub)
+			a.scannerCfg.CiscoAIDefense.ScanHookSurface = tc.boot
+			live := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			live.CiscoAIDefense.UnavailableAction = config.AIDUnavailableActionBlock
+			live.CiscoAIDefense.ScanHookSurface = tc.live
+			a.SetConfigRuntime(nil, func() *config.Config { return live })
+
+			v := a.inspectToolPolicy(req)
+			if v == nil {
+				t.Fatal("no verdict")
+			}
+			if stub.calls != tc.wantAIDCalls {
+				t.Fatalf("AI Defense calls = %d, want %d", stub.calls, tc.wantAIDCalls)
+			}
+			if tc.wantAIDBlocks {
+				assertManagedAIDUnavailableBlock(t, v.Action, v.Severity, v.Reason, v.Findings)
+				return
+			}
+			if v.Action != tc.wantAction {
+				t.Fatalf("verdict = %+v, want %s", v, tc.wantAction)
+			}
+		})
+	}
+}
+
 func TestManagedAIDUnavailableActionGenericInspectRoutes(t *testing.T) {
 	routes := []struct {
 		name string

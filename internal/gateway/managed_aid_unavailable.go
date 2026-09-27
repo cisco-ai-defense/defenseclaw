@@ -172,10 +172,11 @@ func managedAIDUnavailableReasonBlockable(reason string) bool {
 	return reason == aidFailOpenUnwired || reason == aidFailOpenUnavailable
 }
 
-// managedAIDPolicyConfig returns the configuration that governs the
-// unavailable action on the hook lane. The live sidecar snapshot wins so a
-// config reload takes effect without an API restart; the construction-time
-// copy is the fallback for servers built without a config runtime.
+// managedAIDPolicyConfig returns the configuration that governs the managed
+// hook lane's scan_hook_surface and unavailable action. The live sidecar
+// snapshot wins so a config reload takes effect without an API restart; the
+// construction-time copy is the fallback for servers built without a config
+// runtime.
 func (a *APIServer) managedAIDPolicyConfig() *config.Config {
 	if a == nil {
 		return nil
@@ -190,14 +191,15 @@ func (a *APIServer) managedAIDPolicyConfig() *config.Config {
 
 // managedAIDUnavailableHookVerdict returns the block verdict for a managed
 // hook-lane request AI Defense could not inspect, or nil to keep the allow
-// path. Hook traffic that an administrator excluded with
+// path. cfg is the managedAIDPolicyConfig snapshot the caller also took
+// scan_hook_surface from. Hook traffic that an administrator excluded with
 // scan_hook_surface=false was never meant to reach AI Defense, so it is not
 // treated as unavailable.
-func (a *APIServer) managedAIDUnavailableHookVerdict(reason string) *ToolInspectVerdict {
+func (a *APIServer) managedAIDUnavailableHookVerdict(cfg *config.Config, reason string) *ToolInspectVerdict {
 	if a == nil || !managedAIDUnavailableReasonBlockable(reason) {
 		return nil
 	}
-	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	if cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
 	if a.managedSupport.unsupported.Load() {
@@ -209,8 +211,7 @@ func (a *APIServer) managedAIDUnavailableHookVerdict(reason string) *ToolInspect
 			Findings: []string{managedAIDUnavailableFinding},
 		}
 	}
-	cfg := a.managedAIDPolicyConfig()
-	if cfg == nil || !cfg.CiscoAIDefense.BlocksWhenUnavailable() {
+	if !cfg.CiscoAIDefense.BlocksWhenUnavailable() {
 		return nil
 	}
 	logManagedAIDUnavailableBlock("hook", reason, managedAIDBlockCauseAction)
