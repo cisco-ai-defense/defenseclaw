@@ -25,6 +25,15 @@ interface ConnectorRow {
     supportsFailClosed: boolean;
     scope: 'user' | 'workspace';
   };
+  // OpenShell sandbox support. "artifacts" means DefenseClaw renders the
+  // connector's overlay-image hook files (tamperTier comes from its
+  // SandboxArtifacts); "pending" means it renders none yet.
+  sandbox: {
+    status: 'artifacts' | 'pending';
+    tamperTier?: 'managed' | 'user';
+    hookConfig?: string;
+    harnessPin?: string;
+  };
   hilt: string;
   notes?: string;
 }
@@ -60,10 +69,26 @@ function Family({ family }: { family: ConnectorRow['family'] }) {
   );
 }
 
+function Sandbox({ sandbox }: { sandbox: ConnectorRow['sandbox'] }) {
+  if (sandbox.status !== 'artifacts' || !sandbox.tamperTier) {
+    return <span className="text-xs text-fd-muted-foreground">pending</span>;
+  }
+  return (
+    <>
+      <span className="rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
+        {sandbox.tamperTier} tier
+      </span>
+      {sandbox.harnessPin && (
+        <div className="mt-1 text-xs text-fd-muted-foreground">image pin {sandbox.harnessPin}</div>
+      )}
+    </>
+  );
+}
+
 export function CapabilityMatrix() {
   return (
     <CapabilityMatrixWrapper className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border">
-      <table className="w-full min-w-[900px] border-collapse text-sm">
+      <table className="w-full min-w-[1000px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
             <Th>Connector</Th>
@@ -73,6 +98,7 @@ export function CapabilityMatrix() {
             <Th>Block</Th>
             <Th>Native ask</Th>
             <Th>Fail-closed</Th>
+            <Th>OpenShell sandbox</Th>
             <Th>HITL behavior</Th>
           </tr>
         </thead>
@@ -112,6 +138,9 @@ export function CapabilityMatrix() {
               </Td>
               <Td>
                 <Tick on={c.hooks.supportsFailClosed} />
+              </Td>
+              <Td>
+                <Sandbox sandbox={c.sandbox} />
               </Td>
               <Td className="max-w-[280px] text-xs leading-relaxed text-fd-muted-foreground">{c.hilt}</Td>
             </tr>

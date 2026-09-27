@@ -27,6 +27,9 @@ type documentedCapabilityMatrix struct {
 			SupportsFailClosed bool     `json:"supportsFailClosed"`
 			Scope              string   `json:"scope"`
 		} `json:"hooks"`
+		Sandbox struct {
+			Status string `json:"status"`
+		} `json:"sandbox"`
 	} `json:"connectors"`
 }
 
@@ -52,7 +55,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		family, toolInspection, subprocessPolicy string
 		canBlock, canAskNative, failClosed       bool
 		askEvents, blockEvents                   []string
-		scope                                    string
+		scope, sandboxStatus                     string
 	}, len(documented.Connectors))
 	for _, row := range documented.Connectors {
 		if _, exists := rows[row.ID]; exists {
@@ -62,7 +65,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			family, toolInspection, subprocessPolicy string
 			canBlock, canAskNative, failClosed       bool
 			askEvents, blockEvents                   []string
-			scope                                    string
+			scope, sandboxStatus                     string
 		}{
 			row.Family,
 			row.ToolInspection,
@@ -73,6 +76,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			row.Hooks.AskEvents,
 			row.Hooks.BlockEvents,
 			row.Hooks.Scope,
+			row.Sandbox.Status,
 		}
 	}
 
@@ -105,6 +109,17 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		if row.toolInspection != wantToolInspection {
 			t.Errorf("%s toolInspection=%q want %q", conn.Name(), row.toolInspection, wantToolInspection)
 		}
+		// The OpenShell sandbox column: "artifacts" exactly for the
+		// connectors that render overlay-image files, "pending" for the rest.
+		// internal/openshell/harness checks the tier, hook file and pin.
+		wantSandbox := "pending"
+		if _, ok := conn.(SandboxArtifactProvider); ok {
+			wantSandbox = "artifacts"
+		}
+		if row.sandboxStatus != wantSandbox {
+			t.Errorf("%s sandbox.status=%q want %q", conn.Name(), row.sandboxStatus, wantSandbox)
+		}
+
 		actualSubprocess := string(conn.SubprocessPolicy())
 		if row.subprocessPolicy != actualSubprocess {
 			t.Errorf("%s subprocessPolicy=%q want %q", conn.Name(), row.subprocessPolicy, conn.SubprocessPolicy())

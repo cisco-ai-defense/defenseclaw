@@ -1,12 +1,13 @@
 ---
 title: Capability Matrix
-description: Per-connector breakdown of block capability, native ask events, fail-closed support, subprocess policy, and HITL behaviour. The single source of truth for "can this connector do X?"
+description: Per-connector breakdown of block capability, native ask events, fail-closed support, subprocess policy, OpenShell sandbox tier, and HITL behaviour. The single source of truth for "can this connector do X?"
 keywords:
   - DefenseClaw capability matrix
   - DefenseClaw connector capabilities
   - native ask connector
   - fail-closed connector
   - subprocess policy DefenseClaw
+  - OpenShell sandbox tamper tier
 ---
 
 This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
@@ -31,6 +32,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
+  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image. managed tier = a root-owned system policy file that user and project settings cannot switch off. The image pin is the harness version the image installs by default. pending = DefenseClaw builds no sandbox image files for this connector yet." />
   <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
 </Cards>
 
@@ -44,6 +46,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
 | Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
+| OpenShell sandbox | `SandboxArtifacts()` in `internal/gateway/connector/claudecode_sandbox.go` and `codex_sandbox.go` (tamper tier and hook config file); `DefaultVersion` in `internal/openshell/harness/` (image pin) |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
 
@@ -74,6 +77,14 @@ Cursor is not counted because DefenseClaw does not enable its native ask respons
 confirm verdicts remain attributed alerts and cannot resume the original call.
 Confirm verdicts on every other connector/event take an immediate
 connector-specific fallback; there is no TUI approval queue.
+
+### "I want to run the agent in an OpenShell sandbox"
+
+Claude Code and Codex are the only connectors with OpenShell sandbox image
+files today. Both register their hooks in the harness's root-owned managed
+policy tier, and their sandbox hooks always fail closed. No `defenseclaw`
+command launches a sandbox yet; the [sandbox guide](/docs/setup/sandbox) is
+where the sandbox commands are documented. Every other connector is pending.
 
 ### "I want fail-closed on transport failures"
 
