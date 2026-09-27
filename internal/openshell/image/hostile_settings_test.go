@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // TestClaudeCodeHostileSettingsPlantsBothTiers runs the planting fragment
@@ -151,6 +153,98 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 			}
 			if settings.Env["SHELL"] != settings.Env["CLAUDE_CODE_SHELL"] {
 				t.Errorf("SHELL = %q, want the planted shell", settings.Env["SHELL"])
+			}
+		})
+	}
+}
+
+// TestCodexHostileSettingsPlantsBothTiers checks the Codex plan the same way:
+// both config files parse as TOML with the documented keys, and every
+// planted program and sourced file leaves its label.
+func TestCodexHostileSettingsPlantsBothTiers(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	plan := hostileSettingsPlans["codex"]
+	if plan.workdir != "/work/dc-hookfire-project" {
+		t.Fatalf("workdir = %q", plan.workdir)
+	}
+	root := t.TempDir()
+	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot, "'/sandbox/", "'"+root+"/sandbox/", "/work/", root+"/work/")
+	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	ranLog := root + hostileRanLog
+	ran := func() []string {
+		t.Helper()
+		data, _ := os.ReadFile(ranLog)
+		_ = os.Remove(ranLog)
+		return strings.Fields(string(data))
+	}
+	if got := ran(); len(got) != 0 {
+		t.Fatalf("planting ran planted programs: %v", got)
+	}
+	for tier, file := range map[string]string{
+		"user":    root + "/sandbox/.codex/config.toml",
+		"project": root + "/work/dc-hookfire-project/.codex/config.toml",
+	} {
+		t.Run(tier, func(t *testing.T) {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg struct {
+				Notify         []string `toml:"notify"`
+				ApprovalPolicy string   `toml:"approval_policy"`
+				ModelProvider  string   `toml:"model_provider"`
+				Features       struct {
+					Hooks *bool `toml:"hooks"`
+				} `toml:"features"`
+				Hooks struct {
+					PreToolUse []struct {
+						Matcher string `toml:"matcher"`
+						Hooks   []struct {
+							Type    string `toml:"type"`
+							Command string `toml:"command"`
+						} `toml:"hooks"`
+					} `toml:"PreToolUse"`
+				} `toml:"hooks"`
+				Shell struct {
+					Set map[string]string `toml:"set"`
+				} `toml:"shell_environment_policy"`
+			}
+			if err := toml.Unmarshal(data, &cfg); err != nil {
+				t.Fatalf("config is not TOML: %v\n%s", err, data)
+			}
+			if cfg.Features.Hooks == nil || *cfg.Features.Hooks || cfg.ApprovalPolicy != "never" || cfg.ModelProvider != "hostile" || len(cfg.Notify) != 1 {
+				t.Fatalf("planted config = %+v", cfg)
+			}
+			var keys []string
+			for key := range cfg.Shell.Set {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			if strings.Join(keys, " ") != "BASH_ENV DEFENSECLAW_HOME DEFENSECLAW_SANDBOX_TOKEN ENV PATH" {
+				t.Fatalf("planted shell env = %v", keys)
+			}
+			if len(cfg.Hooks.PreToolUse) != 1 || len(cfg.Hooks.PreToolUse[0].Hooks) != 1 {
+				t.Fatalf("planted hooks = %+v", cfg.Hooks)
+			}
+			bin := strings.SplitN(cfg.Shell.Set["PATH"], ":", 2)[0]
+			for label, argv := range map[string][]string{
+				"curl":        {filepath.Join(bin, "curl")},
+				"jq":          {filepath.Join(bin, "jq")},
+				"notify":      {cfg.Notify[0], "{}"},
+				"config-hook": {"/bin/sh", "-c", cfg.Hooks.PreToolUse[0].Hooks[0].Command},
+				"shell-env":   {bash, "-c", ". " + cfg.Shell.Set["BASH_ENV"]},
+			} {
+				if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v\n%s", label, err, out)
+				}
+				if got := ran(); len(got) != 1 || got[0] != tier+":"+label {
+					t.Fatalf("%s left %v in the planted-run log", label, got)
+				}
 			}
 		})
 	}
