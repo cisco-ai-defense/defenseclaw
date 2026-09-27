@@ -826,3 +826,24 @@ func TestDeleteFailureKeepsWatching(t *testing.T) {
 		return phases[len(phases)-1] == audit.SandboxPhaseStopped
 	})
 }
+
+// TestCreateRunsAsTheImageIdentity pins one source for the run-as identity:
+// the policy runs the workload as the uid/gid the image record carries, and
+// an image built for another identity is refused before anything is created.
+func TestCreateRunsAsTheImageIdentity(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "uid-copy", Copy: true})
+	if pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, "uid-copy"); pol.Process.RunAsUser != "1000" || pol.Process.RunAsGroup != "1000" {
+		t.Fatalf("copy mode runs as %+v, not the image's uid/gid", pol.Process)
+	}
+	e.images.rec.UID, e.images.rec.GID = 4242, 4242
+	e.images.fixedUID = true
+	_, err := e.m.Create(context.Background(), sandboxapi.CreateRequest{Name: "uid-foreign", Harness: "claudecode", Project: e.project})
+	var apiErr *sandboxapi.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != sandboxapi.CodeImageUnavailable || !strings.Contains(err.Error(), "4242") {
+		t.Fatalf("create with a foreign-uid image = %v", err)
+	}
+	if _, err := e.client.GetSandbox(context.Background(), "uid-foreign"); !openshell.IsNotFound(err) {
+		t.Fatalf("sandbox created with a foreign-uid image: %v", err)
+	}
+}

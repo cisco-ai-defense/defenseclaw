@@ -56,6 +56,8 @@ type fakeImages struct {
 	err   error
 	calls int
 	build []bool
+	// fixedUID keeps rec's UID/GID instead of the build spec's.
+	fixedUID bool
 }
 
 func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, build bool) (image.Record, error) {
@@ -68,7 +70,9 @@ func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, build bool
 	}
 	rec := f.rec
 	rec.Connector = spec.Harness.Name
-	rec.UID, rec.GID = spec.UID, spec.GID
+	if !f.fixedUID {
+		rec.UID, rec.GID = spec.UID, spec.GID
+	}
 	return rec, nil
 }
 

@@ -203,6 +203,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err != nil {
 		return nil, err
 	}
+	uid, gid := m.runAs()
+	if img.UID != uid || img.GID != gid {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
+			"the %s sandbox image %s was built for uid %d:%d, not the sandbox run-as identity %d:%d; rebuild it",
+			spec.DisplayName, img.Tag, img.UID, img.GID, uid, gid)
+	}
 	arts, err := spec.Provider.SandboxArtifacts(connector.SandboxRenderTarget{
 		IngressPort: m.opts.IngressPort, AgentVersion: img.HarnessVersion, HookContractID: img.HookContract,
 	})
@@ -361,10 +367,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		envOut[k] = v
 	}
 
-	// Policy.
+	// Policy: the workload runs as the identity the image was built for.
 	pin := policy.Input{
 		Profile: policy.Profile(eff.Profile), Harness: spec.Name, Workdir: rec.Workdir,
-		WorkdirMode: policy.WorkdirMode(in.mode), RunAsUser: strconv.Itoa(m.host.UID), RunAsGroup: strconv.Itoa(m.host.GID),
+		WorkdirMode: policy.WorkdirMode(in.mode), RunAsUser: strconv.Itoa(img.UID), RunAsGroup: strconv.Itoa(img.GID),
 		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort, HarnessReadOnly: []string{spec.InstallRoot()},
 		HostPorts: eff.MCP.HostPorts, APIPort: m.opts.APIPort, GatewayPort: policyGatewayPort(gw.Port),
 	}
@@ -552,9 +558,10 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 	if m.opts.Images == nil {
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "no image builder is configured")
 	}
+	uid, gid := m.runAs()
 	bs := image.BuildSpec{
 		Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
-		UID: m.host.UID, GID: m.host.GID, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
+		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
 		DefenseClawVersion: m.opts.DefenseClawVersion,
 	}
 	rec, err := m.opts.Images.Resolve(ctx, bs, build)
@@ -567,6 +574,15 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		return image.Record{}, &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "the " + spec.DisplayName + " sandbox image is not usable", Detail: err.Error()}
 	}
 	return rec, nil
+}
+
+// runAs is the one source of a sandbox's run-as identity: the numeric host
+// uid/gid, in mount and copy mode alike. The overlay image is built for it
+// (image.BuildSpec chowns /sandbox to it, and the hook-fire probe runs as
+// it), and the policy runs the workload as the uid/gid the image record
+// carries, which create checks against it, so the two cannot drift apart.
+func (m *Manager) runAs() (uid, gid int) {
+	return m.host.UID, m.host.GID
 }
 
 // mintBinding mints the sandbox's ingress binding, replacing a stale one

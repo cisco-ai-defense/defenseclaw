@@ -94,8 +94,9 @@ const (
 	// WorkdirMount bind-mounts the project live; the process runs as the
 	// host uid so files keep the user's ownership.
 	WorkdirMount WorkdirMode = "mount"
-	// WorkdirCopy uploads a sanitized copy; the process runs as the image's
-	// sandbox user.
+	// WorkdirCopy uploads a sanitized copy; the process runs as the same
+	// numeric uid/gid the image was built for (the host user), which owns
+	// /sandbox and the copy workdir below it.
 	WorkdirCopy WorkdirMode = "copy"
 )
 
@@ -153,8 +154,12 @@ type Input struct {
 	// Mounts are additional mount targets outside the workdir (context
 	// directories are read-only).
 	Mounts []Mount
-	// RunAsUser/RunAsGroup are the numeric host uid/gid in mount mode and
-	// the image's sandbox user in copy mode. Root is refused.
+	// RunAsUser/RunAsGroup are the numeric uid/gid the overlay image was
+	// built for (image.Record UID/GID: the host user, in mount and copy
+	// mode alike). The image chowns /sandbox to that identity and runs its
+	// hook-fire probe as it, so the workload must run as exactly it; a named
+	// account is refused because nothing would tie it to the image. Root is
+	// refused.
 	RunAsUser  string
 	RunAsGroup string
 	// IngressPort is the host-loopback hook ingress. It is reached through
@@ -217,8 +222,8 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 	if err := validatePrincipal("run_as_group", in.RunAsGroup); err != nil {
 		return nil, err
 	}
-	if in.WorkdirMode == WorkdirMount && (!isNumeric(in.RunAsUser) || !isNumeric(in.RunAsGroup)) {
-		return nil, fmt.Errorf("openshell policy: mount mode runs as the numeric host uid/gid, got %q:%q", in.RunAsUser, in.RunAsGroup)
+	if !isNumeric(in.RunAsUser) || !isNumeric(in.RunAsGroup) {
+		return nil, fmt.Errorf("openshell policy: the sandbox runs as the numeric uid/gid its image was built for, got %q:%q", in.RunAsUser, in.RunAsGroup)
 	}
 	if err := validatePort("ingress", in.IngressPort); err != nil {
 		return nil, err

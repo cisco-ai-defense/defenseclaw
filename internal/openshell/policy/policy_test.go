@@ -61,7 +61,7 @@ func goldenCases() map[string]Input {
 	copyMode := baseInput(ProfileOpen, "codex")
 	copyMode.WorkdirMode = WorkdirCopy
 	copyMode.Workdir = "/sandbox/work/myapp"
-	copyMode.RunAsUser, copyMode.RunAsGroup = "sandbox", "sandbox"
+	copyMode.RunAsUser, copyMode.RunAsGroup = "1001", "1001"
 	cases["open-codex-copy"] = copyMode
 
 	context := baseInput(ProfileBalanced, "claudecode")
@@ -266,18 +266,21 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 		return in
 	}
 	cases := map[string]Input{
-		"unknown-profile":        mutate(func(in *Input) { in.Profile = "yolo" }),
-		"bad-harness":            mutate(func(in *Input) { in.Harness = "Claude Code" }),
-		"no-mode":                mutate(func(in *Input) { in.WorkdirMode = "" }),
-		"relative-workdir":       mutate(func(in *Input) { in.Workdir = "work/myapp" }),
-		"unclean-workdir":        mutate(func(in *Input) { in.Workdir = "/work/../etc" }),
-		"root-workdir":           mutate(func(in *Input) { in.Workdir = "/" }),
-		"system-workdir":         mutate(func(in *Input) { in.Workdir = "/usr/local/src" }),
-		"mount-outside-work":     mutate(func(in *Input) { in.Workdir = "/srv/myapp" }),
-		"workdir-is-home":        mutate(func(in *Input) { in.WorkdirMode = WorkdirCopy; in.Workdir = "/sandbox" }),
-		"root-user":              mutate(func(in *Input) { in.RunAsUser = "0" }),
-		"root-group-name":        mutate(func(in *Input) { in.RunAsGroup = "root" }),
-		"named-user-mount":       mutate(func(in *Input) { in.RunAsUser = "sandbox" }),
+		"unknown-profile":    mutate(func(in *Input) { in.Profile = "yolo" }),
+		"bad-harness":        mutate(func(in *Input) { in.Harness = "Claude Code" }),
+		"no-mode":            mutate(func(in *Input) { in.WorkdirMode = "" }),
+		"relative-workdir":   mutate(func(in *Input) { in.Workdir = "work/myapp" }),
+		"unclean-workdir":    mutate(func(in *Input) { in.Workdir = "/work/../etc" }),
+		"root-workdir":       mutate(func(in *Input) { in.Workdir = "/" }),
+		"system-workdir":     mutate(func(in *Input) { in.Workdir = "/usr/local/src" }),
+		"mount-outside-work": mutate(func(in *Input) { in.Workdir = "/srv/myapp" }),
+		"workdir-is-home":    mutate(func(in *Input) { in.WorkdirMode = WorkdirCopy; in.Workdir = "/sandbox" }),
+		"root-user":          mutate(func(in *Input) { in.RunAsUser = "0" }),
+		"root-group-name":    mutate(func(in *Input) { in.RunAsGroup = "root" }),
+		"named-user-mount":   mutate(func(in *Input) { in.RunAsUser = "sandbox" }),
+		"named-user-copy": mutate(func(in *Input) {
+			in.WorkdirMode, in.Workdir, in.RunAsUser, in.RunAsGroup = WorkdirCopy, "/sandbox/work/myapp", "sandbox", "sandbox"
+		}),
 		"shell-in-user":          mutate(func(in *Input) { in.RunAsUser = "1000;rm" }),
 		"missing-egress":         mutate(func(in *Input) { in.EgressPort = 0 }),
 		"port-collision":         mutate(func(in *Input) { in.EgressPort = in.IngressPort }),
