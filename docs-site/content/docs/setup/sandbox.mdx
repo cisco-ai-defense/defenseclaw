@@ -52,8 +52,8 @@ the folder back the way it was before the session.
 
 | Requirement | Details |
 | --- | --- |
-| DefenseClaw | Installed and set up (`defenseclaw setup`), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user. |
-| Docker | Docker Engine 28 or newer. On macOS, Docker Desktop with host networking on and your home folder shared. |
+| DefenseClaw | Installed and initialized (`defenseclaw init`, see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user. |
+| Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On macOS, Docker Desktop with host networking on and your home folder shared. |
 | Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. On macOS the Docker Desktop VM provides it. |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
 | Linux login | `sudo loginctl enable-linger $USER` is recommended, so the OpenShell gateway keeps running after you log out. |
@@ -109,10 +109,10 @@ Open the TUI (`defenseclaw tui`), press `0` for Setup, and pick the
 **Sandbox** wizard (slot 13). It first runs `defenseclaw sandbox doctor`
 to check the machine, then shows every question the command line asks as a
 field: the harnesses (Claude Code and Codex), whether to install OpenShell,
-project-folder mounts, OpenShell telemetry, shell wrappers, and whether to
-build the images now. Your answers are the consent: the wizard runs
-`defenseclaw sandbox setup --non-interactive` with the matching flags, and
-only `sudo` may still ask for your password. Choose **doctor** as the action
+project-folder mounts, OpenShell telemetry (Linux only, see step 4 below),
+shell wrappers, and whether to build the images now. Your answers are the
+consent: the wizard runs `defenseclaw sandbox setup --non-interactive` with
+the matching flags, and only `sudo` may still ask for your password. Choose **doctor** as the action
 to check the machine without changing anything.
 
 </Tab>
@@ -123,6 +123,8 @@ wizard asks the same questions as the TUI and runs the same
 `defenseclaw sandbox setup --non-interactive` command, except that it never
 installs OpenShell: the installer needs `sudo`, so if OpenShell is missing,
 run `defenseclaw sandbox setup --install-openshell` in a terminal first.
+Its **Disable OpenShell telemetry** answer has no effect on a Mac: OpenShell's
+telemetry stays on there (see step 4 below).
 
 </Tab>
 </Tabs>
@@ -143,8 +145,13 @@ What setup does, in order:
    host mounts; agents cannot reach the gateway, and DefenseClaw mounts only
    the folder you launch from. Say no, or pass `--no-mounts`, and every run
    works on a copy instead.
-4. **Turns OpenShell's anonymous usage telemetry off**, unless you keep it
-   (`--upstream-telemetry`).
+4. **Turns OpenShell's anonymous usage telemetry off** on Linux, unless you
+   keep it (`--upstream-telemetry`). Setup does this in the gateway's
+   `gateway.env`, which only the Linux systemd service reads. On macOS the
+   Homebrew gateway runs under launchd, which ignores that file, so setup
+   cannot turn the telemetry off there: it stays on whatever you answer, and
+   the doctor shows its telemetry check as skipped (`gateway.env is read by
+   the systemd unit only`).
 5. **Records the harnesses** in `openshell.harnesses` and shows which model
    credential each one would use, then turns `openshell.enabled` on.
 6. **Offers the shell wrappers** that make typing `claude` or `codex` start
@@ -156,11 +163,11 @@ What setup does, in order:
 
 | Flag | Effect |
 | --- | --- |
-| `--harness NAME` | A harness to set up; repeat it for more. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
+| `--harness NAME` | A harness to set up; repeat it for more. The list replaces `openshell.harnesses`, so name every harness you want. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
 | `--install-openshell` | Install OpenShell without asking. |
 | `--no-mounts` | Leave bind mounts off; every run works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
-| `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. |
+| `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS it stays on either way. |
 | `--skip-images` | Don't build images now; the first run builds its image. |
 | `--non-interactive` | Never prompt: take the defaults and skip steps that need consent. |
 | `--yes`, `-y` | Answer every question with its default. |
@@ -175,8 +182,19 @@ already configured and up-to-date images are left as they are.
 Start a harness with `defenseclaw sandbox run <command>`, using the command
 from the table. DefenseClaw uses a harness image only after proving that
 its hooks fire and block in it, so the unverified harnesses below cannot
-run yet. The TUI and macOS wizards offer Claude Code and Codex; set up the
-others with `defenseclaw sandbox setup --harness <command>`.
+run yet. The TUI and macOS wizards offer Claude Code and Codex. To add
+others, run setup with every harness you want, for example:
+
+```bash
+defenseclaw sandbox setup --harness claude --harness codex --harness copilot
+```
+
+`--harness` replaces the `openshell.harnesses` list rather than adding to it,
+and that list decides which images the doctor checks and `image build`
+builds by default, and which harnesses the wizards turn on. So
+`setup --harness copilot` alone drops Claude Code and Codex from it, and a
+later run of the TUI or macOS wizard sets it back to the harnesses you pick
+there.
 
 | Harness | Command | Hook tier | Status |
 | --- | --- | --- | --- |
@@ -240,7 +258,7 @@ Sandbox dc-claude-myapp-7f3a · Claude Code · skip-permissions ON · network: o
 | `Context` | Extra reference folders you added with `--context`, read-only. |
 | `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
-| `Host` | Ports on your machine you listed with `--host-port`. |
+| `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: the agent could edit its own hook settings, and hook silence is detected. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
@@ -462,7 +480,7 @@ When the harness exits, you get a summary, a review of the changes that can
 run code on your machine, and a choice:
 
 ```text
-Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 sites contacted (1 blocked) · 8 files changed (+212 −37)
+Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 sites contacted (1 request blocked) · 8 files changed (+212 −37)
 ⚠ Changed files that can run code on your machine: package.json#scripts.postinstall, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-myapp-7f3a   delete: defenseclaw sandbox delete dc-claude-myapp-7f3a
@@ -503,7 +521,12 @@ defenseclaw sandbox review dc-claude-myapp-7f3a --diff
   ⚠ Changed files that can run code on your machine: package.json#scripts.postinstall, .envrc  → review before running
     HIGH     package.json#scripts.postinstall — npm lifecycle script changed (runs automatically on install): node scripts/setup.js
     HIGH     .envrc — sourced by direnv when you enter the folder
+    CRITICAL src/settings.py:12 — clawshield-secrets: <the finding's title>
 ```
+
+Flags come first, then what the secret scanner (`clawshield-secrets`) and
+the code scanner (`codeguard`) found in the changed files, with the file
+and, when the scanner reports one, the line.
 
 ### Undo the session
 
@@ -700,7 +723,8 @@ your sandboxes reached into an `openshell.egress.allow` list you can paste
 into `config.yaml`; `defenseclaw sandbox policy allow HOST` and
 `defenseclaw sandbox policy block HOST` add one host at a time.
 `defenseclaw sandbox policy explain` shows every setting a run would get and
-where each one comes from.
+where each one comes from. It shortens long lists, such as the secret-file
+masks and the allowlist, and says so; `-o json` prints every value in full.
 
 ### Keep the harness prompts
 
@@ -721,9 +745,9 @@ Use this for a local database or dev server. Inside the sandbox the service
 is at `host.openshell.internal:5432`, and the banner's `Host` line lists
 the port. A port the pack or your organization's policy refuses, and
 DefenseClaw's own ports and the OpenShell gateway's, are never opened; the
-run warns about them. A connection to your machine is a door into it, so
-the sandbox's first connection to the port arrives as an ask for you to
-approve.
+run warns about them and leaves them off the `Host` line. A connection to
+your machine is a door into it, so the sandbox's first connection to the
+port arrives as an ask for you to approve.
 
 ### Other run flags
 
@@ -842,12 +866,22 @@ defenseclaw sandbox teardown --dry-run
 defenseclaw sandbox teardown
 ```
 
-Teardown deletes DefenseClaw's sandboxes, the OpenShell providers and
-provider profiles it created, and its images (`--keep-images` keeps them).
-It restores the OpenShell gateway configuration setup changed, unless
-someone changed it since, removes the shell wrappers, and turns
-`openshell.enabled` off. OpenShell itself stays installed.
-`defenseclaw uninstall` runs teardown too, and stops if teardown fails.
+Teardown deletes this install's sandboxes and the OpenShell providers it
+created, and its images (`--keep-images` keeps them). It restores the
+OpenShell gateway configuration setup changed, unless someone changed it
+since, removes the shell wrappers, and turns `openshell.enabled` off.
+OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
+and stops if teardown fails.
+
+Provider profiles are shared by everything on the OpenShell gateway, so
+teardown removes more than this install's own. It deletes this install's
+hook ingress profile, the older gateway-wide `defenseclaw-ingress` profile,
+and every DefenseClaw credential profile (`dc-cred-…`) and model provider
+profile (`defenseclaw-…`) that no remaining provider uses, including ones
+another DefenseClaw install imported. Another DefenseClaw daemon on the same
+gateway imports them again when it needs them, and another install's
+ingress profile is never removed. On a shared gateway, run `--dry-run`
+first and check the `provider profiles` line.
 
 ## Troubleshooting
 
@@ -885,7 +919,9 @@ DefenseClaw daemon, the sandbox hooks, the harness images, the shell
 wrappers and your organization's policy. Every failed check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
 restarting the gateway, or turning bind mounts on), after asking.
-`--json` prints the report as JSON. The command exits 1 when a check fails.
+The command exits 1 when a check fails. With `--json` it prints the report
+as JSON and always exits 0; the report's `ok` field says whether every check
+passed.
 
 `defenseclaw doctor` shows the same checks as rows in its **Sandbox**
 section, and skips them while `openshell.enabled` is off.

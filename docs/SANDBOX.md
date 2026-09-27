@@ -72,7 +72,7 @@ parts of the boundary that depend on the project.
 | --- | --- | --- |
 | Network | The workload has no network; the supervisor is the only path out and applies per-endpoint, per-binary rules | The egress proxy for web traffic: blocklist feed, SSRF guard, per-destination decisions, byte counts |
 | Files | Landlock; only bind-mounted host paths are visible | Which host paths are mounted, secret masks, read-only git state, snapshot and undo, change review |
-| Identity | The process identity the policy names | Runs as your uid in mount mode (as `sandbox` in copy mode) and builds a per-uid image |
+| Identity | The process identity the policy names | Runs as your uid in mount and copy mode and builds a per-uid image |
 | Credentials | Placeholders resolve only on bound endpoints, for bound binaries | Per-sandbox binding tokens, provider profiles pinned to the harness binary; LLM traffic never passes through DefenseClaw |
 | Agent actions | None | Hooks feed the existing guardrail pipeline: rule packs, CEL, the judge, HITL |
 | Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe, hook tamper and hook silence detection |
