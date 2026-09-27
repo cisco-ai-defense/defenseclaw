@@ -458,6 +458,22 @@ type fakeDNS struct {
 	calls   map[string]int
 	// hang makes lookups of a name wait for their context.
 	hang map[string]bool
+	// errs makes lookups of a name fail with the error.
+	errs map[string]error
+}
+
+// setErr makes lookups of host fail with err (nil: answer again).
+func (d *fakeDNS) setErr(host string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.errs == nil {
+		d.errs = map[string]error{}
+	}
+	if err == nil {
+		delete(d.errs, host+".")
+		return
+	}
+	d.errs[host+"."] = err
 }
 
 // setHang makes lookups of host wait until their context ends (on) or
@@ -504,6 +520,10 @@ func (d *fakeDNS) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.errs[name]; err != nil {
+		d.calls[name]++
+		return nil, err
+	}
 	addrs, ok := d.answers[name]
 	if !ok {
 		addrs = []string{"93.184.216.34"}

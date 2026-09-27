@@ -485,12 +485,75 @@ func TestClassifyResolvesNames(t *testing.T) {
 		ResolvesToHost(ctx, proposal("gone.example.org", 443), pol) || ResolvesToHost(ctx, proposal("host.openshell.internal", 5432), pol) {
 		t.Fatal("ResolvesToHost misjudged an approved rule")
 	}
-	// A canceled context fails closed.
+	// A canceled context never approves: the proposal waits.
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	pol.Resolver = resolverFunc(func(ctx context.Context, _ string) ([]net.IPAddr, error) { return nil, ctx.Err() })
-	if got := Classify(canceled, proposal("cdn.example.org", 443), pol); got.Verdict != Reject || got.Reason != ReasonUnresolved {
+	if got := Classify(canceled, proposal("cdn.example.org", 443), pol); got.Verdict != Defer || got.Reason != ReasonLookupFailed {
 		t.Fatalf("Classify without DNS = %+v", got)
+	}
+}
+
+// TestClassifyDefersTransientLookups pins that only a name that does not
+// exist or has no address is rejected as unresolved: a timeout or a
+// temporary DNS failure defers the proposal (it stays pending and is
+// decided later), and a deferral never hides a rejection or turns into an
+// approval or an ask.
+func TestClassifyDefersTransientLookups(t *testing.T) {
+	ctx := context.Background()
+	fail := map[string]error{
+		"nx.example.org.":       &net.DNSError{Err: "no such host", Name: "nx.example.org", IsNotFound: true},
+		"servfail.example.org.": &net.DNSError{Err: "server misbehaving", Name: "servfail.example.org", IsTemporary: true},
+		"timeout.example.org.":  &net.DNSError{Err: "i/o timeout", Name: "timeout.example.org", IsTimeout: true},
+		"refused.example.org.":  &net.DNSError{Err: "connection refused", Name: "refused.example.org"},
+		"deadline.example.org.": context.DeadlineExceeded,
+	}
+	pol := testPolicy(effective(t, nil, packs.Flags{}))
+	pol.Resolver = resolverFunc(func(ctx context.Context, name string) ([]net.IPAddr, error) {
+		if err, ok := fail[name]; ok {
+			return nil, err
+		}
+		if name == "empty.example.org." {
+			return []net.IPAddr{}, nil
+		}
+		return testResolver.LookupIPAddr(ctx, name)
+	})
+	for _, tc := range []struct {
+		host    string
+		verdict Verdict
+		reason  Reason
+	}{
+		{"nx.example.org", Reject, ReasonUnresolved},
+		{"empty.example.org", Reject, ReasonUnresolved},
+		{"servfail.example.org", Defer, ReasonLookupFailed},
+		{"timeout.example.org", Defer, ReasonLookupFailed},
+		{"refused.example.org", Defer, ReasonLookupFailed},
+		{"deadline.example.org", Defer, ReasonLookupFailed},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			got := Classify(ctx, proposal(tc.host, 443), pol)
+			if got.Verdict != tc.verdict || got.Reason != tc.reason {
+				t.Fatalf("Classify(%s) = %+v, want %s %s", tc.host, got, tc.verdict, tc.reason)
+			}
+		})
+	}
+	// Endpoint order: a rejection anywhere wins over a deferral, and a
+	// deferral wins over an ask or an approval.
+	multi := func(hosts ...string) Proposal {
+		p := proposal(hosts[0], 443)
+		for _, h := range hosts[1:] {
+			p.Endpoints = append(p.Endpoints, Endpoint{Host: h, Port: 443})
+		}
+		return p
+	}
+	if got := Classify(ctx, multi("timeout.example.org", "webhook.site"), pol); got.Verdict != Reject {
+		t.Fatalf("deferred + blocklisted = %+v, want a rejection", got)
+	}
+	if got := Classify(ctx, multi("ok.example.org", "timeout.example.org"), pol); got.Verdict != Defer {
+		t.Fatalf("approved + deferred = %+v, want a deferral", got)
+	}
+	if got := Classify(ctx, multi("wiki.corp", "timeout.example.org"), pol); got.Verdict != Defer {
+		t.Fatalf("ask + deferred = %+v, want a deferral", got)
 	}
 }
 

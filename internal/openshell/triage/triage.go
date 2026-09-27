@@ -31,8 +31,10 @@
 //     gateway), wildcard or malformed destinations, what the proxy refuses
 //     and no unblock lifts (the block lists, the blocklist feed), public IP
 //     literals in the open mode until they are unblocked (they sidestep the
-//     name-based blocklist), names that resolve to this machine or to
-//     nothing, and ports the proxy does not carry;
+//     name-based blocklist), names that resolve to this machine or do not
+//     exist, and ports the proxy does not carry;
+//   - deferred: proposals with a name whose lookup timed out or failed
+//     temporarily stay pending and are decided again later;
 //   - asked: doors into the user's machine or network (host.openshell.internal
 //     and other host-local names, private addresses, intranet names and
 //     names that resolve to private addresses), proposals OpenShell's
@@ -55,6 +57,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -78,7 +81,16 @@ const (
 	Reject Verdict = "reject"
 	// Ask queues it for the user.
 	Ask Verdict = "ask"
+	// Defer leaves it pending for now: a destination could not be checked
+	// (its DNS lookup timed out or failed temporarily), so neither an
+	// approval nor a rejection would be sound. Decide it again later.
+	Defer Verdict = "defer"
 )
+
+// ErrDeferred marks an approval that could not be checked right before it
+// was applied (see Defer): it is neither approved nor refused, and the
+// check is worth repeating.
+var ErrDeferred = errors.New("triage: the approval cannot be checked now")
 
 // Reason is the stable machine token behind a verdict.
 type Reason string
@@ -97,9 +109,12 @@ const (
 	// ReasonResolvesToHost: the name resolves to this machine or what only
 	// it reaches (link-local, metadata, reserved addresses).
 	ReasonResolvesToHost Reason = "resolves_to_host"
-	// ReasonUnresolved: the name does not resolve, so where a direct rule
-	// would lead cannot be checked.
+	// ReasonUnresolved: the name does not exist or has no address, so where
+	// a direct rule would lead cannot be checked.
 	ReasonUnresolved Reason = "unresolved"
+	// ReasonLookupFailed defers: the name's DNS lookup timed out or failed
+	// temporarily.
+	ReasonLookupFailed Reason = "lookup_failed"
 	// ReasonRuleShape: the proposal names a reserved or non-mechanistic
 	// rule, or asks for rule features triage never approves (layer-7
 	// rules, access presets, credential handling).
@@ -391,9 +406,10 @@ type Decision struct {
 
 // Classify judges a proposal. The rule itself is judged first (its name
 // and features), then its allowed_ips and every endpoint: any rejection
-// rejects the proposal, then any ask asks, otherwise it is approved.
-// Destination names are resolved (bounded by ctx and a per-name timeout) and
-// held to the proxy's dial-time address rules.
+// rejects the proposal, then an endpoint that could not be checked defers
+// it, then any ask asks, otherwise it is approved. Destination names are
+// resolved (bounded by ctx and a per-name timeout) and held to the proxy's
+// dial-time address rules.
 func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 	if pol.Effective == nil {
 		return Decision{Verdict: Reject, Reason: ReasonPolicy, Message: "the sandbox policy is not resolved", Kind: KindNetworkRule}
@@ -430,13 +446,16 @@ func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 			}
 		}
 	}
-	var ask *Decision
-	var approve *Decision
+	var ask, deferred, approve *Decision
 	for _, ep := range p.Endpoints {
 		d := judgeEndpoint(ctx, ep, p.AllowedIPs, pol, decider)
 		switch d.Verdict {
 		case Reject:
 			return d
+		case Defer:
+			if deferred == nil {
+				deferred = &d
+			}
 		case Ask:
 			if ask == nil {
 				ask = &d
@@ -446,6 +465,10 @@ func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 				approve = &d
 			}
 		}
+	}
+	if deferred != nil {
+		// Its lookup may still reject the whole proposal.
+		return *deferred
 	}
 	if ask != nil {
 		return *ask
@@ -610,8 +633,10 @@ func blocklistedMessage(host string, dec egress.Decision) string {
 // now: a direct OpenShell rule reaches whatever the name resolves to
 // without the proxy's guard, so a name that leads to this machine is
 // rejected and one that leads to a private network asks (or is rejected
-// when unblocking is off). A name that does not resolve is rejected: where
-// its rule would lead cannot be checked.
+// when unblocking is off). A name that does not exist or has no address is
+// rejected: where its rule would lead cannot be checked. A lookup that
+// timed out or failed temporarily defers the proposal instead, so a flaky
+// resolver never turns into a rejection the agent has to work around.
 func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *egress.Decider, dec egress.Decision) Decision {
 	if verdict.Verdict == Reject {
 		return verdict
@@ -621,6 +646,12 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 	cancel()
 	if err != nil {
 		verdict.Risky = true
+		if lookupTransient(err) {
+			verdict.Verdict, verdict.Reason = Defer, ReasonLookupFailed
+			verdict.Message = verdict.Host + " could not be looked up just now (" + truncate(err.Error(), 120) +
+				"); DefenseClaw decides it again on its next pass"
+			return verdict
+		}
 		return reject(verdict, ReasonUnresolved, verdict.Host+" does not resolve from this machine, so DefenseClaw cannot check "+
 			"where a direct rule would lead; reach it through the egress proxy (HTTPS_PROXY) instead")
 	}
@@ -652,6 +683,21 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 	default:
 		return reject(verdict, ReasonBlocklisted, verdict.Host+" resolves to an address on the egress blocklist ("+chk.Rule+")")
 	}
+}
+
+// lookupTransient reports a lookup failure worth retrying: a timeout, a
+// canceled lookup, or a DNS error other than "no such host" (SERVFAIL, an
+// unreachable server). A name that does not exist or resolves to no
+// address is final.
+func lookupTransient(err error) bool {
+	if errors.Is(err, egress.ErrNoAddresses) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && !dnsErr.IsNotFound
 }
 
 // ResolvesToHost reports a proposal (typically a rule approved earlier)

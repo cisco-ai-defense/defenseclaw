@@ -178,11 +178,17 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   (`egress.LookupHost` and `Decider.CheckAddrs`). A name that resolves to
   this machine, link-local, metadata or reserved addresses is rejected. A
   name that resolves to a private network asks, or is rejected when
-  `openshell.admin.allow_unblock` is `false`. A name that does not resolve
-  is rejected.
+  `openshell.admin.allow_unblock` is `false`. A name that does not exist or
+  has no address is rejected. A lookup that times out or fails temporarily
+  (SERVFAIL, an unreachable resolver) rejects nothing: the proposal stays
+  pending and the next pass decides it.
 - The batcher repeats the whole check, with fresh DNS answers, right before
-  it applies an approval. Every reconcile, about every 5 minutes, removes
-  approved rules whose names now resolve to this machine.
+  it applies an approval. When that check cannot be made (a failing lookup,
+  or a sandbox policy that does not resolve), an automatic approval is
+  triaged again later, and your own approval is retried three times, then
+  comes back to you as a pending ask. The proposal is not rejected.
+- Every reconcile, about every 5 minutes, removes approved rules whose
+  names now resolve to this machine.
 - A proposal's `allowed_ips` are judged as whole ranges against the same
   guard (`packs.Effective.AllowedIPReach`), because with `allowed_ips` set
   OpenShell skips its own private-address check for the rule and the name

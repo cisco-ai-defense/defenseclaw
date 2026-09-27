@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -736,4 +737,69 @@ func TestRemovedRulesAreAudited(t *testing.T) {
 	if refused := e.tel.refusedRecords(); len(refused) > 0 {
 		t.Fatalf("the audit recorder refused records: %v", refused)
 	}
+}
+
+// TestFlakyDNSNeverRejects pins that a lookup that fails temporarily
+// (SERVFAIL, a timeout) leaves a proposal pending instead of rejecting it:
+// in triage the chunk waits for a later pass, and an approval the user gave
+// is retried and then handed back to the user, never rejected in OpenShell.
+func TestFlakyDNSNeverRejects(t *testing.T) {
+	savedDelay, savedRetry := triageDelay, applyRetryDelay
+	triageDelay, applyRetryDelay = 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { triageDelay, applyRetryDelay = savedDelay, savedRetry })
+	servfail := &net.DNSError{Err: "server misbehaving", Name: "flaky", IsTemporary: true}
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "flakybox"})
+	e.watch.waitStarted(t, sb.Name)
+
+	// Triage: the proposal waits while the resolver fails.
+	e.dns.setErr("cdn.flaky.example.org", servfail)
+	auto := addChunk(e, sb.Name, chunk("allow_cdn_flaky_example_org_443", "cdn.flaky.example.org", 443))
+	e.m.mu.Lock()
+	b := e.m.boxes[sb.Name]
+	e.m.mu.Unlock()
+	e.m.triageSandbox(context.Background(), b)
+	e.dns.mu.Lock()
+	looked := e.dns.calls["cdn.flaky.example.org."]
+	e.dns.mu.Unlock()
+	if looked == 0 {
+		t.Fatal("the flaky name was not looked up")
+	}
+	_ = e.m.batcher.Drain(context.Background())
+	if s := chunkStatus(e, sb.Name, auto); s != "pending" {
+		t.Fatalf("proposal with a failing lookup = %s, want it left pending", s)
+	}
+	e.dns.setErr("cdn.flaky.example.org", nil)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "the deferred proposal approved", func() bool { return chunkStatus(e, sb.Name, auto) == "approved" })
+
+	// Apply: the user approves a private-network ask while the resolver
+	// fails; the approval is retried, then comes back to the user.
+	e.dns.set("db.flaky.example.org", "10.0.0.5")
+	asked := addChunk(e, sb.Name, chunk("allow_db_flaky_example_org_443", "db.flaky.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	e.dns.setErr("db.flaky.example.org", servfail)
+	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the approval handed back", func() bool {
+		var back bool
+		for _, ev := range e.m.ActivitySince(0, sb.Name) {
+			back = back || (ev.Kind == sandboxapi.ActivityApprovalRequested && ev.ApprovalID == asks[0].ID && ev.Reason == "lookup_failed")
+		}
+		return back
+	})
+	if s := chunkStatus(e, sb.Name, asked); s != "pending" {
+		t.Fatalf("approved proposal with a failing lookup = %s, want it left pending", s)
+	}
+	if again := waitAsks(t, e, sb.Name, 1); again[0].ID != asks[0].ID {
+		t.Fatalf("asks = %+v, want the same ask back", again)
+	}
+	e.dns.setErr("db.flaky.example.org", nil)
+	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the second approval applied", func() bool { return chunkStatus(e, sb.Name, asked) == "approved" })
 }

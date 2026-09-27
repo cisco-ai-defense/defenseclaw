@@ -89,6 +89,9 @@ type approval struct {
 	actor       string
 	createdAt   time.Time
 	resolvedAt  time.Time
+	// deferrals counts the apply-time checks of an operator approval that
+	// could not be made (triage.ErrDeferred) since it was queued.
+	deferrals int
 }
 
 // approvalID names the ask for one proposed rule of one sandbox: a digest
@@ -235,13 +238,17 @@ func (m *Manager) recheckApproval(ctx context.Context, it triage.Item, chunk ope
 	}
 	eff, err := m.resolveBox(b)
 	if err != nil {
-		return err
+		// The sandbox fails closed until its policy resolves again; the
+		// approval waits instead of being refused for good.
+		return fmt.Errorf("%w: the sandbox policy cannot be resolved: %v", triage.ErrDeferred, err)
 	}
 	p := triage.FromChunk(it.Sandbox, chunk)
 	d := triage.Classify(ctx, p, m.triagePolicy(b, eff))
 	switch {
 	case d.Verdict == triage.Reject:
 		return errors.New(d.Message)
+	case d.Verdict == triage.Defer:
+		return fmt.Errorf("%w: %s", triage.ErrDeferred, d.Message)
 	case d.Verdict == triage.Ask && !operator:
 		return errors.New("it needs the user's approval now: " + d.Message)
 	}
@@ -328,6 +335,15 @@ func (m *Manager) triageSandbox(ctx context.Context, b *box) {
 			m.mu.Unlock()
 			more = true
 			break
+		}
+		if d.Verdict == triage.Defer {
+			// A lookup timed out or failed temporarily: the chunk stays
+			// pending in OpenShell and the next sweep decides it again.
+			m.mu.Lock()
+			delete(b.seenChunks, chunk.ID)
+			m.mu.Unlock()
+			m.logf("triage of %s proposal %s deferred: %s", name, chunk.ID, d.Message)
+			continue
 		}
 		m.applyTriage(ctx, gw, b, bindingID, p, d)
 	}
@@ -570,9 +586,11 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			}
 		}
 		applied := r.Err == nil && r.Refused == nil && !r.Skipped && !r.Changed && !r.Stale && !r.Gone
+		deferred := r.Refused != nil && errors.Is(r.Refused, triage.ErrDeferred)
 		if b != nil && applied {
 			b.rulesAdded++
 		}
+		retryApply := false
 		if a != nil {
 			a.resolvedAt = m.now().UTC()
 			switch {
@@ -580,6 +598,19 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 				a.status = sandboxapi.ApprovalApproved
 			case r.Skipped:
 				a.status = sandboxapi.ApprovalPending
+			case deferred && a.actor == actorOperator:
+				// The user's approval could not be checked (a DNS lookup
+				// timed out, the policy did not resolve): try again a few
+				// times, then hand it back to the user. The chunk stays
+				// pending in OpenShell either way.
+				// It stays the operator's (a.actor), so triage does not
+				// decide the chunk over the user's head meanwhile.
+				a.deferrals++
+				if a.deferrals < maxApplyDeferrals {
+					retryApply = true
+				} else {
+					a.status, a.deferrals = sandboxapi.ApprovalPending, 0
+				}
 			case r.Refused != nil && a.actor == actorOperator:
 				a.status = sandboxapi.ApprovalRejected
 			default:
@@ -587,6 +618,10 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			}
 		}
 		m.mu.Unlock()
+		if retryApply {
+			m.retryApply(a, r.Item)
+			continue
+		}
 		// Decide the chunk again as it is now: its content or the policy
 		// changed, or an automatic approval no longer passes (triage then
 		// rejects it or asks the user).
@@ -595,6 +630,13 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			m.retriage(b, r.Item.ChunkID)
 		}
 		if a == nil || b == nil {
+			continue
+		}
+		if deferred && a.status == sandboxapi.ApprovalPending {
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalRequested, Sandbox: a.sandbox, ApprovalID: a.id,
+				Host: a.decision.Host, Port: a.decision.Port, Reason: string(triage.ReasonLookupFailed),
+				Message: "DefenseClaw could not check " + a.decision.Host + " before applying your approval (" +
+					truncate(r.Refused.Error(), 200) + "); approve it again"})
 			continue
 		}
 		fail := func(reason, msg string) {
@@ -617,6 +659,9 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 				Host: a.decision.Host, Port: a.decision.Port, Reason: "refused_at_apply", Message: a.decision.Host + " " + msg})
+			continue
+		case deferred:
+			fail(string(triage.ReasonLookupFailed), "DefenseClaw could not check "+a.decision.Host+" before applying it; it looks at it again")
 			continue
 		case r.Refused != nil:
 			fail("refused_at_apply", "the approval of "+a.decision.Host+" no longer passes the policy; DefenseClaw looks at it again")
@@ -651,6 +696,28 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: a.decision.Host, Port: a.decision.Port, Reason: a.actor, Message: msg})
 	}
+}
+
+// maxApplyDeferrals bounds the apply attempts of an operator approval whose
+// check could not be made; applyRetryDelay spaces them.
+const maxApplyDeferrals = 3
+
+var applyRetryDelay = 15 * time.Second
+
+// retryApply queues an operator approval for the batcher again after
+// applyRetryDelay, unless it was decided or moved on meanwhile.
+func (m *Manager) retryApply(a *approval, it triage.Item) {
+	time.AfterFunc(applyRetryDelay, func() {
+		if m.running() == nil {
+			return
+		}
+		m.mu.Lock()
+		still := m.approvals[a.id] == a && a.status == sandboxapi.ApprovalQueued && a.chunkID == it.ChunkID
+		m.mu.Unlock()
+		if still {
+			m.batcher.Enqueue(it)
+		}
+	})
 }
 
 func approvalActor(actor string) string {
