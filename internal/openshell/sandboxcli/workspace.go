@@ -284,6 +284,10 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
+	if res.Kind == workspace.CopyPlain && o.applyMode() == workspace.ApplyBranch {
+		return fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
+			"bring them back with --apply or --patch-out FILE", o.Name)
+	}
 	if stdout != nil && modes == 0 {
 		return writeJSON(stdout, res)
 	}
@@ -301,7 +305,11 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		a.warn(b)
 	}
 	if modes == 0 {
-		a.note("bring it back with --apply, --branch or --patch-out FILE")
+		if res.Kind == workspace.CopyPlain {
+			a.note("bring it back with --apply or --patch-out FILE")
+		} else {
+			a.note("bring it back with --apply, --branch or --patch-out FILE")
+		}
 		return nil
 	}
 	nothing := func() error {

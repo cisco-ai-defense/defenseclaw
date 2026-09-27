@@ -70,6 +70,30 @@ type fakeDaemon struct {
 	// createMCP and createWarnings are what create reports.
 	createMCP      *sandboxapi.MCPSummary
 	createWarnings []string
+	// timeline records the order of the steps of a run, shared with the
+	// other fakes of a testApp.
+	timeline *timeline
+}
+
+// timeline is the ordered record of what the fakes did.
+type timeline struct {
+	mu    sync.Mutex
+	steps []string
+}
+
+func (tl *timeline) add(step string) {
+	if tl == nil {
+		return
+	}
+	tl.mu.Lock()
+	tl.steps = append(tl.steps, step)
+	tl.mu.Unlock()
+}
+
+func (tl *timeline) list() []string {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	return append([]string(nil), tl.steps...)
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -232,6 +256,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		sb.Warnings = append(sb.Warnings, d.createWarnings...)
 		d.sandboxes[name] = sb
+		d.timeline.add("create " + name)
 		reply(sb)
 	case strings.HasPrefix(path, sandboxapi.PathSandboxes+"/"):
 		rest := strings.TrimPrefix(path, sandboxapi.PathSandboxes+"/")
@@ -302,7 +327,8 @@ type fakeTerminal struct {
 	// startErr fails the start of the harness (nothing runs).
 	startErr error
 	// during runs while the harness "owns" the terminal.
-	during func()
+	during   func()
+	timeline *timeline
 }
 
 func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, error) {
@@ -316,6 +342,7 @@ func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, er
 	if startErr != nil {
 		return -1, startErr
 	}
+	f.timeline.add("attach")
 	if during != nil {
 		during()
 	}
@@ -327,7 +354,8 @@ type fakeStreamer struct {
 	mu   sync.Mutex
 	runs [][]string
 	// answer returns the exit status and output for an argv.
-	answer func(argv []string) (int, string)
+	answer   func(argv []string) (int, string)
+	timeline *timeline
 }
 
 func (f *fakeStreamer) Stream(_ context.Context, inv openshell.Invocation, stdout, _ io.Writer) (int, error) {
@@ -338,6 +366,7 @@ func (f *fakeStreamer) Stream(_ context.Context, inv openshell.Invocation, stdou
 	if inv.Interactive {
 		return -1, io.ErrUnexpectedEOF
 	}
+	f.timeline.add(execStep(inv.Argv))
 	if answer == nil {
 		return 0, nil
 	}
@@ -354,6 +383,26 @@ func (f *fakeStreamer) commands() []string {
 		out = append(out, strings.Join(sandboxCommand(argv), " "))
 	}
 	return out
+}
+
+// execStep is an exec's timeline entry: "exec <command> in <workdir>",
+// the workdir "-" when the exec names none.
+func execStep(argv []string) string {
+	workdir := "-"
+	for i, a := range argv {
+		if a == "--" {
+			break
+		}
+		if a == "--workdir" && i+1 < len(argv) {
+			workdir = argv[i+1]
+		}
+	}
+	cmd := sandboxCommand(argv)
+	head := ""
+	if len(cmd) > 0 {
+		head = cmd[0]
+	}
+	return "exec " + head + " in " + workdir
 }
 
 // sandboxCommand strips `openshell sandbox exec … --` from an argv.
@@ -413,16 +462,18 @@ func (f *fakeImages) Remove(_ context.Context, dryRun bool) ([]string, error) {
 
 // fakeCopy is an in-memory CopyWorkspace.
 type fakeCopy struct {
-	mu    sync.Mutex
-	steps []string
-	pull  *workspace.PullResult
-	apply []workspace.ApplyOptions
+	mu       sync.Mutex
+	steps    []string
+	pull     *workspace.PullResult
+	apply    []workspace.ApplyOptions
+	timeline *timeline
 }
 
 func (f *fakeCopy) step(s string) {
 	f.mu.Lock()
 	f.steps = append(f.steps, s)
 	f.mu.Unlock()
+	f.timeline.add(s)
 }
 
 func (f *fakeCopy) Stage(_ context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
@@ -523,6 +574,9 @@ func newTestApp(t *testing.T, input string) *testApp {
 			t.Fatal(err)
 		}
 	}
+	// One timeline for the order of a run's steps.
+	tl := &timeline{}
+	ta.daemon.timeline, ta.term.timeline, ta.stream.timeline, ta.copy.timeline = tl, tl, tl, tl
 	// A test that drops Cfg (or its DataDir) falls back to
 	// config.DefaultDataPath: keep that in the fixture too, never the
 	// developer's ~/.defenseclaw.

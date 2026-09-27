@@ -48,9 +48,12 @@ type session struct {
 	before *sandboxapi.Sandbox
 }
 
-// probe runs a trivial command until the sandbox answers.
-func (s *session) probe(ctx context.Context) error {
-	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{WorkDir: s.sb.Workdir, Timeout: probeTimeout})
+// probe runs a trivial command in workdir until the sandbox answers; ""
+// is the sandbox's default directory. The harness's workdir exists only
+// once a copy-mode project is uploaded, so a probe there comes after the
+// upload.
+func (s *session) probe(ctx context.Context, workdir string) error {
+	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{WorkDir: workdir, Timeout: probeTimeout})
 	if err != nil {
 		return err
 	}
@@ -173,7 +176,8 @@ printf '%s\n' "$!" > "$d/latest.pid"
 	return nil
 }
 
-// uploadCopy sends the staged copy and records its baseline.
+// uploadCopy sends the staged copy and records its baseline. It runs
+// before any exec in the workdir, which the upload creates.
 func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) error {
 	a := s.app
 	t := a.transport(s.cli)
@@ -186,9 +190,6 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 		if err := s.api.ReportWorkspace(context.WithoutCancel(ctx), s.sb.Name, r); err != nil {
 			a.warn("could not record the upload with the daemon: " + err.Error())
 		}
-	}
-	if err := s.probe(ctx); err != nil {
-		return err
 	}
 	a.note(fmt.Sprintf("Uploading the copy (%s, %s)…", plural(int64(rec.Files), "file", "files"), humanBytes(rec.Bytes)))
 	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t)
@@ -381,9 +382,13 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	}
 	mode := ""
 	if a.IO.TTY && !s.yes {
-		ans, err := a.choose("Bring the changes back?", []choice{
-			{"a", "apply (3-way)"}, {"b", "branch dc/" + after.Name}, {"p", "patch file"}, {"s", "skip"},
-		}, "a")
+		choices := []choice{{"a", "apply (3-way)"}}
+		if pull.Kind != workspace.CopyPlain {
+			// A plain folder has no branches to put the work on.
+			choices = append(choices, choice{"b", "branch dc/" + after.Name})
+		}
+		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"})
+		ans, err := a.choose("Bring the changes back?", choices, "a")
 		if err != nil {
 			return err
 		}

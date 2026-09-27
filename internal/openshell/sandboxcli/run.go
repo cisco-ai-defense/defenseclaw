@@ -198,13 +198,15 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		}
 		return err
 	}
+	// Copy mode: create, upload, baseline, then the probe in the workdir the
+	// upload made, then the harness.
 	if copyMode {
 		if err := s.uploadCopy(ctx, copyRec); err != nil {
 			return fail(err)
 		}
 	}
 	a.banner(sb, llm, o)
-	if err := s.probe(ctx); err != nil {
+	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
 	opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo, CredentialProfile: sb.Launch.CredentialProfile,
@@ -372,20 +374,31 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 // stageCopy stages the copy-mode project with the effective workspace
 // policy.
 func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions) (*workspace.CopyRecord, error) {
-	eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Copy: true, Safe: o.Safe, Unmask: o.Unmask})
+	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe, Unmask: o.Unmask}, name)
 	if err != nil {
 		return nil, err
 	}
-	home, _ := a.Home()
 	a.note("Copying " + a.tildePath(project) + " (secrets are held back)…")
-	rec, err := a.Workspace.Stage(ctx, workspace.StageOptions{
-		Project: project, Name: name, DataDir: a.dataDir(), Home: home, GitDepth: eff.Workspace.GitDepth,
-		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Replace: true,
-	})
+	rec, err := a.Workspace.Stage(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("stage the project copy: %w", err)
 	}
 	return rec, nil
+}
+
+// copyStageOptions stages flags.Project for sandbox name with the effective
+// workspace policy: masks, exceptions, history depth and the size cap.
+func (a *App) copyStageOptions(flags packs.Flags, name string) (workspace.StageOptions, error) {
+	flags.Copy = true
+	eff, _, err := packs.Resolve(a.Cfg, flags)
+	if err != nil {
+		return workspace.StageOptions{}, err
+	}
+	home, _ := a.Home()
+	return workspace.StageOptions{
+		Project: flags.Project, Name: name, DataDir: a.dataDir(), Home: home, GitDepth: eff.Workspace.GitDepth,
+		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Replace: true,
+	}, nil
 }
 
 // banner prints the plan's launch banner.

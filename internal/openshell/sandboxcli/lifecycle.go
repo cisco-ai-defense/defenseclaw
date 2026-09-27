@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -270,13 +271,18 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		}
 	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
-	if err := s.probe(ctx); err != nil {
-		return err
-	}
 	if o.Refresh && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+		// The refresh replaces the copy, workdir included (a failed refresh
+		// may have left none): probe outside it, and the refresh's baseline
+		// checks the new workdir.
+		if err := s.probe(ctx, ""); err != nil {
+			return err
+		}
 		if err := a.refreshCopy(ctx, s); err != nil {
 			return err
 		}
+	} else if err := s.probe(ctx, sb.Workdir); err != nil {
+		return err
 	}
 	if o.Shell {
 		inv, err := cli.Connect(sb.Name)
@@ -304,18 +310,25 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
-	home, _ := a.Home()
+	// The sandbox's own policy decides what is held back, as at its run.
+	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile}, s.sb.Name)
+	if err != nil {
+		return err
+	}
 	t := a.transport(s.cli)
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
-	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{
-		Stage: workspace.StageOptions{Project: s.sb.Project, Name: s.sb.Name, DataDir: a.dataDir(), Home: home, Replace: true},
-		Exec:  t, Upload: t,
-	})
+	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
 		return fmt.Errorf("refresh the copy: %w", err)
 	}
 	files, b := int64(rec.Files), rec.Bytes
-	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, FileCount: &files, ByteCount: &b})
+	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})
+	for _, w := range rec.Warnings {
+		a.warn(w)
+	}
+	if len(rec.HeldBack) > 0 {
+		a.note("held back: " + strings.Join(firstN(rec.HeldBack, 8), "  "))
+	}
 	return nil
 }
 

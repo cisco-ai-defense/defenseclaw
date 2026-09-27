@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -365,6 +366,114 @@ func TestRunCopySession(t *testing.T) {
 		if !strings.Contains(out, w) {
 			t.Errorf("output lacks %q:\n%s", w, out)
 		}
+	}
+}
+
+// The copy's workdir exists only once the copy is uploaded: a copy-mode run
+// stages, creates the sandbox, uploads, sets the baseline, then probes the
+// workdir, then starts the harness. Nothing runs in the workdir before the
+// upload.
+func TestRunCopyOrdersUploadBaselineProbeAttach(t *testing.T) {
+	const workdir = "/sandbox/work/proj"
+	cases := []struct {
+		name  string
+		opts  RunOptions
+		setup func(*testApp)
+		want  []string
+	}{
+		{"attached", RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, nil, []string{
+			"stage copybox", "create copybox", "upload copybox", "baseline copybox", "exec true in " + workdir, "attach", "pull copybox",
+		}},
+		{"detached", RunOptions{Harness: "claude", Copy: true, Name: "copybox", Detach: true, Prompt: "fix it"},
+			func(ta *testApp) { ta.IO.TTY = false }, []string{
+				"stage copybox", "create copybox", "upload copybox", "baseline copybox", "exec true in " + workdir, "exec sh in " + workdir,
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "s\n")
+			if c.setup != nil {
+				c.setup(ta)
+			}
+			if err := ta.Run(context.Background(), c.opts); err != nil {
+				t.Fatalf("Run: %v\n%s", err, ta.output())
+			}
+			if got := ta.daemon.timeline.list(); !slices.Equal(got, c.want) {
+				t.Fatalf("steps =\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+// A failed upload removes the sandbox without having probed a workdir that
+// does not exist.
+func TestRunCopyUploadFailureDeletesSandbox(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Workspace = &failingUpload{fakeCopy: ta.copy}
+	err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "copybox"})
+	if err == nil || !strings.Contains(err.Error(), "upload the project copy") {
+		t.Fatalf("Run = %v", err)
+	}
+	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/copybox")); n != 1 {
+		t.Fatalf("delete calls = %d", n)
+	}
+	if runs := ta.stream.commands(); len(runs) != 0 {
+		t.Fatalf("execs before the upload: %q", runs)
+	}
+}
+
+type failingUpload struct{ *fakeCopy }
+
+func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader) (*workspace.CopyRecord, error) {
+	return nil, errors.New("openshell upload failed (exit 1)")
+}
+
+// Resuming a copy-mode sandbox with --refresh probes outside the workdir
+// (a failed refresh may have left none), then refreshes, then attaches; a
+// plain resume probes the workdir.
+func TestConnectRefreshOrdersProbeRefreshAttach(t *testing.T) {
+	for _, refresh := range []bool{true, false} {
+		t.Run(fmt.Sprintf("refresh=%t", refresh), func(t *testing.T) {
+			ta := newTestApp(t, "s\n")
+			sb := sampleSandbox("copybox")
+			sb.WorkdirMode, sb.Workdir, sb.Phase = "copy", "/sandbox/work/proj", "stopped"
+			ta.daemon.add(sb)
+			if err := ta.Connect(context.Background(), ConnectOptions{Name: "copybox", Refresh: refresh}); err != nil {
+				t.Fatalf("Connect: %v\n%s", err, ta.output())
+			}
+			want := []string{"exec true in /sandbox/work/proj", "attach", "pull copybox"}
+			if refresh {
+				want = []string{"exec true in -", "refresh copybox", "attach", "pull copybox"}
+			}
+			if got := ta.daemon.timeline.list(); !slices.Equal(got, want) {
+				t.Fatalf("steps = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A copy of a plain folder has no branch to bring work back on: the end of
+// the session does not offer one, and `pull --branch` says what works.
+func TestPlainFolderCopyHasNoBranchChoice(t *testing.T) {
+	ta := newTestApp(t, "p\n")
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain,
+		Changes: []workspace.TreeChange{{Path: "notes.md", Status: "M", Added: 1}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 1}}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "plainbox"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	if !strings.Contains(out, "Bring the changes back? [A] apply (3-way)  [p] patch file  [s] skip") || strings.Contains(out, "branch dc/") {
+		t.Fatalf("choices:\n%s", out)
+	}
+	if len(ta.copy.apply) != 1 || ta.copy.apply[0].Mode != workspace.ApplyPatch {
+		t.Fatalf("apply = %+v", ta.copy.apply)
+	}
+	err := ta.Pull(context.Background(), PullOptions{Name: "plainbox", Branch: true})
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") || !strings.Contains(err.Error(), "--apply or --patch-out") {
+		t.Fatalf("pull --branch = %v", err)
+	}
+	if len(ta.copy.apply) != 1 {
+		t.Fatal("pull --branch applied something")
 	}
 }
 
