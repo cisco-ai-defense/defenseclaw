@@ -18,8 +18,9 @@ Serves a scripted conversation to Claude Code (or any Messages API client):
   GET  /v1/models[/<id>]                 small static model list
   anything else                          logged, 404 JSON error
 
-Every request is appended to --log as one JSON line (path, query, headers,
-summary of the body). --dump-dir additionally stores each full request body.
+Every request is appended to --log as one JSON line (path, query, headers with
+credential values redacted, summary of the body). --dump-dir additionally
+stores each full request body.
 
 Script file (JSON), selected per request by substring match against the most
 recent *real* user prompt (a user message that is not only tool_result blocks):
@@ -88,6 +89,30 @@ def load_script():
         with open(ARGS.script, "r", encoding="utf-8") as fh:
             return json.load(fh)
     return DEFAULT_SCRIPT
+
+
+# Header names that carry credentials. The log keeps such a header, its auth
+# scheme, and whether the value is still an OpenShell credential placeholder
+# (the supervisor did not substitute the real secret), never the value itself.
+CREDENTIAL_HEADER_WORDS = ("auth", "token", "key", "secret", "cookie", "session", "password", "credential",
+                           "signature")
+PLACEHOLDER_PREFIX = "openshell:resolve:"
+
+
+def redact_headers(headers):
+    """Return the request headers as a dict with every credential value redacted."""
+    out = {}
+    for name, value in headers.items():
+        if not any(word in name.lower() for word in CREDENTIAL_HEADER_WORDS):
+            out[name] = value
+            continue
+        scheme, sep, rest = value.strip().partition(" ")
+        if sep and scheme.isalpha():  # "Bearer <token>", "Basic <credentials>"
+            prefix, secret = scheme + " ", rest.strip()
+        else:
+            prefix, secret = "", value.strip()
+        out[name] = prefix + ("[redacted placeholder]" if secret.startswith(PLACEHOLDER_PREFIX) else "[redacted]")
+    return out
 
 
 def log_line(obj):
@@ -247,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
             "method": self.command,
             "path": urlparse(self.path).path,
             "query": parse_qs(urlparse(self.path).query),
-            "headers": {k: v for k, v in self.headers.items()},
+            "headers": redact_headers(self.headers),
             "body_len": len(raw),
         }
         if isinstance(body, dict):

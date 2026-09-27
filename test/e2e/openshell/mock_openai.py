@@ -15,8 +15,8 @@
   GET  /v1/models | /models             static list ({"data": [...], "models": [...]})
   anything else                          logged, 404 JSON error
 
-Every request is appended to --log as one JSON line; --dump-dir stores full
-bodies. Script file (JSON), selected by substring match against the last user
+Every request is appended to --log as one JSON line (credential header values
+redacted); --dump-dir stores full bodies. Script file (JSON), selected by substring match against the last user
 message text in the request "input":
 
   {
@@ -67,6 +67,30 @@ def load_script():
         with open(ARGS.script, "r", encoding="utf-8") as fh:
             return json.load(fh)
     return DEFAULT_SCRIPT
+
+
+# Header names that carry credentials. The log keeps such a header, its auth
+# scheme, and whether the value is still an OpenShell credential placeholder
+# (the supervisor did not substitute the real secret), never the value itself.
+CREDENTIAL_HEADER_WORDS = ("auth", "token", "key", "secret", "cookie", "session", "password", "credential",
+                           "signature")
+PLACEHOLDER_PREFIX = "openshell:resolve:"
+
+
+def redact_headers(headers):
+    """Return the request headers as a dict with every credential value redacted."""
+    out = {}
+    for name, value in headers.items():
+        if not any(word in name.lower() for word in CREDENTIAL_HEADER_WORDS):
+            out[name] = value
+            continue
+        scheme, sep, rest = value.strip().partition(" ")
+        if sep and scheme.isalpha():  # "Bearer <token>", "Basic <credentials>"
+            prefix, secret = scheme + " ", rest.strip()
+        else:
+            prefix, secret = "", value.strip()
+        out[name] = prefix + ("[redacted placeholder]" if secret.startswith(PLACEHOLDER_PREFIX) else "[redacted]")
+    return out
 
 
 def log_line(obj):
@@ -204,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
             SEQ[0] += 1
             seq = SEQ[0]
         rec = {"seq": seq, "ts": time.time(), "method": self.command, "path": self.path,
-               "headers": {k: v for k, v in self.headers.items()}, "body_len": len(raw)}
+               "headers": redact_headers(self.headers), "body_len": len(raw)}
         body = None
         if raw:
             try:
