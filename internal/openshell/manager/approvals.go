@@ -411,12 +411,15 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 			d.Message = "the sandbox proposed many new destinations in a short time; approve to open " + d.Host
 		}
 	}
-	if d.Verdict == triage.Ask && pending >= maxPendingApprovals {
+	prev := m.approvals[a.id]
+	// A proposal of a rule already asked about collapses into that ask
+	// (below) and adds none, so the cap does not apply to it: applying it
+	// would reject the ask the user may be reading.
+	if d.Verdict == triage.Ask && pending >= maxPendingApprovals && (prev == nil || prev.status != sandboxapi.ApprovalPending) {
 		d.Verdict, d.Reason = triage.Reject, triage.ReasonTooManyPending
 		d.Message = "too many proposals are waiting for you; this one was rejected"
 	}
 	a.decision = d
-	prev := m.approvals[a.id]
 	var superseded, duplicate string
 	collapse := false
 	switch {
