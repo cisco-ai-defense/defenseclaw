@@ -35,10 +35,13 @@ import (
 //     daemon replaced the ingress provider profile. This is reported at
 //     once, also after hooks that did get through.
 //   - OpenShell let a hook connect to the ingress, but no authenticated
-//     request followed within hookAttemptGrace: the ingress does not answer,
-//     or the sandbox token never reached the hook.
-//   - The harness worked (a model call, OTLP, egress) for HookReachWindow
-//     without a single authenticated hook.
+//     request (hook, OTLP or notify) followed within hookAttemptGrace: the
+//     ingress does not answer, or the sandbox token never reached the hook.
+//     A connection OpenShell closed on a policy reload counts as an attempt.
+//   - The harness worked (a model call, egress) for HookReachWindow
+//     without a single authenticated hook. OTLP is no sign of work: the
+//     Codex TUI exports it from its start and fires its hooks only with the
+//     first prompt.
 //
 // A session is flagged once; an authenticated hook clears the flag.
 
@@ -113,6 +116,11 @@ func (m *Manager) unreachableLocked(b *box, now time.Time) string {
 	inSession := func(t time.Time) bool { return !t.IsZero() && !t.Before(b.started) }
 	reached := inSession(b.hooks.lastHook)
 	refused := inSession(b.hooks.lastIngressRefused) && (!reached || b.hooks.lastIngressRefused.After(b.hooks.lastHook))
+	// An authenticated OTLP or notify request proves the ingress answers
+	// and the sandbox token arrives: the connections OpenShell reported may
+	// be the harness's telemetry (the Codex TUI exports from its start and
+	// fires its first hooks only with the first prompt).
+	authenticated := inSession(b.hooks.lastOTLP) || inSession(b.hooks.lastNotify)
 	switch {
 	case refused:
 		return fmt.Sprintf("OpenShell refused the hooks' connections to the DefenseClaw ingress (%s:%d): the sandbox's network policy "+
@@ -120,7 +128,7 @@ func (m *Manager) unreachableLocked(b *box, now time.Time) string {
 			openshellHostAlias, m.opts.IngressPort)
 	case reached:
 		return ""
-	case !b.reach.firstAttempt.IsZero() && now.Sub(b.reach.firstAttempt) >= hookAttemptGrace:
+	case !authenticated && !b.reach.firstAttempt.IsZero() && now.Sub(b.reach.firstAttempt) >= hookAttemptGrace:
 		return fmt.Sprintf("the hooks connect to the DefenseClaw ingress (port %d), but not one request authenticated: "+
 			"the ingress does not answer, or the sandbox token did not reach the hook", m.opts.IngressPort)
 	case !b.reach.firstWork.IsZero() && now.Sub(b.reach.firstWork) >= m.opts.HookReachWindow:

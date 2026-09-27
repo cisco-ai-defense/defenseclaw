@@ -67,9 +67,11 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 	case sandboxauth.RouteNotify:
 		box.hooks.lastNotify = now
 	case sandboxauth.RouteOTLP:
+		// Not a sign of work for the reachability check: the Codex TUI
+		// exports OTLP from its start, before the first prompt that fires
+		// its hooks. A model call is (watch.go).
 		box.hooks.lastOTLP = now
 		box.activeAt = now
-		m.noteWorkLocked(box)
 	}
 	name := box.rec.Name
 	m.mu.Unlock()

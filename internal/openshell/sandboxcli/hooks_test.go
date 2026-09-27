@@ -165,6 +165,28 @@ func TestRunWithHooksHasNoHookWarning(t *testing.T) {
 	}
 }
 
+// An idle Codex TUI fires its first hook only with the first prompt but
+// exports OTLP from its start: authenticated telemetry proves the path, so
+// the run does not warn that hooks are overdue (live, the warning covered
+// the TUI of every session left idle for 45 seconds).
+func TestRunIdleTelemetryIsNoHookWarning(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	ta.HookWindow = 10 * time.Millisecond
+	ta.term.hooks = nil
+	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	ta.term.during = func() {
+		ta.daemon.mu.Lock()
+		ta.daemon.sandboxes["dc-claude-proj-1a2b"].Hooks.LastOTLPAt = time.Now()
+		ta.daemon.mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // past the window
+	}
+	_ = ta.Run(context.Background(), RunOptions{Harness: "codex"})
+	if live := stderr.String(); strings.Contains(live, "not reaching") {
+		t.Fatalf("an idle session with authenticated telemetry was warned:\n%s", live)
+	}
+}
+
 // A copy-mode session without hooks warns and fails the same way.
 func TestRunCopySessionWithoutHooks(t *testing.T) {
 	ta := newTestApp(t, "s\n")

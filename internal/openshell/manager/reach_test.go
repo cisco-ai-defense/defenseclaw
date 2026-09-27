@@ -197,7 +197,6 @@ func TestHookReachSilentWork(t *testing.T) {
 		{"local model endpoint", func(r *reachEnv) {
 			r.ocsf("NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:28921 [policy:dc_cred_1 engine:opa]")
 		}},
-		{"otlp", func(r *reachEnv) { r.m.ObserveIngress(r.binding, sandboxauth.RouteOTLP) }},
 	} {
 		t.Run(work.name, func(t *testing.T) {
 			r := newReachEnv(t)
@@ -221,6 +220,32 @@ func TestHookReachSilentWork(t *testing.T) {
 	r.m.checkHookReach(context.Background())
 	if h := r.hooks(); h.Unreachable {
 		t.Fatalf("a session with hooks was flagged: %+v", h)
+	}
+}
+
+// An idle Codex TUI connects to the ingress and exports OTLP from its start
+// but fires its first hooks only with the first prompt: live, that raised a
+// HIGH "not one request authenticated" alarm 15 seconds after every start
+// although the OTLP requests authenticated. Authenticated OTLP proves the
+// ingress answers and the token arrives, and OTLP is no sign of work; the
+// first model call without hooks is still flagged after the window.
+func TestHookReachIdleTelemetry(t *testing.T) {
+	r := newReachEnv(t)
+	r.ocsf("NET:OPEN [INFO] ALLOWED /opt/defenseclaw-harness/codex/bin/codex(81) -> host.openshell.internal:" + strconv.Itoa(testIngressPort) + " [policy:defenseclaw_ingress engine:opa]")
+	r.m.ObserveIngress(r.binding, sandboxauth.RouteOTLP)
+	for i := 0; i < 6; i++ {
+		r.advance(DefaultHookReachWindow)
+		r.m.ObserveIngress(r.binding, sandboxauth.RouteOTLP)
+		r.m.checkHookReach(context.Background())
+	}
+	if h := r.hooks(); h.Unreachable {
+		t.Fatalf("an idle harness exporting telemetry was flagged: %+v", h)
+	}
+	r.ocsf("HTTP:POST [INFO] ALLOWED POST https://bedrock-mantle.us-east-1.api.aws/v1/responses [policy:_provider_x engine:l7]")
+	r.advance(DefaultHookReachWindow + time.Second)
+	r.m.checkHookReach(context.Background())
+	if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "the harness has been working") {
+		t.Fatalf("a model call without hooks = %+v", h)
 	}
 }
 

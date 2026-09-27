@@ -1158,18 +1158,21 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
   hooks that got through. A connection OpenShell closes because the policy
   changed while it was open ("policy generation is stale"; every policy
   reload does that) is no refusal and only counts as an attempt.
-- OpenShell lets a hook connect but no authenticated request follows within
-  15 seconds: the ingress does not answer, or the sandbox token did not reach
-  the hook.
-- The harness works (a model call, a local model endpoint, OTLP, egress) for
-  `HookReachWindow` (30 seconds) without one authenticated hook.
+- OpenShell lets a hook connect but no authenticated request (hook, OTLP or
+  notify) follows within 15 seconds: the ingress does not answer, or the
+  sandbox token did not reach the hook.
+- The harness works (a model call, a local model endpoint, egress) for
+  `HookReachWindow` (30 seconds) without one authenticated hook. OTLP is no
+  sign of work: the Codex TUI exports it from its start and posts its first
+  hooks only with the first prompt.
 
 An authenticated hook clears the flag (`hooks_restored` on the feed). The
 sandbox's hook coverage carries `unreachable`, `unreachable_reason` and
 `ingress_refused`, which `sandbox status`, `sandbox list` ("unreachable!")
 and the "Sandbox hooks" check of `sandbox doctor` show. The run itself warns
-live (the daemon's line, or its own once no hook arrived in the session's
-first 45 seconds), ends the summary with "DefenseClaw hooks are not reaching
+live (the daemon's line, or its own once neither a hook nor authenticated
+OTLP arrived in the session's first 45 seconds), ends the summary with
+"DefenseClaw hooks are not reaching
 the daemon; every tool call is being blocked … Run: defenseclaw sandbox
 doctor", and exits 69 when not one hook of the session got through (the
 harness's own non-zero status wins). `sandbox logs` does the same for a

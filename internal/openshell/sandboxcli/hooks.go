@@ -34,8 +34,9 @@ import (
 // status (ExitHooksUnreachable) when not one hook got through.
 
 // DefaultHookWindow is how long a session may run before its first hook is
-// overdue. Both harnesses post SessionStart as they start and
-// UserPromptSubmit before their first model turn.
+// overdue. Claude Code posts SessionStart as it starts; the Codex TUI posts
+// it only with the first prompt, but exports OTLP from its start, which
+// proves the path (telemetryReached).
 const DefaultHookWindow = 45 * time.Second
 
 // runHookSlack absorbs the difference between the sandbox's clock, which
@@ -94,7 +95,7 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 	case <-t.C:
 	}
 	sb, err := s.api.Get(ctx, s.sb.Name)
-	if err != nil || s.hooksReached(sb) {
+	if err != nil || s.hooksReached(sb) || s.telemetryReached(sb) {
 		return
 	}
 	s.warnHooksOnce("⚠ " + hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason,
@@ -109,6 +110,20 @@ func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
 		before = s.sb
 	}
 	return after.Hooks.HookRequests > before.Hooks.HookRequests
+}
+
+// telemetryReached reports whether an authenticated OTLP request of the
+// session reached DefenseClaw by the time after was read: the ingress
+// answers and the sandbox token arrives, so a harness that fires its first
+// hook only with the first prompt (the Codex TUI) is not overdue. The
+// daemon still flags a session that works without hooks, and the run shows
+// its feed line.
+func (s *session) telemetryReached(after *sandboxapi.Sandbox) bool {
+	before := s.before
+	if before == nil {
+		before = s.sb
+	}
+	return after.Hooks.LastOTLPAt.After(before.Hooks.LastOTLPAt)
 }
 
 // printHookReach ends the summary of a session none of whose hooks reached
