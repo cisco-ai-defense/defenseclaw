@@ -61,20 +61,34 @@ const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 // edit would run inside, or silence, every hook. `bash -p` keeps them out of
 // the launcher itself; the exec drops them from the harness environment
 // (SHELLOPTS and BASHOPTS are read-only inside bash, so env removes them).
-var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE"}
+// The Node-based harnesses and wrappers (Cursor Agent, the npm launchers)
+// would likewise load a file NODE_OPTIONS names (--require, --import) and
+// resolve missing modules from NODE_PATH before any of their own code runs.
+var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE", "NODE_OPTIONS", "NODE_PATH"}
 
 // launcherPreamble is the environment set-up every launcher runs first:
-// system directories lead PATH, and the egress proxy settings are exported
-// from openshell.EnvEgressURL and openshell.EnvEgressBypass, the names that
-// survive sandbox creation (OpenShell 0.1.1 drops every *_PROXY variable and
-// NODE_USE_ENV_PROXY passed at create). A well-formed http:// proxy URL
-// replaces any proxy settings the caller's environment carries, so the
-// harness and every tool it runs go through the DefenseClaw proxy; without
-// one the caller's environment is left alone. The proxy is a convenience
-// path, not the boundary: OpenShell refuses direct egress the policy does not
-// allow either way.
+// system directories lead PATH, Node's compile cache is off, and the egress
+// proxy settings are exported from openshell.EnvEgressURL and
+// openshell.EnvEgressBypass, the names that survive sandbox creation
+// (OpenShell 0.1.1 drops every *_PROXY variable and NODE_USE_ENV_PROXY passed
+// at create). A well-formed http:// proxy URL replaces any proxy settings the
+// caller's environment carries, so the harness and every tool it runs go
+// through the DefenseClaw proxy; without one the caller's environment is left
+// alone. The proxy is a convenience path, not the boundary: OpenShell refuses
+// direct egress the policy does not allow either way.
+//
+// Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
+// own module.enableCompileCache) says, which for the Cursor Agent wrapper is
+// ~/.cache/cursor-compile-cache in the workload-writable HOME, and runs the
+// V8 code it finds there in place of the root-owned sources (measured on
+// Cursor's Node 24.5.0: a second start reads the cache and V8 accepts it).
+// NODE_DISABLE_COMPILE_CACHE=1 switches the cache off, reads included.
 const launcherPreamble = `PATH=` + LauncherSystemPATH + `${PATH:+:$PATH}
 export PATH
+# Node would run V8 code cached in the workload-writable HOME in place of the
+# root-owned harness sources.
+NODE_DISABLE_COMPILE_CACHE=1
+export NODE_DISABLE_COMPILE_CACHE
 # OpenShell drops the standard proxy variables passed at sandbox creation;
 # DefenseClaw passes them under its own names.
 case "${` + openshell.EnvEgressURL + `:-}" in

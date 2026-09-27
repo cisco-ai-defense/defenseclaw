@@ -145,6 +145,38 @@ func TestLaunchersScrubShellStartupEnv(t *testing.T) {
 	}
 }
 
+// TestLaunchersKeepNodeOffWorkloadCode starts every launcher with the Node
+// variables an agent could export from ~/.bashrc: a NODE_OPTIONS preload, a
+// NODE_PATH module directory and a compile cache in a directory it owns. The
+// Cursor Agent wrapper and the npm launchers run Node, which would load the
+// preload and run cached V8 code in place of the root-owned sources, so the
+// harness must receive neither variable and the compile cache switched off
+// (NODE_DISABLE_COMPILE_CACHE also overrides the cache the Cursor wrapper
+// points at ~/.cache).
+func TestLaunchersKeepNodeOffWorkloadCode(t *testing.T) {
+	for _, name := range Names() {
+		spec, _ := Get(name)
+		t.Run(name, func(t *testing.T) {
+			planted := t.TempDir()
+			code, got, out := launcherEnv(t, spec, []string{
+				"NODE_OPTIONS=--require=" + planted + "/preload.js", "NODE_PATH=" + planted, "NODE_COMPILE_CACHE=" + planted,
+				"NODE_DISABLE_COMPILE_CACHE=0",
+			})
+			if code != 0 || !strings.Contains(got, "\nPATH=") {
+				t.Fatalf("the stub never ran: exit %d\n%s", code, out)
+			}
+			for _, v := range []string{"NODE_OPTIONS", "NODE_PATH"} {
+				if strings.Contains(got, "\n"+v+"=") {
+					t.Errorf("%s reached the harness:\n%s", v, got)
+				}
+			}
+			if !strings.Contains(got, "\nNODE_DISABLE_COMPILE_CACHE=1\n") {
+				t.Errorf("Node's compile cache is not switched off:\n%s", got)
+			}
+		})
+	}
+}
+
 // TestLaunchersLeaveProxyAloneWithoutEgress keeps a strict-profile sandbox
 // (no DefenseClaw proxy) free of proxy settings.
 func TestLaunchersLeaveProxyAloneWithoutEgress(t *testing.T) {

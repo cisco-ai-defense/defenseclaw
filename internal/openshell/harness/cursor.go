@@ -122,6 +122,7 @@ var Cursor = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"trust the working directory with --trust (every project is mounted under /work) and switch Cursor's own sandbox off with --sandbox disabled",
+		"switch Node's compile cache off (NODE_DISABLE_COMPILE_CACHE=1): the cursor-agent wrapper points NODE_COMPILE_CACHE at ~/.cache/cursor-compile-cache, and Node runs the V8 code cached there in place of the root-owned index.js chunks, hooks runner included",
 	},
 })
 
@@ -132,7 +133,8 @@ var cursorLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw Cursor Agent launcher (OpenShell sandbox images, root-owned).
 # The DefenseClaw hooks are Cursor's enterprise /etc/cursor/hooks.json, which
-# no environment or user setting moves; export the egress proxy and exec the
-# pinned Cursor Agent with the caller's arguments.
+# no environment or user setting moves; export the egress proxy, keep Node's
+# compile cache off (see launcherPreamble) and exec the pinned Cursor Agent
+# with the caller's arguments.
 set -u
 ` + launcherPreamble + launcherExec(`/usr/local/bin/cursor-agent "$@"`)
