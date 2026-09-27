@@ -615,6 +615,28 @@ func TestApprovalRecheckedAtApply(t *testing.T) {
 	}
 }
 
+// TestSlowDNSDefersTriage pins that a resolver slower than the triage
+// pass's budget leaves the proposal for the next poll instead of rejecting
+// it as unresolvable.
+func TestSlowDNSDefersTriage(t *testing.T) {
+	savedDelay, savedBudget := triageDelay, triagePassBudget
+	triageDelay, triagePassBudget = 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { triageDelay, triagePassBudget = savedDelay, savedBudget })
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "slowbox"})
+	e.watch.waitStarted(t, sb.Name)
+	e.dns.setHang("slow.example.org", true)
+	id := addChunk(e, sb.Name, chunk("allow_slow_example_org_443", "slow.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	time.Sleep(300 * time.Millisecond)
+	if s := chunkStatus(e, sb.Name, id); s != "pending" {
+		t.Fatalf("proposal with a hanging lookup = %s, want it left pending", s)
+	}
+	e.dns.setHang("slow.example.org", false)
+	eventually(t, "the deferred proposal approved", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+}
+
 // TestReconcileRemovesRulesThatResolveToThisMachine pins that an approved
 // rule whose name later resolves to this machine is removed on the next
 // enforcement pass.

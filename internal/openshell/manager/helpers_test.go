@@ -377,6 +377,19 @@ type fakeDNS struct {
 	// rebinds switch a name's answers once it was looked up so often.
 	rebinds map[string]rebind
 	calls   map[string]int
+	// hang makes lookups of a name wait for their context.
+	hang map[string]bool
+}
+
+// setHang makes lookups of host wait until their context ends (on) or
+// answer again (off).
+func (d *fakeDNS) setHang(host string, on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.hang == nil {
+		d.hang = map[string]bool{}
+	}
+	d.hang[host+"."] = on
 }
 
 type rebind struct {
@@ -402,7 +415,14 @@ func (d *fakeDNS) rebindAfter(host string, n int, addrs ...string) {
 	d.rebinds[host+"."] = rebind{after: n, addrs: addrs}
 }
 
-func (d *fakeDNS) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, error) {
+func (d *fakeDNS) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	d.mu.Lock()
+	hang := d.hang[name]
+	d.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	addrs, ok := d.answers[name]

@@ -308,18 +308,36 @@ func (m *Manager) triageSandbox(ctx context.Context, b *box) {
 		fresh = append(fresh, chunk)
 	}
 	m.mu.Unlock()
-	for _, chunk := range fresh {
+	// Classify resolves destination names; a slow resolver must not hold
+	// the pass (and the Run loop that sweeps) for long. Chunks the budget
+	// leaves undecided wait for the next poll instead of being rejected as
+	// unresolvable.
+	pass, cancel := context.WithTimeout(ctx, triagePassBudget)
+	defer cancel()
+	for i, chunk := range fresh {
 		if ctx.Err() != nil {
 			return
 		}
 		p := triage.FromChunk(name, chunk)
-		d := triage.Classify(ctx, p, pol)
+		d := triage.Classify(pass, p, pol)
+		if pass.Err() != nil && ctx.Err() == nil {
+			m.mu.Lock()
+			for _, c := range fresh[i:] {
+				delete(b.seenChunks, c.ID)
+			}
+			m.mu.Unlock()
+			more = true
+			break
+		}
 		m.applyTriage(ctx, gw, b, bindingID, p, d)
 	}
 	if more {
 		m.scheduleTriage(b)
 	}
 }
+
+// triagePassBudget bounds one draft poll's decisions, DNS lookups included.
+var triagePassBudget = 45 * time.Second
 
 // retriage forgets that a chunk was decided, so the next poll decides it
 // again, and schedules that poll.
