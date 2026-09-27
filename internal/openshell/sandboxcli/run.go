@@ -163,6 +163,18 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if err != nil {
 		return err
 	}
+	// A launch the harness cannot take (OmniGent with a profile that names
+	// no default model and no --model) fails before a sandbox exists.
+	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}
+	if o.Prompt != "" {
+		pre.Mode, pre.Prompt = harness.Headless, o.Prompt
+	}
+	if llm.Credential != nil {
+		pre.CredentialProfile, pre.BedrockRegion = llm.Credential.Profile, llm.Credential.BedrockRegion
+	}
+	if _, err := spec.LaunchArgv(pre); err != nil {
+		return err
+	}
 	var copyRec *workspace.CopyRecord
 	if copyMode {
 		// Stage first: a project that cannot be copied (too large, a
@@ -274,6 +286,14 @@ func printMode(spec *harness.Spec, args []string) bool {
 		return has("-x", "--execute")
 	case "kiro":
 		return has("--no-interactive")
+	case "hermes":
+		return has("-q", "--query")
+	case "openhands":
+		return has("--headless")
+	case "antigravity":
+		return has("-p", "--print", "--prompt", "-print", "-prompt")
+	case "omnigent":
+		return has("-p", "--prompt")
 	}
 	return false
 }
@@ -292,6 +312,12 @@ func printHint(spec *harness.Spec) string {
 		return ` or -- -x "TEXT"`
 	case "kiro":
 		return ` or -- --no-interactive "TEXT"`
+	case "hermes":
+		return ` or -- chat -q "TEXT"`
+	case "openhands":
+		return ` or -- --headless -t "TEXT"`
+	case "antigravity", "omnigent":
+		return ` or -- -p "TEXT"`
 	}
 	return ""
 }

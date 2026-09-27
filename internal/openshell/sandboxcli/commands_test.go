@@ -630,6 +630,10 @@ func TestDetectLLM(t *testing.T) {
 	opencode, _ := harness.Get("opencode")
 	copilot, _ := harness.Get("copilot")
 	kiro, _ := harness.Get("kiro")
+	hermes, _ := harness.Get("hermes")
+	openhands, _ := harness.Get("openhands")
+	antigravity, _ := harness.Get("antigravity")
+	omnigent, _ := harness.Get("omnigent")
 	cases := []struct {
 		name    string
 		spec    *harness.Spec
@@ -656,6 +660,16 @@ func TestDetectLLM(t *testing.T) {
 		{"copilot byok anthropic", copilot, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.CopilotAnthropicID, "ANTHROPIC_API_KEY", false},
 		{"copilot has no openai", copilot, map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", "", "", true},
 		{"kiro logs in inside", kiro, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", "", "", false},
+		{"hermes openai", hermes, map[string]string{"OPENAI_API_KEY": "k", "ANTHROPIC_API_KEY": "a"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
+		{"hermes anthropic", hermes, map[string]string{"ANTHROPIC_API_KEY": "a"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
+		{"hermes bedrock", hermes, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"openhands bedrock", openhands, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"openhands openai", openhands, map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", profiles.OpenAIID, "OPENAI_API_KEY", false},
+		{"antigravity gemini", antigravity, map[string]string{"GEMINI_API_KEY": "g"}, "", "", profiles.GeminiID, "GEMINI_API_KEY", false},
+		{"antigravity has no openai", antigravity, map[string]string{"OPENAI_API_KEY": "k"}, "", "openai", "", "", true},
+		{"antigravity signs in inside", antigravity, nil, "", "", "", "", false},
+		{"omnigent bedrock", omnigent, map[string]string{EnvBedrockToken: "b"}, "", "bedrock", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"omnigent openai", omnigent, map[string]string{"OPENAI_API_KEY": "k"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -725,6 +739,7 @@ func TestPrintModeEveryHarness(t *testing.T) {
 	for name, args := range map[string][]string{
 		"claudecode": {"-p", "x"}, "codex": {"exec", "x"}, "opencode": {"run", "x"}, "copilot": {"--prompt=x"},
 		"amp": {"-x", "x"}, "cursor": {"--print", "x"}, "kiro": {"--no-interactive", "x"}, "devin": {"-p", "x"},
+		"hermes": {"chat", "-q", "x"}, "openhands": {"--headless", "-t", "x"}, "antigravity": {"-p", "x"}, "omnigent": {"--prompt=x"},
 	} {
 		spec, ok := harness.Get(name)
 		if !ok {
@@ -735,6 +750,12 @@ func TestPrintModeEveryHarness(t *testing.T) {
 		}
 		if printHint(spec) == "" {
 			t.Errorf("%s has no print hint", name)
+		}
+	}
+	for _, name := range harness.Names() {
+		spec, _ := harness.Get(name)
+		if printHint(spec) == "" {
+			t.Errorf("registered harness %s has no headless switch", name)
 		}
 	}
 }

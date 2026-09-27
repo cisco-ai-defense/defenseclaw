@@ -229,7 +229,7 @@ harness.`,
 	f.BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
 	f.StringVarP(&o.Prompt, "prompt", "p", "", "run the harness headless with this prompt")
 	f.StringArrayVar(&o.Env, "env", nil, "KEY=VALUE non-secret variable for the sandbox (repeatable)")
-	f.StringVar(&o.LLM, "llm", sandboxcli.LLMAuto, "model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock")
+	f.StringVar(&o.LLM, "llm", sandboxcli.LLMAuto, "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini")
 	f.StringVar(&o.BedrockRegion, "bedrock-region", "", "Amazon Bedrock region for --llm bedrock (default $AWS_REGION)")
 	f.BoolVar(&o.NoSnapshot, "no-snapshot", false, "skip the pre-session snapshot (and so undo)")
 	f.BoolVar(&o.NoBuild, "no-build", false, "fail instead of building a missing harness image")

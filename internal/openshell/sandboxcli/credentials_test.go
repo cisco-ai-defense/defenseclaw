@@ -67,3 +67,25 @@ func TestRunModelNoteWhenCredentialBindsTheKey(t *testing.T) {
 		t.Fatalf("banner:\n%s", ta.output())
 	}
 }
+
+// TestRunRefusesAnOmniGentLaunchWithoutAModel: the OmniGent sandbox agent
+// names no model, and a profile without a default one needs --model; the
+// run fails before a sandbox is created.
+func TestRunRefusesAnOmniGentLaunchWithoutAModel(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["OPENAI_API_KEY"] = "sk-test-not-a-secret"
+	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	err := ta.Run(context.Background(), RunOptions{Harness: "omnigent"})
+	if err == nil || !strings.Contains(err.Error(), "--model") {
+		t.Fatalf("Run = %v, want the missing model", err)
+	}
+	if calls := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes); len(calls) != 0 {
+		t.Fatalf("a sandbox was created: %d calls", len(calls))
+	}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}); err != nil {
+		t.Fatalf("Run with --model: %v", err)
+	}
+	if req := createRequest(t, ta.daemon); req.LLM == nil || req.LLM.Profile != "defenseclaw-openai" {
+		t.Fatalf("create request LLM = %+v", req.LLM)
+	}
+}
