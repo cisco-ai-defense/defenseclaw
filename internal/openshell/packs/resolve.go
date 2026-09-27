@@ -253,9 +253,12 @@ type Effective struct {
 	// Harness is the requested harness, or empty when none was requested or
 	// it was refused (see FirstFatal).
 	Harness string `json:"harness,omitempty"`
-	// AllowedHarnesses is the pack ∩ admin allowlist; nil allows every
-	// harness.
-	AllowedHarnesses []string    `json:"allowed_harnesses,omitempty"`
+	// AnyHarness reports that neither the pack nor openshell.admin limits
+	// the harness: every harness may run and AllowedHarnesses is empty.
+	AnyHarness bool `json:"any_harness"`
+	// AllowedHarnesses is the pack ∩ admin allowlist when AnyHarness is
+	// false; empty then means no harness may run. It is never nil.
+	AllowedHarnesses []string    `json:"allowed_harnesses"`
 	Workspace        Workspace   `json:"workspace"`
 	Egress           Egress      `json:"egress"`
 	MCP              MCP         `json:"mcp"`
@@ -794,6 +797,7 @@ func (r *resolver) resolveHarness(flags Flags) {
 		r.eff.AllowedHarnesses = append([]string(nil), packAllowed...)
 		r.set("harness.allowed", listValue(packAllowed), r.packLayer)
 	default:
+		r.eff.AnyHarness, r.eff.AllowedHarnesses = true, []string{}
 		r.set("harness.allowed", "(any)", r.packLayer)
 	}
 

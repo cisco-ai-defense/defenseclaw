@@ -18,6 +18,7 @@ package packs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -78,8 +79,9 @@ func TestResolveDefaults(t *testing.T) {
 	if !eff.Yolo || eff.Workspace.Mode != "mount" || !eff.MCP.Import || !eff.MCP.HostPortAccess || eff.Learn {
 		t.Fatalf("switches = %+v", eff)
 	}
-	if eff.HookFailMode != FailModeClosed || eff.Harness != "" || eff.AllowedHarnesses != nil {
-		t.Fatalf("hooks %q harness %q allowed %v", eff.HookFailMode, eff.Harness, eff.AllowedHarnesses)
+	if eff.HookFailMode != FailModeClosed || eff.Harness != "" || !eff.AnyHarness ||
+		eff.AllowedHarnesses == nil || len(eff.AllowedHarnesses) != 0 {
+		t.Fatalf("hooks %q harness %q any %v allowed %v", eff.HookFailMode, eff.Harness, eff.AnyHarness, eff.AllowedHarnesses)
 	}
 	if !reflect.DeepEqual(eff.Egress.Feeds, []string{FeedBuiltin}) || !reflect.DeepEqual(eff.Egress.Ports, []int{80, 443}) ||
 		eff.Egress.LargeUploadMB != 25 || len(eff.Egress.Block) != 0 || len(eff.Egress.AdminBlock) != 0 {
@@ -513,6 +515,50 @@ func TestResolvePackHarnessAllowlist(t *testing.T) {
 	wantSetting(t, eff, "harness.allowed", "codex", SourceAdmin, "pack claude-only ∩ openshell.admin.allowed_harnesses")
 	if _, violations = mustResolve(t, cfg, Flags{Harness: "codex"}); len(violations) != 0 {
 		t.Fatalf("codex violations %+v", violations)
+	}
+
+	// An empty intersection allows no harness, and JSON consumers can tell
+	// it apart from "every harness".
+	allowedJSON := func(eff *Effective) string {
+		t.Helper()
+		data, err := json.Marshal(eff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Any     *bool     `json:"any_harness"`
+			Allowed *[]string `json:"allowed_harnesses"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Any == nil || decoded.Allowed == nil || *decoded.Allowed == nil {
+			t.Fatalf("json lacks any_harness or an allowed_harnesses array: %s", data)
+		}
+		return fmt.Sprintf("any=%v allowed=%v", *decoded.Any, *decoded.Allowed)
+	}
+	cfg.OpenShell.Admin.AllowedHarnesses = []string{"opencode"}
+	eff, violations = mustResolve(t, cfg, Flags{Harness: "codex"})
+	if v := FirstFatal(violations); v == nil || eff.AnyHarness || len(eff.AllowedHarnesses) != 0 {
+		t.Fatalf("empty intersection: violations %+v any %v allowed %v", violations, eff.AnyHarness, eff.AllowedHarnesses)
+	}
+	wantSetting(t, eff, "harness.allowed", "(none)", SourceAdmin, "")
+	for _, harness := range []string{"claudecode", "codex", "opencode"} {
+		if err := eff.Allow(Action{Kind: ActionHarness, Harness: harness}); err == nil {
+			t.Fatalf("empty intersection allowed %s", harness)
+		}
+	}
+	if got := allowedJSON(eff); got != "any=false allowed=[]" {
+		t.Fatalf("empty intersection json: %s", got)
+	}
+	unrestricted, _ := mustResolve(t, testConfig(nil), Flags{})
+	if got := allowedJSON(unrestricted); got != "any=true allowed=[]" {
+		t.Fatalf("unrestricted json: %s", got)
+	}
+	cfg.OpenShell.Admin.AllowedHarnesses = []string{"codex"}
+	restricted, _ := mustResolve(t, cfg, Flags{})
+	if got := allowedJSON(restricted); got != "any=false allowed=[codex]" {
+		t.Fatalf("restricted json: %s", got)
 	}
 }
 
