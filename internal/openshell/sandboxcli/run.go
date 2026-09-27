@@ -342,7 +342,7 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		req.Credentials = append(req.Credentials, b)
 	}
 	if o.GitHubWrite {
-		token, from := a.githubToken()
+		token := a.githubToken()
 		if token == "" {
 			return req, llmChoice{}, errors.New("--github-write needs your GitHub token in GH_TOKEN or GITHUB_TOKEN")
 		}
@@ -352,7 +352,6 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 				reserved[name] = true
 			}
 		}
-		_ = from
 	}
 	llm, err := a.detectLLM(spec, o.LLM, o.BedrockRegion, reserved)
 	if err != nil {

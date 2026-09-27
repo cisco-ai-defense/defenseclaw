@@ -254,13 +254,8 @@ func (a *App) ParseCredential(spec string) (sandboxapi.CredentialBinding, error)
 }
 
 // githubToken finds the user's GitHub token for --github-write.
-func (a *App) githubToken() (string, string) {
-	for _, n := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
-		if v := strings.TrimSpace(a.Getenv(n)); v != "" {
-			return v, n
-		}
-	}
-	return "", ""
+func (a *App) githubToken() string {
+	return firstNonEmpty(a.Getenv("GH_TOKEN"), a.Getenv("GITHUB_TOKEN"))
 }
 
 // ParseEnv parses --env KEY=VALUE.

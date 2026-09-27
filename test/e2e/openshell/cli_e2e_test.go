@@ -279,7 +279,7 @@ func (c *cliEnv) runClaude() {
 	out := c.ok(45*time.Minute, "run", "claude", "--detach", "--name", c.claude, "--llm", "none",
 		"--credential", "ANTHROPIC_API_KEY=host.openshell.internal:"+strconv.Itoa(c.mock),
 		"--env", "ANTHROPIC_BASE_URL=http://host.openshell.internal:"+strconv.Itoa(c.mock),
-		"--prompt", "Write the allowed marker file.")
+		"--", "-p", "Write the allowed marker file.")
 	t.Logf("run (%s):\n%s", time.Since(started).Round(time.Second), truncate(out, 3000))
 	for _, want := range []string{"Sandbox " + c.claude + " · Claude Code · skip-permissions ON", "Hidden", ".env",
 		"running in the background"} {
