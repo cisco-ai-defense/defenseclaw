@@ -610,6 +610,9 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 // sandbox correlation and increments metric.defenseclaw.egress.events with
 // source openshell or dc-egress-proxy. A blocked decision is mandatory. The
 // destination is agent-chosen, so no host or port value fails the record.
+// Neither does the session or agent ID: the agent fills both through the
+// correlation envelope, so a value that is not a registered identifier is
+// omitted (see sandboxAgentCorrelation).
 func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input SandboxEgressEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -654,6 +657,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	reason := optionalSandboxText(input.Reason, maxSandboxEgressReasonBytes)
 	policyOutcome := optionalSandboxText(input.PolicyOutcome, maxSandboxEgressOutcomeBytes)
 	decisionCode := optionalNetworkIdentifier(input.DecisionCode)
+	conversationID, agentID := sandboxAgentCorrelation(event)
 	log := sandboxV8Log{
 		action: ActionSandboxEgress, event: event, bucket: observability.BucketNetworkEgress,
 		eventName: eventName, phase: "policy", outcome: outcome, mandatory: input.Blocked,
@@ -664,8 +668,8 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		) (observability.Record, error) {
 			allowed := observability.LogEgressAllowedInput{
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
-				GenAIConversationID:         optionalNetworkText(event.SessionID),
-				GenAIAgentID:                optionalNetworkText(event.AgentID),
+				GenAIConversationID:         conversationID,
+				GenAIAgentID:                agentID,
 				DefenseClawNetworkTargetRef: host, DefenseClawNetworkTargetPath: path,
 				DefenseClawNetworkResolvedIp: resolvedIP, DefenseClawNetworkPolicyOutcome: policyOutcome,
 				DefenseClawNetworkDecision: observability.Present(decision), DefenseClawNetworkDecisionCode: decisionCode,
@@ -768,6 +772,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 	reason := optionalSandboxText(input.Reason, maxSandboxFindingTextBytes)
 	kind := observability.Present(string(input.Kind))
 	risky := observability.Present(input.Risky)
+	conversationID, agentID := sandboxAgentCorrelation(event)
 	log := sandboxV8Log{
 		action: ActionSandboxApproval, event: event, bucket: observability.BucketComplianceActivity,
 		eventName: eventName, phase: "approval", outcome: outcome, mandatory: resolved,
@@ -778,8 +783,8 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 			if !resolved {
 				return builder.BuildLogApprovalRequested(observability.LogApprovalRequestedInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
-					GenAIConversationID:   optionalNetworkText(event.SessionID),
-					GenAIAgentID:          optionalNetworkText(event.AgentID),
+					GenAIConversationID:   conversationID,
+					GenAIAgentID:          agentID,
 					DefenseClawApprovalID: approvalID, DefenseClawApprovalDangerous: risky,
 					DefenseClawGuardrailReason: reason, DefenseClawSandboxApprovalKind: kind,
 					ServerAddress: host, ServerPort: port,
@@ -792,8 +797,8 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 			}
 			return builder.BuildLogApprovalResolved(observability.LogApprovalResolvedInput{
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
-				GenAIConversationID:   optionalNetworkText(event.SessionID),
-				GenAIAgentID:          optionalNetworkText(event.AgentID),
+				GenAIConversationID:   conversationID,
+				GenAIAgentID:          agentID,
 				DefenseClawApprovalID: approvalID, DefenseClawApprovalResult: input.Result,
 				DefenseClawApprovalActorType: optionalSandboxEnum(input.ActorType),
 				DefenseClawApprovalDangerous: risky, DefenseClawGuardrailReason: reason,
@@ -1681,6 +1686,16 @@ func sandboxIPIdentifier(ip net.IP) string {
 		groups[index] = fmt.Sprintf("%x", uint16(v6[2*index])<<8|uint16(v6[2*index+1]))
 	}
 	return strings.Join(groups, ":")
+}
+
+// sandboxAgentCorrelation projects the envelope's session and agent IDs onto
+// gen_ai.conversation.id and gen_ai.agent.id. The agent chooses both (the
+// session header and the hook payload's session_id feed the envelope), so a
+// value that is not a registered identifier is omitted rather than allowed
+// to fail the record. The record's correlation keeps the envelope's IDs
+// unchanged, as every producer's does, so the request's records still join.
+func sandboxAgentCorrelation(event Event) (conversationID, agentID observability.Optional[string]) {
+	return optionalNetworkIdentifier(event.SessionID), optionalNetworkIdentifier(event.AgentID)
 }
 
 // sandboxEgressPath keeps only an origin-form path: userinfo cannot appear in

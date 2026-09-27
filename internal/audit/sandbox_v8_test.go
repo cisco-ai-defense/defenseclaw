@@ -1607,6 +1607,92 @@ func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
 	t.Run("workspace path encoding", func(t *testing.T) { testSandboxWorkspacePathsFitTheirEncodedBound(t, harness) })
 	t.Run("finding target ref", func(t *testing.T) { testSandboxFindingTargetRefIsBoundedNotDropped(t, harness) })
 	t.Run("free text", func(t *testing.T) { testSandboxFreeTextIsBoundedNotRejected(t, harness) })
+	t.Run("session and agent ids", func(t *testing.T) { testSandboxAgentCorrelationIsIdentifierChecked(t, harness) })
+}
+
+// testSandboxAgentCorrelationIsIdentifierChecked feeds session and agent IDs
+// that are not registered identifiers into every egress and approval family.
+// They come from the correlation envelope, which the agent fills through its
+// session header and hook payload, so gen_ai.conversation.id and
+// gen_ai.agent.id are omitted, never allowed to fail the record. A padded
+// identifier is trimmed.
+func testSandboxAgentCorrelationIsIdentifierChecked(t *testing.T, harness *sandboxHarness) {
+	producers := []struct {
+		name      string
+		mandatory bool
+		record    func(context.Context, *SandboxRecorder) error
+	}{
+		{"egress allowed", false, func(ctx context.Context, r *SandboxRecorder) error {
+			return r.RecordSandboxEgress(ctx, SandboxEgressEvent{
+				Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org",
+			})
+		}},
+		{"egress blocked", true, func(ctx context.Context, r *SandboxRecorder) error {
+			return r.RecordSandboxEgress(ctx, SandboxEgressEvent{
+				Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceOpenShell, Host: "pastebin.com", Blocked: true,
+			})
+		}},
+		{"approval requested", false, func(ctx context.Context, r *SandboxRecorder) error {
+			return r.RecordSandboxApproval(ctx, SandboxApprovalEvent{
+				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalRequested, ApprovalID: "draft-9",
+				Kind: SandboxApprovalNetworkRule,
+			})
+		}},
+		{"approval resolved", true, func(ctx context.Context, r *SandboxRecorder) error {
+			return r.RecordSandboxApproval(ctx, SandboxApprovalEvent{
+				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-9",
+				Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalDenied, ActorType: SandboxApprovalByOperator,
+			})
+		}},
+	}
+	for _, ids := range []struct {
+		name, session, agent string
+		wantSession          string
+		wantAgent            string
+	}{
+		{name: "space", session: "my session", agent: "my agent"},
+		{name: "leading underscore", session: "_abc", agent: "_agent"},
+		{name: "at sign", session: "abc@def", agent: "agent@host"},
+		{name: "over 256 bytes", session: strings.Repeat("s", 257), agent: strings.Repeat("a", 257)},
+		{name: "padded", session: " session-9\t", agent: "agent-9 ", wantSession: "session-9", wantAgent: "agent-9"},
+	} {
+		for _, producer := range producers {
+			t.Run(ids.name+"/"+producer.name, func(t *testing.T) {
+				runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+				ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
+					SessionID: ids.session, AgentID: ids.agent,
+				})
+				if err := producer.record(ctx, recorder); err != nil {
+					t.Fatalf("an agent-chosen session or agent id cost the record: %v", err)
+				}
+				_, record := onlySandboxRecord(t, runtime)
+				assertRecordMatchesRuntimeCatalog(t, record)
+				// The record's correlation keeps the envelope's IDs unchanged,
+				// as every producer's does, so the schema check covers the
+				// whole record except those two join keys.
+				wire := decodeRecordWire(t, record)
+				if correlation, ok := wire["correlation"].(map[string]any); ok {
+					delete(correlation, "session_id")
+					delete(correlation, "agent_id")
+				}
+				if err := runtimeSchemaViolation(t, wire); err != nil {
+					t.Fatal(err)
+				}
+				if record.Mandatory() != producer.mandatory {
+					t.Fatalf("mandatory=%v want %v", record.Mandatory(), producer.mandatory)
+				}
+				body := sandboxBody(t, record)
+				for key, want := range map[string]string{
+					"gen_ai.conversation.id": ids.wantSession, "gen_ai.agent.id": ids.wantAgent,
+				} {
+					got, present := body[key]
+					if present != (want != "") || (present && got != want) {
+						t.Fatalf("%s=%#v present=%v want %q", key, got, present, want)
+					}
+				}
+			})
+		}
+	}
 }
 
 // testSandboxFreeTextIsBoundedNotRejected feeds hostile text into every
@@ -2305,6 +2391,13 @@ func runtimeSchemaViolation(t *testing.T, wire map[string]any) error {
 func assertRecordMatchesRuntimeContract(t *testing.T, record observability.Record) {
 	t.Helper()
 	assertRecordMatchesRuntimeSchema(t, record)
+	assertRecordMatchesRuntimeCatalog(t, record)
+}
+
+// assertRecordMatchesRuntimeCatalog is the catalog half of
+// assertRecordMatchesRuntimeContract.
+func assertRecordMatchesRuntimeCatalog(t *testing.T, record observability.Record) {
+	t.Helper()
 	wire := decodeRecordWire(t, record)
 	catalog := loadRuntimeCatalog(t)
 	signal, _ := wire["signal"].(string)

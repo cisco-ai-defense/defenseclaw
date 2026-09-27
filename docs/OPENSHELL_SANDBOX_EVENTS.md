@@ -207,8 +207,9 @@ a sandbox twice.
 
 ## Agent-chosen values
 
-The sandboxed agent picks destinations, file names and finding targets. None
-of these values can make the producer drop the record:
+The sandboxed agent picks destinations, file names, finding targets, and its
+session and agent IDs. None of these values can make the producer drop the
+record:
 
 - An egress or approval host has its port split off (the port is used when
   none was given separately). It is lowercased and IDNA-encoded
@@ -227,6 +228,11 @@ of these values can make the producer drop the record:
   every file.
 - A finding `target_ref` is cut to its registered 256 bytes; one that is not
   an identifier is omitted.
+- The session and agent IDs come from the correlation envelope, which the
+  agent fills through its session header and hook payload. Egress and
+  approval records carry them as `gen_ai.conversation.id` and
+  `gen_ai.agent.id` only when they are registered identifiers (trimmed, at
+  most 256 bytes); any other value is omitted.
 
 ## Retired legacy events
 
