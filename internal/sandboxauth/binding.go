@@ -127,7 +127,8 @@ type RateLimit struct {
 	RequestsPerSecond float64 `json:"rps,omitempty"`
 	// Burst is the hook/notify/inspect bucket size.
 	Burst int `json:"burst,omitempty"`
-	// MaxInFlight caps concurrent requests across every route.
+	// MaxInFlight caps concurrent hook, notify and inspect requests. OTLP
+	// uploads have their own, smaller cap (LimiterConfig.OTLPMaxInFlight).
 	MaxInFlight int `json:"max_in_flight,omitempty"`
 }
 

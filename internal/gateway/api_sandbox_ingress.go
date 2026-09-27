@@ -59,8 +59,9 @@ import (
 //	trace, request ID (always minted), correlation (identity from the
 //	              binding's host user)
 //	authorize     route allowlist and connector match (404/403),
-//	              per-binding limiter (429), in-flight tracking
-//	metrics, CSRF, body limit
+//	              per-binding limiter with separate hook and OTLP
+//	              slots (429), in-flight tracking
+//	metrics, CSRF, body limit (OTLP far below the host receiver's cap)
 //	idempotency   replay of a retried hook post by key
 //	mux           hook / notify / inspect / OTLP handlers
 
@@ -74,6 +75,11 @@ const (
 	sandboxIdempotentReplayHeader = "X-DefenseClaw-Idempotent-Replay"
 
 	defaultSandboxIdempotencyTTL = 2 * time.Minute
+	// defaultSandboxOTLPMaxBodyBytes caps one sandbox OTLP upload. The
+	// receiver buffers the whole body before decoding, so with the
+	// limiter's OTLP slots this bounds the memory sandbox telemetry can pin.
+	// Harness exporters batch far below it.
+	defaultSandboxOTLPMaxBodyBytes int64 = 4 << 20
 	// sandboxIngressShutdownTimeout bounds graceful shutdown.
 	sandboxIngressShutdownTimeout = 5 * time.Second
 )
@@ -119,6 +125,9 @@ type SandboxIngressConfig struct {
 	IdempotencyTTL time.Duration
 	// FS is the host filesystem FSView reads through. Nil uses the OS.
 	FS sandboxauth.FS
+	// OTLPMaxBodyBytes caps one OTLP upload. Zero uses 4 MiB; it may not
+	// exceed the host receiver's cap.
+	OTLPMaxBodyBytes int64
 }
 
 type sandboxIngressState struct {
@@ -128,6 +137,8 @@ type sandboxIngressState struct {
 	inFlight *sandboxauth.InFlight
 	idem     *hookIdempotencyCache
 	fs       sandboxauth.FS
+	// otlpMaxBytes is the OTLP request body cap.
+	otlpMaxBytes int64
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -156,12 +167,20 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 	if err := validateSandboxIngressAddr(cfg.Addr, a.addr); err != nil {
 		return err
 	}
+	otlpMaxBytes := cfg.OTLPMaxBodyBytes
+	switch {
+	case otlpMaxBytes == 0:
+		otlpMaxBytes = defaultSandboxOTLPMaxBodyBytes
+	case otlpMaxBytes < 0 || otlpMaxBytes > otlpRequestBodyMaxBytes:
+		return fmt.Errorf("sandbox ingress: OTLP body cap must be between 1 and %d bytes", otlpRequestBodyMaxBytes)
+	}
 	st := &sandboxIngressState{
 		addr:         cfg.Addr,
 		bindings:     cfg.Bindings,
 		limiter:      cfg.Limiter,
 		inFlight:     cfg.InFlight,
 		fs:           cfg.FS,
+		otlpMaxBytes: otlpMaxBytes,
 		authFailures: rate.NewLimiter(10, 20),
 	}
 	if st.limiter == nil {
@@ -344,7 +363,7 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	}
 	var h http.Handler = mux
 	h = st.idem.middleware(h)
-	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
+	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, st.otlpMaxBytes)
 	h = a.apiCSRFProtect(h)
 	h = a.metricsMiddleware(h)
 	h = a.sandboxIngressAuthorize(st, exact, h)

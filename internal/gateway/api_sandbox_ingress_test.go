@@ -148,6 +148,10 @@ func TestSetSandboxIngressValidatesConfig(t *testing.T) {
 		{"hostname", SandboxIngressConfig{Addr: "localhost:18971", Bindings: store}},
 		{"main port", SandboxIngressConfig{Addr: "127.0.0.1:18970", Bindings: store}},
 		{"bad port", SandboxIngressConfig{Addr: "127.0.0.1:99999", Bindings: store}},
+		{"negative otlp cap", SandboxIngressConfig{Addr: "127.0.0.1:18971", Bindings: store, OTLPMaxBodyBytes: -1}},
+		{"otlp cap above host", SandboxIngressConfig{
+			Addr: "127.0.0.1:18971", Bindings: store, OTLPMaxBodyBytes: otlpRequestBodyMaxBytes + 1,
+		}},
 	} {
 		if err := api.SetSandboxIngress(tc.cfg); err == nil {
 			t.Errorf("%s: accepted", tc.name)
@@ -536,6 +540,94 @@ func TestSandboxIngressLimiterAndInFlight(t *testing.T) {
 	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
 		t.Fatal("forget did not reset the limiter")
 	}
+}
+
+// TestSandboxIngressOTLPBodyCap pins the sandbox OTLP body cap: the
+// receiver buffers a whole upload before decoding, so a sandbox gets a few
+// MiB rather than the host receiver's 64 MiB.
+func TestSandboxIngressOTLPBodyCap(t *testing.T) {
+	if defaultSandboxOTLPMaxBodyBytes > 8<<20 || defaultSandboxOTLPMaxBodyBytes >= otlpRequestBodyMaxBytes {
+		t.Fatalf("default sandbox OTLP cap %d is not a few MiB", defaultSandboxOTLPMaxBodyBytes)
+	}
+	runtime := newSidecarRuntimeFixture(t, true)
+	pad := func(n int64) string {
+		return `{"resourceLogs":[],"pad":"` + strings.Repeat("a", int(n)) + `"}`
+	}
+
+	f := newSandboxIngressFixture(t)
+	f.api.bindOTLPObservabilityRuntime(runtime.runtime)
+	if st := f.api.sandboxIngressState(); st.otlpMaxBytes != defaultSandboxOTLPMaxBodyBytes {
+		t.Fatalf("default cap = %d", st.otlpMaxBytes)
+	}
+	if rec := f.do(t, http.MethodPost, "/v1/logs", f.claudeTok, pad(defaultSandboxOTLPMaxBodyBytes)); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload over the default cap: %d", rec.Code)
+	}
+
+	f = newSandboxIngressFixture(t, func(cfg *SandboxIngressConfig) { cfg.OTLPMaxBodyBytes = 1 << 10 })
+	f.api.bindOTLPObservabilityRuntime(runtime.runtime)
+	if rec := f.do(t, http.MethodPost, "/v1/logs", f.claudeTok, pad(2<<10)); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload over a configured cap: %d", rec.Code)
+	}
+	if rec := f.do(t, http.MethodPost, "/v1/logs", f.claudeTok, `{"resourceLogs":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("upload under the cap: %d %s", rec.Code, rec.Body.String())
+	}
+	// Hook bodies keep the ordinary API cap.
+	hook := `{"hook_event_name":"UserPromptSubmit","prompt":"` + strings.Repeat("a", 4<<10) + `"}`
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, hook); rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatal("hook body limited by the OTLP cap")
+	}
+}
+
+// TestSandboxIngressSlowOTLPCannotStarveHooks holds a binding's every OTLP
+// slot with uploads that never finish and checks its hooks still run.
+func TestSandboxIngressSlowOTLPCannotStarveHooks(t *testing.T) {
+	f := newSandboxIngressFixture(t, func(cfg *SandboxIngressConfig) {
+		cfg.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{MaxInFlight: 2, OTLPMaxInFlight: 2})
+	})
+	st := f.api.sandboxIngressState()
+	_, exact := f.api.sandboxIngressMux()
+	unblock := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	h := f.api.sandboxIngressAuthenticate(st, f.api.sandboxIngressAuthorize(st, exact, http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/logs" {
+				entered <- struct{}{}
+				<-unblock
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	send := func(path string) int {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+f.claudeTok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			send("/v1/logs")
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("otlp upload never reached the handler")
+		}
+	}
+	if got := send("/v1/logs"); got != http.StatusTooManyRequests {
+		t.Fatalf("third concurrent upload: %d, want 429", got)
+	}
+	for i := 0; i < 3; i++ {
+		if got := send("/api/v1/claude-code/hook"); got != http.StatusNoContent {
+			t.Fatalf("hook %d while uploads are open: %d", i, got)
+		}
+	}
+	close(unblock)
+	wg.Wait()
 }
 
 func TestSandboxIngressRevokeAndRotate(t *testing.T) {

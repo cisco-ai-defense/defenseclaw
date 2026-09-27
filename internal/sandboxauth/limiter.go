@@ -34,6 +34,10 @@ var (
 
 // LimiterConfig holds the per-binding defaults. A binding's RateLimit
 // overrides the hook-bucket rate, burst and concurrency.
+//
+// Hook-class requests and OTLP uploads have separate buckets and separate
+// concurrency slots: telemetry gates nothing, so slow or bulky uploads must
+// never hold the capacity that PreToolUse and friends need to answer.
 type LimiterConfig struct {
 	// HookRPS and HookBurst bound hook, notify and inspect calls. A busy
 	// agent fires a few hooks per tool call, so the defaults leave room for
@@ -44,8 +48,16 @@ type LimiterConfig struct {
 	// an exporter flush can never starve the hooks that gate tool calls.
 	OTLPRPS   float64
 	OTLPBurst int
-	// MaxInFlight caps concurrent requests per binding across all routes.
+	// MaxInFlight caps concurrent hook, notify and inspect requests per
+	// binding.
 	MaxInFlight int
+	// OTLPMaxInFlight caps concurrent OTLP uploads per binding. Each open
+	// upload may pin a whole request body in memory, so this is small.
+	OTLPMaxInFlight int
+	// OTLPMaxInFlightTotal caps concurrent OTLP uploads across every
+	// binding, so the memory sandbox telemetry can pin does not grow with the
+	// number of sandboxes.
+	OTLPMaxInFlightTotal int
 	// IdleTTL drops the state of bindings that have been silent this long.
 	IdleTTL time.Duration
 	// Now is the clock; nil uses time.Now.
@@ -55,12 +67,14 @@ type LimiterConfig struct {
 // DefaultLimiterConfig returns the production defaults.
 func DefaultLimiterConfig() LimiterConfig {
 	return LimiterConfig{
-		HookRPS:     25,
-		HookBurst:   100,
-		OTLPRPS:     10,
-		OTLPBurst:   50,
-		MaxInFlight: 32,
-		IdleTTL:     10 * time.Minute,
+		HookRPS:              25,
+		HookBurst:            100,
+		OTLPRPS:              10,
+		OTLPBurst:            50,
+		MaxInFlight:          32,
+		OTLPMaxInFlight:      4,
+		OTLPMaxInFlightTotal: 16,
+		IdleTTL:              10 * time.Minute,
 	}
 }
 
@@ -71,6 +85,7 @@ type Limiter struct {
 
 	mu        sync.Mutex
 	bindings  map[string]*limiterEntry
+	otlpTotal int
 	lastSweep time.Time
 }
 
@@ -88,7 +103,8 @@ type limiterEntry struct {
 // limiterSlots is shared by every generation of a binding's entry so a
 // release always returns its slot to the counter it was taken from.
 type limiterSlots struct {
-	inFlight int
+	hook int
+	otlp int
 }
 
 // NewLimiter builds a limiter; zero fields in cfg take the defaults.
@@ -109,6 +125,12 @@ func NewLimiter(cfg LimiterConfig) *Limiter {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = def.MaxInFlight
 	}
+	if cfg.OTLPMaxInFlight <= 0 {
+		cfg.OTLPMaxInFlight = def.OTLPMaxInFlight
+	}
+	if cfg.OTLPMaxInFlightTotal <= 0 {
+		cfg.OTLPMaxInFlightTotal = def.OTLPMaxInFlightTotal
+	}
 	if cfg.IdleTTL <= 0 {
 		cfg.IdleTTL = def.IdleTTL
 	}
@@ -128,24 +150,39 @@ func (l *Limiter) Acquire(b Binding, route Route) (release func(), err error) {
 	l.sweepLocked(now)
 	entry := l.entryLocked(b, now)
 	entry.lastSeen = now
-	if entry.slots.inFlight >= entry.maxIn {
-		return nil, ErrTooManyInFlight
-	}
+	otlp := route == RouteOTLP
 	bucket := entry.hook
-	if route == RouteOTLP {
+	if otlp {
+		if entry.slots.otlp >= l.cfg.OTLPMaxInFlight || l.otlpTotal >= l.cfg.OTLPMaxInFlightTotal {
+			return nil, ErrTooManyInFlight
+		}
 		bucket = entry.otlp
+	} else if entry.slots.hook >= entry.maxIn {
+		return nil, ErrTooManyInFlight
 	}
 	if !bucket.AllowN(now, 1) {
 		return nil, ErrRateLimited
 	}
 	slots := entry.slots
-	slots.inFlight++
+	if otlp {
+		slots.otlp++
+		l.otlpTotal++
+	} else {
+		slots.hook++
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			l.mu.Lock()
-			if slots.inFlight > 0 {
-				slots.inFlight--
+			if otlp {
+				if slots.otlp > 0 {
+					slots.otlp--
+				}
+				if l.otlpTotal > 0 {
+					l.otlpTotal--
+				}
+			} else if slots.hook > 0 {
+				slots.hook--
 			}
 			if current, ok := l.bindings[b.ID]; ok && current.slots == slots {
 				current.lastSeen = l.cfg.Now()
@@ -200,7 +237,7 @@ func (l *Limiter) sweepLocked(now time.Time) {
 	}
 	l.lastSweep = now
 	for id, entry := range l.bindings {
-		if entry.slots.inFlight == 0 && now.Sub(entry.lastSeen) >= l.cfg.IdleTTL {
+		if entry.slots.hook == 0 && entry.slots.otlp == 0 && now.Sub(entry.lastSeen) >= l.cfg.IdleTTL {
 			delete(l.bindings, id)
 		}
 	}

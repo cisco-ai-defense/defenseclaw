@@ -69,11 +69,11 @@ func TestLimiterInFlightCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := l.Acquire(b, RouteOTLP)
+	r2, err := l.Acquire(b, RouteInspect)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Acquire(b, RouteHook); !errors.Is(err, ErrTooManyInFlight) {
+	if _, err := l.Acquire(b, RouteNotify); !errors.Is(err, ErrTooManyInFlight) {
 		t.Fatalf("cap not enforced: %v", err)
 	}
 	r1()
@@ -84,6 +84,64 @@ func TestLimiterInFlightCap(t *testing.T) {
 		r3()
 	}
 	r2()
+}
+
+// TestLimiterOTLPHasItsOwnSlots pins that telemetry uploads, which may each
+// pin a large body, can neither take the slots hooks need nor grow without
+// bound per binding or across bindings.
+func TestLimiterOTLPHasItsOwnSlots(t *testing.T) {
+	l := NewLimiter(LimiterConfig{
+		HookRPS: 1000, HookBurst: 1000, OTLPRPS: 1000, OTLPBurst: 1000,
+		MaxInFlight: 1, OTLPMaxInFlight: 2, OTLPMaxInFlightTotal: 3,
+	})
+	a, b, c := Binding{ID: "sb_a"}, Binding{ID: "sb_b"}, Binding{ID: "sb_c"}
+	var releases []func()
+	acquire := func(binding Binding, route Route) {
+		t.Helper()
+		release, err := l.Acquire(binding, route)
+		if err != nil {
+			t.Fatalf("%s %s: %v", binding.ID, route, err)
+		}
+		releases = append(releases, release)
+	}
+	acquire(a, RouteOTLP)
+	acquire(a, RouteOTLP)
+	if _, err := l.Acquire(a, RouteOTLP); !errors.Is(err, ErrTooManyInFlight) {
+		t.Fatalf("per-binding otlp cap: %v", err)
+	}
+	// Open uploads do not hold the hook slot.
+	acquire(a, RouteHook)
+	if _, err := l.Acquire(a, RouteHook); !errors.Is(err, ErrTooManyInFlight) {
+		t.Fatalf("hook cap: %v", err)
+	}
+	// A full hook slot does not block telemetry of another binding, but the
+	// cross-binding total does.
+	acquire(b, RouteOTLP)
+	if _, err := l.Acquire(c, RouteOTLP); !errors.Is(err, ErrTooManyInFlight) {
+		t.Fatalf("total otlp cap: %v", err)
+	}
+	if r, err := l.Acquire(c, RouteHook); err != nil {
+		t.Fatalf("hooks limited by the otlp total: %v", err)
+	} else {
+		r()
+	}
+	// A forgotten binding's open upload still returns its share of the total.
+	l.Forget(a.ID)
+	releases[0]()
+	if r, err := l.Acquire(c, RouteOTLP); err != nil {
+		t.Fatalf("total not returned after forget: %v", err)
+	} else {
+		r()
+	}
+	for _, release := range releases {
+		release()
+	}
+	l.mu.Lock()
+	total := l.otlpTotal
+	l.mu.Unlock()
+	if total != 0 {
+		t.Fatalf("otlp total = %d after every release", total)
+	}
 }
 
 func TestLimiterBindingOverride(t *testing.T) {
