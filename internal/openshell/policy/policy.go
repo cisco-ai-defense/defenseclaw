@@ -134,8 +134,10 @@ var systemReadOnly = []string{"/usr", "/lib", "/etc", "/proc", "/dev/urandom", "
 
 // baseReadWrite adds the scratch space, the null device and HOME; the PTY
 // devices let interactive harnesses and PTY-backed tools open terminals
-// (Landlock hides /dev entries that are not listed).
-var baseReadWrite = []string{"/tmp", "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", SandboxHome}
+// (Landlock hides /dev entries that are not listed). p2-render-13: /dev/shm
+// is needed for Python multiprocessing and Chromium/Playwright; /dev/zero,
+// /dev/random, /dev/full are common tool dependencies.
+var baseReadWrite = []string{"/tmp", "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/dev/shm", "/dev/zero", "/dev/random", "/dev/full", SandboxHome}
 
 // protectedTargets can never be a workdir or mount target.
 var protectedTargets = []string{"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var", SandboxHome}
@@ -175,11 +177,11 @@ type Input struct {
 	// to the sandbox (a local database, a dev server). None may be the
 	// ingress, egress, DefenseClaw API or OpenShell gateway port.
 	HostPorts []int
-	// APIPort is the DefenseClaw main API port; zero selects
-	// DefaultAPIPort.
+	// APIPort is the DefenseClaw main API port (required, must be resolved
+	// by the caller; p2-render-14).
 	APIPort int
-	// GatewayPort is the local OpenShell gateway port; zero selects
-	// DefaultGatewayPort.
+	// GatewayPort is the local OpenShell gateway port (required, must be
+	// resolved by the caller; p2-render-14).
 	GatewayPort int
 }
 
@@ -228,6 +230,13 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 		if in.EgressPort == in.IngressPort {
 			return nil, fmt.Errorf("openshell policy: egress and ingress share port %d", in.EgressPort)
 		}
+	}
+	// p2-render-14: refuse zero ports; caller must pass resolved values.
+	if in.APIPort <= 0 || in.APIPort > 65535 {
+		return nil, fmt.Errorf("openshell policy: API port must be resolved by caller (got %d)", in.APIPort)
+	}
+	if in.GatewayPort <= 0 || in.GatewayPort > 65535 {
+		return nil, fmt.Errorf("openshell policy: gateway port must be resolved by caller (got %d)", in.GatewayPort)
 	}
 
 	readOnly := append([]string(nil), systemReadOnly...)
@@ -428,22 +437,18 @@ func validateEndpoint(rule string, ep v1.PolicyNetworkEndpoint) error {
 }
 
 // reservedHostPorts maps every host-loopback listener a sandbox must never
-// reach to its name.
+// reach to its name. p2-render-14: this is a subset of packs.reservedPorts
+// (missing guardrail proxy, model router, OpenClaw gateway) because Input
+// does not carry those ports yet; the complete set should be computed from
+// config once and passed to both.
 func reservedHostPorts(in Input) map[uint32]string {
-	api, gateway := in.APIPort, in.GatewayPort
-	if api == 0 {
-		api = DefaultAPIPort
-	}
-	if gateway == 0 {
-		gateway = DefaultGatewayPort
-	}
 	reserved := map[uint32]string{}
 	for _, p := range []struct {
 		port  int
 		label string
 	}{
-		{gateway, "OpenShell gateway port"},
-		{api, "DefenseClaw API port"},
+		{in.GatewayPort, "OpenShell gateway port"},
+		{in.APIPort, "DefenseClaw API port"},
 		{in.EgressPort, "DefenseClaw egress proxy port"},
 		{in.IngressPort, "DefenseClaw hook ingress port"},
 	} {
