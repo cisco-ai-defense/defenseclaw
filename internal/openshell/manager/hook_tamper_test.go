@@ -82,8 +82,13 @@ func TestToolCallHooksClassify(t *testing.T) {
 		{"opencode", "tool.execute.after", "done", false, toolResultRan},
 		{"amp", "agent.end", "done", false, toolResultNone},
 		{"kiro", "", "", false, toolResultNone},
-		// A connector with no reviewed tool-call hooks pairs nothing.
-		{"hermes", "pre_tool_call", "", false, toolResultNone},
+		{"hermes", "pre_tool_call", "", true, toolResultNone},
+		{"hermes", "post_tool_call", "", false, toolResultRan},
+		{"hermes", "PreToolUse", "", false, toolResultNone},
+		{"openhands", "PreToolUse", "", true, toolResultNone},
+		{"antigravity", "PostToolUse", "", false, toolResultRan},
+		{"omnigent", "PreToolUse", "", true, toolResultNone},
+		// A connector with no reviewed tool-call hooks names nothing.
 		{"future", "PreToolUse", "", false, toolResultNone},
 	} {
 		pre, result := toolCallHooksFor(tt.connector).classify(tt.event, tt.status)
@@ -96,12 +101,13 @@ func TestToolCallHooksClassify(t *testing.T) {
 // Every sandboxed harness is listed, and each pairs by the identity its
 // hooks carry: a per-call ID (Claude Code, Codex, Cursor, OpenCode, Amp),
 // the call's content (Kiro CLI, measured to send none), or nothing (Copilot
-// CLI and Devin CLI, whose post-tool events on a denied call are not
-// measured).
+// CLI, Devin CLI, Hermes, OpenHands, Antigravity and OmniGent, whose
+// post-tool events on a denied call are not measured).
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID,
 		"kiro": keyByContent, "copilot": keyNone, "devin": keyNone,
+		"hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -513,6 +519,10 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "kiro", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
 		{connector: "copilot", pre: "preToolUse", post: "postToolUse"},
 		{connector: "devin", pre: "PreToolUse", post: "PostToolUse"},
+		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
+		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
+		{connector: "antigravity", pre: "PreToolUse", post: "PostToolUse"},
+		{connector: "omnigent", pre: "PreToolUse", post: "PostToolUse"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			e := newEnv(t, nil)

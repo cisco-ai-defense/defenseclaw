@@ -1133,7 +1133,7 @@ compromised hook shows:
   | OpenCode | `tool.execute.before` | `tool.execute.after` | | the plugin's `callID` |
   | Amp | `tool.call` | `tool.result` with status `done` | `tool.result` with another status | the plugin's `toolUseID` |
   | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
-  | Copilot CLI, Devin CLI | not paired | | | |
+  | Copilot CLI, Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
   report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
@@ -1147,7 +1147,9 @@ compromised hook shows:
   repeat of a call DefenseClaw allowed with the same input is not reported.
   Copilot CLI and Devin CLI hooks carry no per-call ID either, and whether
   their post-tool events fire for a call a hook denied is not measured, so
-  for them hook silence is the backstop. Every harness's pre-tool events
+  for them hook silence is the backstop. The same holds for Hermes,
+  OpenHands, Antigravity and OmniGent until their hook payloads are
+  measured. Every harness's pre-tool events
   count in the session summary's tool calls and blocks.
 
 The pack's `hooks.on_tamper` picks the response: `stop` (the default in

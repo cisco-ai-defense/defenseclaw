@@ -159,6 +159,13 @@ var toolCallHooksByConnector = map[string]toolCallHooks{
 	// backstop.
 	"copilot": {pre: "preToolUse", ran: "postToolUse", failed: "postToolUseFailure"},
 	"devin":   {pre: "PreToolUse", ran: "PostToolUse"},
+	// Hermes, OpenHands, Antigravity and OmniGent: whether their hooks carry
+	// a per-call ID the gateway sees, and whether a post-tool event fires for
+	// a denied call, is not measured, so they are not paired either.
+	"hermes":      {pre: "pre_tool_call", ran: "post_tool_call"},
+	"openhands":   {pre: "PreToolUse", ran: "PostToolUse"},
+	"antigravity": {pre: "PreToolUse", ran: "PostToolUse"},
+	"omnigent":    {pre: "PreToolUse", ran: "PostToolUse"},
 }
 
 // toolCallHooksFor returns the connector's tool-call hook events. A
