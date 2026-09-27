@@ -315,6 +315,11 @@ exist only in the image; nothing on your host changes.
   sign-in. Signing in with a Google account inside a sandbox is untested.
 - **Launch flags.** Skip-permissions mode adds
   `--dangerously-skip-permissions`. A headless run is `agy -p <prompt>`.
+- **Other traffic.** Apart from the model, a mock-model run reached only
+  `antigravity-unleash.goog` (feature flags) and `play.googleapis.com` (usage
+  logging). That traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist. Block either host with
+  `openshell.egress.block` if your organization requires it.
 - **Status.** The image passes the hook-fire probe against a Gemini-API mock:
   all five lifecycle hooks reach the ingress, a blocked tool call does not
   run, and a replaced user `hooks.json` is restored. A run through the

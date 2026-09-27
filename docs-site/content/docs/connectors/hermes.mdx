@@ -291,6 +291,10 @@ only in the image; nothing on your host changes.
   - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A headless run is
   `hermes chat -q <prompt> -Q`.
+- **Other traffic.** Apart from the model, a mock-model run reached only
+  `pypi.org` and `github.com` (Hermes' update check). That traffic goes
+  through the DefenseClaw egress proxy, which logs it and applies the
+  blocklist.
 - **Status.** The image passes the hook-fire probe on a mock model: session,
   LLM and tool hooks reach the ingress, a blocked tool call does not run, and
   a hostile user `config.yaml` has no effect. A run through the DefenseClaw

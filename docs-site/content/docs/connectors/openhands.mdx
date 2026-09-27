@@ -179,6 +179,10 @@ exist only in the image; nothing on your host changes.
     `LLM_BASE_URL` set to the Mantle route
 - **Launch flags.** Skip-permissions mode adds `--always-approve`. A headless
   run is `openhands --headless --exit-without-confirmation -t <prompt>`.
+- **Other traffic.** Apart from the model, a mock-model run reached only
+  `pypi.org` (the version check), `github.com` and `raw.githubusercontent.com`
+  (the public skills download). That traffic goes through the DefenseClaw
+  egress proxy, which logs it and applies the blocklist.
 - **Status.** The image passes the hook-fire probe on a mock model: session,
   prompt, tool and stop hooks reach the ingress, a blocked tool call does not
   run, and a replaced user `hooks.json` is restored. A run through the

@@ -218,6 +218,11 @@ exist only in the image; nothing on your host changes.
   `defenseclaw-anthropic` (`ANTHROPIC_API_KEY`); OmniGent picks up either key
   from the environment. OmniGent has no skip-permissions switch: approval
   pauses come from its policies, including DefenseClaw's native ASK.
+- **Other traffic.** Apart from the model, a mock-model run reached
+  `chatgpt.com`, `config.omnigent-telemetry.io`, `github.com` and `models.dev`
+  (the model catalog). The launcher sets `OMNIGENT_NO_UPDATE_CHECK=1`. That
+  traffic goes through the DefenseClaw egress proxy, which logs it and
+  applies the blocklist.
 - **Status.** The image passes the hook-fire probe with the sandbox agent on a
   mock model. The request, llm_request, tool_call, tool_result and response
   policy events reach the ingress, and a blocked tool call does not run. A
