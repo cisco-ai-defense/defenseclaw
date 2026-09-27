@@ -118,6 +118,10 @@ func TestResolveDefaults(t *testing.T) {
 	wantSetting(t, eff, "resources.cpu", "(unlimited)", SourceDefault, "")
 	wantSetting(t, eff, "learn", "false", SourceDefault, "")
 	wantSetting(t, eff, "hooks.fail_mode", "closed", SourcePack, "pack open")
+	wantSetting(t, eff, "hooks.on_tamper", "alert", SourcePack, "pack open")
+	if eff.HookOnTamper != OnTamperAlert {
+		t.Fatalf("hook on_tamper = %q", eff.HookOnTamper)
+	}
 
 	// The loader defaults (git_depth 200, on_exit ask) read as defaults.
 	loaded := testConfig(func(o *config.OpenShellConfig) {
@@ -793,6 +797,23 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		{open, open, ""},
 		{open, balanced, "network.mode"},
 		{balanced, strict, "network.mode"},
+	} {
+		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
+			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)
+		}
+	}
+	// A tamper response of alert is looser than stop; stop is never looser.
+	alerting := *balanced
+	alerting.Name, alerting.Hooks.OnTamper = "alerting", OnTamperAlert
+	stopping := *open
+	stopping.Name, stopping.Hooks.OnTamper = "stopping", OnTamperStop
+	for _, tc := range []struct {
+		candidate, baseline *Pack
+		want                string
+	}{
+		{&alerting, balanced, "hooks.on_tamper"},
+		{balanced, &alerting, ""},
+		{&stopping, open, ""},
 	} {
 		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
 			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)

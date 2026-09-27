@@ -216,6 +216,29 @@ hooks: {fail_mode: closed}
 	}
 }
 
+// hooks.on_tamper defaults to alert on an open network and to stop
+// otherwise; an explicit value wins.
+func TestParseOnTamper(t *testing.T) {
+	for _, tc := range []struct {
+		network, hooks, want string
+	}{
+		{"open", "{fail_mode: closed}", OnTamperAlert},
+		{"allowlist", "{fail_mode: closed}", OnTamperStop},
+		{"deny", "{fail_mode: closed}", OnTamperStop},
+		{"open", "{fail_mode: closed, on_tamper: stop}", OnTamperStop},
+		{"allowlist", "{fail_mode: closed, on_tamper: alert}", OnTamperAlert},
+	} {
+		doc := strings.Replace(minimalPack, "network: {mode: open}", "network: {mode: "+tc.network+"}", 1)
+		if tc.network == "deny" {
+			doc = strings.Replace(doc, "network: {mode: deny}", "network: {mode: deny}\negress: {ports: []}", 1)
+		}
+		doc = strings.Replace(doc, "hooks: {fail_mode: closed}", "hooks: "+tc.hooks, 1)
+		if got := mustParse(t, doc).Hooks.OnTamper; got != tc.want {
+			t.Errorf("network %s hooks %s: on_tamper = %q, want %q", tc.network, tc.hooks, got, tc.want)
+		}
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	replace := func(old, new string) string { return strings.Replace(minimalPack, old, new, 1) }
 	for _, tc := range []struct {
@@ -247,6 +270,8 @@ func TestParseRejects(t *testing.T) {
 		{"unknown approvals", replace("mode: triage}", "mode: never}"), "invalid_value", "approvals.mode"},
 		{"unknown workspace", replace("mode: mount}", "mode: overlay}"), "invalid_value", "workspace.mode"},
 		{"open fail mode", replace("fail_mode: closed", "fail_mode: open"), "invalid_value", "hooks.fail_mode"},
+		{"unknown tamper response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_tamper: kill}"), "invalid_value", "hooks.on_tamper"},
+		{"list tamper response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_tamper: [stop]}"), "yaml_type", "hooks.on_tamper"},
 		{"missing yolo", replace("harness: {yolo: true}", "harness: {}"), "missing_field", "harness.yolo"},
 		{"missing mcp import", replace("mcp: {import: true, host_ports: false}", "mcp: {host_ports: false}"), "missing_field", "mcp.import"},
 		{"unknown feed", replace("network: {mode: open}", "network: {mode: open}\negress: {feeds: [custom]}"), "invalid_value", "egress.feeds[0]"},
