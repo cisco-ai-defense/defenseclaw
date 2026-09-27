@@ -1225,7 +1225,9 @@ shows:
   `tui/src/tooltips.rs`). OpenShell refuses the connection and drafts a
   proposal; triage rejects it (`harness_background_fetch`) instead of
   opening a direct rule, whose policy reload would close the session's open
-  connections, and Codex shows a built-in tip.
+  connections, and Codex shows a built-in tip. OpenShell's denials of the
+  download are audited but neither counted as blocked sites nor shown on
+  the feed; the rejection's one line explains it.
 - On Amazon Bedrock (`--llm bedrock`) the run pins `openai.gpt-oss-20b` in
   the managed config, because Mantle does not serve Codex's own default
   model (its requests fail with `validation_error: Invalid 'input'`). The

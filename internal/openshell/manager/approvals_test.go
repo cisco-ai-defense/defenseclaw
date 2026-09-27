@@ -145,6 +145,27 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	sb := e.create(sandboxapi.CreateRequest{Name: "fetchbox", Harness: "codex"})
 	e.watch.waitStarted(t, sb.Name)
 	codex := harness.Codex.InstallRoot() + "/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+	// OpenShell's two denials of the download (the lines 0.1.1 printed): the
+	// DNS refusal names no binary, the connection names Codex's. Neither
+	// counts as a blocked site or shows on the feed; a curl's does.
+	for _, line := range []string{
+		"NET:REFUSE [MED] DENIED raw.githubusercontent.com [reason:policy_dns_ineligible]",
+		"NET:OPEN [MED] DENIED " + codex + "(0) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]",
+	} {
+		rec, err := ocsf.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
+	}
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 0 {
+		t.Fatalf("the tip download counted as %d blocked sites", got.Egress.Blocked)
+	}
+	for _, ev := range e.m.ActivitySince(0, sb.Name) {
+		if ev.Kind == sandboxapi.ActivityEgressBlocked {
+			t.Fatalf("the tip download's denial is on the feed: %+v", ev)
+		}
+	}
 	tip := chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443)
 	tip.Binary = codex
 	tip.ProposedRule.Binaries = []types.PolicyNetworkBinary{{Path: codex}}
@@ -161,6 +182,14 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 		t.Fatalf("feed message = %q", msg)
 	}
 
+	rec, err := ocsf.Parse("NET:OPEN [MED] DENIED /usr/bin/curl(9) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
+		t.Fatalf("a curl's denial counted as %d blocked sites, want 1", got.Egress.Blocked)
+	}
 	curl := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443))
 	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
 	eventually(t, "the agent's approval", func() bool { return chunkStatus(e, sb.Name, curl) == "approved" })

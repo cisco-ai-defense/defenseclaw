@@ -213,6 +213,11 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if !r.Denied() && !r.Allowed() {
 			return
 		}
+		// The harness's own background request around the proxy is refused
+		// as expected and is none of the agent's doing: it is audited, but
+		// neither counted as a blocked site nor shown on the feed, where
+		// triage's rejection of its proposal explains it once.
+		fetch := r.Denied() && harnessFetchDenial(harnessName, r, host)
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
 			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
@@ -220,9 +225,11 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
-			m.mu.Lock()
-			b.blocked++
-			m.mu.Unlock()
+			if !fetch {
+				m.mu.Lock()
+				b.blocked++
+				m.mu.Unlock()
+			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
 			// on the stream.
@@ -234,7 +241,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 			ev.Scheme = schemeOf(r.URL)
 		}
 		_ = m.tel.RecordSandboxEgress(ctx, ev)
-		if r.Denied() {
+		if r.Denied() && !fetch {
 			m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)"})
 		}
@@ -274,6 +281,24 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 	default:
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
 	}
+}
+
+// harnessFetchDenial reports an OpenShell denial of one of the sandbox
+// harness's own background requests (harness.Spec.DirectFetches): the
+// destination is the fetch's, and the actor is a binary under the harness's
+// root-owned install root, or none (the DNS refusal before the connection
+// names no binary). Binary is display text the workload could choose, which
+// can at worst hide such a denial from the feed; the audit record stays.
+func harnessFetchDenial(harnessName string, r ocsf.Record, host string) bool {
+	for _, f := range harnessFetches(harnessName) {
+		if host != triage.NormalizeHost(f.Host) || (r.Port != 0 && r.Port != f.Port) {
+			continue
+		}
+		if r.Binary == "" || (strings.HasPrefix(r.Binary, f.BinaryRoot+"/") && !strings.Contains(r.Binary, "/../")) {
+			return true
+		}
+	}
+	return false
 }
 
 // policyReloadCut reports a connection OpenShell closed because the
