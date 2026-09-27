@@ -938,7 +938,7 @@ func (e *env) deleteProfiles() {
 		return
 	}
 	for _, p := range list {
-		ours := p.ID == profiles.IngressID || p.ID == profiles.AnthropicID || strings.HasPrefix(p.ID, "dc-cred-")
+		ours := slices.Contains(profiles.IDs(), p.ID) || strings.HasPrefix(p.ID, "dc-cred-")
 		if e.profilesBefore[p.ID] || !ours {
 			continue
 		}
