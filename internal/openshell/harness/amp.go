@@ -119,14 +119,14 @@ var Amp = register(&Spec{
 // AmpLauncherPath is the in-image Amp launcher.
 const AmpLauncherPath = LauncherDir + "/amp-launch"
 
-const ampLauncher = `#!/bin/bash -p
+var ampLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw Amp launcher (OpenShell sandbox images, root-owned). Amp loads
 # the DefenseClaw policy plugin from ~/.config/amp/plugins; point it at the
 # image HOME and drop the overrides that would load other plugins or
 # settings, then exec the pinned Amp binary with the caller's arguments.
 set -u
-for arg in "$@"; do
+` + launcherPreamble + `for arg in "$@"; do
   case "$arg" in
     --settings-file|--settings-file=*)
       echo "defenseclaw: amp --settings-file is not supported in a DefenseClaw sandbox" >&2
@@ -138,5 +138,4 @@ unset AMP_DISABLE_PLUGINS AMP_PLUGIN_URI AMP_PLUGIN_SOURCE_BASE64 AMP_SETTINGS_F
 HOME=` + connector.SandboxHomeDir + `
 AMP_SKIP_UPDATE_CHECK=1
 export HOME AMP_SKIP_UPDATE_CHECK
-exec /usr/local/bin/amp "$@"
-`
+` + launcherExec(`/usr/local/bin/amp "$@"`)

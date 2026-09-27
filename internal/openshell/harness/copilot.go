@@ -155,14 +155,14 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 // CopilotLauncherPath is the in-image Copilot launcher.
 const CopilotLauncherPath = LauncherDir + "/copilot-launch"
 
-const copilotLauncher = `#!/bin/bash -p
+var copilotLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw GitHub Copilot CLI launcher (OpenShell sandbox images,
 # root-owned). Pins the CLI to the package pre-extracted at image build,
 # trusts the working directory, then execs the pinned CLI with the caller's
 # arguments.
 set -u
-# The executable prefers the newest package in any cache it searches unless
+` + launcherPreamble + `# The executable prefers the newest package in any cache it searches unless
 # auto-update is off, and a dist override replaces it outright.
 unset COPILOT_CLI_DIST_DIR COPILOT_CLI_VERSION COPILOT_CACHE_HOME
 COPILOT_AUTO_UPDATE=false
@@ -186,5 +186,4 @@ case "$dir" in
     fi
     ;;
 esac
-exec /usr/local/bin/copilot "$@"
-`
+` + launcherExec(`/usr/local/bin/copilot "$@"`)

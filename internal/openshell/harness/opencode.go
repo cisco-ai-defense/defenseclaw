@@ -129,7 +129,7 @@ var OpenCode = register(&Spec{
 // OpenCodeLauncherPath is the in-image OpenCode launcher.
 const OpenCodeLauncherPath = LauncherDir + "/opencode-launch"
 
-const openCodeLauncher = `#!/bin/bash -p
+var openCodeLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw OpenCode launcher (OpenShell sandbox images, root-owned).
 # The DefenseClaw policy plugin is registered from the managed
@@ -137,7 +137,7 @@ const openCodeLauncher = `#!/bin/bash -p
 # without it, then exec the pinned OpenCode binary with the caller's
 # arguments.
 set -u
-for arg in "$@"; do
+` + launcherPreamble + `for arg in "$@"; do
   case "$arg" in
     --pure|--pure=*)
       echo "defenseclaw: opencode --pure runs without the DefenseClaw policy plugin; refusing" >&2
@@ -148,5 +148,4 @@ done
 unset OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR
 OPENCODE_DISABLE_AUTOUPDATE=1
 export OPENCODE_DISABLE_AUTOUPDATE
-exec /usr/local/bin/opencode "$@"
-`
+` + launcherExec(`/usr/local/bin/opencode "$@"`)

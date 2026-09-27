@@ -125,7 +125,7 @@ esac`,
 // ClaudeCodeLauncherPath is the in-image Claude Code launcher.
 const ClaudeCodeLauncherPath = LauncherDir + "/claudecode-launch"
 
-const claudeCodeLauncher = `#!/bin/bash -p
+var claudeCodeLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v2
 # DefenseClaw Claude Code launcher (OpenShell sandbox images, root-owned).
 # Refreshes the first-run state that cannot be baked into the image, then
@@ -135,8 +135,7 @@ const claudeCodeLauncher = `#!/bin/bash -p
 # key. For an OpenShell placeholder those include revision digits that change
 # on every sandbox start, so the approval is recorded again on each launch.
 set -u
-` + egressLauncherSnippet + `
-cfg="${HOME:-/sandbox}/.claude.json"
+` + launcherPreamble + `cfg="${HOME:-/sandbox}/.claude.json"
 key="${ANTHROPIC_API_KEY:-}"
 if [ -n "$key" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ -w "$cfg" ] && [ -x /usr/bin/jq ]; then
   if [ "${#key}" -gt 20 ]; then
@@ -175,5 +174,4 @@ if [ -f "$servers" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ -w "$cfg" ] && [ -
     fi
   fi
 fi
-exec /usr/local/bin/claude "$@"
-`
+` + launcherExec(`/usr/local/bin/claude "$@"`)

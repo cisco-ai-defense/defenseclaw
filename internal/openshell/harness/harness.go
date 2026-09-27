@@ -49,6 +49,58 @@ const (
 	WorkRoot = "/work"
 )
 
+// LauncherSystemPATH leads the PATH every launcher passes to its harness:
+// the root-owned system directories, ahead of whatever the caller's PATH
+// adds.
+const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// launcherScrubbedEnv are variables no launcher passes to its harness. The
+// harnesses run hooks and tool commands through bash, which reads the file
+// BASH_ENV names before a -c command and applies SHELLOPTS and BASHOPTS
+// (noexec among them), so one line in a shell start-up file the agent can
+// edit would run inside, or silence, every hook. `bash -p` keeps them out of
+// the launcher itself; the exec drops them from the harness environment
+// (SHELLOPTS and BASHOPTS are read-only inside bash, so env removes them).
+var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE"}
+
+// launcherPreamble is the environment set-up every launcher runs first:
+// system directories lead PATH, and the egress proxy settings are exported
+// from openshell.EnvEgressURL and openshell.EnvEgressBypass, the names that
+// survive sandbox creation (OpenShell 0.1.1 drops every *_PROXY variable and
+// NODE_USE_ENV_PROXY passed at create). A well-formed http:// proxy URL
+// replaces any proxy settings the caller's environment carries, so the
+// harness and every tool it runs go through the DefenseClaw proxy; without
+// one the caller's environment is left alone. The proxy is a convenience
+// path, not the boundary: OpenShell refuses direct egress the policy does not
+// allow either way.
+const launcherPreamble = `PATH=` + LauncherSystemPATH + `${PATH:+:$PATH}
+export PATH
+# OpenShell drops the standard proxy variables passed at sandbox creation;
+# DefenseClaw passes them under its own names.
+case "${` + openshell.EnvEgressURL + `:-}" in
+  http://*[!A-Za-z0-9:@._/-]*) ;;
+  http://?*)
+    HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
+    https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
+    NODE_USE_ENV_PROXY=1
+    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
+    export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy
+    ;;
+esac
+`
+
+// launcherExec is the launcher's last line: exec command (the pinned binary
+// and its arguments, in shell syntax) without the shell start-up variables.
+func launcherExec(command string) string {
+	var b strings.Builder
+	b.WriteString("exec /usr/bin/env")
+	for _, name := range launcherScrubbedEnv {
+		b.WriteString(" -u " + name)
+	}
+	b.WriteString(" " + command + "\n")
+	return b.String()
+}
+
 // LaunchMode selects how the harness runs.
 type LaunchMode string
 
@@ -179,11 +231,12 @@ type Spec struct {
 	DefaultVersion string
 	// Provider renders the connector's overlay artifacts.
 	Provider connector.SandboxArtifactProvider
-	// TamperTier is where the hook registration lives in the image:
-	// connector.SandboxTamperTierManaged (a root-owned system/managed policy
-	// that user and project settings cannot switch off) or
+	// TamperTier says whether the agent or a repository can switch the hooks
+	// off: connector.SandboxTamperTierManaged (a root-owned system/managed
+	// policy that user and project settings cannot switch off) or
 	// connector.SandboxTamperTierUser (a file in the image HOME the agent can
-	// edit). It always equals the rendered artifacts' tier.
+	// edit, or code the user or a project adds that runs beside the hooks).
+	// It always equals the rendered artifacts' tier.
 	TamperTier string
 	// Verification is the evidence behind this spec.
 	Verification Verification
@@ -363,7 +416,10 @@ func tomlStringIs(value, want string) bool {
 // connector artifacts' startup env, the DefenseClaw sandbox identity, the
 // egress proxy settings and the credential profile's env. Provider hosts and
 // host.openshell.internal bypass the proxy, so hooks reach the ingress and
-// OpenShell can inject LLM credentials on its direct provider rules.
+// OpenShell can inject LLM credentials on its direct provider rules. The
+// proxy settings are also passed as openshell.EnvEgressURL and
+// openshell.EnvEgressBypass, from which the launcher exports them
+// (OpenShell 0.1.1 drops the standard names).
 func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 	if opts.Artifacts.Connector != s.Name {
 		return nil, fmt.Errorf("harness %s: artifacts belong to connector %q", s.Name, opts.Artifacts.Connector)
@@ -416,25 +472,6 @@ func SetNoProxy(env map[string]string, list string) {
 	env["no_proxy"] = list
 	env[openshell.EnvEgressBypass] = list
 }
-
-// egressLauncherSnippet exports the DefenseClaw egress proxy for the harness
-// and every tool it runs. OpenShell strips *_PROXY variables from the sandbox
-// environment, so the proxy arrives under names the filter keeps. The proxy
-// is a convenience path, not the boundary: OpenShell refuses direct egress
-// the policy does not allow either way.
-const egressLauncherSnippet = `if [ -n "${DEFENSECLAW_EGRESS_URL:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
-  case "$DEFENSECLAW_EGRESS_URL" in
-    http://*[!A-Za-z0-9:@._/-]*) ;;
-    http://*)
-      HTTPS_PROXY="$DEFENSECLAW_EGRESS_URL"; HTTP_PROXY="$DEFENSECLAW_EGRESS_URL"
-      https_proxy="$DEFENSECLAW_EGRESS_URL"; http_proxy="$DEFENSECLAW_EGRESS_URL"
-      NODE_USE_ENV_PROXY=1
-      NO_PROXY="${DEFENSECLAW_EGRESS_BYPASS:-host.openshell.internal}"; no_proxy="$NO_PROXY"
-      export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy
-      ;;
-  esac
-fi
-`
 
 var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 

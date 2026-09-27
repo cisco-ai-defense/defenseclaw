@@ -337,8 +337,9 @@ func TestEnv(t *testing.T) {
 		"ANTHROPIC_BASE_URL":                     "https://bedrock-mantle.us-east-1.api.aws/anthropic",
 		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
 		"NO_PROXY":                               "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
-		"DEFENSECLAW_EGRESS_URL":                 "http://b1:secret@host.openshell.internal:18972",
-		"DEFENSECLAW_EGRESS_BYPASS":              "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
+		// The names the launchers export the proxy settings from.
+		"DEFENSECLAW_EGRESS_URL":    "http://b1:secret@host.openshell.internal:18972",
+		"DEFENSECLAW_EGRESS_BYPASS": "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
 	}
 	for key, value := range want {
 		if env[key] != value {
@@ -355,11 +356,13 @@ func TestEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := strict["HTTPS_PROXY"]; ok {
-		t.Fatal("strict sandboxes (no proxy URL) must not get proxy env")
+	for _, key := range []string{"HTTPS_PROXY", openshell.EnvEgressURL} {
+		if _, ok := strict[key]; ok {
+			t.Fatalf("strict sandboxes (no proxy URL) must not get %s", key)
+		}
 	}
-	if strict["NO_PROXY"] != "api.openai.com,host.openshell.internal" {
-		t.Fatalf("NO_PROXY = %q", strict["NO_PROXY"])
+	if strict["NO_PROXY"] != "api.openai.com,host.openshell.internal" || strict[openshell.EnvEgressBypass] != strict["NO_PROXY"] {
+		t.Fatalf("NO_PROXY = %q, %s = %q", strict["NO_PROXY"], openshell.EnvEgressBypass, strict[openshell.EnvEgressBypass])
 	}
 
 	if _, err := Codex.Env(EnvOptions{Artifacts: claude}); err == nil {
@@ -410,8 +413,8 @@ func TestHookOnlyHarnessEnv(t *testing.T) {
 					t.Errorf("env[%s] = %q, want %q", key, env[key], value)
 				}
 			}
-			if env["NO_PROXY"] != tc.noProxy || env["HTTPS_PROXY"] != proxy {
-				t.Errorf("NO_PROXY %q HTTPS_PROXY %q", env["NO_PROXY"], env["HTTPS_PROXY"])
+			if env["NO_PROXY"] != tc.noProxy || env["HTTPS_PROXY"] != proxy || env[openshell.EnvEgressBypass] != tc.noProxy || env[openshell.EnvEgressURL] != proxy {
+				t.Errorf("NO_PROXY %q HTTPS_PROXY %q %s %q %s %q", env["NO_PROXY"], env["HTTPS_PROXY"], openshell.EnvEgressBypass, env[openshell.EnvEgressBypass], openshell.EnvEgressURL, env[openshell.EnvEgressURL])
 			}
 			if tc.profile != profiles.CopilotGitHubID && env["COPILOT_OFFLINE"] == "" && tc.spec == Copilot {
 				t.Error("a Copilot BYOK profile must run offline")
@@ -565,8 +568,8 @@ func TestCodexLauncherAddsRuntimeSettings(t *testing.T) {
 }
 
 // TestLaunchersExportEgressProxy pins that the launchers restore the proxy
-// variables OpenShell strips from the sandbox environment, and only from a
-// well-formed http:// URL.
+// variables OpenShell strips from the sandbox environment, only from a
+// well-formed http:// URL, and in place of the caller's.
 func TestLaunchersExportEgressProxy(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
@@ -606,8 +609,13 @@ func TestLaunchersExportEgressProxy(t *testing.T) {
 		if got := run(openshell.EnvEgressURL + "=http://x y@host:1"); got != "||||" {
 			t.Fatalf("%s exported a malformed proxy: %q", tc.spec.Name, got)
 		}
-		if got := run("HTTPS_PROXY=http://already:set@h:1", openshell.EnvEgressURL+"="+proxy); !strings.HasPrefix(got, "http://already:set@h:1|") {
-			t.Fatalf("%s overrode an existing proxy: %q", tc.spec.Name, got)
+		// The DefenseClaw proxy replaces one the caller's environment
+		// carries; a malformed one leaves it alone.
+		if got := run("HTTPS_PROXY=http://already:set@h:1", openshell.EnvEgressURL+"="+proxy); !strings.HasPrefix(got, proxy+"|") {
+			t.Fatalf("%s kept the caller's proxy: %q", tc.spec.Name, got)
+		}
+		if got := run("HTTPS_PROXY=http://already:set@h:1", openshell.EnvEgressURL+"=http://x y@host:1"); !strings.HasPrefix(got, "http://already:set@h:1|") {
+			t.Fatalf("%s replaced the caller's proxy with a malformed one: %q", tc.spec.Name, got)
 		}
 		if got := run(); got != "||||" {
 			t.Fatalf("%s exported a proxy without one: %q", tc.spec.Name, got)
@@ -619,6 +627,13 @@ func TestLaunchersExportEgressProxy(t *testing.T) {
 // stub that records its argv and the named variables ("<unset>" when
 // absent), runs it with env, and returns the exit code and the record.
 func runLauncher(t *testing.T, spec *Spec, binary string, vars []string, env []string, args ...string) (int, string) {
+	t.Helper()
+	return runLauncherIn(t, spec, binary, "", vars, env, args...)
+}
+
+// runLauncherIn is runLauncher started in cwd (empty: the stub's temp
+// dir, which is also HOME unless env sets it).
+func runLauncherIn(t *testing.T, spec *Spec, binary, cwd string, vars []string, env []string, args ...string) (int, string) {
 	t.Helper()
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
@@ -640,6 +655,9 @@ func runLauncher(t *testing.T, spec *Spec, binary string, vars []string, env []s
 	}
 	cmd := exec.Command(launcher, args...)
 	cmd.Dir = dir
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + dir}, env...)
 	out, err := cmd.CombinedOutput()
 	code := 0
