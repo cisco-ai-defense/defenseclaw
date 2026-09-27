@@ -562,3 +562,87 @@ func TestProposalFloodLimits(t *testing.T) {
 		t.Fatalf("rules after a restart = %d", spent)
 	}
 }
+
+// TestApprovalRecheckedAtApply pins that an approval is judged again, with
+// a fresh DNS answer, right before it is applied: a name that resolved to a
+// public address at triage time but to this machine by then is never
+// approved, whether triage or the operator approved it.
+func TestApprovalRecheckedAtApply(t *testing.T) {
+	saved := triageDelay
+	triageDelay = 10 * time.Millisecond
+	t.Cleanup(func() { triageDelay = saved })
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "rebindbox"})
+	e.watch.waitStarted(t, sb.Name)
+
+	// Automatic approval: public at triage, loopback at apply.
+	e.dns.rebindAfter("cdn.rebind.example.org", 1, "127.0.0.1")
+	auto := addChunk(e, sb.Name, chunk("allow_cdn_rebind_example_org_443", "cdn.rebind.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "the rebound proposal rejected", func() bool { return chunkStatus(e, sb.Name, auto) == "rejected" })
+	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, auto)
+	if !strings.Contains(c.RejectionReason, "this machine") {
+		t.Fatalf("rejection = %q", c.RejectionReason)
+	}
+
+	// Operator approval of a private-network ask: private at triage and at
+	// the decision, loopback at apply.
+	e.dns.set("db.rebind.example.org", "10.0.0.5")
+	e.dns.rebindAfter("db.rebind.example.org", 2, "127.0.0.1")
+	asked := addChunk(e, sb.Name, chunk("allow_db_rebind_example_org_443", "db.rebind.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	if asks[0].Host != "db.rebind.example.org" || !asks[0].Risky {
+		t.Fatalf("ask = %+v", asks[0])
+	}
+	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the operator approval refused at apply", func() bool { return chunkStatus(e, sb.Name, asked) == "rejected" })
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	for _, rule := range []string{"allow_cdn_rebind_example_org_443", "allow_db_rebind_example_org_443"} {
+		if _, ok := policy.NetworkPolicies[rule]; ok {
+			t.Fatalf("rule %s reached the policy", rule)
+		}
+	}
+	var refused bool
+	for _, ev := range e.m.ActivitySince(0, sb.Name) {
+		refused = refused || (ev.Kind == sandboxapi.ActivityApprovalResolved && ev.Reason == "refused_at_apply")
+	}
+	if !refused {
+		t.Fatal("no refused_at_apply feed event")
+	}
+}
+
+// TestReconcileRemovesRulesThatResolveToThisMachine pins that an approved
+// rule whose name later resolves to this machine is removed on the next
+// enforcement pass.
+func TestReconcileRemovesRulesThatResolveToThisMachine(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "laterbox"})
+	e.watch.waitStarted(t, sb.Name)
+	keep := addChunk(e, sb.Name, chunk("allow_keep_example_org_443", "keep.example.org", 443))
+	later := addChunk(e, sb.Name, chunk("allow_later_example_org_443", "later.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "approvals applied", func() bool {
+		return chunkStatus(e, sb.Name, keep) == "approved" && chunkStatus(e, sb.Name, later) == "approved"
+	})
+	e.dns.set("later.example.org", "169.254.169.254")
+	e.m.enforceAll(context.Background())
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	if _, ok := policy.NetworkPolicies["allow_later_example_org_443"]; ok {
+		t.Fatal("a rule that resolves to metadata is still in the policy")
+	}
+	if _, ok := policy.NetworkPolicies["allow_keep_example_org_443"]; !ok {
+		t.Fatal("the public rule was removed")
+	}
+	var fed bool
+	for _, ev := range e.m.ActivitySince(0, sb.Name) {
+		fed = fed || (ev.Kind == sandboxapi.ActivityEgressBlocked && ev.Reason == "resolves_to_host")
+	}
+	if !fed {
+		t.Fatal("no feed event for the removed rule")
+	}
+}

@@ -374,15 +374,32 @@ func (w *fakeWatch) waitStarted(t *testing.T, sandbox string) {
 type fakeDNS struct {
 	mu      sync.Mutex
 	answers map[string][]string
+	// rebinds switch a name's answers once it was looked up so often.
+	rebinds map[string]rebind
+	calls   map[string]int
 }
 
-func newFakeDNS() *fakeDNS { return &fakeDNS{answers: map[string][]string{}} }
+type rebind struct {
+	after int
+	addrs []string
+}
+
+func newFakeDNS() *fakeDNS {
+	return &fakeDNS{answers: map[string][]string{}, rebinds: map[string]rebind{}, calls: map[string]int{}}
+}
 
 // set makes host resolve to addrs; none makes it fail to resolve.
 func (d *fakeDNS) set(host string, addrs ...string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.answers[host+"."] = addrs
+}
+
+// rebindAfter makes host resolve to addrs once it was looked up n times.
+func (d *fakeDNS) rebindAfter(host string, n int, addrs ...string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rebinds[host+"."] = rebind{after: n, addrs: addrs}
 }
 
 func (d *fakeDNS) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, error) {
@@ -392,6 +409,10 @@ func (d *fakeDNS) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, er
 	if !ok {
 		addrs = []string{"93.184.216.34"}
 	}
+	if r, ok := d.rebinds[name]; ok && d.calls[name] >= r.after {
+		addrs = r.addrs
+	}
+	d.calls[name]++
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}
