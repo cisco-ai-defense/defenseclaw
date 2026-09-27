@@ -319,7 +319,7 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 		images = append(images, hookFireImage(args))
 		return 0
 	})
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	clock := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	b := &Builder{Docker: docker, Store: store, Now: func() time.Time { return clock }}
 	ctx := context.Background()
@@ -400,7 +400,7 @@ func TestVerifyHooksRefusesUnrecordedOrReplacedImages(t *testing.T) {
 		"image-not-listed": {Tag: c.Tag, ContentHash: c.ContentHash, ImageID: "sha256:" + strings.Repeat("1", 64)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			store := NewStore(t.TempDir())
+			store := testStore(t)
 			if stored != nil {
 				if err := store.Put(*stored); err != nil {
 					t.Fatal(err)
@@ -434,7 +434,7 @@ func TestVerifyHooksRefusesUnrecordedOrReplacedImages(t *testing.T) {
 
 func TestVerifyHooksKeepsVerdictWhenProbeCannotRun(t *testing.T) {
 	c := hookFireContext(t)
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	verifiedAt := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	if err := store.Put(Record{
 		Tag: c.Tag, ContentHash: c.ContentHash, ImageID: "sha256:" + strings.Repeat("1", 64),
@@ -473,7 +473,7 @@ func TestVerifyHooksKeepsVerdictWhenProbeCannotRun(t *testing.T) {
 func TestVerifyHooksIgnoresProbeOfReplacedImage(t *testing.T) {
 	c := hookFireContext(t)
 	sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	docker := verifyDocker(t, c, sim, func([]string) int {
 		// A concurrent rebuild replaces the record while the probe runs.
 		if err := store.Put(Record{Tag: c.Tag, ContentHash: c.ContentHash, ImageID: "sha256:" + strings.Repeat("3", 64)}); err != nil {

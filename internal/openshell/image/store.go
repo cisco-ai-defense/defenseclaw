@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -50,8 +51,11 @@ type Record struct {
 	IngressPort        int    `json:"ingress_port"`
 	DefenseClawVersion string `json:"defenseclaw_version"`
 	// FailMode is the fail mode baked into the image's hooks.
-	FailMode string    `json:"fail_mode"`
-	BuiltAt  time.Time `json:"built_at"`
+	FailMode string `json:"fail_mode"`
+	// Owner is the Store.Owner of the data dir that built the image; Prune
+	// removes only images this store recorded under its own owner.
+	Owner   string    `json:"owner"`
+	BuiltAt time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
@@ -81,9 +85,19 @@ type Store struct {
 }
 
 type storeDoc struct {
-	Version int      `json:"version"`
-	Images  []Record `json:"images"`
+	Version int `json:"version"`
+	// Owner identifies this data dir to the Docker daemon: every image it
+	// builds carries it in its content hash (so in its tag) and in the
+	// LabelOwner label. It is random, created on first use, so two data dirs
+	// sharing one daemon never share, select or prune each other's images,
+	// and a lost images.json makes every earlier image foreign rather than
+	// removable.
+	Owner  string   `json:"owner,omitempty"`
+	Images []Record `json:"images"`
 }
+
+// ownerRE is the shape of a store owner.
+var ownerRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // NewStore opens the store under dataDir.
 func NewStore(dataDir string) *Store {
@@ -92,6 +106,28 @@ func NewStore(dataDir string) *Store {
 
 // Path is the store file.
 func (s *Store) Path() string { return s.path }
+
+// Owner returns this store's owner, creating and persisting it on first use.
+func (s *Store) Owner() (string, error) {
+	var owner string
+	err := s.locked(func() error {
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		if doc.Owner == "" {
+			if doc.Owner, err = randomHex(8); err != nil {
+				return err
+			}
+			if err := s.write(doc); err != nil {
+				return err
+			}
+		}
+		owner = doc.Owner
+		return nil
+	})
+	return owner, err
+}
 
 // List returns every record sorted by tag.
 func (s *Store) List() ([]Record, error) {
@@ -155,7 +191,8 @@ func recordMatches(r Record, c *Context) bool {
 		r.GID == c.Spec.GID &&
 		r.IngressPort == c.Spec.IngressPort &&
 		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
-		r.FailMode == c.Spec.FailMode
+		r.FailMode == c.Spec.FailMode &&
+		r.Owner == c.Spec.Owner
 }
 
 // Put inserts or replaces the record with r.Tag.
@@ -261,6 +298,9 @@ func (s *Store) read() (storeDoc, error) {
 	}
 	if doc.Version != storeVersion {
 		return storeDoc{}, fmt.Errorf("openshell image store: %s has unsupported version %d", s.path, doc.Version)
+	}
+	if doc.Owner != "" && !ownerRE.MatchString(doc.Owner) {
+		return storeDoc{}, fmt.Errorf("openshell image store: %s has a malformed owner", s.path)
 	}
 	sort.Slice(doc.Images, func(i, j int) bool { return doc.Images[i].Tag < doc.Images[j].Tag })
 	return doc, nil

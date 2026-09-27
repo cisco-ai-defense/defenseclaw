@@ -37,8 +37,29 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
+// testOwner is the store owner of testSpec and testStore.
+const testOwner = "e0e0e0e0e0e0e0e0"
+
 func testSpec(h *harness.Spec) BuildSpec {
-	return BuildSpec{Harness: h, UID: 1000, GID: 1000, IngressPort: 18971, DefenseClawVersion: "1.2.3", Repository: "e-defenseclaw-sandbox"}
+	return BuildSpec{Harness: h, UID: 1000, GID: 1000, IngressPort: 18971, DefenseClawVersion: "1.2.3", Repository: "e-defenseclaw-sandbox", Owner: testOwner}
+}
+
+// testStore is an empty store whose owner is testOwner.
+func testStore(t *testing.T) *Store {
+	t.Helper()
+	return testStoreOwnedBy(t, testOwner)
+}
+
+func testStoreOwnedBy(t *testing.T, owner string) *Store {
+	t.Helper()
+	store := NewStore(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), []byte(`{"version":1,"owner":"`+owner+`","images":[]}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 func mustContext(t *testing.T, spec BuildSpec) *Context {
@@ -120,6 +141,7 @@ func TestContentHashCoversEveryInput(t *testing.T) {
 		"gid":        func(s *BuildSpec) { s.GID = 1001 },
 		"ingress":    func(s *BuildSpec) { s.IngressPort = 18981 },
 		"dc-version": func(s *BuildSpec) { s.DefenseClawVersion = "1.2.4" },
+		"owner":      func(s *BuildSpec) { s.Owner = "f0f0f0f0f0f0f0f0" },
 		"base":       func(s *BuildSpec) { s.BaseImage = "ghcr.io/example/base@sha256:" + strings.Repeat("a", 64) },
 		"harness":    func(s *BuildSpec) { s.HarnessVersion = "2.1.160" },
 	}
@@ -160,6 +182,8 @@ func TestNewContextRefusesUnsafeSpecs(t *testing.T) {
 		"missing-dc-version": {func(s *BuildSpec) { s.DefenseClawVersion = "" }, nil},
 		"bad-ingress":        {func(s *BuildSpec) { s.IngressPort = 0 }, nil},
 		"fail-open":          {func(s *BuildSpec) { s.FailMode = "open" }, nil},
+		"no-owner":           {func(s *BuildSpec) { s.Owner = "" }, nil},
+		"bad-owner":          {func(s *BuildSpec) { s.Owner = "../other" }, nil},
 		"unknown-fail-mode":  {func(s *BuildSpec) { s.FailMode = "observe" }, nil},
 	}
 	for name, tc := range cases {

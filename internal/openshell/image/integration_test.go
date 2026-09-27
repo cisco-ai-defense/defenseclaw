@@ -114,7 +114,7 @@ func TestLiveOverlay(t *testing.T) {
 			if !sc.ready {
 				t.Skip("mock LLM URL not set; hook-fire probe skipped")
 			}
-			c, err := NewContext(spec)
+			c, err := b.Context(spec)
 			if err != nil {
 				t.Fatal(err)
 			}

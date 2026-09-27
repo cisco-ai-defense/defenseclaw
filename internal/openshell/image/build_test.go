@@ -19,10 +19,13 @@ package image
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -123,7 +126,7 @@ func containsSeq(args []string, a, b string) bool {
 func TestBuildRecordsVerifiedImage(t *testing.T) {
 	c := mustContext(t, testSpec(harness.Codex))
 	docker := imageDocker(t, c, goodProbeOutput(c))
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	fixed := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	b := &Builder{Docker: docker, Store: store, Now: func() time.Time { return fixed }}
 
@@ -162,7 +165,7 @@ func TestBuildRemovesImagesThatFailVerification(t *testing.T) {
 	c := mustContext(t, testSpec(harness.ClaudeCode))
 	tampered := strings.Replace(goodProbeOutput(c), "version 2.1.156", "version 2.1.999", 1)
 	docker := imageDocker(t, c, tampered)
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	b := &Builder{Docker: docker, Store: store}
 	if _, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{}); err == nil || !strings.Contains(err.Error(), "failed verification") {
 		t.Fatalf("Build error = %v", err)
@@ -177,7 +180,7 @@ func TestBuildRemovesImagesThatFailVerification(t *testing.T) {
 
 func TestBuildRefusesUnknownContractWithoutDocker(t *testing.T) {
 	docker := &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}
-	b := &Builder{Docker: docker, Store: NewStore(t.TempDir())}
+	b := &Builder{Docker: docker, Store: testStore(t)}
 	spec := testSpec(harness.Codex)
 	spec.HarnessVersion = "0.117.0"
 	if _, err := b.Build(context.Background(), spec, BuildOptions{}); err == nil {
@@ -195,57 +198,80 @@ func TestBuildPropagatesDockerFailure(t *testing.T) {
 		}
 		return "", 1
 	}}
-	b := &Builder{Docker: docker, Store: NewStore(t.TempDir())}
+	b := &Builder{Docker: docker, Store: testStore(t)}
 	if _, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{}); err == nil || !strings.Contains(err.Error(), "docker build") {
 		t.Fatalf("Build error = %v", err)
 	}
 }
 
 func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	own := func(r Record) Record {
+		r.Owner = testOwner
+		return r
+	}
 	for _, r := range []Record{
-		{Tag: "e-repo:claudecode-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
-		{Tag: "e-repo:claudecode-new-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(time.Hour)},
-		// The newest hook-verified image is what Store.Current selects, so it
-		// survives even though a newer unverified build exists.
-		{Tag: "e-repo:claudecode-verified-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(30 * time.Minute), HookFireVerified: true},
-		{Tag: "e-repo:claudecode-verified-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-time.Hour), HookFireVerified: true},
-		{Tag: "e-repo:codex-only-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
-		{Tag: "e-repo:codex-gone-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(2 * time.Hour)},
-		{Tag: "other:claudecode-x-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
+		own(Record{Tag: "e-repo:claudecode-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
+		own(Record{Tag: "e-repo:claudecode-older-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-2 * time.Hour)}),
+		own(Record{Tag: "e-repo:claudecode-new-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(time.Hour)}),
+		// The newest hook-verified image is what Store.Current selects for
+		// an unchanged spec, so it survives a newer unverified build.
+		own(Record{Tag: "e-repo:claudecode-verified-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(30 * time.Minute), HookFireVerified: true}),
+		own(Record{Tag: "e-repo:claudecode-verified-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-time.Hour), HookFireVerified: true}),
+		own(Record{Tag: "e-repo:codex-only-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
+		own(Record{Tag: "e-repo:codex-gone-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(2 * time.Hour)}),
+		own(Record{Tag: "other:claudecode-x-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
+		// Recorded here without this store's owner (a record from before
+		// store owners), and recorded under the owner but now naming an
+		// image without its label: neither is removed.
+		{Tag: "e-repo:claudecode-legacy-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-3 * time.Hour)},
+		own(Record{Tag: "e-repo:claudecode-relabelled-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-4 * time.Hour)}),
 	} {
 		if err := store.Put(r); err != nil {
 			t.Fatal(err)
 		}
 	}
-	listing := strings.Join([]string{
-		"e-repo:claudecode-old-u1000", "e-repo:claudecode-new-u1000", "e-repo:codex-only-u1000",
+	ownedTags := []string{
+		"e-repo:claudecode-old-u1000", "e-repo:claudecode-older-u1000", "e-repo:claudecode-new-u1000", "e-repo:codex-only-u1000",
 		"e-repo:claudecode-verified-u1000", "e-repo:claudecode-verified-old-u1000",
-		"e-repo:untracked", "e-repo:<none>", "other:claudecode-x-u1000",
-	}, "\n")
+		// This store's label without a record (images.json restored from an
+		// older copy).
+		"e-repo:claudecode-lost-record-u1000",
+		"e-repo:<none>", "other:claudecode-x-u1000",
+	}
+	// Another data dir sharing the daemon, the legacy image and the
+	// relabelled one.
+	foreignTags := []string{"e-repo:claudecode-otherdir-u1000", "e-repo:claudecode-legacy-u1000", "e-repo:claudecode-relabelled-u1000"}
 	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
 		if args[0] == "image" && args[1] == "ls" {
 			if !containsSeq(args, "--filter", "label="+LabelSandboxImage+"=1") {
 				t.Errorf("image ls must filter DefenseClaw images: %v", args)
 			}
-			return listing, 0
+			if containsSeq(args, "--filter", "label="+LabelOwner+"="+testOwner) {
+				return strings.Join(ownedTags, "\n"), 0
+			}
+			return strings.Join(append(append([]string(nil), ownedTags...), foreignTags...), "\n"), 0
 		}
 		if args[0] == "image" && args[1] == "rm" {
+			if containsSeq(args, "rm", "-f") || containsSeq(args, "rm", "--force") {
+				t.Errorf("prune must let docker refuse images in use: %v", args)
+			}
 			return "", 0
 		}
 		return "", 1
 	}}
 	b := &Builder{Docker: docker, Store: store}
 
-	dry, err := b.Prune(context.Background(), PruneOptions{Repository: "e-repo", Keep: []string{"e-repo:untracked"}, DryRun: true})
+	keep := []string{"e-repo:claudecode-older-u1000"}
+	dry, err := b.Prune(context.Background(), PruneOptions{Repository: "e-repo", Keep: keep, DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if docker.count("image", "rm") != 0 {
 		t.Fatal("dry run removed images")
 	}
-	report, err := b.Prune(context.Background(), PruneOptions{Repository: "e-repo", Keep: []string{"e-repo:untracked"}})
+	report, err := b.Prune(context.Background(), PruneOptions{Repository: "e-repo", Keep: keep})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,22 +279,232 @@ func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 		strings.Join(dry.Removed, ",") != strings.Join(report.Removed, ",") {
 		t.Fatalf("removed = %v (dry %v)", report.Removed, dry.Removed)
 	}
-	if strings.Join(report.Kept, ",") != "e-repo:claudecode-new-u1000,e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000,e-repo:untracked" {
+	if docker.count("image", "rm") != 2 {
+		t.Fatalf("docker image rm ran %d times", docker.count("image", "rm"))
+	}
+	if strings.Join(report.Kept, ",") != "e-repo:claudecode-new-u1000,e-repo:claudecode-older-u1000,e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000" {
 		t.Fatalf("kept = %v", report.Kept)
 	}
 	if strings.Join(report.ForgottenStale, ",") != "e-repo:codex-gone-u1000" {
 		t.Fatalf("stale = %v", report.ForgottenStale)
+	}
+	if strings.Join(report.Unrecorded, ",") != "e-repo:claudecode-lost-record-u1000" {
+		t.Fatalf("unrecorded = %v", report.Unrecorded)
+	}
+	if strings.Join(report.Foreign, ",") != "e-repo:claudecode-legacy-u1000,e-repo:claudecode-otherdir-u1000,e-repo:claudecode-relabelled-u1000" {
+		t.Fatalf("foreign = %v", report.Foreign)
 	}
 	records, _ := store.List()
 	var tags []string
 	for _, r := range records {
 		tags = append(tags, r.Tag)
 	}
-	if strings.Join(tags, ",") != "e-repo:claudecode-new-u1000,e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000,other:claudecode-x-u1000" {
+	if strings.Join(tags, ",") != "e-repo:claudecode-legacy-u1000,e-repo:claudecode-new-u1000,e-repo:claudecode-older-u1000,e-repo:claudecode-relabelled-u1000,"+
+		"e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000,other:claudecode-x-u1000" {
 		t.Fatalf("store after prune = %v", tags)
 	}
 	if _, err := b.Prune(context.Background(), PruneOptions{Repository: "Bad Repo"}); err == nil {
 		t.Fatal("invalid repository accepted")
+	}
+}
+
+// fakeDaemon is a Docker daemon with a tag table and image labels, enough
+// to build, inspect, list by label, run the static probe and remove.
+type fakeDaemon struct {
+	t        *testing.T
+	mu       sync.Mutex
+	images   map[string]map[string]string // image ID -> labels
+	tags     map[string]string            // tag -> image ID
+	contexts map[string]*Context          // tag -> context (for the probe)
+	inUse    map[string]bool              // image IDs a container uses
+}
+
+func newFakeDaemon(t *testing.T) *fakeDaemon {
+	return &fakeDaemon{t: t, images: map[string]map[string]string{}, tags: map[string]string{}, contexts: map[string]*Context{}, inUse: map[string]bool{}}
+}
+
+func (d *fakeDaemon) expect(c *Context) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.contexts[c.Tag] = c
+}
+
+func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer, args ...string) error {
+	if stdin != nil {
+		_, _ = io.Copy(io.Discard, stdin)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fail := func() error { return &CommandError{Args: args, ExitCode: 1} }
+	switch {
+	case args[0] == "build":
+		labels := map[string]string{}
+		tag := ""
+		for i := 0; i+1 < len(args); i++ {
+			switch args[i] {
+			case "--label":
+				k, v, _ := strings.Cut(args[i+1], "=")
+				labels[k] = v
+			case "-t":
+				tag = args[i+1]
+			}
+		}
+		keys := make([]string, 0, len(labels))
+		for k := range labels {
+			keys = append(keys, k+"="+labels[k])
+		}
+		sort.Strings(keys)
+		sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+		id := "sha256:" + hex.EncodeToString(sum[:])
+		d.images[id] = labels
+		d.tags[tag] = id
+		return nil
+	case args[0] == "image" && args[1] == "inspect":
+		id, ok := d.tags[args[len(args)-1]]
+		if !ok {
+			return fail()
+		}
+		_, _ = io.WriteString(stdout, id+"\n")
+		return nil
+	case args[0] == "run" && containsSeq(args, "--network", "none"):
+		for i := range args {
+			if args[i] == "--entrypoint" && i+2 < len(args) {
+				if c, ok := d.contexts[args[i+2]]; ok {
+					_, _ = io.WriteString(stdout, goodProbeOutput(c))
+					return nil
+				}
+			}
+		}
+		return fail()
+	case args[0] == "image" && args[1] == "ls":
+		var want []string
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--filter" {
+				want = append(want, strings.TrimPrefix(args[i+1], "label="))
+			}
+		}
+		var out []string
+		for tag, id := range d.tags {
+			match := true
+			for _, f := range want {
+				k, v, _ := strings.Cut(f, "=")
+				match = match && d.images[id][k] == v
+			}
+			if match {
+				out = append(out, tag)
+			}
+		}
+		sort.Strings(out)
+		_, _ = io.WriteString(stdout, strings.Join(out, "\n"))
+		return nil
+	case args[0] == "image" && args[1] == "rm":
+		tag := args[len(args)-1]
+		id, ok := d.tags[tag]
+		if !ok || d.inUse[id] {
+			return fail()
+		}
+		delete(d.tags, tag)
+		return nil
+	}
+	d.t.Errorf("unexpected docker call %v", args)
+	return fail()
+}
+
+// TestPruneLeavesOtherDataDirsAlone shares one daemon between two data
+// dirs building the same specs: their images get distinct tags, neither
+// accepts the other's spec, and pruning one never removes the other's
+// images (docker also refuses an image a container still uses).
+func TestPruneLeavesOtherDataDirsAlone(t *testing.T) {
+	daemon := newFakeDaemon(t)
+	storeA, storeB := testStoreOwnedBy(t, "a0a0a0a0a0a0a0a0"), testStoreOwnedBy(t, "b0b0b0b0b0b0b0b0")
+	clock := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	a := &Builder{Docker: daemon, Store: storeA, Now: now}
+	b := &Builder{Docker: daemon, Store: storeB, Now: now}
+	ctx := context.Background()
+	build := func(builder *Builder, spec BuildSpec) Record {
+		t.Helper()
+		spec.Owner = ""
+		c, err := builder.Context(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		daemon.expect(c)
+		clock = clock.Add(time.Minute)
+		rec, err := builder.Build(ctx, spec, BuildOptions{})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		return rec
+	}
+	older := testSpec(harness.Codex)
+	older.DefenseClawVersion = "1.2.2"
+	current := testSpec(harness.Codex)
+
+	aOld, bOld := build(a, older), build(b, older)
+	aCur, bCur := build(a, current), build(b, current)
+	if aCur.Tag == bCur.Tag || aOld.Tag == bOld.Tag || aCur.Owner != "a0a0a0a0a0a0a0a0" || bCur.Owner != "b0b0b0b0b0b0b0b0" {
+		t.Fatalf("data dirs share tags or owners: %+v / %+v", aCur, bCur)
+	}
+	foreignSpec := current
+	foreignSpec.Owner = "b0b0b0b0b0b0b0b0"
+	if _, err := a.Context(foreignSpec); err == nil {
+		t.Fatal("a builder accepted a spec owned by another data dir")
+	}
+	// B's older image still runs a sandbox.
+	daemon.inUse[daemon.tags[bOld.Tag]] = true
+
+	report, err := a.Prune(ctx, PruneOptions{Repository: current.Repository})
+	if err != nil {
+		t.Fatalf("Prune(A): %v", err)
+	}
+	if strings.Join(report.Removed, ",") != aOld.Tag {
+		t.Fatalf("A removed %v, want only its own older image %s", report.Removed, aOld.Tag)
+	}
+	foreign := []string{bOld.Tag, bCur.Tag}
+	sort.Strings(foreign)
+	if strings.Join(report.Foreign, ",") != strings.Join(foreign, ",") {
+		t.Fatalf("A foreign = %v, want %v", report.Foreign, foreign)
+	}
+	for _, tag := range []string{bOld.Tag, bCur.Tag, aCur.Tag} {
+		if _, ok := daemon.tags[tag]; !ok {
+			t.Fatalf("%s was removed", tag)
+		}
+	}
+	// B's own older image is in use: docker refuses and B keeps its record.
+	report, err = b.Prune(ctx, PruneOptions{Repository: current.Repository})
+	if err == nil || len(report.Removed) != 0 || strings.Join(report.Foreign, ",") != aCur.Tag {
+		t.Fatalf("Prune(B) = %+v, %v", report, err)
+	}
+	if _, ok, _ := storeB.Get(bOld.Tag); !ok {
+		t.Fatal("B forgot an image docker refused to remove")
+	}
+}
+
+func TestStoreOwnerIsCreatedOncePerDataDir(t *testing.T) {
+	dir := t.TempDir()
+	first, err := NewStore(dir).Owner()
+	if err != nil || !ownerRE.MatchString(first) {
+		t.Fatalf("owner = %q %v", first, err)
+	}
+	if again, err := NewStore(dir).Owner(); err != nil || again != first {
+		t.Fatalf("owner changed: %q -> %q (%v)", first, again, err)
+	}
+	if other, _ := NewStore(t.TempDir()).Owner(); other == first {
+		t.Fatal("two data dirs share an owner")
+	}
+	store := NewStore(dir)
+	if err := store.Put(Record{Tag: "r:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := store.Owner(); again != first {
+		t.Fatal("a write dropped the owner")
+	}
+	if err := os.WriteFile(store.Path(), []byte(`{"version":1,"owner":"NOT-HEX","images":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Owner(); err == nil {
+		t.Fatal("malformed owner accepted")
 	}
 }
 
@@ -335,7 +571,7 @@ func recordFor(c *Context, builtAt time.Time, verified bool) Record {
 		Tag: c.Tag, ImageID: "sha256:" + strings.Repeat("1", 64), ContentHash: c.ContentHash,
 		Connector: c.Spec.Harness.Name, HarnessVersion: c.HarnessVersion, HookContract: c.Contract,
 		BaseImage: c.Spec.BaseImage, UID: c.Spec.UID, GID: c.Spec.GID, IngressPort: c.Spec.IngressPort,
-		DefenseClawVersion: c.Spec.DefenseClawVersion, FailMode: c.Spec.FailMode, BuiltAt: builtAt,
+		DefenseClawVersion: c.Spec.DefenseClawVersion, FailMode: c.Spec.FailMode, Owner: c.Spec.Owner, BuiltAt: builtAt,
 		HookFireVerified: verified,
 	}
 	if verified {
@@ -349,7 +585,7 @@ func recordFor(c *Context, builtAt time.Time, verified bool) Record {
 // never falls back to the older image (its hooks may be stale), and never
 // selects a record whose recorded inputs drifted from the expected build.
 func TestStoreCurrentSelectsOnlyTheExactVerifiedImage(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	oldSpec := testSpec(harness.ClaudeCode)
 	newSpec := testSpec(harness.ClaudeCode)
@@ -404,6 +640,7 @@ func TestStoreCurrentSelectsOnlyTheExactVerifiedImage(t *testing.T) {
 		"ingress":      func(r *Record) { r.IngressPort = 18981 },
 		"connector":    func(r *Record) { r.Connector = "codex" },
 		"not-verified": func(r *Record) { r.HookFireVerified = false },
+		"owner":        func(r *Record) { r.Owner = "f0f0f0f0f0f0f0f0" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := recordFor(newCtx, t0.Add(time.Hour), true)

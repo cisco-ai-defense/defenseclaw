@@ -50,7 +50,7 @@ type BuildOptions struct {
 // image keeps its recorded verdict; Store.Current selects the image only
 // after VerifyHooks proves its hooks fire.
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
-	c, err := NewContext(spec)
+	c, err := b.Context(spec)
 	if err != nil {
 		return Record{}, err
 	}
@@ -113,6 +113,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		IngressPort:        c.Spec.IngressPort,
 		DefenseClawVersion: c.Spec.DefenseClawVersion,
 		FailMode:           c.Spec.FailMode,
+		Owner:              c.Spec.Owner,
 		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
@@ -128,6 +129,34 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		return Record{}, err
 	}
 	return rec, nil
+}
+
+// Context renders spec's build context for this builder's store: an empty
+// spec.Owner becomes the store's owner, and a spec owned by another data dir
+// is refused.
+func (b *Builder) Context(spec BuildSpec) (*Context, error) {
+	owner, err := b.Store.Owner()
+	if err != nil {
+		return nil, err
+	}
+	switch spec.Owner {
+	case "":
+		spec.Owner = owner
+	case owner:
+	default:
+		return nil, fmt.Errorf("openshell image: spec belongs to image store owner %q, not this store's %q", spec.Owner, owner)
+	}
+	return NewContext(spec)
+}
+
+// Current returns the verified image a sandbox built from spec must run
+// (see Store.Current).
+func (b *Builder) Current(spec BuildSpec) (Record, bool, error) {
+	c, err := b.Context(spec)
+	if err != nil {
+		return Record{}, false, err
+	}
+	return b.Store.Current(c)
 }
 
 func (b *Builder) now() time.Time {
@@ -174,13 +203,25 @@ type PruneReport struct {
 	Removed        []string
 	Kept           []string
 	ForgottenStale []string
+	// Unrecorded are images labelled with this store's owner that it holds
+	// no record for (for example after images.json was restored from an
+	// older copy). They are reported, never removed.
+	Unrecorded []string
+	// Foreign are the repository's other DefenseClaw images: built by
+	// another data dir sharing the daemon, or recorded here without this
+	// store's owner label. They are reported, never removed.
+	Foreign []string
 }
 
-// Prune removes DefenseClaw overlay images of one repository except, per
-// (connector, uid, gid, ingress port), the most recent image and the most
-// recent hook-verified one (what Store.Current selects for an unchanged
-// spec), plus
-// opts.Keep, and forgets store records whose image no longer exists.
+// Prune removes overlay images this store built, in one repository, except,
+// per (connector, uid, gid, ingress port), the most recent image and the
+// most recent hook-verified one (what Store.Current selects for an unchanged
+// spec), plus opts.Keep, and forgets store records whose image no longer
+// exists. An image is removed only when this store recorded it under its own
+// owner and the image carries that owner label; every other DefenseClaw
+// image is reported, never removed, so data dirs sharing a Docker daemon (or
+// a data dir that lost images.json) never delete images another one runs.
+// Images in use by a container are refused by docker itself (no --force).
 func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, error) {
 	repo := opts.Repository
 	if repo == "" {
@@ -189,17 +230,17 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	if !repositoryRE.MatchString(repo) {
 		return PruneReport{}, fmt.Errorf("openshell image: invalid repository %q", repo)
 	}
-	listed, err := output(ctx, b.Docker, nil, "image", "ls", "--filter", "label="+LabelSandboxImage+"=1",
-		"--format", "{{.Repository}}:{{.Tag}}")
+	owner, err := b.Store.Owner()
 	if err != nil {
-		return PruneReport{}, fmt.Errorf("openshell image: list images: %w", err)
+		return PruneReport{}, err
 	}
-	present := map[string]bool{}
-	for _, line := range strings.Split(listed, "\n") {
-		tag := strings.TrimSpace(line)
-		if strings.HasPrefix(tag, repo+":") && !strings.HasSuffix(tag, ":<none>") {
-			present[tag] = true
-		}
+	present, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1")
+	if err != nil {
+		return PruneReport{}, err
+	}
+	owned, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1", "label="+LabelOwner+"="+owner)
+	if err != nil {
+		return PruneReport{}, err
 	}
 	records, err := b.Store.List()
 	if err != nil {
@@ -215,15 +256,23 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	}
 	latest := map[identity]Record{}
 	verified := map[identity]Record{}
-	var stale []string
+	recorded := map[string]bool{}
+	var report PruneReport
+	var candidates []Record
 	for _, r := range records {
 		if !strings.HasPrefix(r.Tag, repo+":") {
 			continue
 		}
-		if !present[r.Tag] {
-			stale = append(stale, r.Tag)
+		recorded[r.Tag] = true
+		switch {
+		case !present[r.Tag]:
+			report.ForgottenStale = append(report.ForgottenStale, r.Tag)
+			continue
+		case r.Owner != owner || !owned[r.Tag]:
+			report.Foreign = append(report.Foreign, r.Tag)
 			continue
 		}
+		candidates = append(candidates, r)
 		id := identity{r.Connector, r.UID, r.GID, r.IngressPort}
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r
@@ -238,32 +287,57 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	for _, r := range verified {
 		keep[r.Tag] = true
 	}
-	var report PruneReport
-	tags := make([]string, 0, len(present))
 	for tag := range present {
-		tags = append(tags, tag)
+		switch {
+		case recorded[tag]:
+		case owned[tag]:
+			report.Unrecorded = append(report.Unrecorded, tag)
+		default:
+			report.Foreign = append(report.Foreign, tag)
+		}
 	}
-	sort.Strings(tags)
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Tag < candidates[j].Tag })
 	var removeErrs []error
-	for _, tag := range tags {
-		if keep[tag] {
-			report.Kept = append(report.Kept, tag)
+	for _, r := range candidates {
+		if keep[r.Tag] {
+			report.Kept = append(report.Kept, r.Tag)
 			continue
 		}
 		if !opts.DryRun {
-			if _, err := output(ctx, b.Docker, nil, "image", "rm", tag); err != nil {
-				removeErrs = append(removeErrs, fmt.Errorf("remove %s: %w", tag, err))
+			if _, err := output(ctx, b.Docker, nil, "image", "rm", r.Tag); err != nil {
+				removeErrs = append(removeErrs, fmt.Errorf("remove %s: %w", r.Tag, err))
 				continue
 			}
 		}
-		report.Removed = append(report.Removed, tag)
+		report.Removed = append(report.Removed, r.Tag)
 	}
-	sort.Strings(stale)
-	report.ForgottenStale = stale
+	sort.Strings(report.ForgottenStale)
+	sort.Strings(report.Unrecorded)
+	sort.Strings(report.Foreign)
 	if !opts.DryRun {
-		if err := b.Store.Remove(append(append([]string(nil), report.Removed...), stale...)...); err != nil {
+		if err := b.Store.Remove(append(append([]string(nil), report.Removed...), report.ForgottenStale...)...); err != nil {
 			return report, err
 		}
 	}
 	return report, errors.Join(removeErrs...)
+}
+
+// listTags lists the tags of repo whose images match every docker filter.
+func (b *Builder) listTags(ctx context.Context, repo string, filters ...string) (map[string]bool, error) {
+	args := []string{"image", "ls"}
+	for _, f := range filters {
+		args = append(args, "--filter", f)
+	}
+	listed, err := output(ctx, b.Docker, nil, append(args, "--format", "{{.Repository}}:{{.Tag}}")...)
+	if err != nil {
+		return nil, fmt.Errorf("openshell image: list images: %w", err)
+	}
+	tags := map[string]bool{}
+	for _, line := range strings.Split(listed, "\n") {
+		tag := strings.TrimSpace(line)
+		if strings.HasPrefix(tag, repo+":") && !strings.HasSuffix(tag, ":<none>") {
+			tags[tag] = true
+		}
+	}
+	return tags, nil
 }

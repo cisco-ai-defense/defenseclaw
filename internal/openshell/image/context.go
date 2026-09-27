@@ -63,6 +63,8 @@ const (
 	LabelGID            = "io.defenseclaw.gid"
 	LabelIngressPort    = "io.defenseclaw.ingress-port"
 	LabelVersion        = "io.defenseclaw.defenseclaw-version"
+	// LabelOwner is the Store.Owner of the data dir that built the image.
+	LabelOwner = "io.defenseclaw.owner"
 )
 
 // ErrUnknownContract is returned when the pinned harness version has no
@@ -90,6 +92,11 @@ type BuildSpec struct {
 	DefenseClawVersion string
 	// Repository defaults to DefaultRepository.
 	Repository string
+	// Owner is the Store.Owner of the data dir the image belongs to
+	// (Builder fills it in). It is part of the content hash, so it names
+	// the tag, and the LabelOwner label, which is applied with --label so
+	// data dirs sharing a daemon still share every build layer.
+	Owner string
 }
 
 // ContextFile is one build-context entry. UID/GID record the in-image owner
@@ -165,6 +172,9 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	}
 	if !versionRE.MatchString(spec.DefenseClawVersion) {
 		return nil, fmt.Errorf("openshell image: DefenseClaw version %q is invalid", spec.DefenseClawVersion)
+	}
+	if !ownerRE.MatchString(spec.Owner) {
+		return nil, fmt.Errorf("openshell image: owner %q is not a store owner (16 lowercase hex digits)", spec.Owner)
 	}
 	switch strings.TrimSpace(spec.FailMode) {
 	case "", connector.SandboxFailMode:
@@ -245,6 +255,7 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		LabelGID:            strconv.Itoa(spec.GID),
 		LabelIngressPort:    strconv.Itoa(spec.IngressPort),
 		LabelVersion:        spec.DefenseClawVersion,
+		LabelOwner:          spec.Owner,
 	}
 	return c, nil
 }
@@ -297,6 +308,7 @@ type hashInput struct {
 	GID                int         `json:"gid"`
 	IngressPort        int         `json:"ingress_port"`
 	FailMode           string      `json:"fail_mode"`
+	Owner              string      `json:"owner"`
 	Files              []hashEntry `json:"files"`
 }
 
@@ -320,6 +332,7 @@ func contentHash(c *Context) (string, error) {
 		GID:                c.Spec.GID,
 		IngressPort:        c.Spec.IngressPort,
 		FailMode:           c.Spec.FailMode,
+		Owner:              c.Spec.Owner,
 	}
 	for _, f := range c.Files {
 		sum := sha256.Sum256(f.Data)
