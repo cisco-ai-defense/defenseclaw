@@ -492,7 +492,9 @@ func (r *liveRig) codex(ctx context.Context) {
 	}
 
 	// (d) Safe mode refuses approval_policy never although the user config
-	// and a raw --dangerously-bypass-approvals-and-sandbox ask for it.
+	// and a raw --dangerously-bypass-approvals-and-sandbox ask for it: Codex
+	// falls back to untrusted, which asks before the marker command, and
+	// codex exec, which cannot ask, does not run it.
 	safe := func(name string, files []RunFile) HookFireRun {
 		sc := allow(name)
 		sc.setup = userConfig("approval_policy = \"never\"\n") + projectConfig("approval_policy = \"never\"\n")
@@ -503,16 +505,17 @@ func (r *liveRig) codex(ctx context.Context) {
 		opts := base
 		opts.RunFiles = files
 		run, _, _ := r.run(ctx, opts, sc)
-		r.requireHooks(run)
 		return run
 	}
 	refused := safe("codex-safe", r.files(connector.SandboxRunConfig{Safe: true}))
-	if report := strings.Join(refused.Report, " "); !strings.Contains(report, "approval: on-request") || !strings.Contains(report, "requirements-fallback") {
-		t.Fatalf("safe mode: Codex ran with %q, want on-request", report)
+	if report := strings.Join(refused.Report, " "); !strings.Contains(report, "approval: untrusted") || !strings.Contains(report, "requirements-fallback") ||
+		!r.sawPreToolUse(refused) || sideEffect(refused) != "absent" {
+		t.Fatalf("safe mode: Codex ran with %q (side effect %s), want untrusted with the marker command not run\n%s", report, sideEffect(refused), refused.Output)
 	}
 	control := safe("codex-safe-control", nil)
-	if report := strings.Join(control.Report, " "); !strings.Contains(report, "approval: never") {
-		t.Fatalf("control: without the run files Codex ran with %q, not never; the scenario proves nothing", report)
+	r.requireHooks(control)
+	if report := strings.Join(control.Report, " "); !strings.Contains(report, "approval: never") || sideEffect(control) != "present" {
+		t.Fatalf("control: without the run files Codex ran with %q (side effect %s), not never; the scenario proves nothing", report, sideEffect(control))
 	}
-	t.Logf("CONTROL safe mode: requirements forced approval %q against user/project approval_policy never and the bypass flag (without: %q)", refused.Report, control.Report)
+	t.Logf("CONTROL safe mode: requirements forced approval %q against user/project approval_policy never and the bypass flag, and the marker command did not run (without: %q, it ran)", refused.Report, control.Report)
 }

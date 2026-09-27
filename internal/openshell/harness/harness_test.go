@@ -393,8 +393,10 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{ClaudeCodeLauncherPath, "--dangerously-skip-permissions", "-p", "fix the tests", "--output-format", "json"}},
 		{"codex-interactive-yolo", Codex, LaunchOptions{Mode: Interactive, Yolo: true},
 			[]string{CodexLauncherPath, "--dangerously-bypass-approvals-and-sandbox"}},
+		// Without Codex's own sandbox, untrusted is the policy that asks
+		// before commands and edits (on-request never would).
 		{"codex-interactive-safe", Codex, LaunchOptions{Mode: Interactive},
-			[]string{CodexLauncherPath, "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="on-request"`}},
+			[]string{CodexLauncherPath, "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="untrusted"`}},
 		{"codex-headless-mantle", Codex, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.CodexBedrockMantleID, BedrockRegion: "us-west-2", Args: []string{"-m", "openai.gpt-oss-20b"}},
 			[]string{CodexLauncherPath, "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
 				"-c", `model_provider="mantle"`, "-c", `model_providers.mantle.name="mantle"`,

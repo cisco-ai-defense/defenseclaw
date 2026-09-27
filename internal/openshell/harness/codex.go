@@ -77,8 +77,11 @@ var Codex = register(&Spec{
 			argv = append(argv, "--dangerously-bypass-approvals-and-sandbox")
 		} else {
 			// Codex's own bubblewrap/Landlock sandbox cannot nest inside
-			// OpenShell; keep its approval prompts but not its sandbox.
-			argv = append(argv, "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="on-request"`)
+			// OpenShell, so Codex runs without one. "untrusted" then asks
+			// before every command outside Codex's read-only set and every
+			// edit; on-request would ask only when the model escalates out
+			// of a sandbox it no longer has, which it never needs to.
+			argv = append(argv, "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="untrusted"`)
 		}
 		argv = append(argv, cp.LaunchArgs...)
 		argv = append(argv, opts.Args...)

@@ -26,9 +26,11 @@ import (
 
 // codexSandboxSafeApprovalPolicies are the Codex 0.146 approval policies
 // that keep its prompts (every AskForApproval value but "never"). Codex
-// falls back to the first one when a flag or a config asks for another, so
-// on-request, the policy a safe launch passes, comes first.
-var codexSandboxSafeApprovalPolicies = []string{"on-request", "on-failure", "untrusted"}
+// falls back to the first one when a config asks for another, so
+// untrusted, the policy a safe launch passes, comes first: without Codex's
+// own sandbox (it cannot run inside OpenShell) it is the one that asks
+// before every command outside Codex's read-only set and every edit.
+var codexSandboxSafeApprovalPolicies = []string{"untrusted", "on-request", "on-failure"}
 
 // codexSandboxSafeSandboxModes: Codex's own sandbox cannot run inside
 // OpenShell, so safe mode still runs danger-full-access; Codex requires
@@ -56,7 +58,7 @@ var (
 //     keys in a project's .codex/config.toml); and the imported MCP servers,
 //     with cwd and env_vars pinned;
 //   - requirements.toml: in safe mode allowed_approval_policies without
-//     "never" (Codex falls back to on-request when a flag, the user or the
+//     "never" (Codex falls back to untrusted when a flag, the user or the
 //     project asks for never) and allowed_sandbox_modes; with project
 //     servers blocked, an mcp_servers allowlist of the imported servers by
 //     name and command or URL identity (none imported: an empty table, which

@@ -546,15 +546,29 @@ func (x *tuiCodex) safeRun() {
 	if !strings.Contains(screen, "skip-permissions OFF (harness prompts kept)") || strings.Contains(screen, "YOLO mode") {
 		t.Fatalf("--safe launch screen:\n%s", screen)
 	}
+	// Without Codex's own sandbox, --safe must ask before a harmless write
+	// too (approval_policy untrusted), not only before a command Codex
+	// deems dangerous.
+	sb := x.get(x.safe)
+	x.exec(sb, 30*time.Second, true, "rm", "-f", allowedMarkerFile)
 	since := time.Now()
-	m.submit("Run the DCE2E-DANGER scenario.")
-	m.waitFor(3*time.Minute, "Codex's approval prompt", func(s string) bool { return strings.Contains(s, approvalAsk) })
+	m.submit("Run the DCE2E-ALLOW scenario.")
+	screen = m.waitFor(3*time.Minute, "Codex's approval prompt", func(s string) bool { return strings.Contains(s, approvalAsk) })
 	m.save("safe-ask")
+	if !strings.Contains(screen, "dce2e-allowed") {
+		t.Fatalf("the approval prompt does not show the marker command:\n%s", screen)
+	}
+	if x.exec(sb, 30*time.Second, true, "test", "-e", allowedMarkerFile).code == 0 {
+		t.Fatal("the command ran before it was approved")
+	}
 	rows := x.waitRows(x.safe, since, "PermissionRequest")
 	m.keys("y")
-	m.waitFor(3*time.Minute, "the approved command", func(s string) bool { return strings.Contains(s, "DCE2E-TURN-DONE danger") })
+	m.waitFor(3*time.Minute, "the approved command", func(s string) bool { return strings.Contains(s, "DCE2E-TURN-DONE allow") })
 	rows = x.waitRowsFor(x.safe, x.waitRows(x.safe, since, "Stop"), notifyEvent)
 	x.record(modeTUI, "--safe turn", rows)
+	if x.exec(sb, 30*time.Second, true, "test", "-e", allowedMarkerFile).code != 0 {
+		t.Fatal("the approved command did not run")
+	}
 	// Ctrl-C at an idle prompt ends the session.
 	since = time.Now()
 	m.keys("C-c")
@@ -569,9 +583,10 @@ func (x *tuiCodex) safeRun() {
 
 	// codex exec cannot show the prompt: PermissionRequest still reaches
 	// DefenseClaw, and Codex refuses the command.
-	sb := x.start(x.safe)
+	sb = x.start(x.safe)
+	x.exec(sb, 30*time.Second, true, "rm", "-f", allowedMarkerFile)
 	since = time.Now()
-	argv, err := harness.Codex.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Prompt: "Run the DCE2E-DANGER scenario.", Args: x.mockArgs()})
+	argv, err := harness.Codex.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Prompt: "Run the DCE2E-ALLOW scenario.", Args: x.mockArgs()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +597,8 @@ func (x *tuiCodex) safeRun() {
 	out := string(res.Stdout) + string(res.Stderr)
 	rows = x.waitRows(sb.Name, since, "SessionEnd")
 	x.record(modeHeadless, "--safe exec", rows)
-	if countEvent(rows, "PermissionRequest") == 0 || !strings.Contains(out, "approval is not supported in exec mode") {
+	if countEvent(rows, "PermissionRequest") == 0 || !strings.Contains(out, "approval is not supported in exec mode") ||
+		x.exec(sb, 30*time.Second, true, "test", "-e", allowedMarkerFile).code == 0 {
 		t.Fatalf("--safe codex exec: %v\n%s", eventNames(rows), truncate(out, 1500))
 	}
 }

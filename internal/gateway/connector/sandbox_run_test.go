@@ -296,7 +296,8 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			policies, _ := req["allowed_approval_policies"].([]interface{})
-			if tc.run.Safe != (len(policies) == 3) {
+			// untrusted first: Codex falls back to the first allowed policy.
+			if tc.run.Safe != (len(policies) == 3) || (tc.run.Safe && policies[0] != "untrusted") {
 				t.Fatalf("approval policies = %v", policies)
 			}
 			for _, p := range policies {
