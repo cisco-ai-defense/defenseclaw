@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1516,5 +1517,57 @@ func TestResolveRunsTheComparedPack(t *testing.T) {
 	}
 	if checks != 1 {
 		t.Fatalf("the --pack was read %d times, want once", checks)
+	}
+}
+
+func TestResolveReviewFloor(t *testing.T) {
+	for _, glob := range reviewFloor {
+		if err := config.ValidateOpenShellProjectGlob(glob); err != nil {
+			t.Errorf("review floor %q: %v", glob, err)
+		}
+	}
+	// A custom pack without review globs still gets the floor, and a
+	// built-in pack keeps its own globs.
+	root := teamPackDir(t)
+	for _, cfg := range []*config.Config{
+		testConfig(func(o *config.OpenShellConfig) { o.Pack, o.PackDir = "team", root }),
+		testConfig(nil),
+	} {
+		eff, _ := mustResolve(t, cfg, Flags{})
+		for _, glob := range []string{"**/.claude/**", ".mcp.json", "**/.codex/**", "AGENTS.md", "CLAUDE.md", "**/.cursor/**",
+			"package-lock.json", "yarn.lock", "go.sum", "Cargo.lock", "uv.lock", PackFileName} {
+			if !containsString(eff.Workspace.Review, glob) {
+				t.Fatalf("pack %s review %v lacks %q", eff.Pack.Name, eff.Workspace.Review, glob)
+			}
+		}
+		if eff.Pack.Builtin && !containsString(eff.Workspace.Review, "package.json") {
+			t.Fatalf("the built-in pack's own review globs were dropped: %v", eff.Workspace.Review)
+		}
+		wantSetting(t, eff, "workdir.review", listValue(eff.Workspace.Review), SourcePack,
+			"pack "+eff.Pack.Name+" + defenseclaw review floor")
+	}
+}
+
+func TestResolvePolicySources(t *testing.T) {
+	home := t.TempDir()
+	withHome(t, home)
+	root := filepath.Join(home, "packs")
+	teamDir := writePack(t, root, "team", customPack("team"))
+	other := writePack(t, t.TempDir(), "other", customPack("other"))
+
+	eff, _ := mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.Pack, o.PackDir = "team", "~/packs" }),
+		Flags{Pack: other})
+	want := []string{filepath.Join(other, PackFileName), root, filepath.Join(teamDir, PackFileName)}
+	sort.Strings(want)
+	if got := eff.PolicySources(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("PolicySources() = %v, want %v", got, want)
+	}
+	// Built-in packs are embedded: only the pack directory is a source.
+	eff, _ = mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.PackDir = root }), Flags{Pack: "strict"})
+	if got := eff.PolicySources(); !reflect.DeepEqual(got, []string{root}) {
+		t.Fatalf("PolicySources() = %v", got)
+	}
+	if got := (*Effective)(nil).PolicySources(); got != nil {
+		t.Fatalf("nil Effective: %v", got)
 	}
 }

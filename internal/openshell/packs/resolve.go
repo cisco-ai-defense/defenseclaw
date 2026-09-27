@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -276,6 +277,8 @@ type Effective struct {
 	// a floor for runtime actions too.
 	requiredPack  bool
 	reservedPorts map[int]string
+	// policySources: see PolicySources.
+	policySources []string
 	home          string
 	// hostNames are this machine's own names, which reach the host.
 	hostNames []string
@@ -397,7 +400,47 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.resolveLearn(flags)
 	r.eff.HookFailMode = pack.Hooks.FailMode
 	r.set("hooks.fail_mode", pack.Hooks.FailMode, r.packLayer)
+	r.eff.policySources = r.policySources(o)
 	return r.eff, r.violations, nil
+}
+
+// PolicySources returns the host paths the sandbox policy is read from:
+// openshell.pack_dir, the files of the custom packs openshell.pack and
+// openshell.admin.required_pack name, and the file of every other custom
+// pack this Resolve loaded (a --pack). A custom pack is trusted because the
+// current user owns it, and in mount
+// mode the agent writes the project as that user, so the sandbox launcher
+// must pass these paths as workspace.SourceOptions.Protected: a folder that
+// holds one is never shared, and an agent cannot rewrite the policy that
+// confines the next session. The default pack directory is inside the
+// DefenseClaw data directory, which is protected on its own.
+func (e *Effective) PolicySources() []string {
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.policySources...)
+}
+
+func (r *resolver) policySources(o config.OpenShellConfig) []string {
+	var sources []string
+	if dir, err := expandHome(strings.TrimSpace(o.PackDir)); err == nil && filepath.IsAbs(dir) {
+		sources = append(sources, filepath.Clean(dir))
+	}
+	for _, ref := range []string{o.Pack, r.admin.RequiredPack} {
+		if ref = strings.TrimSpace(ref); ref == "" || IsBuiltin(ref) {
+			continue
+		}
+		if file, err := packFilePath(ref, o.PackDir); err == nil {
+			sources = appendUnique(sources, file)
+		}
+	}
+	for _, pack := range r.loaded {
+		if !pack.Builtin && filepath.IsAbs(pack.Source) {
+			sources = appendUnique(sources, pack.Source)
+		}
+	}
+	sort.Strings(sources)
+	return sources
 }
 
 func validateFlags(flags Flags) error {
@@ -772,6 +815,29 @@ func (r *resolver) resolveHarness(flags Flags) {
 	r.set("harness", harness, layer{SourceFlag, "sandbox run"})
 }
 
+// reviewFloor are the sensitive-change globs every run's end-of-session
+// review flags on top of the pack's workspace.review, so a custom pack cannot
+// drop them. The workspace review's built-in risk rules already cover build
+// files, git hook managers, and package- and version-manager config; these
+// are the files a harness or agent tool loads and acts on without asking the
+// next time anyone runs one in the project outside the sandbox (hooks, MCP
+// servers, instructions), lock files, which can point the next install at
+// any package source, and sandbox policy packs kept in the project.
+var reviewFloor = []string{
+	"**/.claude/**", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json",
+	"**/.codex/**", "AGENTS.md", "AGENTS.override.md",
+	"**/.cursor/**", ".cursorrules",
+	"**/.gemini/**", "GEMINI.md",
+	"**/.windsurf/**", ".windsurfrules",
+	"**/.kiro/**", "**/.amazonq/**", "**/.continue/**", "**/.roo/**", ".roomodes",
+	".clinerules", "**/.clinerules/**", "**/.opencode/**", "opencode.json", "opencode.jsonc", ".aider.conf.yml",
+	".github/copilot-instructions.md", ".github/instructions/**", ".github/prompts/**", ".github/chatmodes/**",
+	"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+	"deno.lock", "poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock", "Cargo.lock", "go.sum", "Gemfile.lock",
+	"composer.lock", "mix.lock", "pubspec.lock", "Podfile.lock", "packages.lock.json", "gradle.lockfile",
+	PackFileName,
+}
+
 func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	pack := r.eff.Pack
 	ws := &r.eff.Workspace
@@ -830,8 +896,8 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	}
 	r.set("workdir.unmask", listValue(ws.Unmask), unmaskFrom)
 
-	ws.Review = append([]string{}, pack.Workspace.Review...)
-	r.set("workdir.review", listValue(ws.Review), r.packLayer)
+	ws.Review = mergeLists(pack.Workspace.Review, reviewFloor)
+	r.set("workdir.review", listValue(ws.Review), layer{r.packLayer.source, r.packLayer.origin + " + defenseclaw review floor"})
 
 	ws.MaxUploadMB, from = pack.Workspace.MaxUploadMB, r.packLayer
 	if o.Workdir.MaxUploadMB > 0 {
