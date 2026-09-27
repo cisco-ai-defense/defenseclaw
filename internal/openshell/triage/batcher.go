@@ -69,12 +69,16 @@ type Item struct {
 	attempts int
 }
 
-// Result is the outcome of one Item. At most one of Err, Skipped, Changed,
-// Stale and Gone is set; none means the chunk is approved.
+// Result is the outcome of one Item. At most one of Err, Refused, Skipped,
+// Changed, Stale and Gone is set; none means the chunk is approved.
 type Result struct {
 	Item Item
 	// Err is set when the approval failed.
 	Err error
+	// Refused is set when BatcherOptions.Recheck refused the approval right
+	// before it was applied; the chunk was not approved and is still
+	// pending.
+	Refused error
 	// Skipped reports a security-flagged chunk OpenShell left out of a bulk
 	// approval.
 	Skipped bool
@@ -114,6 +118,11 @@ type BatcherOptions struct {
 	// MaxWait bounds the wait for quiescence; a sandbox busy that long gets
 	// its batch anyway (default 2m).
 	MaxWait time.Duration
+	// Recheck, when set, judges every approval again right before it is
+	// applied, against the chunk as it is then: a destination name may
+	// resolve elsewhere, and the policy may have changed, since the approval
+	// was decided. An error leaves the chunk unapproved (Result.Refused).
+	Recheck func(ctx context.Context, item Item, chunk openshell.PolicyChunk) error
 	// OnResult receives every batch's results. It runs on the batcher
 	// goroutine and must not block for long.
 	OnResult func([]Result)
@@ -363,6 +372,7 @@ func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) ([]Re
 		c, done := a.check(draft, it)
 		switch {
 		case done:
+		case a.refused(it, c):
 		case c.SecurityNotes != "":
 			single = append(single, it)
 		default:
@@ -417,6 +427,19 @@ func (a *applyRun) result(r Result) {
 }
 
 func (a *applyRun) fail(it Item, err error) { a.result(Result{Item: it, Err: err}) }
+
+// refused runs BatcherOptions.Recheck on an item about to be applied and
+// settles it as Refused when the check fails.
+func (a *applyRun) refused(it Item, c openshell.PolicyChunk) bool {
+	if a.b.opts.Recheck == nil {
+		return false
+	}
+	if err := a.b.opts.Recheck(a.ctx, it, c); err != nil {
+		a.result(Result{Item: it, Refused: err})
+		return true
+	}
+	return false
+}
 
 // again retries an item whose review token went stale, up to
 // maxApplyAttempts.

@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -368,6 +369,39 @@ func (w *fakeWatch) waitStarted(t *testing.T, sandbox string) {
 	}
 }
 
+// fakeDNS answers the names a test sets and a public address for every
+// other name, so triage never depends on real DNS.
+type fakeDNS struct {
+	mu      sync.Mutex
+	answers map[string][]string
+}
+
+func newFakeDNS() *fakeDNS { return &fakeDNS{answers: map[string][]string{}} }
+
+// set makes host resolve to addrs; none makes it fail to resolve.
+func (d *fakeDNS) set(host string, addrs ...string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.answers[host+"."] = addrs
+}
+
+func (d *fakeDNS) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	addrs, ok := d.answers[name]
+	if !ok {
+		addrs = []string{"93.184.216.34"}
+	}
+	if len(addrs) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	out := make([]net.IPAddr, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, net.IPAddr{IP: net.ParseIP(a)})
+	}
+	return out, nil
+}
+
 // harnessEnv is a fixture tying a manager to the fake gateway.
 type harnessEnv struct {
 	t        *testing.T
@@ -384,6 +418,7 @@ type harnessEnv struct {
 	tel      *memTelemetry
 	persist  *fakePersister
 	watch    *fakeWatch
+	dns      *fakeDNS
 	forgot   []string
 	m        *Manager
 	cancel   context.CancelFunc
@@ -438,6 +473,7 @@ func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	e.tel = &memTelemetry{}
 	e.persist = &fakePersister{}
 	e.watch = newFakeWatch()
+	e.dns = newFakeDNS()
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1"}
 	e.m = e.newManager()
 	return e
@@ -470,7 +506,7 @@ func (e *harnessEnv) newManager() *Manager {
 		Bindings: e.store, Images: e.images, Workspace: e.ws, Profiles: e.importer, Telemetry: e.tel,
 		Persist: e.persist, ForgetBinding: func(id string) { e.forgot = append(e.forgot, id) },
 		IngressPort: testIngressPort, EgressPort: testEgressPort, APIPort: 18970,
-		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch,
+		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
 		DefenseClawVersion: "1.2.3", SettleDelay: -1, HookSilence: 10 * time.Minute,
 		Logf: func(format string, args ...any) { e.t.Logf("[manager] "+format, args...) },
 	})

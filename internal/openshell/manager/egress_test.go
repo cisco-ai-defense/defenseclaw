@@ -63,7 +63,18 @@ func principalOf(t *testing.T, e *harnessEnv, name string) egress.Principal {
 	if !ok {
 		t.Fatalf("no principal for %s", name)
 	}
+	if p.Decider == nil {
+		t.Fatalf("the principal of %s has no decider of its own", name)
+	}
 	return p
+}
+
+// decide is the proxy's verdict for the sandbox's current principal, which
+// carries the sandbox's own decider.
+func decide(t *testing.T, e *harnessEnv, name, host string, port int) egress.Decision {
+	t.Helper()
+	p := principalOf(t, e, name)
+	return p.Decider.Decide(p, host, port)
 }
 
 func TestDeciderAndUnblocks(t *testing.T) {
@@ -72,13 +83,11 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	e.m.AttachProxy(proxy)
 	e.create(sandboxapi.CreateRequest{Name: "egbox"})
 	e.create(sandboxapi.CreateRequest{Name: "otherbox"})
-	p, other := principalOf(t, e, "egbox"), principalOf(t, e, "otherbox")
-	d := proxy.current()
-	if d == nil {
-		t.Fatal("no decider set")
+	if proxy.current() == nil {
+		t.Fatal("no default decider set")
 	}
 	for host, allowed := range map[string]bool{"example.org": true, "webhook.site": false, "blocked.example.com": false} {
-		if got := d.Decide(p, host, 443).Allowed; got != allowed {
+		if got := decide(t, e, "egbox", host, 443).Allowed; got != allowed {
 			t.Fatalf("%s allowed = %v, want %v", host, got, allowed)
 		}
 	}
@@ -88,8 +97,7 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	if err != nil || resp.Scope != "sandbox" || resp.Host != "webhook.site" || !resp.Persisted {
 		t.Fatalf("unblock = %+v, %v", resp, err)
 	}
-	d = proxy.current()
-	if !d.Decide(p, "webhook.site", 443).Allowed || d.Decide(other, "webhook.site", 443).Allowed {
+	if !decide(t, e, "egbox", "webhook.site", 443).Allowed || decide(t, e, "otherbox", "webhook.site", 443).Allowed {
 		t.Fatal("sandbox unblock scope is wrong")
 	}
 	// The operator blocklist and guard blocks are never unblocked.
@@ -107,7 +115,7 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	if err != nil || resp.Scope != "always" || !slices.Equal(e.persist.allow, []string{"pastebin.com"}) {
 		t.Fatalf("always = %+v, %v (persisted %v)", resp, err, e.persist.allow)
 	}
-	if !proxy.current().Decide(other, "pastebin.com", 443).Allowed {
+	if !decide(t, e, "otherbox", "pastebin.com", 443).Allowed {
 		t.Fatal("always unblock not effective")
 	}
 	var unblocks int
@@ -147,12 +155,10 @@ func TestAdminAllowOnlyForcesAllowlist(t *testing.T) {
 	proxy := &fakeProxy{}
 	e.m.AttachProxy(proxy)
 	e.create(sandboxapi.CreateRequest{Name: "aobox"})
-	p := principalOf(t, e, "aobox")
-	if p.Mode != egress.ModeAllowlist {
-		t.Fatalf("mode = %s", p.Mode)
+	if mode := principalOf(t, e, "aobox").Decider.Mode(); mode != egress.ModeAllowlist {
+		t.Fatalf("mode = %s", mode)
 	}
-	d := proxy.current()
-	if !d.Decide(p, "git.corp.example", 443).Allowed || d.Decide(p, "example.org", 443).Allowed {
+	if !decide(t, e, "aobox", "git.corp.example", 443).Allowed || decide(t, e, "aobox", "example.org", 443).Allowed {
 		t.Fatal("allow-only not enforced")
 	}
 }
@@ -163,12 +169,21 @@ func TestConfigChangeRebuildsDecider(t *testing.T) {
 	e.m.AttachProxy(proxy)
 	e.run()
 	e.create(sandboxapi.CreateRequest{Name: "cfgbox"})
-	p := principalOf(t, e, "cfgbox")
-	if !proxy.current().Decide(p, "late.example.com", 443).Allowed {
+	if !decide(t, e, "cfgbox", "late.example.com", 443).Allowed {
 		t.Fatal("precondition")
 	}
+	proxy.mu.Lock()
+	sets := proxy.sets
+	proxy.mu.Unlock()
 	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"late.example.com"} })
-	eventually(t, "decider rebuild", func() bool { return !proxy.current().Decide(p, "late.example.com", 443).Allowed })
+	eventually(t, "decider rebuild", func() bool { return !decide(t, e, "cfgbox", "late.example.com", 443).Allowed })
+	// The default decider is swapped too, retiring pooled upstream
+	// connections.
+	eventually(t, "default decider swap", func() bool {
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		return proxy.sets > sets
+	})
 }
 
 func TestEgressSinkMapping(t *testing.T) {
@@ -183,7 +198,8 @@ func TestEgressSinkMapping(t *testing.T) {
 	sink.EgressEvent(egress.Event{Kind: egress.EventAllowed, Time: now, BindingID: b.ID, SandboxName: sb.Name, Method: "CONNECT",
 		Host: "registry.npmjs.org", Port: 443, Source: egress.SourceDefault})
 	sink.EgressEvent(egress.Event{Kind: egress.EventBlocked, Time: now, BindingID: b.ID, SandboxName: sb.Name, Method: "CONNECT",
-		Host: "webhook.site", Port: 443, Category: "webhook_catcher", Source: egress.SourceFeed, Entry: "webhook.site", Reason: "exfil destination"})
+		Host: "webhook.site", Port: 443, Category: "webhook_catcher", Source: egress.SourceFeed, Entry: "webhook.site", Reason: "exfil destination",
+		Unblockable: true})
 	sink.EgressEvent(egress.Event{Kind: egress.EventLargeUpload, Time: now, BindingID: b.ID, SandboxName: sb.Name,
 		Host: "files.example.net", BytesUp: 30 << 20, Terminated: true})
 	sink.EgressEvent(egress.Event{Kind: egress.EventAllowed, SandboxName: "unknown-box", Host: "x.example"})
@@ -355,18 +371,17 @@ func TestAlwaysDecisionsAreUnblocks(t *testing.T) {
 	proxy := &fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})}
 	e.m.AttachProxy(proxy)
 	e.create(sandboxapi.CreateRequest{Name: "alwaysbox"})
-	p := principalOf(t, e, "alwaysbox")
 	for _, host := range []string{"cdn.example.org", "webhook.site"} {
-		if dec := proxy.current().Decide(p, host, 443); !dec.Allowed || dec.Source != egress.SourceUnblock {
+		if dec := decide(t, e, "alwaysbox", host, 443); !dec.Allowed || dec.Source != egress.SourceUnblock {
 			t.Fatalf("%s = %+v, want allowed by an unblock (not an operator allow)", host, dec)
 		}
 	}
-	if dec := proxy.current().Decide(p, "other.example.org", 443); dec.Allowed {
+	if dec := decide(t, e, "alwaysbox", "other.example.org", 443); dec.Allowed {
 		t.Fatalf("unlisted host allowed in allowlist mode: %+v", dec)
 	}
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
 	e.m.refreshEgress()
-	if dec := proxy.current().Decide(p, "cdn.example.org", 443); dec.Allowed {
+	if dec := decide(t, e, "alwaysbox", "cdn.example.org", 443); dec.Allowed || dec.Unblockable {
 		t.Fatalf("saved unblock applied after allow_unblock=false: %+v", dec)
 	}
 }

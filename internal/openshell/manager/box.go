@@ -39,9 +39,12 @@ type box struct {
 	op sync.Mutex
 
 	// The fields below are guarded by Manager.mu.
-	rec      record
-	sb       *openshell.Sandbox
-	eff      *packs.Effective
+	rec record
+	sb  *openshell.Sandbox
+	eff *packs.Effective
+	// decider is the sandbox's own egress proxy decider, built from eff
+	// (Manager.egressDecider) whenever eff is.
+	decider  *egress.Decider
 	cred     egress.Credential
 	phase    audit.SandboxPhase
 	creating bool

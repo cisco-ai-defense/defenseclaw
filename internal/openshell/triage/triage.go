@@ -20,25 +20,32 @@
 // denied by OpenShell, which then drafts a proposal to open that
 // destination. Approving one adds a direct OpenShell network rule that
 // bypasses the DefenseClaw egress proxy, its blocklist and its SSRF guard, so
-// triage holds every proposal to what the proxy would enforce:
+// triage holds every proposal to what the proxy would enforce, by asking the
+// sandbox's own proxy decider (packs.Effective.EgressDecider) and applying
+// the proxy's dial-time address rules to what every destination name
+// resolves to (egress.Decider.CheckAddrs):
 //
 //   - rejected: anything the effective sandbox policy refuses (the
 //     administrator's blocklist and allow-only list, link-local, metadata
 //     and reserved addresses, DefenseClaw's own listeners and the OpenShell
-//     gateway), wildcard or malformed destinations, blocklisted hosts,
-//     public IP literals (they sidestep the name-based blocklist) and ports
-//     the proxy does not carry;
+//     gateway), wildcard or malformed destinations, what the proxy refuses
+//     and no unblock lifts (the block lists, the blocklist feed), public IP
+//     literals in the open mode until they are unblocked (they sidestep the
+//     name-based blocklist), names that resolve to this machine or to
+//     nothing, and ports the proxy does not carry;
 //   - asked: doors into the user's machine or network (host.openshell.internal
-//     and other host-local names, private addresses), proposals OpenShell's
+//     and other host-local names, private addresses, intranet names and
+//     names that resolve to private addresses), proposals OpenShell's
 //     advisor flagged, and everything the pack's approvals mode does not
 //     auto-approve;
 //   - approved automatically: the rest, when the pack's approvals mode is
-//     auto, or triage on an open network, or the host is already allowed
-//     (an "always" decision or the curated allowlist).
+//     auto, or triage on an open network, or the proxy allows the host
+//     through an unblock or an allow entry.
 //
 // Approvals are applied by a Batcher at hook-quiescent moments: every
 // OpenShell policy reload closes the sandbox's open connections, including
-// a hook request waiting on a verdict.
+// a hook request waiting on a verdict. The Batcher's Recheck judges each
+// approval again, with fresh DNS answers, right before it is applied.
 package triage
 
 import (
@@ -52,10 +59,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 )
 
@@ -85,6 +94,12 @@ const (
 	ReasonIPLiteral        Reason = "ip_literal"
 	ReasonPortNotAllowed   Reason = "port_not_allowed"
 	ReasonAgentProposalOff Reason = "agent_proposals_disabled"
+	// ReasonResolvesToHost: the name resolves to this machine or what only
+	// it reaches (link-local, metadata, reserved addresses).
+	ReasonResolvesToHost Reason = "resolves_to_host"
+	// ReasonUnresolved: the name does not resolve, so where a direct rule
+	// would lead cannot be checked.
+	ReasonUnresolved Reason = "unresolved"
 	// ReasonRuleShape: the proposal names a reserved or non-mechanistic
 	// rule, or asks for rule features triage never approves (layer-7
 	// rules, access presets, credential handling).
@@ -327,17 +342,31 @@ func isZeroJSON(v any) bool {
 type Policy struct {
 	// Effective is the sandbox's resolved policy. Required.
 	Effective *packs.Effective
-	// Feed matches the egress proxy's blocklist feeds. Required whenever the
-	// effective policy has feeds.
-	Feed packs.FeedMatcher
+	// Decider is the sandbox's egress proxy decider
+	// (Effective.EgressDecider with the sandbox's unblocks) and Principal
+	// the sandbox's proxy principal: a proposal is held to exactly what the
+	// proxy decides for this sandbox, its unblocks included. Nil uses the
+	// policy's decider without unblocks.
+	Decider   *egress.Decider
+	Principal egress.Principal
+	// Resolver resolves destination names for the proxy's dial-time address
+	// checks; nil uses net.DefaultResolver.
+	Resolver egress.Resolver
 	// AgentProposals is openshell.approvals.agent_proposals; false rejects
 	// every proposal.
 	AgentProposals bool
-	// Unblocked are the destinations the user unblocked or approved for
-	// every sandbox (openshell.egress.unblocked). They lift blocklist feed
-	// and allowlist refusals as they do in the egress proxy, never the
-	// private-address, host or administrator checks.
-	Unblocked []string
+}
+
+// resolveTimeout bounds the DNS lookup of one proposed destination.
+const resolveTimeout = 5 * time.Second
+
+// decider returns the policy's decider, building the one without unblocks
+// when none is set.
+func (pol Policy) decider() (*egress.Decider, error) {
+	if pol.Decider != nil {
+		return pol.Decider, nil
+	}
+	return pol.Effective.EgressDecider(nil)
 }
 
 // Decision is triage's verdict on one proposal.
@@ -360,9 +389,17 @@ type Decision struct {
 // Classify judges a proposal. The rule itself is judged first (its name
 // and features), then its allowed_ips and every endpoint: any rejection
 // rejects the proposal, then any ask asks, otherwise it is approved.
-func Classify(p Proposal, pol Policy) Decision {
+// Destination names are resolved (bounded by ctx and a per-name timeout) and
+// held to the proxy's dial-time address rules.
+func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 	if pol.Effective == nil {
 		return Decision{Verdict: Reject, Reason: ReasonPolicy, Message: "the sandbox policy is not resolved", Kind: KindNetworkRule}
+	}
+	decider, err := pol.decider()
+	if err != nil {
+		host, port := firstEndpoint(p)
+		return Decision{Verdict: Reject, Reason: ReasonPolicy, Kind: KindNetworkRule, Host: host, Port: port,
+			Message: "the sandbox's egress policy cannot be evaluated: " + err.Error()}
 	}
 	if !pol.AgentProposals {
 		host, port := firstEndpoint(p)
@@ -393,7 +430,7 @@ func Classify(p Proposal, pol Policy) Decision {
 	var ask *Decision
 	var approve *Decision
 	for _, ep := range p.Endpoints {
-		d := judgeEndpoint(ep, p.AllowedIPs, pol)
+		d := judgeEndpoint(ctx, ep, p.AllowedIPs, pol, decider)
 		switch d.Verdict {
 		case Reject:
 			return d
@@ -458,9 +495,10 @@ func firstEndpoint(p Proposal) (string, int) {
 	return p.Endpoints[0].Host, p.Endpoints[0].Port
 }
 
-// judgeEndpoint classifies one destination. allowedIPs are the proposal's
-// allowed_ips, which the administrator checks see.
-func judgeEndpoint(ep Endpoint, allowedIPs []string, pol Policy) Decision {
+// judgeEndpoint classifies one destination against the sandbox's proxy
+// decider. allowedIPs are the proposal's allowed_ips, which the
+// administrator checks see.
+func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Policy, decider *egress.Decider) Decision {
 	eff := pol.Effective
 	host := NormalizeHost(ep.Host)
 	d := Decision{Kind: KindNetworkRule, Host: host, Port: ep.Port}
@@ -476,7 +514,7 @@ func judgeEndpoint(ep Endpoint, allowedIPs []string, pol Policy) Decision {
 	if local {
 		d.Kind, d.Risky = KindHostPort, true
 	}
-	if err := checkApproval(eff, host, ep.Port, false, pol.Feed, allowedIPs); err != nil {
+	if err := checkApproval(eff, host, ep.Port, false, allowedIPs); err != nil {
 		var v *packs.Violation
 		if errors.As(err, &v) {
 			d.Violation = v
@@ -491,40 +529,48 @@ func judgeEndpoint(ep Endpoint, allowedIPs []string, pol Policy) Decision {
 	if local {
 		return ask(d, ReasonHostLocal, fmt.Sprintf("the sandbox asks to reach port %s on your machine", portText(ep.Port)))
 	}
-	addr, isIP := parseIP(host)
-	if isIP && IsPrivate(addr) {
-		d.Risky = true
-		return ask(d, ReasonPrivateNetwork, "the sandbox asks to reach "+host+" on your private network")
-	}
+	_, isIP := parseIP(host)
 	if isIP {
 		d.Risky = true
-		return reject(d, ReasonIPLiteral, "IP-literal destinations bypass the egress blocklist; use a host name through the proxy")
 	}
-	// An always decision counts only while unblocking is allowed at all.
-	unblocked := packs.MatchAnyHost(pol.Unblocked, host) && CheckUnblock(eff, host) == nil
-	if dec := eff.DecideEgress(host, 0, pol.Feed); !dec.Allowed {
+	// The proxy's verdict for this sandbox, before the port: approvals
+	// carry their own ports (checked below).
+	dec := decider.DecideHost(pol.Principal, host)
+	if !dec.Allowed {
 		switch {
-		case dec.Rule == packs.RuleFeed && unblocked:
-			// Lifted by an earlier "always" decision, as in the proxy.
-		case dec.Rule == packs.RuleAdminBlock, dec.Rule == packs.RuleAdminAllowOnly, dec.Rule == packs.RuleBlock,
-			dec.Rule == packs.RuleFeed, dec.Rule == packs.RuleInvalid:
-			msg := host + " is on the egress blocklist"
-			if dec.Match != "" {
-				msg += " (" + dec.Match + ")"
-			}
-			return reject(d, ReasonBlocklisted, msg)
+		case dec.Category == egress.CategoryPrivateNetwork:
+			d.Risky = true
+			return ask(d, ReasonPrivateNetwork, "the sandbox asks to reach "+host+" on your private network")
+		case dec.Category == egress.CategoryIPLiteral:
+			return reject(d, ReasonIPLiteral, "IP-literal destinations bypass the egress blocklist; use a host name through the proxy, "+
+				"or unblock "+host+" first")
+		case dec.Source == egress.SourceGuard:
+			return reject(d, ReasonInvalid, "the egress proxy refuses "+host+": "+dec.Reason)
+		case dec.Source == egress.SourceAdmin, dec.Source == egress.SourceOperator, dec.Source == egress.SourceFeed:
+			return reject(d, ReasonBlocklisted, blocklistedMessage(host, dec))
 		}
+		// Not allowlisted: the approvals mode decides below.
 	}
 	if ep.Port != 0 && !containsInt(eff.Egress.Ports, ep.Port) {
 		return reject(d, ReasonPortNotAllowed, fmt.Sprintf(
 			"port %d is not an egress port (%s); use HTTPS, or open it with an explicit allow rule", ep.Port, joinInts(eff.Egress.Ports)))
 	}
-	if packs.MatchAnyHost(eff.Egress.Allow, host) || packs.MatchAnyHost(eff.Egress.AllowOnly, host) {
-		return approve(d, ReasonAllowed, host+" is on the allow list")
+	verdict := approvalsMode(d, eff, host)
+	switch {
+	case dec.Allowed && dec.Source == egress.SourceUnblock:
+		verdict = approve(d, ReasonAllowed, host+" was unblocked")
+	case dec.Allowed && dec.Source != egress.SourceDefault:
+		verdict = approve(d, ReasonAllowed, host+" is on the allow list")
 	}
-	if unblocked {
-		return approve(d, ReasonAllowed, host+" was approved for every sandbox earlier")
+	if isIP {
+		return verdict
 	}
+	return checkResolved(ctx, verdict, pol, decider, dec)
+}
+
+// approvalsMode is the verdict for a destination the proxy neither refuses
+// outright nor allows through an unblock or an allow entry.
+func approvalsMode(d Decision, eff *packs.Effective, host string) Decision {
 	switch eff.Approvals {
 	case packs.ApprovalsAuto:
 		return approve(d, ReasonAutoMode, "approved automatically (approvals: auto)")
@@ -540,6 +586,113 @@ func judgeEndpoint(ep Endpoint, allowedIPs []string, pol Policy) Decision {
 	default:
 		return ask(d, ReasonManual, "approvals are manual for the "+eff.Profile+" profile")
 	}
+}
+
+func blocklistedMessage(host string, dec egress.Decision) string {
+	msg := host + " is on the egress blocklist"
+	switch {
+	case dec.Entry != "":
+		msg += " (" + dec.Entry + ")"
+	case dec.Rule != "":
+		msg += " (" + dec.Rule + ")"
+	case dec.Category == egress.CategoryAdminAllowOnly:
+		msg = host + " is not on your organization's list of allowed destinations"
+	}
+	return msg
+}
+
+// checkResolved holds an approval or ask for a destination name to the
+// proxy's dial-time address rules, applied to what the name resolves to
+// now: a direct OpenShell rule reaches whatever the name resolves to
+// without the proxy's guard, so a name that leads to this machine is
+// rejected and one that leads to a private network asks (or is rejected
+// when unblocking is off). A name that does not resolve is rejected: where
+// its rule would lead cannot be checked.
+func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *egress.Decider, dec egress.Decision) Decision {
+	if verdict.Verdict == Reject {
+		return verdict
+	}
+	lctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	addrs, err := egress.LookupHost(lctx, pol.Resolver, verdict.Host)
+	cancel()
+	if err != nil {
+		verdict.Risky = true
+		return reject(verdict, ReasonUnresolved, verdict.Host+" does not resolve from this machine, so DefenseClaw cannot check "+
+			"where a direct rule would lead; reach it through the egress proxy (HTTPS_PROXY) instead")
+	}
+	// Judge the addresses as the proxy would once the destination is
+	// admitted; a not-allowlisted destination asks, and its addresses count.
+	probe := dec
+	probe.Allowed = true
+	chk := decider.CheckAddrs(pol.Principal, probe, addrs)
+	if chk.Allowed {
+		return verdict
+	}
+	verdict.Risky = true
+	switch {
+	case chk.Category == egress.CategoryHostInternal:
+		return reject(verdict, ReasonResolvesToHost, verdict.Host+" resolves to "+resolvedWhat(chk)+
+			"; sandboxes reach services on this machine only through a host port")
+	case chk.Category == egress.CategoryPrivateNetwork:
+		if !decider.UnblocksAllowed() {
+			verdict.Violation = &packs.Violation{
+				Key: "approvals.approve", Source: packs.SourceUser, Attempted: verdict.Host,
+				Constraint: "openshell.admin.allow_unblock", Message: "blocked by your organization's DefenseClaw policy: approvals.approve",
+				Detail: verdict.Host + " resolves to a private network address, which the egress proxy refuses",
+			}
+			return reject(verdict, ReasonAdmin, verdict.Violation.Error())
+		}
+		return ask(verdict, ReasonPrivateNetwork, "the sandbox asks to reach "+verdict.Host+", which resolves to a private network address")
+	case chk.Category == egress.CategoryAdminBlock:
+		return reject(verdict, ReasonAdmin, verdict.Host+" resolves to an address your organization's DefenseClaw policy blocks")
+	default:
+		return reject(verdict, ReasonBlocklisted, verdict.Host+" resolves to an address on the egress blocklist ("+chk.Rule+")")
+	}
+}
+
+// ResolvesToHost reports a proposal (typically a rule approved earlier)
+// with a destination name that now resolves to this machine or what only it
+// reaches, which a direct rule must never lead to whoever approved it.
+// Host-local names and IP literals are judged as named by CheckProposal; a
+// name that does not resolve does not count.
+func ResolvesToHost(ctx context.Context, p Proposal, pol Policy) bool {
+	if pol.Effective == nil {
+		return false
+	}
+	decider, err := pol.decider()
+	if err != nil {
+		return false
+	}
+	for _, ep := range p.Endpoints {
+		host := NormalizeHost(ep.Host)
+		if host == "" || IsHostLocal(host) {
+			continue
+		}
+		if _, isIP := parseIP(host); isIP {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+		addrs, err := egress.LookupHost(lctx, pol.Resolver, host)
+		cancel()
+		if err != nil {
+			continue
+		}
+		probe := decider.DecideHost(pol.Principal, host)
+		probe.Allowed = true
+		if chk := decider.CheckAddrs(pol.Principal, probe, addrs); chk.Category == egress.CategoryHostInternal {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedWhat names the refused address kind from a dial-time refusal.
+func resolvedWhat(chk egress.Decision) string {
+	reason := strings.TrimSuffix(strings.TrimPrefix(chk.Reason, "The destination resolves to "), ".")
+	if reason == chk.Reason || reason == "" {
+		return "an address of this machine"
+	}
+	return reason
 }
 
 // judgeAllowedIP classifies one allowed_ips entry. A non-empty allowed_ips
@@ -564,32 +717,31 @@ var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
 // CheckApproval runs the effective policy's checks for approving a
 // destination once (always false) or for future sandboxes (always true).
-// Every approval, triage or operator, goes through it; feed is the egress
-// proxy's blocklist matcher.
-func CheckApproval(eff *packs.Effective, host string, port int, always bool, feed packs.FeedMatcher) error {
-	return checkApproval(eff, host, port, always, feed, nil)
+// Every approval, triage or operator, goes through it.
+func CheckApproval(eff *packs.Effective, host string, port int, always bool) error {
+	return checkApproval(eff, host, port, always, nil)
 }
 
 // CheckProposal runs CheckApproval for every endpoint of a proposal, with
 // its allowed_ips.
-func CheckProposal(eff *packs.Effective, p Proposal, always bool, feed packs.FeedMatcher) error {
+func CheckProposal(eff *packs.Effective, p Proposal, always bool) error {
 	if len(p.Endpoints) == 0 {
 		return errors.New("sandbox policy: the proposal names no destination")
 	}
 	for _, ep := range p.Endpoints {
-		if err := checkApproval(eff, NormalizeHost(ep.Host), ep.Port, always, feed, p.AllowedIPs); err != nil {
+		if err := checkApproval(eff, NormalizeHost(ep.Host), ep.Port, always, p.AllowedIPs); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func checkApproval(eff *packs.Effective, host string, port int, always bool, feed packs.FeedMatcher, allowedIPs []string) error {
+func checkApproval(eff *packs.Effective, host string, port int, always bool, allowedIPs []string) error {
 	kind := packs.ActionApprove
 	if always {
 		kind = packs.ActionApproveAlways
 	}
-	return eff.Allow(packs.Action{Kind: kind, Host: host, Port: port, Feed: feed, AllowedIPs: allowedIPs})
+	return eff.Allow(packs.Action{Kind: kind, Host: host, Port: port, AllowedIPs: allowedIPs})
 }
 
 // CheckUnblock runs the effective policy's checks for an egress unblock.

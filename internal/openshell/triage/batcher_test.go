@@ -455,3 +455,50 @@ func TestBatcherRunTwice(t *testing.T) {
 		t.Fatal("second Run accepted")
 	}
 }
+
+// TestBatcherRechecksBeforeApplying pins the apply-time re-check: an
+// approval Recheck refuses is left unapproved and reported as Refused, the
+// rest of the batch still lands, and Recheck sees the chunk as it is when
+// the batch is applied.
+func TestBatcherRechecksBeforeApplying(t *testing.T) {
+	apply := newFakeApplier()
+	col := newCollector()
+	var mu sync.Mutex
+	var seen []string
+	recheck := func(_ context.Context, it Item, c openshell.PolicyChunk) error {
+		mu.Lock()
+		seen = append(seen, c.ProposedRule.Endpoints[0].Host)
+		mu.Unlock()
+		if it.ChunkID == "rebind" {
+			return errors.New("rebind.example.org resolves to an address of this machine")
+		}
+		return nil
+	}
+	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add, Recheck: recheck})
+	b.Enqueue(item(apply, "box", "ok"))
+	b.Enqueue(item(apply, "box", "rebind"))
+	results := col.wait(t, 2)
+	for _, r := range results {
+		switch r.Item.ChunkID {
+		case "ok":
+			if r.Err != nil || r.Refused != nil || r.PolicyVersion == 0 {
+				t.Fatalf("ok result = %+v", r)
+			}
+		case "rebind":
+			if r.Refused == nil || !strings.Contains(r.Refused.Error(), "this machine") || r.Err != nil || r.PolicyVersion != 0 {
+				t.Fatalf("rebind result = %+v", r)
+			}
+		}
+	}
+	if apply.status("box", "ok") != "approved" || apply.status("box", "rebind") != "pending" {
+		t.Fatalf("statuses = %s, %s", apply.status("box", "ok"), apply.status("box", "rebind"))
+	}
+	if bulk, _ := apply.calls(); len(bulk) != 1 || len(bulk[0]) != 1 || bulk[0][0] != "box/ok" {
+		t.Fatalf("bulk calls = %v, want only the rechecked approval", bulk)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("recheck saw %v, want both chunks", seen)
+	}
+}

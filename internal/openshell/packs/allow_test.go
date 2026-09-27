@@ -25,15 +25,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// testFeed stands in for the egress proxy's builtin exfiltration feed.
-func testFeed(feeds []string, host string) (string, bool) {
-	if containsString(feeds, FeedBuiltin) && (host == "webhook.site" || host == "raw.githubusercontent.com" ||
-		strings.HasSuffix(host, ".pastebin.com")) {
-		return "exfil:" + host, true
-	}
-	return "", false
-}
-
 func withHostname(t *testing.T, name string) {
 	t.Helper()
 	previous := osHostname
@@ -77,18 +68,38 @@ func TestAllowActions(t *testing.T) {
 		{"unblock a URL", nil, Flags{}, Action{Kind: ActionUnblock, Host: "https://x.example"}, invalid},
 
 		{"approve once", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443, Feed: testFeed}, allowed},
-		{"approve once without a feed matcher", nil, Flags{},
 			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, allowed},
-		{"approve once without a feed matcher when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, invalid},
+		{"approve once with unblock on", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, allowed},
+		// The policy checks against the proxy's own feed; no matcher to pass.
+		{"approve a feed subdomain when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "x.pastebin.com", Port: 443}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve an allowed feed host when unblock is off", func(o *config.OpenShellConfig) {
+			o.Admin.AllowUnblock, o.Admin.EgressAllowOnly = boolPtr(false), []string{"webhook.site"}
+		}, Flags{}, Action{Kind: ActionApprove, Host: "webhook.site", Port: 443}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		// The proxy's guard: other names of this machine, intranet names.
+		{"approve a localdomain name", nil, Flags{}, Action{Kind: ActionApprove, Host: "build.localdomain", Port: 443},
+			outcome{constraint: "defenseclaw"}},
+		{"approve an OpenShell-internal name", nil, Flags{}, Action{Kind: ActionApprove, Host: "gateway.openshell.internal", Port: 443},
+			outcome{constraint: "defenseclaw"}},
+		{"approve an intranet name", nil, Flags{}, Action{Kind: ActionApprove, Host: "jira.corp", Port: 443}, allowed},
+		{"approve an intranet name when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "jira.corp", Port: 443}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve a single-label name", nil, Flags{}, Action{Kind: ActionApprove, Host: "intranet", Port: 443}, invalid},
+		{"unblock a private address", nil, Flags{}, Action{Kind: ActionUnblock, Host: "10.1.2.3"}, outcome{constraint: "defenseclaw"}},
+		{"unblock an intranet name", nil, Flags{}, Action{Kind: ActionUnblock, Host: "wiki.internal"}, outcome{constraint: "defenseclaw"}},
+		{"unblock this machine", nil, Flags{}, Action{Kind: ActionUnblock, Host: "localhost"}, outcome{constraint: "defenseclaw"}},
+		{"unblock the metadata address", nil, Flags{}, Action{Kind: ActionUnblock, Host: "169.254.169.254"}, outcome{constraint: "defenseclaw"}},
+		{"unblock a single-label name", nil, Flags{}, Action{Kind: ActionUnblock, Host: "intranet"}, invalid},
+		{"unblock a public IP literal", nil, Flags{}, Action{Kind: ActionUnblock, Host: "93.184.216.34"}, allowed},
+		{"unblock a host the policy allows", nil, Flags{}, Action{Kind: ActionUnblock, Host: "example.org"}, allowed},
 		// Block entries are applied before unblocks, so an approval, which
 		// bypasses the proxy, cannot lift them either.
 		{"approve a blocklisted host", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"paste.example"} }, Flags{},
-			Action{Kind: ActionApprove, Host: "paste.example", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.egress.block"}},
+			Action{Kind: ActionApprove, Host: "paste.example", Port: 443}, outcome{constraint: "openshell.egress.block"}},
 		{"approve a blocklisted host when unblock is off", func(o *config.OpenShellConfig) {
 			o.Egress.Block, o.Admin.AllowUnblock = []string{"paste.example"}, boolPtr(false)
-		}, Flags{}, Action{Kind: ActionApprove, Host: "Paste.Example.", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.egress.block"}},
+		}, Flags{}, Action{Kind: ActionApprove, Host: "Paste.Example.", Port: 443}, outcome{constraint: "openshell.egress.block"}},
 		{"unblock a blocklisted host", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"*.paste.example"} }, Flags{},
 			Action{Kind: ActionUnblock, Host: "a.paste.example"}, outcome{constraint: "openshell.egress.block"}},
 		{"approve a blocklisted address spelled differently", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"93.184.215.14"} }, Flags{},
@@ -120,22 +131,22 @@ func TestAllowActions(t *testing.T) {
 		{"unblock a single-address range", nil, Flags{}, Action{Kind: ActionUnblock, Host: "198.51.100.7/32"}, invalid},
 		{"approve the Podman host alias", nil, Flags{}, Action{Kind: ActionApprove, Host: "host.containers.internal", Port: OpenShellGatewayPort},
 			outcome{constraint: "defenseclaw"}},
-		{"approve a feed host", nil, Flags{}, Action{Kind: ActionApprove, Host: "webhook.site", Port: 443, Feed: testFeed}, allowed},
+		{"approve a feed host", nil, Flags{}, Action{Kind: ActionApprove, Host: "webhook.site", Port: 443}, allowed},
 		{"approve a feed host when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "webhook.site", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+			Action{Kind: ActionApprove, Host: "webhook.site", Port: 443}, outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve a feed host with the feed off", func(o *config.OpenShellConfig) { o.Egress.Feed = "none" }, Flags{},
 			Action{Kind: ActionApprove, Host: "webhook.site", Port: 443}, allowed},
 		{"approve a private address", nil, Flags{}, Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432}, allowed},
 		{"approve a private address when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+			Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432}, outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve a CGNAT address when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "100.64.1.2", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+			Action{Kind: ActionApprove, Host: "100.64.1.2", Port: 443}, outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve public allowed_ips", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"93.184.216.0/24"}}, allowed},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"93.184.216.0/24"}}, allowed},
 		{"approve private allowed_ips", nil, Flags{},
-			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"10.0.0.0/8"}}, allowed},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"10.0.0.0/8"}}, allowed},
 		{"approve private allowed_ips without unblock", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"8.0.0.0/5"}},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"8.0.0.0/5"}},
 			outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve metadata allowed_ips", nil, Flags{},
 			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"169.254.0.0/16"}}, outcome{constraint: "defenseclaw"}},
@@ -282,7 +293,6 @@ func TestAllowMessages(t *testing.T) {
 }
 
 func TestDecideEgress(t *testing.T) {
-	feed := testFeed
 	for _, tc := range []struct {
 		name        string
 		edit        func(*config.OpenShellConfig)
@@ -295,7 +305,7 @@ func TestDecideEgress(t *testing.T) {
 		unblockable bool
 	}{
 		{"open web", nil, Flags{}, "example.org", 443, true, RuleNetworkOpen, "", false},
-		{"feed hit", nil, Flags{}, "WEBHOOK.site.", 443, false, RuleFeed, "exfil:webhook.site", true},
+		{"feed hit", nil, Flags{}, "WEBHOOK.site.", 443, false, RuleFeed, "Webhook.site", true},
 		{"feed off", func(o *config.OpenShellConfig) { o.Egress.Feed = "none" }, Flags{}, "webhook.site", 443, true, RuleNetworkOpen, "", false},
 		{"allow exempts from the feed", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"webhook.site"} }, Flags{},
 			"webhook.site", 443, true, RuleAllow, "webhook.site", false},
@@ -312,6 +322,7 @@ func TestDecideEgress(t *testing.T) {
 		{"allowlist hit", nil, Flags{Profile: "balanced"}, "example.org", 443, false, RuleNetworkAllowlist, "", true},
 		{"allowlist pack entry", nil, Flags{Pack: "balanced"}, "pypi.org", 443, true, RuleAllow, "pypi.org", false},
 		{"deny profile", nil, Flags{Profile: "strict"}, "pypi.org", 443, false, RuleNetworkDeny, "", false},
+		{"deny profile feed host", nil, Flags{Profile: "strict"}, "webhook.site", 443, false, RuleNetworkDeny, "", false},
 		{"admin block", func(o *config.OpenShellConfig) {
 			o.Admin.EgressBlock, o.Egress.Allow = []string{"*.ngrok.io"}, []string{"a.ngrok.io"}
 		}, Flags{}, "a.ngrok.io", 443, false, RuleAdminBlock, "*.ngrok.io", false},
@@ -320,13 +331,14 @@ func TestDecideEgress(t *testing.T) {
 		{"admin allow-only hit", func(o *config.OpenShellConfig) { o.Admin.EgressAllowOnly = []string{"*.corp.example"} }, Flags{},
 			"git.corp.example", 443, true, RuleAdminAllowOnly, "*.corp.example", false},
 		{"feed inside allow-only", func(o *config.OpenShellConfig) { o.Admin.EgressAllowOnly = []string{"*.pastebin.com"} }, Flags{},
-			"x.pastebin.com", 443, false, RuleFeed, "exfil:x.pastebin.com", true},
+			"x.pastebin.com", 443, false, RuleFeed, "Pastebin", true},
 		{"unblock disabled", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
-			"webhook.site", 443, false, RuleFeed, "exfil:webhook.site", false},
-		{"curated allow entry exempts from the feed", nil, Flags{Pack: "balanced"},
-			"raw.githubusercontent.com", 443, true, RuleAllow, "*.githubusercontent.com", false},
-		{"nothing exempts from the feed when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{Pack: "balanced"},
-			"raw.githubusercontent.com", 443, false, RuleFeed, "exfil:raw.githubusercontent.com", false},
+			"webhook.site", 443, false, RuleFeed, "Webhook.site", false},
+		{"required pack allow entry exempts from the feed", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "feedteam" }, Flags{},
+			"x.pastebin.com", 443, true, RuleAllow, "x.pastebin.com", false},
+		{"nothing exempts from the feed when unblock is off", func(o *config.OpenShellConfig) {
+			o.Admin.RequiredPack, o.Admin.AllowUnblock = "feedteam", boolPtr(false)
+		}, Flags{}, "x.pastebin.com", 443, false, RuleFeed, "Pastebin", false},
 		{"raised profile uses the curated allowlist", nil, Flags{Profile: "balanced"},
 			"registry.npmjs.org", 443, true, RuleAllow, "registry.npmjs.org", false},
 		{"admin floor uses the curated allowlist", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{},
@@ -337,41 +349,60 @@ func TestDecideEgress(t *testing.T) {
 		// user allow-everything entry.
 		{"floor with a user allow-everything entry", func(o *config.OpenShellConfig) {
 			o.Egress.Allow, o.Admin.MinProfile, o.Admin.AllowUnblock = []string{"*"}, "balanced", boolPtr(false)
-		}, Flags{}, "webhook.site", 443, false, RuleFeed, "exfil:webhook.site", false},
-		{"ip literal", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"2001:db8::1"} }, Flags{},
-			"[2001:db8::1]", 443, false, RuleBlock, "2001:db8::1", false},
-		{"admin block in another spelling", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"2001:db8::7"} }, Flags{},
-			"[2001:DB8:0:0::7]", 443, false, RuleAdminBlock, "2001:db8::7", false},
-		{"admin block of a mapped address", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"::ffff:203.0.113.7"} }, Flags{},
-			"203.0.113.7", 443, false, RuleAdminBlock, "203.0.113.7", false},
-		{"admin block range", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"198.51.100.0/24"} }, Flags{},
-			"198.51.100.200", 443, false, RuleAdminBlock, "198.51.100.0/24", false},
-		{"admin block range misses", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"198.51.100.0/24"} }, Flags{},
-			"198.51.101.1", 443, true, RuleNetworkOpen, "", false},
-		{"user block range", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"2001:db8:1::/48"} }, Flags{},
-			"2001:db8:1::99", 443, false, RuleBlock, "2001:db8:1::/48", false},
-		{"allow range", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"198.51.100.0/24"} }, Flags{Profile: "balanced"},
-			"198.51.100.9", 443, true, RuleAllow, "198.51.100.0/24", false},
-		{"range host", nil, Flags{}, "198.51.100.0/24", 443, false, RuleInvalid, "", false},
+		}, Flags{}, "webhook.site", 443, false, RuleFeed, "Webhook.site", false},
+		// The proxy's guard and IP-literal rule are part of the verdict.
+		{"open mode IP literal", nil, Flags{}, "93.184.216.34", 443, false, RuleIPLiteral, "", true},
+		{"open mode IP literal without unblocks", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			"93.184.216.34", 443, false, RuleIPLiteral, "", false},
+		{"private address", nil, Flags{}, "10.1.2.3", 443, false, RulePrivateNetwork, "", false},
+		{"intranet name", nil, Flags{}, "wiki.corp", 443, false, RulePrivateNetwork, "", false},
+		{"intranet name the user allowed", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"wiki.corp"} }, Flags{},
+			"wiki.corp", 443, true, RuleAllow, "wiki.corp", false},
+		{"this machine", nil, Flags{}, "localhost", 443, false, RuleHostInternal, "", false},
+		{"metadata", nil, Flags{}, "169.254.169.254", 80, false, RuleHostInternal, "", false},
+		{"documentation range is reserved", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"198.51.100.0/24"} }, Flags{},
+			"198.51.100.9", 443, false, RuleHostInternal, "", false},
+		{"ip literal block", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"2606:4700::1111"} }, Flags{},
+			"[2606:4700::1111]", 443, false, RuleBlock, "2606:4700::1111", false},
+		{"admin block in another spelling", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"2606:4700::7"} }, Flags{},
+			"[2606:4700:0:0::7]", 443, false, RuleAdminBlock, "2606:4700::7", false},
+		{"admin block of a mapped address", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"::ffff:93.184.216.34"} }, Flags{},
+			"93.184.216.34", 443, false, RuleAdminBlock, "93.184.216.34", false},
+		{"admin block range", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"93.184.216.0/24"} }, Flags{},
+			"93.184.216.200", 443, false, RuleAdminBlock, "93.184.216.0/24", false},
+		{"admin block range misses", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"93.184.216.0/24"} }, Flags{},
+			"93.184.217.1", 443, false, RuleIPLiteral, "", true},
+		{"user block range", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"2606:4700:1::/48"} }, Flags{},
+			"2606:4700:1::99", 443, false, RuleBlock, "2606:4700:1::/48", false},
+		{"allow range", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"93.184.216.0/24"} }, Flags{Profile: "balanced"},
+			"93.184.216.9", 443, true, RuleAllow, "93.184.216.0/24", false},
+		{"range host", nil, Flags{}, "93.184.216.0/24", 443, false, RuleInvalid, "", false},
 		{"empty host", nil, Flags{}, "", 443, false, RuleInvalid, "", false},
 		{"wildcard host", nil, Flags{}, "*.example.org", 443, false, RuleInvalid, "", false},
+		{"single-label host", nil, Flags{}, "intranet", 443, false, RuleInvalid, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			eff, _ := mustResolve(t, testConfig(tc.edit), tc.flags)
-			got := eff.DecideEgress(tc.host, tc.port, feed)
-			want := EgressDecision{Allowed: tc.allowed, Rule: tc.rule, Match: tc.match, Unblockable: tc.unblockable}
-			if got != want {
-				t.Fatalf("DecideEgress(%q, %d) = %+v, want %+v", tc.host, tc.port, got, want)
+			cfg := testConfig(tc.edit)
+			if cfg.OpenShell.Admin.RequiredPack == "feedteam" {
+				root := t.TempDir()
+				writePack(t, root, "feedteam", strings.Replace(customPack("feedteam"), "network: {mode: open}",
+					"network: {mode: open}\negress: {allow: [x.pastebin.com]}", 1))
+				cfg.OpenShell.PackDir = root
+			}
+			eff, _ := mustResolve(t, cfg, tc.flags)
+			got := eff.DecideEgress(tc.host, tc.port)
+			if got.Allowed != tc.allowed || got.Rule != tc.rule || got.Match != tc.match || got.Unblockable != tc.unblockable {
+				t.Fatalf("DecideEgress(%q, %d) = %+v, want allowed=%v rule=%s match=%q unblockable=%v",
+					tc.host, tc.port, got, tc.allowed, tc.rule, tc.match, tc.unblockable)
+			}
+			if !got.Allowed && got.Reason == "" {
+				t.Fatalf("DecideEgress(%q, %d) refused without a reason", tc.host, tc.port)
 			}
 		})
 	}
 
-	eff, _ := mustResolve(t, testConfig(nil), Flags{})
-	if got := eff.DecideEgress("webhook.site", 443, nil); !got.Allowed {
-		t.Fatalf("without a feed matcher the feed step is skipped: %+v", got)
-	}
 	var nilEff *Effective
-	if got := nilEff.DecideEgress("example.org", 443, feed); got.Allowed {
+	if got := nilEff.DecideEgress("example.org", 443); got.Allowed {
 		t.Fatal("a nil Effective must refuse egress")
 	}
 }
@@ -499,7 +530,7 @@ func TestBlockListIsNotUnblockable(t *testing.T) {
 		{"a.paste.example", "pack team", "not allowed by the team sandbox pack: "},
 		{"drop.example", "openshell.egress.block", "blocked by your own openshell.egress.block list: "},
 	} {
-		if d := eff.DecideEgress(tc.host, 443, testFeed); d.Allowed || d.Rule != RuleBlock || d.Unblockable {
+		if d := eff.DecideEgress(tc.host, 443); d.Allowed || d.Rule != RuleBlock || d.Unblockable {
 			t.Fatalf("DecideEgress(%s) = %+v", tc.host, d)
 		}
 		for _, kind := range []ActionKind{ActionUnblock, ActionApprove, ActionApproveAlways} {
@@ -512,7 +543,7 @@ func TestBlockListIsNotUnblockable(t *testing.T) {
 		}
 	}
 	// Feed entries stay unblockable.
-	if d := eff.DecideEgress("webhook.site", 443, testFeed); d.Rule != RuleFeed || !d.Unblockable {
+	if d := eff.DecideEgress("webhook.site", 443); d.Rule != RuleFeed || !d.Unblockable {
 		t.Fatalf("feed decision %+v", d)
 	}
 	if err := eff.Allow(Action{Kind: ActionUnblock, Host: "webhook.site"}); err != nil {

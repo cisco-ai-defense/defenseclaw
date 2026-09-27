@@ -127,7 +127,7 @@ type credentialPlan struct {
 // planCredentials validates --credential bindings: each placeholder may
 // only resolve at an endpoint the sandbox could be approved to reach
 // directly, which is exactly what its provider rule opens.
-func planCredentials(eff *packs.Effective, feed packs.FeedMatcher, list []sandboxapi.CredentialBinding, reservedNames map[string]bool) ([]credentialPlan, error) {
+func planCredentials(eff *packs.Effective, list []sandboxapi.CredentialBinding, reservedNames map[string]bool) ([]credentialPlan, error) {
 	if len(list) > maxCredentials {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "at most %d credentials may be bound", maxCredentials)
 	}
@@ -156,11 +156,11 @@ func planCredentials(eff *packs.Effective, feed packs.FeedMatcher, list []sandbo
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 				"credential %s: name the host as %s to bind it to a port on this machine", c.Name, packs.OpenShellHostAlias)
 		}
-		if err := triage.CheckApproval(eff, c.Host, c.Port, false, feed); err != nil {
+		if err := triage.CheckApproval(eff, c.Host, c.Port, false); err != nil {
 			return nil, err
 		}
 		if !triage.IsHostLocal(c.Host) {
-			if dec := eff.DecideEgress(c.Host, 0, feed); !dec.Allowed {
+			if dec := eff.DecideEgress(c.Host, 0); !dec.Allowed {
 				switch dec.Rule {
 				case packs.RuleAdminBlock, packs.RuleAdminAllowOnly, packs.RuleBlock, packs.RuleFeed:
 					return nil, sandboxapi.Errorf(sandboxapi.CodePolicyViolation,

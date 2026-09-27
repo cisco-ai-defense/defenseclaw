@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -33,95 +35,67 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
-// feedMatcher adapts the egress proxy's builtin blocklist to the packs
-// FeedMatcher, so approvals and unblocks are checked against exactly what
-// the proxy blocks.
-func (m *Manager) feedMatcher() packs.FeedMatcher {
-	feed, err := egress.BuiltinBlocklist()
-	return func(feeds []string, host string) (string, bool) {
-		if err != nil || !slices.Contains(feeds, packs.FeedBuiltin) {
-			return "", false
-		}
-		match, ok := feed.Match(host)
-		if !ok {
-			return "", false
-		}
-		return match.Entry.Name, true
-	}
+// unblockIndex serves a sandbox decider's unblock lookups: the unblocks
+// scoped to the principal's sandbox and the persistent ones ("always"
+// decisions made since the daemon started, and the saved
+// openshell.egress.unblocked). The decider consults them only after its
+// guard, the administrator's lists and the block list, and not at all while
+// the administrator forbids unblocking, so an unblock never lifts more than
+// the sandbox's own policy allows.
+type unblockIndex struct {
+	live  *egress.MemoryUnblocks
+	saved *egress.MemoryUnblocks
 }
 
-// Decider builds the egress decider from the configured posture and the
-// live sandboxes: the administrator's and every sandbox pack's block lists
-// apply to all sandboxes (a union can only block more), the configured
-// allow list applies to all, and each sandbox's own allow list and
-// unblocks reach only that sandbox through the unblock index.
+func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock, bool) {
+	if ub, ok := u.live.Unblocked(p, host); ok {
+		return ub, true
+	}
+	return u.saved.Unblocked(p, host)
+}
+
+// unblockIndex returns the index with cfg's saved "always" decisions.
+// Configuration validation keeps them parseable; one that is not is
+// skipped.
+func (m *Manager) unblockIndex(cfg *config.Config) unblockIndex {
+	saved, _ := egress.NewMemoryUnblocks()
+	for _, host := range cfg.OpenShell.Egress.Unblocked {
+		_ = saved.Add(egress.Unblock{Pattern: host})
+	}
+	return unblockIndex{live: m.unblocks, saved: saved}
+}
+
+// egressDecider builds a sandbox's own egress proxy decider from its
+// resolved policy (packs.Effective.EgressDecider) and the unblock index.
+// Each sandbox's proxy credential carries its own, so one sandbox's pack,
+// admin clamps, ports and unblocks never decide another's egress.
+func (m *Manager) egressDecider(cfg *config.Config, eff *packs.Effective) (*egress.Decider, error) {
+	d, err := eff.EgressDecider(m.unblockIndex(cfg))
+	if err != nil {
+		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid, Message: "the sandbox egress policy is invalid", Detail: err.Error()}
+	}
+	return d, nil
+}
+
+// Decider builds the egress proxy's default decider: the configured posture
+// without run flags, with the persistent unblocks. The manager registers
+// every sandbox's proxy credential with the sandbox's own decider
+// (egressDecider), so the default decides only for a principal registered
+// without one.
 func (m *Manager) Decider() (*egress.Decider, error) {
 	cfg := m.config()
 	base, err := m.baseEffective(cfg)
 	if err != nil {
 		return nil, err
 	}
-	opts := egress.DeciderOptions{
-		Mode:  egress.ModeOpen,
-		Ports: base.Egress.Ports,
-		// "Always" decisions are unblocks, never operator allows: an allow
-		// entry opens the private addresses its name resolves to, an
-		// unblock only lifts blocklist and allowlist refusals.
-		Unblocks: unblockIndex{m: m, always: proxyPatterns(cfg.OpenShell.Egress.Unblocked)},
-	}
-	if base.NetworkMode == packs.NetworkAllowlist {
-		opts.Mode = egress.ModeAllowlist
-	}
-	if !slices.Contains(base.Egress.Feeds, packs.FeedBuiltin) {
-		opts.Blocklists = []*egress.Feed{}
-	}
-	block := append(append([]string{}, base.Egress.AdminBlock...), base.Egress.Block...)
-	allow := append([]string{}, base.Egress.Allow...)
-	ports := append([]int{}, base.Egress.Ports...)
-	m.mu.Lock()
-	for _, b := range m.boxes {
-		if b.eff == nil || b.deleted {
-			continue
-		}
-		block = append(block, b.eff.Egress.Block...)
-		for _, p := range b.eff.Egress.Ports {
-			if !slices.Contains(ports, p) {
-				ports = append(ports, p)
-			}
-		}
-	}
-	m.mu.Unlock()
-	if len(base.Egress.AllowOnly) > 0 {
-		// Nothing outside the administrator's list is reachable.
-		opts.Mode = egress.ModeAllowlist
-		opts.Allowlists = []*egress.Feed{}
-		allow = append([]string{}, base.Egress.AllowOnly...)
-	}
-	opts.Block = proxyPatterns(block)
-	opts.Allow = proxyPatterns(allow)
-	opts.Ports = ports
-	return egress.NewDecider(opts)
+	return m.egressDecider(cfg, base)
 }
 
-// proxyPatterns converts pack host globs to proxy patterns: "*" (every
-// host) has no proxy form and is dropped, which only matters for allow
-// lists (packs never let it through).
-func proxyPatterns(globs []string) []string {
-	var out []string
-	for _, g := range globs {
-		g = strings.TrimSpace(g)
-		if g == "" || g == "*" {
-			continue
-		}
-		if !slices.Contains(out, g) {
-			out = append(out, g)
-		}
-	}
-	return out
-}
-
-// refreshEgress re-resolves every sandbox's policy and swaps in a new
-// decider. It runs after creates, deletes and configuration changes.
+// refreshEgress re-resolves every sandbox's policy, re-registers its proxy
+// credential with its rebuilt decider, and swaps in a new default decider,
+// which also retires the proxy's pooled upstream connections. It runs after
+// creates, deletes and configuration changes.
 func (m *Manager) refreshEgress() {
 	cfg := m.opts.Config()
 	m.mu.Lock()
@@ -155,22 +129,22 @@ func (m *Manager) refreshEgress() {
 }
 
 // syncCredential registers a sandbox's egress proxy credential with its
-// current principal, or revokes it while the sandbox's network mode is deny
-// (the strict profile, for example after an administrator raised
-// min_profile): the proxy then refuses the sandbox altogether instead of
-// serving it in open mode.
+// current principal and decider, or revokes it while the sandbox's network
+// mode is deny (the strict profile, for example after an administrator
+// raised min_profile) or it has no decider: the proxy then refuses the
+// sandbox altogether instead of serving it under another policy.
 func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.mu.Lock()
-	cred, rec := b.cred, b.rec
+	cred, rec, d := b.cred, b.rec, b.decider
 	m.mu.Unlock()
 	if cred.Username == "" || rec.BindingID == "" || eff == nil {
 		return
 	}
-	if eff.NetworkMode == packs.NetworkDeny {
+	if eff.NetworkMode == packs.NetworkDeny || d == nil {
 		m.creds.Revoke(rec.BindingID)
 		return
 	}
-	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, eff))
+	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d))
 }
 
 // enforceAll re-checks the approved rules of every ready sandbox against
@@ -198,55 +172,12 @@ func (m *Manager) enforceAll(ctx context.Context) {
 	}
 }
 
-// unblockIndex serves the Decider's unblock lookups: sandbox-scoped and
-// persistent unblocks (always, openshell.egress.unblocked), and each
-// sandbox's own pack allow list. Nothing is unblocked when the
-// administrator forbids unblocking, and nothing outside an administrator
-// allow-only list.
-type unblockIndex struct {
-	m      *Manager
-	always []string
-}
-
-func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock, bool) {
-	m := u.m
-	m.mu.Lock()
-	var b *box
-	if p.SandboxName != "" {
-		b = m.boxes[p.SandboxName]
-	}
-	var eff *packs.Effective
-	if b != nil {
-		eff = b.eff
-	}
-	m.mu.Unlock()
-	if eff == nil {
-		return egress.Unblock{}, false
-	}
-	if triage.CheckUnblock(eff, host) != nil {
-		return egress.Unblock{}, false
-	}
-	if len(eff.Egress.AllowOnly) > 0 && !packs.MatchAnyHost(eff.Egress.AllowOnly, host) {
-		return egress.Unblock{}, false
-	}
-	if ub, ok := m.unblocks.Unblocked(p, host); ok {
-		return ub, true
-	}
-	for _, glob := range u.always {
-		if packs.MatchHost(glob, host) {
-			return egress.Unblock{Pattern: glob}, true
-		}
-	}
-	for _, glob := range eff.Egress.Allow {
-		if packs.MatchHost(glob, host) {
-			return egress.Unblock{Pattern: glob, SandboxID: p.SandboxID}, true
-		}
-	}
-	return egress.Unblock{}, false
-}
-
 // Unblock lifts an egress block for one sandbox or, with Always, for every
-// sandbox (the host joins openshell.egress.unblocked).
+// sandbox (the host joins openshell.egress.unblocked). The policy's check
+// (packs ActionUnblock) asks the same decider the proxy uses, so only what
+// an unblock can lift there is accepted: the blocklist feed and the mode
+// defaults, never the guard (this machine, private networks), the
+// administrator's lists or the block list.
 func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error) {
 	host := triage.NormalizeHost(req.Host)
 	if host == "" || strings.ContainsAny(host, "/ \t") {
@@ -274,23 +205,8 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		return nil, m.violationError(ctx, err, req.Sandbox)
 	}
 	if req.Always {
-		if err := triage.CheckApproval(eff, host, 0, true, m.feedMatcher()); err != nil && !triage.IsHostLocal(host) {
+		if err := triage.CheckApproval(eff, host, 0, true); err != nil && !triage.IsHostLocal(host) {
 			return nil, m.violationError(ctx, err, req.Sandbox)
-		}
-	}
-	// Guard and operator blocks (private networks, this machine, the
-	// administrator's blocklist) are never lifted by an unblock.
-	probe := egress.Principal{BindingID: "unblock-probe", SandboxName: req.Sandbox}
-	if b != nil {
-		m.mu.Lock()
-		probe = m.principal(b.rec.BindingID, scopeID(b.rec.ID, b.rec.Name), b.rec.Name, eff)
-		m.mu.Unlock()
-	}
-	if d, derr := m.Decider(); derr == nil {
-		dec := d.Decide(probe, host, 443)
-		if !dec.Allowed && !dec.Unblockable && (dec.Source == egress.SourceGuard || dec.Source == egress.SourceOperator) {
-			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
-				Message: host + " cannot be unblocked", Detail: dec.Reason}
 		}
 	}
 	resp := &sandboxapi.UnblockResponse{Host: host, Sandbox: req.Sandbox}
@@ -437,7 +353,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
 			}
 			m.feed.Publish(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
-				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && unblockable(e),
+				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && e.Unblockable,
 				Reason: truncate(e.Reason, 300), Message: msg,
 			})
 		}
@@ -458,12 +374,6 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
 			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Severity: severity,
 			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%d bytes)", e.Host, e.BytesUp)})
 	}
-}
-
-// unblockable reports proxy refusals an unblock can lift: feed entries and
-// the mode defaults (allowlist misses, open-mode IP literals).
-func unblockable(e egress.Event) bool {
-	return e.Source == egress.SourceFeed || e.Source == egress.SourceDefault
 }
 
 func egressScheme(e egress.Event) string {

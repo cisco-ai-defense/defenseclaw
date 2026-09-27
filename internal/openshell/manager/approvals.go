@@ -195,13 +195,60 @@ func (m *Manager) triageSweep(ctx context.Context) {
 	}
 }
 
-// triagePolicy is what triage judges a sandbox's proposals against.
-func (m *Manager) triagePolicy(eff *packs.Effective) triage.Policy {
+// triagePolicy is what triage judges a sandbox's proposals against: its
+// resolved policy and the same decider, principal and unblocks its proxy
+// credential carries, so a direct rule is approved only where the proxy
+// would let the sandbox through.
+func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	cfg := m.config()
-	return triage.Policy{
-		Effective: eff, Feed: m.feedMatcher(), AgentProposals: cfg.OpenShell.Approvals.AgentProposalsEnabled(),
-		Unblocked: cfg.OpenShell.Egress.Unblocked,
+	m.mu.Lock()
+	d := b.decider
+	if b.eff != eff {
+		d = nil
 	}
+	rec := b.rec
+	m.mu.Unlock()
+	if d == nil {
+		d, _ = m.egressDecider(cfg, eff)
+	}
+	return triage.Policy{
+		Effective: eff, Decider: d, Principal: m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d),
+		Resolver: m.opts.Resolver, AgentProposals: cfg.OpenShell.Approvals.AgentProposalsEnabled(),
+	}
+}
+
+// recheckApproval judges an approval again right before the batcher applies
+// it (triage.BatcherOptions.Recheck), against the chunk as it is then, the
+// current policy and fresh DNS answers: an automatic approval must still be
+// approved automatically, an operator's must still not be rejected.
+func (m *Manager) recheckApproval(ctx context.Context, it triage.Item, chunk openshell.PolicyChunk) error {
+	id, _ := it.Tag.(string)
+	m.mu.Lock()
+	a, b := m.approvals[id], m.boxes[it.Sandbox]
+	operator, always := false, false
+	if a != nil {
+		operator, always = a.actor == actorOperator, a.always
+	}
+	m.mu.Unlock()
+	if b == nil {
+		return errors.New("the sandbox is gone")
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		return err
+	}
+	p := triage.FromChunk(it.Sandbox, chunk)
+	d := triage.Classify(ctx, p, m.triagePolicy(b, eff))
+	switch {
+	case d.Verdict == triage.Reject:
+		return errors.New(d.Message)
+	case d.Verdict == triage.Ask && !operator:
+		return errors.New("it needs the user's approval now: " + d.Message)
+	}
+	if operator {
+		return triage.CheckProposal(eff, p, always)
+	}
+	return nil
 }
 
 // triageSandbox fetches a sandbox's pending proposals and decides the ones
@@ -228,7 +275,7 @@ func (m *Manager) triageSandbox(ctx context.Context, b *box) {
 		}
 		return
 	}
-	pol := m.triagePolicy(eff)
+	pol := m.triagePolicy(b, eff)
 	// seenChunks tracks the inbox's pending chunks only: a decided chunk
 	// leaves the pending list and its entry goes with it.
 	pending := make(map[string]bool, len(draft.Chunks))
@@ -266,7 +313,7 @@ func (m *Manager) triageSandbox(ctx context.Context, b *box) {
 			return
 		}
 		p := triage.FromChunk(name, chunk)
-		d := triage.Classify(p, pol)
+		d := triage.Classify(ctx, p, pol)
 		m.applyTriage(ctx, gw, b, bindingID, p, d)
 	}
 	if more {
@@ -504,7 +551,7 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 				ident.PolicyVersion = r.PolicyVersion
 			}
 		}
-		applied := r.Err == nil && !r.Skipped && !r.Changed && !r.Stale && !r.Gone
+		applied := r.Err == nil && r.Refused == nil && !r.Skipped && !r.Changed && !r.Stale && !r.Gone
 		if b != nil && applied {
 			b.rulesAdded++
 		}
@@ -515,13 +562,18 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 				a.status = sandboxapi.ApprovalApproved
 			case r.Skipped:
 				a.status = sandboxapi.ApprovalPending
+			case r.Refused != nil && a.actor == actorOperator:
+				a.status = sandboxapi.ApprovalRejected
 			default:
 				a.status = sandboxapi.ApprovalFailed
 			}
 		}
 		m.mu.Unlock()
-		if b != nil && (r.Changed || r.Stale) {
-			// Decide the chunk again as it is now.
+		// Decide the chunk again as it is now: its content or the policy
+		// changed, or an automatic approval no longer passes (triage then
+		// rejects it or asks the user).
+		retry := r.Changed || r.Stale || (r.Refused != nil && (a == nil || a.actor != actorOperator))
+		if b != nil && retry {
 			m.retriage(b, r.Item.ChunkID)
 		}
 		if a == nil || b == nil {
@@ -536,6 +588,20 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		case r.Err != nil:
 			m.logf("apply approval %s of %s: %v", a.id, a.sandbox, r.Err)
 			fail("apply_failed", "the approval could not be applied: "+truncate(r.Err.Error(), 200))
+			continue
+		case r.Refused != nil && a.actor == actorOperator:
+			// The user approved it, but it no longer passes the policy (a
+			// name that now resolves to this machine, say): reject it.
+			msg := "not approved: " + truncate(r.Refused.Error(), 300)
+			if gw, err := m.gateway(ctx); err == nil {
+				m.rejectChunk(ctx, gw, a.sandbox, r.Item.ChunkID, msg)
+			}
+			m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
+				Host: a.decision.Host, Port: a.decision.Port, Reason: "refused_at_apply", Message: a.decision.Host + " " + msg})
+			continue
+		case r.Refused != nil:
+			fail("refused_at_apply", "the approval of "+a.decision.Host+" no longer passes the policy; DefenseClaw looks at it again")
 			continue
 		case r.Changed:
 			fail("changed", "the proposal for "+a.decision.Host+" changed after it was decided; DefenseClaw looks at it again")
@@ -652,13 +718,13 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		}
 		// The whole proposal is judged again against the current policy:
 		// approving applies every endpoint, port and allowed IP in it.
-		if cur := triage.Classify(p, m.triagePolicy(eff)); cur.Verdict == triage.Reject {
+		if cur := triage.Classify(ctx, p, m.triagePolicy(b, eff)); cur.Verdict == triage.Reject {
 			if cur.Violation != nil {
 				return nil, m.violationError(ctx, cur.Violation, a.sandbox)
 			}
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
 		}
-		if err := triage.CheckProposal(eff, p, d.Always, m.feedMatcher()); err != nil {
+		if err := triage.CheckProposal(eff, p, d.Always); err != nil {
 			return nil, m.violationError(ctx, err, a.sandbox)
 		}
 		if d.Always {

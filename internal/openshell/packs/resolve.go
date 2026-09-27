@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
 )
 
@@ -214,15 +215,18 @@ type Workspace struct {
 	OnExit      string   `json:"on_exit"`
 }
 
-// Egress is the effective egress-proxy posture. Effective.DecideEgress
-// applies it to a destination; the decision order is: AdminBlock (never
-// unblockable) → AllowOnly (when set, nothing outside it) → Ports → Block
-// (the pack's and openshell.egress.block; not unblockable either, the proxy
-// applies it before unblocks) → Feeds (Allow exempts a host from the feeds,
-// unless openshell.admin.allow_unblock is false) → the network mode (open
-// allows; allowlist needs Allow or AllowOnly; deny refuses). The host lists
-// hold canonical egress patterns (config.ParseOpenShellEgressPattern): names,
-// "*." wildcards, IP addresses and CIDR prefixes.
+// Egress is the effective egress-proxy posture. Effective.EgressOptions
+// turns it into the egress proxy's decider, whose order (see egress.go) is
+// the one semantics: the guard (this machine never, private networks only
+// through an allow entry) → Ports → AdminBlock and AllowOnly (never
+// unblockable) → Block (the pack's and openshell.egress.block; not
+// unblockable: remove the entry) → unblocks → Allow (exempts a host from
+// the feeds, unless openshell.admin.allow_unblock is false) → Feeds
+// (unblockable) → AllowOnly entries → the network mode (open allows names
+// and refuses IP literals until unblocked; allowlist refuses the rest; deny
+// runs without the proxy). The host lists hold canonical egress patterns
+// (config.ParseOpenShellEgressPattern): names, "*." wildcards, IP addresses
+// and CIDR prefixes.
 type Egress struct {
 	Feeds         []string `json:"feeds"`
 	Block         []string `json:"block"`
@@ -289,6 +293,9 @@ type Effective struct {
 	// hostNames are this machine's own names, which reach the host.
 	hostNames []string
 	settings  map[string]Setting
+	// decider is the egress decider without unblocks (EgressDecider(nil))
+	// that DecideEgress and the unblock and approval checks ask.
+	decider *egress.Decider
 }
 
 // explainOrder is the order Explain reports settings in.
@@ -397,6 +404,9 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.resolveHarness(flags)
 	r.resolveWorkspace(o, flags)
 	if err := r.resolveEgress(o); err != nil {
+		return nil, nil, err
+	}
+	if r.eff.decider, err = r.eff.EgressDecider(nil); err != nil {
 		return nil, nil, err
 	}
 	r.resolveMCP(o, flags)

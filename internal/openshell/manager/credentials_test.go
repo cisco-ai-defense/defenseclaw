@@ -66,10 +66,8 @@ func TestPlanCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &Manager{}
-	feed := m.feedMatcher()
 	reserved := map[string]bool{"ANTHROPIC_API_KEY": true}
-	good, err := planCredentials(eff, feed, []sandboxapi.CredentialBinding{
+	good, err := planCredentials(eff, []sandboxapi.CredentialBinding{
 		{Name: "STRIPE_API_KEY", Value: "s", Host: "API.Stripe.com"},
 		{Name: "MOCK_KEY", Value: "m", Host: "host.openshell.internal", Port: 18921},
 	}, reserved)
@@ -92,7 +90,7 @@ func TestPlanCredentials(t *testing.T) {
 		"empty value":      {{Name: "A", Value: "", Host: "a.example"}},
 		"loopback literal": {{Name: "A", Value: "1", Host: "127.0.0.1", Port: 5432}},
 	} {
-		if _, err := planCredentials(eff, feed, list, reserved); err == nil {
+		if _, err := planCredentials(eff, list, reserved); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

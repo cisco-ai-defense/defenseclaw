@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 )
 
 // OpenShellHostAlias is the name a sandbox uses to reach the host.
@@ -40,9 +41,7 @@ const (
 	// destination host (Action.Host), for one sandbox or always.
 	ActionUnblock ActionKind = "unblock"
 	// ActionApprove approves one OpenShell draft proposal for
-	// Action.Host (and Action.Port) once. Pass Action.Feed: when
-	// openshell.admin.allow_unblock is false, an approval is checked
-	// against the blocklist feeds and refused without a matcher.
+	// Action.Host (and Action.Port) once.
 	ActionApprove ActionKind = "approve"
 	// ActionApproveAlways approves a proposal and keeps the rule for
 	// future sandboxes.
@@ -73,9 +72,6 @@ type Action struct {
 	Path string
 	// Harness is the harness to run.
 	Harness string
-	// Feed is the egress proxy's blocklist feed matcher, read by approvals
-	// (see ActionApprove).
-	Feed FeedMatcher
 	// AllowedIPs are an approval's allowed_ips entries: the addresses the
 	// destination may resolve to. Set, they replace OpenShell's own
 	// private-address check, so ranges DefenseClaw never opens are refused
@@ -139,6 +135,11 @@ func (e *Effective) adminViolation(key, attempted, constraint, detail string) *V
 	}
 }
 
+// allowUnblock checks an unblock against the egress decider the proxy
+// uses (EgressOptions): the refusals it reports unblockable (the blocklist
+// feed and the mode defaults) can be lifted, and so can a host it allows
+// today (the unblock then only matters once the policy refuses it). The
+// guard, the administrator's lists and the block list are never lifted.
 func (e *Effective) allowUnblock(host string) error {
 	host, err := validHost(host)
 	if err != nil {
@@ -149,11 +150,28 @@ func (e *Effective) allowUnblock(host string) error {
 		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
 			"blocked destinations cannot be unblocked; ask your administrator")
 	}
+	// The organization's and the user's own lists explain a refusal best,
+	// whatever else would refuse the host too.
 	if v := e.Egress.adminVerdict(key, host); v != nil {
 		return v
 	}
 	if v := e.blockVerdict(key, host); v != nil {
 		return v
+	}
+	d, err := e.policyDecider()
+	if err != nil {
+		return err
+	}
+	dec := d.DecideHost(policyProbe, host)
+	if !dec.Allowed {
+		switch dec.Source {
+		case egress.SourceGuard:
+			return guardViolation(key, host, dec)
+		case egress.SourceAdmin:
+			return e.adminRefusal(key, host, dec)
+		case egress.SourceOperator:
+			return e.blockRefusal(key, host, dec)
+		}
 	}
 	if e.NetworkMode == NetworkDeny {
 		return e.profileViolation(key, host, "the proxy is off, so destinations cannot be unblocked")
@@ -161,11 +179,57 @@ func (e *Effective) allowUnblock(host string) error {
 	return nil
 }
 
+// guardViolation refuses what the egress proxy's guard never lets an
+// unblock or approval open: this machine and what only it reaches, and
+// private networks (only an allow entry opens those).
+func guardViolation(key, host string, dec egress.Decision) error {
+	switch dec.Category {
+	case egress.CategoryHostInternal:
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
+			Message: "DefenseClaw never opens this machine, link-local, cloud metadata or reserved addresses to a sandbox",
+			Detail:  dec.Reason,
+		}
+	case egress.CategoryPrivateNetwork:
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
+			Message: "unblocks never open private networks: " + key,
+			Detail:  "add the exact host name or address to openshell.egress.allow to reach " + host,
+		}
+	}
+	return fmt.Errorf("sandbox policy: %s is not a destination the egress proxy reaches: %s", host, dec.Reason)
+}
+
+// adminRefusal explains a refusal by the administrator's lists
+// (egress.SourceAdmin).
+func (e *Effective) adminRefusal(key, host string, dec egress.Decision) *Violation {
+	if v := e.Egress.adminVerdict(key, host); v != nil {
+		return v
+	}
+	constraint, detail := "openshell.admin.egress_allow_only", host+" is not on your organization's list of allowed destinations"
+	if dec.Category == egress.CategoryAdminBlock {
+		constraint, detail = "openshell.admin.egress_block", host+" matches "+dec.Rule+" on your organization's blocklist"
+	}
+	return &Violation{Key: key, Source: SourceUser, Attempted: host, Constraint: constraint, Message: adminMessage(key), Detail: detail}
+}
+
+// blockRefusal explains a refusal by the block list (egress.SourceOperator).
+func (e *Effective) blockRefusal(key, host string, dec egress.Decision) *Violation {
+	if v := e.blockVerdict(key, host); v != nil {
+		return v
+	}
+	return &Violation{
+		Key: key, Source: SourceUser, Attempted: host, Constraint: "openshell.egress.block",
+		Message: "blocked by the sandbox's block list: " + key,
+		Detail:  host + " matches " + dec.Rule + "; remove the entry to reach it",
+	}
+}
+
 // blockVerdict refuses a host on the block list (the pack's egress.block and
 // openshell.egress.block). The egress proxy applies those entries before any
-// unblock decision, like the administrator's (egress.Decider operator
-// blocks), so neither an unblock nor an approval, which bypasses the proxy,
-// may lift them: reaching the host takes removing the entry.
+// unblock decision, after only the guard and the administrator's lists, so
+// neither an unblock nor an approval, which bypasses the proxy, may lift
+// them: reaching the host takes removing the entry.
 func (e *Effective) blockVerdict(key, host string) *Violation {
 	glob, ok := firstMatch(e.Egress.Block, host)
 	if !ok {
@@ -193,15 +257,18 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 //     request;
 //   - link-local, cloud metadata, multicast and reserved addresses are
 //     never approved;
+//   - other names the proxy treats as this machine (the guard's
+//     host-internal names) are never approved;
 //   - a destination on the block list (the pack's and the user's) is
 //     never approved: no unblock lifts those entries either;
 //   - when openshell.admin.allow_unblock is false, a destination on a
-//     blocklist feed, or a private network address, is refused too:
-//     approving it would lift the proxy's refusal.
+//     blocklist feed, or on a private network (an address, or an intranet
+//     name the proxy refuses), is refused too: approving it would lift the
+//     proxy's refusal.
 //
-// Address checks see the host as named: a name that resolves to a blocked
-// or local address is caught only by what OpenShell enforces on the direct
-// rule, because this check does not resolve names.
+// These checks see the host as named. What a name resolves to is checked by
+// triage, when it decides and again when the approval is applied, with the
+// proxy's own dial-time rules (egress.Decider.CheckAddrs).
 func (e *Effective) allowApproval(key string, action Action, always bool) error {
 	host, err := validHost(action.Host)
 	if err != nil {
@@ -253,20 +320,44 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 			Detail:  host + " is one of them",
 		}
 	}
+	d, err := e.policyDecider()
+	if err != nil {
+		return err
+	}
+	dec := d.DecideHost(policyProbe, host)
+	switch dec.Category {
+	case egress.CategoryHostInternal:
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
+			Message: "DefenseClaw never opens this machine, link-local, cloud metadata or reserved addresses to a sandbox",
+			Detail:  dec.Reason,
+		}
+	case egress.CategoryInvalidDestination:
+		// A single-label name, which resolvers complete with the host's
+		// search domains.
+		return fmt.Errorf("sandbox policy: approving %s: %s", host, dec.Reason)
+	}
 	if v := e.blockVerdict(key, host); v != nil {
 		return v
+	}
+	if !dec.Allowed {
+		switch dec.Source {
+		case egress.SourceAdmin:
+			return e.adminRefusal(key, host, dec)
+		case egress.SourceOperator:
+			return e.blockRefusal(key, host, dec)
+		}
 	}
 	if !unblockForbidden {
 		return nil
 	}
-	if len(e.Egress.Feeds) > 0 {
-		if action.Feed == nil {
-			return fmt.Errorf("sandbox policy: approving %s needs the blocklist feed to check it against", host)
-		}
-		if entry, blocked := action.Feed(e.Egress.Feeds, host); blocked {
-			return e.adminViolation(key, host, "openshell.admin.allow_unblock",
-				host+" is on the blocklist feed ("+entry+"), and blocked destinations cannot be approved")
-		}
+	if !dec.Allowed && dec.Source == egress.SourceFeed {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			host+" is on the blocklist feed ("+dec.Entry+"), and blocked destinations cannot be approved")
+	}
+	if dec.Category == egress.CategoryPrivateNetwork {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			host+" is on a private network, which the egress proxy refuses")
 	}
 	if isPrivateAddress(host) {
 		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
@@ -472,87 +563,6 @@ func (e *Effective) requiresCopy(path string) string {
 		}
 	}
 	return ""
-}
-
-// EgressRule names the step of the egress decision order that decided.
-type EgressRule string
-
-const (
-	// RuleInvalid: the destination is not a host name or IP address.
-	RuleInvalid          EgressRule = "invalid"
-	RuleAdminBlock       EgressRule = "admin_block"
-	RuleAdminAllowOnly   EgressRule = "admin_allow_only"
-	RulePort             EgressRule = "port"
-	RuleBlock            EgressRule = "block"
-	RuleFeed             EgressRule = "feed"
-	RuleAllow            EgressRule = "allow"
-	RuleNetworkOpen      EgressRule = "network_open"
-	RuleNetworkAllowlist EgressRule = "network_allowlist"
-	RuleNetworkDeny      EgressRule = "network_deny"
-)
-
-// EgressDecision is the effective policy's verdict for one destination.
-type EgressDecision struct {
-	Allowed bool       `json:"allowed"`
-	Rule    EgressRule `json:"rule"`
-	// Match is the host glob or feed entry that decided, if any.
-	Match string `json:"match,omitempty"`
-	// Unblockable says whether Allow(ActionUnblock) could lift a refusal.
-	Unblockable bool `json:"unblockable"`
-}
-
-// FeedMatcher reports whether host is on one of the named blocklist feeds
-// and which entry matched. The egress proxy supplies it from its feed data.
-type FeedMatcher func(feeds []string, host string) (entry string, blocked bool)
-
-// DecideEgress applies the effective egress posture to a destination host
-// and port (0 skips the port check) in the documented order: admin block,
-// admin allow-only, ports, the deny network mode, block, feeds (unless the
-// host is on the allow list and openshell.admin.allow_unblock is not false),
-// then the open or allowlist network mode. SSRF protection (loopback, private
-// ranges, metadata, rebinding) is the proxy's job and runs before this, and so
-// does matching IP entries against the addresses a name resolves to.
-func (e *Effective) DecideEgress(host string, port int, feed FeedMatcher) EgressDecision {
-	h, _ := config.NormalizeOpenShellHost(host)
-	if e == nil || h == "" || strings.ContainsAny(h, "*/") {
-		return EgressDecision{Rule: RuleInvalid}
-	}
-	eg := e.Egress
-	if glob, ok := firstMatch(eg.AdminBlock, h); ok {
-		return EgressDecision{Rule: RuleAdminBlock, Match: glob}
-	}
-	allowOnlyGlob, inAllowOnly := firstMatch(eg.AllowOnly, h)
-	if len(eg.AllowOnly) > 0 && !inAllowOnly {
-		return EgressDecision{Rule: RuleAdminAllowOnly}
-	}
-	if port != 0 && !containsInt(eg.Ports, port) {
-		return EgressDecision{Rule: RulePort, Match: strconv.Itoa(port)}
-	}
-	if e.NetworkMode == NetworkDeny {
-		return EgressDecision{Rule: RuleNetworkDeny}
-	}
-	unblockable := !isFalse(e.admin.AllowUnblock)
-	if glob, ok := firstMatch(eg.Block, h); ok {
-		// The proxy applies block entries before unblocks (blockVerdict).
-		return EgressDecision{Rule: RuleBlock, Match: glob}
-	}
-	allowGlob, allowed := firstMatch(eg.Allow, h)
-	// With unblocking forbidden, nothing lifts a feed entry.
-	if (!allowed || !unblockable) && feed != nil && len(eg.Feeds) > 0 {
-		if entry, blocked := feed(eg.Feeds, h); blocked {
-			return EgressDecision{Rule: RuleFeed, Match: entry, Unblockable: unblockable}
-		}
-	}
-	switch {
-	case allowed:
-		return EgressDecision{Allowed: true, Rule: RuleAllow, Match: allowGlob}
-	case inAllowOnly:
-		return EgressDecision{Allowed: true, Rule: RuleAdminAllowOnly, Match: allowOnlyGlob}
-	case e.NetworkMode == NetworkOpen:
-		return EgressDecision{Allowed: true, Rule: RuleNetworkOpen}
-	default:
-		return EgressDecision{Rule: RuleNetworkAllowlist, Unblockable: unblockable}
-	}
 }
 
 // adminVerdict refuses a host the administrator blocked or left outside a

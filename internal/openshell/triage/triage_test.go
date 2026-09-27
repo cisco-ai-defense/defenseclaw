@@ -17,8 +17,11 @@
 package triage
 
 import (
+	"context"
+	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
@@ -26,19 +29,52 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 )
 
 func boolPtr(v bool) *bool { return &v }
 
-// testFeed blocks the hosts the builtin feed would, for the test's purposes.
-func testFeed(feeds []string, host string) (string, bool) {
-	for _, f := range feeds {
-		if f == packs.FeedBuiltin && (host == "webhook.site" || strings.HasSuffix(host, ".pastebin.com")) {
-			return "exfil:" + host, true
-		}
+// fakeResolver answers the names a test sets and a public address for
+// every other name, so no test depends on real DNS.
+type fakeResolver struct {
+	mu      sync.Mutex
+	answers map[string][]string
+	lookups []string
+}
+
+func newResolver() *fakeResolver { return &fakeResolver{answers: map[string][]string{}} }
+
+func (r *fakeResolver) set(host string, addrs ...string) *fakeResolver {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.answers[host+"."] = addrs
+	return r
+}
+
+func (r *fakeResolver) LookupIPAddr(_ context.Context, name string) ([]net.IPAddr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups = append(r.lookups, name)
+	addrs, ok := r.answers[name]
+	if !ok {
+		addrs = []string{"93.184.216.34"}
 	}
-	return "", false
+	if len(addrs) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	out := make([]net.IPAddr, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, net.IPAddr{IP: net.ParseIP(a)})
+	}
+	return out, nil
+}
+
+// testResolver answers every test that does not bring its own.
+var testResolver = newResolver()
+
+func testPolicy(eff *packs.Effective) Policy {
+	return Policy{Effective: eff, Resolver: testResolver, AgentProposals: true}
 }
 
 func effective(t *testing.T, edit func(*config.OpenShellConfig), flags packs.Flags) *packs.Effective {
@@ -141,7 +177,7 @@ func TestClassify(t *testing.T) {
 		{"strict asks", strict, proposal("unknown.example.org", 443), Ask, ReasonManual, KindNetworkRule, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Classify(tc.p, Policy{Effective: tc.eff, Feed: testFeed, AgentProposals: true})
+			got := Classify(context.Background(), tc.p, testPolicy(tc.eff))
 			if got.Verdict != tc.verdict || got.Reason != tc.reason || got.Kind != tc.kind || got.Risky != tc.risky {
 				t.Fatalf("Classify = %+v, want verdict %s reason %s kind %s risky %v", got, tc.verdict, tc.reason, tc.kind, tc.risky)
 			}
@@ -157,11 +193,11 @@ func TestClassifyWorstEndpointWins(t *testing.T) {
 	p := Proposal{Sandbox: "s", ChunkID: "c", RuleName: "allow_multi", Endpoints: []Endpoint{
 		{Host: "ok.example.org", Port: 443}, {Host: "host.openshell.internal", Port: 8080}, {Host: "webhook.site", Port: 443},
 	}}
-	if got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true}); got.Verdict != Reject || got.Host != "webhook.site" {
+	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Reject || got.Host != "webhook.site" {
 		t.Fatalf("mixed proposal = %+v, want the blocklisted endpoint to reject it", got)
 	}
 	p.Endpoints = p.Endpoints[:2]
-	if got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true}); got.Verdict != Ask || got.Kind != KindHostPort {
+	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Ask || got.Kind != KindHostPort {
 		t.Fatalf("mixed proposal = %+v, want the host port to ask", got)
 	}
 }
@@ -170,7 +206,7 @@ func TestClassifySecurityNotesAsk(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
 	p := proposal("cdn.example.org", 443)
 	p.SecurityNotes = "binary downloads executables"
-	got := Classify(p, Policy{Effective: open, Feed: testFeed, AgentProposals: true})
+	got := Classify(context.Background(), p, testPolicy(open))
 	if got.Verdict != Ask || got.Reason != ReasonSecurityFlagged {
 		t.Fatalf("flagged proposal = %+v, want an ask", got)
 	}
@@ -178,7 +214,7 @@ func TestClassifySecurityNotesAsk(t *testing.T) {
 
 func TestClassifyAgentProposalsOff(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
-	got := Classify(proposal("ok.example.org", 443), Policy{Effective: open, Feed: testFeed})
+	got := Classify(context.Background(), proposal("ok.example.org", 443), Policy{Effective: open, Resolver: testResolver})
 	if got.Verdict != Reject || got.Reason != ReasonAgentProposalOff {
 		t.Fatalf("proposals off = %+v", got)
 	}
@@ -219,7 +255,7 @@ func TestClassifyAllowedIPs(t *testing.T) {
 		t.Run(tc.entry, func(t *testing.T) {
 			p := proposal("my-cdn.attacker.example", 443)
 			p.AllowedIPs = []string{tc.entry}
-			got := Classify(p, Policy{Effective: tc.eff, Feed: testFeed, AgentProposals: true})
+			got := Classify(context.Background(), p, testPolicy(tc.eff))
 			if got.Verdict != tc.verdict || got.Reason != tc.reason {
 				t.Fatalf("allowed_ips %s = %+v, want %s %s", tc.entry, got, tc.verdict, tc.reason)
 			}
@@ -227,7 +263,7 @@ func TestClassifyAllowedIPs(t *testing.T) {
 				t.Fatalf("private allowed_ips ask = %+v", got)
 			}
 			// The operator's decision runs the same checks.
-			if err := CheckProposal(tc.eff, p, false, testFeed); (err != nil) != (tc.verdict == Reject) {
+			if err := CheckProposal(tc.eff, p, false); (err != nil) != (tc.verdict == Reject) {
 				t.Fatalf("CheckProposal(%s) = %v", tc.entry, err)
 			}
 		})
@@ -236,8 +272,8 @@ func TestClassifyAllowedIPs(t *testing.T) {
 
 func TestClassifyRuleShape(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
-	pol := Policy{Effective: open, Feed: testFeed, AgentProposals: true}
-	if got := Classify(FromChunk("box", liveChunk("www.example.net", 443)), pol); got.Verdict != Approve || got.Reason != ReasonAutoMode {
+	pol := testPolicy(open)
+	if got := Classify(context.Background(), FromChunk("box", liveChunk("www.example.net", 443)), pol); got.Verdict != Approve || got.Reason != ReasonAutoMode {
 		t.Fatalf("OpenShell's own proposal = %+v, want an automatic approval (the open pack uses approvals: auto)", got)
 	}
 	for name, edit := range map[string]func(c *openshell.PolicyChunk){
@@ -263,7 +299,7 @@ func TestClassifyRuleShape(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := liveChunk("www.example.net", 443)
 			edit(&c)
-			got := Classify(FromChunk("box", c), pol)
+			got := Classify(context.Background(), FromChunk("box", c), pol)
 			if got.Verdict != Reject || got.Reason != ReasonRuleShape {
 				t.Fatalf("Classify = %+v, want an unsupported-rule rejection", got)
 			}
@@ -272,31 +308,152 @@ func TestClassifyRuleShape(t *testing.T) {
 	// Merging into an earlier plain approval of the same rule is fine.
 	c := liveChunk("www.example.net", 443)
 	c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{{Host: "www.example.net", Port: 443}}}
-	if got := Classify(FromChunk("box", c), pol); got.Verdict != Approve {
+	if got := Classify(context.Background(), FromChunk("box", c), pol); got.Verdict != Approve {
 		t.Fatalf("merge into a plain rule = %+v", got)
 	}
 }
 
+// TestClassifyUnblocked: triage asks the sandbox's own proxy decider, so
+// the sandbox's unblocks lift what they lift in the proxy (the feed, the
+// allowlist, open-mode IP literals) for that sandbox only, and never the
+// administrator's lists, the block list or the private-network checks.
 func TestClassifyUnblocked(t *testing.T) {
+	ctx := context.Background()
 	balanced := effective(t, nil, packs.Flags{Profile: "balanced"})
+	open := effective(t, nil, packs.Flags{})
 	adminBlock := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"webhook.site"} }, packs.Flags{})
-	unblocked := []string{"api.internal-tools.example", "webhook.site", "10.1.2.3"}
-	pol := Policy{Effective: balanced, Feed: testFeed, AgentProposals: true, Unblocked: unblocked}
-	if got := Classify(proposal("api.internal-tools.example", 443), pol); got.Verdict != Approve || got.Reason != ReasonAllowed {
+	userBlock := effective(t, func(o *config.OpenShellConfig) { o.Egress.Block = []string{"webhook.site"} }, packs.Flags{})
+	unblocks, err := egress.NewMemoryUnblocks(
+		egress.Unblock{Pattern: "api.internal-tools.example"},
+		egress.Unblock{Pattern: "webhook.site"},
+		egress.Unblock{Pattern: "10.1.2.3"},
+		egress.Unblock{Pattern: "93.184.216.34", SandboxID: "sb-a"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withUnblocks := func(eff *packs.Effective, sandboxID string) Policy {
+		d, err := eff.EgressDecider(unblocks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol := testPolicy(eff)
+		pol.Decider, pol.Principal = d, egress.Principal{BindingID: "b-" + sandboxID, SandboxID: sandboxID}
+		return pol
+	}
+	pol := withUnblocks(balanced, "sb-a")
+	if got := Classify(ctx, proposal("api.internal-tools.example", 443), pol); got.Verdict != Approve || got.Reason != ReasonAllowed {
 		t.Fatalf("unblocked host = %+v", got)
 	}
-	// An earlier always decision lifts the blocklist feed, as in the proxy.
-	if got := Classify(proposal("webhook.site", 443), pol); got.Verdict != Approve {
+	// An unblock lifts the blocklist feed, as in the proxy.
+	if got := Classify(ctx, proposal("webhook.site", 443), pol); got.Verdict != Approve || got.Reason != ReasonAllowed {
 		t.Fatalf("unblocked feed host = %+v", got)
 	}
-	// It never lifts the administrator's blocklist or the private checks.
-	pol.Effective = adminBlock
-	if got := Classify(proposal("webhook.site", 443), pol); got.Verdict != Reject || got.Reason != ReasonAdmin {
+	// A sandbox's own unblock of an IP literal opens it for that sandbox only.
+	if got := Classify(ctx, proposal("93.184.216.34", 443), withUnblocks(open, "sb-a")); got.Verdict != Approve || !got.Risky {
+		t.Fatalf("unblocked IP literal = %+v", got)
+	}
+	if got := Classify(ctx, proposal("93.184.216.34", 443), withUnblocks(open, "sb-b")); got.Verdict != Reject || got.Reason != ReasonIPLiteral {
+		t.Fatalf("another sandbox's unblock applied: %+v", got)
+	}
+	// Without the sandbox's decider, only the policy decides.
+	if got := Classify(ctx, proposal("webhook.site", 443), testPolicy(balanced)); got.Verdict != Reject || got.Reason != ReasonBlocklisted {
+		t.Fatalf("feed host without unblocks = %+v", got)
+	}
+	// It never lifts the administrator's blocklist, the block list or the
+	// private checks.
+	if got := Classify(ctx, proposal("webhook.site", 443), withUnblocks(adminBlock, "sb-a")); got.Verdict != Reject || got.Reason != ReasonAdmin {
 		t.Fatalf("admin-blocked unblocked host = %+v", got)
 	}
-	if got := Classify(proposal("10.1.2.3", 443), pol); got.Verdict != Ask || got.Reason != ReasonPrivateNetwork {
+	if got := Classify(ctx, proposal("webhook.site", 443), withUnblocks(userBlock, "sb-a")); got.Verdict != Reject || got.Reason != ReasonPolicy {
+		t.Fatalf("user-blocked unblocked host = %+v", got)
+	}
+	if got := Classify(ctx, proposal("10.1.2.3", 443), withUnblocks(adminBlock, "sb-a")); got.Verdict != Ask || got.Reason != ReasonPrivateNetwork {
 		t.Fatalf("unblocked private address = %+v", got)
 	}
+}
+
+// TestClassifyResolvesNames: a direct rule reaches whatever its name
+// resolves to without the proxy's guard, so triage resolves every name and
+// holds the answers to the proxy's dial-time rules.
+func TestClassifyResolvesNames(t *testing.T) {
+	ctx := context.Background()
+	r := newResolver().
+		set("rebind.example.org", "127.0.0.1").
+		set("meta.example.org", "169.254.169.254").
+		set("mixed.example.org", "93.184.216.34", "::1").
+		set("lan.example.org", "10.0.0.5").
+		set("db.corp-tools.example", "10.0.0.6").
+		set("feedaddr.example.org", "93.184.216.35").
+		set("gone.example.org")
+	open := effective(t, nil, packs.Flags{})
+	noUnblock := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, packs.Flags{})
+	allowed := effective(t, func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"db.corp-tools.example"} }, packs.Flags{})
+	blockedAddr := effective(t, func(o *config.OpenShellConfig) { o.Egress.Block = []string{"93.184.216.35"} }, packs.Flags{})
+	adminAddr := effective(t, func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"93.184.216.0/24"} }, packs.Flags{})
+	balanced := effective(t, nil, packs.Flags{Profile: "balanced"})
+	for _, tc := range []struct {
+		name    string
+		eff     *packs.Effective
+		host    string
+		verdict Verdict
+		reason  Reason
+	}{
+		{"public answer", open, "cdn.example.org", Approve, ReasonAutoMode},
+		{"loopback answer", open, "rebind.example.org", Reject, ReasonResolvesToHost},
+		{"metadata answer", open, "meta.example.org", Reject, ReasonResolvesToHost},
+		{"one bad answer among good ones", open, "mixed.example.org", Reject, ReasonResolvesToHost},
+		{"private answer asks", open, "lan.example.org", Ask, ReasonPrivateNetwork},
+		{"private answer when unblock is off", noUnblock, "lan.example.org", Reject, ReasonAdmin},
+		{"private answer an exact allow entry opens", allowed, "db.corp-tools.example", Approve, ReasonAllowed},
+		{"not-allowlisted name with a loopback answer", balanced, "rebind.example.org", Reject, ReasonResolvesToHost},
+		{"blocked address answer", blockedAddr, "feedaddr.example.org", Reject, ReasonBlocklisted},
+		{"admin-blocked address answer", adminAddr, "feedaddr.example.org", Reject, ReasonAdmin},
+		{"no answer", open, "gone.example.org", Reject, ReasonUnresolved},
+		{"intranet name asks without a lookup", open, "wiki.corp", Ask, ReasonPrivateNetwork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := testPolicy(tc.eff)
+			pol.Resolver = r
+			got := Classify(ctx, proposal(tc.host, 443), pol)
+			if got.Verdict != tc.verdict || got.Reason != tc.reason {
+				t.Fatalf("Classify(%s) = %+v, want %s %s", tc.host, got, tc.verdict, tc.reason)
+			}
+			if tc.verdict != Approve && !got.Risky {
+				t.Fatalf("Classify(%s) = %+v, want it marked risky", tc.host, got)
+			}
+		})
+	}
+	r.mu.Lock()
+	lookups := strings.Join(r.lookups, " ")
+	r.mu.Unlock()
+	if strings.Contains(lookups, "wiki.corp") {
+		t.Fatalf("an intranet name was looked up: %s", lookups)
+	}
+	if !strings.Contains(lookups, "cdn.example.org.") {
+		t.Fatalf("names are not looked up fully qualified: %s", lookups)
+	}
+
+	// Approved rules are re-checked the same way.
+	pol := testPolicy(open)
+	pol.Resolver = r
+	if !ResolvesToHost(ctx, proposal("rebind.example.org", 443), pol) || ResolvesToHost(ctx, proposal("lan.example.org", 443), pol) ||
+		ResolvesToHost(ctx, proposal("gone.example.org", 443), pol) || ResolvesToHost(ctx, proposal("host.openshell.internal", 5432), pol) {
+		t.Fatal("ResolvesToHost misjudged an approved rule")
+	}
+	// A canceled context fails closed.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	pol.Resolver = resolverFunc(func(ctx context.Context, _ string) ([]net.IPAddr, error) { return nil, ctx.Err() })
+	if got := Classify(canceled, proposal("cdn.example.org", 443), pol); got.Verdict != Reject || got.Reason != ReasonUnresolved {
+		t.Fatalf("Classify without DNS = %+v", got)
+	}
+}
+
+type resolverFunc func(ctx context.Context, name string) ([]net.IPAddr, error)
+
+func (f resolverFunc) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	return f(ctx, name)
 }
 
 func TestContentDigest(t *testing.T) {
@@ -325,7 +482,7 @@ func TestContentDigest(t *testing.T) {
 }
 
 func TestClassifyNilPolicy(t *testing.T) {
-	if got := Classify(proposal("a.example", 443), Policy{AgentProposals: true}); got.Verdict != Reject {
+	if got := Classify(context.Background(), proposal("a.example", 443), Policy{AgentProposals: true}); got.Verdict != Reject {
 		t.Fatalf("nil effective = %+v", got)
 	}
 }
@@ -361,10 +518,10 @@ func TestFromChunk(t *testing.T) {
 
 func TestCheckApprovalAndUnblock(t *testing.T) {
 	noUnblock := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, packs.Flags{})
-	if err := CheckApproval(noUnblock, "ok.example.org", 443, true, testFeed); err == nil {
+	if err := CheckApproval(noUnblock, "ok.example.org", 443, true); err == nil {
 		t.Fatal("approve-always allowed without allow_unblock")
 	}
-	if err := CheckApproval(noUnblock, "ok.example.org", 443, false, testFeed); err != nil {
+	if err := CheckApproval(noUnblock, "ok.example.org", 443, false); err != nil {
 		t.Fatalf("approve once refused: %v", err)
 	}
 	if err := CheckUnblock(noUnblock, "webhook.site"); err == nil {

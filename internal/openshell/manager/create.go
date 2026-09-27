@@ -191,7 +191,10 @@ type createInput struct {
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
 	cfg := m.config()
 	eff, spec, name := in.eff, in.harness, in.name
-	feed := m.feedMatcher()
+	egressDec, err := m.egressDecider(cfg, eff)
+	if err != nil {
+		return nil, err
+	}
 
 	img, err := m.image(ctx, cfg, spec, !in.req.NoBuild)
 	if err != nil {
@@ -223,7 +226,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			reservedNames[k] = true
 		}
 	}
-	creds, err := planCredentials(eff, feed, in.req.Credentials, reservedNames)
+	creds, err := planCredentials(eff, in.req.Credentials, reservedNames)
 	if err != nil {
 		var v *packs.Violation
 		if errors.As(err, &v) {
@@ -317,7 +320,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		if cred, err = egress.NewCredential(); err != nil {
 			return nil, err
 		}
-		if err := m.creds.Register(cred, m.principal(binding.ID, "", name, eff)); err != nil {
+		if err := m.creds.Register(cred, m.principal(binding.ID, "", name, egressDec)); err != nil {
 			return nil, err
 		}
 		rb.add("revoke proxy credential", func(context.Context) error { m.creds.Revoke(binding.ID); return nil })
@@ -391,7 +394,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	m.mu.Lock()
 	b.rec = rec
-	b.eff = eff
+	b.eff, b.decider = eff, egressDec
 	b.cred = cred
 	m.mu.Unlock()
 	// Once the box holds its binding: the harness has not run yet, so the
@@ -422,7 +425,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "record the sandbox id on its binding: %v", err)
 	}
 	if cred.Username != "" {
-		_ = m.creds.Register(cred, m.principal(binding.ID, scopeID(sb.ID, name), name, eff))
+		_ = m.creds.Register(cred, m.principal(binding.ID, scopeID(sb.ID, name), name, egressDec))
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return nil, err
@@ -584,14 +587,10 @@ func (m *Manager) revokeBinding(id string) error {
 	return err
 }
 
-// principal is the egress identity of a sandbox. An administrator
-// allow-only list forces allowlist mode for every sandbox.
-func (m *Manager) principal(bindingID, sandboxID, name string, eff *packs.Effective) egress.Principal {
-	mode := egress.ModeOpen
-	if eff.NetworkMode == packs.NetworkAllowlist || len(eff.Egress.AllowOnly) > 0 {
-		mode = egress.ModeAllowlist
-	}
-	return egress.Principal{BindingID: bindingID, SandboxID: sandboxID, SandboxName: name, Mode: mode}
+// principal is the egress identity of a sandbox, carrying the sandbox's own
+// decider (egressDecider), so the proxy decides it by its policy alone.
+func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider) egress.Principal {
+	return egress.Principal{BindingID: bindingID, SandboxID: sandboxID, SandboxName: name, Decider: d}
 }
 
 // reserve claims name for a create.

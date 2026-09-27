@@ -59,12 +59,17 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
-	eff, violations, err := m.resolve(m.config(), rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	cfg := m.config()
+	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	if err != nil {
+		return nil, nil, err
+	}
+	d, err := m.egressDecider(cfg, eff)
 	if err != nil {
 		return nil, nil, err
 	}
 	m.mu.Lock()
-	b.eff = eff
+	b.eff, b.decider = eff, d
 	m.mu.Unlock()
 	return eff, violations, nil
 }
@@ -108,10 +113,12 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 // enforceApprovedRules removes the approved OpenShell rules the current
 // policy would refuse to approve now: destinations the administrator
 // blocked or left off an allow-only list, host ports and private networks
-// the administrator closed, and what DefenseClaw never opens. Approved
-// rules bypass the egress proxy, so an administrator change must reach
-// them too. Only triaged rules (allow_*) are judged; DefenseClaw renders
-// its own and the provider rules.
+// the administrator closed, what DefenseClaw never opens, and names that
+// now resolve to this machine (the proxy's dial-time guard, re-applied on
+// every reconcile). Approved rules bypass the egress proxy, so an
+// administrator change or a changed DNS answer must reach them too. Only
+// triaged rules (allow_*) are judged; DefenseClaw renders its own and the
+// provider rules.
 func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	name, ready := b.rec.Name, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
@@ -123,34 +130,42 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	if err != nil || cfg == nil || cfg.Policy == nil {
 		return
 	}
-	feed := m.feedMatcher()
 	var ops []openshell.PolicyMergeOperation
-	var removed []string
+	var removed, rebound []string
+	pol := m.triagePolicy(b, eff)
 	for ruleName, rule := range cfg.Policy.NetworkPolicies {
 		if !strings.HasPrefix(ruleName, "allow_") {
 			continue
 		}
 		p := triage.FromChunk(name, openshell.PolicyChunk{RuleName: ruleName, ProposedRule: &rule})
-		if err := triage.CheckProposal(eff, p, false, feed); !orgRefusal(err) {
+		switch {
+		case orgRefusal(triage.CheckProposal(eff, p, false)):
+			removed = append(removed, ruleName)
+		case triage.ResolvesToHost(ctx, p, pol):
+			rebound = append(rebound, ruleName)
+		default:
 			continue
 		}
 		ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: ruleName}})
-		removed = append(removed, ruleName)
 	}
 	if len(ops) == 0 {
 		return
 	}
 	sort.Strings(removed)
+	sort.Strings(rebound)
+	all := append(append([]string{}, removed...), rebound...)
+	reason, code, eventReason := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation), "SANDBOX_ADMIN_POLICY"
+	if len(removed) == 0 {
+		reason, code, eventReason = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST", "SANDBOX_RULE_RESOLVES_TO_HOST"
+	}
 	res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
-		Annotations: map[string]string{"source": "defenseclaw", "reason": "admin-policy"},
+		Annotations: map[string]string{"source": "defenseclaw", "reason": reason},
 	})
 	if err != nil {
-		m.logf("%s: sandbox %s: remove rules the policy now refuses (%s): %v",
-			gatewaylog.ErrCodeOpenShellAdminViolation, name, strings.Join(removed, ", "), err)
+		m.logf("%s: sandbox %s: remove rules the policy now refuses (%s): %v", code, name, strings.Join(all, ", "), err)
 		return
 	}
-	m.logf("%s: sandbox %s: removed approved rules the policy now refuses: %s",
-		gatewaylog.ErrCodeOpenShellAdminViolation, name, strings.Join(removed, ", "))
+	m.logf("%s: sandbox %s: removed approved rules the policy now refuses: %s", code, name, strings.Join(all, ", "))
 	m.mu.Lock()
 	id := b.identity()
 	if b.sb != nil && res != nil && res.Version != 0 {
@@ -159,13 +174,20 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	}
 	m.mu.Unlock()
 	ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
-		Target: truncate(strings.Join(removed, ","), 256), Reason: "SANDBOX_ADMIN_POLICY", ChangeCount: len(removed), Timestamp: m.now()}
+		Target: truncate(strings.Join(all, ","), 256), Reason: eventReason, ChangeCount: len(all), Timestamp: m.now()}
 	if res != nil {
 		ev.PolicyHash = res.PolicyHash
 	}
 	_ = m.tel.RecordSandboxPolicy(ctx, ev)
-	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
-		Reason: "admin_policy", Message: fmt.Sprintf("removed %d approved rule(s) %s", len(removed), sandboxapi.AdminMessage)})
+	if len(removed) > 0 {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Reason: "admin_policy", Message: fmt.Sprintf("removed %d approved rule(s) %s", len(removed), sandboxapi.AdminMessage)})
+	}
+	if len(rebound) > 0 {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Reason: string(triage.ReasonResolvesToHost), Message: fmt.Sprintf(
+				"removed %d approved rule(s) whose destination now resolves to this machine: %s", len(rebound), strings.Join(rebound, ", "))})
+	}
 }
 
 // orgRefusal reports a refusal by the administrator or a DefenseClaw

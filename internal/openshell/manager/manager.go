@@ -73,6 +73,8 @@ type HostUser struct {
 }
 
 // ProxyControl is the running egress proxy. *egress.Proxy satisfies it.
+// Each sandbox's proxy credential carries the sandbox's own decider; the
+// manager sets the default after re-registering them (refreshEgress).
 type ProxyControl interface {
 	SetDecider(d *egress.Decider) error
 	Counter() *egress.Counter
@@ -118,6 +120,9 @@ type Options struct {
 	HostUser *HostUser
 	// Watch defaults to StreamWatch.
 	Watch WatchFunc
+	// Resolver resolves the destination names of approvals for the egress
+	// proxy's dial-time checks; nil uses net.DefaultResolver.
+	Resolver egress.Resolver
 	// DefenseClawVersion is part of the image content hash.
 	DefenseClawVersion string
 	// SettleDelay waits for the first settings poll after a start
@@ -265,6 +270,7 @@ func New(opts Options) (*Manager, error) {
 		Quiesce:  opts.Quiesce,
 		Debounce: debounce,
 		OnResult: m.approvalsApplied,
+		Recheck:  m.recheckApproval,
 	})
 	if err := m.loadRecords(); err != nil {
 		return nil, err
