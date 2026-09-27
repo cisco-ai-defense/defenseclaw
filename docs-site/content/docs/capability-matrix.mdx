@@ -32,7 +32,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
-  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image: the policy tier, then the hook config file. managed tier = a root-owned system policy file that user and project settings cannot switch off. user tier = a file in the image home the agent can edit, or code the agent or a repository adds runs beside the hooks. The image pin is the harness version the image installs by default. pending = DefenseClaw renders no sandbox image files for this connector yet." />
+  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell overlay image: the policy tier, then the hook config file. managed tier = a root-owned system policy file that user and project settings cannot switch off. user tier = a file in the image home the agent can edit (some launchers restore it from a root-owned copy before every start), or code the agent or a repository adds runs beside the hooks. The image pin is the harness version the image installs by default. The last line says whether the harness has run end to end in an OpenShell sandbox. pending = DefenseClaw renders no sandbox image files for this connector yet." />
   <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
 </Cards>
 
@@ -46,7 +46,7 @@ the proxy or subprocess-shim wiring used by some connectors elsewhere.
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
 | Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
-| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); `DefaultVersion` in `internal/openshell/harness/` (image pin) |
+| OpenShell sandbox | `SandboxArtifacts()` and the `<connector>_sandbox.go` renderers in `internal/gateway/connector/` (tamper tier and hook config file); `DefaultVersion` and `Verification()` in `internal/openshell/harness/` (image pin and end-to-end status) |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
 
@@ -81,11 +81,13 @@ connector-specific fallback; there is no TUI approval queue.
 ### "I want to run the agent in an OpenShell sandbox"
 
 DefenseClaw can render OpenShell sandbox image files for Claude Code, Codex,
-OpenCode, GitHub Copilot CLI, Amp, Cursor Agent, Kiro CLI and Devin CLI. The
-matrix shows each one's tier: Claude Code, Codex, Copilot CLI and Cursor
-Agent register their hooks in a root-owned managed policy. The others are in
-the user tier: the agent can edit their hook file, or code the agent or a
-repository adds runs beside the hooks. Every sandbox hook fails closed. No
+OpenCode, GitHub Copilot CLI, Amp, Cursor Agent, Kiro CLI, Devin CLI, Hermes,
+OpenHands, Antigravity and OmniGent. The matrix shows each one's tier: Claude
+Code, Codex, Copilot CLI, Cursor Agent, Hermes and OmniGent register their
+hooks in a root-owned managed policy. The others are in the user tier: the
+agent can edit their hook file, or code the agent or a repository adds runs
+beside the hooks. Every sandbox hook fails closed. The **OpenShell sandbox**
+column says which harnesses have run end to end in a sandbox. No
 `defenseclaw` command launches a sandbox yet. The
 [sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
 they ship; today it covers legacy cleanup. Every other connector is pending.

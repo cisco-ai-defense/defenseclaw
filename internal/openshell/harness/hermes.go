@@ -43,7 +43,7 @@ var Hermes = register(&Spec{
 	Provider:       connector.NewHermesConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
 	verification: Verification{Status: Unverified,
-		Note: "pending the host run recorded in docs/sandbox: image hook-fire probe and an OpenShell sandbox on Bedrock Mantle"},
+		Note: "the image hook-fire probe passed (mock model through the managed defenseclaw provider: session, LLM and tool hooks reached the stand-in ingress, BLOCKME denied, a hostile user config ignored); no run through the DefenseClaw daemon in an OpenShell sandbox yet"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/hermes", "--version"},
 		VersionRE:       regexp.MustCompile(`^Hermes Agent v([0-9]+\.[0-9]+\.[0-9]+)`),

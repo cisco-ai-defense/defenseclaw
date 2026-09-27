@@ -145,6 +145,45 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only.
 </Callout>
 
+## OpenShell sandbox
+
+DefenseClaw can build an OpenHands OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Hooks in the user tier.** OpenHands CLI has no system or managed hook
+  location. It loads the first of `<workdir>/.openhands/hooks.json` and
+  `~/.openhands/hooks.json` that exists, once per conversation. The image
+  seeds the reviewed `~/.openhands/hooks.json` and keeps a root-owned copy
+  under `/usr/local/lib/defenseclaw/openhands/`. The launcher restores the
+  user file from that copy before every start, so an edit made during a
+  session is undone at the next launch.
+- **Project hook files are refused.** A working directory with its own
+  `.openhands/hooks.json` would replace DefenseClaw's hooks, so the launcher
+  refuses to start there with a message that names the file. Rename the file
+  to run OpenHands in the sandbox.
+- **Fail closed.** The sandbox hook exits 2, the status OpenHands enforces, on
+  every failure: missing token, ingress down, or a bad reply.
+- **Known gap.** The agent can edit `~/.openhands/hooks.json`, or start a
+  second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
+  tool call first, and hook-silence detection is the backstop.
+- **Install pin.** The image installs OpenHands CLI 1.16.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
+  version below the reviewed hook contract (`>=1.12.0`).
+- **Model access.** Every DefenseClaw provider profile runs OpenHands with
+  `--override-with-envs`. The launcher copies the profile's credential
+  placeholder into `LLM_API_KEY`; you choose the model with `LLM_MODEL`, a
+  LiteLLM name:
+  - `defenseclaw-openai`: `openai/<model>`
+  - `defenseclaw-anthropic`: `anthropic/<model>`
+  - `defenseclaw-bedrock-mantle-openai`: `openai/<Mantle model id>`, with
+    `LLM_BASE_URL` set to the Mantle route
+- **Launch flags.** Skip-permissions mode adds `--always-approve`. A headless
+  run is `openhands --headless --exit-without-confirmation -t <prompt>`.
+- **Status.** The image passes the hook-fire probe on a mock model: session,
+  prompt, tool and stop hooks reach the ingress, a blocked tool call does not
+  run, and a replaced user `hooks.json` is restored. A run through the
+  DefenseClaw daemon in an OpenShell sandbox is still pending.
+
 ## Disable
 
 ```bash

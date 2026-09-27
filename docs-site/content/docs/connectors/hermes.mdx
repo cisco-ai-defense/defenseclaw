@@ -257,6 +257,46 @@ reports the staged state as unhealthy/pending reload.
 The official-source record and full cross-surface matrix are in
 [`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
+## OpenShell sandbox
+
+DefenseClaw can build a Hermes OpenShell overlay image. The files below exist
+only in the image; nothing on your host changes.
+
+- **Hooks in the managed tier.** Hermes 0.19 reads an administrator layer from
+  `/etc/hermes/config.yaml` and merges it over `~/.hermes/config.yaml` key by
+  key, with the managed value winning. The image registers the DefenseClaw
+  hook for all 23 Hermes events in that root-owned file. It also pins
+  `hooks_auto_accept: true` (the hooks register without the first-use prompt),
+  `plugins.enabled: []` (in-process plugins cannot load and unregister hooks)
+  and `terminal.backend: local` (approved commands run inside the sandbox). A
+  user setting can add hooks for other events but cannot drop or replace
+  DefenseClaw's.
+- **Fail closed.** Hermes ignores a hook's exit status and treats a timeout as
+  no opinion, so the sandbox hook prints a Hermes block directive on every
+  failure: missing token, ingress down, or a bad reply. It does so well inside
+  the 30-second hook timeout.
+- **Known gap.** `hermes --safe-mode` (and `HERMES_SAFE_MODE=1`) skips every
+  shell hook. The image launcher refuses `--safe-mode`, but an agent could
+  still start a second Hermes in safe mode from a tool call. DefenseClaw sees
+  that tool call first, and hook-silence detection is the backstop.
+- **Install pin.** The image installs Hermes Agent 0.19.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13, with dependency
+  resolution cut off at the review date. The build refuses a Hermes version
+  outside the reviewed hook contracts (`>=0.19.0,<0.22.0`).
+- **Model access.** Use one of these provider profiles. Each key is an
+  OpenShell placeholder that resolves only at the provider endpoint, and only
+  for the harness's own interpreter:
+  - `defenseclaw-openai` or `defenseclaw-bedrock-mantle-openai`, through the
+    image's managed `defenseclaw` provider (`--provider defenseclaw -m <model>`)
+  - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Launch flags.** Skip-permissions mode adds `--yolo`. A headless run is
+  `hermes chat -q <prompt> -Q`.
+- **Status.** The image passes the hook-fire probe on a mock model: session,
+  LLM and tool hooks reach the ingress, a blocked tool call does not run, and
+  a hostile user `config.yaml` has no effect. A run through the DefenseClaw
+  daemon in an OpenShell sandbox is still pending, so the capability matrix
+  lists Hermes as not yet verified end to end.
+
 ## Disable
 
 ```bash

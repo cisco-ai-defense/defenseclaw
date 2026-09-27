@@ -280,3 +280,42 @@ current `.agents/rules`, legacy `.agent/rules`, and plugin `rules/*.md` sources.
 
 Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization
 policy surfaces are outside this connector contract and remain unverified.
+
+## OpenShell sandbox
+
+DefenseClaw can build an Antigravity OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Hooks in the user tier.** agy reads its global hooks from
+  `~/.gemini/config/hooks.json`, and the reviewed 1.2.x build has no system or
+  managed hook location. The image seeds the reviewed file and keeps a
+  root-owned copy under `/usr/local/lib/defenseclaw/antigravity/`. The
+  launcher restores the user file from that copy before every start, so an
+  edit made during a session is undone at the next launch.
+- **Workspace hooks.** agy also loads `<workspace>/.agents/hooks.json`. The
+  launcher refuses to start when that file reuses one of DefenseClaw's
+  `defenseclaw-antigravity-*` hook keys. Workspace hooks under their own keys
+  still load alongside DefenseClaw's.
+- **Fail closed.** agy enforces only a synchronous PreToolUse
+  `{"decision":"deny"}`. The sandbox hook prints that deny on every
+  PreToolUse failure: missing token, ingress down, or a bad reply.
+- **Known gap.** The agent can edit `~/.gemini/config/hooks.json`, or start a
+  second agy with another `HOME`, from a tool call. DefenseClaw sees that tool
+  call first, and hook-silence detection is the backstop.
+- **Install pin.** The image installs agy 1.2.12 from the tarball Google's
+  installer manifest names. It checks the tarball against the manifest's
+  SHA-512, which DefenseClaw pins per architecture (arm64, x86_64). The build
+  refuses a version without a pinned download or below the reviewed hook
+  contract (`>=1.1.8`).
+- **Model access.** Use the `defenseclaw-gemini` provider profile. It sends
+  `GEMINI_API_KEY` as `x-goog-api-key` to `generativelanguage.googleapis.com`,
+  and the placeholder resolves only for the agy binary. When the key is set,
+  the launcher selects agy's `gemini` model provider in
+  `~/.gemini/antigravity-cli/settings.json`, and the key skips the Google
+  sign-in. Signing in with a Google account inside a sandbox is untested.
+- **Launch flags.** Skip-permissions mode adds
+  `--dangerously-skip-permissions`. A headless run is `agy -p <prompt>`.
+- **Status.** The image passes the hook-fire probe against a Gemini-API mock:
+  all five lifecycle hooks reach the ingress, a blocked tool call does not
+  run, and a replaced user `hooks.json` is restored. A run through the
+  DefenseClaw daemon in an OpenShell sandbox is still pending.

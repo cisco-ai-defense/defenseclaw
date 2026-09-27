@@ -187,6 +187,43 @@ unsupported and unverified instead of appearing as an empty live inventory.
 
 <HookEventsList connector="omnigent" />
 
+## OpenShell sandbox
+
+DefenseClaw can build an OmniGent OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Policy in the managed tier.** OmniGent evaluates policies in the server
+  that `omnigent run` starts inside the sandbox. That server reads
+  `$OMNIGENT_CONFIG_HOME/config.yaml`, and the image launcher points it at the
+  root-owned `/etc/omnigent/config.yaml`. That file loads the DefenseClaw
+  policy module and attaches the server-wide `defenseclaw_guardrail` policy.
+  A user `~/.omnigent/config.yaml` has no effect on it. The policy bridge
+  itself is root-owned under `/usr/local/lib/defenseclaw/omnigent/`.
+- **Fail closed.** The sandbox bridge presents only the per-sandbox binding
+  token and retries a dropped request once. Every failure becomes a DENY:
+  missing token, ingress down, a bad status or a bad reply.
+- **Sandbox agent.** OmniGent's own bubblewrap sandbox cannot run inside
+  OpenShell. The image therefore ships an agent,
+  `/usr/local/lib/defenseclaw/omnigent/agent`, whose shell runs in the caller
+  process on the `openai-agents` harness. Run it with
+  `omnigent run /usr/local/lib/defenseclaw/omnigent/agent --model <model>`.
+  Every request, model call and tool call still passes the DefenseClaw policy.
+- **Known gap.** The policy binds through `OMNIGENT_CONFIG_HOME`, which the
+  launcher sets. A second OmniGent started from a tool call without it would
+  run without the policy. DefenseClaw sees that tool call first.
+- **Install pin.** The image installs OmniGent 0.13.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
+  version outside the reviewed contract (`>=0.7.0,<0.14.0`).
+- **Model access.** Use `defenseclaw-openai` (`OPENAI_API_KEY`) or
+  `defenseclaw-anthropic` (`ANTHROPIC_API_KEY`); OmniGent picks up either key
+  from the environment. OmniGent has no skip-permissions switch: approval
+  pauses come from its policies, including DefenseClaw's native ASK.
+- **Status.** The image passes the hook-fire probe with the sandbox agent on a
+  mock model. The request, llm_request, tool_call, tool_result and response
+  policy events reach the ingress, and a blocked tool call does not run. A
+  run through the DefenseClaw daemon in an OpenShell sandbox is still
+  pending.
+
 ## Disable
 
 ```bash

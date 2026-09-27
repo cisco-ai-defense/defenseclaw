@@ -62,7 +62,7 @@ var Antigravity = register(&Spec{
 	Provider:       connector.NewAntigravityConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
 	verification: Verification{Status: Unverified,
-		Note: "pending the host run recorded in docs/sandbox: image hook-fire probe against the built-in Gemini mock"},
+		Note: "the image hook-fire probe passed (Gemini mock through GEMINI_API_KEY: all five lifecycle hooks reached the stand-in ingress, BLOCKME denied, a replaced ~/.gemini/config/hooks.json restored); no run through the DefenseClaw daemon in an OpenShell sandbox yet, and Google sign-in inside a sandbox is untested"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/agy", "--version"},
 		VersionRE:       regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`),
@@ -92,7 +92,7 @@ var Antigravity = register(&Spec{
 	},
 	customization: []CustomizationPath{
 		{Host: ".gemini/config/skills", Sandbox: "/sandbox/.gemini/config/skills", Dir: true, Note: "user skills"},
-		{Host: ".gemini/config/workflows", Sandbox: "/sandbox/.gemini/config/workflows", Dir: true, Note: "user workflows"},
+		{Host: ".gemini/config/agents", Sandbox: "/sandbox/.gemini/config/agents", Dir: true, Note: "user agents"},
 		{Host: ".gemini/GEMINI.md", Sandbox: "/sandbox/.gemini/GEMINI.md", Note: "user rules"},
 	},
 	preseedRefresh: []string{

@@ -46,7 +46,7 @@ var OpenHands = register(&Spec{
 	Provider:       connector.NewOpenHandsConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
 	verification: Verification{Status: Unverified,
-		Note: "pending the host run recorded in docs/sandbox: image hook-fire probe and an OpenShell sandbox on Bedrock Mantle"},
+		Note: "the image hook-fire probe passed (mock model through --override-with-envs: session, prompt, tool and stop hooks reached the stand-in ingress, BLOCKME denied, a replaced ~/.openhands/hooks.json restored); no run through the DefenseClaw daemon in an OpenShell sandbox yet"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/bin/env", "OPENHANDS_SUPPRESS_BANNER=1", "/usr/local/bin/openhands", "--version"},
 		VersionRE:       regexp.MustCompile(`^OpenHands CLI ([0-9]+\.[0-9]+\.[0-9]+)`),
