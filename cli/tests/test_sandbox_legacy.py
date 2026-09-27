@@ -75,6 +75,8 @@ class FakeHost:
     group: list[str] = field(default_factory=lambda: ["alice"])
     sandbox_user: bool = True
     sandbox_processes: bool = False
+    # /proc mounted with hidepid: only root sees the sandbox user's processes.
+    proc_hidden: bool = False
     active_units: set[str] = field(default_factory=lambda: set(legacy.SYSTEMD_UNITS))
     live_pids: dict[int, str] = field(default_factory=dict)  # pid -> /proc/<pid>/cmdline
     acls: dict[str, set[int]] = field(default_factory=dict)  # path -> uids with named entries
@@ -164,7 +166,8 @@ class FakeHost:
             self.group.remove(rest[1])
             return ok
         if name == "pgrep":
-            return ok if self.sandbox_processes else legacy.CommandResult(1)
+            visible = self.sandbox_processes and (argv[0] == SUDO or not self.proc_hidden)
+            return legacy.CommandResult(0, "4242\n") if visible else legacy.CommandResult(1)
         if name == "userdel":
             self.sandbox_user = False
             return ok
@@ -287,6 +290,7 @@ def host(tmp_path):
         group_members=lambda name: list(fake.group),
         pid_alive=lambda pid: pid in fake.live_pids,
         pid_cmdline=lambda pid: fake.live_pids.get(pid),
+        proc_hides_processes=lambda: fake.proc_hidden,
         home=lambda: operator_home,
         now=lambda: dt.datetime(2026, 9, 26, 12, 0, tzinfo=dt.timezone.utc),
         authenticate=lambda system: True,
@@ -390,7 +394,7 @@ def _clean_host(tmp_path):
         binary_path=str(tmp_path / "bin" / "openshell-sandbox"), netns_dir=str(tmp_path / "netns"),
         route_localnet_path=str(tmp_path / "rl"), host_os=lambda: "linux", invoking_user=lambda: "alice",
         lookup_user=lambda name: None, group_members=lambda name: None, home=lambda: str(tmp_path),
-        pid_alive=lambda pid: False,
+        pid_alive=lambda pid: False, proc_hides_processes=lambda: fake.proc_hidden,
     )
     return cfg, fake, system
 
@@ -683,6 +687,86 @@ def test_sandbox_processes_stop_cleanup_after_the_units(host):
     assert any(f"uid {SANDBOX_UID} still runs" in line for line in lines)
     assert not [call for call in host.fake.calls if tool("chown") in call or tool("setfacl") in call]
     assert host.cfg.saves == 0
+
+
+def test_hidepid_proc_looks_for_sandbox_processes_as_root(host):
+    # Under hidepid an unprivileged pgrep exits 1 ("no process") while the
+    # sandbox user still runs some; only root's pgrep sees them.
+    host.fake.proc_hidden = True
+    host.fake.sandbox_processes = True
+    _, steps = _plan(host, remove_user=True)
+    stopped = next(step for step in steps if step.id == "stopped")
+    assert stopped.actions[0].privileged
+    assert f"`sudo pgrep -u {SANDBOX_UID}` finds no process" in stopped.actions[0].description
+    user = next(step for step in steps if step.id == "user")
+    assert user.commands[0].check == sudo("pgrep", "-u", str(SANDBOX_UID))
+
+    result, _, lines = _apply(host, remove_user=True)
+    assert result.applied == ["units"] and result.failed == ["stopped"]
+    assert any(f"uid {SANDBOX_UID} still runs PID 4242" in line for line in lines)
+    assert sudo("pgrep", "-u", str(SANDBOX_UID)) in host.fake.calls
+    assert (tool("pgrep"), "-u", str(SANDBOX_UID)) not in host.fake.calls
+    assert host.fake.sandbox_user is True and host.cfg.saves == 0
+
+
+def test_hidepid_probe_as_root_is_skipped_for_root_and_without_hidepid(host):
+    host.fake.proc_hidden = False
+    assert legacy._uid_process_probe(host.system, SANDBOX_UID) == (tool("pgrep"), "-u", str(SANDBOX_UID))
+    host.fake.proc_hidden = True
+    assert legacy._uid_process_probe(host.system, SANDBOX_UID) == sudo("pgrep", "-u", str(SANDBOX_UID))
+    host.system.euid = lambda: 0
+    assert legacy._uid_process_probe(host.system, SANDBOX_UID) == (tool("pgrep"), "-u", str(SANDBOX_UID))
+    # Without a trusted sudo the uid cannot be checked, which counts as running.
+    host.system.euid = lambda: OPERATOR_UID
+    host.system.resolve = lambda name: None if name == "sudo" else tool(name)
+    result, _, lines = _apply(host)
+    assert result.failed == ["stopped"]
+    assert any(f"cannot check for processes of uid {SANDBOX_UID}" in line for line in lines)
+
+
+def test_privileged_probe_action_authenticates_sudo_first(host):
+    state = legacy.detect(host.cfg, system=host.system)
+    ran: list[str] = []
+
+    def probe() -> str:
+        ran.append("probe")
+        return "ok"
+
+    host.system.authenticate = lambda system: False
+    unprivileged = [legacy.Step("stopped", "check", actions=[legacy.Action("probe", probe)])]
+    legacy.apply(unprivileged, state, yes=True, dry_run=False, system=host.system, echo=lambda line: None)
+    assert ran == ["probe"]
+    privileged = [legacy.Step("stopped", "check", actions=[legacy.Action("probe", probe, privileged=True)])]
+    with pytest.raises(Exception, match="sudo authentication failed"):
+        legacy.apply(privileged, state, yes=True, dry_run=False, system=host.system, echo=lambda line: None)
+    assert ran == ["probe"]
+
+
+@pytest.mark.parametrize(
+    ("mounts", "hidden"),
+    [
+        ("proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n", False),
+        ("proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2 0 0\n", True),
+        ("proc /proc proc rw,relatime,hidepid=invisible 0 0\n", True),
+        ("proc /proc proc rw,relatime,hidepid=noaccess,gid=27 0 0\n", True),
+        ("proc /proc proc rw,relatime,hidepid=ptraceable 0 0\n", True),
+        ("proc /proc proc rw,relatime,hidepid=0 0 0\n", False),
+        ("proc /proc proc rw,relatime,hidepid=off 0 0\n", False),
+        # A container's second proc mount elsewhere does not count; the last
+        # /proc mount is the one in effect.
+        ("proc /proc proc rw,hidepid=2 0 0\nproc /srv/proc proc rw 0 0\n", True),
+        ("proc /proc proc rw,hidepid=2 0 0\nproc /proc proc rw 0 0\n", False),
+        ("/dev/sda1 / ext4 rw 0 0\n", False),
+    ],
+)
+def test_proc_hides_processes_reads_the_proc_mount(tmp_path, mounts, hidden):
+    path = tmp_path / "mounts"
+    path.write_text(mounts)
+    assert legacy._proc_hides_processes(str(path)) is hidden
+
+
+def test_proc_hides_processes_without_a_mount_table(tmp_path):
+    assert legacy._proc_hides_processes(str(tmp_path / "missing")) is False
 
 
 def test_foreign_unit_left_running_stops_cleanup(host):

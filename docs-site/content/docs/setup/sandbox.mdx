@@ -84,7 +84,9 @@ repeated.
    unit is active (including one cleanup left alone because it is not
    DefenseClaw-generated), that no PID recorded in `<data_dir>/sandbox.pids`
    or `<data_dir>/openshell.pid` still runs that program, and that
-   `pgrep -u <sandbox uid>` finds nothing. Otherwise cleanup stops and changes
+   `pgrep -u <sandbox uid>` finds nothing (run through sudo when `/proc` is
+   mounted with `hidepid`, which hides other users' processes from a normal
+   user). Otherwise cleanup stops and changes
    nothing else. Cleanup never runs the non-systemd launcher itself, because
    it lives in the operator-writable data directory; stop it first with
    `sudo <data_dir>/scripts/run-sandbox.sh stop`.

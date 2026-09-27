@@ -248,6 +248,32 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _proc_hides_processes(mounts: str = "/proc/self/mounts") -> bool:
+    """Whether /proc is mounted with ``hidepid``, hiding other users' processes.
+
+    Under ``hidepid=1``/``2`` (``noaccess``, ``invisible``, ``ptraceable``) a
+    non-root user sees only its own processes, so an unprivileged ``pgrep -u
+    <uid>`` exits 1, "no process", while that uid still runs some. The last
+    /proc mount listed is the one in effect. An unreadable mount table (no
+    /proc at all) reports False: pgrep could not look either.
+    """
+    try:
+        with open(mounts, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return False
+    hidden = False
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4 or fields[1] != "/proc" or fields[2] != "proc":
+            continue
+        hidden = any(
+            option.startswith("hidepid=") and option.partition("=")[2] not in ("0", "off")
+            for option in fields[3].split(",")
+        )
+    return hidden
+
+
 def _pid_cmdline(pid: int) -> str | None:
     """The process's command line, or None when it cannot be read."""
     try:
@@ -288,6 +314,7 @@ class System:
     group_members: Callable[[str], list[str] | None] = _group_members
     pid_alive: Callable[[int], bool] = _pid_alive
     pid_cmdline: Callable[[int], str | None] = _pid_cmdline
+    proc_hides_processes: Callable[[], bool] = _proc_hides_processes
     home: Callable[[], str] = lambda: os.path.expanduser("~")
     now: Callable[[], _dt.datetime] = lambda: _dt.datetime.now(_dt.timezone.utc)
     authenticate: Callable[[System], bool] | None = None
@@ -1200,10 +1227,15 @@ class Command:
 
 @dataclass
 class Action:
-    """A Python-native change (no subprocess); ``description`` is what it does."""
+    """A Python-native change; ``description`` is what it does.
+
+    ``privileged`` marks an action that runs a probe through sudo, so the
+    run authenticates sudo before any step, as it does for root commands.
+    """
 
     description: str
     run: Callable[[], str]
+    privileged: bool = False
 
 
 @dataclass
@@ -1265,14 +1297,30 @@ def _units_step(state: LegacyState, system: System) -> Step | None:
     return _finish(step)
 
 
+def _uid_probe_needs_root(system: System) -> bool:
+    """Whether ``pgrep -u`` for another uid must run as root to see its processes."""
+    return not system.is_root() and system.proc_hides_processes()
+
+
+def _uid_process_probe(system: System, uid: int) -> tuple[str, ...]:
+    """``pgrep -u <uid>``, through sudo when /proc hides other users' processes.
+
+    Its exit 1 ("no process") is conclusive only when pgrep can see every
+    process: as root, or with /proc mounted without ``hidepid``.
+    """
+    build = privileged_argv if _uid_probe_needs_root(system) else unprivileged_argv
+    return build(system, "pgrep", "-u", str(uid))
+
+
 def _still_running(state: LegacyState, system: System) -> list[str]:
     """What of the legacy sandbox still runs, one finding per item.
 
     Covers both launchers: the systemd units (a foreign or tampered unit the
     units step left alone included), the PIDs run-sandbox.sh and the old
     gateway recorded (its root ACL-fixer loop lives exactly as long as the
-    recorded openshell-sandbox PID), and any process of the sandbox uid.
-    Anything that cannot be checked counts as running.
+    recorded openshell-sandbox PID), and any process of the sandbox uid
+    (looked up as root when /proc hides other users' processes). Anything
+    that cannot be checked counts as running.
     """
     found: list[str] = []
     for marked in state.units:
@@ -1293,7 +1341,7 @@ def _still_running(state: LegacyState, system: System) -> list[str]:
         found.append(f"PID {pid} ({program or 'unnamed'}) from {source} is running")
     if state.sandbox_uid is not None:
         try:
-            argv = unprivileged_argv(system, "pgrep", "-u", str(state.sandbox_uid))
+            argv = _uid_process_probe(system, state.sandbox_uid)
         except UntrustedCommandError as exc:
             found.append(f"cannot check for processes of uid {state.sandbox_uid}: {exc}")
         else:
@@ -1322,7 +1370,12 @@ def _stopped_step(state: LegacyState, system: System) -> Step | None:
     if state.recorded_pids:
         sources = ", ".join(sorted({source for _, _, source in state.recorded_pids}))
         checks.append(f"no PID recorded in {sources} is still running")
-    if state.sandbox_uid is not None:
+    as_root = state.sandbox_uid is not None and _uid_probe_needs_root(system)
+    if as_root:
+        checks.append(
+            f"`sudo pgrep -u {state.sandbox_uid}` finds no process (/proc hides other users' processes)"
+        )
+    elif state.sandbox_uid is not None:
         checks.append(f"`pgrep -u {state.sandbox_uid}` finds no process")
     if not checks:
         return None
@@ -1348,7 +1401,7 @@ def _stopped_step(state: LegacyState, system: System) -> Step | None:
             + f", then re-run cleanup{stale}"
         )
 
-    step.actions.append(Action("check that " + "; ".join(checks), run))
+    step.actions.append(Action("check that " + "; ".join(checks), run, privileged=as_root))
     return step
 
 
@@ -1637,7 +1690,7 @@ def _user_step(state: LegacyState, system: System, earlier: Sequence[Step]) -> S
         step.commands.append(
             Command(
                 privileged_argv(system, "userdel", "-r", SANDBOX_USER),
-                check=unprivileged_argv(system, "pgrep", "-u", str(state.sandbox_uid)),
+                check=_uid_process_probe(system, state.sandbox_uid),
                 run_when="check-fails",
                 precondition=_user_removal_ready(state, system, ownership_planned),
             )
@@ -2008,10 +2061,13 @@ def apply(
     if not yes and not confirm(f"Apply {len(runnable)} cleanup step(s) to this machine?"):
         raise SystemExit(1)
     sudo = system.trusted("sudo")
-    needs_sudo = not system.is_root() and any(
-        sudo and (command.argv[:1] == (sudo,) or command.check[:1] == (sudo,))
-        for step in runnable
-        for command in step.commands
+    needs_sudo = not system.is_root() and (
+        any(
+            sudo and (command.argv[:1] == (sudo,) or command.check[:1] == (sudo,))
+            for step in runnable
+            for command in step.commands
+        )
+        or any(action.privileged for step in runnable for action in step.actions)
     )
     if needs_sudo and not (system.authenticate or validate_sudo)(system):
         raise click.ClickException("sudo authentication failed; nothing was changed")
