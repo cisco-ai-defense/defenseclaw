@@ -348,8 +348,10 @@ func (c *Counter) evictRefusedLocked() {
 // uploadBlocked reports that the large-upload block already applies to
 // p's traffic to host: its own total, or its registrable domain's, crossed
 // the threshold. A host with no record yet is not refused here (whether it
-// is first-seen is only known at contact); its first upload chunk is cut
-// instead.
+// is first-seen is only known at contact), and neither is one whose address
+// total crossed (the address is only known once dialed): a CONNECT tunnel
+// is refused once its flow opens (flow.uploadRefused), and a forwarded
+// request's first upload chunk is cut.
 func (c *Counter) uploadBlocked(p Principal, host string) bool {
 	if !c.block || c.threshold <= 0 {
 		return false
@@ -478,6 +480,28 @@ func (f *flow) openAt(remote netip.Addr) bool {
 		f.dest.Store(d)
 	})
 	return f.first.Load()
+}
+
+// uploadRefused reports that the large-upload block already refuses every
+// upload of the open flow: its destination's total, or a registrable-domain
+// or address total it counts toward, crossed the threshold before it sent
+// anything, so addUp would cut its first chunk. scope describes the
+// aggregate, empty for the destination's own total. Admission checks the
+// host and its domain (uploadBlocked); only an open flow knows its address.
+func (f *flow) uploadRefused(exempt bool) (scope string, refused bool) {
+	c, d := f.counter, f.dest.Load()
+	if d == nil || exempt || !c.block || c.threshold <= 0 || !d.novel {
+		return "", false
+	}
+	if d.flagged.Load() {
+		return "", true
+	}
+	for _, a := range f.aggs {
+		if a.flagged.Load() {
+			return a.scope(), true
+		}
+	}
+	return "", false
 }
 
 // uploadVerdict is the large-upload outcome of one upload chunk.

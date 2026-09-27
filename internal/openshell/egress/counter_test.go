@@ -485,3 +485,54 @@ func TestCounterBlocksAggregates(t *testing.T) {
 		t.Errorf("an exempt flow was cut: %+v", v)
 	}
 }
+
+// uploadRefused tells an open flow whose first upload chunk the block would
+// cut: its destination, domain or address total already crossed. Exempt
+// flows, known hosts and the alert-only mode are never refused.
+func TestCounterUploadRefused(t *testing.T) {
+	addr := netip.MustParseAddr("198.51.100.7")
+	known := func(_ Principal, host string) bool { return host == "known.example" }
+	c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: true, KnownHost: known})
+	f, _ := c.open(testPrincipal, "big.example", addr)
+	if scope, refused := f.uploadRefused(false); refused {
+		t.Fatalf("a fresh flow is refused (%q)", scope)
+	}
+	if v := f.addUp(2000, false); !v.cut {
+		t.Fatalf("2000 bytes over a 1000-byte block = %+v", v)
+	}
+	f.close()
+	if scope, refused := f.uploadRefused(false); !refused || scope != "" {
+		t.Errorf("the flagged destination = %q, %v", scope, refused)
+	}
+	tests := []struct {
+		host    string
+		addr    netip.Addr
+		exempt  bool
+		scope   string
+		refused bool
+	}{
+		{host: "other.example", addr: addr, scope: "destinations at 198.51.100.7", refused: true},
+		{host: "cdn.big.example", scope: "destinations under big.example", refused: true},
+		{host: "other.example", addr: addr, exempt: true},
+		{host: "known.example", addr: addr},
+		{host: "elsewhere.example", addr: netip.MustParseAddr("198.51.100.8")},
+	}
+	for _, tt := range tests {
+		f, _ := c.open(testPrincipal, tt.host, tt.addr)
+		scope, refused := f.uploadRefused(tt.exempt)
+		if refused != tt.refused || scope != tt.scope {
+			t.Errorf("%s at %s (exempt %v) = %q, %v; want %q, %v", tt.host, tt.addr, tt.exempt, scope, refused, tt.scope, tt.refused)
+		}
+		// addUp agrees: a refused flow's first chunk is cut.
+		if v := f.addUp(1, tt.exempt); v.cut != tt.refused {
+			t.Errorf("%s: addUp = %+v, uploadRefused %v", tt.host, v, refused)
+		}
+		f.close()
+	}
+	alert := NewCounter(CounterOptions{LargeUploadBytes: 1000})
+	f, _ = alert.open(testPrincipal, "big.example", addr)
+	f.addUp(2000, false)
+	if _, refused := f.uploadRefused(false); refused {
+		t.Error("the alert-only mode refuses uploads")
+	}
+}

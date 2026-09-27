@@ -566,12 +566,22 @@ func (p *Proxy) admit(r *http.Request, pr Principal, dec Decision) (func(), *Dec
 	}
 	if !exemptFromUploadBlock(dec) && p.counter.uploadBlocked(pr, dec.Host) {
 		release()
-		refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-		refused.Reason = p.largeUploadReason()
-		refused.Unblockable = true
+		refused := p.largeUploadRefusal(dec, "")
 		return nil, &refused
 	}
 	return release, nil
+}
+
+// largeUploadRefusal is dec refused by the large-upload block; scope names
+// the domain or address total that crossed, empty for the destination's
+// own.
+func (p *Proxy) largeUploadRefusal(dec Decision, scope string) Decision {
+	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
+	refused.Reason, refused.Unblockable = p.largeUploadReason(), true
+	if scope != "" {
+		refused.Reason = p.largeUploadScopeReason(scope)
+	}
+	return refused
 }
 
 // exemptFromUploadBlock: destinations the user unblocked or the operator
@@ -582,6 +592,11 @@ func exemptFromUploadBlock(dec Decision) bool {
 
 func (p *Proxy) largeUploadReason() string {
 	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", formatBytes(p.counter.LargeUploadBytes()))
+}
+
+func (p *Proxy) largeUploadScopeReason(scope string) string {
+	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
+		formatBytes(p.counter.LargeUploadBytes()), scope)
 }
 
 func formatBytes(n int64) string {
@@ -641,9 +656,19 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	flow, first := p.counter.open(pr, dec.Host, remote.Addr())
 	defer flow.close()
+	exempt := exemptFromUploadBlock(dec)
+	if scope, refused := flow.uploadRefused(exempt); refused {
+		// A total the tunnel counts toward (its address's, say) already
+		// crossed the threshold, so its first upload chunk would be cut:
+		// refuse it now, with a body and an event, instead of cutting it
+		// silently after the 200.
+		_ = upstream.Close()
+		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(dec, scope), start)
+		return
+	}
 	t := &tunnel{
 		id: newTunnelID(), principal: pr, method: http.MethodConnect, dec: dec, started: start,
-		flow: flow, exempt: exemptFromUploadBlock(dec),
+		flow: flow, exempt: exempt,
 	}
 	t.setCloser(func() {
 		_ = conn.Close()
@@ -902,8 +927,7 @@ func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e.TunnelID = t.id
 	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason()
 	if v.scope != "" {
-		e.Reason = fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
-			formatBytes(p.counter.LargeUploadBytes()), v.scope)
+		e.Reason = p.largeUploadScopeReason(v.scope)
 	}
 	e.BytesUp = v.total
 	if d := t.flow.dest.Load(); d != nil {

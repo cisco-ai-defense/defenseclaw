@@ -424,9 +424,7 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	t := st.tunnel
 	dec := t.dec
 	if t.cut.Load() {
-		refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-		refused.Reason, refused.Unblockable = p.largeUploadReason(), true
-		p.refuseForward(w, t.principal, t.method, refused, t.started)
+		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(dec, ""), t.started)
 		return
 	}
 	var de *dialError

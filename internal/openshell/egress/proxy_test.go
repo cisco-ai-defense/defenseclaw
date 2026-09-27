@@ -927,6 +927,69 @@ func TestProxyLargeUploadAcrossNames(t *testing.T) {
 	}
 }
 
+// Once a server's address total crossed the threshold, a CONNECT to
+// another first-seen name at that address, one contacted before or a new
+// one, is refused before the tunnel is established, with a large_upload
+// body and a blocked event, rather than cut silently after the 200.
+func TestProxyLargeUploadBlockAtFlaggedAddress(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) {
+		c.counter = &CounterOptions{LargeUploadBytes: 1024, BlockLargeUploads: true}
+	})
+	sinkAddr, _ := startSink(t)
+	h.dialer.route(443, sinkAddr)
+	upload := func(host string, n int) {
+		t.Helper()
+		conn, br, resp := h.connect(host+":443", basicAuth(h.cred), helloFor(host))
+		if resp.status != http.StatusOK {
+			t.Fatalf("CONNECT %s = %d %s", host, resp.status, resp.body)
+		}
+		_, _ = conn.Write(bytes.Repeat([]byte("u"), n))
+		_ = conn.(interface{ CloseWrite() error }).CloseWrite()
+		_, _ = io.Copy(io.Discard, br)
+		_ = conn.Close()
+	}
+	for _, host := range []string{"known.example", "big.example", "fresh.example"} {
+		h.resolver.set(host, []string{publicV4})
+	}
+	upload("known.example", 64)
+	upload("big.example", 4096) // flags big.example, its domain and the address
+	if e := h.sink.wait(t, EventLargeUpload, 1)[0]; e.Host != "big.example" || !e.Terminated {
+		t.Fatalf("large_upload event = %+v", e)
+	}
+	eventually(t, "every tunnel to close", func() bool { return len(h.proxy.Tunnels()) == 0 })
+
+	for _, host := range []string{"known.example", "fresh.example"} {
+		_, _, resp := h.connect(host+":443", basicAuth(h.cred), nil)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("CONNECT %s after the address total crossed = %d %s; want 403", host, resp.status, resp.body)
+		}
+		b := decodeBlock(t, resp.body)
+		if b.Category != CategoryLargeUpload || !b.Unblockable || !strings.Contains(b.Reason, "destinations at "+publicV4) ||
+			!strings.Contains(b.HowToUnblock, "sandbox unblock "+host) {
+			t.Errorf("CONNECT %s block = %+v", host, b)
+		}
+	}
+	var refused []string
+	for _, e := range h.sink.ofKind(EventBlocked) {
+		if e.Category == CategoryLargeUpload {
+			refused = append(refused, e.Host)
+		}
+	}
+	if !slices.Equal(refused, []string{"known.example", "fresh.example"}) {
+		t.Errorf("large_upload refusals = %q", refused)
+	}
+
+	// An unblock of the name exempts it from the block.
+	if err := h.unblocks.Add(Unblock{Pattern: "fresh.example", SandboxID: "sb-1"}); err != nil {
+		t.Fatal(err)
+	}
+	conn, _, resp := h.connect("fresh.example:443", basicAuth(h.cred), nil)
+	if resp.status != http.StatusOK {
+		t.Fatalf("CONNECT after the unblock = %d %s", resp.status, resp.body)
+	}
+	_ = conn.Close()
+}
+
 func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	var got atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
