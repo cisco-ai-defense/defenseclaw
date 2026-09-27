@@ -77,7 +77,7 @@
     "/etc/codex/managed_config.toml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "708a5827ad431ef0243a441b5d2d7c0e1d93853eee3f10f8ac922387ece1c955"
+      "sha256": "b12c6da954a5da2aea43d309e7208dfb0b82e9808c95526e4860147ed29a9fc9"
     },
     "/etc/codex/requirements.toml": {
       "mode": "-rw-r--r--",

@@ -50,11 +50,24 @@ var codexSandboxDisabledFeatures = []string{
 	"tool_suggest",
 }
 
+// codexSandboxPinnedShellEnv are variables the managed config pins in
+// shell_environment_policy.set, the environment Codex gives every command
+// it runs (the shell tool, and the processes that command starts): a
+// workload-written user config.toml, or a trusted project's, can set them
+// there. BASH_ENV and ENV name a file each non-interactive shell sources
+// before the command PreToolUse approved, and the loader variables act
+// before the command's first line; "" is unset to both. PATH stays unpinned
+// (projects set it legitimately); the hooks harden their own. The image's
+// hook-fire probe plants all of them in its hostile user and project
+// config.
+var codexSandboxPinnedShellEnv = []string{"BASH_ENV", "ENV", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD"}
+
 // SandboxArtifacts renders the Codex overlay: sandbox hook scripts, the
 // notify bridge, /etc/codex/requirements.toml (allow_managed_hooks_only,
 // features.hooks pinned true and the contract-selected hook matrix) and
 // /etc/codex/managed_config.toml (update check, analytics and network-syncing
-// features off, notify, OTLP exporters to the ingress).
+// features off, notify, OTLP exporters to the ingress, the shell variables in
+// codexSandboxPinnedShellEnv pinned).
 func (c *CodexConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
 	rt, err := resolveSandboxTarget(c.Name(), target)
 	if err != nil {
@@ -170,12 +183,17 @@ func renderCodexSandboxManagedConfig(rt resolvedSandboxTarget, environment strin
 	for _, feature := range codexSandboxDisabledFeatures {
 		features[feature] = false
 	}
+	pinnedShellEnv := make(map[string]interface{}, len(codexSandboxPinnedShellEnv))
+	for _, key := range codexSandboxPinnedShellEnv {
+		pinnedShellEnv[key] = ""
+	}
 	cfg := map[string]interface{}{
 		"check_for_update_on_startup": false,
 		"notify":                      []interface{}{path.Join(SandboxHookDir, codexSandboxNotifyScript)},
 		"analytics":                   map[string]interface{}{"enabled": false},
 		"features":                    features,
 		"otel":                        otel,
+		"shell_environment_policy":    map[string]interface{}{"set": pinnedShellEnv},
 	}
 	body, err := toml.Marshal(cfg)
 	if err != nil {
@@ -249,6 +267,13 @@ func verifyCodexSandboxPolicy(requirements, managedConfig []byte, rt resolvedSan
 	for _, feature := range codexSandboxDisabledFeatures {
 		if features[feature] != false {
 			return fmt.Errorf("verify Codex sandbox managed config: features.%s is not disabled", feature)
+		}
+	}
+	shellPolicy, _ := managed["shell_environment_policy"].(map[string]interface{})
+	shellSet, _ := shellPolicy["set"].(map[string]interface{})
+	for _, key := range codexSandboxPinnedShellEnv {
+		if got, ok := shellSet[key].(string); !ok || got != "" {
+			return fmt.Errorf("verify Codex sandbox managed config: shell_environment_policy.set.%s is not pinned to \"\"", key)
 		}
 	}
 	otel, _ := managed["otel"].(map[string]interface{})

@@ -45,3 +45,11 @@ protocol = 'json'
 [otel.trace_exporter.otlp-http.headers]
 x-defenseclaw-client = 'codex-otel/1.0'
 x-defenseclaw-source = 'codex'
+
+[shell_environment_policy]
+[shell_environment_policy.set]
+BASH_ENV = ''
+ENV = ''
+LD_AUDIT = ''
+LD_LIBRARY_PATH = ''
+LD_PRELOAD = ''
