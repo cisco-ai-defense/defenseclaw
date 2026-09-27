@@ -19,20 +19,21 @@ and whether MCP servers come along. DefenseClaw ships three packs (`open`,
 `balanced`, and `strict`), and you can write your own.
 
 An administrator can add limits on top of any pack in the `openshell.admin`
-block of `config.yaml`. The limits are designed to cover every sandbox run on
-the machine, and to tell a user who tries to go past them which setting
-stopped them and why.
+block of `config.yaml`. The limits cover every sandbox run on the machine and
+every action taken while one runs, and a user who tries to go past them is
+told which setting stopped them.
 
-<Callout title="Accepted in config.yaml, not enforced yet">
-Support for NVIDIA OpenShell 0.1 is being rebuilt, and no DefenseClaw command
-starts an OpenShell 0.1 sandbox yet. `config.yaml` already accepts the
-`openshell` keys on this page. The v8 schema and DefenseClaw's load-time checks
-validate them, and DefenseClaw refuses a config with an invalid value. Pack
-files aren't opened when the config loads, so nothing checks a custom pack
-yet. Everything else this page describes, including run options, runtime
-actions, and messages, takes effect once sandbox support ships. The
-[Sandbox guide](/docs/setup/sandbox) covers the `sandbox` command as it is
-today.
+To see the policy a run would get, and where each setting comes from, run
+`defenseclaw sandbox policy explain` in the project folder. The
+[Sandbox guide](/docs/setup/sandbox) walks through a session, and
+[Sandbox CLI](/docs/reference/sandbox-cli) lists every command and flag.
+
+<Callout title="Sandboxes and managed installs">
+Sandboxes run on Linux and macOS, as your own user. A `managed_enterprise`
+install doesn't start the sandbox runtime yet. Sandboxes therefore run only on
+installs where the user owns `config.yaml`, and there the admin block is
+enforced but advisory. See
+[Authoritative and advisory admin blocks](#authoritative-and-advisory-admin-blocks).
 </Callout>
 
 ## The built-in packs at a glance
@@ -40,8 +41,8 @@ today.
 | Setting | `open` (default) | `balanced` | `strict` |
 | --- | --- | --- | --- |
 | Web access | Any site by name, except the blocklist, private networks, and this machine | Only the curated developer allowlist | None; only the harness's own model provider |
-| Connection requests | `triage` | `triage` | `manual` |
-| Proxy ports | 80, 443 | 80, 443 | 443 (the proxy is off) |
+| Connection requests | `auto` | `triage` | `manual` |
+| Proxy ports | 80, 443 | 80, 443 | 443, for approved connections only (the proxy is off) |
 | Large-upload alert | 25 MiB | 10 MiB | 5 MiB |
 | Your project | Mounted live | Mounted live | Copied; changes come back as a patch or branch |
 | Copy size limit | 500 MiB | 500 MiB | 200 MiB |
@@ -50,9 +51,12 @@ today.
 | The repository's own MCP servers | Stay stopped | Stay stopped | Stay stopped |
 | Host ports for MCP servers | Can be opened | Can be opened | Never |
 | Hook failure | Tool call denied | Tool call denied | Tool call denied |
+| Hook tamper | Reported, sandbox keeps running | Sandbox stopped | Sandbox stopped |
 
 All three packs use the built-in blocklist feed, hide the same list of secret
 files, and flag the same list of files that can run code on your machine.
+`defenseclaw sandbox pack list` lists the packs with their digests, and
+`defenseclaw sandbox pack show balanced` prints one.
 
 ## Built-in packs
 
@@ -73,24 +77,37 @@ DefenseClaw egress proxy, which allows destinations by default and blocks:
 
 The project folder is mounted live, so you see the agent's edits in your
 editor as they happen. The harness runs in skip-permissions mode, while
-DefenseClaw's hooks still check every tool call.
+DefenseClaw's hooks still check every tool call. A program that connects
+around the proxy is refused by OpenShell, and its connection request is
+approved automatically unless the policy refuses it or it reaches into your
+machine or private network, which asks you.
+
+Default-open egress is a deliberate trade-off. A prompt-injected agent can
+send project code to any host the blocklist doesn't list. DefenseClaw's hooks,
+the blocklist feed, large-upload reports, masked secrets, and endpoint-bound
+credentials limit the damage. When that isn't enough, move to `balanced` or
+`strict`.
 
 ### `balanced`
 
 A default-deny web. The proxy reaches only a curated developer allowlist:
 
-- **Package registries:** npm, Yarn, PyPI, the Go module proxy and checksum
-  database, crates.io, RubyGems, Maven Central, Gradle, NuGet, and Docker Hub.
-- **Source hosts:** `github.com`, `codeload.github.com`,
-  `objects.githubusercontent.com`, `raw.githubusercontent.com`, and
-  `gitlab.com`.
-- **Documentation:** Python, MDN, Go, docs.rs, Node.js, and npm docs.
+- **Package registries:** npm and Yarn, PyPI, the Go module proxy, checksum
+  database and index, crates.io, RubyGems, Maven Central, Gradle, NuGet,
+  Packagist, Hex, pub.dev, and conda.
+- **Source hosts:** `github.com`, `api.github.com`, `codeload.github.com`,
+  `*.githubusercontent.com`, `ghcr.io`, `gitlab.com`, and `bitbucket.org`.
+- **Toolchains:** Node.js, Rust (`static.rust-lang.org`, `sh.rustup.rs`),
+  `www.python.org`, and `astral.sh`.
+- **Documentation:** Python, MDN, Go, docs.rs, the Rust docs, GitHub and npm
+  docs, TypeScript, Microsoft Learn, and Stack Overflow.
 
-The pack's host list is in `policies/sandbox/balanced/pack.yaml`. The egress
-proxy also has its own allowlist feed, which differs from this list; see
-[How a destination is decided](#how-a-destination-is-decided). The blocklist
-feed still applies on top. The project is still mounted live and
-skip-permissions mode stays on.
+The exact host list is in `policies/sandbox/balanced/pack.yaml`, and
+`defenseclaw sandbox pack show balanced` prints it. The same list is the
+egress proxy's allowlist feed, host for host, and a test keeps the two
+identical. The blocklist feed still applies on top. A host off the list can
+be unblocked, and a direct connection request for one asks you. The project
+is still mounted live and skip-permissions mode stays on.
 
 <Callout type="warn" title="An allowlist limits where, not what">
 The proxy sees HTTPS traffic as encrypted tunnels, so it cannot tell a
@@ -102,10 +119,11 @@ needs a GitHub credential inside the sandbox.
 ### `strict`
 
 No web. The egress proxy is off, so only the harness's model provider is
-reachable. Every connection request is asked (`manual`), and the harness keeps
-its own permission prompts. The agent works on a copy of the project, and its
-changes come back as a patch or a branch. MCP servers stay behind, and no host
-port is ever opened.
+reachable. Every connection request is asked (`manual`), unless one of your
+`openshell.egress.allow` entries names the host, and the harness keeps its own
+permission prompts. The agent works on a copy of the project, and its changes
+come back as a patch or a branch. MCP servers stay behind, and no host port is
+ever opened.
 
 ## Pack settings explained
 
@@ -117,16 +135,31 @@ These are the settings each pack controls. The
   `strict`.
 - **Approvals mode** (`approvals.mode`): what happens when a program in the
   sandbox connects somewhere directly instead of through the DefenseClaw proxy.
-  OpenShell refuses the connection and drafts a request to allow it.
-  - `auto` approves every request that isn't blocked.
-  - `triage` approves known-good destinations and asks about the rest.
-  - `manual` asks about every request.
+  OpenShell refuses the connection and drafts a request to allow it, and
+  DefenseClaw triages the request against the same policy the proxy applies.
+  - Whatever the mode, a request the proxy would refuse outright is rejected:
+    the block lists and the blocklist feed, this machine's own listeners,
+    link-local and metadata addresses, a public IP address under `open`
+    (until it is unblocked), a port off the port list, and a name that
+    resolves to this machine or doesn't resolve. A request for a host that an
+    allow entry or an unblock already covers is approved.
+  - Requests that reach into your machine (a localhost port) or your private
+    network always ask, and so do requests OpenShell's policy advisor flags.
+  - For the rest, `auto` approves. `triage` approves on an open network and
+    asks otherwise. `manual` asks.
+  - A stricter profile never runs looser approvals: `balanced` triages at
+    least, and `strict` is always `manual`.
+  - Approvals are applied in batches when the sandbox's hooks are quiet,
+    because every OpenShell policy change closes the sandbox's open
+    connections. `openshell.approvals.debounce_ms` sets how quiet.
 - **Blocklist feeds** (`egress.feeds`): `builtin` is DefenseClaw's curated
   blocklist and the only feed.
-- **Block and allow lists** (`egress.block`, `egress.allow`): host globs.
-- **Ports** (`egress.ports`): the destination ports the proxy connects to.
-- **Large-upload alert** (`egress.large_upload_mb`): raise an alert when a host
-  the sandbox hasn't contacted before receives more than this many MiB.
+- **Block and allow lists** (`egress.block`, `egress.allow`): host patterns.
+- **Ports** (`egress.ports`): the destination ports the proxy connects to, and
+  the only ports a connection request can open.
+- **Large-upload alert** (`egress.large_upload_mb`): report an upload of more
+  than this many MiB to a host the sandbox hasn't contacted before. `0` turns
+  the report off. The upload itself is not cut off.
 - **Workspace mode** (`workspace.mode`): `mount` shares the project folder
   live. `copy` gives the agent a copy, and its changes come back as a patch or
   branch.
@@ -136,6 +169,11 @@ These are the settings each pack controls. The
 - **Review list** (`workspace.review`): files that can run code on your
   machine, such as `package.json`, `Makefile`, `.envrc`, editor task files,
   and CI workflows. Changes to them are called out at the end of a session.
+  Whatever the pack, the review also flags changes to harness and agent-tool
+  project config (`.claude/`, `.mcp.json`, `.codex/`, `.cursor/`,
+  `.gemini/`, `AGENTS.md`, `CLAUDE.md`, and similar), to lock files, and to
+  `pack.yaml` files: a harness run later outside the sandbox acts on them
+  without asking.
 - **Skip-permissions default** (`harness.yolo`) and **allowed harnesses**
   (`harness.allowed`).
 - **MCP** (`mcp.import`, `mcp.host_ports`, `mcp.blocked_tools`,
@@ -150,8 +188,18 @@ These are the settings each pack controls. The
   cannot reach DefenseClaw denies the tool call.
 - **Hook tamper response** (`hooks.on_tamper`): what DefenseClaw does when a
   tool runs without its verdict, because the workload killed or bypassed its
-  hook. `stop` stops the sandbox; `alert` reports a high-severity finding and
-  keeps it running. `open` alerts; `balanced` and `strict` stop.
+  hook. DefenseClaw pairs each tool call's result with its check, so a result
+  for a call that was denied, or that never got a check, is a hook tamper.
+  `stop` stops the sandbox; `alert` reports a high-severity finding and
+  keeps it running. Both show in the activity feed. `open` alerts;
+  `balanced` and `strict` stop.
+
+Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
+workload runs as the same user as the hooks, so it could stop a hook
+process. The files it can reach and the network it can use are enforced
+outside the sandbox, by OpenShell and the egress proxy. How far the
+harness's own settings can switch its hooks off depends on the harness's
+tamper tier; see the [capability matrix](/docs/capability-matrix).
 
 ## MCP servers in a sandbox
 
@@ -211,6 +259,8 @@ create this directory, so create it when you add your first custom pack.
 Start from the built-in pack closest to what you want: copy
 `policies/sandbox/<pack>/pack.yaml` from the DefenseClaw repository to
 `<pack_dir>/<name>/pack.yaml`, then change `name` to match the directory.
+Check the result with `defenseclaw sandbox pack validate`, and select it with
+`openshell.pack` or `defenseclaw sandbox run --pack <name>`.
 
 ```yaml
 version: 1
@@ -264,12 +314,14 @@ hooks:
 ```
 
 <Callout type="warn" title="A custom pack starts from nothing">
-A custom pack gets only what it lists. Its `masks` and `review` lists replace
-the built-in ones, so copy every built-in entry you want to keep. In
-`allowlist` mode, the policy's allow list for a custom pack is only the pack's
-own `egress.allow` hosts plus your `openshell.egress.allow` entries. The
-balanced pack's curated list is not added. Copy the registry and source hosts
-you need from `policies/sandbox/balanced/pack.yaml`.
+A custom pack gets only what it lists. Its `masks`, `unmask`, and `review`
+lists replace the built-in ones, so copy every built-in entry you want to
+keep; only DefenseClaw's own review list (harness and agent config, lock
+files, `pack.yaml`) is always added. In `allowlist` mode, the policy's allow
+list for a custom pack is only the pack's own `egress.allow` hosts plus your
+`openshell.egress.allow` entries. The balanced pack's curated list is not
+added. Copy the registry and source hosts you need from
+`defenseclaw sandbox pack show balanced`.
 </Callout>
 
 ### Pack file reference
@@ -282,10 +334,10 @@ you need from `policies/sandbox/balanced/pack.yaml`.
 | `network.mode` | Yes | | `open`, `allowlist`, or `deny`. |
 | `approvals.mode` | Yes | | `auto`, `triage`, or `manual`. |
 | `egress.feeds` | No | `[builtin]` | Only `builtin`; `[]` turns the feed off. At most 16. |
-| `egress.block` | No | `[]` | Host globs. At most 1024. |
-| `egress.allow` | No | `[]` | Host globs, but never `*` or a whole top-level domain such as `*.com` or `*.co.uk`. At most 1024. |
+| `egress.block` | No | `[]` | Host patterns. At most 1024. |
+| `egress.allow` | No | `[]` | Host patterns, but never one that covers a whole top-level domain such as `*.com` or `*.co.uk`, or an address range wider than `/8` (IPv4) or `/16` (IPv6). At most 1024. |
 | `egress.ports` | No | `[80, 443]` | Ports 1–65535; duplicates are dropped. At least one unless `network.mode` is `deny`; a `deny` pack that lists none gets 80 and 443 when a profile turns the proxy on. At most 64. |
-| `egress.large_upload_mb` | No | `25` | 0–1048576; `0` turns the alert off. |
+| `egress.large_upload_mb` | No | `25` | 0–1048576; `0` turns the report off. |
 | `workspace.mode` | Yes | | `mount` or `copy`. |
 | `workspace.masks` | No | `[]` | Project globs. At most 1024. |
 | `workspace.unmask` | No | `[]` | Project globs. At most 1024. |
@@ -296,14 +348,18 @@ you need from `policies/sandbox/balanced/pack.yaml`.
 | `mcp.import` | Yes | | `true` or `false`. |
 | `mcp.host_ports` | Yes | | `true` or `false`. |
 | `mcp.blocked_tools` | No | `[]` | Tool names or globs using letters, digits, `_`, `.`, `:`, `*`, and `-`. At most 1024. |
-| `mcp.project_servers` | No | `block` | `block` or `allow`. `allow` is looser, so a required or locked pack cannot be replaced by a pack that allows them. |
+| `mcp.project_servers` | No | `block` | `block` or `allow`. `allow` is looser: with `pack` [locked](#locked), a run can't switch to a pack that allows them where the configured pack blocks them. |
 | `hooks.fail_mode` | Yes | | Must be `closed`. |
-| `hooks.on_tamper` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`. When an administrator locks the pack, a pack that alerts where the configured one stops is refused. |
+| `hooks.on_tamper` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`. `alert` is looser: with `pack` locked, a run can't switch to a pack that alerts where the configured pack stops. |
 
-**Host globs** are `*`, an exact host name (`example.com`), `*.example.com`
-(every subdomain, not `example.com` itself), or an IP address. Schemes, ports,
-paths, and wildcards inside a name are refused. Matching ignores case and a
-trailing dot.
+**Host patterns** use the egress proxy's grammar: an exact host name
+(`example.com`), `*.example.com` (every subdomain, not `example.com` itself),
+an IP address, or a CIDR prefix such as `198.51.100.0/24`. Addresses compare
+by value, so every spelling of an address matches the same entry. A bare `*`
+is refused: choose the network mode instead. Schemes, ports, paths, wildcards
+inside a name, and host names whose last label doesn't start with a letter
+(`127.1`, `0x7f000001`) are refused. Matching ignores case and a trailing
+dot.
 
 **Project globs** are relative to the project folder and use forward slashes,
 for example `config/*.pem` or `.github/workflows/**`. Absolute paths, `~`,
@@ -343,28 +399,43 @@ On macOS and Linux, DefenseClaw also checks ownership so that no other local
 user can change your policy:
 
 - the file and its directory must belong to you or to root;
-- neither may be writable by every user. The one exception is a root-owned
-  file in a directory that every user can write to but that has the sticky
-  bit set, such as `/tmp`. Your own file in such a directory is refused.
+- neither may be writable by its group or by every user. On Linux a POSIX ACL
+  that grants another user or group write access counts as group-writable;
+  macOS ACLs are not inspected;
+- the one exception is a root-owned file in a directory that others can
+  write to but that has the sticky bit set, such as `/tmp`. Your own file in
+  such a directory is refused.
 
-Fix a refused file with `chmod o-w` or by moving it to a directory you own.
+Fix a refused file with `chmod go-w` or by moving it to a directory you own.
 These ownership checks don't run on Windows.
+
+Because you own your custom packs, keep them out of the folders you run
+sandboxes on. A folder that holds a pack the policy is read from
+(`openshell.pack_dir`, or the file of a custom pack you use) is never shared
+with a sandbox, so an agent can't rewrite the policy that confines its next
+session.
+
+To check a pack file before you use it, run
+`defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.yaml`.
+It applies the same rules as a run and prints the pack's name, profile, and
+digest.
 
 ### Pack digest
 
 Every pack has a digest: `sha256:` followed by the SHA-256 hash of the file's
-exact bytes. Compute it for a custom pack with your system's hashing tool:
+exact bytes. `defenseclaw sandbox pack list` and
+`defenseclaw sandbox pack show <pack>` report it:
 
 ```bash
-sha256sum ~/.defenseclaw/policies/sandbox/team-web/pack.yaml     # Linux
-shasum -a 256 ~/.defenseclaw/policies/sandbox/team-web/pack.yaml # macOS
+defenseclaw sandbox pack show team-web
+defenseclaw sandbox pack list --output json
 ```
 
-Put `sha256:` in front of the hex value. Any change to the file, including a
-comment or whitespace, changes the digest. A built-in pack's digest is the
-SHA-256 of `policies/sandbox/<name>/pack.yaml` in the DefenseClaw source at
-the release tag you run. Administrators use the digest to pin a required pack;
-see [`required_pack_digest`](#required_pack-and-required_pack_digest).
+Any change to the file, including a comment or whitespace, changes the
+digest, so `sha256sum` (or `shasum -a 256` on macOS) of the file gives the
+same hex value. A built-in pack's digest can change with each DefenseClaw
+release. Administrators use the digest to pin a required pack; see
+[`required_pack_digest`](#required_pack-and-required_pack_digest).
 
 ## How the effective policy is computed
 
@@ -375,33 +446,44 @@ override the one before it, and the last one can only make things stricter:
 2. **Your `openshell` keys** in `config.yaml` override the pack. See
    [Configuration](/docs/reference/configuration#openshell-sandbox-settings)
    for each key.
-3. **Per-run options** chosen when a sandbox starts override your keys.
-   Examples are a stricter profile, copy mode, keeping the harness prompts, or
-   leaving MCP servers behind. The sandbox commands that take these options
-   aren't built yet.
+3. **Per-run options** of [`defenseclaw sandbox run`](/docs/reference/sandbox-cli#sandbox-run)
+   override your keys: `--pack`, `--profile`, `--copy`, `--safe` (keep the
+   harness prompts), `--unmask`, `--host-port`, `--no-mcp`, `--cpu`, and
+   `--memory`.
 4. **`openshell.admin`** clamps the result. Anything looser than the
    administrator allows is replaced with the allowed value, and a harness the
    administrator doesn't allow is refused.
+
+`defenseclaw sandbox policy explain` shows the result for a run in the
+current folder, or for a sandbox with `--sandbox NAME`. It lists every
+setting with its value, the layer that set it, and its exact origin, such as
+`openshell.admin.min_profile`, plus the value that was asked for when a limit
+clamped it. It takes the same policy options as `run`:
+
+```bash
+defenseclaw sandbox policy explain --harness codex --profile balanced --copy
+```
 
 Keys that the pack governs have no default of their own, so a key you leave
 unset follows the pack. Some settings merge instead of replacing:
 
 | Setting | How the layers combine |
 | --- | --- |
-| Profile | The pack's network mode, then `openshell.profile`, then the run's profile. Each replaces the one before, so it can loosen as well as tighten. Admin floors raise it (see below). |
+| Profile | The pack's network mode, then `openshell.profile`, then `--profile`. Each replaces the one before, so it can loosen as well as tighten. Admin floors raise it (see below). |
 | Approvals | The pack's mode, but never looser than the profile: `balanced` triages at least, and `strict` asks about every request. |
 | Skip-permissions | The pack's `harness.yolo`, then `openshell.yolo`, then the run. Keeping the harness prompts for a run always wins. |
 | Allowed harnesses | The pack's list and `openshell.admin.allowed_harnesses`. When both are set, only harnesses on both lists can run. |
 | Workspace mode | The pack's mode, then `openshell.workdir.mode`, then copy mode for a run. |
 | Secret masks | The pack's masks plus `openshell.workdir.masks`. Masks can be added but not removed; only unmask entries reveal a masked file. |
 | Unmask | The pack's list plus `openshell.workdir.unmask` plus the run's entries. |
-| Review list | The pack's list only. |
+| Review list | The pack's list plus DefenseClaw's own review list (harness and agent config, lock files, `pack.yaml`), which no pack can drop. |
 | Blocklist feeds | The pack's feeds. `openshell.egress.feed: none` turns them off, `builtin` turns the built-in feed on. |
 | Block list | The pack's list plus `openshell.egress.block`. |
 | Allow list | See [The allow list](#the-allow-list). |
 | Proxy ports | The pack's ports, or `openshell.egress.ports`, which replaces them. |
 | MCP import | The pack's `mcp.import`, then `openshell.mcp.import`, then leaving MCP servers behind for a run. |
 | Repository MCP servers | The pack's `mcp.project_servers` only. |
+| Hook fail mode and tamper response | The pack's `hooks.fail_mode` and `hooks.on_tamper` only. |
 | Host ports | `openshell.mcp.host_ports` plus the run's ports. Each port is checked. |
 | Resources | `openshell.resources`, then the run's CPU and memory request, capped by `openshell.admin.max_resources`. |
 
@@ -550,10 +632,10 @@ openshell:
 
 <Callout title="Pinning a built-in pack">
 A built-in pack's digest can change when DefenseClaw is upgraded. If you pin
-`open`, `balanced`, or `strict` with `required_pack_digest`, recompute the pin
-from `policies/sandbox/<name>/pack.yaml` at the new release tag with every
-upgrade, or no sandbox starts. Pin a custom pack when you need content that
-stays fixed.
+`open`, `balanced`, or `strict` with `required_pack_digest`, read the new
+digest with `defenseclaw sandbox pack show <name>` after every upgrade and
+update the pin, or no sandbox starts. Pin a custom pack when you need content
+that stays fixed.
 </Callout>
 
 `required_pack` always runs that exact pack, so users can't switch to a
@@ -721,8 +803,9 @@ openshell:
 
 ### Runtime actions
 
-Once sandbox support ships, the same policy also gates what happens while a
-sandbox runs:
+The same policy also gates what happens while a sandbox runs, such as
+`defenseclaw sandbox unblock`, `approve`, and an answer in the TUI or the
+macOS app:
 
 | Action | Refused by |
 | --- | --- |
@@ -732,10 +815,12 @@ sandbox runs:
 | Open a host port | `allow_host_ports: false`, or a pack with `mcp.host_ports: false` |
 | Mount a host folder | `allow_mount: false`, or a folder covered by `require_copy_for` |
 | Run in skip-permissions mode | `allow_yolo: false` |
-| Use learn mode | `allow_learn_mode: false` |
+| Use learn mode (the sandbox API's `learn` option; `sandbox run` has no flag for it) | `allow_learn_mode: false` |
 | Run a harness | `allowed_harnesses`, or the pack's `harness.allowed` |
 
 A request to connect to this machine itself is treated as a host-port request.
+In a `managed_enterprise` install, "always" decisions can't be saved, because
+the administrator owns `config.yaml`.
 
 ### Limits DefenseClaw always applies
 
@@ -744,31 +829,39 @@ No pack or admin setting can change these:
 - Sandbox hooks always fail closed.
 - DefenseClaw never opens its own listeners to a sandbox: the API
   (`gateway.api_port`, 18970 by default), the sandbox hook ingress and egress
-  proxy (the next two ports by default), the guardrail proxy, and the model
-  router when routing runs on this machine. The OpenShell gateway (17670 by
-  default) and the OpenClaw gateway (`gateway.port`, 18789 by default) are
-  never opened either.
+  proxy (the next two ports by default), the guardrail proxy, the model
+  router when routing runs on this machine, and the listeners of enabled
+  Prometheus destinations. The OpenShell gateway (the registration's port,
+  17670 by default) and the OpenClaw gateway (`gateway.port`, 18789 by
+  default) are never opened either.
 - Link-local, cloud metadata, multicast, and reserved addresses are never
   approved.
 - Allow entries that cover every host or a whole top-level domain are ignored.
 
 ## What users see when something is blocked
 
-Once sandbox support ships, a refusal by the admin block names the key and
-explains why:
+A refusal by the admin block names the key it refused. The `sandbox` commands
+print it like this, in the launch banner for a clamped setting and as the
+error for a refused action:
 
 ```text
-blocked by your organization's DefenseClaw policy: yolo (skip-permissions mode is disabled; the harness keeps its permission prompts)
-blocked by your organization's DefenseClaw policy: profile (your organization requires at least the balanced profile)
-blocked by your organization's DefenseClaw policy: egress.unblock (blocked destinations cannot be unblocked; ask your administrator)
-blocked by your organization's DefenseClaw policy: harness (your organization allows only claudecode, codex)
+blocked by your organization's DefenseClaw policy: yolo
+blocked by your organization's DefenseClaw policy: profile
+blocked by your organization's DefenseClaw policy: egress.unblock
+blocked by your organization's DefenseClaw policy: harness
 ```
 
+The reason travels with it. The [sandbox API](/docs/reference/gateway-api#sandbox-api)
+returns it as the error's `detail` and in its `violation` object (for example
+"skip-permissions mode is disabled; the harness keeps its permission prompts",
+with the constraint `openshell.admin.allow_yolo`), and
+`defenseclaw sandbox policy explain` names the constraint behind each
+clamped setting and the value that was asked for.
+
 A pack or profile refusal names the pack or profile instead, for example
-`not allowed by the strict sandbox pack: mcp.host_ports (the pack does not open host ports)`.
-A limit DefenseClaw always applies starts with "DefenseClaw never" or
-"DefenseClaw ignores", for example
-`DefenseClaw never opens DefenseClaw's API (port 18970) to a sandbox (choose another port)`.
+`not allowed by the strict sandbox pack: mcp.host_ports`. A limit DefenseClaw
+always applies starts with "DefenseClaw never" or "DefenseClaw ignores", for
+example `DefenseClaw never opens DefenseClaw's API (port 18970) to a sandbox`.
 
 What happens next depends on the refusal:
 
@@ -795,6 +888,21 @@ How far the admin block binds depends on who owns `config.yaml`:
 | `deployment_mode: managed_enterprise` | The administrator. Users can't write it. | **Authoritative.** Users can only affect a run through per-run options and runtime actions, and the admin block limits both. |
 | Any other mode | The user. | **Advisory.** It applies to every run, but the user can edit or remove it. Use it for team defaults and to prevent mistakes, not to stop a determined user. |
 
+`defenseclaw sandbox doctor`, `sandbox status`, and `sandbox policy explain`
+say which one applies on a machine.
+
+<Callout type="warn" title="Managed installs don't run sandboxes yet">
+A `managed_enterprise` install runs the DefenseClaw gateway as a service
+account, while OpenShell's gateway is a per-user service, and sandboxes must
+run as the developer's own account. So the gateway doesn't start the sandbox
+runtime in a managed install (`/health` reports the `sandbox` subsystem as
+`disabled`), and `sandbox setup`, `sandbox run`, and `sandbox teardown` refuse
+to start there. Today the admin block binds
+sandboxes only as an advisory block, on installs where the developer owns
+`config.yaml`. You can already stage it in a managed config, which validates
+it.
+</Callout>
+
 In a managed install the administrator writes the whole file, so the
 `openshell` keys outside `admin` are organization defaults too.
 
@@ -819,11 +927,14 @@ for rolling the admin block out to managed machines.
 
 ## Example: a balanced organization
 
+This example and the next are `openshell` blocks to distribute to developer
+machines. While managed installs don't run sandboxes, such a block is
+advisory on the machines that do (see above).
+
 The goal is fast, low-friction development on the web allowlist. Customer
 code never gets a live mount, and one file-sharing service is off limits.
 
 ```yaml
-deployment_mode: managed_enterprise
 openshell:
   enabled: true
   pack: balanced
@@ -865,7 +976,6 @@ The goal is no web access, no host access, and every change reviewed before it
 reaches the developer's working tree.
 
 ```yaml
-deployment_mode: managed_enterprise
 openshell:
   enabled: true
   admin:
@@ -908,5 +1018,6 @@ What developers get:
   lists every `openshell` key.
 - [Enterprise deployment](/docs/setup/enterprise-deployment) covers
   administrator-owned configuration.
-- The [Sandbox guide](/docs/setup/sandbox) covers the `sandbox` command as it
-  is today: cleanup of the removed legacy standalone sandbox.
+- The [Sandbox guide](/docs/setup/sandbox) walks through setup and a session.
+- [Sandbox CLI](/docs/reference/sandbox-cli) lists every `sandbox` command and
+  flag, including `policy explain` and the `pack` commands.

@@ -1594,11 +1594,13 @@ allowed. With `deployment_mode: managed_enterprise`, users can't write
 `config.yaml`, so the admin block is **authoritative**. On any other install it
 is advisory, because the user owns the file.
 
-<Callout title="Stage the limits now; they apply once sandbox support ships">
-Support for NVIDIA OpenShell 0.1 is being rebuilt, and no DefenseClaw command
-starts an OpenShell 0.1 sandbox yet. The managed config already accepts and
-validates the `openshell.admin` block, so you can roll it out ahead of time.
-The limits take effect once sandbox support ships.
+<Callout type="warn" title="Managed installs don't run sandboxes yet">
+A `managed_enterprise` install doesn't start the sandbox runtime:
+`/health` reports the `sandbox` subsystem as `disabled`, and
+`defenseclaw sandbox setup` and `defenseclaw sandbox run` refuse to start.
+The managed config still accepts and validates the `openshell.admin` block, so
+you can stage it. On installs where the developer owns `config.yaml`, where
+sandboxes do run, the same block is enforced but advisory.
 </Callout>
 
 ```yaml
@@ -1631,10 +1633,11 @@ reloads it in place in both `gateway.config_reload.mode` settings. On Linux and
 macOS, the edit is enough, and you can skip the restart step. On Windows, the
 installer's `Repair` action restarts the services anyway.
 
-Once sandbox support ships, a request the admin block forbids is replaced with
-the allowed value or refused. The message starts with
-"blocked by your organization's DefenseClaw policy" and names the setting and
-the reason.
+Where sandboxes run, a request the admin block forbids is replaced with the
+allowed value or refused. The message starts with
+"blocked by your organization's DefenseClaw policy" and names the setting;
+`defenseclaw sandbox policy explain` shows the constraint behind each
+clamped setting.
 
 To require your own pack instead of a built-in one, set `required_pack` to an
 absolute path and pin its content with `required_pack_digest`. In
@@ -1651,9 +1654,10 @@ doesn't qualify. Built-in packs are always trusted.
 
 <Callout title="Where sandboxes run">
 OpenShell's gateway is a per-user service, so OpenShell sandboxes run under
-the developer's own account, not under the DefenseClaw service account. The
-sandbox commands aren't built yet; the [Sandbox guide](/docs/setup/sandbox)
-covers the `sandbox` command as it is today.
+the developer's own account, with the DefenseClaw gateway running as that
+account too, not as the DefenseClaw service account. That is why managed
+installs don't run them yet. The [Sandbox guide](/docs/setup/sandbox) walks
+through setup and a session.
 </Callout>
 
 Every admin key, the built-in packs, custom packs, and two complete
