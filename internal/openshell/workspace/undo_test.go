@@ -308,8 +308,8 @@ func TestUndoRecoversDeletedObjects(t *testing.T) {
 	e.git(e.project, "gc", "-q")
 	head := e.git(e.project, "rev-parse", "HEAD")
 	rec := mustSnapshot(t, e, "s1")
-	if !rec.Git.ObjectsLinked {
-		t.Skip("data dir cannot hard-link the project's objects on this filesystem")
+	if !rec.Git.ObjectsCopied {
+		t.Fatalf("the snapshot did not copy the project's objects: %v", rec.Warnings)
 	}
 	// The agent wipes the object store.
 	for _, dir := range []string{"pack"} {

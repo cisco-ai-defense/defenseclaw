@@ -17,6 +17,7 @@
 package workspace
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -322,6 +323,45 @@ func (r *rootFS) writeFile(rel string, src io.Reader, mode fs.FileMode, mtime ti
 		_ = r.root.Chtimes(rel, mtime, mtime)
 	}
 	return nil
+}
+
+// sameFile reports whether rel is a regular file with exactly the bytes of
+// the regular file other (outside the root).
+func (r *rootFS) sameFile(rel, other string) bool {
+	info, err := r.root.Lstat(rel)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	oinfo, err := os.Lstat(other)
+	if err != nil || !oinfo.Mode().IsRegular() || oinfo.Size() != info.Size() {
+		return false
+	}
+	a, err := r.root.Open(rel)
+	if err != nil {
+		return false
+	}
+	defer a.Close()
+	b, err := os.OpenFile(other, os.O_RDONLY|oNoFollow, 0)
+	if err != nil {
+		return false
+	}
+	defer b.Close()
+	bufA, bufB := make([]byte, 64<<10), make([]byte, 64<<10)
+	for {
+		na, errA := io.ReadFull(a, bufA)
+		nb, errB := io.ReadFull(b, bufB)
+		if na != nb || !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false
+		}
+		endA := errors.Is(errA, io.EOF) || errors.Is(errA, io.ErrUnexpectedEOF)
+		endB := errors.Is(errB, io.EOF) || errors.Is(errB, io.ErrUnexpectedEOF)
+		switch {
+		case endA && endB:
+			return true
+		case errA != nil || errB != nil:
+			return false
+		}
+	}
 }
 
 func (r *rootFS) symlink(rel, target string) error {

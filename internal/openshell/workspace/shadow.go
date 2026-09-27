@@ -23,14 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // shadow is a DefenseClaw-owned git directory whose work tree is the
@@ -42,10 +41,12 @@ import (
 //     fsmonitor, raw line endings;
 //   - info/attributes unsets text/eol/ident/filter/encoding for every path,
 //     so captures and restores round-trip bytes exactly;
-//   - it borrows the project's objects through alternates and, where the
-//     filesystem allows, hard-links them (packs and loose objects are
-//     immutable), so deleting the project's .git/objects does not destroy
-//     the snapshot.
+//   - it keeps its own copy of the project's pack and loose object files
+//     (a filesystem clone where possible, else a byte copy up to a size
+//     cap) and borrows anything past the cap through alternates. A copy,
+//     unlike a hard link, shares no inode with the project, so the agent
+//     deleting or rewriting .git/objects in place cannot reach the
+//     snapshot.
 type shadow struct {
 	dir     string
 	project string
@@ -267,84 +268,191 @@ var (
 	packFileRE    = regexp.MustCompile(`^pack-[0-9a-f]+\.(pack|rev|bitmap|mtimes|promisor|idx)$`)
 )
 
-// linkObjects hard-links the project's immutable object files into the
-// shadow. It reports false (with a reason) when the data dir is on another
-// filesystem or the filesystem refuses links; the snapshot then relies on
-// alternates alone.
-func (s *shadow) linkObjects() (bool, string) {
-	src := filepath.Join(s.gitDir, "objects")
-	dst := filepath.Join(s.dir, "objects")
-	link := func(from, to string) error {
-		if pathExists(to) {
-			return nil
-		}
-		if err := os.Link(from, to); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				return nil
-			}
-			return err
-		}
-		return nil
-	}
-	fail := func(err error) (bool, string) {
-		if errors.Is(err, syscall.EXDEV) {
-			return false, "the DefenseClaw data dir is on a different filesystem than the project, so the snapshot shares the project's git objects instead of keeping its own copy"
-		}
-		return false, "could not keep a private copy of the project's git objects (" + err.Error() + "); the snapshot shares them with the project"
-	}
+// DefaultMaxObjectCopyBytes caps how many bytes of the project's git
+// objects a snapshot byte-copies into its shadow when the filesystem cannot
+// clone them. Clones (reflink, APFS clonefile) cost no space and do not
+// count against it.
+const DefaultMaxObjectCopyBytes int64 = 1 << 30
 
-	packs, _ := os.ReadDir(filepath.Join(src, "pack"))
-	var names []string
-	for _, e := range packs {
-		if e.Type().IsRegular() && packFileRE.MatchString(e.Name()) {
-			names = append(names, e.Name())
+var errObjectCopyLimit = errors.New("copy limit reached")
+
+// objectFiles lists the pack and loose object files under a git objects
+// directory, relative to it with forward slashes. Each pack's files form
+// one group with the .pack first and the .idx last, so a reader never sees
+// an index whose pack is missing. Symlinks, symlinked directories and other
+// non-regular entries are skipped.
+func objectFiles(objects string) (packs [][]string, loose []string) {
+	isDir := func(p string) bool {
+		info, err := os.Lstat(p)
+		return err == nil && info.IsDir()
+	}
+	if !isDir(objects) {
+		return nil, nil
+	}
+	groups := map[string][]string{}
+	if isDir(filepath.Join(objects, "pack")) {
+		entries, _ := os.ReadDir(filepath.Join(objects, "pack"))
+		for _, e := range entries {
+			if e.Type().IsRegular() && packFileRE.MatchString(e.Name()) {
+				base := strings.TrimSuffix(e.Name(), path.Ext(e.Name()))
+				groups[base] = append(groups[base], "pack/"+e.Name())
+			}
 		}
 	}
-	// Link each pack before its index so a reader never sees an index
-	// whose pack is missing.
-	sort.Slice(names, func(i, j int) bool {
-		ii, ji := strings.HasSuffix(names[i], ".idx"), strings.HasSuffix(names[j], ".idx")
-		if ii != ji {
-			return !ii
+	rank := func(name string) int {
+		switch path.Ext(name) {
+		case ".pack":
+			return 0
+		case ".idx":
+			return 2
 		}
-		return names[i] < names[j]
-	})
-	if len(names) > 0 {
-		if err := os.MkdirAll(filepath.Join(dst, "pack"), 0o700); err != nil {
-			return fail(err)
-		}
+		return 1
 	}
-	for _, n := range names {
-		if err := link(filepath.Join(src, "pack", n), filepath.Join(dst, "pack", n)); err != nil {
-			return fail(err)
-		}
+	bases := make([]string, 0, len(groups))
+	for b := range groups {
+		bases = append(bases, b)
 	}
-	prefixes, _ := os.ReadDir(src)
+	sort.Strings(bases)
+	for _, b := range bases {
+		g := groups[b]
+		sort.Slice(g, func(i, j int) bool {
+			if ri, rj := rank(g[i]), rank(g[j]); ri != rj {
+				return ri < rj
+			}
+			return g[i] < g[j]
+		})
+		packs = append(packs, g)
+	}
+	prefixes, _ := os.ReadDir(objects)
 	for _, p := range prefixes {
 		if !p.IsDir() || !loosePrefixRE.MatchString(p.Name()) {
 			continue
 		}
-		objs, err := os.ReadDir(filepath.Join(src, p.Name()))
-		if err != nil {
-			continue
-		}
-		made := false
+		objs, _ := os.ReadDir(filepath.Join(objects, p.Name()))
 		for _, o := range objs {
-			if !o.Type().IsRegular() || !looseObjectRE.MatchString(o.Name()) {
-				continue
-			}
-			if !made {
-				if err := os.MkdirAll(filepath.Join(dst, p.Name()), 0o700); err != nil {
-					return fail(err)
-				}
-				made = true
-			}
-			if err := link(filepath.Join(src, p.Name(), o.Name()), filepath.Join(dst, p.Name(), o.Name())); err != nil {
-				return fail(err)
+			if o.Type().IsRegular() && looseObjectRE.MatchString(o.Name()) {
+				loose = append(loose, p.Name()+"/"+o.Name())
 			}
 		}
 	}
-	return true, ""
+	return packs, loose
+}
+
+// copyObjects gives the shadow its own copy of every pack and loose object
+// file the project has, so the snapshot does not depend on files the agent
+// can delete or rewrite in place. Each file is cloned where the filesystem
+// allows and byte-copied otherwise, at most budget bytes in all. Files the
+// shadow already holds are kept: object files are immutable, and the copy
+// an earlier snapshot took is one the agent could not touch. It reports
+// false with a reason when some objects are reachable only through the
+// project (alternates).
+func (s *shadow) copyObjects(budget int64) (bool, string) {
+	if budget <= 0 {
+		budget = DefaultMaxObjectCopyBytes
+	}
+	limit := budget
+	src := filepath.Join(s.gitDir, "objects")
+	dst := filepath.Join(s.dir, "objects")
+	packs, loose := objectFiles(src)
+	var failure error
+	fail := func(err error) {
+		if failure == nil || errors.Is(failure, errObjectCopyLimit) {
+			failure = err
+		}
+	}
+	for _, group := range packs {
+		var made []string
+		for _, rel := range group {
+			created, err := copyObjectFile(filepath.Join(src, filepath.FromSlash(rel)), filepath.Join(dst, filepath.FromSlash(rel)), &budget)
+			if err != nil {
+				// Half a pack is of no use; drop what this group added.
+				for _, m := range made {
+					_ = os.Remove(filepath.Join(dst, filepath.FromSlash(m)))
+				}
+				fail(err)
+				break
+			}
+			if created {
+				made = append(made, rel)
+			}
+		}
+	}
+	for _, rel := range loose {
+		if _, err := copyObjectFile(filepath.Join(src, filepath.FromSlash(rel)), filepath.Join(dst, filepath.FromSlash(rel)), &budget); err != nil {
+			fail(err)
+		}
+	}
+	switch {
+	case failure == nil:
+		return true, ""
+	case errors.Is(failure, errObjectCopyLimit):
+		return false, fmt.Sprintf("the project's git objects are larger than the %d MiB a snapshot copies on a filesystem that cannot clone files, so the snapshot shares the rest with the project; if the session deletes or rewrites them, undo cannot bring back the history they hold", limit>>20)
+	default:
+		return false, "could not keep a private copy of the project's git objects (" + failure.Error() + "); the snapshot shares them with the project"
+	}
+}
+
+// copyObjectFile copies one object file to a new private file at to,
+// through a temporary name so an interrupted copy never leaves a truncated
+// object behind. It does nothing when to exists. Byte copies are charged to
+// budget.
+func copyObjectFile(from, to string, budget *int64) (bool, error) {
+	if _, err := os.Lstat(to); err == nil {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return false, err
+	}
+	tmp := filepath.Join(filepath.Dir(to), ".dc-copy-"+randomSuffix())
+	if !cloneFile(from, tmp) {
+		n, err := copyBytesLimited(from, tmp, *budget)
+		if err != nil {
+			_ = os.Remove(tmp)
+			return false, err
+		}
+		*budget -= n
+	}
+	if err := os.Chmod(tmp, 0o444); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	if err := os.Rename(tmp, to); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	return true, nil
+}
+
+// copyBytesLimited copies the regular file src (never through a symlink)
+// to a new file dst, failing with errObjectCopyLimit past limit bytes.
+func copyBytesLimited(src, dst string, limit int64) (int64, error) {
+	in, err := os.OpenFile(src, os.O_RDONLY|oNoFollow, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file", src)
+	}
+	if info.Size() > limit {
+		return 0, errObjectCopyLimit
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(out, io.LimitReader(in, limit+1))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n > limit {
+		err = errObjectCopyLimit
+	}
+	return n, err
 }
 
 // capture stages the whole work tree (tracked and untracked, minus

@@ -446,70 +446,73 @@ func recoverObjects(ctx context.Context, st *sessionState, gs *GitSnapshot) []st
 	}
 	// A fetch cannot repair this: the project still has refs naming the
 	// lost commits, so negotiation claims them and nothing is sent. The
-	// shadow holds the same immutable pack and loose-object files (hard
-	// links taken at snapshot time), so put those back instead.
+	// shadow holds its own copy of the object files taken at snapshot
+	// time, so put those back instead.
 	_ = restoreObjectFiles(st.sh)
 	return missingObjects(ctx, st.proj, needed)
 }
 
-// restoreObjectFiles links (or copies) every pack and loose object file
-// the shadow has and the project lacks back into the project's store. The
-// target directories are made real directories first, through os.Root, so
-// a planted symlink cannot redirect the writes.
+// restoreObjectFiles copies back into the project's store every pack and
+// loose object file the shadow holds that the project lacks or holds with
+// different bytes. Object files are named after their content, so a
+// same-named file with other bytes was damaged, and the shadow's copy is an
+// equivalent replacement. A replaced pack takes its whole group along (and
+// loses derived files the shadow does not hold), so index and pack always
+// match. Writes are byte copies through os.Root on the git dir: a planted
+// symlink cannot redirect them, and the project never shares an inode with
+// the shadow.
 func restoreObjectFiles(sh *shadow) error {
 	r, err := openRootFS(sh.gitDir)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	src := filepath.Join(sh.dir, "objects")
 	put := func(rel string) error {
-		if _, err := r.root.Lstat(rel); err == nil {
-			return nil
-		}
-		if err := r.ensureDir(path.Dir(rel)); err != nil {
-			return err
-		}
-		src := filepath.Join(sh.dir, filepath.FromSlash(rel))
-		if err := os.Link(src, filepath.Join(sh.gitDir, filepath.FromSlash(rel))); err == nil {
-			return nil
-		}
-		f, err := os.Open(src)
+		f, err := os.OpenFile(filepath.Join(src, filepath.FromSlash(rel)), os.O_RDONLY|oNoFollow, 0)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
-		return r.writeFile(rel, f, 0o444, time.Time{})
+		return r.writeFile("objects/"+rel, f, 0o444, time.Time{})
 	}
-	packs, _ := os.ReadDir(filepath.Join(sh.dir, "objects", "pack"))
-	var names []string
-	for _, e := range packs {
-		if e.Type().IsRegular() && packFileRE.MatchString(e.Name()) {
-			names = append(names, e.Name())
+	packs, loose := objectFiles(src)
+	for _, group := range packs {
+		base := strings.TrimSuffix(group[0], path.Ext(group[0]))
+		held := map[string]bool{}
+		replace := false
+		for _, rel := range group {
+			held[rel] = true
+			if ext := path.Ext(rel); (ext == ".pack" || ext == ".idx") && !r.sameFile("objects/"+rel, filepath.Join(src, filepath.FromSlash(rel))) {
+				replace = true
+			}
 		}
-	}
-	sort.Slice(names, func(i, j int) bool {
-		ii, ji := strings.HasSuffix(names[i], ".idx"), strings.HasSuffix(names[j], ".idx")
-		if ii != ji {
-			return !ii
-		}
-		return names[i] < names[j]
-	})
-	for _, n := range names {
-		if err := put("objects/pack/" + n); err != nil {
-			return err
-		}
-	}
-	prefixes, _ := os.ReadDir(filepath.Join(sh.dir, "objects"))
-	for _, p := range prefixes {
-		if !p.IsDir() || !loosePrefixRE.MatchString(p.Name()) {
+		if !replace {
+			// Intact pack and index; only fill in missing derived files.
+			for _, rel := range group {
+				if _, err := r.root.Lstat("objects/" + rel); err != nil {
+					if err := put(rel); err != nil {
+						return err
+					}
+				}
+			}
 			continue
 		}
-		objs, _ := os.ReadDir(filepath.Join(sh.dir, "objects", p.Name()))
-		for _, o := range objs {
-			if o.Type().IsRegular() && looseObjectRE.MatchString(o.Name()) {
-				if err := put("objects/" + p.Name() + "/" + o.Name()); err != nil {
-					return err
-				}
+		for _, ext := range []string{".rev", ".bitmap", ".mtimes"} {
+			if !held[base+ext] {
+				_ = r.clear("objects/" + base + ext)
+			}
+		}
+		for _, rel := range group {
+			if err := put(rel); err != nil {
+				return err
+			}
+		}
+	}
+	for _, rel := range loose {
+		if !r.sameFile("objects/"+rel, filepath.Join(src, filepath.FromSlash(rel))) {
+			if err := put(rel); err != nil {
+				return err
 			}
 		}
 	}

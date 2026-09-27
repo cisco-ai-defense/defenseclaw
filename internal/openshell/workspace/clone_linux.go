@@ -27,9 +27,10 @@ import (
 // cloneFile creates dst (which must not exist) sharing src's data blocks
 // when the filesystem supports reflinks (btrfs, XFS, bcachefs). It returns
 // false, leaving no dst behind, when cloning is unavailable so the caller
-// can fall back to a byte copy.
+// can fall back to a byte copy. Like the darwin version it never follows a
+// symlink at src.
 func cloneFile(src, dst string) bool {
-	in, err := os.Open(src)
+	in, err := os.OpenFile(src, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return false
 	}

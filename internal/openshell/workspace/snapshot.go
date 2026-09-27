@@ -59,6 +59,9 @@ type SnapshotOptions struct {
 	// (default 250k). A larger folder is refused: a partial snapshot would
 	// make Undo delete the files it left out.
 	MaxWalkEntries int
+	// MaxObjectCopyBytes caps the git object bytes a snapshot byte-copies
+	// when the filesystem cannot clone them (DefaultMaxObjectCopyBytes).
+	MaxObjectCopyBytes int64
 	// Skip lists project-relative paths a non-git snapshot neither copies
 	// nor restores (masked secrets: the sandbox cannot change them).
 	Skip []string
@@ -119,7 +122,10 @@ type GitSnapshot struct {
 	Pinned           map[string]FileState `json:"pinned,omitempty"`
 	Ignored          []string             `json:"ignored,omitempty"`
 	IgnoredTruncated bool                 `json:"ignored_truncated,omitempty"`
-	ObjectsLinked    bool                 `json:"objects_linked"`
+	// ObjectsCopied reports that the shadow holds its own copy of every
+	// object file the project had; when false some history is reachable
+	// only through the project's object store.
+	ObjectsCopied bool `json:"objects_copied"`
 }
 
 // CopyTree is a non-git snapshot on disk.
@@ -234,9 +240,9 @@ func snapshotGit(ctx context.Context, lay layout, src *Source, opts SnapshotOpti
 
 	gs := &GitSnapshot{GitDir: gitDir, GitDirID: id, Shadow: sh.dir, Ref: "refs/defenseclaw/pre/" + opts.Name}
 	rec.Git = gs
-	linked, why := sh.linkObjects()
-	gs.ObjectsLinked = linked
-	if !linked {
+	copied, why := sh.copyObjects(opts.MaxObjectCopyBytes)
+	gs.ObjectsCopied = copied
+	if !copied {
 		rec.Warnings = append(rec.Warnings, why)
 	}
 	proj := gitCmd{dir: src.Path, gitDir: gitDir, workTree: src.Path}

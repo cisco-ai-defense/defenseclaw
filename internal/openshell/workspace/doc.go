@@ -41,8 +41,10 @@
 // working tree runs against a DefenseClaw-owned "shadow" git directory rather
 // than the project's own .git, so a planted config, attributes file, commondir
 // or hook in the project is never consulted. The shadow also keeps its own
-// copy (hard links where possible) of the project's objects, so the snapshot
-// survives an agent deleting .git/objects.
+// copy of the project's object files (a filesystem clone where possible,
+// else a byte copy up to a size cap; never a hard link, which would share
+// the inode the agent can rewrite), so the snapshot survives an agent
+// deleting or rewriting .git/objects.
 //
 // OpenShell is reached only through the Execer, Uploader, Downloader and
 // SandboxLister interfaces. CLI implements the transfers and exec with the
