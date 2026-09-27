@@ -86,21 +86,49 @@ type UndoResult struct {
 	// SavedRefs are the post-session ref tips saved under refs/defenseclaw/post-refs/<name>/
 	// before restoring the pre-session state, so the session's branch work is recoverable.
 	SavedRefs []string `json:"saved_refs,omitempty"`
-	Warnings  []string `json:"warnings,omitempty"`
+	// Ignored are changes where the snapshot holds no copy: files git
+	// ignores or, in a folder that is not a git repository, the dependency
+	// directories it skips. Undo deletes what the session wrote to Python
+	// bytecode caches (Removed) and leaves the rest, each with a Remedy.
+	Ignored  []IgnoredChange `json:"ignored,omitempty"`
+	Warnings []string        `json:"warnings,omitempty"`
 }
 
-// Empty reports whether the folder already matches the snapshot.
+// Empty reports whether undo has nothing to put back: the folder matches
+// the snapshot, apart from any Unrestored changes.
 func (r *UndoResult) Empty() bool {
 	return len(r.Changes) == 0 && len(r.RefChanges) == 0 && len(r.ControlChanges) == 0 &&
 		len(r.NestedRepos) == 0 && len(r.LostObjects) == 0 &&
-		r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter
+		r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter && !r.removesIgnored()
+}
+
+// Unrestored are the changes undo cannot put back (see Ignored).
+func (r *UndoResult) Unrestored() []IgnoredChange {
+	var out []IgnoredChange
+	for _, c := range r.Ignored {
+		if !c.Removed {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (r *UndoResult) removesIgnored() bool {
+	for _, c := range r.Ignored {
+		if c.Removed {
+			return true
+		}
+	}
+	return false
 }
 
 // Undo restores the project folder to its pre-session snapshot: the
-// working tree (tracked and untracked files; ignored files are left alone),
-// HEAD and the branch, branches and tags, the staging area, and the git
-// control files the agent could write. Run it with Preview first to show
-// the operator what will change.
+// working tree (tracked and untracked files), HEAD and the branch, branches
+// and tags, the staging area, and the git control files the agent could
+// write. Files git ignores have no copy in the snapshot: undo deletes what
+// the session wrote to Python bytecode caches and reports the rest
+// (UndoResult.Ignored). Run it with Preview first to show the operator what
+// will change.
 func Undo(ctx context.Context, opts UndoOptions) (*UndoResult, error) {
 	if !platformSupported() {
 		return nil, ErrUnsupportedPlatform
@@ -276,11 +304,11 @@ func emptyPin(s FileState) bool {
 }
 
 // newNestedRepos lists git repositories that appeared inside the folder
-// since the snapshot.
-func newNestedRepos(rec *SnapshotRecord) ([]string, bool, error) {
+// since the snapshot, from a fresh scan of it (also returned).
+func newNestedRepos(rec *SnapshotRecord) ([]string, bool, *sentinelScan, error) {
 	now, err := scanSentinels(rec.Project, skipList(rec))
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	before := toSet(rec.NestedRepos)
 	var out []string
@@ -289,7 +317,30 @@ func newNestedRepos(rec *SnapshotRecord) ([]string, bool, error) {
 			out = append(out, n)
 		}
 	}
-	return out, rec.SentinelsCapped || now.capped, nil
+	return out, rec.SentinelsCapped || now.capped, now, nil
+}
+
+// undoIgnored fills res.Ignored from the snapshot's ignored manifest, if it
+// has one; nowRoots are the ignored places now and changes the snapshot's
+// own comparison.
+func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) {
+	man, err := loadIgnored(dataDir, rec.Name)
+	if err != nil {
+		res.Warnings = append(res.Warnings, "the record of the files the snapshot does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
+		return
+	}
+	if man == nil {
+		return
+	}
+	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, changedPaths(changes))
+	if err != nil {
+		res.Warnings = append(res.Warnings, "could not check the files the snapshot does not copy: "+err.Error())
+		return
+	}
+	res.Ignored = irep.Changes
+	if w := ignoredWarning(irep, rec.Kind == SnapshotGit); w != "" {
+		res.Warnings = append(res.Warnings, w)
+	}
 }
 
 func skipList(rec *SnapshotRecord) []string {
@@ -330,7 +381,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		return err
 	}
 	res.PinnedChanges = pinnedChanges(rec)
-	nested, capped, err := newNestedRepos(rec)
+	nested, capped, _, err := newNestedRepos(rec)
 	if err != nil {
 		return err
 	}
@@ -338,6 +389,8 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	if capped {
 		res.Warnings = append(res.Warnings, "the folder is too large to check completely for new nested git repositories")
 	}
+	nowIgnored, _ := st.sh.ignoredEntries(ctx, maxIgnoredFiles+1)
+	undoIgnored(rec, opts.DataDir, nowIgnored, allChanges, res)
 	needed := map[string]struct{}{}
 	for _, oid := range gs.Refs {
 		needed[oid] = struct{}{}
@@ -480,6 +533,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	if warning != "" {
 		res.Warnings = append(res.Warnings, warning)
 	}
+	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
 	if err := exportToProject(ctx, st.sh, st.proj, postRef); err != nil {
 		res.Warnings = append(res.Warnings, "the session's version of the folder is kept by DefenseClaw only ("+err.Error()+")")
 	}
@@ -845,7 +899,7 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 		return err
 	}
 	res.Changes = changes
-	nested, capped, err := newNestedRepos(rec)
+	nested, capped, now, err := newNestedRepos(rec)
 	if err != nil {
 		return err
 	}
@@ -853,15 +907,18 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 	if capped {
 		res.Warnings = append(res.Warnings, "the folder is too large to check completely for new nested git repositories")
 	}
-	if len(rec.Copy.Opaque) > 0 {
+	if man, _ := loadIgnored(opts.DataDir, rec.Name); man == nil && len(rec.Copy.Opaque) > 0 {
+		// A snapshot from before the ignored manifest: say what undo skips.
 		res.Warnings = append(res.Warnings, "left as the session left them: "+strings.Join(firstN(rec.Copy.Opaque, 5), ", "))
 	}
+	undoIgnored(rec, opts.DataDir, now.heavy, changes, res)
 	if opts.Preview {
 		return nil
 	}
 	if err := restoreTree(rec.Project, changes, before); err != nil {
 		return err
 	}
+	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
 	if len(nested) == 0 {
 		return nil
 	}

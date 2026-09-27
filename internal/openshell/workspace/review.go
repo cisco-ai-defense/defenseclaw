@@ -136,20 +136,26 @@ func Review(ctx context.Context, opts ReviewOptions) (*ReviewReport, error) {
 		opts.MaxScanBytes = defaultMaxScanBytes
 	}
 	rep := &ReviewReport{Name: rec.Name, Project: rec.Project, Kind: rec.Kind}
+	man, err := loadIgnored(opts.DataDir, opts.Name)
+	if err != nil {
+		rep.Warnings = append(rep.Warnings, "the record of the files the snapshot does not copy is unreadable ("+err.Error()+"); changes there are not reported")
+	}
+	now, err := scanSentinels(rec.Project, skipList(rec))
+	if err != nil {
+		return nil, err
+	}
 	switch rec.Kind {
 	case SnapshotGit:
-		err = reviewGit(ctx, rec, opts, rep)
+		err = reviewGit(ctx, rec, man, now, opts, rep)
 	case SnapshotCopy:
-		err = reviewCopy(rec, opts, rep)
+		err = reviewCopy(rec, man, now, opts, rep)
 	default:
 		err = fmt.Errorf("workspace: snapshot %s has unknown kind %q", rec.Name, rec.Kind)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := reviewSentinels(rec, opts, rep); err != nil {
-		return nil, err
-	}
+	reviewSentinels(rec, man, now, opts, rep)
 	rep.Flags = sortFlags(rep.Flags)
 	for _, c := range rep.Changes {
 		if c.NewMode == "040000" || (c.OldMode == "040000" && c.NewMode == "") {
@@ -162,7 +168,7 @@ func Review(ctx context.Context, opts ReviewOptions) (*ReviewReport, error) {
 	return rep, nil
 }
 
-func reviewGit(ctx context.Context, rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport) error {
+func reviewGit(ctx context.Context, rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, opts ReviewOptions, rep *ReviewReport) error {
 	gs := rec.Git
 	st, err := openSession(ctx, rec, "defenseclaw: working tree at review of sandbox session "+rec.Name, false)
 	if err != nil {
@@ -172,6 +178,10 @@ func reviewGit(ctx context.Context, rec *SnapshotRecord, opts ReviewOptions, rep
 	rep.Warnings = append(rep.Warnings, st.warnings...)
 	if rep.Changes, err = diffTrees(ctx, st.sh.bare(), gs.Tree, st.postTree); err != nil {
 		return err
+	}
+	if man != nil {
+		nowRoots, _ := st.sh.ignoredEntries(ctx, maxIgnoredFiles+1)
+		reviewIgnored(rec, man, nowRoots, now, rep)
 	}
 	blobs := blobReader{g: st.sh.bare()}
 	var oids []string
@@ -271,12 +281,15 @@ func scanChanges(changes []TreeChange, scanners []ContentScanner, content conten
 	return out
 }
 
-func reviewCopy(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport) error {
+func reviewCopy(rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, opts ReviewOptions, rep *ReviewReport) error {
 	changes, _, _, err := compareTrees(rec.Copy, rec.Project)
 	if err != nil {
 		return err
 	}
 	rep.Changes = changes
+	if man != nil {
+		reviewIgnored(rec, man, now.heavy, now, rep)
+	}
 	content := func(c TreeChange, after bool) ([]byte, bool) {
 		root := rec.Copy.Dir
 		if after {
@@ -298,14 +311,49 @@ func reviewCopy(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport) erro
 	return nil
 }
 
-// reviewSentinels re-walks the folder for host-executable files that the
-// tree diff cannot see (ignored by git), new nested repositories and
-// changed dependency directories.
-func reviewSentinels(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport) error {
-	now, err := scanSentinels(rec.Project, skipList(rec))
-	if err != nil {
-		return err
+// reviewIgnored flags what the session changed where the snapshot holds no
+// copy (see ignoredManifest); nowRoots are those places now. Sentinel
+// files are left to reviewSentinels.
+func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string, now *sentinelScan, rep *ReviewReport) {
+	exclude := changedPaths(rep.Changes)
+	for rel := range now.files {
+		exclude[rel] = struct{}{}
 	}
+	for rel := range rec.Sentinels {
+		exclude[rel] = struct{}{}
+	}
+	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, exclude)
+	if err != nil {
+		rep.Warnings = append(rep.Warnings, "could not check the files the snapshot does not copy: "+err.Error())
+		return
+	}
+	git := rec.Kind == SnapshotGit
+	flags, quiet := ignoredFlags(irep.Changes, git)
+	rep.Flags = append(rep.Flags, flags...)
+	if len(quiet) > 0 {
+		what := "Files git ignores"
+		if !git {
+			what = "Files in directories the undo snapshot does not copy"
+		}
+		rep.Warnings = append(rep.Warnings, what+" changed during the session in "+strings.Join(firstN(quiet, 5), ", ")+"; they are not in the diff and undo leaves them")
+	}
+	if w := ignoredWarning(irep, git); w != "" {
+		rep.Warnings = append(rep.Warnings, w)
+	}
+}
+
+func changedPaths(changes []TreeChange) map[string]struct{} {
+	out := make(map[string]struct{}, len(changes))
+	for _, c := range changes {
+		out[c.Path] = struct{}{}
+	}
+	return out
+}
+
+// reviewSentinels uses the re-walk of the folder (now) for host-executable
+// files that the tree diff cannot see (ignored by git), new nested
+// repositories and changed dependency directories.
+func reviewSentinels(rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, opts ReviewOptions, rep *ReviewReport) {
 	inDiff := map[string]struct{}{}
 	for _, c := range rep.Changes {
 		inDiff[c.Path] = struct{}{}
@@ -368,7 +416,8 @@ func reviewSentinels(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport)
 		rep.Flags = append(rep.Flags, Flag{Path: n, Label: label, Kind: RiskNestedRepo, Severity: SeverityCritical, Detail: detail})
 	}
 	for dir, fp := range now.deps {
-		if old, ok := rec.DependencyDirs[dir]; ok && old == fp {
+		if old, ok := rec.DependencyDirs[dir]; (ok && old == fp) || man.covers(dir) {
+			// Unchanged, or the ignored manifest compares it file by file.
 			continue
 		}
 		rep.Flags = append(rep.Flags, Flag{Path: dir, Label: dir + "/", Kind: RiskDependencies, Severity: SeverityMedium,
@@ -377,7 +426,6 @@ func reviewSentinels(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport)
 	if rec.SentinelsCapped || now.capped {
 		rep.Warnings = append(rep.Warnings, "the folder is too large to check every file for host-executable changes")
 	}
-	return nil
 }
 
 func stateMode(s FileState) string {

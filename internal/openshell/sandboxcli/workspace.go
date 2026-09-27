@@ -90,6 +90,13 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		return writeJSON(stdout, preview)
 	}
 	if empty {
+		if preview.Result != nil && len(preview.Result.Unrestored()) > 0 {
+			// Not a clean result: the session changed what undo cannot
+			// put back.
+			a.printUnrestored(preview.Result.Unrestored())
+			a.note("nothing else to undo: the rest of " + o.Name + "'s folder matches its pre-session snapshot")
+			return nil
+		}
 		a.ok("nothing to undo: " + o.Name + "'s folder matches its pre-session snapshot")
 		return nil
 	}
@@ -126,6 +133,13 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		for _, w := range res.Result.Warnings {
 			a.warn(w)
 		}
+		if left := res.Result.Unrestored(); len(left) > 0 {
+			paths := make([]string, len(left))
+			for i, c := range left {
+				paths[i] = c.Path
+			}
+			a.warn("not restored (see above): " + strings.Join(firstN(paths, 6), ", "))
+		}
 	}
 	if res.Restarted {
 		a.ok("restarted " + o.Name)
@@ -159,8 +173,38 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 	for _, n := range r.NestedRepos {
 		a.line("  remove nested repository " + n)
 	}
+	for _, c := range r.Ignored {
+		if c.Removed {
+			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), c.Path))
+		}
+	}
 	for _, p := range r.PinnedChanges {
 		a.warn(p + " changed on this machine during the session; it is kept")
+	}
+	a.printUnrestored(r.Unrestored())
+}
+
+// printUnrestored warns about each change undo cannot put back (files the
+// snapshot holds no copy of) and what to do about it.
+func (a *App) printUnrestored(list []workspace.IgnoredChange) {
+	const shown = 8
+	for i, c := range list {
+		if i == shown {
+			a.warn(fmt.Sprintf("… and %d more places undo cannot restore (`%s review` lists them)", len(list)-shown, CommandName))
+			break
+		}
+		what := c.Summary() + " during the session"
+		if c.ExecutableCount > 0 {
+			ex := make([]string, len(c.Executables))
+			for j, p := range c.Executables {
+				ex[j] = strings.TrimPrefix(p, c.Path)
+			}
+			what += ", including " + strings.Join(ex, ", ")
+			if c.ExecutableCount > len(ex) {
+				what += fmt.Sprintf(" and %d more that run on this machine", c.ExecutableCount-len(ex))
+			}
+		}
+		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", c.Path, what, c.Remedy))
 	}
 }
 

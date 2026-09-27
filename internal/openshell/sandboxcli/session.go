@@ -277,6 +277,12 @@ func (s *session) end(ctx context.Context) error {
 			return fmt.Errorf("undo: %w", apiError(err))
 		}
 		a.ok("undone: " + firstNonEmpty(res.Summary, "the folder is back to its pre-session snapshot"))
+		if res.Result != nil {
+			for _, w := range res.Result.Warnings {
+				a.warn(w)
+			}
+			a.printUnrestored(res.Result.Unrestored())
+		}
 		return s.finish(ctx, true)
 	}
 	return s.finish(ctx, false)

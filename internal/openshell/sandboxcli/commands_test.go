@@ -240,6 +240,59 @@ func TestUndoPreviewThenRestore(t *testing.T) {
 	}
 }
 
+func TestUndoNamesWhatItCannotRestore(t *testing.T) {
+	deps := workspace.IgnoredChange{Path: "node_modules/", Modified: 1, Executables: []string{"node_modules/.bin/tool"}, ExecutableCount: 1,
+		Dependencies: true, Remedy: "delete it and reinstall the packages (for example `npm ci`)"}
+	cache := workspace.IgnoredChange{Path: "calc/__pycache__/", Added: 1, Modified: 1, Removed: true, Remedy: "delete it; Python rebuilds it"}
+
+	// Only changes undo cannot restore: no clean "nothing to undo".
+	ta := newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("box"))
+	ta.daemon.undo = sandboxapi.UndoResponse{Result: &workspace.UndoResult{Project: ta.project, Preview: true, Ignored: []workspace.IgnoredChange{deps}}}
+	if err := ta.Undo(context.Background(), UndoOptions{Name: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	out := ta.output()
+	for _, want := range []string{
+		"undo cannot restore node_modules/ (1 file added or changed during the session, including .bin/tool): delete it and reinstall the packages (for example `npm ci`)",
+		"nothing else to undo",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "✓ nothing to undo") {
+		t.Errorf("undo reported a clean folder:\n%s", out)
+	}
+	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/box/undo")); n != 1 {
+		t.Errorf("undo calls = %d, want the preview only", n)
+	}
+
+	// With something to restore: the bytecode cache is listed as removed,
+	// and the result repeats what was left.
+	ta = newTestApp(t, "y\n")
+	ta.daemon.add(sampleSandbox("box"))
+	ta.daemon.undo = sandboxapi.UndoResponse{Result: &workspace.UndoResult{Project: ta.project,
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}}, Ignored: []workspace.IgnoredChange{cache, deps}}}
+	if err := ta.Undo(context.Background(), UndoOptions{Name: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	out = ta.output()
+	for _, want := range []string{
+		"remove  2 files the session wrote to calc/__pycache__/ (a Python bytecode cache)",
+		"undo cannot restore node_modules/",
+		"restored: 1 file restored",
+		"not restored (see above): node_modules/",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "undo cannot restore calc/__pycache__/") {
+		t.Errorf("the removed bytecode cache is reported as unrestorable:\n%s", out)
+	}
+}
+
 func TestReviewAndDelete(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.add(sampleSandbox("box"))

@@ -31,6 +31,7 @@ import (
 // Everything this package persists lives under the DefenseClaw data dir:
 //
 //	<data>/snapshots/<name>/snapshot.json   snapshot record
+//	<data>/snapshots/<name>/ignored.json    metadata of the files it does not copy
 //	<data>/snapshots/<name>/tree/           non-git copy snapshot
 //	<data>/shadows/<project-key>.git        shadow git dir shared by a project
 //	<data>/sandboxes/<name>/workspace/      mask files and mount state
@@ -117,7 +118,7 @@ func readJSON(path string, v any) error {
 
 // snapshotDirEntries are the only names Snapshot writes into a snapshot
 // directory, besides safefile's ".safefile-*" temporaries.
-var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true}
+var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true, ignoredManifestName: true}
 
 // checkSnapshotDir refuses a snapshot directory that holds anything
 // Snapshot does not write there, so a per-name write or delete never mixes

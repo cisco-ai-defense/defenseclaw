@@ -199,9 +199,14 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 	if err := ensurePrivateDir(dir); err != nil {
 		return nil, err
 	}
+	// The files the snapshot keeps no copy of: what git ignores, or a
+	// plain folder's dependency directories. Their manifest lets Review
+	// and Undo tell what the session changed there.
+	var ignoredRoots []string
+	ignoredListed := true
 	if src.Git != nil {
 		rec.Kind = SnapshotGit
-		if err := snapshotGit(ctx, lay, src, opts, rec); err != nil {
+		if ignoredRoots, ignoredListed, err = snapshotGit(ctx, lay, src, opts, rec); err != nil {
 			_ = removeSnapshotDir(dir)
 			return nil, err
 		}
@@ -211,6 +216,7 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 			_ = removeSnapshotDir(dir)
 			return nil, err
 		}
+		ignoredRoots = heavyRoots(rec.Copy.Opaque)
 	}
 	sentinels, err := scanSentinels(src.Path, opts.Skip)
 	if err != nil {
@@ -218,6 +224,16 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 		return nil, err
 	}
 	rec.Sentinels, rec.NestedRepos, rec.DependencyDirs, rec.SentinelsCapped = sentinels.files, sentinels.nested, sentinels.deps, sentinels.capped
+	manifest, err := recordIgnored(src.Path, ignoredRoots, toSet(opts.Skip))
+	if err != nil {
+		_ = removeSnapshotDir(dir)
+		return nil, err
+	}
+	manifest.Truncated = manifest.Truncated || !ignoredListed
+	if err := writeIgnored(lay, opts.Name, manifest); err != nil {
+		_ = removeSnapshotDir(dir)
+		return nil, err
+	}
 	if err := writeJSON(lay.snapshotRecord(opts.Name), rec); err != nil {
 		_ = removeSnapshotDir(dir)
 		return nil, err
@@ -225,16 +241,31 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 	return rec, nil
 }
 
-func snapshotGit(ctx context.Context, lay layout, src *Source, opts SnapshotOptions, rec *SnapshotRecord) error {
+// heavyRoots are the dependency and cache directories among a plain
+// snapshot's opaque paths (the rest are nested .git directories).
+func heavyRoots(opaque []string) []string {
+	var out []string
+	for _, rel := range opaque {
+		if path.Base(rel) != ".git" {
+			out = append(out, rel+"/")
+		}
+	}
+	return out
+}
+
+// snapshotGit takes the git half of a snapshot. It returns what git
+// ignores (collapsed directories end in "/"), up to the ignored-manifest
+// cap, and whether that list could be read.
+func snapshotGit(ctx context.Context, lay layout, src *Source, opts SnapshotOptions, rec *SnapshotRecord) (roots []string, listed bool, err error) {
 	gitDir := src.Git.GitDir
 	info, err := os.Lstat(gitDir)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	id, _ := identityOf(info)
 	sh, unlock, err := openShadow(ctx, lay, src.Path, gitDir, opts.Home)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	defer unlock()
 
@@ -248,40 +279,42 @@ func snapshotGit(ctx context.Context, lay layout, src *Source, opts SnapshotOpti
 	proj := gitCmd{dir: src.Path, gitDir: gitDir, workTree: src.Path}
 	gs.Head, gs.Branch, err = resolveHead(ctx, proj)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if gs.Refs, err = listRefs(ctx, proj); err != nil {
-		return err
+		return nil, false, err
 	}
 	commit, tree, warnings, err := sh.capture(ctx, "defenseclaw: working tree before sandbox session "+opts.Name, gs.Head)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	rec.Warnings = append(rec.Warnings, warnings...)
 	gs.Commit, gs.Tree = commit, tree
 	if err := sh.updateRef(ctx, gs.Ref, commit); err != nil {
-		return err
+		return nil, false, err
 	}
 	if ic, err := indexCommit(ctx, sh, opts.Name); err == nil {
 		gs.IndexCommit = ic
 	} else {
 		rec.Warnings = append(rec.Warnings, "the staging area was not recorded ("+err.Error()+"); undo will leave it as the session left it")
 	}
-	ignored, err := sh.ignoredEntries(ctx, maxIgnoredEntries+1)
-	if err == nil {
+	// One listing serves both the record (bounded) and the manifest roots.
+	if all, err := sh.ignoredEntries(ctx, maxIgnoredFiles+1); err == nil {
+		roots, listed = all, len(all) <= maxIgnoredFiles
+		ignored := all
 		gs.IgnoredTruncated = len(ignored) > maxIgnoredEntries
 		if gs.IgnoredTruncated {
 			ignored = ignored[:maxIgnoredEntries]
 		}
-		gs.Ignored = ignored
+		gs.Ignored = append([]string(nil), ignored...)
 	}
 	gs.Control, err = captureControl(gitDir)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	gs.Pinned, err = capturePinned(src)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if hasGitlinks(ctx, sh.bare(), tree) {
 		rec.Warnings = append(rec.Warnings, "submodule working trees are not part of the snapshot; undo restores which submodule commit is checked out, not files inside submodules")
@@ -293,7 +326,7 @@ func snapshotGit(ctx context.Context, lay layout, src *Source, opts SnapshotOpti
 			gs.ProjectRef = true
 		}
 	}
-	return nil
+	return roots, listed, nil
 }
 
 // resolveHead returns the HEAD commit ("" when unborn) and the symbolic
@@ -530,6 +563,9 @@ type sentinelScan struct {
 	files  map[string]FileState
 	nested []string
 	deps   map[string]DirFingerprint
+	// heavy are the dependency and cache directories the walk does not
+	// enter ("node_modules/"), at any depth.
+	heavy  []string
 	capped bool
 }
 
@@ -560,6 +596,9 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 		if d.IsDir() {
 			if isDependencyDir(d.Name()) && strings.Count(rel, "/") < 3 {
 				res.deps[rel] = fingerprintDir(filepath.Join(root, filepath.FromSlash(rel)))
+			}
+			if isHeavyDir(d.Name()) {
+				res.heavy = append(res.heavy, rel+"/")
 			}
 			return nil
 		}
