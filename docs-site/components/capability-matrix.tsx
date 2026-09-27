@@ -26,7 +26,8 @@ interface ConnectorRow {
     scope: 'user' | 'workspace';
   };
   // OpenShell sandbox support. "artifacts" means DefenseClaw renders the
-  // connector's overlay-image hook files (tamperTier comes from its
+  // connector's overlay-image hook files (tamperTier and hookConfig, the
+  // root-owned file that registers the hooks, come from its
   // SandboxArtifacts); "pending" means it renders none yet.
   sandbox: {
     status: 'artifacts' | 'pending';
@@ -78,6 +79,11 @@ function Sandbox({ sandbox }: { sandbox: ConnectorRow['sandbox'] }) {
       <span className="rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
         {sandbox.tamperTier} tier
       </span>
+      {sandbox.hookConfig && (
+        <div className="mt-1 max-w-[220px] break-all font-mono text-[11px] text-fd-muted-foreground">
+          {sandbox.hookConfig}
+        </div>
+      )}
       {sandbox.harnessPin && (
         <div className="mt-1 text-xs text-fd-muted-foreground">image pin {sandbox.harnessPin}</div>
       )}
