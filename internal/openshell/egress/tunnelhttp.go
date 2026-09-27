@@ -38,8 +38,8 @@ import (
 // site served from the same address (a CDN), so each request is read,
 // required to be for the tunnel's own host, and written upstream again;
 // the upstream's responses are copied back byte for byte. A 101 Switching
-// Protocols answer to an Upgrade request (ws://) turns the rest of the
-// tunnel into a plain relay.
+// Protocols answer to a WebSocket Upgrade request (ws://) turns the rest of
+// the tunnel into a plain relay; other upgrade offers are stripped.
 
 // pendingDepth bounds requests forwarded ahead of their responses.
 const pendingDepth = 64
@@ -261,7 +261,7 @@ func (p *Proxy) relayRequests(t *tunnel, client net.Conn, src io.Reader, upstrea
 			req.Header["User-Agent"] = []string{""} // keep Write from adding Go's own
 		}
 		e := pendingRequest{method: req.Method}
-		upgrade := wantsUpgrade(req.Header)
+		upgrade := websocketUpgrade(req.Header)
 		if upgrade {
 			e.verdict = make(chan bool, 1)
 		}
@@ -322,19 +322,67 @@ func skipEmptyLines(br *bufio.Reader) error {
 	}
 }
 
-// wantsUpgrade reports an HTTP/1.1 protocol upgrade request.
-func wantsUpgrade(h http.Header) bool {
-	if h.Get("Upgrade") == "" {
+// websocketUpgrade reports a WebSocket upgrade request and strips any other
+// upgrade offer from h. Only WebSocket is honored: after 101 Switching
+// Protocols the rest of the connection is relayed as is, which is what a
+// WebSocket needs, but any other protocol would leave inspection the same
+// way. h2c carries HTTP/2 streams whose :authority can name any site on the
+// server, and an RFC 2817 TLS/1.0 upgrade a ClientHello whose server name
+// is never screened. Stripping Upgrade, HTTP2-Settings and their Connection
+// tokens sends the request as plain HTTP/1.1, which the server answers as
+// such (clients fall back); a server that switches anyway has not been
+// offered a switch, and the tunnel stays inspected.
+func websocketUpgrade(h http.Header) bool {
+	if len(h.Values("Upgrade")) == 0 {
 		return false
 	}
+	if onlyToken(h.Values("Upgrade"), "websocket") && hasToken(h.Values("Connection"), "upgrade") {
+		return true
+	}
+	h.Del("Upgrade")
+	h.Del("Http2-Settings")
+	var keep []string
 	for _, v := range h.Values("Connection") {
 		for _, token := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			if token = strings.TrimSpace(token); token != "" && !strings.EqualFold(token, "upgrade") && !strings.EqualFold(token, "http2-settings") {
+				keep = append(keep, token)
+			}
+		}
+	}
+	h.Del("Connection")
+	if len(keep) > 0 {
+		h.Set("Connection", strings.Join(keep, ", "))
+	}
+	return false
+}
+
+// hasToken reports token in a comma-separated header list.
+func hasToken(values []string, token string) bool {
+	for _, v := range values {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// onlyToken reports a comma-separated header list that is exactly token.
+func onlyToken(values []string, token string) bool {
+	n := 0
+	for _, v := range values {
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t == "" {
+				continue
+			}
+			if !strings.EqualFold(t, token) {
+				return false
+			}
+			n++
+		}
+	}
+	return n == 1
 }
 
 // headLimit bounds the bytes read while a request head is armed.

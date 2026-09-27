@@ -1159,6 +1159,49 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 	}
 }
 
+// Absolute-form requests honor only WebSocket upgrades too: an h2c offer is
+// stripped, and an upstream that switches anyway gets a 502 instead of an
+// uninspected relay.
+func TestProxyAbsoluteFormOnlyWebSocketUpgrades(t *testing.T) {
+	var seen atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Store(r.Header.Get("Upgrade") + "|" + r.Header.Get("Http2-Settings"))
+		fmt.Fprint(w, "plain")
+	}))
+	defer upstream.Close()
+	sw := &switchingUpstream{}
+	switching := sw.start(t)
+	h := newHarness(t, func(c *harnessConfig) { c.decider.Ports = []int{80, 443, 8080} })
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.dialer.route(8080, switching)
+
+	offer := "Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n"
+	for _, tt := range []struct {
+		url    string
+		status int
+	}{
+		{"http://example.com/", http.StatusOK},
+		{"http://example.com:8080/", http.StatusBadGateway},
+	} {
+		conn, br := h.dialProxy()
+		fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: example.com\r\n%sProxy-Authorization: %s\r\n\r\n", tt.url, offer, basicAuth(h.cred))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.url, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tt.status {
+			t.Errorf("%s with an h2c offer = %d, want %d", tt.url, resp.StatusCode, tt.status)
+		}
+	}
+	if got, _ := seen.Load().(string); got != "|" {
+		t.Errorf("the upstream saw Upgrade|HTTP2-Settings %q", got)
+	}
+	if upgrades, _ := sw.seen(); len(upgrades) != 1 || upgrades[0] != "|" {
+		t.Errorf("the switching upstream saw %q", upgrades)
+	}
+}
+
 func TestProxySinkPanicIsContained(t *testing.T) {
 	h := newHarness(t, func(c *harnessConfig) { c.sink = EventSinkFunc(func(Event) { panic("sink bug") }) })
 	h.dialer.route(443, startEcho(t))

@@ -246,6 +246,10 @@ func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 	u.Host = host
 	pr.Out.URL = &u
 	pr.Out.Host = ""
+	// The ReverseProxy relays any upgraded protocol as is once the upstream
+	// answers 101; only WebSocket is honored, as in tunnels. Without an
+	// offer, an upstream that switches anyway gets a 502.
+	websocketUpgrade(pr.Out.Header)
 }
 
 // transportDial is the Transport's only way out: it dials the decided

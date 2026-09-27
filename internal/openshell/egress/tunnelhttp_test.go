@@ -337,6 +337,113 @@ func TestTunnelHTTPUpgrade(t *testing.T) {
 	readTunnelRefusal(t, br)
 }
 
+// switchingUpstream answers every request with 101 Switching Protocols
+// whatever it asked for, then records everything else it receives.
+type switchingUpstream struct {
+	mu       sync.Mutex
+	upgrades []string
+	after    bytes.Buffer
+}
+
+func (s *switchingUpstream) start(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				s.mu.Lock()
+				s.upgrades = append(s.upgrades, req.Header.Get("Upgrade")+"|"+req.Header.Get("Http2-Settings"))
+				s.mu.Unlock()
+				fmt.Fprint(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n")
+				buf := make([]byte, 4096)
+				for {
+					n, err := br.Read(buf)
+					s.mu.Lock()
+					s.after.Write(buf[:n])
+					s.mu.Unlock()
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func (s *switchingUpstream) seen() ([]string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.upgrades...), s.after.String()
+}
+
+// Only WebSocket upgrades are honored. Any other offer (h2c, RFC 2817
+// TLS/1.0) is stripped, HTTP2-Settings with it, so the request goes out as
+// plain HTTP/1.1; an upstream that switches protocols anyway gets nothing
+// the proxy has not inspected, since HTTP/2 streams or a ClientHello after
+// the switch could name any other site on the server.
+func TestTunnelHTTPOnlyWebSocketUpgrades(t *testing.T) {
+	rec := &hostRecorder{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.ServeHTTP(w, r)
+		fmt.Fprintf(w, " upgrade=%q settings=%q connection=%q", r.Header.Get("Upgrade"), r.Header.Get("Http2-Settings"), r.Header.Get("Connection"))
+	}))
+	defer upstream.Close()
+	h := newHarness(t, nil)
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	for _, offer := range []string{
+		"Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n",
+		"Connection: keep-alive, upgrade\r\nUpgrade: TLS/1.0\r\n",
+		"Connection: Upgrade\r\nUpgrade: websocket, h2c\r\n",
+	} {
+		conn, br := h.tunnel("example.com:80", []byte("GET /h HTTP/1.1\r\nHost: example.com\r\n"+offer+"\r\n"))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("%q: %v", offer, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `upgrade="" settings=""`) ||
+			strings.Contains(strings.ToLower(string(body)), "connection=\"upgrade") {
+			t.Errorf("%q reached the upstream as %d %q", offer, resp.StatusCode, body)
+		}
+		// Still inspected: a request for another host is refused.
+		fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
+		readTunnelRefusal(t, br)
+	}
+
+	// An upstream that switches without being offered a switch.
+	sw := &switchingUpstream{}
+	h2 := newHarness(t, nil)
+	h2.dialer.route(80, sw.start(t))
+	conn, br := h2.tunnel("example.com:80", []byte("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade, HTTP2-Settings\r\n"+
+		"Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n\r\n"))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("switching upstream = %v, %v", resp, err)
+	}
+	fmt.Fprint(conn, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	readTunnelRefusal(t, br)
+	eventually(t, "the tunnel to close", func() bool { return len(h2.sink.ofKind(EventClosed)) == 1 })
+	if upgrades, after := sw.seen(); len(upgrades) != 1 || upgrades[0] != "|" || strings.Contains(after, "PRI") {
+		t.Errorf("the upstream saw upgrade offers %q and then %q", upgrades, after)
+	}
+}
+
 // Upload bytes in an inspected tunnel count toward the large-upload block
 // as in any other tunnel.
 func TestTunnelHTTPLargeUpload(t *testing.T) {

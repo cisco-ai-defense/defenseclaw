@@ -29,7 +29,9 @@
 //     HTTP/1.x instead (undici's ProxyAgent, and so Node's fetch with
 //     NODE_USE_ENV_PROXY, tunnels http:// URLs by default) has each request
 //     read and forwarded only when its Host is the tunnel's own host, for
-//     the same reason; after a 101 upgrade (ws://) it is relayed as is.
+//     the same reason; after a WebSocket upgrade (ws://) it is relayed as
+//     is, and other upgrade offers (h2c, TLS/1.0) are stripped so the
+//     tunnel stays inspected.
 //     Other protocols (SSH, databases) are relayed only on ports the
 //     operator added; on the web ports 80 and 443 they, and HTTP/2 without
 //     TLS, are refused with a 400 inside the tunnel.
