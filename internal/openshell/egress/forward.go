@@ -41,10 +41,9 @@ import (
 // ReverseProxy and Transport callbacks.
 type forwardState struct {
 	p *Proxy
-	// gen is the generation whose transport the request is sent on, and
-	// decider the decider that decided it (the principal's own or gen's).
+	// gen is the generation whose transport the request is sent on; the
+	// request's tunnel holds the policy that decides it.
 	gen      *generation
-	decider  *Decider
 	tunnel   *tunnel
 	scheme   string
 	explicit bool // the request URL carried a port
@@ -101,8 +100,10 @@ func (st *forwardState) admitConn(addr netip.AddrPort) *dialError {
 	if !addr.IsValid() {
 		return &dialError{status: http.StatusBadGateway, reason: "connecting to the destination failed"}
 	}
-	t := st.tunnel
-	return st.decider.dialRules(t.principal, t.dec).check(addr.Addr(), st.p.dialer.local)
+	// Recorded before it is checked, so a recheck that replaces the
+	// request's policy meanwhile checks it again (Proxy.revise).
+	pol := st.tunnel.connectedTo(addr.Addr())
+	return pol.d.dialRules(pol.pr, pol.dec).check(addr.Addr(), st.p.dialer.local)
 }
 
 func defaultPort(scheme string) int {
@@ -127,12 +128,10 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, shuttingDownResponse())
 		return
 	}
-	pr, presented, ok := p.authenticate(r)
+	pr, cred, presented, ok := p.authenticate(r)
 	if !ok {
 		p.challenged(presented, r.Method, r.URL.Host, start)
-		w.Header().Set("Proxy-Authenticate", proxyAuthenticate)
-		w.Header().Set("Connection", "close")
-		writeJSON(w, http.StatusProxyAuthRequired, authRequiredResponse())
+		writeAuthRequiredJSON(w)
 		return
 	}
 
@@ -170,24 +169,29 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	// whose dial fails or is refused is not contact.
 	flow := p.counter.pending(pr, dec.Host)
 	defer flow.close()
-	t := &tunnel{
-		id: newTunnelID(), principal: pr, method: r.Method, dec: dec, started: start,
-		flow: flow, exempt: exemptFromUploadBlock(dec),
-	}
+	t := newTunnel(pr, cred, d, r.Method, dec, start, flow)
+	// A recheck that ends the request cancels its upstream exchange; the
+	// client connection stays with the HTTP server.
+	reqCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	t.cancel = cancel
 	if !p.track(t) {
 		w.Header().Set("Connection", "close")
 		writeJSON(w, http.StatusServiceUnavailable, shuttingDownResponse())
 		return
 	}
 	defer p.untrack(t)
+	if v, mine := p.confirmTracked(t); v != nil {
+		if mine && v.refusal != nil {
+			p.recordRefusal(pr, r.Method, *v.refusal, statusFor(*v.refusal), start, "")
+		} else if mine {
+			p.emitAuthFailed(r.Method, r.URL.Host, start)
+		}
+		p.answerEnded(w, t)
+		return
+	}
 
-	// Recheck ends a request whose sandbox may no longer make it; until a
-	// request upgrades, the HTTP server owns its connections, so it is
-	// ended through its context.
-	reqCtx, cancelReq := context.WithCancel(r.Context())
-	defer cancelReq()
-	t.setCloser(cancelReq)
-	st := &forwardState{p: p, gen: gen, decider: d, tunnel: t, scheme: scheme, explicit: explicit}
+	st := &forwardState{p: p, gen: gen, tunnel: t, scheme: scheme, explicit: explicit}
 	// A request that began before SetDecider hands its upstream connection
 	// back to the retired generation's pool once it is done; close it there.
 	defer func() {
@@ -249,13 +253,34 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		e := p.event(EventClosed, pr, r.Method, dec)
 		e.TunnelID, e.RemoteAddr, e.Status = t.id, st.remoteAddr(), cw.status()
 		e.BytesUp, e.BytesDown, e.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-		e.Terminated = t.cut.Load() || t.idled.Load() || t.revoked.Load()
-		if t.revoked.Load() {
+		e.Terminated = t.terminated()
+		if t.ended.Load() != nil {
 			e.Reason = revokedReason
 		}
 		p.emit(e)
 	}()
 	p.forwarder.ServeHTTP(cw, out)
+}
+
+// answerEnded answers a forwarded request a recheck ended before its
+// response began: with the refusal, which the recheck reported, or with
+// the 407 challenge when its credential was revoked.
+func (p *Proxy) answerEnded(w http.ResponseWriter, t *tunnel) {
+	v := t.ended.Load()
+	if v == nil || v.refusal == nil {
+		writeAuthRequiredJSON(w)
+		return
+	}
+	w.Header().Set("Connection", "close")
+	writeJSON(w, statusFor(*v.refusal), p.blockResponse(t.principal, *v.refusal))
+}
+
+// writeAuthRequiredJSON answers a forwarded request whose credential is
+// missing, wrong or revoked with the 407 challenge.
+func writeAuthRequiredJSON(w http.ResponseWriter) {
+	w.Header().Set("Proxy-Authenticate", proxyAuthenticate)
+	w.Header().Set("Connection", "close")
+	writeJSON(w, http.StatusProxyAuthRequired, authRequiredResponse())
 }
 
 // refuseForward answers a refused request and ends its client connection,
@@ -310,7 +335,8 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 	if !ok || host != dec.Host || port != dec.Port {
 		return nil, fmt.Errorf("egress: upstream dial to %s does not match the decided destination", sanitizeHost(addr))
 	}
-	conn, remote, err := p.dialer.dial(ctx, host, port, st.decider.dialRules(st.tunnel.principal, dec))
+	pol := st.tunnel.policy()
+	conn, remote, err := p.dialer.dial(ctx, host, port, pol.d.dialRules(pol.pr, pol.dec))
 	if err != nil {
 		var de *dialError
 		if errors.As(err, &de) {
@@ -381,7 +407,7 @@ func (c *idleConn) Read(b []byte) (int, error) {
 
 func (c *idleConn) Write(b []byte) (int, error) {
 	if t := c.owner.Load(); t != nil && len(b) > 0 {
-		v := t.flow.addUp(int64(len(b)), t.exempt)
+		v := t.flow.addUp(int64(len(b)), t.exempt.Load())
 		if v.signal {
 			c.p.emitLargeUpload(t, v)
 		}
@@ -433,8 +459,13 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	}
 	t := st.tunnel
 	dec := t.dec
+	if t.ended.Load() != nil {
+		p.answerEnded(w, t)
+		return
+	}
+	d := t.policy().d
 	if t.cut.Load() {
-		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(t.principal, st.decider, dec, ""), t.started)
+		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(t.principal, d, dec, ""), t.started)
 		return
 	}
 	var de *dialError
@@ -442,14 +473,12 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 		de = st.lastDialErr()
 	}
 	if de != nil && de.category != "" {
-		p.refuseForward(w, t.principal, t.method, dialRefusal(st.decider, dec, de), t.started)
+		p.refuseForward(w, t.principal, t.method, dialRefusal(d, dec, de), t.started)
 		return
 	}
 	status, reason := http.StatusBadGateway, "the upstream request failed"
 	var netErr net.Error
 	switch {
-	case t.revoked.Load():
-		status, reason = http.StatusForbidden, "the sandbox's egress policy no longer allows it"
 	case de != nil:
 		status, reason = de.status, de.reason
 	case errors.Is(err, context.Canceled):

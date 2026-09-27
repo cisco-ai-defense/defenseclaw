@@ -91,7 +91,7 @@ const (
 // HeaderTimeout and maxFirstFlight. Only the visible server name is
 // checked: an Encrypted Client Hello's outer name and a Host header inside
 // the TLS session are out of reach without terminating TLS.
-func (p *Proxy) screenFirstFlight(t *tunnel, d *Decider, client net.Conn, r io.Reader) ([]byte, flightKind, error) {
+func (p *Proxy) screenFirstFlight(t *tunnel, client net.Conn, r io.Reader) ([]byte, flightKind, error) {
 	buf := make([]byte, firstReadSize)
 	n, err := r.Read(buf)
 	if n == 0 {
@@ -129,7 +129,10 @@ func (p *Proxy) screenFirstFlight(t *tunnel, d *Decider, client net.Conn, r io.R
 	if err != nil {
 		return nil, flightUnknown, err
 	}
-	if dec, refused := serverNameRefusal(t, d, name); refused {
+	// Recorded before it is decided, so a recheck that replaces the
+	// tunnel's policy meanwhile decides it again (Proxy.revise).
+	pol := t.sawServerName(name)
+	if dec, refused := serverNameRefusal(t, pol.pr, pol.d, name); refused {
 		p.refuseInTunnel(t, client, dec, tlsAlertAccessDenied)
 		return nil, flightUnknown, errTunnelRefused
 	}
@@ -215,10 +218,10 @@ func isTokenChar(c byte) bool {
 }
 
 // serverNameRefusal decides the server name a tunnel's ClientHello asked
-// for. No name, the CONNECT target itself, and IP literals (RFC 6066 forbids
-// them in SNI, and they cannot select a virtual host by name) need no second
-// decision.
-func serverNameRefusal(t *tunnel, d *Decider, name string) (Decision, bool) {
+// for, for pr with d. No name, the CONNECT target itself, and IP literals
+// (RFC 6066 forbids them in SNI, and they cannot select a virtual host by
+// name) need no second decision.
+func serverNameRefusal(t *tunnel, pr Principal, d *Decider, name string) (Decision, bool) {
 	if name == "" {
 		return Decision{}, false
 	}
@@ -231,7 +234,7 @@ func serverNameRefusal(t *tunnel, d *Decider, name string) (Decision, bool) {
 	if addr.IsValid() || host == t.dec.Host {
 		return Decision{}, false
 	}
-	dec := d.Decide(t.principal, host, t.dec.Port)
+	dec := d.Decide(pr, host, t.dec.Port)
 	if dec.Allowed {
 		return Decision{}, false
 	}

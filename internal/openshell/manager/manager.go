@@ -83,7 +83,7 @@ type HostUser struct {
 type ProxyControl interface {
 	SetDecider(d *egress.Decider) error
 	Counter() *egress.Counter
-	Recheck(current func(bindingID string) (egress.Principal, bool)) int
+	Recheck(bindingID string) int
 }
 
 // Options configure a Manager.

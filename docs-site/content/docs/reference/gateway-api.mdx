@@ -689,6 +689,12 @@ A blocked request gets `403` with a JSON body: `error: "egress_blocked"`, the
 host, port and category, whether it can be unblocked, and a `how_to_unblock`
 sentence written for the agent to pass on to you.
 
+Policy changes reach open connections too. When a sandbox's policy changes
+(an administrator's constraint, for example), the proxy decides its open
+tunnels and in-flight requests again and closes the ones it now blocks. When
+a sandbox loses its proxy credential (its policy can no longer be resolved,
+or it moves to `strict`), all of its open tunnels close.
+
 The proxy also counts bytes per destination and reports an upload of more
 than 25 MiB (the default threshold) to a destination the sandbox had not
 contacted before.

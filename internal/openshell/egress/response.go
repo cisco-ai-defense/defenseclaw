@@ -245,6 +245,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(body)
 }
 
+// writeAuthRequired answers a CONNECT whose credential is missing, wrong or
+// revoked with the 407 challenge.
+func writeAuthRequired(conn net.Conn) {
+	writeRaw(conn, http.StatusProxyAuthRequired, "Proxy Authentication Required",
+		http.Header{"Proxy-Authenticate": {proxyAuthenticate}}, authRequiredResponse())
+}
+
 // writeRaw writes a complete HTTP/1.1 response to a hijacked connection and
 // closes it, lingering briefly so data the client already sent (a pipelined
 // TLS ClientHello, say) does not turn the close into a reset that loses the

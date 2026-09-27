@@ -105,6 +105,15 @@ type mapDialer struct {
 	fail    map[string]error
 	hang    map[string]bool
 	dialed  []string
+	// onDial, when set, runs before each dial (to hold one while a test
+	// changes the proxy's policy).
+	onDial func(address string)
+}
+
+func (d *mapDialer) setOnDial(fn func(address string)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onDial = fn
 }
 
 func newMapDialer() *mapDialer {
@@ -131,8 +140,11 @@ func (d *mapDialer) DialContext(ctx context.Context, network, address string) (n
 	port, _ := strconv.Atoi(portText)
 	d.mu.Lock()
 	d.dialed = append(d.dialed, address)
-	failErr, hang, target := d.fail[host], d.hang[host], d.targets[port]
+	failErr, hang, target, onDial := d.fail[host], d.hang[host], d.targets[port], d.onDial
 	d.mu.Unlock()
+	if onDial != nil {
+		onDial(address)
+	}
 	if net.ParseIP(host) == nil {
 		return nil, fmt.Errorf("mapDialer: asked to dial non-literal %q", address)
 	}

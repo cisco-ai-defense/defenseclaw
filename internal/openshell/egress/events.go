@@ -32,6 +32,8 @@ const (
 	// instead. A tunnel refused for its plaintext content (an HTTP request
 	// for another host, or a protocol its port does not carry) carries its
 	// TunnelID too; its client got a 400 JSON response inside the tunnel.
+	// So does a tunnel or request a recheck (Proxy.Recheck) ended because
+	// its policy now refuses it; its connections were closed.
 	EventBlocked EventKind = "blocked"
 	// EventClosed: an allowed tunnel or request finished; carries byte
 	// counts and duration.
@@ -94,8 +96,9 @@ type Event struct {
 	// large upload happened (large_upload).
 	FirstSeen bool
 	// Terminated marks a tunnel or request cut by the large-upload block, by
-	// the tunnel idle timeout, or refused inside the tunnel (its TLS server
-	// name or its plaintext content).
+	// the tunnel idle timeout, refused inside the tunnel (its TLS server
+	// name or its plaintext content), or ended by a recheck (Proxy.Recheck:
+	// its credential was revoked or its policy now refuses it).
 	Terminated bool
 	// Error is a bounded failure description for failed events.
 	Error string

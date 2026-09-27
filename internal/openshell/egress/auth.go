@@ -44,7 +44,8 @@ type Principal struct {
 	// (packs.Effective.EgressDecider), so one sandbox's pack, clamps and
 	// unblocks never decide another's egress. Nil uses the proxy's default
 	// (Options.Decider, SetDecider). Re-registering the credential with a
-	// new decider applies it to later tunnels and requests.
+	// new decider applies it to later tunnels and requests, and
+	// Proxy.Recheck to the open ones.
 	Decider *Decider
 	// LargeUploadBytes is the sandbox's own large-upload threshold (its
 	// pack's egress.large_upload_mb): zero uses the counter's
@@ -148,7 +149,8 @@ func NewCredentialStore() *CredentialStore {
 
 // Register installs c for p, replacing any credential previously registered
 // for p.BindingID. Re-registering the same credential updates the principal
-// (for example a profile change) without rotating.
+// (for example a profile change) without rotating. Open tunnels follow
+// either change once Proxy.Recheck runs.
 func (s *CredentialStore) Register(c Credential, p Principal) error {
 	if err := validateCredential(c); err != nil {
 		return err
@@ -173,7 +175,7 @@ func (s *CredentialStore) Register(c Credential, p Principal) error {
 }
 
 // Revoke removes the credential registered for bindingID and reports
-// whether there was one. Tunnels already open stay open until
+// whether there was one. Tunnels and requests already open stay open until
 // Proxy.Recheck closes them.
 func (s *CredentialStore) Revoke(bindingID string) bool {
 	s.mu.Lock()

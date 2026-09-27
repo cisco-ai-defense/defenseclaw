@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -300,21 +301,117 @@ func deciderFor(pr Principal, gen *generation) *Decider {
 	return gen.decider
 }
 
-// SetDecider swaps the default decider used for new tunnels and requests of
-// principals without their own, for example after a configuration reload.
-// Open tunnels and in-flight requests keep their decision. Upstream
-// connections pooled under the old generation are closed and never reused,
-// so the dial-time checks (CIDR blocks on the resolved address) in force
-// now apply to every later request. A sandbox manager that gives every
-// principal its own decider calls it after re-registering them, to retire
-// the pooled connections too.
+// SetDecider swaps the default decider for principals without their own,
+// for example after a configuration reload, and rechecks every open tunnel
+// and in-flight request (Recheck), so the new decider also reaches the
+// tunnels it now refuses. Upstream connections pooled under the old
+// generation are closed and never reused, so the dial-time checks (CIDR
+// blocks on the resolved address) in force now apply to every later
+// request. A sandbox manager that gives every principal its own decider
+// calls it after re-registering them, to retire the pooled connections too.
 func (p *Proxy) SetDecider(d *Decider) error {
 	if d == nil {
 		return errors.New("egress: nil decider")
 	}
 	old := p.gen.Swap(p.newGeneration(d))
 	old.transport.CloseIdleConnections()
+	p.Recheck("")
 	return nil
+}
+
+// Recheck applies the current credentials and policy to the open tunnels
+// and in-flight forwarded requests of bindingID, or of every binding when
+// bindingID is empty. A tunnel is otherwise decided only when it opens, and
+// traffic keeps it open well past TunnelIdleTimeout. Each one is
+// authenticated again with the credential it presented and decided again
+// by the decider of the principal that credential maps to now (its own,
+// else the default): its destination, the address it is connected to, and
+// the TLS server name it asked for. Those whose credential was revoked or
+// replaced, or which that decision now refuses, are closed; a refusal is
+// reported as a blocked event with the tunnel's id. It returns how many it
+// closed.
+//
+// The sandbox manager calls it whenever it revokes or re-registers a
+// binding's credential: a sandbox that fails closed or goes to the deny
+// network mode, or whose policy an administrator tightened.
+func (p *Proxy) Recheck(bindingID string) int {
+	p.mu.Lock()
+	open := make([]*tunnel, 0, len(p.tunnels))
+	for t := range p.tunnels {
+		// A tunnel refused for its content is ending already.
+		if (bindingID == "" || t.principal.BindingID == bindingID) && !t.refused.Load() {
+			open = append(open, t)
+		}
+	}
+	p.mu.Unlock()
+	ended := 0
+	for _, t := range open {
+		if v := p.revise(t); !v.keep() && p.endRevised(t, v) {
+			ended++
+		}
+	}
+	return ended
+}
+
+// revokedReason is the closed event's reason for a tunnel or request a
+// recheck ended (Recheck).
+const revokedReason = "closed: the sandbox's egress policy no longer allows it"
+
+// revision is a recheck's verdict on an open tunnel or request.
+type revision struct {
+	// revoked: the credential no longer authenticates as the tunnel's
+	// binding.
+	revoked bool
+	// refusal is the decision that now refuses it.
+	refusal *Decision
+}
+
+func (v revision) keep() bool { return !v.revoked && v.refusal == nil }
+
+// revise decides t again under the principal its credential maps to now
+// and that principal's decider (its own, else the current default), and
+// makes that the tunnel's policy. The address and server name are read
+// after the policy is replaced, and recorded before it is read
+// (connectedTo, sawServerName), so each of them is checked under the new
+// policy by one side or the other.
+func (p *Proxy) revise(t *tunnel) revision {
+	pr, ok := p.auth.Authenticate(t.cred.Username, t.cred.Password)
+	if !ok || pr.BindingID != t.principal.BindingID {
+		return revision{revoked: true}
+	}
+	d := deciderFor(pr, p.gen.Load())
+	dec := d.Decide(pr, t.dec.Host, t.dec.Port)
+	if !dec.Allowed {
+		return revision{refusal: &dec}
+	}
+	t.policyMu.Lock()
+	t.pol = tunnelPolicy{pr: pr, d: d, dec: dec}
+	remote, name := t.remote, t.serverName
+	t.policyMu.Unlock()
+	t.exempt.Store(exemptFromUploadBlock(dec))
+	if remote.IsValid() {
+		if de := d.dialRules(pr, dec).check(remote, p.dialer.local); de != nil {
+			refused := dialRefusal(d, dec, de)
+			return revision{refusal: &refused}
+		}
+	}
+	if refused, ok := serverNameRefusal(t, pr, d, name); ok {
+		return revision{refusal: &refused}
+	}
+	return revision{}
+}
+
+// endRevised ends t for a recheck's verdict v, reporting a refusal, unless
+// something already ended it. It reports whether it did.
+func (p *Proxy) endRevised(t *tunnel, v revision) bool {
+	if !t.ended.CompareAndSwap(nil, &v) {
+		return false
+	}
+	if dec := v.refusal; dec != nil {
+		p.recordRefusal(t.principal, t.method, *dec, statusFor(*dec), t.started, t.id)
+	}
+	t.end()
+	return true
 }
 
 // Counter returns the proxy's byte counter.
@@ -432,30 +529,98 @@ func (p *Proxy) Tunnels() []TunnelStats {
 
 // tunnel is one open CONNECT tunnel or forwarded request.
 type tunnel struct {
-	id        string
+	id string
+	// principal and dec are what the tunnel opened with; host and port
+	// never change, and events carry them.
 	principal Principal
 	method    string
 	dec       Decision
 	started   time.Time
 	flow      *flow
-	exempt    bool
-	cut       atomic.Bool
+	// cred is the proxy credential the tunnel authenticated with, which a
+	// recheck authenticates again. Never logged (Credential redacts).
+	cred Credential
+	// cancel ends a forwarded request's upstream exchange; nil for CONNECT.
+	cancel context.CancelFunc
+	// exempt: the large-upload block only signals (exemptFromUploadBlock).
+	exempt atomic.Bool
+	cut    atomic.Bool
 	// idled marks a tunnel or request ended by TunnelIdleTimeout.
 	idled atomic.Bool
 	// refused marks a CONNECT tunnel ended for its TLS server name or its
 	// plaintext content.
 	refused atomic.Bool
-	// revoked marks a tunnel or request Recheck ended: the sandbox's
-	// credential was revoked, or its decider no longer allows it.
-	revoked atomic.Bool
+	// ended is the verdict of the recheck that ended the tunnel or request
+	// (Recheck): its credential was revoked, or its policy now refuses it.
+	ended atomic.Pointer[revision]
+
+	// policyMu guards what a recheck revises and what it checks again.
+	policyMu sync.Mutex
+	pol      tunnelPolicy
+	// remote is the upstream address the tunnel or request is connected
+	// to, once known.
+	remote netip.Addr
+	// serverName is the TLS server name a CONNECT tunnel's ClientHello
+	// asked for, once screened.
+	serverName string
 
 	closeMu sync.Mutex
-	// closeFn force-closes the tunnel's connections: a CONNECT's once it is
-	// established, an upgraded request's once it upgrades. While the HTTP
-	// server owns a plain forwarded request's connections it cancels the
-	// request instead.
+	// closeFn force-closes the tunnel's connections. It stays nil while the
+	// HTTP server owns them (plain forwarded requests, which a recheck ends
+	// through cancel) and is set once a CONNECT is established or a
+	// forwarded request upgrades.
 	closeFn func()
 	closed  bool
+}
+
+// tunnelPolicy is what decides an open tunnel: the principal its
+// credential maps to, that principal's decider (its own, else the
+// default), and the decision the decider made. A recheck replaces it.
+type tunnelPolicy struct {
+	pr  Principal
+	d   *Decider
+	dec Decision
+}
+
+func newTunnel(pr Principal, cred Credential, d *Decider, method string, dec Decision, start time.Time, flow *flow) *tunnel {
+	t := &tunnel{
+		id: newTunnelID(), principal: pr, method: method, dec: dec, started: start, flow: flow, cred: cred,
+		pol: tunnelPolicy{pr: pr, d: d, dec: dec},
+	}
+	t.exempt.Store(exemptFromUploadBlock(dec))
+	return t
+}
+
+// policy returns the tunnel's current policy.
+func (t *tunnel) policy() tunnelPolicy {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	return t.pol
+}
+
+// connectedTo records the upstream address and returns the policy to
+// check it with.
+func (t *tunnel) connectedTo(addr netip.Addr) tunnelPolicy {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	t.remote = addr.Unmap()
+	return t.pol
+}
+
+// sawServerName records the TLS server name and returns the policy to
+// decide it with.
+func (t *tunnel) sawServerName(name string) tunnelPolicy {
+	t.policyMu.Lock()
+	defer t.policyMu.Unlock()
+	t.serverName = name
+	return t.pol
+}
+
+// terminated reports a tunnel or request the proxy cut short: the
+// large-upload block, the idle timeout, a refusal inside the tunnel, or a
+// recheck.
+func (t *tunnel) terminated() bool {
+	return t.cut.Load() || t.idled.Load() || t.refused.Load() || t.ended.Load() != nil
 }
 
 // setCloser installs the force-close func, running it at once if the tunnel
@@ -480,6 +645,16 @@ func (t *tunnel) close() {
 	if fn != nil {
 		fn()
 	}
+}
+
+// end force-closes the tunnel's connections and cancels a forwarded
+// request's upstream exchange, which ends it whether or not its response
+// began.
+func (t *tunnel) end() {
+	if t.cancel != nil {
+		t.cancel()
+	}
+	t.close()
 }
 
 // closeIdle ends the tunnel for TunnelIdleTimeout.
@@ -508,40 +683,6 @@ func (p *Proxy) activeTunnels() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.tunnels)
-}
-
-// revokedReason is the closed event's reason for a tunnel Recheck ended.
-const revokedReason = "closed: the sandbox's egress policy no longer allows it"
-
-// Recheck decides every open tunnel and in-flight forwarded request again
-// and closes the ones now refused. current returns the principal registered
-// for a binding now (CredentialStore.Lookup); ok false means its credential
-// was revoked, which closes every one of its tunnels. The others are
-// decided again by the principal's current decider (or the default), so a
-// block list, admin or network-mode change reaches connections already
-// open: without it they keep the decision they were opened with.
-// Upstream connections pooled for requests are retired by SetDecider. It
-// reports how many it closed.
-func (p *Proxy) Recheck(current func(bindingID string) (Principal, bool)) int {
-	p.mu.Lock()
-	open := make([]*tunnel, 0, len(p.tunnels))
-	for t := range p.tunnels {
-		open = append(open, t)
-	}
-	p.mu.Unlock()
-	gen := p.gen.Load()
-	closed := 0
-	for _, t := range open {
-		if pr, ok := current(t.principal.BindingID); ok {
-			if deciderFor(pr, gen).Decide(pr, t.dec.Host, t.dec.Port).Allowed {
-				continue
-			}
-		}
-		t.revoked.Store(true)
-		t.close()
-		closed++
-	}
-	return closed
 }
 
 func (p *Proxy) closeTunnels() {
@@ -574,20 +715,32 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authenticate resolves the request's proxy credential. presented reports
 // whether the request carried any Proxy-Authorization at all.
-func (p *Proxy) authenticate(r *http.Request) (pr Principal, presented, ok bool) {
+func (p *Proxy) authenticate(r *http.Request) (pr Principal, cred Credential, presented, ok bool) {
 	values := r.Header.Values("Proxy-Authorization")
 	if len(values) == 0 {
-		return Principal{}, false, false
+		return Principal{}, Credential{}, false, false
 	}
 	user, pass, parsed := parseProxyAuthorization(values)
 	if !parsed {
-		return Principal{}, true, false
+		return Principal{}, Credential{}, true, false
 	}
 	pr, ok = p.auth.Authenticate(user, pass)
 	if !ok || strings.TrimSpace(pr.BindingID) == "" {
-		return Principal{}, true, false
+		return Principal{}, Credential{}, true, false
 	}
-	return pr, true, true
+	return pr, Credential{Username: user, Password: pass}, true, true
+}
+
+// confirmTracked rechecks a tunnel or request once it is tracked, since a
+// recheck that ran after it authenticated but before it was tracked did not
+// see it. It returns nil to go on, else the verdict that ended it; mine
+// reports that this check ended it, so the refusal is the caller's to
+// report (a concurrent Recheck reports its own).
+func (p *Proxy) confirmTracked(t *tunnel) (v *revision, mine bool) {
+	if rv := p.revise(t); !rv.keep() && t.ended.CompareAndSwap(nil, &rv) {
+		return &rv, true
+	}
+	return t.ended.Load(), false
 }
 
 // challenged records a 407. A request without any credential is the normal
@@ -676,11 +829,10 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		writeRaw(conn, http.StatusServiceUnavailable, "Service Unavailable", nil, shuttingDownResponse())
 		return
 	}
-	pr, presented, ok := p.authenticate(r)
+	pr, cred, presented, ok := p.authenticate(r)
 	if !ok {
 		p.challenged(presented, http.MethodConnect, target, start)
-		writeRaw(conn, http.StatusProxyAuthRequired, "Proxy Authentication Required",
-			http.Header{"Proxy-Authenticate": {proxyAuthenticate}}, authRequiredResponse())
+		writeAuthRequired(conn)
 		return
 	}
 	d := deciderFor(pr, p.gen.Load())
@@ -718,10 +870,8 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope), start)
 		return
 	}
-	t := &tunnel{
-		id: newTunnelID(), principal: pr, method: http.MethodConnect, dec: dec, started: start,
-		flow: flow, exempt: exempt,
-	}
+	t := newTunnel(pr, cred, d, http.MethodConnect, dec, start, flow)
+	t.connectedTo(remote.Addr())
 	t.setCloser(func() {
 		_ = conn.Close()
 		_ = upstream.Close()
@@ -732,6 +882,25 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer p.untrack(t)
+	if v, mine := p.confirmTracked(t); v != nil {
+		// The credential was revoked or the policy changed while the
+		// tunnel was being dialed. A concurrent Recheck that ended it
+		// closed the connection already, so these writes fail quietly.
+		_ = upstream.Close()
+		switch {
+		case v.refusal == nil:
+			if mine {
+				p.emitAuthFailed(http.MethodConnect, target, start)
+			}
+			writeAuthRequired(conn)
+		case mine:
+			p.refuseRaw(conn, pr, http.MethodConnect, *v.refusal, start)
+		default:
+			status := statusFor(*v.refusal)
+			writeRaw(conn, status, reasonPhrase(status, v.refusal), nil, p.blockResponse(pr, *v.refusal))
+		}
+		return
+	}
 
 	_ = conn.SetWriteDeadline(time.Now().Add(rawWriteTimeout))
 	_, err = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n")
@@ -744,13 +913,13 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	allowed.TunnelID, allowed.RemoteAddr, allowed.Status, allowed.FirstSeen = t.id, remote.String(), http.StatusOK, first
 	p.emit(allowed)
 
-	p.relay(t, d, conn, brw.Reader, upstream)
+	p.relay(t, conn, brw.Reader, upstream)
 
 	closed := p.event(EventClosed, pr, http.MethodConnect, dec)
 	closed.TunnelID, closed.RemoteAddr, closed.Status = t.id, remote.String(), http.StatusOK
 	closed.BytesUp, closed.BytesDown, closed.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-	closed.Terminated = t.idled.Load() || t.cut.Load() || t.refused.Load() || t.revoked.Load()
-	if t.revoked.Load() {
+	closed.Terminated = t.terminated()
+	if t.ended.Load() != nil {
 		closed.Reason = revokedReason
 	}
 	p.emit(closed)
@@ -842,7 +1011,7 @@ func (p *Proxy) dialFailedRaw(conn net.Conn, pr Principal, d *Decider, dec Decis
 // the tunnel is idle for TunnelIdleTimeout. The client's first flight is
 // screened before anything reaches the upstream (screenFirstFlight); a
 // tunnel carrying HTTP/1.x has its requests inspected one by one.
-func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Reader, upstream net.Conn) {
+func (p *Proxy) relay(t *tunnel, client net.Conn, clientReader io.Reader, upstream net.Conn) {
 	var last atomic.Int64
 	touch := func() { last.Store(time.Now().UnixNano()) }
 	touch()
@@ -850,7 +1019,7 @@ func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Re
 	go watchIdle(p.idle, &last, done, t.closeIdle)
 
 	up := func(n int) bool {
-		v := t.flow.addUp(int64(n), t.exempt)
+		v := t.flow.addUp(int64(n), t.exempt.Load())
 		if v.signal {
 			p.emitLargeUpload(t, v)
 		}
@@ -863,7 +1032,7 @@ func (p *Proxy) relay(t *tunnel, d *Decider, client net.Conn, clientReader io.Re
 	hs := newHTTPSession()
 	errc := make(chan error, 2)
 	go func() {
-		first, kind, err := p.screenFirstFlight(t, d, client, clientReader)
+		first, kind, err := p.screenFirstFlight(t, client, clientReader)
 		if err != nil {
 			errc <- err
 			return

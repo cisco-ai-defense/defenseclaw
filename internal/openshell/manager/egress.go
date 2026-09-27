@@ -138,7 +138,7 @@ func (m *Manager) recheckTunnels() {
 	if proxy == nil {
 		return
 	}
-	if n := proxy.Recheck(m.creds.Lookup); n > 0 {
+	if n := proxy.Recheck(""); n > 0 {
 		m.logf("closed %d egress tunnel(s) the sandbox policy no longer allows", n)
 	}
 }

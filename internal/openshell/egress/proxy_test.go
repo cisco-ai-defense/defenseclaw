@@ -1592,7 +1592,8 @@ func TestProxyForwardCountsConnectedRequestsOnly(t *testing.T) {
 // SetDecider must not let upstream connections pooled under the old decider
 // carry requests the new one refuses at dial time (here a CIDR block on the
 // resolved address), including connections that in-flight requests hand
-// back to the pool after the swap.
+// back to the pool after the swap. The in-flight request itself is
+// rechecked and refused: it is connected to the blocked address.
 func TestProxySetDeciderRetiresPooledUpstreams(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -1617,8 +1618,8 @@ func TestProxySetDeciderRetiresPooledUpstreams(t *testing.T) {
 	slow := make(chan error, 1)
 	go func() {
 		status, err := getStatus(b, "http://example.com/slow")
-		if err == nil && status != http.StatusOK {
-			err = fmt.Errorf("status %d", status)
+		if err == nil && status != http.StatusForbidden {
+			err = fmt.Errorf("status %d, want 403", status)
 		}
 		slow <- err
 	}()

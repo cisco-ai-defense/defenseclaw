@@ -53,10 +53,12 @@
 // (Decider.Decide lists the order). Every sandbox's credential carries its
 // own Decider (Principal.Decider), built from the sandbox's resolved policy
 // by packs.Effective.EgressDecider, so the proxy never merges one
-// sandbox's policy into another's. Checks that open a path the proxy does
-// not guard, such as approving a direct OpenShell rule for a name, apply
-// the same dial-time address rules through LookupHost and
-// Decider.CheckAddrs.
+// sandbox's policy into another's. A tunnel is decided when it opens and
+// again whenever its binding's credential or policy changes (Proxy.Recheck,
+// SetDecider), so a revoked credential or a tightened policy also ends the
+// tunnels already open. Checks that open a path the proxy does not guard,
+// such as approving a direct OpenShell rule for a name, apply the same
+// dial-time address rules through LookupHost and Decider.CheckAddrs.
 //
 // Hostnames are resolved on the proxy side as fully qualified names, never
 // through the host's DNS search domains. Every DNS answer is checked by
