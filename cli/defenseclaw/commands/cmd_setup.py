@@ -4325,7 +4325,10 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "devin": {
         "label": "Devin",
-        "description": "project hooks + documented local MCP, skill, rule, and agent discovery",
+        "description": (
+            "Devin CLI and Devin Desktop (Devin Local) hooks + documented local MCP, "
+            "skill, rule, and agent discovery"
+        ),
         "tool_mode": "both",
         "subprocess_policy": "none",
     },

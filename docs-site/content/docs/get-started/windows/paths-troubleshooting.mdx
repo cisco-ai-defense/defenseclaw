@@ -45,15 +45,13 @@ intact when diagnosing a problem.
 | `%CODEX_HOME%\config.toml` | Codex user config plus DefenseClaw-marked OTLP/notify fields. | Other Codex settings are user-owned; use DefenseClaw teardown to remove managed fields. |
 | `%CLAUDE_CONFIG_DIR%\settings.json` | Claude Code user config plus DefenseClaw-marked hooks/OTLP environment entries. Default is `%USERPROFILE%\.claude`. | Do not remove individual managed entries by hand; use setup/remove. |
 | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` | DefenseClaw-managed Amp TypeScript system-policy plugin with a connector-scoped credential. | **Never print, copy, or hand-edit.** Use setup/remove; operator-owned sibling plugins are separate. |
-| `%GEMINI_CLI_HOME%\.gemini\settings.json` | Retired Gemini CLI integration state only. | New setup is unavailable. `defenseclaw setup remove geminicli --yes` uses the authenticated receipt to remove only DefenseClaw-owned legacy entries. |
-| `%USERPROFILE%\.gemini\config\hooks.json` | Google Antigravity's native hook configuration. | This nested Antigravity document is separate from retired Gemini CLI root settings; lifecycle operations must not cross those ownership boundaries. |
+| `%USERPROFILE%\.gemini\config\hooks.json` | Google Antigravity's native hook configuration. | DefenseClaw writes only this Antigravity document under `%USERPROFILE%\.gemini`; use setup/remove. |
 | `%COPILOT_HOME%\hooks\defenseclaw.json` | GitHub Copilot CLI global hook registration; the default home is `%USERPROFILE%\.copilot`. | Uses Copilot's official `powershell` field. An explicitly pinned workspace instead uses `<workspace>\.github\hooks\defenseclaw.json`; keep those scopes separate. |
 | `%USERPROFILE%\.cursor\hooks.json` | Cursor user hooks plus DefenseClaw-managed entries. | Cursor has no documented configuration-home environment variable. Setup records this exact native path for repair, upgrade, and teardown. |
 | `%APPDATA%\devin\config.json` | Canonical Devin user configuration. DefenseClaw adds one managed command-hook group to each of the eight lifecycle events under `hooks` and preserves foreign JSONC content. | Do not replace individual managed entries; use setup/remove. |
 | `<workspace>\.devin\hooks.v1.json` | Canonical project hook document when an explicit workspace is selected. The hook map is the whole JSONC document. | Keep project and user custody separate; use setup/remove. |
 | `%APPDATA%\devin\mcp_config.json`, `<workspace>\.devin\mcp_config.json` | Canonical Devin MCP read/write locations. Higher-precedence local compatibility files may be inventoried read-only. | Manage through Devin or DefenseClaw MCP commands; do not copy credentials into support output. |
 | `%USERPROFILE%\.defenseclaw\connector_backups\devin\config.json` | Managed ownership/restore receipt for the exact Devin hook document. | Do not edit or copy it; setup/teardown use it for exact lifecycle custody. |
-| `%USERPROFILE%\.defenseclaw\connector_backups\windsurf\config.json` | Retired predecessor receipt retained only when an older authenticated install still owns cleanup work. | Do not edit or copy it. Upgrade/uninstall consumes only its receipt-bound managed entries; it is not active connector state. |
 | `%USERPROFILE%\.defenseclaw\hook_contract_lock.json` | Versioned connector readiness metadata. An active `devin` entry must identify `devin-hooks-v1` and the exact user or project hook document. | If Doctor reports a missing Devin lock, rerun `defenseclaw setup devin --yes --restart`; another connector setup is not a repair path. |
 | `%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js` | OpenCode bridge plugin. Default config root is `%USERPROFILE%\.config\opencode`. | Carries a connector-scoped token. Do not edit or copy; Doctor detects digest drift and Setup reconciles it. Restart OpenCode after lifecycle changes. |
 | `%OMNIGENT_CONFIG_HOME%\config.yaml` | OmniGent's effective custom-policy configuration; the default home is `%USERPROFILE%\.omnigent`. | Start OmniGent with the same explicit `--config` path after setup. DefenseClaw's bridge also binds the exact selected `uv tool` environment. |
@@ -71,9 +69,7 @@ configuration overrides honored by their respective implementations. Set them
 to absolute, normalized native Windows paths before initial Setup or connector
 setup. The installer validates and records them; reparse ancestors are refused.
 Antigravity, Cursor, and Devin publish no equivalent public
-configuration-home override. The retired Gemini CLI cleanup path can still read
-its previously authenticated `GEMINI_CLI_HOME` custody record; it is not a
-supported new setup override. Antigravity's distinct global hook path is fixed at
+configuration-home override. Antigravity's distinct global hook path is fixed at
 `%USERPROFILE%\.gemini\config\hooks.json`; Setup keeps any predecessor custom
 path only as internal custody needed for exact migration and restoration.
 Legacy cleanup records Gemini's vendor root and derived `.gemini` directory

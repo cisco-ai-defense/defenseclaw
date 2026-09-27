@@ -7,6 +7,7 @@ keywords:
   - config version 8
   - observability v8
   - DefenseClaw rollback
+  - renamed and removed connectors
 ---
 
 On every supported POSIX source, use the authenticated resolver asset owned by
@@ -520,6 +521,117 @@ remote destination is reported as degraded and retries independently.
 Release/support tooling may expose the same deterministic converter as a
 read-only, secret-free preview. Such a preview is optional, is never a
 prerequisite for the target-release resolver, and has no second apply protocol.
+
+## Renamed and removed connectors
+
+Two connectors changed in this release. One is migrated for you; the other
+needs a one-time manual cleanup.
+
+### Windsurf is now Devin
+
+Windsurf was renamed **Devin Desktop** (Cognition). DefenseClaw now protects it
+with the [`devin` connector](/docs/connectors/devin), which covers Devin CLI and
+Devin Desktop's default **Devin Local** agent: both read the same hook config.
+The old `windsurf` connector no longer exists.
+
+The move is automatic. It runs during `defenseclaw upgrade`, on the next
+`defenseclaw-gateway restart`, or when you run `defenseclaw setup devin`:
+
+- In `~/.defenseclaw/config.yaml`, `guardrail.connector`, `guardrail.connectors`,
+  and `claw.mode` entries named `windsurf` become `devin`. The old block keeps
+  its settings (mode, `hook_fail_mode`, `enabled`, and so on). If a `devin`
+  block already exists, it wins and the `windsurf` block is dropped; the
+  upgrade output names the dropped key.
+- The gateway removes only the hook entries DefenseClaw wrote into
+  `~/.codeium/windsurf/hooks.json`. Hooks from other tools in that file stay.
+- It deletes `~/.defenseclaw/hooks/windsurf-hook.sh` (and `windsurf-hook.ps1`
+  if present) and `~/.defenseclaw/connector_backups/windsurf/`, and clears
+  `windsurf` from `hook_contract_lock.json` and `active_connector.json`.
+- It installs the Devin hooks in `~/.config/devin/config.json` (Windows:
+  `%APPDATA%\devin\config.json`).
+- The gateway log records one line that starts with
+  `Windsurf is now Devin Desktop: moved connector "windsurf" to "devin"` and
+  names the files it changed.
+
+What is not protected: conversations in Devin Desktop's legacy **Cascade**
+agent. New Devin Desktop tabs start on Devin Local, which is protected;
+existing Cascade conversations keep running without DefenseClaw hooks.
+
+To confirm, run `defenseclaw doctor` and check that the Devin hook row passes,
+then open a new Devin Desktop tab or Devin CLI session.
+
+### Gemini CLI was removed
+
+DefenseClaw no longer ships a Gemini CLI connector. For Google's agent, use
+[Antigravity](/docs/connectors/antigravity) instead.
+
+DefenseClaw does not remove old Gemini CLI state for you. If you used the
+Gemini CLI connector, do this once, before you set up Antigravity:
+
+1. Remove it from DefenseClaw's config:
+
+   ```bash
+   defenseclaw setup remove geminicli --yes
+   ```
+
+   This works even when Gemini CLI was your only connector; DefenseClaw then
+   enforces nothing until step 7. Or delete `geminicli` from
+   `guardrail.connectors` and `guardrail.connector` in
+   `~/.defenseclaw/config.yaml`.
+2. Open `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
+   on Windows `%USERPROFILE%\.gemini\settings.json`). Under `hooks`, look at
+   each of these events: `SessionStart`, `SessionEnd`, `BeforeAgent`,
+   `AfterAgent`, `BeforeModel`, `AfterModel`, `BeforeToolSelection`,
+   `BeforeTool`, `AfterTool`, `PreCompress`, `Notification`. Delete every group
+   whose `hooks` list contains `"name": "defenseclaw"`, then delete any event
+   key left empty. A DefenseClaw group looks like this:
+
+   ```json
+   {
+     "matcher": "*",
+     "hooks": [
+       {
+         "name": "defenseclaw",
+         "type": "command",
+         "command": "/home/you/.defenseclaw/hooks/geminicli-hook.sh",
+         "timeout": 30000,
+         "description": "DefenseClaw hook inspection"
+       }
+     ]
+   }
+   ```
+3. If `telemetry.otlpEndpoint` in the same file contains `/otlp/geminicli/`,
+   delete the `telemetry` object or put back your own values.
+4. Do not touch `~/.gemini/config/`. That directory belongs to Antigravity.
+5. Delete `~/.defenseclaw/hooks/geminicli-hook.sh`,
+   `~/.defenseclaw/hooks/.otlp-geminicli.token`, and
+   `~/.defenseclaw/connector_backups/geminicli/`.
+6. Restart the gateway. (`setup remove` already did this unless you passed
+   `--no-restart`.)
+
+   ```bash
+   defenseclaw-gateway restart
+   ```
+7. Set up Antigravity, or any other connector you use:
+
+   ```bash
+   defenseclaw setup antigravity
+   ```
+
+<Callout type="warn" title="Finish step 2 before you use Gemini CLI again">
+Until the DefenseClaw groups are gone from `settings.json`, Gemini CLI keeps
+calling a gateway endpoint that no longer exists. With
+`guardrail.hook_fail_mode: closed`, that blocks every Gemini CLI action.
+</Callout>
+
+If `config.yaml` still names `geminicli`, the gateway refuses to start and its
+error points to this section. Step 1 fixes that. DefenseClaw also drops the old
+`geminicli` entries from its lock and active-connector state on the next start;
+it never edits `~/.gemini` itself.
+
+Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
+an older release exported with that value do not validate against the current
+schemas if you re-export them.
 
 ## Verify the result
 
