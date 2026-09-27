@@ -1063,6 +1063,15 @@ func hookContractByIDForOS(connectorName, contractID, goos string) (HookContract
 			return contract, true
 		}
 	}
+	// A sandbox binding pins the sandbox-only contract its image was built
+	// for; every OpenShell sandbox runs Linux.
+	if goos == "linux" {
+		for _, contract := range sandboxOnlyHookContracts(connectorName) {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
+		}
+	}
 	return HookContract{}, false
 }
 
@@ -1092,7 +1101,12 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	contracts := hookContractsForOS(name, goos)
+	return resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+}
+
+// resolveHookContractAgainst matches rawVersion against contracts, the
+// registered contracts of connector name.
+func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,

@@ -219,6 +219,9 @@ const (
 	claudePreToolUse  = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
 	codexPreToolUse   = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
 	copilotPreToolUse = `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/proj","toolName":"bash","toolArgs":{"command":"ls","description":"list"}}`
+	cursorPreToolUse  = `{"hook_event_name":"beforeShellExecution","conversation_id":"c1","command":"ls","cwd":"/work/proj","cursor_version":"2026.07.23-e383d2b"}`
+	kiroPreToolUse    = `{"hook_event_name":"preToolUse","cwd":"/work/proj","session_id":"s1","tool_name":"shell","tool_input":{"command":"ls"}}`
+	devinPreToolUse   = `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"ls"}}`
 	allowResponse     = `200|{"action":"allow"}`
 )
 
@@ -363,6 +366,9 @@ func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
 		{"claudecode", "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, true},
 		{"codex", "0.146.0", "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, true},
 		{"copilot", "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, true},
+		{"cursor", "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, true},
+		{"kiro", "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, true},
+		{"devin", "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, true},
 		{"claudecode", "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, false},
 		{"claudecode", "2.1.156", "inspect-tool-response.sh", nil, `{"output":"ok"}`, false},
 		{"codex", "0.146.0", "inspect-request.sh", nil, `{"content":"hi"}`, false},
@@ -539,6 +545,9 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 		{"codex-hook", &CodexConnector{}, "0.146.0", "codex-hook.sh",
 			[]string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, "/api/v1/codex/hook", true},
 		{"copilot-hook", NewCopilotConnector(), "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, "/api/v1/copilot/hook", true},
+		{"cursor-hook", NewCursorConnector(), "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, "/api/v1/cursor/hook", true},
+		{"kiro-hook", NewKiroConnector(), "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, "/api/v1/kiro/hook", true},
+		{"devin-hook", NewDevinConnector(), "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, "/api/v1/devin/hook", true},
 		{"inspect-tool", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool", false},
 	}
 	vectors := map[string]func(t *testing.T, a *sandboxEnvAttack) map[string]string{
@@ -968,6 +977,37 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 			{"copilot-hook.sh", copilotPreToolUseArgs, oversized, token, nil},
 			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, nil, nil},
 			{"copilot-hook.sh", []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, token, []string{allowResponse}},
+		}},
+		{"cursor", NewCursorConnector(), "2026.07.23-e383d2b", []scenario{
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{allowResponse}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{blockOut}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`200|{"action":"block","hook_output":{"permission":"deny"}}`}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`200|{"action":"allow","hook_output":{"permission":"allow"}}`}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{"exit:52", allowResponse}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`401|{}`}},
+			{"cursor-hook.sh", nil, oversized, token, nil},
+			{"cursor-hook.sh", nil, cursorPreToolUse, nil, nil},
+		}},
+		{"kiro", NewKiroConnector(), "2.24.1", []scenario{
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{allowResponse}},
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{blockOut}},
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{`200|{"action":"block","hook_output":{"decision":"block","reason":"nope"}}`}},
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{"exit:52", allowResponse}},
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{`401|{}`}},
+			{"kiro-hook.sh", nil, oversized, token, nil},
+			{"kiro-hook.sh", nil, kiroPreToolUse, nil, nil},
+		}},
+		{"devin", NewDevinConnector(), "3000.4.25", []scenario{
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{allowResponse}},
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{blockOut}},
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{`200|{"action":"block","hook_output":{"decision":"block","reason":"nope"}}`}},
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{"exit:52", allowResponse}},
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"devin-hook.sh", nil, devinPreToolUse, token, []string{`401|{}`}},
+			{"devin-hook.sh", nil, oversized, token, nil},
+			{"devin-hook.sh", nil, devinPreToolUse, nil, nil},
 		}},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {

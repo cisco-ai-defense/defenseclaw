@@ -42,6 +42,9 @@ var sandboxGoldenTargets = []struct {
 	{"codex", &CodexConnector{}, "0.146.0"},
 	{"amp", NewAMPConnector(), "0.0.1785334225-g9abe75"},
 	{"copilot", NewCopilotConnector(), "1.0.88"},
+	{"cursor", NewCursorConnector(), "2026.07.23-e383d2b"},
+	{"devin", NewDevinConnector(), "3000.4.25"},
+	{"kiro", NewKiroConnector(), "2.24.1"},
 	{"opencode", NewOpenCodeConnector(), "1.18.31"},
 }
 
@@ -183,7 +186,7 @@ func TestRenderSandboxHookFilesRefusesConnectorsWithoutVariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"cursor", "hermes", "openclaw", ""} {
+	for _, name := range []string{"hermes", "openclaw", "windsurf", ""} {
 		if _, err := renderSandboxHookFiles(name, rt); err == nil {
 			t.Fatalf("connector %q rendered sandbox hooks without a sandbox template variant", name)
 		}

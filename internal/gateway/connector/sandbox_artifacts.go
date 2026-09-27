@@ -166,9 +166,34 @@ type SandboxArtifactProvider interface {
 }
 
 // ResolveSandboxHookContract resolves a harness version against the Linux
-// hook contracts, which are the ones every overlay image runs.
+// hook contracts, which are the ones every overlay image runs. A connector
+// whose host hooks are not version-gated (Kiro) resolves against its
+// sandbox-only contracts instead: an overlay image always pins a reviewed
+// harness build.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
+	name := normalizeConnectorName(connectorName)
+	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
+		return resolveHookContractAgainst(name, agentVersion, contracts)
+	}
 	return resolveHookContractForOS(connectorName, agentVersion, "linux")
+}
+
+// sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply
+// only inside DefenseClaw's OpenShell overlay images, for connectors whose
+// host hooks are not version-gated. Each connector keeps its contracts in its
+// own <connector>_sandbox.go file.
+var sandboxOnlyHookContractsByConnector = map[string]func() []HookContract{
+	"kiro": kiroSandboxHookContracts,
+}
+
+// sandboxOnlyHookContracts returns fresh copies of connector's sandbox-only
+// hook contracts (none for most connectors).
+func sandboxOnlyHookContracts(connectorName string) []HookContract {
+	contracts, ok := sandboxOnlyHookContractsByConnector[normalizeConnectorName(connectorName)]
+	if !ok {
+		return nil
+	}
+	return contracts()
 }
 
 // SandboxIngressAddr returns host.openshell.internal:<port>.
@@ -187,6 +212,9 @@ var sandboxHookScriptsByConnector = map[string][]string{
 	"claudecode": {"claude-code-hook.sh"},
 	"codex":      {"codex-hook.sh"},
 	"copilot":    {"copilot-hook.sh"},
+	"cursor":     {"cursor-hook.sh"},
+	"devin":      {"devin-hook.sh"},
+	"kiro":       {"kiro-hook.sh"},
 }
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox
@@ -413,4 +441,5 @@ var (
 	_ SandboxArtifactProvider = (*CodexConnector)(nil)
 	_ SandboxArtifactProvider = (*hookOnlyConnector)(nil)
 	_ SandboxArtifactProvider = (*AMPConnector)(nil)
+	_ SandboxArtifactProvider = (*KiroConnector)(nil)
 )

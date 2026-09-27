@@ -31,7 +31,21 @@ import (
 var hookOnlySandboxRenderers = map[string]func(resolvedSandboxTarget) (SandboxArtifacts, error){
 	"amp":      renderAmpSandboxArtifacts,
 	"copilot":  renderCopilotSandboxArtifacts,
+	"cursor":   renderCursorSandboxArtifacts,
+	"devin":    renderDevinSandboxArtifacts,
 	"opencode": renderOpenCodeSandboxArtifacts,
+}
+
+// HasSandboxVariant reports whether conn renders OpenShell overlay
+// artifacts. Every hook-only connector implements SandboxArtifactProvider,
+// but only those with a reviewed sandbox variant render; the others refuse.
+func HasSandboxVariant(conn Connector) bool {
+	if hookOnly, ok := conn.(*hookOnlyConnector); ok {
+		_, ok := hookOnlySandboxRenderers[hookOnly.name]
+		return ok
+	}
+	_, ok := conn.(SandboxArtifactProvider)
+	return ok
 }
 
 // SandboxArtifacts renders the connector's OpenShell overlay artifacts, or

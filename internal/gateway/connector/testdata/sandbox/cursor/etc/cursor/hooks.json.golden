@@ -1,0 +1,173 @@
+{
+  "hooks": {
+    "afterAgentResponse": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "afterAgentThought": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "afterTabFileEdit": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "beforeTabFileRead": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "stop": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "workspaceOpen": [
+      {
+        "command": "'/usr/local/lib/defenseclaw/hooks/cursor-hook.sh'",
+        "failClosed": true,
+        "timeout": 30,
+        "type": "command"
+      }
+    ]
+  },
+  "version": 1
+}

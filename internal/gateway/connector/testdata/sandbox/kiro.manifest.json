@@ -1,0 +1,128 @@
+{
+  "connector": "kiro",
+  "hook_contract": "kiro-cli-hooks-v1",
+  "tamper_tier": "user",
+  "env": {},
+  "binaries": [
+    {
+      "Name": "bash",
+      "Role": "runtime"
+    },
+    {
+      "Name": "chmod",
+      "Role": "runtime"
+    },
+    {
+      "Name": "curl",
+      "Role": "runtime"
+    },
+    {
+      "Name": "date",
+      "Role": "runtime"
+    },
+    {
+      "Name": "find",
+      "Role": "runtime"
+    },
+    {
+      "Name": "head",
+      "Role": "runtime"
+    },
+    {
+      "Name": "id",
+      "Role": "runtime"
+    },
+    {
+      "Name": "jq",
+      "Role": "runtime"
+    },
+    {
+      "Name": "kiro-cli-chat",
+      "Role": "harness"
+    },
+    {
+      "Name": "mkdir",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mktemp",
+      "Role": "runtime"
+    },
+    {
+      "Name": "od",
+      "Role": "runtime"
+    },
+    {
+      "Name": "readlink",
+      "Role": "runtime"
+    },
+    {
+      "Name": "rm",
+      "Role": "runtime"
+    },
+    {
+      "Name": "sed",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tail",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tr",
+      "Role": "runtime"
+    }
+  ],
+  "files": {
+    "/sandbox/.kiro/agents/defenseclaw.json": {
+      "mode": "-rw-r--r--",
+      "owner": "user",
+      "sha256": "2cbe2a98d245f82e08b155e3499f387bdfe8a568c3b7b48cfde9b76dd8d553ba"
+    },
+    "/sandbox/.kiro/settings/cli.json": {
+      "mode": "-rw-r--r--",
+      "owner": "user",
+      "sha256": "409b8ea41bcd3a9386491637a2ca165b507d8c1ca34da730e4fbf100b67c1ccb"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "b7c97bd48429e2c906071f587736bd44b79811d10d924325ab513c8072e375b4"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "74876854ee207b9ce6f501dd086f8fd3e8276e43632ccb5d121715774fa52239"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "8432419c91e876721900e15dc6a96c15251ca0eafa196d5ea25ff3400f1004ba"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "41da0b72ceb0b7b8a8dd9999dd3cacc0ebc17f1adfb876a6fa577497d5876661"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "7e2d58230961190cedbb296d4ed89c3609991d130ee9e915ddf8a10a679ec3ad"
+    },
+    "/usr/local/lib/defenseclaw/hooks/kiro-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "b90992b1a1c3c6eae40f98b1630f52e6a4d13cbab79b7c76c8e79d3950e9dcd3"
+    },
+    "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "2cbe2a98d245f82e08b155e3499f387bdfe8a568c3b7b48cfde9b76dd8d553ba"
+    }
+  }
+}

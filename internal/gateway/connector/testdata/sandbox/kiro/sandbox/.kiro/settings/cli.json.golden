@@ -1,0 +1,5 @@
+{
+  "app.disableAutoupdates": true,
+  "chat.defaultAgent": "defenseclaw",
+  "telemetry.enabled": false
+}

@@ -52,10 +52,18 @@ func sandboxFile(t *testing.T, artifacts SandboxArtifacts, path string) SandboxF
 }
 
 func TestHookOnlySandboxArtifactsRefuseConnectorsWithoutVariant(t *testing.T) {
-	for _, conn := range []*hookOnlyConnector{NewCursorConnector(), NewHermesConnector(), NewGeminiCLIConnector()} {
+	for _, conn := range []*hookOnlyConnector{NewHermesConnector(), NewGeminiCLIConnector(), NewOpenHandsConnector(), NewAntigravityConnector()} {
 		_, err := conn.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.0.0"})
 		if err == nil || !strings.Contains(err.Error(), "no OpenShell sandbox variant") {
 			t.Fatalf("%s: err = %v", conn.Name(), err)
+		}
+		if HasSandboxVariant(conn) {
+			t.Fatalf("%s reports a sandbox variant it cannot render", conn.Name())
+		}
+	}
+	for _, conn := range []Connector{NewCursorConnector(), NewDevinConnector(), NewCopilotConnector(), NewOpenCodeConnector(), NewKiroConnector(), NewAMPConnector(), &ClaudeCodeConnector{}, &CodexConnector{}} {
+		if !HasSandboxVariant(conn) {
+			t.Fatalf("%s renders sandbox artifacts but reports no variant", conn.Name())
 		}
 	}
 }

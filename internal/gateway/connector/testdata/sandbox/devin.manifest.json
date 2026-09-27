@@ -1,0 +1,123 @@
+{
+  "connector": "devin",
+  "hook_contract": "devin-hooks-v1",
+  "tamper_tier": "user",
+  "env": {},
+  "binaries": [
+    {
+      "Name": "bash",
+      "Role": "runtime"
+    },
+    {
+      "Name": "chmod",
+      "Role": "runtime"
+    },
+    {
+      "Name": "curl",
+      "Role": "runtime"
+    },
+    {
+      "Name": "date",
+      "Role": "runtime"
+    },
+    {
+      "Name": "devin",
+      "Role": "harness"
+    },
+    {
+      "Name": "find",
+      "Role": "runtime"
+    },
+    {
+      "Name": "head",
+      "Role": "runtime"
+    },
+    {
+      "Name": "id",
+      "Role": "runtime"
+    },
+    {
+      "Name": "jq",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mkdir",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mktemp",
+      "Role": "runtime"
+    },
+    {
+      "Name": "od",
+      "Role": "runtime"
+    },
+    {
+      "Name": "readlink",
+      "Role": "runtime"
+    },
+    {
+      "Name": "rm",
+      "Role": "runtime"
+    },
+    {
+      "Name": "sed",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tail",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tr",
+      "Role": "runtime"
+    }
+  ],
+  "files": {
+    "/sandbox/.config/devin/config.json": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "sha256": "a37708568e5965e63f6a4e2a5f5122ee0a33fa3eba734a5db701b2c13e4aa9c2"
+    },
+    "/usr/local/lib/defenseclaw/devin/config.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a37708568e5965e63f6a4e2a5f5122ee0a33fa3eba734a5db701b2c13e4aa9c2"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "b7c97bd48429e2c906071f587736bd44b79811d10d924325ab513c8072e375b4"
+    },
+    "/usr/local/lib/defenseclaw/hooks/devin-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "5bbcc0115129cda5be6c8ec5f5f958fad60838ce1c171d7ebb1cb0ebbd8f1d93"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "09c5aa1a2ccfd8b00dd666089b190db473e4fd3b9621a03c9dda8239e0efc031"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "273d1caa8d6dfb974367b8b16c9295f4172b217280382ae96b5092ead14afcf2"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "167293926bc75b382be398ceec57bf8e1199ffc1e56462285985e8c68ad1aa26"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "91fc08e28ccd4aa4e6bdcb03fccdd776329a742040d4cd2a7b6cbcc64a5e2c9c"
+    }
+  }
+}
