@@ -165,6 +165,8 @@ func (e *env) createHookOnly(w hookOnlyWiring) *sandboxapi.Sandbox {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	ctx := e.ctx(30 * time.Second)
+	e.recordProfiles(ctx, e.prefixedProviders(ctx))
 	t.Logf("created %s in %s: phase=%s pack=%s profile=%s mode=%s image=%s contract=%s tier=%s",
 		sb.Name, time.Since(started).Round(time.Second), sb.Phase, sb.Pack, sb.Profile, sb.WorkdirMode, sb.Image,
 		sb.HookContract, sb.TamperTier)
@@ -191,7 +193,8 @@ func (e *env) hookOnlyReachesIngress(sb *sandboxapi.Sandbox) {
 	if calls == 0 || substituted == 0 || placeholder != 0 {
 		t.Fatalf("mock model: %d model calls, %d with the key substituted, %d with a placeholder", calls, substituted, placeholder)
 	}
-	t.Logf("mock model: %d model calls, every key substituted by OpenShell", calls)
+	t.Logf("mock model: %d model calls, every key substituted by OpenShell; tool calls %q", calls,
+		mockChatCalls(filepath.Join(e.work, "logs", "mock.jsonl")))
 	if after.Tampered != 0 {
 		t.Fatalf("real harness traffic raised hook tamper: %+v", after)
 	}
@@ -202,7 +205,8 @@ func (e *env) hookOnlyBlocked(sb *sandboxapi.Sandbox, w hookOnlyWiring) {
 	before := e.get(sb.Name).Hooks
 	out := e.harness(sb, "Run the DCE2E-DENY scenario.")
 	if res := e.exec(sb, 30*time.Second, true, "test", "-e", blockedMarkerFile); res.code == 0 {
-		t.Fatalf("the blocked command ran: %s exists (harness said %q)", blockedMarkerFile, out)
+		t.Fatalf("the blocked command ran: %s exists (harness said %q); tool calls: %q", blockedMarkerFile, out,
+			mockChatCalls(filepath.Join(e.work, "logs", "mock.jsonl")))
 	}
 	after := e.waitHooks(sb.Name, func(h sandboxapi.HookCoverage) bool { return h.ToolBlocked > before.ToolBlocked })
 	if !strings.HasPrefix(after.LastBlocked, blockedReason) || strings.Contains(after.LastBlocked, "<redacted") {
@@ -270,7 +274,25 @@ type mockChatRecord struct {
 	Plan        *struct {
 		Scenario string `json:"scenario"`
 		Reply    string `json:"reply"`
+		Call     *struct {
+			Name   string          `json:"name"`
+			Args   string          `json:"args"`
+			Schema json.RawMessage `json:"schema"`
+		} `json:"call"`
 	} `json:"plan"`
+}
+
+// mockChatCalls returns the shell tool calls the mock model made, with the
+// tool's parameter names, so a command that ran anyway shows the exact
+// arguments the hook was asked about.
+func mockChatCalls(path string) []string {
+	var out []string
+	for _, rec := range mockChatRecords(path) {
+		if rec.Plan != nil && rec.Plan.Call != nil {
+			out = append(out, rec.Plan.Call.Name+" "+rec.Plan.Call.Args+" "+string(rec.Plan.Call.Schema))
+		}
+	}
+	return out
 }
 
 func mockChatRecords(path string) []mockChatRecord {

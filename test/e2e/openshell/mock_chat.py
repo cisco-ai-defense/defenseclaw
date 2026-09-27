@@ -113,6 +113,13 @@ def fill_args(schema, command):
     return args
 
 
+def schema_keys(schema):
+    """The shell tool's parameter names, for the log: which fields a real
+    model's call could carry next to the command."""
+    schema = schema or {}
+    return {"properties": sorted(schema.get("properties") or {}), "required": list(schema.get("required") or [])}
+
+
 def pick(prompt):
     for sc in load_script().get("scenarios", []):
         if sc.get("match", "") in prompt:
@@ -238,6 +245,9 @@ class Handler(BaseHTTPRequestHandler):
                 finish = "tool_calls"
         rec["plan"] = {"scenario": sc and sc.get("name"), "turn": idx, "tools": sorted(schemas)[:60],
                        "reply": "tool_call" if finish == "tool_calls" else "text"}
+        if message.get("tool_calls"):
+            fn = message["tool_calls"][0]["function"]
+            rec["plan"]["call"] = {"name": fn["name"], "args": fn["arguments"], "schema": schema_keys(schemas[fn["name"]])}
         log_line(rec)
         base = {"id": "chatcmpl-mock-%d" % seq, "created": int(time.time()), "model": body.get("model") or "mock-model"}
         use = {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
@@ -288,6 +298,9 @@ class Handler(BaseHTTPRequestHandler):
                         "arguments": json.dumps(fill_args(schemas[tool], turn["shell"]))}]
         rec["plan"] = {"scenario": sc and sc.get("name"), "turn": idx, "tools": sorted(k for k in schemas if k)[:60],
                        "reply": "tool_call" if out[0]["type"] == "function_call" else "text"}
+        if out[0]["type"] == "function_call":
+            rec["plan"]["call"] = {"name": out[0]["name"], "args": out[0]["arguments"],
+                                   "schema": schema_keys(schemas[out[0]["name"]])}
         log_line(rec)
         use = {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 5,
                "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 17}
@@ -345,6 +358,9 @@ class Handler(BaseHTTPRequestHandler):
                 parts = [{"functionCall": {"name": tool, "args": fill_args(schemas[tool], turn["shell"])}}]
         rec["plan"] = {"scenario": sc and sc.get("name"), "turn": idx, "tools": sorted(k for k in schemas if k)[:60],
                        "reply": "tool_call" if "functionCall" in parts[0] else "text"}
+        if "functionCall" in parts[0]:
+            fc = parts[0]["functionCall"]
+            rec["plan"]["call"] = {"name": fc["name"], "args": json.dumps(fc["args"]), "schema": schema_keys(schemas[fc["name"]])}
         log_line(rec)
         resp = {"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP", "index": 0}],
                 "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 5, "totalTokenCount": 17},
