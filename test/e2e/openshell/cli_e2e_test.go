@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -78,6 +79,7 @@ func TestSandboxCLI(t *testing.T) {
 	e.step("run claude detached", c.runClaude)
 	e.step("blocked marker command", c.blockedCommand)
 	e.step("egress block and unblock", c.egress)
+	e.step("terminal attach", c.terminalAttach)
 	e.step("masked secret and live edit", c.liveEdit)
 	e.step("nested repository guard", c.nestedRepo)
 	e.step("review and undo", c.reviewUndo)
@@ -356,6 +358,36 @@ func (c *cliEnv) egress() {
 	if got := c.proxyConnect(c.claude, "https://"+blockedHost+"/dce2e"); got != "200" {
 		t.Fatalf("%s after the unblock = %q", blockedHost, got)
 	}
+}
+
+// terminalAttach runs `sandbox exec --tty` under script(1), so the command
+// takes the foreground-terminal path `run` and `connect` use: a pseudo
+// terminal inside the sandbox and the child's exit status back.
+func (c *cliEnv) terminalAttach() {
+	t := c.t
+	script, err := exec.LookPath("script")
+	if err != nil || runtime.GOOS != "linux" {
+		t.Skip("util-linux script(1) is needed to give the CLI a terminal")
+	}
+	bin := filepath.Join(c.work, "bin", "defenseclaw-gateway")
+	inner := shellJoin(bin, "sandbox", "exec", c.claude, "--", "sh", "-c", "test -t 0 && test -t 1 && echo DCE2E-TTY-OK; exit 3")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, script, "-q", "-e", "-f", "-c", inner, "/dev/null")
+	cmd.Dir, cmd.Env = c.project, c.environ
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errorsAs(err, &exit) || exit.ExitCode() != 3 || !strings.Contains(string(out), "DCE2E-TTY-OK") {
+		t.Fatalf("exec on a terminal = %v:\n%s", err, truncate(string(out), 1000))
+	}
+}
+
+func shellJoin(args ...string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 func (c *cliEnv) liveEdit() {
