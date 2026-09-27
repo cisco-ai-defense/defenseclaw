@@ -153,9 +153,11 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || DECISION=""
 elif [ "$ACTION" = "block" ]; then
-  # A block without an event-native verdict still denies (exit 2 is Devin's
-  # veto); the reason travels in Devin's top-level decision shape.
+  # A block without an event-native verdict still denies: exit 2 is Devin's
+  # veto. Print Devin's block object, and the gateway's reason on stderr.
   printf '{"decision":"block","reason":"Blocked by DefenseClaw Devin policy."}\n'
+  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+  printf '%s\n' "${REASON:-Blocked by DefenseClaw Devin policy.}" >&2
 fi
 if [ "$ACTION" = "block" ] || [ "$DECISION" = "block" ]; then
   exit 2

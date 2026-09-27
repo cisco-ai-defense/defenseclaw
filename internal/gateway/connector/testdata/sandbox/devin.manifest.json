@@ -97,7 +97,7 @@
     "/usr/local/lib/defenseclaw/hooks/devin-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "sha256": "5bbcc0115129cda5be6c8ec5f5f958fad60838ce1c171d7ebb1cb0ebbd8f1d93"
+      "sha256": "0d3782a847f2ac2afc522132ba5eb1ff12a7672a034c581b2650ca98b78d2bd4"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

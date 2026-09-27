@@ -417,6 +417,10 @@ func TestSandboxDevinHook(t *testing.T) {
 			t.Fatalf("%s: exit %d stdout %q", name, run.exitCode, run.stdout)
 		}
 	}
+	run = h.run(t, hook, nil, devinPreToolUse, env, []string{`200|{"action":"block","reason":"nope"}`})
+	if run.exitCode != 2 || !strings.Contains(run.stderr, "nope") {
+		t.Fatalf("block without output: exit %d stderr %q", run.exitCode, run.stderr)
+	}
 	// Context for an observation event is printed without blocking.
 	context := `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"note"}}`
 	run = h.run(t, hook, nil, `{"hook_event_name":"PostToolUse","tool_name":"exec"}`, env, []string{`200|{"action":"alert","hook_output":` + context + `}`})
