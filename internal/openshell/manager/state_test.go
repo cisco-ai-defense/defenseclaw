@@ -152,6 +152,37 @@ func TestSandboxWithoutRecordFailsClosed(t *testing.T) {
 	}
 }
 
+// TestUnrecordedSandboxDeletedElsewhereKeepsItsSnapshot pins that a
+// sandbox adopted without a record and then deleted outside DefenseClaw
+// keeps its snapshot reachable, across restarts too: a retained record
+// needs no run flags.
+func TestUnrecordedSandboxDeletedElsewhereKeepsItsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lostsnap"})
+	p, _ := e.m.records.path("lostsnap")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	e.m = e.newManager()
+	if err := e.m.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.DeleteSandbox(ctx, "lostsnap"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rec := loadRecord(t, e, "lostsnap"); rec == nil || !rec.Retained {
+		t.Fatalf("retained record = %+v", rec)
+	}
+	e.m = e.newManager()
+	if _, err := e.m.Undo(ctx, "lostsnap", sandboxapi.UndoRequest{}); err != nil {
+		t.Fatalf("undo after a restart: %v", err)
+	}
+}
+
 // TestGuardBaselineIsBounded pins that a project listing a huge number of
 // gitlinks cannot push its sandbox's record past what a restart reads
 // back: the baseline is cut (and marked truncated), the project's own

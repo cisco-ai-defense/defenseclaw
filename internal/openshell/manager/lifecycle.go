@@ -621,16 +621,19 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 // retire keeps a gone sandbox's box for its pre-session snapshot only: the
 // record drops everything that belonged to the live sandbox and is saved
 // as retained, so the snapshot stays reachable across restarts. Callers
-// ran cleanup (which released the rest) and hold b.op.
+// ran cleanup (which released the rest) and hold b.op. A retained record
+// never resolves a policy, so one adopted without its run flags
+// (unrecorded) is written too.
 func (m *Manager) retire(b *box) {
 	m.mu.Lock()
-	b.retained, b.missing = true, false
+	b.retained, b.missing, b.unrecorded = true, false, false
 	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
 	b.rec.Retained = true
 	b.rec.BindingID, b.rec.Providers, b.rec.EgressUser, b.rec.Cursor, b.rec.Unblocks = "", nil, "", "", nil
+	name := b.rec.Name
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {
-		m.logf("keep the snapshot record of %s: %v", b.rec.Name, err)
+		m.logf("keep the snapshot record of %s: %v", name, err)
 	}
 	m.refreshEgress()
 }
