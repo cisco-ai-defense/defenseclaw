@@ -1357,13 +1357,25 @@ policy under `C:\Program Files\ClaudeCode`, so no user or project environment
 can redirect this managed registration.
 
 DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
-policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
-a file policy superseded by `policyHelper`. It also refuses installation when
-an HKLM `Settings` policy has higher precedence. In those environments, merge
-the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
-local file installation cannot override it. Remotely delivered policy is an
-external management boundary and must likewise include the hook matrix at its
-authoritative source.
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or a
+file policy superseded by `policyHelper`. An HKLM `Settings` policy outranks the
+DefenseClaw drop-in. Enrollment accepts it when it sets
+`"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
+which then becomes the approved-client floor) or already carries the
+DefenseClaw hook entries exactly (same matcher, timeout, `async` flag and
+arguments), which the installed CLI prints with `enterprise windows
+export-claude-policy --agent-version <x.y.z>` for the Claude Code version the
+endpoints run; any other HKLM policy is refused with both fixes named, and the
+refusal names the export command for its target. Without `--agent-version` the
+export prints the oldest supported hook contract. A policy that registers a
+DefenseClaw hook outside the target's hook contract is refused either way.
+Claude loads only an HKLM policy that carries the
+matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
+and while the lock is enforced no HKLM policy may set it to `false`; setting
+`claude_code.allow_unmanaged_hooks: true` waives both. See [Claude Code on
+Windows](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/reference/CLAUDE-CODE-WINDOWS.md)
+for the status fields. Remotely delivered policy is an external management
+boundary and must likewise include the hook matrix at its authoritative source.
 
 Claude managed-source precedence is server-managed, then HKLM/MDM, then the
 Program Files policy, then HKCU; the first authoritative source wins.

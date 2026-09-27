@@ -978,7 +978,7 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 }
 
 func claudeCodeEventHasEnforcingHook(
-	entries []interface{}, eventType, requiredMatcher string, requiredAsync bool, opts SetupOpts,
+	entries []interface{}, eventType, requiredMatcher string, requiredAsync bool, requiredTimeout int, opts SetupOpts,
 ) bool {
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]interface{})
@@ -991,7 +991,7 @@ func claudeCodeEventHasEnforcingHook(
 		}
 		for _, rawHandler := range handlers {
 			handler, ok := rawHandler.(map[string]interface{})
-			if !ok || !claudeCodeHandlerMatchesContract(handler, requiredAsync, opts) {
+			if !ok || !claudeCodeHandlerMatchesContract(handler, requiredAsync, requiredTimeout, opts) {
 				continue
 			}
 			return true
@@ -1056,9 +1056,18 @@ func claudeCodeMatcherCovers(eventType string, raw interface{}, required string)
 	return false
 }
 
-func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAsync bool, opts SetupOpts) bool {
+func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAsync bool, requiredTimeout int, opts SetupOpts) bool {
 	asynchronous, err := claudeCodeHandlerAsync(handler)
 	if err != nil || asynchronous != requiredAsync {
+		return false
+	}
+	// Claude stops a handler at its registered timeout and treats that as a
+	// non-blocking error, so the action proceeds. The hook sizes its own
+	// budget to the rendered timeout (hookexec.ClaudeCodeHookTimeoutSeconds)
+	// so it can still answer with the configured fail mode; a shorter
+	// registration ends it first. Every DefenseClaw rendering writes the
+	// timeout, so a missing or shorter one is not the DefenseClaw contract.
+	if timeout, ok := claudeCodeHookInteger(handler["timeout"]); !ok || timeout < requiredTimeout {
 		return false
 	}
 	if condition, exists := handler["if"]; exists {
@@ -2332,6 +2341,17 @@ func claudeCodeHookInteger(value interface{}) (int, bool) {
 	case float64:
 		converted := int(typed)
 		return converted, float64(converted) == typed
+	case json.Number:
+		// Policy sources decoded with UseNumber (decodeClaudeCodeSettings).
+		if integer, err := typed.Int64(); err == nil {
+			return int(integer), int64(int(integer)) == integer
+		}
+		value, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		converted := int(value)
+		return converted, float64(converted) == value
 	default:
 		return 0, false
 	}

@@ -323,7 +323,7 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 	for _, group := range groups {
 		expectedEvents[group.eventType] = struct{}{}
 		entries, ok := hooks[group.eventType].([]interface{})
-		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, opts) {
+		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, group.timeout, opts) {
 			if diagnoseMissing {
 				return false, fmt.Errorf("Claude Code %s does not contain the enforcing DefenseClaw %s hook", source.label(), group.eventType)
 			}

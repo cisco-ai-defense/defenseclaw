@@ -125,12 +125,28 @@ policy only when the DefenseClaw hooks stay effective:
   `claude_policy_hklm_merge_pending_targets`. The targets still enroll: a
   recorded version is written once, at discovery, and cannot show which client
   runs, so it neither admits nor refuses a target; or
-- the policy already carries the exact DefenseClaw hook matrix. Print it on an
+- the policy already carries the DefenseClaw hook entries exactly as they are
+  exported: the same matcher, `timeout`, `async` flag and `args` (the hook
+  path may differ only in case). Other administrator hooks may sit beside
+  them. Claude stops a hook at its registered `timeout` and lets the action
+  run, so a copy with a shorter one is refused. Print the entries on an
   installed endpoint with
-  `defenseclaw-gateway enterprise windows export-claude-policy` (add
-  `--agent-version <x.y.z>` to select a hook contract, `--compact` for a
-  single-line `REG_SZ` value, or `--hook-executable` for a non-default
-  install root) and add its `hooks` object to the MDM/GPO policy.
+  `defenseclaw-gateway enterprise windows export-claude-policy --agent-version <x.y.z>`,
+  where `<x.y.z>` is the Claude Code version the endpoints run. Without
+  `--agent-version` the command prints the oldest supported hook contract,
+  which targets on newer clients refuse; each refusal names the exact command
+  for its target. Add `--compact` for a single-line `REG_SZ` value, or
+  `--hook-executable` for a non-default install root. Add the printed `hooks`
+  object to the MDM/GPO policy. Claude then loads only that policy, so add the
+  printed `"allowManagedHooksOnly": true` as well: enrollment refuses a policy
+  that carries the hooks without it unless the DefenseClaw config sets
+  `claude_code.allow_unmanaged_hooks: true`.
+
+While that managed-hooks-only lock is enforced, an HKLM policy that sets
+`allowManagedHooksOnly: false` is refused under either option. A policy that
+registers a DefenseClaw hook on an event outside the target's hook contract,
+such as an export for another Claude Code version, is also refused under
+either option.
 
 An HKLM policy that sets `disableAllHooks` or `policyHelper` is still refused,
 as is any other HKLM policy, with a message naming both fixes. `enterprise

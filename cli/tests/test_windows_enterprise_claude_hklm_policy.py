@@ -52,10 +52,11 @@ def test_connector_admits_merge_or_the_carried_matrix_without_trusting_recorded_
     assert 'ClaudeCodeManagedPolicyExportCommand = "defenseclaw-gateway enterprise windows export-claude-policy"' in merge
     assert 'claudeCodeOSAdminPolicyComposition = runtime.GOOS == "windows"' in merge
     admits = _slice(merge, "func claudeCodeOSAdminAdmitsManagedHooks", "func ClaudeCodeOSAdminPolicyAdmitsManagedHooks")
-    # Hook-defeating gates are checked before either admission path.
+    # Hook-defeating gates are checked before either admission path, and a
+    # DefenseClaw hook outside the target contract is refused under both.
     assert admits.index("validateClaudeCodeManagedHookControls(source, true)") < admits.index(
-        "claudeCodeSourceHasHookContract(source, opts, false)"
-    )
+        "claudeCodeOSAdminStrayManagedHookEvent(source, opts)"
+    ) < admits.index("claudeCodeOSAdminCarriesManagedHooks(source, opts)")
     # #899 review: the recorded agent_version is written once, at discovery,
     # and is often the installer placeholder, so it must neither admit nor
     # refuse a target under merge; the floor is enforced host-wide.

@@ -43,8 +43,14 @@ Claude Code applies the highest-ranked managed source. An MDM or GPO policy in
 HKLM\SOFTWARE\Policies\ClaudeCode\Settings outranks the DefenseClaw
 managed-settings.d drop-in, so enrollment refuses it unless that policy either
 sets "managedSourcesBehavior": "merge" (Claude Code ` + connector.ClaudeCodeManagedSourcesMergeMinimumVersion + ` or newer) or
-already contains this hook matrix. Add the printed "hooks" object to that
-policy. The output names the installed hook executable and contains no
+already contains this hook matrix exactly. Pass --agent-version with the
+Claude Code version the endpoints run: the hook contract depends on it, and
+without it the oldest supported contract is printed. An enrollment refusal
+names the command for its target. Add the printed "hooks" object to that
+policy, and the printed "allowManagedHooksOnly": true unless the DefenseClaw
+config sets claude_code.allow_unmanaged_hooks: true; Claude then loads only
+that policy, so enrollment refuses one that carries the hooks without the
+lock. The output names the installed hook executable and contains no
 credentials. It is read-only and needs no elevation.`,
 		Hidden:       true,
 		Args:         cobra.NoArgs,
@@ -57,7 +63,7 @@ credentials. It is read-only and needs no elevation.`,
 	flags.StringVar(&opts.hookExecutable, "hook-executable", "",
 		"absolute path of defenseclaw-hook.exe (default: the hook beside this installed gateway)")
 	flags.StringVar(&opts.agentVersion, "agent-version", "",
-		"Claude Code version whose hook contract to render (default: the default Claude hook contract)")
+		"Claude Code version the endpoints run, which selects the hook contract to render (default: the oldest supported contract; an enrollment refusal names the version to pass)")
 	flags.BoolVar(&opts.compact, "compact", false,
 		"print single-line JSON, suitable for a REG_SZ value")
 	return cmd

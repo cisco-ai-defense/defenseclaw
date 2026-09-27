@@ -206,3 +206,179 @@ func TestClaudeCodeManagedHookPolicyDocumentMatchesTheInstalledRendering(t *test
 		t.Fatal("export rendered a policy outside managed enterprise setup")
 	}
 }
+
+// claudeOSAdminSettingsEdited is claudeOSAdminSettings with edit applied to
+// every DefenseClaw handler of the exported matrix.
+func claudeOSAdminSettingsEdited(
+	t *testing.T, exportOpts SetupOpts, extra map[string]interface{}, edit func(event string, handler map[string]interface{}),
+) string {
+	t.Helper()
+	var settings map[string]interface{}
+	if err := json.Unmarshal([]byte(claudeOSAdminSettings(t, exportOpts, extra)), &settings); err != nil {
+		t.Fatal(err)
+	}
+	for event, entries := range settings["hooks"].(map[string]interface{}) {
+		for _, entry := range entries.([]interface{}) {
+			for _, handler := range entry.(map[string]interface{})["hooks"].([]interface{}) {
+				edit(event, handler.(map[string]interface{}))
+			}
+		}
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func claudeOSAdminSource(t *testing.T, raw string) *claudeCodeSettingsSource {
+	t.Helper()
+	settings, err := decodeClaudeCodeSettings([]byte(raw), "test policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &claudeCodeSettingsSource{name: "MDM/OS managed settings", settings: settings}
+}
+
+// TestClaudeOSAdminPolicyHoldsTheCarriedHooksToTheRenderedTimeouts is the
+// #899 review regression for a carried copy whose handlers time out first.
+// Claude stops a handler at its registered timeout and lets the action run,
+// so a policy that lowers it would make the fail-closed hook fail open.
+func TestClaudeOSAdminPolicyHoldsTheCarriedHooksToTheRenderedTimeouts(t *testing.T) {
+	opts := claudeOSAdminTestOpts(t, "2.1.250")
+	setTimeout := func(timeout interface{}, events ...string) func(string, map[string]interface{}) {
+		return func(event string, handler map[string]interface{}) {
+			if len(events) == 0 || event == events[0] {
+				if timeout == nil {
+					delete(handler, "timeout")
+				} else {
+					handler["timeout"] = timeout
+				}
+			}
+		}
+	}
+	for name, edit := range map[string]func(string, map[string]interface{}){
+		"every handler at one second": setTimeout(1),
+		"PreToolUse at one second":    setTimeout(1, "PreToolUse"),
+		"Stop without a timeout":      setTimeout(nil, "Stop"),
+		"Stop longer than rendered":   setTimeout(600, "Stop"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := claudeOSAdminSettingsEdited(t, opts, nil, edit)
+			if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, opts); err == nil {
+				t.Fatal("an HKLM copy that differs from the rendered DefenseClaw hooks was admitted")
+			}
+		})
+	}
+	// The exact rule covers the matcher too, as the drop-in verify does.
+	var wider map[string]interface{}
+	if err := json.Unmarshal([]byte(claudeOSAdminSettings(t, opts, nil)), &wider); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range wider["hooks"].(map[string]interface{})["PreToolUse"].([]interface{}) {
+		delete(entry.(map[string]interface{}), "matcher")
+	}
+	if raw, err := json.Marshal(wider); err != nil {
+		t.Fatal(err)
+	} else if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(string(raw), claudeOSAdminLabel, opts); err == nil {
+		t.Fatal("an HKLM copy with a different PreToolUse matcher was admitted")
+	}
+	// The guardian audit of an outranking policy checks the security
+	// property rather than the exact bytes: a shorter or missing timeout is
+	// not the contract, a longer one still lets the hook answer.
+	short := claudeOSAdminSource(t, claudeOSAdminSettingsEdited(t, opts, nil, setTimeout(1, "PreToolUse")))
+	if present, err := claudeCodeSourceHasHookContract(short, opts, true); present || err == nil ||
+		!strings.Contains(err.Error(), "PreToolUse") {
+		t.Fatalf("audit of a one-second PreToolUse copy = (present=%v, err=%v), want the missing PreToolUse hook", present, err)
+	}
+	missing := claudeOSAdminSource(t, claudeOSAdminSettingsEdited(t, opts, nil, setTimeout(nil, "Stop")))
+	if present, err := claudeCodeSourceHasHookContract(missing, opts, true); present || err == nil ||
+		!strings.Contains(err.Error(), "Stop") {
+		t.Fatalf("audit of a Stop copy without a timeout = (present=%v, err=%v), want the missing Stop hook", present, err)
+	}
+	long := claudeOSAdminSource(t, claudeOSAdminSettingsEdited(t, opts, nil, setTimeout(600, "Stop")))
+	if present, err := claudeCodeSourceHasHookContract(long, opts, true); err != nil || !present {
+		t.Fatalf("audit of a longer Stop timeout = (present=%v, err=%v), want the contract", present, err)
+	}
+	exact := claudeOSAdminSource(t, claudeOSAdminSettings(t, opts, nil))
+	if present, err := claudeCodeSourceHasHookContract(exact, opts, true); err != nil || !present {
+		t.Fatalf("audit of the exported copy = (present=%v, err=%v), want the contract", present, err)
+	}
+}
+
+// TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract is
+// the #899 review regression for an export made for another Claude Code
+// version. Merge unions the policy's hooks with the drop-in, so a DefenseClaw
+// handler on an event outside the target's contract made the guardian audit
+// report the hooks missing forever while Setup kept succeeding.
+func TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract(t *testing.T) {
+	target := claudeOSAdminTestOpts(t, "2.1.154")
+	newer := target
+	newer.AgentVersion = "2.1.250"
+	for name, extra := range map[string]map[string]interface{}{
+		"carried": nil,
+		"merged":  {"managedSourcesBehavior": "merge"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(claudeOSAdminSettings(t, newer, extra), claudeOSAdminLabel, target)
+			if err == nil {
+				t.Fatal("a policy with a DefenseClaw hook outside the target contract was admitted")
+			}
+			for _, want := range []string{"DirectoryAdded", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.154"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+	// Another administrator's hook on that event is not DefenseClaw's.
+	other := `{"managedSourcesBehavior":"merge","hooks":{"DirectoryAdded":[{"hooks":[{"type":"command","command":"C:\\audit.exe"}]}]}}`
+	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(other, claudeOSAdminLabel, target); err != nil {
+		t.Fatalf("merge with another administrator's DirectoryAdded hook was refused: %v", err)
+	}
+}
+
+// TestClaudeOSAdminRefusalNamesTheExportForTheTargetContract is the #899
+// review regression for the refusal's remedy. Without --agent-version the
+// export prints the default (oldest) contract, which a target on a newer
+// contract refuses with the same message, so following it never succeeded.
+func TestClaudeOSAdminRefusalNamesTheExportForTheTargetContract(t *testing.T) {
+	v2 := ResolveHookContract("claudecode", "2.1.250").Contract
+	for _, tc := range []struct {
+		recorded, pinned, want string
+	}{
+		{recorded: "2.1.250", want: "2.1.250"},
+		{recorded: "2.1.154", want: "2.1.154"},
+		{recorded: "Claude Code 2.1.230", want: "2.1.230"},
+		// Identity checks pin the contract without a recorded version.
+		{pinned: v2.ContractID, want: NormalizeAgentVersion("claudecode", v2.MinAgentVersion)},
+	} {
+		t.Run(tc.recorded+tc.pinned, func(t *testing.T) {
+			opts := claudeOSAdminTestOpts(t, tc.recorded)
+			opts.HookContractID = tc.pinned
+			err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(`{"model":"managed-by-mdm"}`, claudeOSAdminLabel, opts)
+			command := ClaudeCodeManagedPolicyExportCommand + " --agent-version "
+			if err == nil || !strings.Contains(err.Error(), command+tc.want+" ") {
+				t.Fatalf("refusal = %v, want it to name %q", err, command+tc.want)
+			}
+			// Following the refusal: export that version, as the command
+			// does, and embed it with its lock.
+			export := opts
+			export.AgentVersion = tc.want
+			export.HookContractID = ResolveHookContract("claudecode", tc.want).Contract.ContractID
+			if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
+				claudeOSAdminSettings(t, export, nil), claudeOSAdminLabel, opts,
+			); err != nil {
+				t.Fatalf("the export the refusal names was refused: %v", err)
+			}
+			// The missing-lock refusal names the same export.
+			unlocked := export
+			unlocked.ClaudeCodeAllowUnmanagedHooks = true
+			if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
+				claudeOSAdminSettings(t, unlocked, nil), claudeOSAdminLabel, opts,
+			); err == nil || !strings.Contains(err.Error(), command+tc.want+")") {
+				t.Fatalf("missing-lock refusal = %v, want it to name %q", err, command+tc.want)
+			}
+		})
+	}
+}
