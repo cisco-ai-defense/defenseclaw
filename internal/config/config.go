@@ -1610,8 +1610,8 @@ type CiscoAIDefenseConfig struct {
 
 	// ScanHookSurface controls whether the hook lane (PreToolUse +
 	// PostToolUse + UserPromptSubmit on hook-only connectors like
-	// Codex / Claude Code / Cursor / Devin / Hermes / Gemini /
-	// Copilot) forwards payloads to Cisco AI Defense.
+	// Codex / Claude Code / Cursor / Devin / Hermes / Copilot)
+	// forwards payloads to Cisco AI Defense.
 	//
 	// Pre-existing AID integration only fires on the proxy lane
 	// (chat prompts + completions) for OpenClaw / ZeptoClaw, so

@@ -253,7 +253,7 @@ type APIServer struct {
 	// at boot via SetCiscoInspector. Only the proxy lane held an
 	// AID client historically; this field extends coverage to the
 	// hook surface (Codex / Claude Code / Cursor / Devin /
-	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
+	// Hermes / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
 	// Widened from *CiscoInspectClient to the Inspector interface so
 	// managed_enterprise installs can inject the token-authenticated

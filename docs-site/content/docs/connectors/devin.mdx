@@ -136,9 +136,11 @@ discovered from the documented `.devin` and `.agents` roots, including
 also reads the pre-rename Devin Desktop rule and skill locations that the
 vendor still loads (see Cognition's
 [memories and rules](https://docs.devin.ai/desktop/cascade/memories) and
-[skills](https://docs.devin.ai/desktop/cascade/skills) documentation);
-DefenseClaw never writes there. Traversal is bounded and does not follow links
-or reparse points.
+[skills](https://docs.devin.ai/desktop/cascade/skills) documentation).
+Setup never installs anything there; `defenseclaw skill quarantine` and
+`restore` can move a flagged skill out of and back into those folders, as for
+any other skill folder. Traversal is bounded and does not follow links or
+reparse points.
 
 Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
 or enforcement. The separate `devin acp` entry point is cataloged for the

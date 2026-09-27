@@ -64,6 +64,13 @@ GEMINI_PATTERNS = (
 
 DESKTOP_RE = re.compile("|".join(DESKTOP_PATTERNS), re.IGNORECASE)
 ANY_RE = re.compile("|".join(DESKTOP_PATTERNS + GEMINI_PATTERNS), re.IGNORECASE)
+# "Gemini" listed next to hook connectors in prose ("Hermes / Gemini /
+# Copilot"). Case-sensitive and limited to agent names that are not also model
+# families, so provider lists and Antigravity's ~/.gemini paths do not match.
+_HOOK_AGENTS = r"(?:Claude Code|Cursor|Devin|Hermes|Copilot|OpenCode|Amp|Kiro|OpenHands)"
+GEMINI_LIST_RE = re.compile(
+    r"\b" + _GEMINI.capitalize() + r"\s*[/,]\s*" + _HOOK_AGENTS + r"\b|\b" + _HOOK_AGENTS + r"\s*[/,]\s*" + _GEMINI.capitalize() + r"\b"
+)
 
 # Files that may name the old Desktop connector (but not Gemini CLI).
 DESKTOP_ONLY_FILES = frozenset(
@@ -142,17 +149,25 @@ def test_retired_connector_names_do_not_reappear() -> None:
             continue
         if relative in DESKTOP_ONLY_FILES:
             gemini_only = re.compile("|".join(GEMINI_PATTERNS), re.IGNORECASE)
-            for hit in _hits(text, gemini_only):
+            for hit in _hits(text, gemini_only) + _hits(text, GEMINI_LIST_RE):
                 violations.append(f"{relative}:{hit}")
             continue
         if relative == UPGRADE_GUIDE:
             text = _outside_upgrade_section(text)
-        for hit in _hits(text, ANY_RE):
+        for hit in _hits(text, ANY_RE) + _hits(text, GEMINI_LIST_RE):
             violations.append(f"{relative}:{hit}")
     assert not violations, (
         "retired connector names reappeared outside the allowlisted migration and "
         "upgrade-notes files:\n" + "\n".join(violations[:50])
     )
+
+
+def test_gemini_list_pattern_matches_connector_lists_only() -> None:
+    gemini = _GEMINI.capitalize()
+    assert GEMINI_LIST_RE.search(f"Codex / Claude Code / Cursor / Devin / Hermes / {gemini} / Copilot")
+    assert GEMINI_LIST_RE.search(f"{gemini}, Copilot")
+    assert not GEMINI_LIST_RE.search(f"OpenAI, Anthropic, {gemini}, Bedrock")
+    assert not GEMINI_LIST_RE.search("~/.gemini/config/hooks.json")
 
 
 def test_allowlisted_files_still_exist() -> None:

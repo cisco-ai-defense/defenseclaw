@@ -47,9 +47,9 @@ func writePathTokenFile(t *testing.T, dataDir string, scope connector.OTLPPathTo
 // when the sidecar boots with no scoped tokens loaded and the operator
 // subsequently runs `defenseclaw setup omnigent` (which mints a token
 // on disk), the very next loopback OTLP request must succeed. Previously
-// the in-memory snapshot only refreshed at sidecar boot, so every Gemini
-// OTLP export returned 401 until the next gateway restart even though
-// settings.json and the on-disk token were correct.
+// the in-memory snapshot only refreshed at sidecar boot, so every scoped
+// OTLP export returned 401 until the next gateway restart even though the
+// agent's config and the on-disk token were correct.
 func TestLookupOTLPPathToken_LazyReloadOnMiss(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

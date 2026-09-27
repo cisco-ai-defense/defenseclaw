@@ -74,7 +74,7 @@ func TestRegisterConnectorHookRoutes_DataDriven(t *testing.T) {
 	}
 }
 
-func TestRegisterConnectorHookRoutesDoesNotExposeDeprecatedGemini(t *testing.T) {
+func TestRegisterConnectorHookRoutesDoesNotExposeRemovedConnector(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		reg  *connector.Registry

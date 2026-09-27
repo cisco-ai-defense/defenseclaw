@@ -1381,10 +1381,6 @@ class TestMCPServers:
         cursor.write_text(json.dumps({"mcpServers": {"c": {"command": "cursor-mcp"}}}))
         assert connector_paths.mcp_servers("cursor", workspace_dir=str(tmp_path))[0].command == "cursor-mcp"
 
-        gemini = fake_home / ".gemini" / "settings.json"
-        gemini.parent.mkdir(parents=True)
-        gemini.write_text(json.dumps({"mcpServers": {"g": {"command": "gemini-mcp"}}}))
-
         copilot = tmp_path / ".github" / "mcp.json"
         copilot.parent.mkdir(parents=True)
         copilot.write_text(json.dumps({"mcpServers": {"p": {"command": "copilot-mcp"}}}))

@@ -669,7 +669,7 @@ func TestDeferredCleanupRecordCarriesCopilotRestorationReceipt(t *testing.T) {
 	}
 }
 
-func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndGemini(t *testing.T) {
+func TestDeferredCleanupConnectorCustodyAcceptsAntigravity(t *testing.T) {
 	fixture := newDeferredCleanupFixture(t)
 	paths := hookruntime.Paths{
 		Root:     fixture.record.RuntimeRoot,
