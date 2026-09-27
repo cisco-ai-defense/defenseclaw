@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -759,19 +758,4 @@ func init() {
 		newSandboxWrapperCmd(true), newSandboxWrapperCmd(false), newSandboxTeardownCmd(),
 	)
 	rootCmd.AddCommand(sandboxCmd)
-}
-
-// sandboxCommandPaths lists every sandbox subcommand path, for tests and
-// the Python stub parity manifest.
-func sandboxCommandPaths(cmd *cobra.Command, prefix string) []string {
-	var out []string
-	for _, c := range cmd.Commands() {
-		if c.Hidden || c.Name() == "help" {
-			continue
-		}
-		p := strings.TrimSpace(prefix + " " + c.Name())
-		out = append(out, p)
-		out = append(out, sandboxCommandPaths(c, p)...)
-	}
-	return out
 }
