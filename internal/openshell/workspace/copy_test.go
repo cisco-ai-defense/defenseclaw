@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -383,6 +384,107 @@ func TestCopyDropsChangesToHeldBackSecrets(t *testing.T) {
 	}
 	if readFile(t, e.project, "ok.txt") != "fine\n" {
 		t.Fatal("other changes not applied")
+	}
+}
+
+// gitFails runs a fixture git command that must fail and returns its
+// output.
+func gitFails(t *testing.T, home, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("git %s succeeded: %s", strings.Join(args, " "), out)
+	}
+	return string(out)
+}
+
+// objectsIn lists the objects a repository really has (no lazy fetch).
+func objectsIn(t *testing.T, home, dir string) map[string]bool {
+	t.Helper()
+	out := runGit(t, home, dir, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
+	set := map[string]bool{}
+	for _, oid := range strings.Fields(out) {
+		set[oid] = true
+	}
+	return set
+}
+
+// TestCopyKeepsHeldBackSecretsOutOfHistory: a held-back tracked file is
+// missing from the copy's working tree, and every committed version of
+// it, or of any other secret-named path, is missing from the shipped
+// history too. The host keeps them all for verifying and applying pulls.
+func TestCopyKeepsHeldBackSecretsOutOfHistory(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	commit := func(msg string) {
+		e.git(e.project, "add", "-A", "-f")
+		e.git(e.project, "commit", "-q", "-m", msg)
+	}
+	writeFile(t, e.project, "config/server.key", "marker-v1\n")
+	writeFile(t, e.project, "old/app.env", "marker-old\n")
+	commit("secrets")
+	writeFile(t, e.project, "config/server.key", "marker-v2\n")
+	e.git(e.project, "rm", "-q", "old/app.env")
+	// A shipped file that happens to hold the same bytes as v1 keeps that
+	// blob in the copy: the agent reads the file anyway.
+	writeFile(t, e.project, "notes.txt", "marker-v1\n")
+	commit("rotate")
+	blob := func(rev string) string { return e.git(e.project, "rev-parse", rev) }
+	v1, v2, old := blob("HEAD~1:config/server.key"), blob("HEAD:config/server.key"), blob("HEAD~1:old/app.env")
+
+	rec, fs := launchCopy(t, e, "c1", nil)
+	if strings.Join(rec.HeldBack, ",") != "config/server.key" {
+		t.Fatalf("held back = %v", rec.HeldBack)
+	}
+	if !strings.Contains(strings.Join(rec.Warnings, "\n"), "left out of the copy's history") {
+		t.Fatalf("warnings = %v", rec.Warnings)
+	}
+	shipped := objectsIn(t, e.home, fs.local(remoteRepo))
+	if shipped[v2] || shipped[old] || !shipped[v1] {
+		t.Fatalf("shipped objects: v2=%v old=%v v1=%v", shipped[v2], shipped[old], shipped[v1])
+	}
+	// The agent's git works; the withheld versions are unreadable.
+	if n := fs.agent(remoteRepo, "rev-list", "--count", "HEAD"); n != "3" {
+		t.Fatalf("history = %s commits", n)
+	}
+	if st := fs.agent(remoteRepo, "status", "--porcelain"); st != "" {
+		t.Fatalf("status = %q", st)
+	}
+	for _, rev := range []string{"HEAD:config/server.key", "HEAD~1:old/app.env"} {
+		if out := gitFails(t, e.home, fs.local(remoteRepo), "show", rev); strings.Contains(out, "marker") {
+			t.Fatalf("git show %s printed the secret: %s", rev, out)
+		}
+	}
+	fs.agent(remoteRepo, "fsck", "--no-progress")
+
+	// The host copy is complete and an ordinary repository.
+	have := objectsIn(t, e.home, rec.BaseGit)
+	if !have[v1] || !have[v2] || !have[old] {
+		t.Fatal("base.git lost objects")
+	}
+	if out := gitFails(t, e.home, rec.BaseGit, "config", "--get", "extensions.partialClone"); out != "" {
+		t.Fatalf("base.git is still a partial clone: %s", out)
+	}
+
+	// The round trip still works, and the secret is left alone.
+	fs.write(remoteRepo+"/src/app.go", "package main // agent\n")
+	fs.agent(remoteRepo, "commit", "-q", "-am", "agent")
+	pr := pull(t, e, fs, "c1")
+	if got := changePaths(pr.Changes); got != "M:src/app.go" || len(pr.Blocking) != 0 {
+		t.Fatalf("changes = %s blocking = %v", got, pr.Blocking)
+	}
+	if _, err := apply(e, "c1", ApplyMerge, nil); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, e.project, "src/app.go") != "package main // agent\n" || readFile(t, e.project, "config/server.key") != "marker-v2\n" {
+		t.Fatal("apply did not land the change or touched the secret")
+	}
+	res, err := apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.Branch = "dc/history" })
+	if err != nil || e.git(e.project, "show", res.Branch+":config/server.key") != "marker-v2" {
+		t.Fatalf("branch: %+v %v", res, err)
 	}
 }
 

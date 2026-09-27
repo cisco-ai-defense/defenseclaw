@@ -77,8 +77,10 @@ type StageOptions struct {
 	// (default 250k); a larger folder is refused rather than copied in part.
 	MaxWalkEntries int
 	// Masks, Unmask, Detector and DisableContentScan select the secrets
-	// that are held back, with the same rules as a live mount's masks
-	// (tracked files included: nothing secret leaves the host).
+	// that are held back, with the same rules as a live mount's masks.
+	// Tracked files are included, and so is history: the shipped history
+	// lacks every committed version of a held-back file and of any path
+	// the name rules cover, so nothing secret leaves the host.
 	Masks              []string
 	Unmask             []string
 	Detector           SecretDetector
@@ -568,6 +570,25 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Baseline = baseline
+	if head != "" {
+		// Held-back files stay out of the shipped history as well, and so
+		// does every version of a path the name rules cover.
+		held := toSet(heldBack)
+		withheld := func(rel string) bool {
+			if _, ok := held[rel]; ok {
+				return true
+			}
+			return !unmaskedBy(scanOpts.unmask, rel) && secretByName(scanOpts.patterns, rel)
+		}
+		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%d committed version(s) of held-back or secret-named files are left out of the copy's history; "+
+				"git commands in the sandbox that need them (git show, git log -p on those paths) fail", n))
+		}
+	}
 	rec.Files = len(files)
 	size, err := treeSize(stage)
 	if err != nil {
@@ -745,28 +766,11 @@ type heldBack struct {
 func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*heldBack, error) {
 	res := &heldBack{}
 	budget := defaultMaxContentScanFiles
-	unmasked := func(rel string) bool {
-		for _, u := range opts.unmask {
-			if matchGlob(u, rel) || strings.EqualFold(strings.Trim(u, "/"), rel) ||
-				strings.HasPrefix(strings.ToLower(rel), strings.ToLower(strings.Trim(u, "/"))+"/") {
-				return true
-			}
-		}
-		return false
-	}
 	for _, rel := range rels {
-		if unmasked(rel) {
+		if unmaskedBy(opts.unmask, rel) {
 			continue
 		}
-		inSecretDir := false
-		for _, part := range strings.Split(path.Dir(rel), "/") {
-			if isSecretDirName(part) {
-				inSecretDir = true
-			}
-		}
-		_, byPattern := matchAny(opts.patterns, rel)
-		_, byName := isSecretName(rel)
-		if inSecretDir || byPattern || byName {
+		if secretByName(opts.patterns, rel) {
 			res.paths = append(res.paths, rel)
 			continue
 		}
@@ -1030,6 +1034,10 @@ func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader)
 	base := filepath.Join(dir, "base.git")
 	_ = os.RemoveAll(base)
 	if err := os.Rename(localGit, base); err != nil {
+		return err
+	}
+	// Verifying pulls needs every object, withheld history included.
+	if err := restoreWithheldObjects(ctx, stageRoot, base); err != nil {
 		return err
 	}
 	if err := (gitCmd{dir: filepath.Dir(base), gitDir: base}).run(ctx, "config", "core.bare", "true"); err != nil {
