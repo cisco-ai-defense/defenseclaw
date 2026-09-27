@@ -1,10 +1,11 @@
 # DefenseClaw sandbox policy pack: balanced
 #
 # Default-deny web: the DefenseClaw egress proxy only reaches the curated
-# developer allowlist below (package registries, source hosts, common docs)
-# plus openshell.egress.allow. Anything else is triaged: known-good
-# destinations are approved automatically and the rest ask. The project
-# folder is still mounted live and the harness runs in skip-permissions mode.
+# developer allowlist below (package registries, source hosts, toolchains,
+# common docs) plus openshell.egress.allow. Anything else is triaged:
+# known-good destinations are approved automatically and the rest ask. The
+# project folder is still mounted live and the harness runs in
+# skip-permissions mode.
 #
 # The proxy sees HTTPS traffic only as encrypted CONNECT tunnels, so it
 # cannot tell a download from an upload: every host listed here can receive
@@ -23,42 +24,65 @@ egress:
   feeds: [builtin]
   block: []
   allow:
+    # This list is the egress proxy's allowlist feed
+    # (policies/sandbox/egress/allowlist.yaml), host for host; a test keeps
+    # the two identical, so change both together.
     # Package registries
     - registry.npmjs.org
     - registry.yarnpkg.com
+    - repo.yarnpkg.com
     - pypi.org
     - files.pythonhosted.org
     - proxy.golang.org
     - sum.golang.org
+    - index.golang.org
+    - crates.io
     - index.crates.io
     - static.crates.io
-    - crates.io
     - rubygems.org
+    - index.rubygems.org
     - repo.maven.apache.org
     - repo1.maven.org
     - plugins.gradle.org
     - services.gradle.org
+    - downloads.gradle.org
     - api.nuget.org
-    - registry-1.docker.io
-    - auth.docker.io
-    - production.cloudflare.docker.com
+    - packagist.org
+    - repo.packagist.org
+    - hex.pm
+    - repo.hex.pm
+    - builds.hex.pm
+    - pub.dev
+    - conda.anaconda.org
     # Source hosts. Listed for clones and downloads, but CONNECT tunnels are
     # opaque, so pushes and uploads to them pass the proxy too. A push still
     # needs a credential for the host inside the sandbox (for GitHub,
     # --github-write).
     - github.com
+    - api.github.com
     - codeload.github.com
-    - objects.githubusercontent.com
-    - raw.githubusercontent.com
+    - "*.githubusercontent.com"
+    - ghcr.io
     - gitlab.com
+    - bitbucket.org
+    # Toolchains
+    - nodejs.org
+    - static.rust-lang.org
+    - sh.rustup.rs
+    - www.python.org
+    - astral.sh
     # Documentation
     - docs.python.org
     - developer.mozilla.org
-    - pkg.go.dev
     - go.dev
+    - pkg.go.dev
     - docs.rs
-    - nodejs.org
+    - doc.rust-lang.org
+    - docs.github.com
     - docs.npmjs.com
+    - www.typescriptlang.org
+    - learn.microsoft.com
+    - stackoverflow.com
   ports: [80, 443]
   large_upload_mb: 10
 

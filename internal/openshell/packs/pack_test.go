@@ -24,6 +24,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	egressfeeds "github.com/defenseclaw/defenseclaw/policies/sandbox/egress"
+	"gopkg.in/yaml.v3"
 )
 
 // minimalPack is the smallest valid pack; tests append or replace keys.
@@ -63,7 +67,7 @@ func TestBuiltinPacksLoad(t *testing.T) {
 		profile, approvals, workspace string
 		yolo, mcpImport, hostPorts    bool
 	}{
-		"open":     {"open", ApprovalsTriage, "mount", true, true, true},
+		"open":     {"open", ApprovalsAuto, "mount", true, true, true},
 		"balanced": {"balanced", ApprovalsTriage, "mount", true, true, true},
 		"strict":   {"strict", ApprovalsManual, "copy", false, false, false},
 	}
@@ -269,6 +273,40 @@ func TestParseRejects(t *testing.T) {
 			_, err := Parse([]byte(tc.doc), "test")
 			wantPackError(t, err, tc.code, tc.field)
 		})
+	}
+}
+
+// TestBalancedAllowListIsTheAllowlistFeed: the balanced pack's egress.allow
+// and the egress proxy's allowlist feed are one curated list; Resolve and
+// the proxy must never disagree about what balanced reaches.
+func TestBalancedAllowListIsTheAllowlistFeed(t *testing.T) {
+	var feed struct {
+		Kind    string `yaml:"kind"`
+		Entries []struct {
+			Hosts []string `yaml:"hosts"`
+		} `yaml:"entries"`
+	}
+	if err := yaml.Unmarshal(egressfeeds.AllowlistYAML(), &feed); err != nil || feed.Kind != "allowlist" {
+		t.Fatalf("allowlist feed: kind %q, %v", feed.Kind, err)
+	}
+	var hosts []string
+	for _, entry := range feed.Entries {
+		for _, host := range entry.Hosts {
+			hosts = append(hosts, config.NormalizeOpenShellEgressPattern(host))
+		}
+	}
+	balanced, err := Builtin("balanced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, want := slices.Clone(balanced.Egress.Allow), hosts
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("balanced egress.allow and the allowlist feed differ:\npack: %v\nfeed: %v", got, want)
+	}
+	if !slices.Equal(curatedAllowlist(), balanced.Egress.Allow) {
+		t.Fatal("curatedAllowlist is not the balanced pack's list")
 	}
 }
 

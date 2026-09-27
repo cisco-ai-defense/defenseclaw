@@ -69,9 +69,12 @@ const (
 	NetworkDeny      = "deny"
 )
 
-// Approvals modes, loosest first: auto approves every proposal that is not
-// blocked, triage auto-approves known-good destinations and asks the rest,
-// manual asks every proposal.
+// Approvals modes, loosest first: auto approves every proposal that is
+// neither blocked (Effective.Allow refuses it: a block list, a feed, an
+// administrator constraint) nor risky (a private network, an IP literal, the
+// host itself, credentialed reach), and asks the risky ones; triage
+// auto-approves known-good destinations and asks the rest; manual asks every
+// proposal. The open pack uses auto, balanced triage and strict manual.
 const (
 	ApprovalsAuto   = "auto"
 	ApprovalsTriage = "triage"

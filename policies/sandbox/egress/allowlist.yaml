@@ -4,7 +4,9 @@
 # (internal/openshell/egress) allows only the destinations below, plus
 # `openshell.egress.allow` and unblock decisions; everything else is blocked
 # with category not_allowlisted and can be unblocked. The blocklist feed still
-# applies on top. "open" mode does not use this file.
+# applies on top. "open" mode does not use this file. The balanced sandbox
+# policy pack (policies/sandbox/balanced/pack.yaml) lists the same hosts in
+# egress.allow; a test keeps the two identical, so change both together.
 #
 # The list is deliberately small: package registries, source hosting and
 # toolchain downloads that installs and builds need, and common reference

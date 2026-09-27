@@ -311,7 +311,7 @@ func TestDecideEgress(t *testing.T) {
 		{"unblock disabled", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
 			"webhook.site", 443, false, RuleFeed, "exfil:webhook.site", false},
 		{"curated allow entry exempts from the feed", nil, Flags{Pack: "balanced"},
-			"raw.githubusercontent.com", 443, true, RuleAllow, "raw.githubusercontent.com", false},
+			"raw.githubusercontent.com", 443, true, RuleAllow, "*.githubusercontent.com", false},
 		{"nothing exempts from the feed when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{Pack: "balanced"},
 			"raw.githubusercontent.com", 443, false, RuleFeed, "exfil:raw.githubusercontent.com", false},
 		{"raised profile uses the curated allowlist", nil, Flags{Profile: "balanced"},

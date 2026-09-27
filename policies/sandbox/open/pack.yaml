@@ -13,7 +13,7 @@ network:
   mode: open
 
 approvals:
-  mode: triage
+  mode: auto
 
 egress:
   feeds: [builtin]

@@ -84,7 +84,7 @@ func TestResolveDefaults(t *testing.T) {
 	if len(violations) != 0 {
 		t.Fatalf("violations = %+v", violations)
 	}
-	if eff.Pack.Name != "open" || eff.Profile != "open" || eff.NetworkMode != NetworkOpen || eff.Approvals != ApprovalsTriage {
+	if eff.Pack.Name != "open" || eff.Profile != "open" || eff.NetworkMode != NetworkOpen || eff.Approvals != ApprovalsAuto {
 		t.Fatalf("posture = pack %s profile %s network %s approvals %s", eff.Pack.Name, eff.Profile, eff.NetworkMode, eff.Approvals)
 	}
 	if !eff.Yolo || eff.Workspace.Mode != "mount" || !eff.MCP.Import || !eff.MCP.HostPortAccess || eff.Learn {
