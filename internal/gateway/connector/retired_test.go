@@ -138,3 +138,78 @@ func TestRetiredConnectorTeardownAndVerify(t *testing.T) {
 		t.Fatalf("second Teardown removed %d entries", got)
 	}
 }
+
+// Native Windows Setup bound the retired connector to the profile that holds
+// the data directory, which is not the gateway's own home when Setup ran for
+// another user. Cleanup must reach that profile's legacy hooks file too.
+func TestRetiredConnectorCleansProfileHoldingDataDir(t *testing.T) {
+	gatewayHome := t.TempDir()
+	profile := t.TempDir()
+	dataDir := filepath.Join(profile, ".defenseclaw")
+	restore, err := BindUserHomeDir(gatewayHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+
+	script := legacyconnector.OwnedHookScripts(dataDir)[0]
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHooks := func(home string, commands ...string) string {
+		t.Helper()
+		var entries []interface{}
+		for _, command := range commands {
+			entries = append(entries, map[string]interface{}{"command": command})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{"pre_run_command": entries}})
+		path := legacyconnector.CascadeUserHooksPath(home)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	profileHooks := writeHooks(profile, script, "/opt/team/check.sh")
+	// The gateway's own home has only a foreign entry that must stay.
+	gatewayHooks := writeHooks(gatewayHome, "/opt/team/check.sh")
+	gatewayBefore, _ := os.ReadFile(gatewayHooks)
+
+	conn, _ := RetiredConnector(legacyconnector.RetiredDesktopID)
+	opts := SetupOpts{DataDir: dataDir}
+	if !conn.(RetiredCleanupReporter).HasResidue(opts) {
+		t.Fatal("HasResidue missed the entry in the profile holding the data dir")
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	report := conn.(RetiredCleanupReporter).LastCleanup()
+	if report.RemovedEntries != 1 || report.HooksPath != profileHooks {
+		t.Fatalf("cleanup report = %+v, want 1 entry from %s", report, profileHooks)
+	}
+	after, _ := os.ReadFile(profileHooks)
+	if strings.Contains(string(after), script) || !strings.Contains(string(after), "/opt/team/check.sh") {
+		t.Fatalf("profile hooks after teardown = %s", after)
+	}
+	if gatewayAfter, _ := os.ReadFile(gatewayHooks); string(gatewayAfter) != string(gatewayBefore) {
+		t.Fatalf("gateway home hooks changed: %s", gatewayAfter)
+	}
+
+	// An explicit bound ConfigHome is the only profile used.
+	writeHooks(profile, script)
+	bound := t.TempDir()
+	if err := conn.Teardown(context.Background(), SetupOpts{DataDir: dataDir, ConfigHome: bound}); err != nil {
+		t.Fatalf("Teardown with ConfigHome: %v", err)
+	}
+	if got := conn.(RetiredCleanupReporter).LastCleanup(); got.RemovedEntries != 0 || got.HooksPath != legacyconnector.CascadeUserHooksPath(bound) {
+		t.Fatalf("bound cleanup report = %+v, want only the bound profile", got)
+	}
+}
