@@ -1,18 +1,986 @@
-# OpenShell sandbox
+# OpenShell sandbox architecture
 
-The legacy standalone sandbox integration was removed. It targeted the
-standalone `openshell-sandbox` 0.0.x binary on Linux, for OpenClaw only, and
-its generated sandbox policy was never enforced. The `sandbox init` and
-`sandbox setup` commands and the gateway's `sandbox` subcommands no longer
-exist. OpenClaw and ZeptoClaw use the `shims` subprocess policy on every
-platform.
+This page is for contributors. It explains how DefenseClaw runs a coding
+harness such as Claude Code or Codex inside an NVIDIA OpenShell 0.1 sandbox:
+what OpenShell enforces, what DefenseClaw adds, how traffic gets in and out,
+how the project folder is shared and taken back, and which measured OpenShell
+behaviours the code is built around. The code is the authority; each section
+names the package to read.
 
-Support for NVIDIA OpenShell 0.1 is being rebuilt and is coming in a future
-release.
+The operator guide for the sandbox commands will live on the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+(`docs-site/content/docs/setup/sandbox.mdx`). Today that page covers only the
+removal of the legacy 0.0.x sandbox. Telemetry details are in
+[OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
+
+## Build status
+
+The integration is being built in layers. The packages in the
+[code map](#code-map) exist with unit tests. What ties them together does not
+exist yet:
+
+- **The sandbox manager.** Nothing creates, starts, stops or deletes a
+  sandbox yet. That work will mint and revoke bindings, build the egress
+  proxy's decider from the resolved pack, take snapshots, and emit telemetry.
+  Sentences below that say "the manager must" are obligations for it.
+- **Daemon wiring.** The sidecar does not start the hook ingress or the egress
+  proxy. Today `openshell.enabled: true` only makes config validation check
+  the two sandbox ports, and switching it (or moving a port while it is on)
+  restarts the API server.
+- **Approvals and surfaces.** Triage of OpenShell draft proposals, MCP
+  import, the REST API under `/api/v1/sandbox/`, the TUI and macOS surfaces,
+  and the shell wrapper.
+- **Commands.** `defenseclaw sandbox legacy-cleanup` is the only `sandbox`
+  command. The egress proxy's block message already names the planned
+  `sandbox unblock` command.
+- **Harnesses.** Only `claudecode` and `codex` have harness specs and sandbox
+  artifacts.
+
+## Why OpenShell
+
+The goal is to let a developer run a harness in its skip-permissions mode
+without putting the machine at risk. That needs a boundary the agent cannot
+argue or code its way around.
+
+- **OpenShell** runs the harness in a workload container with no network, a
+  Landlock filesystem policy, seccomp, and a non-root user. A supervisor
+  outside the workload is the only way out. It applies per-endpoint,
+  per-binary network rules and swaps credential placeholders for real values
+  only on the endpoints they are bound to. Static binaries, raw system calls
+  and obfuscated commands meet the same kernel-enforced limits.
+- **Qpoint qcontrol**, the alternative considered, hooks functions inside the
+  agent process. That gives visibility and soft control, but the agent still
+  runs with the user's full privileges, and in-process hooks can be bypassed.
+
+The planned side-by-side bake-off was only half run: OpenShell 0.1.1 was
+measured (see [platform behaviours](#platform-behaviours-to-design-around)),
+but qcontrol was never installed or measured. The choice rests on how the two
+work. Reopen it if a qcontrol run shows something OpenShell cannot do.
+qcontrol may still be added later as an optional event source.
+
+## Who enforces what
+
+OpenShell supplies the boundary. DefenseClaw supplies the judgment and the
+parts of the boundary that depend on the project.
+
+| Concern | OpenShell enforces | DefenseClaw adds |
+| --- | --- | --- |
+| Network | The workload has no network; the supervisor is the only path out and applies per-endpoint, per-binary rules | The egress proxy for web traffic: blocklist feed, SSRF guard, per-destination decisions, byte counts |
+| Files | Landlock; only bind-mounted host paths are visible | Which host paths are mounted, secret masks, read-only git state, snapshot and undo, change review |
+| Identity | The process identity the policy names | Runs as your uid in mount mode (as `sandbox` in copy mode) and builds a per-uid image |
+| Credentials | Placeholders resolve only on bound endpoints, for bound binaries | Per-sandbox binding tokens, provider profiles pinned to the harness binary; LLM traffic never passes through DefenseClaw |
+| Agent actions | None | Hooks feed the existing guardrail pipeline: rule packs, CEL, the judge, HITL |
+| Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe |
+| Visibility | OCSF events over `WatchSandbox` | Parse, correlate by sandbox, emit v8 telemetry |
+
+## Components
+
+Ports are shown for the default `gateway.api_port` of 18970.
+
+```text
+ Host (one user)                          OpenShell 0.1, docker driver
++--------------------------------+       +--------------------------------+
+| DefenseClaw daemon             |       | openshell-gateway              |
+|   :18970 main API              |       |   systemd user service :17670  |
+|   :18971 sandbox hook ingress  |       |                                |
+|   :18972 egress proxy          |       | per sandbox:                   |
++--------------------------------+       |   supervisor (host network)    |
+      ^              ^                   |     policy, credentials, OCSF  |
+      | hooks, OTLP  | web traffic       |   workload (no network,        |
+      +------+-------+                   |     Landlock, seccomp,         |
+             |                           |     non-root)                  |
+   supervisor relays                     |     harness + sandbox hooks    |
+   host.openshell.internal               +--------------------------------+
+   to host 127.0.0.1
+```
+
+The OpenShell client (`openshell.Dial`) talks to the gateway over gRPC with
+mTLS through the OpenShell Go SDK. The upstream `openshell` CLI is used only
+where the SDK has no transport: terminal attach, file upload and download,
+port forwarding, gateway registration and install.
+
+## Networking
+
+Networking needs no veth pairs, iptables rules or root. DefenseClaw listens
+on loopback only.
+
+### Listeners
+
+| Listener | Config key | Default | Reached by |
+| --- | --- | --- | --- |
+| Main API | `gateway.api_port` | 18970 | Host clients only; never exposed to a sandbox |
+| Sandbox hook ingress | `openshell.ingress_port` (0 means `api_port + 1`) | 18971 | Sandbox hooks and harness OTLP exporters |
+| Egress proxy | `openshell.egress_port` (0 means `api_port + 2`) | 18972 | Every web client in the sandbox |
+
+Both sandbox listeners refuse anything but a loopback address. With
+`openshell.enabled` on, config validation refuses sandbox ports that collide
+with each other, with `gateway.api_port` or with `guardrail.port`, and derived
+ports past 65535.
+
+### host.openshell.internal
+
+Inside the workload, `host.openshell.internal` resolves to a synthetic address
+(`198.18.0.2`) that the supervisor relays to host `127.0.0.1`. The host
+service sees the client as `127.0.0.1`. So on the sandbox listeners a loopback
+source proves nothing: every request is authenticated by its own credential,
+and the main API's loopback carve-outs never apply because sandbox traffic
+never reaches the main listener.
+
+### Paths out of the workload
+
+```text
+ workload process
+   |
+   |-- hook POST ---> host.openshell.internal:18971
+   |                    provider rule: bearer placeholder swapped for the
+   |                    real binding token, relayed to 127.0.0.1:18971
+   |
+   |-- web ---------> host.openshell.internal:18972  (HTTPS_PROXY)
+   |                    rule defenseclaw_egress: tcp, tls skip, any binary
+   |                    raw relay to 127.0.0.1:18972, the proxy decides
+   |
+   |-- LLM API -----> provider host, for example api.anthropic.com:443
+   |                    (NO_PROXY) provider rule swaps the key placeholder
+   |
+   '-- anything else: denied by OpenShell, which files a draft proposal
+```
+
+The harness spec builds the environment passed to `openshell sandbox create
+--env` (`harness.Spec.Env`):
+
+- `HTTPS_PROXY`, `HTTP_PROXY` and their lowercase forms point at
+  `http://<user>:<secret>@host.openshell.internal:<egress_port>`, and
+  `NODE_USE_ENV_PROXY=1` makes Node's `fetch` honour them. The strict profile
+  sets no proxy.
+- `NO_PROXY` and `no_proxy` list `host.openshell.internal` plus the provider
+  hosts of the harness's credential profile, so hooks reach the ingress
+  directly and LLM calls stay on OpenShell's provider rules.
+- `DEFENSECLAW_SANDBOX_ID` and `DEFENSECLAW_SANDBOX_NAME` identify the
+  sandbox. The ID is also meant to tell a nested DefenseClaw launch that it
+  already runs sandboxed.
+- The connector's startup variables (see [overlay images](#overlay-images)).
+
+A client that ignores `HTTPS_PROXY` and connects directly is denied by
+OpenShell, which then files a draft policy proposal. Triaging those proposals
+is not built yet.
+
+## Hook ingress
+
+`internal/gateway/api_sandbox_ingress.go` serves a second listener with a
+minimal route table:
+
+- the hook path of each built-in connector (plugin connectors are excluded:
+  a sandbox runs only a reviewed built-in harness);
+- the Codex notify path;
+- `/api/v1/inspect/tool`, `/request`, `/response` and `/tool-response`;
+- OTLP over HTTP at `/v1/logs`, `/v1/metrics` and `/v1/traces`. The
+  `/otlp/<source>/<token>/` form is not served, because it puts a credential
+  in the URL.
+
+Any other path answers 404 once the request is authenticated. There are no
+admin routes, and the master gateway token, connector hook tokens and OTLP
+path tokens are never accepted.
+
+Each request passes these steps in order:
+
+1. **Authenticate.** Exactly one `Authorization: Bearer` header must carry a
+   live binding credential, or the answer is 401. OpenShell substitutes the
+   credential into every header and the query string of a bound endpoint, so
+   a credential anywhere else (another header, the host, the path, the query,
+   percent- or Basic-encoded) answers 400: it would otherwise be echoed back
+   or written to audit sinks.
+2. **Trace, request ID, correlation.** Client-supplied request IDs are
+   dropped and a new one is always minted. The user identity comes from the
+   binding's host user; identity headers from the sandbox are removed.
+3. **Authorize.** The path must belong to a route class the binding lists
+   (`hook`, `notify`, `inspect`, `otlp`) and to the binding's one connector.
+   Inspect calls name their connector in `X-DefenseClaw-Connector`; OTLP
+   uploads in `x-defenseclaw-source`, which defaults to the binding's
+   connector. A mismatch answers 403.
+4. **Limit.** Per binding, hook, notify and inspect calls share a bucket of
+   25 requests a second with a burst of 100 and at most 32 in flight. OTLP
+   has its own bucket (10 a second, burst 50), at most 4 uploads in flight per
+   binding and 16 across all bindings, and a 4 MiB body cap. Over a limit the
+   answer is 429 with `Retry-After: 1`.
+5. **Replay.** A hook or notify request may carry
+   `X-DefenseClaw-Hook-Idempotency-Key`. A completed response is kept for two
+   minutes, per binding, and a retry of the exact same request gets it back
+   (marked `X-DefenseClaw-Idempotent-Replay`) instead of a second
+   evaluation.
+
+Hook handlers then treat a sandbox request differently from a host request
+(`internal/gateway/sandbox_hook_scope.go`):
+
+- The connector profile comes from the binding's reviewed hook contract and
+  image harness version, never from the host's contract lock or version
+  cache.
+- A payload working directory is mapped through the binding's `FSView`. In
+  mount mode `/work/<repo>` becomes the real host project path, and a path
+  resolves only if it stays inside the project and is not a masked secret. In
+  copy mode no path reaches the host filesystem.
+- `~` means the sandbox HOME, `/sandbox`, never the host user's home.
+- Tool results never earn the source-scope proofs that read the host tree.
+- Session state is kept per binding, because session IDs are chosen by the
+  agent.
+- Nothing runs git or a subprocess scanner against the agent-writable tree on
+  the host.
+
+## Sandbox bindings and tokens
+
+A binding (`internal/sandboxauth`) is one sandbox's authorization at the
+ingress:
+
+- **Credential.** `dcsb_` followed by 43 base64url characters (256 random
+  bits). It is returned once when minted; the store keeps only its SHA-256.
+  The main API refuses any credential with the `dcsb_` prefix in
+  `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth` or an OTLP path token
+  before any other credential check, so none of its loopback carve-outs can
+  be reached with one.
+- **Scope.** The sandbox ID and name, the one connector it may act for, the
+  harness version and hook contract baked into its image, the policy profile,
+  the route classes (hook and OTLP by default, plus notify for Codex), the
+  workspace mode with its mounts and masks, and the host user.
+- **Store.** `<data_dir>/sandboxes/bindings.json`, owner-only (0600 in a 0700
+  directory), updated under an advisory lock with atomic replacement, at most
+  1,024 bindings. Each process re-reads the file within a second, so a revoke
+  written by another process applies within a second. Not supported on
+  Windows.
+- **Lifecycle.** `Mint`, `Rotate` (new credential, same binding), `Update`
+  and `Revoke`. An optional TTL is re-applied on every rotation. The manager
+  must revoke a binding when its sandbox is deleted, rotate it when the
+  sandbox starts, and call `ForgetSandboxBinding` to drop the ingress's
+  per-binding limiter, in-flight and replay state.
+
+`openshell.token_delivery` selects how the manager hands the token to the
+sandbox. With `provider` (the default) it becomes an OpenShell provider
+credential created from the `defenseclaw-ingress` profile: variable
+`DEFENSECLAW_SANDBOX_TOKEN`, sent as a bearer in `authorization`, bound to
+`host.openshell.internal:<ingress_port>` with `protocol: rest`. The workload
+only ever sees a placeholder. With `env` it is a plain variable the agent can
+read.
+
+Placeholders are revision-scoped (they change on every start), so nothing may
+bake them into static files. The sandbox hooks read the variable on each
+request, Claude Code's `otelHeadersHelper` prints the header on each export,
+and the Codex launcher adds the OTLP header as `-c` flags at launch.
+
+## Egress proxy
+
+`internal/openshell/egress` is the general web path out of a sandbox. The
+policy reaches it through one rule, `defenseclaw_egress`: host
+`host.openshell.internal`, the egress port, `protocol: tcp` with `tls: skip`
+(a raw relay), for every binary (`/**`). OpenShell's HTTP parser rejects a
+CONNECT request addressed to another host, and it does not substitute
+placeholders on a raw relay, so the proxy authenticates the sandbox itself.
+
+### Authentication
+
+Each sandbox gets its own proxy credential: a `dcx-` user name and a 256-bit
+password, sent by clients as `Proxy-Authorization: Basic` from the userinfo of
+`HTTPS_PROXY`. The proxy keeps only a SHA-256 of the password, one credential
+per binding (registering a new one rotates the old one). The credential only
+attributes traffic to a sandbox and rate-limits it; it grants nothing the
+sandbox does not already have. A request without a credential gets a 407
+challenge; a wrong one also records an `auth_failed` event.
+
+### Request handling
+
+- **CONNECT tunnels** carry HTTPS as opaque bytes. The proxy never terminates
+  TLS, so certificate-pinning clients keep working. It reads the TLS server
+  name (SNI) and ends a tunnel whose name it would block, so an allowed name
+  or address cannot front for a blocked site on the same CDN.
+- **Plain HTTP inside a tunnel** (Node's `fetch` tunnels `http://` URLs) is
+  read request by request and forwarded only when each request's host is the
+  tunnel's own host. After a WebSocket upgrade the bytes are relayed as they
+  are; other upgrade offers are stripped so the tunnel stays inspected.
+- **Other protocols** (SSH, databases) are relayed only on ports the operator
+  added. On ports 80 and 443 they, and HTTP/2 without TLS, get a 400 inside
+  the tunnel.
+- **Absolute-form requests** (plain `http://`) are forwarded with hop-by-hop
+  headers and the proxy credential stripped.
+
+Blocked requests get a JSON 403 body that the agent can read: the host, the
+category, a reason, whether it can be unblocked, and how to ask. Limits get a
+429.
+
+### Decision order
+
+`Decider.Decide` applies these layers in order; the first that decides wins:
+
+1. **Guard.** The destination must be a valid host and port. This machine and
+   what only it reaches (loopback, its own addresses, `localhost`,
+   `host.openshell.internal`, link-local and cloud metadata addresses,
+   reserved ranges) are never reachable (`host_internal`). Private networks
+   (RFC 1918, carrier-grade NAT, IPv6 unique local, the other hosts on this
+   machine's subnets, intranet names) are reachable only where an operator
+   allow rule names them (`private_network`). The port must be on the port
+   list (80 and 443 by default). Guard blocks are never unblockable.
+2. **Operator block list**, for example `openshell.egress.block` and the host
+   firewall's deny rules.
+3. **Unblock decisions**, for one sandbox or for every sandbox.
+4. **Operator allow list**, for example `openshell.egress.allow`.
+5. **Blocklist feed.** Unblockable.
+6. **Mode default.** Open mode (the `open` profile) allows host names and
+   blocks IP literals as `ip_literal`, because a literal would sidestep the
+   name-based feed; that block is unblockable. Allowlist mode (the `balanced`
+   profile) allows only allowlist-feed matches and blocks the rest as
+   `not_allowlisted`, also unblockable. The `strict` profile runs without the
+   proxy.
+
+Host names are resolved on the proxy side as fully qualified names, never
+through the host's search domains. Every DNS answer passes the SSRF policy
+just before the connection, and the dial targets the checked address, so DNS
+rebinding between check and dial has nothing to exploit. A feed's IP and CIDR
+entries and operator CIDR blocks also apply to the resolved address.
+
+### Feeds
+
+Both feeds are embedded from `policies/sandbox/egress/`. Host patterns are an
+exact host or `*.` for every subdomain (not the apex).
+
+- `blocklist.yaml` (`defenseclaw-blocklist`) lists services whose main use
+  from an unattended agent is moving data to a place anyone can read or past
+  network controls. Categories: `paste_site`, `file_drop`, `webhook_catcher`,
+  `tunnel`, `anonymizer`.
+- `allowlist.yaml` (`defenseclaw-allowlist`) is the allowlist-mode feed.
+  Categories: `package_registry`, `source_hosting`, `toolchain`,
+  `documentation`. CONNECT tunnels are opaque, so the proxy cannot tell a
+  download from an upload: every listed host with a write API (GitHub, GitLab,
+  the registries' publish endpoints) can receive data too. The balanced
+  profile narrows destinations; it is not an exfiltration barrier for those
+  hosts.
+
+`FirewallBlockPatterns` carries over only outbound TCP deny rules with a
+destination that cover the proxy's ports. The host firewall's default action
+and allowlist scope what the DefenseClaw host itself may reach and are not
+applied to sandboxes.
+
+### Byte counts and large uploads
+
+The `Counter` keeps bytes up and down per tunnel and per destination. When
+the bytes sent to a destination this sandbox had not contacted before cross
+the large-upload threshold (`large_upload_mb`, 25 MiB in the `open` pack), it
+raises a `large_upload` event once. Uploads to first-seen hosts are also
+totalled per registrable domain and per resolved address (per /64 for IPv6),
+so rotating subdomains or domains that point at one server does not reset the
+count. `CounterOptions.BlockLargeUploads` can also cut the tunnel; no
+configuration key selects it yet.
+
+### Limits
+
+At most 1,024 client connections in total; per binding 256 connections, 256
+concurrent tunnels or requests, and 50 new ones a second with a burst of 200.
+Headers must arrive within 10 seconds, and an idle tunnel closes after 10
+minutes.
+
+### Events
+
+The proxy reports `allowed`, `blocked`, `closed`, `failed`, `auth_failed` and
+`large_upload` events to an `EventSink`. Events never carry credentials, URL
+paths or query strings. The sink that turns them into `log.egress.allowed`
+and `log.egress.blocked` records (source `dc-egress-proxy`) and
+`sandbox.large_upload` findings is part of the manager.
+
+### Relation to the pack posture
+
+`packs.Effective.DecideEgress` answers the same question at policy level (admin
+block, admin allow-only list, ports, deny mode, block list, feeds, mode) for
+explaining decisions and checking runtime actions. The proxy's `Decider`
+enforces per connection. Building a `Decider` from an `Effective` posture is
+the manager's job.
+
+## Provider credentials and LLM traffic
+
+LLM traffic never goes through DefenseClaw. OpenShell adds a
+`_provider_<name>` rule for every provider attached to a sandbox, and only
+those rules substitute credential placeholders. `internal/openshell/profiles`
+renders the provider profiles, which are meant to be imported once at setup:
+
+| Profile | Credential | Sent as | Endpoint |
+| --- | --- | --- | --- |
+| `defenseclaw-ingress` | `DEFENSECLAW_SANDBOX_TOKEN` | bearer | `host.openshell.internal:<ingress_port>` |
+| `defenseclaw-anthropic` | `ANTHROPIC_API_KEY` | `x-api-key` | `api.anthropic.com:443` |
+| `defenseclaw-claude-oauth` | `CLAUDE_CODE_OAUTH_TOKEN` | bearer | `api.anthropic.com:443` |
+| `defenseclaw-claude-bedrock-mantle` | `ANTHROPIC_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
+| `defenseclaw-openai` | `OPENAI_API_KEY` | bearer | `api.openai.com:443` |
+| `defenseclaw-codex-bedrock-mantle` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` |
+
+LLM profiles are pinned to the realpaths of the harness binaries that the
+image probe recorded, so no other program in the sandbox can use the key; an
+inference credential usable by every binary is refused. The ingress profile
+allows every binary: hooks post with `curl`, and the harness itself exports
+OTLP. There is no egress profile: the proxy credential travels in
+`HTTPS_PROXY`, which OpenShell cannot substitute on a raw relay.
+
+## Sandbox policy
+
+`internal/openshell/policy` renders the typed OpenShell `SandboxPolicy`. The
+output is deterministic and golden-tested (`internal/openshell/policy/testdata`),
+because every policy reload closes connections.
+
+- **Landlock** is `hard_requirement`: a kernel without the needed ABI refuses
+  to start the sandbox instead of running it unconfined.
+- **Read-only:** `/usr`, `/lib`, `/etc`, `/proc`, `/dev/urandom`, `/var/log`,
+  `/opt`, the harness install roots and read-only context mounts.
+- **Read-write:** `/tmp`, `/dev/null`, `/dev/ptmx`, `/dev/pts`, `/dev/tty`,
+  `/sandbox` and the workdir (`/work/<repo>` in mount mode).
+- **Process:** the numeric host uid and gid in mount mode (required), the
+  image's `sandbox` user in copy mode. Root is refused.
+- **Network:** `defenseclaw_egress` for the `open` and `balanced` profiles,
+  nothing for `strict`. Credentialed endpoints are left to OpenShell's
+  provider rules. Extra rules (for example a consented host port) may not use
+  the reserved `defenseclaw_` or `_provider_` prefixes. They may reach
+  `host.openshell.internal` only on a consented host port, which can never be
+  the ingress, egress, main API or OpenShell gateway port. Loopback names,
+  wildcards that could match them, and IP literals in loopback, link-local,
+  metadata, CGNAT or OpenShell's synthetic range are refused.
+
+## Workspace
+
+`internal/openshell/workspace` gives the harness the project folder and
+nothing else, and lets the operator take back what the agent did.
+
+### Mount mode
+
+Mount mode is the default. `PlanMount` validates the launch folder and turns
+it into docker-driver bind mounts:
+
+| Mount | Target | Access |
+| --- | --- | --- |
+| The project | `/work/<repo>` | read-write |
+| The git directory and up to 32 submodule git directories, each bound onto itself so it cannot be renamed away and replaced | same paths | read-write |
+| In each of those, `config`, `hooks` and `commondir`; also a `core.hooksPath` inside the project, config include files, the worktrees admin directory and a `.git` pointer file | same paths | read-only |
+| Each detected secret file or directory | same path | read-only empty file or directory |
+| Each extra reference folder | beside the project under `/work` | read-only |
+
+Missing protection targets (an empty hooks directory, a `commondir` file
+that makes git use the git directory itself) are created on the host so they
+can be bound, and removed again by `ReleaseMount`. The manager must call
+`ReleaseMount` when a sandbox is deleted, not when it stops, because a
+restart reuses them.
+
+The folder is refused outright when it:
+
+- is reached through a symbolic link (the error names the real path), is not
+  a directory, or is a top-level system directory;
+- is part of the operating system (`/etc`, `/usr`, `/var/lib`, `/System`,
+  `/Library`, `/opt/homebrew` and similar) or holds many projects or users
+  (`/tmp`, `/home`, `/Users`, `/Volumes`, `/data` and similar);
+- is your home directory or contains it;
+- is inside, or contains, a credential or state directory under your home
+  (`.ssh`, `.aws`, `.config`, `.gnupg`, `.kube`, `.docker`, `.azure`, the
+  OpenShell and DefenseClaw state directories, `Library` and others, with
+  their XDG equivalents), or the DefenseClaw data directory.
+
+It needs copy mode instead (`NeedsCopyError`) when its git state cannot be
+protected in place, for example when `.git` is a symbolic link, the git
+directory lives outside the folder (a linked worktree or submodule checkout),
+`core.worktree` is set, `core.hooksPath` is the project itself or leaves it
+through a link, there are more than 32 submodule git directories, or there
+are more than 256 secret files to mask. A secret scan that cannot finish
+(more than 250,000 entries) refuses the mount.
+
+### Secret masks
+
+A file is masked when:
+
+- its name matches a built-in credential name (`.env`, `.env.*`, keys and
+  certificates, `.netrc`, `.npmrc`, `credentials.json`, `*.tfstate` and
+  others) or it sits in a credential directory (`.ssh`, `.aws`, `.kube` and
+  others). Templates such as `.env.example` stay visible;
+- it matches a pack or `openshell.workdir.masks` glob; or
+- the ClawShield secret rules find a critical-severity credential in it
+  (files up to 256 KiB, at most 2,000 of them).
+
+Unmask globs (the pack's templates, `openshell.workdir.unmask`) keep a path
+visible. A tracked file whose name looks secret but whose content is exactly
+the committed version stays visible, because the agent can read it from the
+repository anyway, unless a pack or config glob names it. A masked file with
+other hard links is flagged, because the same bytes may be visible under
+another name.
+
+### Snapshot and undo
+
+`Snapshot` records the folder before the session.
+
+- **Git projects.** The whole working tree, tracked and untracked (ignored
+  files are left alone), is committed into a DefenseClaw-owned shadow git
+  directory, `<data_dir>/snapshots/git/<project-key>.git`, under
+  `refs/defenseclaw/pre/<name>`. The ref is also written into the project
+  unless disabled. HEAD, the branch, other refs, the staging area and the git
+  control files the agent could write are recorded. The shadow keeps its own
+  copy of the project's objects (hard links where possible), so the snapshot
+  survives the agent deleting `.git/objects`.
+- **Other folders.** A copy under `<data_dir>/snapshots/<name>/tree/`, using
+  file clones where the filesystem supports them, capped at 1 GiB and 250,000
+  entries. A larger folder is refused, because a partial snapshot would make
+  undo delete what it left out.
+- **Both.** A walk records the files that can run code on the host, the
+  nested repositories that already exist, and fingerprints of dependency
+  directories, so the review sees changes git ignores.
+
+`Undo` needs the sandbox stopped first (the manager must stop it), and has a
+preview mode. It restores the working tree, HEAD and the branch, branches and
+tags, the staging area and the git control files; removes nested
+repositories created during the session; copies back commits deleted during
+the session; and removes files the session hid with changed ignore rules
+(they stay recoverable from `refs/defenseclaw/post-hidden/<name>`). The
+folder as the session left it is kept as a shadow commit, and as
+`refs/defenseclaw/post/<name>` in the project where possible, so an undo can
+itself be reverted.
+
+Every git command DefenseClaw runs on the host goes through
+`internal/gitsafe`, and every post-session operation that touches the working
+tree runs against the shadow git directory, never the project's own `.git`.
+A planted config, attributes file, `commondir` or hook in the project is
+never consulted.
+
+### End-of-session review
+
+`Review` compares the folder with its snapshot without changing it. It
+reports a diffstat and flags, most severe first, the changes that can run
+code on your machine:
+
+- **Critical:** a new nested git repository, a symbolic link that points
+  outside the project (host tools follow it to your files), and a new or
+  changed submodule URL in `.gitmodules`.
+- **High:** changed npm lifecycle scripts (`postinstall` and the like), new
+  filter, diff or merge drivers in `.gitattributes`, files that run
+  implicitly (`.envrc`, editor tasks and settings, IDE run configurations,
+  dev containers, git hook managers, package-manager config, Python tooling,
+  build files), new executables or files made executable, and paths matching
+  the pack's `workspace.review` globs.
+- **Medium:** other npm scripts and dependency changes, CI definitions,
+  container builds, version-manager files, a secret-like file created or
+  changed, and a changed dependency directory (packages installed in the
+  sandbox run on the host when you use them).
+
+Host-executable files that git ignores are found by re-walking the folder.
+The ClawShield secret rules and CodeGuard also scan the changed files (files
+up to 1 MiB, at most 2,000 of them).
+
+### Known limit: planted nested repositories
+
+Mount mode cannot stop the agent from creating a new git repository inside
+the project folder. Git reads a repository's own configuration whenever it
+runs inside that repository, and some git settings (for example
+`core.fsmonitor`) name a program git starts by itself. So an agent could leave
+behind a nested repository that runs a program on your machine the next time
+something on the host runs git inside that subfolder: you, your editor, or a
+git-aware shell prompt.
+
+What limits the damage:
+
+- The project's own `.git/config` and hooks are read-only in the sandbox, so
+  the planted configuration only applies inside the nested folder.
+- DefenseClaw's own post-session git work uses the shadow git directory and
+  never reads it.
+- Review flags the nested repository as critical, and undo removes it.
+
+None of this stops the planted program if something runs git in that folder
+before the review. For untrusted repositories or tasks, use copy mode. There
+the agent's work comes back as git objects in a verified bundle, which cannot
+carry another repository's configuration, and nothing reaches the host folder
+until the operator applies it. There is no guardrail rule for this case.
+
+### Copy mode
+
+Copy mode is the choice for untrusted repositories or tasks. The agent works
+on a copy, and changes come back only through a verified pull.
+
+1. **Stage.** A git project becomes a sanitized shallow clone (depth
+   `openshell.workdir.git_depth`, 200 by default; no hooks, config written by
+   DefenseClaw, remotes without credentials) with the current working tree on
+   top. A plain folder is copied with a hidden git directory kept at
+   `/sandbox/.dc/git`. Secrets are held back by the mask rules, tracked files
+   included, and the committed versions of held-back files are removed from
+   the shipped history: the copy becomes a partial clone whose promisor
+   remote has no URL, so asking git for one of those blobs fails instead of
+   reading it. The size is checked first (`max_upload_mb`, 500 MiB in the
+   `open` pack).
+2. **Upload.** The copy goes to `/sandbox/work/<repo>`, which the sandbox user
+   can write, and `refs/defenseclaw/baseline` marks the starting point.
+3. **Pull.** A capture in the sandbox writes `refs/defenseclaw/result` (HEAD
+   plus uncommitted work) and streams it back as a git bundle, capped at 1 GiB
+   by bytes received. The bundle is verified against the staged history,
+   changes to held-back paths are dropped, and the result gets the same review
+   as mount mode. Nothing in the project changes yet.
+4. **Apply.** `apply` merges the result into the working tree three ways (git
+   2.38 or newer; older git, or a conflict, falls back to a `dc/<name>`
+   branch for git projects plus a patch file), `branch` creates `dc/<name>`,
+   and `patch` writes a patch file. A refused pull, or a review with a high or
+   critical flag or a critical secret, stops `apply` and `branch` until the
+   operator overrides it.
+
+Mount plans and copy records supply the sandbox labels
+`io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
+real path, in hex) and `io.defenseclaw/workdir-mode`, so a later run can find
+and resume the sandbox. A refresh refuses to replace a copy
+whose last pull was never applied. Host git must be 2.29 or newer.
+
+### Where state lives
+
+```text
+<data_dir>/snapshots/<name>/snapshot.json    snapshot record
+<data_dir>/snapshots/<name>/tree/            non-git snapshot copy
+<data_dir>/snapshots/git/<project-key>.git   shadow git directory
+<data_dir>/sandboxes/<name>/workspace/       mask files and mount state
+<data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
+<data_dir>/sandboxes/bindings.json           ingress bindings
+<data_dir>/sandboxes/images.json             overlay image records
+```
+
+Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
+digits and `-`, at most 63 characters), and `git` is reserved.
+
+## Overlay images
+
+`internal/openshell/image` builds one image per harness, uid and ingress port
+(and every other input) on top of the digest-pinned NVIDIA community base
+(`ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63…`;
+`openshell.image.base` overrides it and must also be digest-pinned).
+
+### Build
+
+The builder renders a deterministic context (a Dockerfile plus files whose
+modes and owners are set in the tar headers) and streams it to
+`docker build --pull=false -t <tag> -`. The Dockerfile:
+
+1. Installs `jq` and `curl` if the base lacks them on the hook PATH
+   (`/usr/bin:/bin:/usr/sbin:/sbin`).
+2. Installs the harness at a version whose Linux hook contract is known. Any
+   other version fails before the build starts. The default Claude Code pin,
+   2.1.156, is relocated from the base image (other pins install from npm);
+   Codex 0.146.0 replaces the base image's 0.117, which is outside every
+   reviewed contract. Binaries move to root-owned
+   `/opt/defenseclaw-harness/<harness>`, so a native installer's copy under
+   `$HOME` never becomes the pinned binary.
+3. Copies DefenseClaw's files root-owned and read-only under
+   `/usr/local/lib/defenseclaw` (hooks in `hooks/`, launchers in `bin/`),
+   the harness's managed configuration, and the user-owned first-run files
+   under `/sandbox`.
+4. Creates `/work` root-owned, chowns `/sandbox` to the run-as uid and gid,
+   and switches to the `sandbox` user.
+
+The tag is `defenseclaw/sandbox:<harness>-<hash>-u<uid>`, where `<hash>` is
+the first 16 hex digits of a content hash over every input: the base digest,
+harness and version, hook contract, uid and gid, ingress port, fail mode,
+DefenseClaw version, the store owner and every file's bytes, mode and owner.
+
+A probe run with `--network none` then checks the in-image bytes, modes and
+owners and records the harness version and the realpaths and SHA-256 digests
+of the required binaries in `<data_dir>/sandboxes/images.json`. The LLM
+provider profiles pin the realpaths of the binaries that open model
+connections. Each data directory has a random store owner that is part of
+the hash and a label, so two data directories sharing one Docker daemon never
+select or prune each other's images.
+
+### Hook-fire verification
+
+A hook script can be present and never run: Claude Code silently drops a
+whole managed-settings drop-in that has one field it does not accept. So
+`Build` ends with a hook-fire probe. It runs the harness headless in the new
+image against a built-in mock LLM and a stand-in ingress on the image's baked
+port, and requires that:
+
+- an allowed tool call's side effect appears;
+- a tool call the stand-in ingress blocks has no side effect;
+- `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `Stop`
+  each arrive authenticated and with an idempotency key.
+
+For Claude Code the allowed run is repeated with hostile user and project
+settings planted: every known way to switch the managed hooks off or divert
+them. The hooks must still fire, and none of the planted programs may run.
+
+`Store.Current` selects only an image built from exactly the expected inputs
+whose hooks were proven to fire. There is no fallback to an older image. An
+image that fails the static checks is removed; one whose hooks do not fire
+stays recorded as unverified and `Build` returns `ErrHooksNotFired`. Never
+launch an unverified image.
+
+On Linux the probe runs on the host network with the stand-in on
+`127.0.0.2`, leaving `127.0.0.1:<ingress_port>` to a running daemon. Docker
+Desktop uses a relay mode instead.
+
+### Tamper tiers
+
+Each connector publishes a tamper tier (`SandboxArtifacts.TamperTier`):
+
+- **managed:** the hook registration lives in the harness's system policy,
+  root-owned in the image, and user or project settings cannot switch it off.
+  Both `claudecode` and `codex` are managed.
+- **user:** the registration lives in a file the agent can edit. For future
+  connectors in this tier, the planned hook-silence finding is the backstop.
+
+**Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
+sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
+OTLP to the ingress, the skip of the dangerous-mode prompt, and Claude's own
+sandbox off (it cannot run inside OpenShell). Its managed `env` pins the
+settings a hostile settings file could use to bypass the hooks:
+`CLAUDE_CODE_SIMPLE=0` keeps the hooks (all but `SessionStart`) on in bare
+mode, the hook-command prefix and shell overrides are emptied, `SHELL` is
+`/bin/bash`, the Stop and SessionEnd hook limits keep Claude's defaults, and
+loader and shell-startup variables are cleared. Startup variables that must
+apply before the managed `env` does (`DISABLE_AUTOUPDATER=1`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`) travel through
+`sandbox create --env`. A pre-seeded `/sandbox/.claude.json` skips onboarding
+and trusts `/work`, and the launcher re-approves the API key placeholder on
+every start. Skip-permissions runs pass `--dangerously-skip-permissions`.
+
+**Codex.** `/etc/codex/requirements.toml` sets `allow_managed_hooks_only`,
+pins `features.hooks` on (without it a user setting can turn hooks off) and
+holds the hook matrix. `/etc/codex/managed_config.toml` turns off the update
+check, analytics and features that sync over the network, and sets notify
+and the OTLP exporters. Codex's own sandbox cannot nest inside OpenShell, so
+skip-permissions runs pass `--dangerously-bypass-approvals-and-sandbox`, and
+runs that keep the prompts pass `sandbox_mode="danger-full-access"` with
+`approval_policy="on-request"`. The launcher exports `CODEX_API_KEY` from
+`OPENAI_API_KEY`, trusts the exact working directory, stores the API key
+login for interactive runs, and adds the OTLP authorization header.
+
+### Sandbox hook scripts
+
+The sandbox variant of the hooks (`internal/gateway/connector/hooks/_sandbox.sh`
+plus `{{if .Sandbox}}` branches) differs from the host hooks:
+
+- The ingress address and request budgets are baked in. The fail mode is
+  always closed; the image build refuses any other value, and the host
+  `DEFENSECLAW_FAIL_MODE` override is never read.
+- The only credential is `DEFENSECLAW_SANDBOX_TOKEN`. A missing or malformed
+  token fails the hook closed (exit code 2); there is no fallback to a host
+  token file or an unauthenticated request.
+- Inherited variables the hooks do not read are dropped and `PATH` is pinned
+  before any child process starts, because the workload shapes the hook
+  environment. No Python interpreter is started.
+- Requests use `curl -q --noproxy '*'`: 2 seconds to connect, 9 seconds in
+  total, 1 second for `SessionEnd`. A transport failure or a 502, 503 or 504
+  is retried once, within 12 seconds, with the same idempotency key.
+
+## Policy packs and admin constraints
+
+`internal/openshell/packs` resolves the sandbox posture for one run. A pack
+bundles it in one file: network mode (`open`, `allowlist` or `deny`, which map
+to the `open`, `balanced` and `strict` profiles), approvals mode (`auto`,
+`triage` or `manual`), egress feeds, block and allow lists, ports and the
+large-upload threshold, workspace mode, masks, unmasks and review globs, the
+harness skip-permissions default and allowlist, MCP import, host-port access
+and blocked tools, and the hook fail mode (only `closed`).
+
+The built-in packs are embedded from `policies/sandbox/<name>/pack.yaml`:
+
+| Pack | Network | Approvals | Workspace | Skip-permissions | MCP import and host ports | Large upload |
+| --- | --- | --- | --- | --- | --- | --- |
+| `open` (default) | open web through the proxy, ports 80 and 443 | triage | mount | on | on | 25 MiB |
+| `balanced` | curated allowlist, ports 80 and 443 | triage | mount | on | on | 10 MiB |
+| `strict` | no proxy; provider hosts only | manual | copy | off | off | 5 MiB |
+
+All three mask the same secret files and review the same host-executable
+paths.
+
+Custom packs are `<pack_dir>/<name>/pack.yaml` (default
+`<policy_dir>/sandbox`) or an absolute path, loaded with the same strict rules
+as guardrail rule packs. A pack's digest is `sha256:` over the file's bytes.
+
+`packs.Resolve` layers the pack, then the user's `openshell` keys, then the
+run inputs (`packs.Flags`, which the future run command will fill), and clamps
+the result by `openshell.admin`. Along the way:
+
+- A stricter profile never runs with looser approvals: `balanced` triages at
+  least, and `strict` asks every proposal.
+- Raising the profile above the pack's own network mode brings in the
+  `balanced` pack's curated allowlist.
+- Allow entries that cover every host or a whole top-level domain are
+  ignored.
+- Every refused loosening is returned as a `Violation` with the message
+  `blocked by your organization's DefenseClaw policy: <key>`, and every
+  setting records where its value came from (`Effective.Explain`).
+
+`openshell.admin` holds the administrator's constraints: `required_pack` (its
+posture becomes a floor) and `required_pack_digest`, `min_profile`,
+`allow_yolo`, `allow_mount`, `allow_host_ports`, `allow_unblock`,
+`allow_learn_mode`, `allowed_harnesses`, `egress_block` (never unblockable),
+`egress_allow_only` (forces an allowlist profile), `require_copy_for`,
+`max_resources`, and `locked` (keys run inputs may not loosen). In a
+`managed_enterprise` install the administrator owns `config.yaml`, so the
+constraints are authoritative and a custom required pack must be an
+administrator-owned file. Elsewhere they are enforced but advisory, because
+the user can edit the file.
+
+`Effective.Allow` checks runtime actions against the same policy: unblock,
+approve, approve always, host port, mount, skip-permissions, learn mode and
+harness. Approvals must pass the proxy's feed matcher, or they fail closed
+when `allow_unblock` is false.
+
+No policy, input or approval ever opens these host ports to a sandbox:
+DefenseClaw's API, sandbox ingress, egress proxy, guardrail proxy and model
+router, the OpenShell gateway the run uses (17670 when unknown), and the
+OpenClaw gateway (18789 by default).
+
+## Telemetry
+
+The sandbox emits v8 telemetry only, through the typed
+`audit.SandboxTelemetry` interface (`internal/audit/sandbox_v8.go`). Every
+record carries the `correlation.sandbox` attribute group, which never appears
+on metrics.
+
+| Source | Producer | Family |
+| --- | --- | --- |
+| Phase changes (initiated or watched) | `RecordSandboxLifecycle` | `log.sandbox.lifecycle`, `metric.defenseclaw.sandbox.transitions`, `metric.defenseclaw.sandbox.active` |
+| Proxy and OpenShell network decisions | `RecordSandboxEgress` | `log.egress.allowed`, `log.egress.blocked`, `metric.defenseclaw.egress.events` |
+| Draft proposals and host-port consents | `RecordSandboxApproval` | `log.approval.requested`, `log.approval.resolved` |
+| Policy applies, rule changes, unblocks | `RecordSandboxPolicy` | `log.policy.updated` |
+| Integration health | `RecordSandboxHealth` | `log.subsystem.*`, subsystem `openshell` |
+| OCSF findings, binary drift, tamper, hook silence, large uploads | `RecordSandboxFinding` | `log.finding.observed` |
+| Snapshot, undo, mask, review, upload, pull | `RecordSandboxWorkspace` | `log.sandbox.workspace` |
+
+Hook decisions from a sandbox carry the sandbox ID and name taken from the
+binding that authenticated them. Nothing calls the producers yet. The manager
+must build one `audit.NewSandboxRecorder` for the process and share it with
+the watcher, the egress proxy sink, approvals and workspace code, and on
+daemon start emit a lifecycle event for every existing sandbox so the active
+gauge is republished.
+
+The watcher side exists. `internal/openshell/stream` follows one sandbox
+through the raw `WatchSandbox` RPC on its own connection (the SDK's watch
+follows status only): status, supervisor log lines, platform events, draft
+notifications and warnings. It persists its cursor through a callback, turns
+`OUT_OF_RANGE` after a gateway restart into a gap event and resubscribes, and
+backs off on transport errors. `internal/openshell/ocsf` parses the OCSF
+shorthand in log lines (classes `NET`, `HTTP`, `SSH`, `PROC`, `FINDING`,
+`LIFECYCLE`, `CONFIG`, `API`, `EVENT`); a fixture corpus captured on a live
+host backs its tests.
+
+## Platform behaviours to design around
+
+These were measured on one Linux arm64 host running OpenShell 0.1.1 (the
+upstream installer, the docker driver and the `openshell-gateway` user
+service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
+
+### Network
+
+| Behaviour | Design consequence |
+| --- | --- |
+| Any network policy update, even an unrelated rule, closes in-flight connections. So does the first settings poll, about 10 to 12 seconds after each sandbox start, and every global profile import. | Egress decisions live in the proxy, not in OpenShell rules. The policy renders deterministically. Profiles are imported once at setup. The manager must start the harness only after the first settings poll (about 15 seconds) and batch rare policy updates for moments when no hook is in flight (`sandboxauth.InFlight`, `openshell.approvals.debounce_ms`, 3,000 ms by default). |
+| The relay drops about 0.3 to 0.7 percent of requests under concurrency, sometimes after the ingress acted. | Hooks retry once with an idempotency key, then fail closed; the ingress replays by key. |
+| `host.openshell.internal` reaches host `127.0.0.1` and the host sees a loopback client. | Separate sandbox listeners that trust credentials, never the source address. |
+| `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |
+| A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted but covers only hosts with three or more labels. | The egress rule allows every binary; there is no catch-all host rule. |
+| curl, Node `fetch` (with `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS and Python urllib all honour `HTTPS_PROXY` through the relay. | The proxy environment covers the common tools. |
+| A direct connection to an unknown host is refused (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`) and a draft proposal is filed. The metadata address is denied. | Non-proxy-aware clients surface as proposals for triage. |
+
+### Credentials
+
+| Behaviour | Design consequence |
+| --- | --- |
+| A placeholder is opaque and scoped to a policy revision (`openshell:resolve:env:v<revision>_<KEY>`); an unversioned one gets HTTP 500. | Hooks and OTLP helpers read the variable per request; launchers refresh first-run state on each start. |
+| Placeholders are substituted in any header and in the query string on bound endpoints, including plain-HTTP `protocol: rest` endpoints, but not in bodies. | The ingress accepts the credential only in `Authorization` and refuses it anywhere else. |
+| Provider profiles are imported one file at a time; their rules appear as `_provider_<name>`. | `Client.ImportProfiles` imports items one by one. |
+
+### Images, mounts and harnesses
+
+| Behaviour | Design consequence |
+| --- | --- |
+| Image `ENV` is not propagated; `sandbox create --env` is. `--from <local tag>` uses the local image. | Startup variables travel in `SandboxArtifacts.Env` and `harness.Spec.Env`. |
+| Bind mounts need `allow_driver_config` and `enable_bind_mounts` for the docker driver and resource admission off in `gateway.toml`, then a gateway restart. | `GatewayConfigurator` plans the TOML-preserving edit, runs the gateway's preflight, backs up, restarts and rolls back if the gateway does not come up. |
+| A read-only over-mount refuses writes, a bind-mounted file is effectively read-only, and an empty-file mask reads as empty. | Git internals and secrets are protected by the mounts themselves (Landlock cannot narrow a subtree of a read-write grant). |
+| `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
+| Content under `/sandbox` in the base image belongs to uid 998. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
+| Landlock hides `/dev` entries that are not listed. | `/dev/ptmx`, `/dev/pts` and `/dev/tty` are read-write for PTY tools. |
+| Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
+| Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
+| Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
+
+### CLI and streams
+
+| Behaviour | Design consequence |
+| --- | --- |
+| `sandbox exec` and `sandbox upload` hang while stdin is an open non-TTY pipe. | Non-interactive invocations read stdin from `/dev/null`. |
+| The first `sandbox exec` after create occasionally returns nothing. | `WaitReady` waits for `Ready` and the `ConfigurationReady` condition. |
+| Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
+| `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
+
+## Supported platforms and versions
+
+- OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
+  installer code (`openshell.Installer`) runs the upstream installer from the
+  v0.1.1 tag only after checking it against a pinned SHA-256. Releases before
+  0.0.37 must be cleaned up with the old CLI first; later ones upgrade in
+  place.
+- A local gateway only, registered with mTLS. Remote gateways and plaintext,
+  unauthenticated, OIDC or Cloudflare registrations are refused, and so are
+  mTLS files that other users can read or write and a registration that
+  another user could change.
+- Linux amd64 and arm64. macOS arm64 on Docker Desktop is a preview. Windows,
+  WSL2 and Intel macOS are unsupported.
+- The daemon and the gateway run as the same non-root user.
+- `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
+  or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
+  systemd linger, the gateway service, CLI, registration, mTLS files, gateway
+  version and driver, global policy, bind mounts, OpenShell telemetry and the
+  sandbox ports.
+
+## Code map
+
+| Concern | Source |
+| --- | --- |
+| OpenShell client, CLI, discovery, install, doctor, gateway config | [`../internal/openshell/`](../internal/openshell/) |
+| `WatchSandbox` stream and OCSF parser | [`../internal/openshell/stream/`](../internal/openshell/stream/), [`../internal/openshell/ocsf/`](../internal/openshell/ocsf/) |
+| Egress proxy | [`../internal/openshell/egress/`](../internal/openshell/egress/) |
+| Egress feeds | [`../policies/sandbox/egress/`](../policies/sandbox/egress/) |
+| Sandbox policy renderer | [`../internal/openshell/policy/`](../internal/openshell/policy/) |
+| Provider profiles | [`../internal/openshell/profiles/`](../internal/openshell/profiles/) |
+| Overlay images and hook-fire probe | [`../internal/openshell/image/`](../internal/openshell/image/) |
+| Harness specs and launchers | [`../internal/openshell/harness/`](../internal/openshell/harness/) |
+| Sandbox artifacts and hook scripts | [`../internal/gateway/connector/sandbox_artifacts.go`](../internal/gateway/connector/sandbox_artifacts.go), [`../internal/gateway/connector/hooks/_sandbox.sh`](../internal/gateway/connector/hooks/_sandbox.sh) |
+| Workspace: mount, masks, snapshot, undo, review, copy | [`../internal/openshell/workspace/`](../internal/openshell/workspace/) |
+| Policy packs and admin constraints | [`../internal/openshell/packs/`](../internal/openshell/packs/), [`../policies/sandbox/`](../policies/sandbox/) |
+| Bindings, limiter, `FSView` | [`../internal/sandboxauth/`](../internal/sandboxauth/) |
+| Hook ingress | [`../internal/gateway/api_sandbox_ingress.go`](../internal/gateway/api_sandbox_ingress.go), [`../internal/gateway/sandbox_hook_scope.go`](../internal/gateway/sandbox_hook_scope.go) |
+| `openshell:` configuration | [`../internal/config/openshell.go`](../internal/config/openshell.go), [`../schemas/config/v8/defenseclaw-config.schema.json`](../schemas/config/v8/defenseclaw-config.schema.json) |
+| Telemetry producers | [`../internal/audit/sandbox_v8.go`](../internal/audit/sandbox_v8.go) |
+| `sandbox` command group and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
+
+## Testing
+
+Unit tests need no OpenShell or Docker:
+
+```bash
+go test ./internal/openshell/... ./internal/sandboxauth/...
+go test -run Sandbox ./internal/gateway/ ./internal/gateway/connector/ \
+  ./internal/audit/
+```
+
+Policy, provider-profile, sandbox-artifact and hook golden files are
+regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
+
+Live tests carry the `openshell_integration` build tag and need a local
+OpenShell 0.1.x gateway (with bind mounts enabled for the workspace tests):
+
+```bash
+go test -tags openshell_integration -run Live -v ./internal/openshell/
+go test -tags openshell_integration -run TestLive -v \
+  ./internal/openshell/workspace/
+DEFENSECLAW_E2E_DATA_DIR="$HOME/dc-e2e" \
+DEFENSECLAW_E2E_IMAGE_REPO=e-defenseclaw-sandbox \
+  go test -tags openshell_integration -run TestLiveOverlay -v -timeout 60m \
+  ./internal/openshell/image/
+```
+
+`DEFENSECLAW_OPENSHELL_GATEWAY` and `DEFENSECLAW_OPENSHELL_IMAGE` pick the
+gateway registration and sandbox image for the workspace test;
+`DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK` also verifies each overlay in relay mode.
+The live tests create short-lived, prefixed sandboxes and delete them. Mock
+model servers and harness scenarios for end-to-end runs are in
+[`../test/e2e/openshell/`](../test/e2e/openshell/).
 
 ## Hosts that still have the legacy install
 
-Review the plan, then run the cleanup:
+The legacy standalone integration targeted the `openshell-sandbox` 0.0.x
+binary on Linux, for OpenClaw only, and its generated sandbox policy was never
+enforced. It was removed. OpenClaw and ZeptoClaw use the `shims` subprocess
+policy on every platform. Review the cleanup plan, then run it:
 
 ```bash
 defenseclaw sandbox legacy-cleanup --dry-run
@@ -21,143 +989,14 @@ defenseclaw sandbox legacy-cleanup
 
 Cleanup stops the systemd units itself but changes nothing else while any part
 of the legacy sandbox still runs. Stop the non-systemd launcher first with
-`sudo <data_dir>/scripts/run-sandbox.sh stop`.
-
-The [published legacy sandbox cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+`sudo <data_dir>/scripts/run-sandbox.sh stop`. The
+[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
 lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
 and the follow-up commands.
 
 Until cleanup runs, a config that still says `openshell.mode: standalone` with
-a non-localhost `guardrail.host` keeps the gateway API bound to that host
-(an explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
+a non-localhost `guardrail.host` keeps the gateway API bound to that host (an
+explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
 remains, `/health` reports the `sandbox` subsystem as `degraded`, and
 `defenseclaw doctor` and `defenseclaw status` point at
 `defenseclaw sandbox legacy-cleanup`.
-
-## OpenShell 0.1.1 spike findings
-
-These are the platform facts the OpenShell 0.1 rebuild is designed around. They
-were measured on one Linux arm64 host running OpenShell 0.1.1 (the upstream
-installer, the Docker driver, and the `openshell-gateway` user service) in
-September 2026.
-
-### Bake-off status
-
-The plan called for a bake-off of OpenShell 0.1.1 against Qpoint qcontrol on
-the same scenario matrix. Only the OpenShell half was run: qcontrol was never
-installed or measured. So the choice of OpenShell is not backed by a
-side-by-side comparison. It rests on how qcontrol works (it hooks functions
-inside the agent process, which gives observability and soft control but not
-an isolation boundary) and on the OpenShell measurements below. The decision
-should be reopened if a qcontrol run shows something OpenShell cannot do.
-qcontrol may still be added later as an optional event source.
-
-### Scenario matrix
-
-| Scenario | OpenShell 0.1.1 | qcontrol |
-| --- | --- | --- |
-| Read host secrets (`~/.ssh`, `~/.aws`) | Host `/home` is not readable inside the sandbox; only explicit bind mounts are visible | Not measured |
-| Write outside the project | Only bind mounts are visible; a read-only over-mount refuses writes ("Read-only file system") | Not measured |
-| `rm -rf` in `$HOME` | Not run. `$HOME` inside the sandbox is `/sandbox`, which is sandbox-local | Not measured |
-| Egress to an arbitrary host | Denied (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`), and a draft policy proposal is filed | Not measured |
-| Egress to the metadata IP `169.254.169.254` | Denied | Not measured |
-| Egress to the host | Only through `host.openshell.internal`, relayed to host `127.0.0.1` | Not measured |
-| DNS exfiltration | Not measured | Not measured |
-| `env -i` children | Not measured | Not measured |
-| Static busybox and raw-syscall variants of the above | Not run separately | Not measured |
-
-### Networking
-
-- `host.openshell.internal` resolves inside the sandbox to a synthetic address
-  (`198.18.0.2`) that the supervisor relays to host `127.0.0.1`; the host
-  service sees the client as `127.0.0.1`.
-- A `protocol: tcp` rule alone for a CONNECT proxy on `host.openshell.internal`
-  is refused by the HTTP parser. `protocol: tcp` with `tls: skip` is a raw
-  relay, and HTTPS through a CONNECT proxy on the host then works end to end.
-  The DefenseClaw egress proxy is reached through that rule.
-- A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted
-  but only covers hosts with three or more labels.
-- Through the relay, `HTTPS_PROXY` is honored by curl, node `fetch` (with
-  `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS, and Python urllib.
-- Any network policy update, even an unrelated rule, closes in-flight
-  connections. They are also closed about 10 to 12 seconds after every sandbox
-  start (the first settings poll) and on every global profile import. So the
-  design keeps egress decisions in the DefenseClaw proxy, batches OpenShell
-  policy updates, imports profiles once at setup, and starts a harness only
-  after the first settings poll (about 15 seconds).
-- The relay occasionally drops a request (about 0.3 to 0.7 percent under
-  concurrency), so hooks need a short timeout and one retry with an
-  idempotency key before they fail closed, and the ingress must deduplicate
-  by that key.
-
-### Credentials
-
-- A credential placeholder in the sandbox environment is opaque and scoped to
-  a policy revision (`openshell:resolve:env:v<revision>_<KEY>`). It is
-  substituted in any header and in the query string on bound endpoints,
-  including plain-HTTP `protocol: rest` endpoints, but not in bodies. An
-  unversioned placeholder gets HTTP 500 (fail closed). Hooks and OTEL
-  exporters therefore read the variable at run time; placeholders cannot be
-  baked into static config.
-- Provider profiles are imported one file at a time with
-  `openshell profile import -f <file> --global`; their rules show up as
-  `_provider_<name>`.
-
-### Images and mounts
-
-- `--from <local tag>` uses the local image. Image `ENV` is not propagated;
-  `sandbox create --env` is.
-- Bind mounts need `allow_driver_config` and `enable_bind_mounts` for the
-  Docker driver, and Docker resource admission turned off, in the gateway's
-  `gateway.toml`, followed by a restart of the gateway service. A read-only
-  over-mount (for example of `.git/hooks`) refuses writes, a bind-mounted file
-  is effectively read-only, and an empty-file mask over `.env` reads as empty.
-- `process.run_as_user` sets the process uid; files written to a bind mount
-  are owned on the host by that uid.
-- Image content under `/sandbox` is owned by uid 998, so an overlay must chown
-  `/sandbox` to the run-as uid. Otherwise writes to `~/.claude` fail and
-  Claude Code's `SessionStart` hook silently does not run.
-- Landlock hides `/dev` entries that are not listed. PTY tools need
-  `/dev/ptmx`, `/dev/pts`, and `/dev/tty` in `read_write`.
-
-### Streams and the CLI
-
-- `WatchSandbox` log lines arrive at level `OCSF` with structured `fields`
-  unset, so the shorthand message text is parsed. The cursor format is
-  `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log
-  buffer.
-- `openshell sandbox exec` occasionally produces no output on the first call
-  after create, so execs use a timeout and a retry and wait for the `Ready`
-  and `ConfigurationReady` conditions. `sandbox exec` and `sandbox upload`
-  hang while stdin is an open non-TTY pipe, so stdin is always `/dev/null`.
-
-### Harnesses
-
-- **Claude Code 2.1.156.** Managed settings come from
-  `/etc/claude-code/managed-settings.json` and the sorted, deep-merged
-  `managed-settings.d/*.json`. A drop-in with one schema-invalid field is
-  dropped whole and silently, so image builds probe that hooks fire.
-  `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and
-  `SessionEnd` fire; a deny works through `permissionDecision: "deny"` or exit
-  code 2, and an unreachable ingress denies the tool within about a second.
-  With `allowManagedHooksOnly: true`, user, project, and command-line settings
-  cannot turn managed hooks off. The one gap is Claude's simple/bare mode,
-  which disables all hooks. A managed `env` of `CLAUDE_CODE_SIMPLE=0` restores
-  every hook except `SessionStart`; the planned mitigation pairs it with a
-  DefenseClaw rule that flags bare invocations. Startup variables such as
-  `DISABLE_AUTOUPDATER=1` must be passed with `sandbox create --env`, because
-  managed `env` applies too late.
-- **Codex 0.146.0.** `/etc/codex/requirements.toml` needs
-  `allow_managed_hooks_only = true` and `[features] hooks = true` (without the
-  feature flag a user setting can turn hooks off). `/etc/codex/managed_config.toml`
-  takes precedence on Linux. Codex's own sandbox cannot run inside OpenShell,
-  so Codex runs with `--dangerously-bypass-approvals-and-sandbox`. `exec` mode
-  authenticates with `CODEX_API_KEY`.
-
-## Code ownership
-
-| Concern | Source |
-| --- | --- |
-| `sandbox` command group | [`cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
-| Legacy detection, plan, apply, and receipt | [`cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
-| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
