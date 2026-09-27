@@ -41,6 +41,8 @@ type SandboxController interface {
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
+	// ReportWorkspace records a copy-mode workspace step the CLI ran.
+	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
@@ -138,6 +140,15 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 				return nil, err
 			}
 			return c.Review(ctx, name, req)
+		case "workspace":
+			var req sandboxapi.WorkspaceReport
+			if err := decodeSandboxBody(r, &req, false); err != nil {
+				return nil, err
+			}
+			if err := c.ReportWorkspace(ctx, name, req); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "recorded"}, nil
 		default:
 			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "unknown sandbox action %q", r.PathValue("verb"))
 		}

@@ -261,6 +261,11 @@ func (c *Client) Review(ctx context.Context, name string, req ReviewRequest) (*R
 	return &out, nil
 }
 
+// ReportWorkspace records a copy-mode workspace step the CLI ran.
+func (c *Client) ReportWorkspace(ctx context.Context, name string, r WorkspaceReport) error {
+	return c.do(ctx, http.MethodPost, sandboxPath(name, "workspace"), nil, r, nil)
+}
+
 // Approvals lists pending asks, optionally for one sandbox.
 func (c *Client) Approvals(ctx context.Context, sandbox string) ([]Approval, error) {
 	q := url.Values{}

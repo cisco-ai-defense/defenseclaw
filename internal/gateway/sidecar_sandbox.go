@@ -43,6 +43,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
+// The sandbox manager is the SandboxController the REST API drives.
+var _ SandboxController = (*manager.Manager)(nil)
+
 // sandboxListenerHost is where the sandbox ingress and egress proxy
 // listen: OpenShell relays host.openshell.internal to host loopback.
 const sandboxListenerHost = "127.0.0.1"

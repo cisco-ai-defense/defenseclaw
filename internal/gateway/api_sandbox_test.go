@@ -122,6 +122,10 @@ func (f *fakeSandboxController) Review(_ context.Context, name string, _ sandbox
 	return &sandboxapi.ReviewResponse{Name: name, Summary: "1 file changed (+1 −0)"}, nil
 }
 
+func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
+	return f.record("workspace " + name + " " + r.Operation)
+}
+
 func (f *fakeSandboxController) Approvals(_ context.Context, sandbox string) ([]sandboxapi.Approval, error) {
 	if err := f.record("approvals " + sandbox); err != nil {
 		return nil, err
@@ -273,6 +277,8 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"POST", sandboxapi.PathSandboxes + "/box/start", `{}`, 200, "start box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/undo", `{"stop":true}`, 200, "undo box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/review", "", 200, "review box"},
+		{"POST", sandboxapi.PathSandboxes + "/box/workspace", `{"operation":"pull","pull_mode":"branch"}`, 200, "workspace box pull"},
+		{"POST", sandboxapi.PathSandboxes + "/box/workspace", "", 400, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
 		{"GET", sandboxapi.PathApprovals + "?sandbox=box", "", 200, "approvals box"},
 		{"POST", sandboxapi.PathApprovals + "/ap_1", `{"decision":"approve","always":true}`, 200, "decide ap_1"},

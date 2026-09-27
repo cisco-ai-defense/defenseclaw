@@ -328,6 +328,31 @@ type ReviewResponse struct {
 	Diff     string                  `json:"diff,omitempty"`
 }
 
+// Workspace operations the CLI reports (the copy-mode steps it runs).
+const (
+	WorkspaceUpload = "upload"
+	WorkspacePull   = "pull"
+)
+
+// WorkspaceReport is POST /sandboxes/{name}/workspace: a copy-mode
+// workspace step the CLI ran (upload, or pull with apply/branch/patch), so
+// the daemon records it with the sandbox's identity. Counts are optional.
+type WorkspaceReport struct {
+	Operation string `json:"operation"`
+	// Result is applied, completed, failed, no_change, partial or skipped
+	// (empty: the operation's default).
+	Result       string `json:"result,omitempty"`
+	FailureClass string `json:"failure_class,omitempty"`
+	// PullMode is apply, branch or patch (pull only).
+	PullMode     string   `json:"pull_mode,omitempty"`
+	FileCount    *int64   `json:"file_count,omitempty"`
+	LinesAdded   *int64   `json:"lines_added,omitempty"`
+	LinesRemoved *int64   `json:"lines_removed,omitempty"`
+	FlaggedCount *int64   `json:"flagged_count,omitempty"`
+	ByteCount    *int64   `json:"byte_count,omitempty"`
+	Paths        []string `json:"paths,omitempty"`
+}
+
 // Approval kinds and statuses.
 const (
 	ApprovalKindNetworkRule = "network_rule"

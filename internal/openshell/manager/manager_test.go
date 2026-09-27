@@ -539,6 +539,36 @@ func TestUndoAndReview(t *testing.T) {
 	}
 }
 
+func TestReportWorkspace(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "copyrep", Copy: true})
+	files := int64(3)
+	if err := e.m.ReportWorkspace(context.Background(), "copyrep", sandboxapi.WorkspaceReport{
+		Operation: sandboxapi.WorkspacePull, PullMode: audit.SandboxPullBranch, FileCount: &files, Paths: []string{"a.go"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	last := e.tel.workspace[len(e.tel.workspace)-1]
+	if last.Operation != audit.SandboxWorkspacePull || last.PullMode != "branch" || *last.FileCount != 3 || last.Sandbox.Name != "copyrep" {
+		t.Fatalf("workspace record = %+v", last)
+	}
+	negative := int64(-1)
+	for _, bad := range []sandboxapi.WorkspaceReport{
+		{Operation: "undo"},
+		{Operation: sandboxapi.WorkspacePull},
+		{Operation: sandboxapi.WorkspaceUpload, PullMode: "apply"},
+		{Operation: sandboxapi.WorkspaceUpload, Result: "exploded"},
+		{Operation: sandboxapi.WorkspaceUpload, ByteCount: &negative},
+	} {
+		if err := e.m.ReportWorkspace(context.Background(), "copyrep", bad); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+			t.Fatalf("report %+v: %v", bad, err)
+		}
+	}
+	if err := e.m.ReportWorkspace(context.Background(), "nope", sandboxapi.WorkspaceReport{Operation: "upload"}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("unknown sandbox: %v", err)
+	}
+}
+
 func TestGatewayUnavailable(t *testing.T) {
 	e := newEnv(t, nil)
 	e.connErr = errors.New("connection refused")

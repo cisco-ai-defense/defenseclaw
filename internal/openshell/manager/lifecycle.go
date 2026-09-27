@@ -545,3 +545,60 @@ func (m *Manager) recordSnapshot(ctx context.Context, b *box) {
 	}
 	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
 }
+
+// ReportWorkspace records a copy-mode workspace step the CLI ran (upload,
+// or pull with apply, branch or patch) with the sandbox's identity.
+func (m *Manager) ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error {
+	b, err := m.box(name)
+	if err != nil {
+		return err
+	}
+	ev := audit.SandboxWorkspaceEvent{
+		Result: audit.SandboxWorkspaceResult(r.Result), FailureClass: r.FailureClass, Initiator: "operator",
+		FileCount: r.FileCount, LinesAdded: r.LinesAdded, LinesRemoved: r.LinesRemoved, FlaggedCount: r.FlaggedCount,
+		ByteCount: r.ByteCount, Paths: r.Paths, Timestamp: m.now(),
+	}
+	switch r.Operation {
+	case sandboxapi.WorkspaceUpload:
+		ev.Operation = audit.SandboxWorkspaceUpload
+		if r.PullMode != "" {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "pull_mode applies to pulls only")
+		}
+	case sandboxapi.WorkspacePull:
+		ev.Operation = audit.SandboxWorkspacePull
+		switch r.PullMode {
+		case audit.SandboxPullApply, audit.SandboxPullBranch, audit.SandboxPullPatch:
+			ev.PullMode = r.PullMode
+		default:
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "pull_mode must be apply, branch or patch")
+		}
+	default:
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "operation must be upload or pull")
+	}
+	switch ev.Result {
+	case "", audit.SandboxWorkspaceApplied, audit.SandboxWorkspaceCompleted, audit.SandboxWorkspaceFailed,
+		audit.SandboxWorkspaceNoChange, audit.SandboxWorkspacePartial, audit.SandboxWorkspaceSkipped:
+	default:
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "unknown workspace result %q", r.Result)
+	}
+	for _, count := range []*int64{r.FileCount, r.LinesAdded, r.LinesRemoved, r.FlaggedCount, r.ByteCount} {
+		if count != nil && *count < 0 {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "counts must not be negative")
+		}
+	}
+	m.mu.Lock()
+	ev.Sandbox = b.identity()
+	m.mu.Unlock()
+	if err := m.tel.RecordSandboxWorkspace(ctx, ev); err != nil {
+		return &sandboxapi.Error{Code: sandboxapi.CodeInvalid, Message: "the workspace report was not recorded", Detail: err.Error()}
+	}
+	msg := "uploaded the project copy"
+	if ev.Operation == audit.SandboxWorkspacePull {
+		msg = "pulled the sandbox's changes (" + r.PullMode + ")"
+	}
+	if ev.Result == audit.SandboxWorkspaceFailed {
+		msg += " — failed"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: name, Reason: r.Operation, Message: msg})
+	return nil
+}
