@@ -130,7 +130,12 @@ type Context struct {
 	// ImageFiles are the connector artifacts plus the harness launcher.
 	ImageFiles []ImageFile
 	// Dirs are the DefenseClaw-owned directories that must be root 0755.
-	Dirs       []string
+	Dirs []string
+	// UserDirs are the directories below the image HOME that hold
+	// user-owned artifacts; the Dockerfile creates them (owned by the run-as
+	// uid, 0755) before copying, because COPY --chmod would give the
+	// directories it creates the file mode and make them untraversable.
+	UserDirs   []string
 	Dockerfile []byte
 	// Files are the context entries (Dockerfile first, then files/...).
 	Files       []ContextFile
@@ -209,6 +214,7 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	sources := append([]connector.SandboxFile(nil), artifacts.Files...)
 	sources = append(sources, spec.Harness.Launcher())
 	dirSet := map[string]bool{}
+	userDirSet := map[string]bool{}
 	for _, f := range sources {
 		if !safePathRE.MatchString(f.Path) || path.Clean(f.Path) != f.Path {
 			return nil, fmt.Errorf("openshell image: artifact path %q is not a safe absolute path", f.Path)
@@ -221,6 +227,9 @@ func NewContext(spec BuildSpec) (*Context, error) {
 			}
 		case connector.SandboxOwnerUser:
 			file.UID, file.GID = spec.UID, spec.GID
+			for dir := path.Dir(f.Path); dir != connector.SandboxHomeDir && strings.HasPrefix(dir, connector.SandboxHomeDir+"/"); dir = path.Dir(dir) {
+				userDirSet[dir] = true
+			}
 		default:
 			return nil, fmt.Errorf("openshell image: artifact %s has unknown owner %q", f.Path, f.Owner)
 		}
@@ -236,6 +245,10 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		c.Dirs = append(c.Dirs, dir)
 	}
 	sort.Strings(c.Dirs)
+	for dir := range userDirSet {
+		c.UserDirs = append(c.UserDirs, dir)
+	}
+	sort.Strings(c.UserDirs)
 
 	c.Dockerfile = renderDockerfile(c, steps)
 	c.Files = append(c.Files, ContextFile{Name: "Dockerfile", Mode: 0o644, Data: c.Dockerfile})
@@ -297,6 +310,9 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		"[ ! -e \"$f\" ] || { echo \"Base image has managed-settings.d file $f that could override DC drop-in\" >&2; exit 1; }; " +
 		"done; fi\n")
 	b.WriteString("# DefenseClaw artifacts: root-owned and read-only to the workload unless under HOME.\n")
+	if len(c.UserDirs) > 0 {
+		fmt.Fprintf(&b, "RUN install -d -o %d -g %d -m 0755 %s\n", spec.UID, spec.GID, strings.Join(c.UserDirs, " "))
+	}
 	for _, f := range c.ImageFiles {
 		fmt.Fprintf(&b, "COPY --chown=%d:%d --chmod=%04o %s %s\n", f.UID, f.GID, uint32(f.Mode), contextName(f.Path), f.Path)
 	}

@@ -249,3 +249,88 @@ func TestCodexHostileSettingsPlantsBothTiers(t *testing.T) {
 		})
 	}
 }
+
+// relocatedHostileSetup runs a plan's planting fragment with its absolute
+// roots moved under a temp dir and returns that root.
+func relocatedHostileSetup(t *testing.T, name string) string {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	plan, ok := hostileSettingsPlans[name]
+	if !ok || plan.workdir != hostileProject {
+		t.Fatalf("%s hostile plan = %+v", name, plan)
+	}
+	root := t.TempDir()
+	relocate := strings.NewReplacer(
+		hostileRoot, root+hostileRoot,
+		"'/sandbox/", "'"+root+"/sandbox/",
+		"\"/sandbox/", "\""+root+"/sandbox/",
+		"/work/", root+"/work/",
+	)
+	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
+		t.Fatalf("planting ran planted programs: %s", data)
+	}
+	return root
+}
+
+func TestCopilotHostileSettingsPlants(t *testing.T) {
+	root := relocatedHostileSetup(t, "copilot")
+	for _, file := range []string{"/sandbox/.copilot/settings.json", "/work/dc-hookfire-project/.github/copilot/settings.json"} {
+		data, err := os.ReadFile(root + file)
+		if err != nil || strings.TrimSpace(string(data)) != `{"disableAllHooks":true}` {
+			t.Fatalf("%s = %s (%v)", file, data, err)
+		}
+	}
+	for tier, file := range map[string]string{
+		"user":    "/sandbox/.copilot/hooks/hostile.json",
+		"project": "/work/dc-hookfire-project/.github/hooks/hostile.json",
+	} {
+		data, err := os.ReadFile(root + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Version int `json:"version"`
+			Hooks   map[string][]struct {
+				Bash string `json:"bash"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil || doc.Version != 1 || len(doc.Hooks["preToolUse"]) != 1 {
+			t.Fatalf("%s hooks = %s (%v)", tier, data, err)
+		}
+		// Copilot runs a bash hook through bash (the setup already relocated
+		// its path).
+		if out, err := exec.Command("bash", "-c", doc.Hooks["preToolUse"][0].Bash).CombinedOutput(); err != nil {
+			t.Fatalf("%s hook: %v\n%s", tier, err, out)
+		}
+		data, _ = os.ReadFile(root + hostileRanLog)
+		_ = os.Remove(root + hostileRanLog)
+		if strings.TrimSpace(string(data)) != tier+":settings-hook" {
+			t.Fatalf("%s hook left %q", tier, data)
+		}
+	}
+	planted, _ := filepath.Glob(root + "/sandbox/*/*/pkg/*/99.0.0/index.js")
+	more, _ := filepath.Glob(root + "/sandbox/.copilot/pkg/*/99.0.0/index.js")
+	if len(planted)+len(more) != 4 {
+		t.Fatalf("planted packages = %v %v", planted, more)
+	}
+}
+
+func TestOpenCodeHostileSettingsPlants(t *testing.T) {
+	root := relocatedHostileSetup(t, "opencode")
+	for _, file := range []string{
+		"/sandbox/.config/opencode/opencode.json",
+		"/work/dc-hookfire-project/opencode.json",
+		"/work/dc-hookfire-project/.opencode/opencode.json",
+	} {
+		data, err := os.ReadFile(root + file)
+		if err != nil || strings.TrimSpace(string(data)) != `{"plugin":[]}` {
+			t.Fatalf("%s = %s (%v)", file, data, err)
+		}
+	}
+}

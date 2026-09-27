@@ -126,6 +126,25 @@ func TestMockLLMAnthropicToolLoop(t *testing.T) {
 	}
 }
 
+// TestMockLLMAnthropicLowercaseBash serves OpenCode and the Copilot CLI,
+// whose shell tool is bash.
+func TestMockLLMAnthropicLowercaseBash(t *testing.T) {
+	_, srv := newMockServer(t)
+	prompt := `{"role":"user","content":"` + builtinAllowPrompt + `"}`
+	_, body := mockPost(t, srv.URL+"/v1/messages",
+		`{"model":"m","messages":[`+prompt+`],"tools":[{"name":"read"},{"name":"bash"},{"name":"edit"}]}`, nil)
+	if !strings.Contains(body, `"name":"bash"`) || !strings.Contains(body, `"stop_reason":"tool_use"`) ||
+		!strings.Contains(body, `"description":"DefenseClaw hook-fire probe"`) {
+		t.Fatalf("lowercase bash turn = %s", body)
+	}
+	// Claude Code's Bash wins when both are advertised.
+	_, body = mockPost(t, srv.URL+"/v1/messages",
+		`{"model":"m","messages":[{"role":"user","content":"`+builtinBlockPrompt+`"}],"tools":[{"name":"bash"},{"name":"Bash"}]}`, nil)
+	if !strings.Contains(body, `"name":"Bash"`) {
+		t.Fatalf("mixed tools turn = %s", body)
+	}
+}
+
 func TestMockLLMAnthropicStreams(t *testing.T) {
 	_, srv := newMockServer(t)
 	body := `{"model":"claude-x","stream":true,"messages":[{"role":"user","content":"` + builtinAllowPrompt + `"}],` + anthropicTools + `}`

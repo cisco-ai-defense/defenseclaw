@@ -94,10 +94,61 @@ func DefaultHookFireNetwork() HookFireNetwork {
 	return HookFireNetworkRelay
 }
 
-// requiredHookEvents must each arrive, authenticated, from a clean run.
-var requiredHookEvents = map[string][]string{
-	"claudecode": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"codex":      {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+// hookFireContract is how one harness's hooks look to the stand-in ingress.
+type hookFireContract struct {
+	// required hooks must each arrive, authenticated, from a clean run.
+	required []string
+	// preTool is the hook whose payload the block marker is matched in.
+	preTool string
+	// deny is the verdict that blocks the pre-tool call, in the shape the
+	// harness's sandbox hook reads.
+	deny func(reason string) map[string]interface{}
+}
+
+// hookFireContracts covers every harness with a sandbox hook variant. Hooks
+// that a harness fires only best-effort (OpenCode's unawaited session
+// events) or only at teardown of an interactive session are not required.
+var hookFireContracts = map[string]hookFireContract{
+	"claudecode": {required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}, preTool: "PreToolUse", deny: claudeCodexDeny},
+	"codex":      {required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}, preTool: "PreToolUse", deny: claudeCodexDeny},
+	"opencode": {
+		required: []string{"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
+		preTool:  "tool.execute.before",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "deny", "reason": reason}}
+		},
+	},
+	"copilot": {
+		required: []string{"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop", "sessionEnd"},
+		preTool:  "preToolUse",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"permissionDecision": "deny", "permissionDecisionReason": reason}}
+		},
+	},
+	"amp": {
+		required: []string{"session.start", "agent.start", "tool.call", "tool.result", "agent.end"},
+		preTool:  "tool.call",
+		deny: func(reason string) map[string]interface{} {
+			return map[string]interface{}{"action": "block", "reason": reason}
+		},
+	},
+}
+
+// claudeCodexDeny is the PreToolUse deny Claude Code and Codex hooks print.
+func claudeCodexDeny(reason string) map[string]interface{} {
+	deny := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		},
+	}
+	return map[string]interface{}{
+		"action":             "block",
+		"reason":             reason,
+		"claude_code_output": deny,
+		"codex_output":       deny,
+	}
 }
 
 // HookFireOptions configure a hook-fire probe. The zero value runs the
@@ -194,6 +245,28 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 			// does not read; an unknown model gets the classic tools field.
 			"-m", "mock-model",
 		}
+	},
+	// OpenCode reaches the mock through a custom provider on its bundled
+	// Anthropic SDK; the model catalog is not fetched.
+	"opencode": func(baseURL string) (map[string]string, []string) {
+		config, _ := json.Marshal(map[string]interface{}{
+			"provider": map[string]interface{}{"dcprobe": map[string]interface{}{
+				"npm": "@ai-sdk/anthropic", "name": "dcprobe",
+				"options": map[string]string{"baseURL": baseURL + "/v1", "apiKey": "sk-ant-dcprobe-0123456789abcdefghij"},
+				"models":  map[string]interface{}{"claude-sonnet-4-5": map[string]interface{}{"name": "DefenseClaw hook-fire mock", "tool_call": true}},
+			}},
+			"model": "dcprobe/claude-sonnet-4-5",
+		})
+		return map[string]string{"OPENCODE_CONFIG_CONTENT": string(config), "OPENCODE_DISABLE_MODELS_FETCH": "1"}, nil
+	},
+	// Copilot CLI's bring-your-own-provider mode needs no GitHub login;
+	// offline mode skips every other request.
+	"copilot": func(baseURL string) (map[string]string, []string) {
+		return map[string]string{
+			"COPILOT_PROVIDER_BASE_URL": baseURL, "COPILOT_PROVIDER_TYPE": "anthropic",
+			"COPILOT_PROVIDER_API_KEY": "sk-ant-dcprobe-0123456789abcdefghij", "COPILOT_MODEL": "claude-sonnet-4.6",
+			"COPILOT_OFFLINE": "true",
+		}, nil
 	},
 }
 
@@ -423,10 +496,11 @@ func serveHTTP(host string, port int, h http.Handler) (int, func(), error) {
 
 // hookFireProbe runs the probe against image ref (a tag or image ID).
 func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opts HookFireOptions) (HookFireResult, error) {
-	required, ok := requiredHookEvents[c.Spec.Harness.Name]
+	contract, ok := hookFireContracts[c.Spec.Harness.Name]
 	if !ok {
 		return HookFireResult{}, fmt.Errorf("openshell image: no hook-fire contract for %s", c.Spec.Harness.Name)
 	}
+	required := contract.required
 	netw, err := resolveHookFireNet(opts, c.Spec.IngressPort)
 	if err != nil {
 		return HookFireResult{}, err
@@ -445,6 +519,16 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	if err != nil {
 		return result, err
 	}
+	var launch func(baseURL string) (map[string]string, []string)
+	if builtin {
+		if launch, ok = builtinMockLaunch[c.Spec.Harness.Name]; !ok {
+			reason := "no built-in mock LLM wiring"
+			if v := c.Spec.Harness.Verification; v.Status == harness.Unverified && v.Reason != "" {
+				reason += ": " + v.Reason
+			}
+			return result, fmt.Errorf("openshell image: %s has %s; verify it with HookFireOptions naming a model the harness can reach", c.Spec.Harness.Name, reason)
+		}
+	}
 	// p2-render-7: in host mode, serialize probes that bind the same address
 	// to prevent EADDRINUSE collisions.
 	var unlock func()
@@ -456,7 +540,7 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		}
 		defer unlock()
 	}
-	sink := &hookSink{token: "dcprobe-" + token}
+	sink := &hookSink{token: "dcprobe-" + token, contract: contract}
 	sinkPort, stopSink, err := serveHTTP(netw.bindHost, netw.sinkPort, sink)
 	if err != nil {
 		return result, fmt.Errorf("openshell image: hook-fire sink: %w", err)
@@ -464,10 +548,6 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	defer stopSink()
 	netw.sinkPort = sinkPort
 	if builtin {
-		launch, ok := builtinMockLaunch[c.Spec.Harness.Name]
-		if !ok {
-			return result, fmt.Errorf("openshell image: no built-in mock LLM wiring for %s", c.Spec.Harness.Name)
-		}
 		mockPort, stopMock, err := serveHTTP(netw.bindHost, 0, newMockLLM(builtinMockScenarios...))
 		if err != nil {
 			return result, fmt.Errorf("openshell image: hook-fire mock LLM: %w", err)
@@ -513,7 +593,7 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 			denied = denied || ev.Blocked
 		}
 		if !denied {
-			problems = append(problems, "the block scenario never reached a PreToolUse carrying the marker")
+			problems = append(problems, "the block scenario never reached a "+contract.preTool+" carrying the marker")
 		} else {
 			sideEffect(blocked, blockSc, "")
 		}
@@ -708,11 +788,14 @@ func (b *Builder) hookFireRun(
 // bearer, records every hook, notify and OTLP request, and answers with
 // DefenseClaw-shaped verdicts.
 type hookSink struct {
-	token  string
-	mu     sync.Mutex
-	events []HookEvent
-	otlp   int
-	block  *BlockScenario
+	token string
+	// contract selects the pre-tool hook and its deny verdict; the zero
+	// value is Claude Code's and Codex's.
+	contract hookFireContract
+	mu       sync.Mutex
+	events   []HookEvent
+	otlp     int
+	block    *BlockScenario
 }
 
 func (s *hookSink) begin(block *BlockScenario) {
@@ -733,10 +816,18 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev := HookEvent{Path: r.URL.Path, Authorized: authorized, IdempotencyKey: r.Header.Get("X-DefenseClaw-Hook-Idempotency-Key")}
 	var payload map[string]json.RawMessage
 	_ = json.Unmarshal(body, &payload)
+	// Codex binds its event in a header, Copilot (whose native payload has
+	// no event field) in its own; everything else names it in the body.
 	if name := r.Header.Get("X-DefenseClaw-Hook-Event"); name != "" {
+		ev.Event = name
+	} else if name := r.Header.Get("X-DefenseClaw-Copilot-Event"); name != "" {
 		ev.Event = name
 	} else if raw, ok := payload["hook_event_name"]; ok {
 		_ = json.Unmarshal(raw, &ev.Event)
+	}
+	preTool, deny := s.contract.preTool, s.contract.deny
+	if preTool == "" {
+		preTool, deny = "PreToolUse", claudeCodexDeny
 	}
 
 	s.mu.Lock()
@@ -754,7 +845,9 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("{}"))
 		return
 	}
-	if authorized && block != nil && ev.Event == "PreToolUse" && bytes.Contains(payload["tool_input"], []byte(block.Marker)) {
+	// The marker is matched anywhere in the pre-tool payload: the tool input
+	// is tool_input for most harnesses and toolArgs for Copilot.
+	if authorized && block != nil && ev.Event == preTool && bytes.Contains(body, []byte(block.Marker)) {
 		ev.Blocked = true
 	}
 	s.events = append(s.events, ev)
@@ -769,20 +862,7 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 		return
 	}
-	reason := "Blocked by the DefenseClaw hook-fire probe"
-	deny := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "deny",
-			"permissionDecisionReason": reason,
-		},
-	}
-	resp, _ := json.Marshal(map[string]interface{}{
-		"action":             "block",
-		"reason":             reason,
-		"claude_code_output": deny,
-		"codex_output":       deny,
-	})
+	resp, _ := json.Marshal(deny("Blocked by the DefenseClaw hook-fire probe"))
 	_, _ = w.Write(resp)
 }
 

@@ -157,6 +157,11 @@ func (m *mockLLM) models(w http.ResponseWriter, r *http.Request, id string) {
 
 // --- Anthropic Messages ---
 
+// anthropicShellTools are the shell tools Messages clients advertise: Claude
+// Code's Bash, and bash for OpenCode and the Copilot CLI (both take
+// {"command", "description"}).
+var anthropicShellTools = []string{"Bash", "bash"}
+
 type anthropicRequest struct {
 	Model    string             `json:"model"`
 	Stream   bool               `json:"stream"`
@@ -237,14 +242,21 @@ func (m *mockLLM) messages(w http.ResponseWriter, r *http.Request) {
 		tools[t.Name] = true
 	}
 	prompt, turn := anthropicPosition(req.Messages)
+	shell := ""
+	for _, name := range anthropicShellTools {
+		if tools[name] {
+			shell = name
+			break
+		}
+	}
 	blocks, stop := []anthropicBlock{{Type: "text", Text: mockAuxText}}, "end_turn"
 	if sc := m.pick(prompt); sc != nil {
 		switch {
-		case turn == 0 && tools["Bash"]:
+		case turn == 0 && shell != "":
 			// A request that cannot call the tool (title generation, quota
 			// probes, classifiers) never burns the scripted tool turn.
 			blocks = []anthropicBlock{{
-				Type: "tool_use", ID: fmt.Sprintf("toolu_dcprobe_%d", seq), Name: "Bash",
+				Type: "tool_use", ID: fmt.Sprintf("toolu_dcprobe_%d", seq), Name: shell,
 				Input: map[string]interface{}{"command": sc.command, "description": "DefenseClaw hook-fire probe"},
 			}}
 			stop = "tool_use"

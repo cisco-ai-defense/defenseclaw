@@ -72,7 +72,8 @@ func mustContext(t *testing.T, spec BuildSpec) *Context {
 }
 
 func TestContextTarIsDeterministic(t *testing.T) {
-	for _, h := range []*harness.Spec{harness.ClaudeCode, harness.Codex} {
+	for _, name := range harness.Names() {
+		h, _ := harness.Get(name)
 		first := mustContext(t, testSpec(h))
 		second := mustContext(t, testSpec(h))
 		a, err := first.Tar()
@@ -267,6 +268,68 @@ func goodProbeOutput(c *Context) string {
 	}
 	b.WriteString("end\n")
 	return b.String()
+}
+
+// TestHookOnlyHarnessContexts renders the OpenCode, Copilot CLI and Amp
+// overlays: the pinned install, the connector's managed or user-scope hook
+// registration with its owner, and the launcher.
+func TestHookOnlyHarnessContexts(t *testing.T) {
+	for _, tc := range []struct {
+		h        *harness.Spec
+		contract string
+		files    map[string]int // in-image path -> expected uid
+		install  string
+		userDirs string
+	}{
+		{harness.OpenCode, "opencode-hooks-v1", map[string]int{
+			connector.OpenCodeSandboxManagedConfigPath: 0,
+			connector.OpenCodeSandboxPluginPath:        0,
+			harness.OpenCodeLauncherPath:               0,
+		}, "'opencode-ai@1.18.31'", ""},
+		{harness.Copilot, "copilot-hooks-v2", map[string]int{
+			connector.CopilotSandboxPolicyPath:                 0,
+			connector.CopilotSandboxManagedSettingsPath:        0,
+			connector.SandboxHookDir + "/copilot-hook.sh":      0,
+			connector.SandboxHomeDir + "/.copilot/config.json": 1000,
+			harness.CopilotLauncherPath:                        0,
+		}, "'@github/copilot@1.0.88'", "/sandbox/.copilot"},
+		{harness.Amp, "amp-plugin-v1", map[string]int{
+			connector.AmpSandboxPluginPath: 1000,
+			harness.AmpLauncherPath:        0,
+		}, "'@ampcode/cli@0.0.1785334225-g9abe75'", "/sandbox/.config /sandbox/.config/amp /sandbox/.config/amp/plugins"},
+	} {
+		t.Run(tc.h.Name, func(t *testing.T) {
+			c := mustContext(t, testSpec(tc.h))
+			if c.Contract != tc.contract || c.Artifacts.TamperTier != tc.h.TamperTier {
+				t.Fatalf("contract %s tier %s", c.Contract, c.Artifacts.TamperTier)
+			}
+			got := map[string]int{}
+			for _, f := range c.ImageFiles {
+				got[f.Path] = f.UID
+			}
+			for path, uid := range tc.files {
+				if owner, ok := got[path]; !ok || owner != uid {
+					t.Errorf("%s: uid %d present %t, want uid %d", path, owner, ok, uid)
+				}
+			}
+			if !strings.Contains(string(c.Dockerfile), tc.install) || !strings.Contains(string(c.Dockerfile), "sha256sum") {
+				t.Fatalf("Dockerfile lacks the pinned install:\n%s", c.Dockerfile)
+			}
+			if want := tc.userDirs; want != "" {
+				line := "RUN install -d -o 1000 -g 1000 -m 0755 " + want + "\n"
+				copyAt := strings.Index(string(c.Dockerfile), "\nCOPY ")
+				if at := strings.Index(string(c.Dockerfile), line); at < 0 || at > copyAt {
+					t.Fatalf("user-owned artifact directories are not created before COPY:\n%s", c.Dockerfile)
+				}
+			} else if strings.Contains(string(c.Dockerfile), "RUN install -d -o 1000") {
+				t.Fatalf("unexpected user directories:\n%s", c.Dockerfile)
+			}
+		})
+	}
+	// Claude Code's only user-owned artifact sits directly in HOME.
+	if c := mustContext(t, testSpec(harness.ClaudeCode)); len(c.UserDirs) != 0 {
+		t.Fatalf("claudecode user dirs = %v", c.UserDirs)
+	}
 }
 
 func TestParseProbeAndVerify(t *testing.T) {

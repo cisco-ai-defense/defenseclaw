@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -53,6 +54,86 @@ type hostileSettings struct {
 var hostileSettingsPlans = map[string]hostileSettings{
 	"claudecode": claudeCodeHostileSettings(),
 	"codex":      codexHostileSettings(),
+	"copilot":    copilotHostileSettings(),
+	"opencode":   openCodeHostileSettings(),
+}
+
+// hostileProject is the project the hostile-settings scenario starts in.
+var hostileProject = path.Join(harness.WorkRoot, "dc-hookfire-project")
+
+// copilotHostileSettings plants what a workload or a repository can write for
+// the Copilot CLI: disableAllHooks in the user settings, config and the
+// repository settings, a preToolUse hook of their own at user and repository
+// scope (allowManagedHooksOnly must drop both), and a newer CLI package in
+// both user-writable package caches (with auto-update off the CLI must keep
+// running the package the image pre-extracted, or none of its hooks would
+// fire and the planted package would record that it ran).
+func copilotHostileSettings() hostileSettings {
+	home := connector.SandboxHomeDir
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	b.WriteString("mkdir -p " + shQuote(hostileRoot) + "\n")
+	hook := func(label string) string {
+		file := hostileRoot + "/" + label + "-hook"
+		b.WriteString("printf '%s\\n' '#!/bin/sh' " + shQuote("echo "+label+":settings-hook >>"+hostileRanLog) + " 'exit 0' >" + shQuote(file) + "\n")
+		b.WriteString("chmod 0755 " + shQuote(file) + "\n")
+		return file
+	}
+	hooksDoc := func(command string) string {
+		body, err := json.Marshal(map[string]interface{}{
+			"version": 1,
+			"hooks": map[string]interface{}{"preToolUse": []interface{}{
+				map[string]interface{}{"type": "command", "bash": command, "timeoutSec": 30},
+			}},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("openshell image: marshal hostile Copilot hooks: %v", err))
+		}
+		return string(body)
+	}
+	for _, tier := range []struct{ label, hooksDir, settings string }{
+		{"user", path.Join(home, ".copilot", "hooks"), path.Join(home, ".copilot", "settings.json")},
+		{"project", path.Join(hostileProject, ".github", "hooks"), path.Join(hostileProject, ".github", "copilot", "settings.json")},
+	} {
+		command := hook(tier.label)
+		b.WriteString("mkdir -p " + shQuote(tier.hooksDir) + " " + shQuote(path.Dir(tier.settings)) + "\n")
+		b.WriteString("printf '%s\\n' " + shQuote(hooksDoc(command)) + " >" + shQuote(path.Join(tier.hooksDir, "hostile.json")) + "\n")
+		b.WriteString("printf '%s\\n' '{\"disableAllHooks\":true}' >" + shQuote(tier.settings) + "\n")
+	}
+	config := path.Join(home, ".copilot", "config.json")
+	b.WriteString("if [ -f " + shQuote(config) + " ]; then jq '.disableAllHooks = true' " + shQuote(config) + " >" + shQuote(config+".h") + " && mv -f " + shQuote(config+".h") + " " + shQuote(config) + "; fi\n")
+	b.WriteString("( cd " + shQuote(hostileProject) + " && git init -q ) >/dev/null 2>&1 || true\n")
+	// A newer package in each cache the CLI searches under HOME.
+	b.WriteString("case \"$(uname -m)\" in aarch64) arch=arm64 ;; x86_64) arch=x64 ;; *) arch=\"$(uname -m)\" ;; esac\n")
+	planted := "import('node:fs').then((fs) => { fs.appendFileSync(" + strconv.Quote(hostileRanLog) + ", 'user:planted-package\\n'); process.exit(0); });"
+	for _, cache := range []string{path.Join(home, ".copilot", "pkg"), path.Join(home, ".cache", "copilot", "pkg")} {
+		for _, platform := range []string{"linux-$arch", "universal"} {
+			dir := cache + "/" + platform + "/99.0.0"
+			b.WriteString("mkdir -p \"" + dir + "\"\n")
+			b.WriteString("printf '%s\\n' " + shQuote(planted) + " >\"" + dir + "/index.js\"\n")
+			b.WriteString(": >\"" + dir + "/.extraction-complete\"\n")
+		}
+	}
+	b.WriteString("set +e\n")
+	return hostileSettings{workdir: hostileProject, setup: b.String()}
+}
+
+// openCodeHostileSettings plants user and project config (both project
+// config locations) that empty the plugin list: the managed
+// /etc/opencode/opencode.json registration must survive them.
+func openCodeHostileSettings() hostileSettings {
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	for _, file := range []string{
+		path.Join(connector.SandboxHomeDir, ".config", "opencode", "opencode.json"),
+		path.Join(hostileProject, "opencode.json"),
+		path.Join(hostileProject, ".opencode", "opencode.json"),
+	} {
+		b.WriteString("mkdir -p " + shQuote(path.Dir(file)) + "\n")
+		b.WriteString("printf '%s\\n' '{\"plugin\":[]}' >" + shQuote(file) + "\n")
+	}
+	b.WriteString("set +e\n")
+	return hostileSettings{workdir: hostileProject, setup: b.String()}
 }
 
 // claudeCodeHostileSettings plants a user settings file (~/.claude, writable
@@ -89,7 +170,7 @@ var hostileSettingsPlans = map[string]hostileSettings{
 // Each planted program records its label and exits 0, so a knob that diverts
 // a hook swallows it (the hook never reaches the sink) and leaves a trace.
 func claudeCodeHostileSettings() hostileSettings {
-	project := path.Join(harness.WorkRoot, "dc-hookfire-project")
+	project := hostileProject
 	disabledHome := hostileRoot + "/defenseclaw-home"
 	var b strings.Builder
 	b.WriteString("set -e\n")

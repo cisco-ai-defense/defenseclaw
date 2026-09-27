@@ -451,6 +451,112 @@ func TestHookSinkVerdicts(t *testing.T) {
 	}
 }
 
+// TestHookSinkHookOnlyContracts drives the stand-in ingress the way the
+// OpenCode and Amp plugins and the Copilot hook do: the event comes from the
+// body or Copilot's event header, the marker is found in the pre-tool
+// payload wherever the harness puts the tool input, and the deny is shaped
+// for the harness's sandbox hook.
+func TestHookSinkHookOnlyContracts(t *testing.T) {
+	for _, tc := range []struct {
+		harness string
+		path    string
+		header  map[string]string
+		preTool string
+		other   string
+		verdict string
+	}{
+		{"opencode", "/api/v1/opencode/hook", nil,
+			`{"hook_event_name":"tool.execute.before","tool_input":{"command":"echo BLOCKME"}}`,
+			`{"hook_event_name":"tool.execute.after","tool_input":{"command":"echo BLOCKME"}}`,
+			`"hook_output":{"decision":"deny"`},
+		{"copilot", "/api/v1/copilot/hook", map[string]string{"X-DefenseClaw-Copilot-Event": "preToolUse"},
+			`{"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo BLOCKME"}}`,
+			`{"sessionId":"s","prompt":"BLOCKME"}`,
+			`"hook_output":{"permissionDecision":"deny"`},
+		{"amp", "/api/v1/amp/hook", nil,
+			`{"hook_event_name":"tool.call","tool_input":{"cmd":"echo BLOCKME"}}`,
+			`{"hook_event_name":"agent.start","prompt":"BLOCKME"}`,
+			`"action":"block"`},
+	} {
+		t.Run(tc.harness, func(t *testing.T) {
+			sink := &hookSink{token: "tok", contract: hookFireContracts[tc.harness]}
+			sink.begin(&BlockScenario{Marker: "BLOCKME"})
+			post := func(body string, headers map[string]string) string {
+				req, _ := http.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer tok")
+				req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k")
+				for k, v := range headers {
+					req.Header.Set(k, v)
+				}
+				rec := &responseRecorder{header: http.Header{}}
+				sink.ServeHTTP(rec, req)
+				return rec.body.String()
+			}
+			if body := post(tc.preTool, tc.header); !strings.Contains(body, tc.verdict) || !strings.Contains(body, `"action":"block"`) {
+				t.Fatalf("pre-tool verdict = %s", body)
+			}
+			otherHeaders := map[string]string{}
+			if tc.harness == "copilot" {
+				otherHeaders["X-DefenseClaw-Copilot-Event"] = "userPromptSubmitted"
+			}
+			if body := post(tc.other, otherHeaders); body != `{"action":"allow"}` {
+				t.Fatalf("a non-pre-tool hook carrying the marker was answered %s", body)
+			}
+			events, _ := sink.end()
+			if len(events) != 2 || !events[0].Blocked || events[1].Blocked || events[0].Event != hookFireContracts[tc.harness].preTool {
+				t.Fatalf("events = %+v", events)
+			}
+		})
+	}
+	for _, name := range harness.Names() {
+		if _, ok := hookFireContracts[name]; !ok {
+			t.Errorf("harness %s has no hook-fire contract", name)
+		}
+	}
+}
+
+// TestHookFireBuiltinRefusesUnverifiedHarness: Amp cannot be driven by the
+// built-in mock, so the zero-value probe refuses before any container runs
+// and says why; its images stay unverified.
+func TestHookFireBuiltinRefusesUnverifiedHarness(t *testing.T) {
+	c := hookFireContextFor(t, harness.Amp)
+	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		t.Errorf("a container ran: %v", args)
+		return "", 1
+	}}}
+	_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
+	if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), "AMP_API_KEY") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestBuiltinMockLaunchReachesTheMock checks the built-in mock wiring of the
+// Messages-speaking hook-only harnesses: OpenCode's custom provider config
+// and Copilot's offline BYOK environment both point at the mock.
+func TestBuiltinMockLaunchReachesTheMock(t *testing.T) {
+	env, args := builtinMockLaunch["opencode"]("http://127.0.0.2:4242")
+	var cfg struct {
+		Provider map[string]struct {
+			NPM     string            `json:"npm"`
+			Options map[string]string `json:"options"`
+		} `json:"provider"`
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(env["OPENCODE_CONFIG_CONTENT"]), &cfg); err != nil || len(args) != 0 {
+		t.Fatalf("opencode config %q: %v", env["OPENCODE_CONFIG_CONTENT"], err)
+	}
+	if p := cfg.Provider["dcprobe"]; p.NPM != "@ai-sdk/anthropic" || p.Options["baseURL"] != "http://127.0.0.2:4242/v1" || cfg.Model != "dcprobe/claude-sonnet-4-5" {
+		t.Fatalf("opencode provider = %+v model %s", cfg, cfg.Model)
+	}
+	env, _ = builtinMockLaunch["copilot"]("http://127.0.0.2:4242")
+	if env["COPILOT_PROVIDER_BASE_URL"] != "http://127.0.0.2:4242" || env["COPILOT_PROVIDER_TYPE"] != "anthropic" || env["COPILOT_OFFLINE"] != "true" {
+		t.Fatalf("copilot env = %v", env)
+	}
+	if _, ok := builtinMockLaunch["amp"]; ok {
+		t.Fatal("Amp has no model endpoint a mock can serve")
+	}
+}
+
 // verifyDocker simulates a daemon that builds c, runs its static probe, and
 // plays the harness for hook-fire runs through sim. onHookFire, when set,
 // sees each hook-fire argv first and may fail the run with a non-zero exit.
