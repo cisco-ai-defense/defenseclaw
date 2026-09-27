@@ -23,7 +23,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -266,6 +269,7 @@ func (m *Manager) ensureProfileOnce(ctx context.Context, gw *Gateway, p profiles
 			return false, sandboxapi.Errorf(sandboxapi.CodeUnavailable,
 				"the OpenShell provider profile %s is not imported; run `defenseclaw sandbox setup`", p.ID)
 		}
+		m.beforeGlobalImport(ctx, p.ID)
 		if err := m.opts.Profiles.Import(ctx, gw.Name, p, 0); err != nil {
 			// Another daemon may have imported it first.
 			_, gerr := gw.Client.GetProfile(ctx, p.ID)
@@ -295,12 +299,60 @@ func (m *Manager) ensureProfileOnce(ctx context.Context, gw *Gateway, p profiles
 		return false, sandboxapi.Errorf(sandboxapi.CodeUpstream, "the OpenShell provider profile %s has no resource version to update", p.ID)
 	}
 	m.logf("updating provider profile %s (running sandboxes briefly lose open connections)", p.ID)
+	m.beforeGlobalImport(ctx, p.ID)
 	if err := m.opts.Profiles.Import(ctx, gw.Name, want, existing.ResourceVersion); err != nil {
 		now, gerr := gw.Client.GetProfile(ctx, p.ID)
 		raced = openshell.IsNotFound(gerr) || (gerr == nil && now.ResourceVersion != existing.ResourceVersion)
 		return raced, &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "update provider profile " + p.ID, Detail: err.Error()}
 	}
 	return false, nil
+}
+
+// profileQuiesceWait bounds the wait for running sandboxes to go quiet
+// before a global profile import; profileQuiesceIdle is how long each must
+// have had no hook request open.
+const (
+	profileQuiesceWait = 30 * time.Second
+	profileQuiesceIdle = 2 * time.Second
+)
+
+// beforeGlobalImport prepares the running sandboxes for a global provider
+// profile import, which closes the in-flight connections of every running
+// sandbox, a hook request waiting on a verdict included. Each is told on
+// the activity feed, and the import waits (as approvals do, see
+// triage.Batcher) until none of them has a hook request open, bounded by
+// profileQuiesceWait: a sandbox busy that long gets the import anyway.
+func (m *Manager) beforeGlobalImport(ctx context.Context, profileID string) {
+	type running struct{ name, bindingID string }
+	var list []running
+	m.mu.Lock()
+	for _, b := range m.boxes {
+		if !b.creating && !b.deleted && !b.retained && b.phase == audit.SandboxPhaseReady && b.rec.BindingID != "" {
+			list = append(list, running{b.rec.Name, b.rec.BindingID})
+		}
+	}
+	m.mu.Unlock()
+	if len(list) == 0 {
+		return
+	}
+	for _, r := range list {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: r.name, Reason: "profile_import",
+			Message: "a new sandbox imports the provider profile " + profileID + "; this sandbox's open connections are reset once its hooks are quiet"})
+	}
+	if m.opts.Quiesce == nil {
+		return
+	}
+	wctx, cancel := context.WithTimeout(ctx, profileQuiesceWait)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, r := range list {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.opts.Quiesce.WaitQuiescent(wctx, r.bindingID, profileQuiesceIdle)
+		}()
+	}
+	wg.Wait()
 }
 
 func profileBinaries(p openshell.ProviderProfile) []string {
