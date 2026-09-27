@@ -5,6 +5,10 @@
 # plus openshell.egress.allow. Anything else is triaged: known-good
 # destinations are approved automatically and the rest ask. The project
 # folder is still mounted live and the harness runs in skip-permissions mode.
+#
+# The proxy sees HTTPS traffic only as encrypted CONNECT tunnels, so it
+# cannot tell a download from an upload: every host listed here can receive
+# data as well as serve it (see the source hosts below).
 version: 1
 name: balanced
 description: Default-deny web limited to a curated developer allowlist; triaged approvals; live project mount.
@@ -38,7 +42,10 @@ egress:
     - registry-1.docker.io
     - auth.docker.io
     - production.cloudflare.docker.com
-    # Source hosts (fetch)
+    # Source hosts. Listed for clones and downloads, but CONNECT tunnels are
+    # opaque, so pushes and uploads to them pass the proxy too. A push still
+    # needs a credential for the host inside the sandbox (for GitHub,
+    # --github-write).
     - github.com
     - codeload.github.com
     - objects.githubusercontent.com
@@ -60,12 +67,7 @@ workspace:
   # Secret files appear empty inside the sandbox (--unmask PATH shares one).
   masks:
     - .env
-    - .env.local
-    - .env.*.local
-    - .env.development
-    - .env.production
-    - .env.staging
-    - .env.test
+    - .env.*
     - "*.pem"
     - "*.key"
     - "*.p12"
@@ -80,10 +82,20 @@ workspace:
     - .npmrc
     - .pypirc
     - .git-credentials
+    - .pgpass
+    - .vault-token
     - .aws/credentials
+    - .kube/config
+    - .docker/config.json
     - credentials.json
     - service-account*.json
     - "*.tfvars"
+  # Committed templates of masked files stay visible.
+  unmask:
+    - .env.example
+    - .env.sample
+    - .env.template
+    - .env.dist
   # Changed files that can run code on your machine; the end-of-session
   # review lists them before you run anything.
   review:

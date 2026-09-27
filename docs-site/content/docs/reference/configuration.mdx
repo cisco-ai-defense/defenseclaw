@@ -420,9 +420,18 @@ The built-in packs are `open` (the default: open web through the DefenseClaw
 egress proxy with the exfiltration blocklist, live project mount,
 skip-permissions on), `balanced` (a curated developer allowlist, triaged
 approvals), and `strict` (no web beyond the harness provider, manual approvals,
-copy mode, harness prompts kept). A custom pack is one strict YAML file with
-the same sections; unknown keys, duplicate keys, anchors, symbolic links,
-world-writable files, and built-in names are refused.
+copy mode, harness prompts kept). The proxy cannot see inside HTTPS tunnels, so
+the source hosts on the `balanced` allowlist (GitHub, GitLab) accept pushes and
+uploads as well as fetches; a push still needs a credential inside the sandbox.
+Every built-in pack masks common secret files (`.env`, `.env.*`, keys and
+certificates, cloud, Kubernetes and Docker credentials) and keeps committed
+templates such as `.env.example` visible (a pack's `workspace.unmask`).
+
+A custom pack is one strict YAML file with the same sections; unknown keys,
+duplicate keys, anchors, symbolic links, world-writable files, and built-in
+names are refused. The pack file and its directory must belong to you or to
+root; a pack in a directory every user can write to (such as `/tmp`, even with
+the sticky bit) loads only when root owns it.
 
 `workdir.masks`, `workdir.unmask`, and `sandbox run --unmask` take
 project-relative globs with forward slashes, like a pack's masks: absolute

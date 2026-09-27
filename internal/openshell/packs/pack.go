@@ -141,6 +141,10 @@ type WorkspacePolicy struct {
 	Mode string `yaml:"mode" json:"mode"`
 	// Masks are project-relative globs of secret files that appear empty.
 	Masks []string `yaml:"masks" json:"masks"`
+	// Unmask are project-relative globs that stay visible despite a mask,
+	// such as committed templates (.env.example). openshell.workdir.unmask
+	// and --unmask add to them.
+	Unmask []string `yaml:"unmask" json:"unmask"`
 	// Review are project-relative globs of files that can run code on the
 	// host; changes to them are called out at the end of the session.
 	Review []string `yaml:"review" json:"review"`
@@ -285,6 +289,7 @@ type egressFile struct {
 type workspaceFile struct {
 	Mode        *string  `yaml:"mode"`
 	Masks       []string `yaml:"masks"`
+	Unmask      []string `yaml:"unmask"`
 	Review      []string `yaml:"review"`
 	MaxUploadMB *int     `yaml:"max_upload_mb"`
 }
@@ -377,6 +382,7 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 	}
 	p.Workspace.Mode = v.enum("workspace.mode", workspace.Mode, config.OpenShellWorkdirMount, config.OpenShellWorkdirCopy)
 	p.Workspace.Masks = v.projectGlobs("workspace.masks", workspace.Masks)
+	p.Workspace.Unmask = v.projectGlobs("workspace.unmask", workspace.Unmask)
 	p.Workspace.Review = v.projectGlobs("workspace.review", workspace.Review)
 	p.Workspace.MaxUploadMB = defaultMaxUploadMB
 	if workspace.MaxUploadMB != nil {

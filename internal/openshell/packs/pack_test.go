@@ -18,6 +18,7 @@ package packs
 
 import (
 	"errors"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -89,10 +90,21 @@ func TestBuiltinPacksLoad(t *testing.T) {
 			if pack.Hooks.FailMode != FailModeClosed || !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
 				t.Fatalf("hooks %q feeds %v", pack.Hooks.FailMode, pack.Egress.Feeds)
 			}
-			for _, mask := range []string{".env", "*.pem", ".aws/credentials"} {
-				if !slices.Contains(pack.Workspace.Masks, mask) {
-					t.Fatalf("masks %v lack %q", pack.Workspace.Masks, mask)
+			for _, file := range []string{
+				".env", ".env.local", ".env.prod", ".env.dev", ".env.production.local", "server.pem",
+				".aws/credentials", ".kube/config", ".docker/config.json", ".pgpass", ".vault-token",
+			} {
+				if !matchesAnyGlob(pack.Workspace.Masks, file) {
+					t.Fatalf("masks %v do not cover %q", pack.Workspace.Masks, file)
 				}
+			}
+			for _, file := range []string{".env.example", ".env.sample", ".env.template", ".env.dist"} {
+				if !matchesAnyGlob(pack.Workspace.Unmask, file) {
+					t.Fatalf("unmask %v does not cover the template %q", pack.Workspace.Unmask, file)
+				}
+			}
+			if matchesAnyGlob(pack.Workspace.Unmask, ".env") || matchesAnyGlob(pack.Workspace.Unmask, ".env.prod") {
+				t.Fatalf("unmask %v shares a secret file", pack.Workspace.Unmask)
 			}
 			for _, review := range []string{"package.json", ".envrc", ".github/workflows/**"} {
 				if !slices.Contains(pack.Workspace.Review, review) {
@@ -116,6 +128,17 @@ func TestBuiltinPacksLoad(t *testing.T) {
 	}
 }
 
+// matchesAnyGlob reports whether a project-relative file matches one of the
+// globs ("*" within one path segment).
+func matchesAnyGlob(globs []string, file string) bool {
+	for _, glob := range globs {
+		if ok, err := path.Match(glob, file); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParseRejectsDuplicateTopLevelKeys(t *testing.T) {
 	_, err := Parse([]byte(minimalPack+"harness: {yolo: false}\n"), "test")
 	wantPackError(t, err, "yaml_duplicate", "harness")
@@ -134,6 +157,7 @@ egress:
 workspace:
   mode: copy
   masks: [" .env ", .env]
+  unmask: [.env.example, " .env.example "]
   review: [Makefile]
   max_upload_mb: 50
 harness: {yolo: false, allowed: [claude-code, codex, claudecode]}
@@ -159,7 +183,8 @@ hooks: {fail_mode: closed}
 	if !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
 		t.Fatalf("absent feeds must default to builtin, got %v", pack.Egress.Feeds)
 	}
-	if !reflect.DeepEqual(pack.Workspace.Masks, []string{".env"}) || pack.Workspace.MaxUploadMB != 50 {
+	if !reflect.DeepEqual(pack.Workspace.Masks, []string{".env"}) || !reflect.DeepEqual(pack.Workspace.Unmask, []string{".env.example"}) ||
+		pack.Workspace.MaxUploadMB != 50 {
 		t.Fatalf("workspace = %+v", pack.Workspace)
 	}
 	if !reflect.DeepEqual(pack.Harness.Allowed, []string{"claudecode", "codex"}) {
@@ -230,6 +255,7 @@ func TestParseRejects(t *testing.T) {
 		{"absolute mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: [/etc/passwd]}"), "invalid_value", "workspace.masks[0]"},
 		{"home mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['~/.ssh/*']}"), "invalid_value", "workspace.masks[0]"},
 		{"escaping review", replace("workspace: {mode: mount}", "workspace: {mode: mount, review: ['../x']}"), "invalid_value", "workspace.review[0]"},
+		{"absolute unmask", replace("workspace: {mode: mount}", "workspace: {mode: mount, unmask: [.env.example, /srv/app/.env]}"), "invalid_value", "workspace.unmask[1]"},
 		{"backslash mask", replace("workspace: {mode: mount}", `workspace: {mode: mount, masks: ['a\b']}`), "invalid_value", "workspace.masks[0]"},
 		{"drive letter mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['C:/x']}"), "invalid_value", "workspace.masks[0]"},
 		{"empty mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['  ']}"), "invalid_value", "workspace.masks[0]"},

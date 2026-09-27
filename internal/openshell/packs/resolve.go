@@ -78,7 +78,8 @@ type Flags struct {
 	Safe bool
 	// Yolo explicitly asks for skip-permissions mode.
 	Yolo bool
-	// Unmask are --unmask project paths.
+	// Unmask are --unmask project-relative globs (see
+	// config.ValidateOpenShellProjectGlob).
 	Unmask []string
 	// HostPorts are --host-port ports.
 	HostPorts []int
@@ -862,11 +863,16 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	ws.Masks = mergeLists(pack.Workspace.Masks, o.Workdir.Masks)
 	r.set("workdir.masks", listValue(ws.Masks), mergedLayer(r.packLayer, len(o.Workdir.Masks) > 0, "openshell.workdir.masks"))
 
-	ws.Unmask = mergeLists(o.Workdir.Unmask, flags.Unmask)
+	ws.Unmask = mergeLists(pack.Workspace.Unmask, o.Workdir.Unmask, flags.Unmask)
 	unmaskFrom := layerDefault
+	if len(pack.Workspace.Unmask) > 0 {
+		unmaskFrom = r.packLayer
+	}
 	switch {
 	case len(flags.Unmask) > 0:
 		unmaskFrom = layer{SourceFlag, "--unmask"}
+	case len(o.Workdir.Unmask) > 0 && len(pack.Workspace.Unmask) > 0:
+		unmaskFrom = mergedLayer(r.packLayer, true, "openshell.workdir.unmask")
 	case len(o.Workdir.Unmask) > 0:
 		unmaskFrom = layer{SourceUser, "openshell.workdir.unmask"}
 	}

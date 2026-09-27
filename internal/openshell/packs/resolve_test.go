@@ -68,6 +68,14 @@ func onlyViolation(t *testing.T, violations []Violation) Violation {
 	return violations[0]
 }
 
+// teamPackDir returns a pack_dir holding the minimal custom pack "team".
+func teamPackDir(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writePack(t, root, "team", customPack("team"))
+	return root
+}
+
 func TestResolveDefaults(t *testing.T) {
 	eff, violations := mustResolve(t, testConfig(nil), Flags{})
 	if len(violations) != 0 {
@@ -88,7 +96,7 @@ func TestResolveDefaults(t *testing.T) {
 		t.Fatalf("egress = %+v", eff.Egress)
 	}
 	if eff.Workspace.MaxUploadMB != 500 || eff.Workspace.GitDepth != 200 || eff.Workspace.OnExit != "ask" ||
-		len(eff.Workspace.Unmask) != 0 || !containsString(eff.Workspace.Masks, ".env") {
+		!containsString(eff.Workspace.Unmask, ".env.example") || !containsString(eff.Workspace.Masks, ".env.*") {
 		t.Fatalf("workspace = %+v", eff.Workspace)
 	}
 	if eff.Resources != (Resources{}) || len(eff.MCP.HostPorts) != 0 {
@@ -100,7 +108,7 @@ func TestResolveDefaults(t *testing.T) {
 	wantSetting(t, eff, "pack", "open", SourceDefault, "default pack")
 	wantSetting(t, eff, "profile", "open", SourcePack, "pack open")
 	wantSetting(t, eff, "yolo", "true", SourcePack, "pack open")
-	wantSetting(t, eff, "workdir.unmask", "(none)", SourceDefault, "")
+	wantSetting(t, eff, "workdir.unmask", ".env.example, .env.sample, .env.template, .env.dist", SourcePack, "pack open")
 	wantSetting(t, eff, "workdir.git_depth", "200", SourceDefault, "")
 	wantSetting(t, eff, "mcp.host_ports", "(none)", SourceDefault, "")
 	wantSetting(t, eff, "resources.cpu", "(unlimited)", SourceDefault, "")
@@ -139,8 +147,12 @@ func TestResolveLayering(t *testing.T) {
 		{"workdir by user", func(o *config.OpenShellConfig) { o.Workdir.Mode = "copy" }, Flags{}, "workdir.mode", "copy", SourceUser, "openshell.workdir.mode"},
 		{"workdir by flag", nil, Flags{Copy: true}, "workdir.mode", "copy", SourceFlag, "--copy"},
 		{"masks merge", func(o *config.OpenShellConfig) { o.Workdir.Masks = []string{"secrets/**"} }, Flags{}, "workdir.masks", "", SourceUser, "pack open + openshell.workdir.masks"},
-		{"unmask by user", func(o *config.OpenShellConfig) { o.Workdir.Unmask = []string{".env.example"} }, Flags{}, "workdir.unmask", ".env.example", SourceUser, "openshell.workdir.unmask"},
-		{"unmask merge flag", func(o *config.OpenShellConfig) { o.Workdir.Unmask = []string{".env.example"} }, Flags{Unmask: []string{"certs/dev.pem", ".env.example"}}, "workdir.unmask", ".env.example, certs/dev.pem", SourceFlag, "--unmask"},
+		{"unmask by user", func(o *config.OpenShellConfig) { o.Workdir.Unmask = []string{"certs/dev.pem"} }, Flags{}, "workdir.unmask", "", SourceUser, "pack open + openshell.workdir.unmask"},
+		{"unmask by user over a pack without unmask", func(o *config.OpenShellConfig) {
+			o.Pack, o.PackDir = "team", teamPackDir(t)
+			o.Workdir.Unmask = []string{"certs/dev.pem"}
+		}, Flags{}, "workdir.unmask", "certs/dev.pem", SourceUser, "openshell.workdir.unmask"},
+		{"unmask merge flag", func(o *config.OpenShellConfig) { o.Workdir.Unmask = []string{".env.example"} }, Flags{Unmask: []string{"certs/dev.pem", ".env.example"}}, "workdir.unmask", ".env.example, .env.sample, .env.template, .env.dist, certs/dev.pem", SourceFlag, "--unmask"},
 		{"upload cap by user", func(o *config.OpenShellConfig) { o.Workdir.MaxUploadMB = 50 }, Flags{}, "workdir.max_upload_mb", "50", SourceUser, ""},
 		{"git depth by user", func(o *config.OpenShellConfig) { o.Workdir.GitDepth = 20 }, Flags{}, "workdir.git_depth", "20", SourceUser, ""},
 		{"on exit by user", func(o *config.OpenShellConfig) { o.Workdir.OnExit = "keep" }, Flags{}, "workdir.on_exit", "keep", SourceUser, ""},
@@ -591,7 +603,7 @@ func TestResolveLockedFlags(t *testing.T) {
 		t.Fatalf("locked violations = %v, want %v", attempted, want)
 	}
 	if eff.Pack.Name != "balanced" || eff.Profile != "balanced" || !eff.Yolo || eff.Workspace.Mode != "mount" ||
-		len(eff.Workspace.Unmask) != 0 || !eff.MCP.Import || !reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) ||
+		containsString(eff.Workspace.Unmask, ".env") || !eff.MCP.Import || !reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) ||
 		eff.Resources != (Resources{CPU: "2"}) {
 		t.Fatalf("locked values were overridden: %+v", eff)
 	}
