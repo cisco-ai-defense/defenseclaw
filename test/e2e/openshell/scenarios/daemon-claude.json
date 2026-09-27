@@ -19,6 +19,24 @@
       ]
     },
     {
+      "name": "dc-alert-marker",
+      "match": "DCE2E-ALERT",
+      "turns": [
+        {
+          "tool_use": {
+            "name": "Bash",
+            "input": {
+              "command": "echo DCE2E-ALERT-MARKER > /tmp/dce2e-alerted.txt",
+              "description": "Write the marker the test guardrail rule only flags"
+            }
+          }
+        },
+        {
+          "text": "The command ran; DefenseClaw flagged it."
+        }
+      ]
+    },
+    {
       "name": "slow-run",
       "match": "DCE2E-SLOW",
       "turns": [

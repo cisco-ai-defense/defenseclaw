@@ -37,6 +37,9 @@
 //     (testdata/guardrail-e2e-marker.yaml) blocks, denied by the hook with a
 //     plain reason (rule, title, what to do instead) that reaches the model,
 //     last_blocked and the activity feed;
+//   - a second marker command the test rule only flags (HIGH, an advisory
+//     alert): the image's hook prints the notice and exits 0, the harness's
+//     tool call runs, and nothing counts as blocked or as a failed hook;
 //   - hook tamper: a PostToolUse for a harmless marker call whose PreToolUse
 //     never reached DefenseClaw raises a hook_tamper finding; the open pack
 //     alerts and keeps the sandbox running;
@@ -102,6 +105,9 @@ import (
 const (
 	blockedMarkerFile = "/tmp/dce2e-blocked.txt"
 	allowedMarkerFile = "/tmp/dce2e-allowed.txt"
+	// alertedMarkerFile is written by the DCE2E-ALERT scenario's tool call,
+	// which the test rule E2E-SANDBOX-ALERT only flags.
+	alertedMarkerFile = "/tmp/dce2e-alerted.txt"
 	// repoMCPMarker is written by the project's .mcp.json server if it ever
 	// starts.
 	repoMCPMarker = "/tmp/dce2e-repo-mcp.txt"
@@ -186,6 +192,7 @@ func TestSandboxDaemon(t *testing.T) {
 	e.step("hook reaches the ingress", func() { e.hookReachesIngress(sb) })
 	e.step("per-run managed configuration", func() { e.runConfig(sb) })
 	e.step("DefenseClaw blocks the marker command", func() { e.blockedToolCall(sb) })
+	e.step("an alert lets the tool run", func() { e.alertedToolCall(sb) })
 	e.step("hook tamper raises an alert", func() { e.tamperAlert(sb) })
 	e.step("egress through the proxy", func() { e.egressThroughProxy(sb) })
 	e.step("shells get the egress proxy", func() { e.shellEnvironment(sb) })
@@ -630,6 +637,51 @@ func (e *env) blockedToolCall(sb *sandboxapi.Sandbox) {
 	}
 	t.Logf("blocked: tool_blocked %d → %d; the model was told %q; harness said %q",
 		before.ToolBlocked, after.ToolBlocked, truncate(told, 200), out)
+}
+
+// alertedToolCall: an advisory finding (the test rule's HIGH, which the
+// default guardrail profile answers with alert and would_block false) never
+// blocks. The image's Claude Code hook, run by hand with the daemon's
+// verdict, prints the notice and exits 0; the harness's tool call runs; and
+// neither counts as blocked or as a failed hook.
+func (e *env) alertedToolCall(sb *sandboxapi.Sandbox) {
+	t := e.t
+	before := e.get(sb.Name).Hooks
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"session_id": "dce2e-alert-" + hex.EncodeToString(raw[:4]), "transcript_path": "/tmp/dce2e-alert.jsonl",
+		"cwd": sb.Workdir, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_use_id": "toolu_dce2e_alert_" + hex.EncodeToString(raw[:]),
+		"tool_input":  map[string]any{"command": "echo DCE2E-ALERT-MARKER", "description": "Harmless alert marker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The payload travels as an argument: exec stdin must stay closed.
+	script := `printf '%s' "$1" > /tmp/dce2e-alert.json && "$2" < /tmp/dce2e-alert.json`
+	res := e.exec(sb, time.Minute, false, "sh", "-c", script, "sh", string(payload), path.Join(connector.SandboxHookDir, "claude-code-hook.sh"))
+	var notice struct {
+		SystemMessage string `json:"systemMessage"`
+	}
+	if res.code != 0 || json.Unmarshal([]byte(strings.TrimSpace(res.stdout)), &notice) != nil ||
+		!strings.Contains(notice.SystemMessage, "E2E-SANDBOX-ALERT") {
+		t.Fatalf("the PreToolUse hook for the alert marker exited %d with %q, want 0 and the notice naming E2E-SANDBOX-ALERT",
+			res.code, truncate(res.stdout, 300))
+	}
+
+	out := e.harness(sb, "Run the DCE2E-ALERT scenario.")
+	if got := e.exec(sb, 30*time.Second, true, "cat", alertedMarkerFile); strings.TrimSpace(got.stdout) != "DCE2E-ALERT-MARKER" {
+		t.Fatalf("the alerted tool call did not run: %s holds %q (harness said %q)", alertedMarkerFile, got.stdout, out)
+	}
+	after := e.waitHooks(sb.Name, func(h sandboxapi.HookCoverage) bool { return h.ToolCalls >= before.ToolCalls+2 })
+	if after.ToolBlocked != before.ToolBlocked || after.HookFailed != before.HookFailed {
+		t.Fatalf("an alert counted as a block or a failed hook: %+v → %+v", before, after)
+	}
+	t.Logf("alert: the hook said %q; tool_calls %d → %d; harness said %q", truncate(notice.SystemMessage, 200),
+		before.ToolCalls, after.ToolCalls, out)
 }
 
 // tamperAlert: in the open pack (hooks.on_tamper: alert) a tool call whose
