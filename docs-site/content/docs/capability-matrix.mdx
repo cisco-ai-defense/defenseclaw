@@ -105,15 +105,21 @@ pending in the matrix above.
 - **Unverified.** These harnesses send every request, the account check
   included, to their vendor's service and need an account before the first
   turn, so no mock model can drive them. Their images build but never pass the
-  hook check, and `sandbox run` refuses them until a check with a vendor
-  account passes.
+  hook check: `sandbox run` builds the image (several GB), then refuses it
+  until a check with a vendor account passes, and the unverified image stays
+  until you remove it (see the connector page).
 - **Not tested live.** A sign-in path whose endpoints or login no live run
   exercised, because no account was available. The connector page says which
   sign-ins `defenseclaw sandbox run` shares.
-- **Setup defaults.** `defenseclaw sandbox setup`, the image commands and the
-  sandbox doctor cover Claude Code and Codex unless you name other harnesses
-  with `--harness` or the `openshell.harnesses` setting. The TUI and macOS
-  setup wizards offer Claude Code and Codex.
+- **Setup defaults.** The `openshell.harnesses` setting (Claude Code and Codex
+  when empty) decides which images `defenseclaw sandbox setup` and a bare
+  `defenseclaw sandbox image build` build and which ones
+  `defenseclaw sandbox doctor` checks. `sandbox setup` writes that list: its
+  `--harness` (repeatable) replaces it, so name every harness you want.
+  `sandbox image build <harness>...` builds the harnesses you name without
+  changing it, and `sandbox run` builds a missing image on the first run. The
+  TUI and macOS setup wizards list only Claude Code and Codex, and a wizard
+  run replaces `openshell.harnesses` with the ones you tick.
 
 Every sandbox hook fails closed.
 
