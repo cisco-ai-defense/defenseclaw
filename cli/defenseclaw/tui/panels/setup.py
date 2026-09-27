@@ -1227,6 +1227,10 @@ class SetupPanelModel:
                 return
 
     def close_wizard_form(self) -> None:
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Setup, or the operator, may change the machine before the
+            # wizard opens again: check it again then.
+            self.sandbox_machine = None
         self.form_fields = []
         self.form_cursor = 0
         self.form_active = False

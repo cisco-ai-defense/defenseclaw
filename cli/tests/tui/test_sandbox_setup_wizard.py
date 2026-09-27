@@ -227,10 +227,11 @@ def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
     model.apply_sandbox_machine_check(sandbox_machine_check(NO_OPENSHELL))
     model.recompute_dependent_fields()
     assert _row(model, "Install OpenShell").value == "no"
-    # Reopening the wizard starts from the check again.
+    # Setup may have changed the machine: reopening the wizard checks it again.
     model.close_wizard_form()
     model.open_goal_menu(SetupWizard.SANDBOX)
-    assert _row(model, "Install OpenShell").value == "yes"
+    assert model.sandbox_machine_wanted()
+    assert _row(model, "This machine").value.startswith("Checking this machine")
 
 
 def test_an_installed_openshell_needs_no_install() -> None:
