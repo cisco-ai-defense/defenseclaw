@@ -369,7 +369,8 @@ const (
 	SandboxFindingTamperAttempt SandboxFindingKind = "tamper_attempt"
 	// SandboxFindingHookSilence is harness activity with no hook traffic.
 	SandboxFindingHookSilence SandboxFindingKind = "hook_silence"
-	// SandboxFindingHookTamper is a PostToolUse for a denied or never-seen PreToolUse.
+	// SandboxFindingHookTamper is a tool that ran without a DefenseClaw
+	// verdict: a PostToolUse whose PreToolUse was denied or never arrived.
 	SandboxFindingHookTamper SandboxFindingKind = "hook_tamper"
 	// SandboxFindingLargeUpload is a large upload to a first-seen host.
 	SandboxFindingLargeUpload SandboxFindingKind = "large_upload"
@@ -1441,7 +1442,7 @@ func (operation SandboxPolicyOperation) valid() bool {
 func (kind SandboxFindingKind) valid() bool {
 	switch kind {
 	case SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingLargeUpload:
+		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload:
 		return true
 	default:
 		return false

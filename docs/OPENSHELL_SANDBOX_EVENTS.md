@@ -170,6 +170,7 @@ whole (for example the watch stream) has no sandbox name.
 | `binary_drift` | A harness binary whose hash left its pin | `SANDBOX-BINARY-DRIFT` |
 | `tamper_attempt` | An attempt to alter hooks or managed config | `SANDBOX-TAMPER-ATTEMPT` |
 | `hook_silence` | Harness activity with no hook traffic | `SANDBOX-HOOK-SILENCE` |
+| `hook_tamper` | A tool that ran without a DefenseClaw verdict: a `PostToolUse` whose `PreToolUse` was denied or never arrived | `SANDBOX-HOOK-TAMPER` |
 | `large_upload` | A large upload to a first-seen host | `SANDBOX-LARGE-UPLOAD` |
 
 A finding requires a severity (INFO, LOW, MEDIUM, HIGH or CRITICAL). A

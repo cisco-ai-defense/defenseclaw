@@ -1132,7 +1132,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 	harness := newSandboxHarness(t)
 	for _, kind := range []SandboxFindingKind{
 		SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingLargeUpload,
+		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
 			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
