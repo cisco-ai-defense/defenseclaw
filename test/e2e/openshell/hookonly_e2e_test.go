@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -75,6 +76,9 @@ func TestSandboxHookOnlyHarness(t *testing.T) {
 		spec:    spec, launchArgs: wiring.args,
 		mockModel: "mock_chat.py", mockScript: "daemon-hookonly.json",
 		tokenDelivery: e2eTokenDelivery(t),
+	}
+	if !openshell.ValidNewSandboxName(e.prefix) {
+		t.Fatalf("DEFENSECLAW_E2E_PREFIX %q is no sandbox name OpenShell creates (at most %d characters)", e.prefix, openshell.MaxSandboxNameLen)
 	}
 	e.repo = repoRoot(t)
 	e.work = filepath.Join(work, e.prefix)

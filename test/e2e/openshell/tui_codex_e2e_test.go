@@ -101,8 +101,8 @@ func TestSandboxTUICodex(t *testing.T) {
 		mock:          envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921) + 300,
 		tokenDelivery: e2eTokenDelivery(t),
 	}
-	if !openshell.ValidSandboxName(e.prefix + "-y") {
-		t.Fatalf("DEFENSECLAW_E2E_PREFIX %q does not make valid sandbox names", e.prefix)
+	if !openshell.ValidNewSandboxName(e.prefix + "-y") {
+		t.Fatalf("DEFENSECLAW_E2E_PREFIX %q does not make sandbox names OpenShell creates (at most %d characters)", e.prefix, openshell.MaxSandboxNameLen)
 	}
 	e.repo = repoRoot(t)
 	e.work = filepath.Join(work, e.prefix)

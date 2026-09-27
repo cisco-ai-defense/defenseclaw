@@ -60,8 +60,8 @@ func TestTwoDaemonsOneGateway(t *testing.T) {
 			t: t, root: t, prefix: prefix + "-" + id, repo: repo, tokenDelivery: delivery,
 			apiPort: apiPort + 20*i, mock: mock + 20*i,
 		}
-		if !openshell.ValidSandboxName(e.prefix + stopSuffix) {
-			t.Fatalf("DEFENSECLAW_E2E_PREFIX %q does not make valid sandbox names", prefix)
+		if !openshell.ValidNewSandboxName(e.prefix + stopSuffix) {
+			t.Fatalf("DEFENSECLAW_E2E_PREFIX %q does not make sandbox names OpenShell creates (at most %d characters)", prefix, openshell.MaxSandboxNameLen)
 		}
 		e.work = filepath.Join(work, e.prefix)
 		pair = append(pair, e)

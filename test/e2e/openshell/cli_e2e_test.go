@@ -612,9 +612,11 @@ func (c *cliEnv) approvalsPolicy() {
 	if !strings.Contains(explain, "SETTING") || !strings.Contains(explain, "profile") {
 		t.Fatalf("policy explain:\n%s", explain)
 	}
+	// The table and the constraints fit 120 columns; only warnings, which
+	// are sentences, may wrap.
 	for _, line := range strings.Split(explain, "\n") {
-		if len([]rune(line)) > 220 {
-			t.Fatalf("policy explain line of %d characters:\n%s", len([]rune(line)), truncate(line, 300))
+		if n := len([]rune(line)); n > 120 && !strings.HasPrefix(line, "  ⚠") {
+			t.Fatalf("policy explain line of %d characters:\n%s", n, truncate(line, 300))
 		}
 	}
 	// Keys longer than the old 14-character column no longer run into
