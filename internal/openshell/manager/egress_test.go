@@ -82,7 +82,7 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	proxy := &fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})}
 	e.m.AttachProxy(proxy)
 	e.create(sandboxapi.CreateRequest{Name: "egbox"})
-	e.create(sandboxapi.CreateRequest{Name: "otherbox"})
+	e.create(sandboxapi.CreateRequest{Name: "otherbox", Project: e.otherProject("other")})
 	if proxy.current() == nil {
 		t.Fatal("no default decider set")
 	}

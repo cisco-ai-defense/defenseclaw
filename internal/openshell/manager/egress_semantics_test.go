@@ -349,8 +349,8 @@ func TestPerSandboxDeciders(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
 	proxy := startLiveProxy(t, e)
 	e.create(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
-	e.create(sandboxapi.CreateRequest{Name: "openbox"})
-	e.create(sandboxapi.CreateRequest{Name: "balbox", Profile: "balanced"})
+	e.create(sandboxapi.CreateRequest{Name: "openbox", Project: e.otherProject("open")})
+	e.create(sandboxapi.CreateRequest{Name: "balbox", Profile: "balanced", Project: e.otherProject("bal")})
 	for _, tc := range []struct {
 		sandbox, target string
 		allowed         bool
@@ -378,7 +378,7 @@ func TestPerSandboxDeciders(t *testing.T) {
 	if status, _ := proxy.connect(t, e, "balbox", "example.org:443"); status != http.StatusOK {
 		t.Fatalf("balbox after its unblock = %d", status)
 	}
-	e.create(sandboxapi.CreateRequest{Name: "balbox2", Profile: "balanced"})
+	e.create(sandboxapi.CreateRequest{Name: "balbox2", Profile: "balanced", Project: e.otherProject("bal2")})
 	if status, _ := proxy.connect(t, e, "balbox2", "example.org:443"); status != http.StatusForbidden {
 		t.Fatalf("another sandbox got balbox's unblock: %d", status)
 	}
@@ -396,7 +396,7 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 	e.run()
 	proxy := startLiveProxy(t, e)
 	e.create(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
-	e.create(sandboxapi.CreateRequest{Name: "openbox"})
+	e.create(sandboxapi.CreateRequest{Name: "openbox", Project: e.otherProject("open")})
 	e.watch.waitStarted(t, "teambox")
 	blocked := addChunk(e, "teambox", chunk("allow_example_org_443", "example.org", 443))
 	kept := addChunk(e, "teambox", chunk("allow_keep_example_net_443", "keep.example.net", 443))

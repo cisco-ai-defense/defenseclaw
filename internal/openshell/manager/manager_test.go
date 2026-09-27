@@ -847,7 +847,7 @@ func TestReconcileKeepsSandboxesCreatedDuringThePass(t *testing.T) {
 	if err != nil || len(snapshot) != 1 {
 		t.Fatalf("list = %v, %v", snapshot, err)
 	}
-	e.create(sandboxapi.CreateRequest{Name: "late"})
+	e.create(sandboxapi.CreateRequest{Name: "late", Project: e.otherProject("late")})
 	ingress, _ := e.client.GetProvider(context.Background(), "late-ingress")
 	token := ingress.Spec.Credentials[openshell.EnvSandboxToken]
 	e.gw.Client = staleList{Client: e.client, list: snapshot}

@@ -759,6 +759,21 @@ func (e *harnessEnv) create(req sandboxapi.CreateRequest) *sandboxapi.Sandbox {
 	return sb
 }
 
+// otherProject makes another project folder, for a second live-mounted
+// sandbox (two sandboxes never mount one folder).
+func (e *harnessEnv) otherProject(name string) string {
+	e.t.Helper()
+	dir := filepath.Join(e.t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return real
+}
+
 func (e *harnessEnv) providers() []string {
 	e.t.Helper()
 	list, err := e.client.ListProviders(context.Background())

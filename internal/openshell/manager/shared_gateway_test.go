@@ -73,11 +73,15 @@ func TestTwoDaemonsShareAGateway(t *testing.T) {
 	)
 	for id, e := range daemons {
 		for i := 1; i <= 2; i++ {
+			// Each sandbox mounts its own folder: one folder is mounted
+			// live by one sandbox at a time.
+			name := fmt.Sprintf("pn-%s-%d", id, i)
+			project := e.otherProject(name)
 			wg.Add(1)
-			go func(e *harnessEnv, name string) {
+			go func(e *harnessEnv, name, project string) {
 				defer wg.Done()
 				_, err := e.m.Create(ctx, sandboxapi.CreateRequest{
-					Name: name, Harness: "claudecode", Project: e.project,
+					Name: name, Harness: "claudecode", Project: project,
 					LLM:         &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-" + name}},
 					Credentials: []sandboxapi.CredentialBinding{{Name: "STRIPE_API_KEY", Value: "stripe-" + name, Host: "api.stripe.com"}},
 				})
@@ -86,7 +90,7 @@ func TestTwoDaemonsShareAGateway(t *testing.T) {
 					errs = append(errs, name+": "+err.Error())
 					mu.Unlock()
 				}
-			}(e, fmt.Sprintf("pn-%s-%d", id, i))
+			}(e, name, project)
 		}
 	}
 	wg.Wait()

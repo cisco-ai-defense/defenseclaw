@@ -143,7 +143,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 			"sandbox name %q must be lowercase letters, digits and '-', at most 63 characters", name)
 	}
-	b, err := m.reserve(name)
+	b, err := m.reserve(name, project, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +155,17 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 			m.release(name, b)
 		}
 	}()
+	// Two live mounts of one folder would each undo the other's running
+	// work, and each review would mix in the other's changes. The check
+	// runs after the reservation, which records the project, so two
+	// concurrent creates on one folder see each other.
+	if mode == config.OpenShellWorkdirMount {
+		if other := m.sharingMount(b, project, false); other != "" {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+				"sandbox %s already mounts %s (or a folder inside or around it) live; run this one with --copy, or delete %s first",
+				other, project, other)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, defaultCreateTimeout)
 	defer cancel()
@@ -677,7 +688,8 @@ func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider
 }
 
 // reserve claims name for a create.
-func (m *Manager) reserve(name string) (*box, error) {
+// reserve claims name for a create of project in the given workdir mode.
+func (m *Manager) reserve(name, project, mode string) (*box, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if old, ok := m.boxes[name]; ok {
@@ -687,9 +699,50 @@ func (m *Manager) reserve(name string) (*box, error) {
 		}
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "a sandbox named %s already exists", name)
 	}
-	b := &box{rec: record{Name: name}, creating: true, seenChunks: map[string]struct{}{}}
+	b := &box{rec: record{Name: name, Project: project, WorkdirMode: mode}, creating: true, seenChunks: map[string]struct{}{}}
 	m.boxes[name] = b
 	return b, nil
+}
+
+// sharingMount returns another sandbox that mounts project, or a folder
+// inside or around it, live; with running, only one whose workload may
+// still run (not stopped, and not only a kept snapshot). Callers must not
+// hold Manager.mu: the comparison reads the filesystem.
+func (m *Manager) sharingMount(b *box, project string, running bool) string {
+	type share struct{ name, project string }
+	var others []share
+	m.mu.Lock()
+	for _, o := range m.boxes {
+		if o == b || o.deleted || o.retained || o.rec.WorkdirMode != config.OpenShellWorkdirMount || o.rec.Project == "" {
+			continue
+		}
+		if running && !o.creating && stoppedAuditPhase(o) {
+			continue
+		}
+		others = append(others, share{o.rec.Name, o.rec.Project})
+	}
+	m.mu.Unlock()
+	sort.Slice(others, func(i, j int) bool { return others[i].name < others[j].name })
+	for _, o := range others {
+		if workspace.Overlaps(project, o.project) {
+			return o.name
+		}
+	}
+	return ""
+}
+
+// stoppedAuditPhase reports a box whose workload does not run. Callers hold
+// Manager.mu.
+func stoppedAuditPhase(b *box) bool {
+	phase := b.phase
+	if phase == "" {
+		phase = audit.SandboxPhase(b.rec.Phase)
+	}
+	switch phase {
+	case audit.SandboxPhaseStopped, audit.SandboxPhaseCompleted, audit.SandboxPhaseError, audit.SandboxPhaseDeleted:
+		return true
+	}
+	return false
 }
 
 func (m *Manager) release(name string, b *box) {

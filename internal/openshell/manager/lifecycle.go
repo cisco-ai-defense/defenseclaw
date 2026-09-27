@@ -623,6 +623,14 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 	if rec.WorkdirMode != config.OpenShellWorkdirMount {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "undo applies to mounted projects; a copy-mode sandbox never changed the folder")
 	}
+	// Undo restores the whole folder: another sandbox mounting it (or a
+	// folder inside or around it) must not be running meanwhile.
+	if !req.Preview {
+		if other := m.sharingMount(b, rec.Project, true); other != "" {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+				"sandbox %s also mounts %s and may be running; stop it before undoing, because undo restores the whole folder", other, rec.Project)
+		}
+	}
 	// Ask OpenShell whether the agent can still write to the folder. A
 	// retained box has no sandbox left (a live one under its name is
 	// another sandbox), so there is nothing to stop or restart.

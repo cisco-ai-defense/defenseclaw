@@ -18,6 +18,10 @@ package manager
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,7 +75,7 @@ func TestStartRefusesARunningSandbox(t *testing.T) {
 // create, which may build an image for up to defaultCreateTimeout.
 func TestLifecycleCallsDuringCreateFailFast(t *testing.T) {
 	e := newEnv(t, nil)
-	b, err := e.m.reserve("slowbox")
+	b, err := e.m.reserve("slowbox", e.project, "mount")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,5 +130,59 @@ func TestFailedStopRestoresThePhase(t *testing.T) {
 	}
 	if tamperStop {
 		t.Fatal("a failed stop keeps later tamper alarms from stopping the sandbox")
+	}
+}
+
+// TestOneLiveMountPerFolder pins that a folder (or one inside or around it)
+// a sandbox mounts live cannot be mounted live by a second one: its undo
+// would restore the folder under the other's running agent. Copy mode is
+// still offered.
+func TestOneLiveMountPerFolder(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "firstbox"})
+	sub := filepath.Join(e.project, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range []string{e.project, sub} {
+		_, err := e.m.Create(ctx, sandboxapi.CreateRequest{Name: "secondbox", Harness: "claudecode", Project: project})
+		if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Message, "--copy") {
+			t.Fatalf("refusal = %q", apiErr.Message)
+		}
+	}
+	if _, err := e.m.Get(ctx, "secondbox"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("the refused create left a box: %v", err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "copybox", Copy: true})
+	if _, err := e.m.Delete(ctx, "firstbox", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "secondbox"})
+}
+
+// TestUndoWaitsForOtherSandboxesOfTheFolder pins that undo, which restores
+// the whole folder, is refused while another sandbox mounting it may run.
+func TestUndoWaitsForOtherSandboxesOfTheFolder(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "oldbox"})
+	if _, err := e.m.Delete(ctx, "oldbox", sandboxapi.DeleteRequest{KeepSnapshot: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "newbox"})
+	_, err := e.m.Undo(ctx, "oldbox", sandboxapi.UndoRequest{})
+	wantCode(t, err, sandboxapi.CodeConflict)
+	if slices.Contains(e.ws.undone, "oldbox") {
+		t.Fatal("undo restored the folder under a running sandbox")
+	}
+	if _, err := e.m.Undo(ctx, "oldbox", sandboxapi.UndoRequest{Preview: true}); err != nil {
+		t.Fatalf("a preview changes nothing and is allowed: %v", err)
+	}
+	if _, err := e.m.Stop(ctx, "newbox"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Undo(ctx, "oldbox", sandboxapi.UndoRequest{}); err != nil {
+		t.Fatalf("undo once the other sandbox stopped: %v", err)
 	}
 }

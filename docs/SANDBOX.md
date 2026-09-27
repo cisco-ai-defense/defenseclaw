@@ -703,6 +703,13 @@ the agent cannot plant one for host git to read. The manager must call
 `ReleaseMount` when a sandbox is deleted, not when it stops, because a
 restart reuses them.
 
+One sandbox at a time mounts a folder live. The manager refuses a second
+live mount of the same folder, or of a folder inside or around it (run that
+one with `--copy`), because each sandbox's undo restores the whole folder and
+each review would mix in the other's changes. Undo is also refused while
+another sandbox mounting the folder may still run (a deleted sandbox whose
+snapshot was kept does not block a new mount).
+
 The folder is refused outright when it:
 
 - is reached through a symbolic link (the error names the real path), is not
