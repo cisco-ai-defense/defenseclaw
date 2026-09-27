@@ -237,35 +237,53 @@ func (v gitVersion) atLeast(major, minor int) bool {
 
 func (v gitVersion) String() string { return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch) }
 
-var (
-	gitVersionOnce sync.Once
-	gitVersionVal  gitVersion
-	gitVersionErr  error
-)
-
 var gitVersionRE = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
+
+// gitVersionCache remembers the host git version once a probe succeeds. A
+// failed probe is not remembered: it may only mean that the caller's
+// context ended, or that git was installed since.
+type gitVersionCache struct {
+	mu sync.Mutex
+	v  gitVersion
+	ok bool
+}
+
+var hostGit gitVersionCache
+
+// get returns the cached version or runs probe (git version) for it.
+func (c *gitVersionCache) get(ctx context.Context, probe func(context.Context) ([]byte, error)) (gitVersion, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ok {
+		return c.v, nil
+	}
+	out, err := probe(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return gitVersion{}, fmt.Errorf("workspace: check the git version: %w", ctxErr)
+		}
+		return gitVersion{}, fmt.Errorf("workspace: git is required on this machine: %w", err)
+	}
+	m := gitVersionRE.FindStringSubmatch(string(out))
+	if m == nil {
+		return gitVersion{}, fmt.Errorf("workspace: unrecognized git version %q", strings.TrimSpace(string(out)))
+	}
+	var v gitVersion
+	v.major, _ = strconv.Atoi(m[1])
+	v.minor, _ = strconv.Atoi(m[2])
+	if m[3] != "" {
+		v.patch, _ = strconv.Atoi(m[3])
+	}
+	c.v, c.ok = v, true
+	return v, nil
+}
 
 // hostGitVersion reports the host git version. It runs outside any
 // repository; dir is accepted for call-site symmetry only.
 func hostGitVersion(ctx context.Context, _ string) (gitVersion, error) {
-	gitVersionOnce.Do(func() {
-		out, err := gitCmd{dir: os.TempDir()}.strict(ctx, "version")
-		if err != nil {
-			gitVersionErr = fmt.Errorf("workspace: git is required on this machine: %w", err)
-			return
-		}
-		m := gitVersionRE.FindStringSubmatch(string(out))
-		if m == nil {
-			gitVersionErr = fmt.Errorf("workspace: unrecognized git version %q", strings.TrimSpace(string(out)))
-			return
-		}
-		gitVersionVal.major, _ = strconv.Atoi(m[1])
-		gitVersionVal.minor, _ = strconv.Atoi(m[2])
-		if m[3] != "" {
-			gitVersionVal.patch, _ = strconv.Atoi(m[3])
-		}
+	return hostGit.get(ctx, func(ctx context.Context) ([]byte, error) {
+		return gitCmd{dir: os.TempDir()}.strict(ctx, "version")
 	})
-	return gitVersionVal, gitVersionErr
 }
 
 // minGitMajor/minGitMinor is the oldest git this package drives: 2.29 adds
