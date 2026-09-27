@@ -18,10 +18,6 @@ package manager
 
 import "strings"
 
-func stringsEqualFold(a, b string) bool {
-	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
-}
-
 // scopeID is the egress principal's sandbox id, which scopes per-sandbox
 // unblocks: the OpenShell id, or the name for a gateway that reports none.
 func scopeID(id, name string) string {

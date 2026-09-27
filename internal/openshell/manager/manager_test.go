@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -619,5 +620,107 @@ func TestComposeName(t *testing.T) {
 func TestImageVersion(t *testing.T) {
 	if v := ImageVersion(); v == "" || strings.ContainsAny(v, " /") {
 		t.Fatalf("ImageVersion = %q", v)
+	}
+}
+
+// TestStartRechecksAdminPolicy pins that an administrator change applies to
+// a stopped sandbox: a live mount or learn mode the organization disallowed
+// since refuses the start with the organization-policy message.
+func TestStartRechecksAdminPolicy(t *testing.T) {
+	for name, edit := range map[string]func(c *config.Config, project string){
+		"allow_mount":      func(c *config.Config, _ string) { c.OpenShell.Admin.AllowMount = boolPtr(false) },
+		"require_copy_for": func(c *config.Config, project string) { c.OpenShell.Admin.RequireCopyFor = []string{project} },
+		"allow_learn_mode": func(c *config.Config, _ string) { c.OpenShell.Admin.AllowLearnMode = boolPtr(false) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.create(sandboxapi.CreateRequest{Name: "orgbox", Learn: true})
+			if _, err := e.m.Stop(context.Background(), "orgbox"); err != nil {
+				t.Fatal(err)
+			}
+			e.setConfig(func(c *config.Config) { edit(c, e.project) })
+			_, err := e.m.Start(context.Background(), "orgbox", sandboxapi.StartRequest{})
+			apiErr := wantCode(t, err, sandboxapi.CodeAdminViolation)
+			if !strings.Contains(apiErr.Message, sandboxapi.AdminMessage) {
+				t.Fatalf("message = %q", apiErr.Message)
+			}
+			if got, _ := e.client.GetSandbox(context.Background(), "orgbox"); got.Status.Phase != openshell.PhaseStopped {
+				t.Fatalf("refused sandbox started: %s", got.Status.Phase)
+			}
+		})
+	}
+}
+
+// TestLaunchYoloFollowsThePolicy pins that skip-permissions mode follows
+// the re-resolved policy: once the administrator forbids it, connect
+// launches the harness with its permission prompts.
+func TestLaunchYoloFollowsThePolicy(t *testing.T) {
+	e := newEnv(t, nil)
+	sb := e.create(sandboxapi.CreateRequest{Name: "yolobox", Yolo: true})
+	if !sb.Launch.Yolo {
+		t.Fatalf("launch = %+v, want skip-permissions", sb.Launch)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
+	e.m.refreshEgress()
+	got, err := e.m.Get(context.Background(), "yolobox")
+	if err != nil || got.Launch.Yolo || got.Yolo {
+		t.Fatalf("after allow_yolo=false: launch %+v yolo %v, %v", got.Launch, got.Yolo, err)
+	}
+}
+
+// TestAdminBlockRemovesApprovedRules pins that approved OpenShell rules,
+// which bypass the egress proxy, are removed once the administrator blocks
+// their destination.
+func TestAdminBlockRemovesApprovedRules(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "rulebox"})
+	e.watch.waitStarted(t, sb.Name)
+	keep := addChunk(e, sb.Name, chunk("allow_keep_example_org_443", "keep.example.org", 443))
+	gone := addChunk(e, sb.Name, chunk("allow_gone_example_org_443", "gone.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "approvals applied", func() bool {
+		return chunkStatus(e, sb.Name, keep) == "approved" && chunkStatus(e, sb.Name, gone) == "approved"
+	})
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"gone.example.org"} })
+	e.m.enforceAll(context.Background())
+	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
+	if _, ok := policy.NetworkPolicies["allow_gone_example_org_443"]; ok {
+		t.Fatal("the admin-blocked rule is still in the policy")
+	}
+	for _, rule := range []string{"allow_keep_example_org_443", "defenseclaw_egress"} {
+		if _, ok := policy.NetworkPolicies[rule]; !ok {
+			t.Fatalf("rule %s removed: %v", rule, policy.NetworkPolicies)
+		}
+	}
+	var removed bool
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		removed = removed || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == "allow_gone_example_org_443")
+	}
+	e.tel.mu.Unlock()
+	if !removed {
+		t.Fatal("no rule_remove record")
+	}
+}
+
+// TestStartTokenDeliveryEnvKeepsTheToken pins that a sandbox created with
+// token_delivery: env keeps authenticating after a restart: its token is
+// a plain variable of the sandbox spec, which a rotation cannot reach.
+func TestStartTokenDeliveryEnvKeepsTheToken(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.TokenDelivery = config.OpenShellTokenDeliveryEnv })
+	sb := e.create(sandboxapi.CreateRequest{Name: "envstart"})
+	got, _ := e.client.GetSandbox(context.Background(), sb.Name)
+	token := got.Spec.Environment[openshell.EnvSandboxToken]
+	if _, err := e.m.Stop(context.Background(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	// The delivery a sandbox was created with wins over a later setting.
+	e.setConfig(func(c *config.Config) { c.OpenShell.TokenDelivery = config.OpenShellTokenDeliveryProvider })
+	if _, err := e.m.Start(context.Background(), sb.Name, sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := e.store.Match(token); err != nil || b.SandboxName != sb.Name {
+		t.Fatalf("the sandbox's token no longer authenticates after a restart: %v", err)
 	}
 }

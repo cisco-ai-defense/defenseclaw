@@ -241,7 +241,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		WorkdirMode: in.mode, CreatedAt: m.now().UTC(), Profile: eff.Profile, NetworkMode: eff.NetworkMode,
 		Approvals: eff.Approvals, Yolo: eff.Yolo, Image: img.Tag, ImageID: img.ImageID,
 		HarnessVersion: img.HarnessVersion, HookContract: img.HookContract, TamperTier: arts.TamperTier,
-		Violations: wireViolations(in.violations),
+		Violations: wireViolations(in.violations), TokenDelivery: config.OpenShellTokenDeliveryProvider,
+	}
+	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
+		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
 	}
 	if eff.Pack != nil {
 		rec.Pack, rec.PackDigest = eff.Pack.Name, eff.Pack.Digest
@@ -486,7 +489,7 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 		return nil
 	}
 
-	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
+	if rec.TokenDelivery == config.OpenShellTokenDeliveryEnv {
 		env[openshell.EnvSandboxToken] = token
 	} else {
 		ingress, err := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: m.opts.IngressPort})

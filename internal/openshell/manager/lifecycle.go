@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"sort"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -228,21 +229,31 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if orphaned {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s has no DefenseClaw binding; delete it and run a new one", rec.Name)
 	}
-	eff, err := m.resolveBox(b)
+	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {
 		return err
 	}
-	if err := eff.Allow(packActionHarness(rec.Harness)); err != nil {
-		return m.violationError(ctx, err, rec.Name)
+	if err := m.checkStart(ctx, rec, eff, violations); err != nil {
+		return err
 	}
-	binding, token, err := m.opts.Bindings.Rotate(rec.BindingID)
+	binding, err := m.opts.Bindings.Get(rec.BindingID)
 	if err != nil {
-		return sandboxapi.Errorf(sandboxapi.CodeInternal, "rotate the sandbox binding: %v", err)
+		return sandboxapi.Errorf(sandboxapi.CodeInternal, "look up the sandbox binding: %v", err)
 	}
-	if m.opts.ForgetBinding != nil {
-		m.opts.ForgetBinding(binding.ID)
-	}
-	if !stringsEqualFold(m.config().OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
+	// With token_delivery: provider the token is rotated, so a credential
+	// from an earlier session is useless, and the provider carries the new
+	// one into the sandbox. With token_delivery: env the token is a plain
+	// variable of the sandbox spec, which OpenShell cannot change after
+	// create: it is kept for the sandbox's life (the agent can read it
+	// either way) rather than rotated into a token no hook presents.
+	if tokenDelivery(rec) == config.OpenShellTokenDeliveryProvider {
+		var token string
+		if binding, token, err = m.opts.Bindings.Rotate(rec.BindingID); err != nil {
+			return sandboxapi.Errorf(sandboxapi.CodeInternal, "rotate the sandbox binding: %v", err)
+		}
+		if m.opts.ForgetBinding != nil {
+			m.opts.ForgetBinding(binding.ID)
+		}
 		pname := providerName(rec.Name, roleIngress, 0)
 		p, err := gw.Client.GetProvider(ctx, pname)
 		if err != nil {
@@ -284,7 +295,20 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
 	m.startWatch(b)
+	m.enforceApprovedRules(ctx, gw, b, eff)
 	return nil
+}
+
+// tokenDelivery is how a sandbox received its ingress token. Records from
+// before the field existed tell by their ingress provider.
+func tokenDelivery(rec record) string {
+	if rec.TokenDelivery != "" {
+		return rec.TokenDelivery
+	}
+	if slices.Contains(rec.Providers, providerName(rec.Name, roleIngress, 0)) {
+		return config.OpenShellTokenDeliveryProvider
+	}
+	return config.OpenShellTokenDeliveryEnv
 }
 
 // maskedRels turns the binding's sandbox mask paths back into

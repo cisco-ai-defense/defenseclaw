@@ -19,13 +19,20 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
+
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
 // resolve resolves the effective sandbox policy for flags against the
@@ -42,17 +49,137 @@ func (m *Manager) resolve(cfg *config.Config, flags packs.Flags) (*packs.Effecti
 // resolveBox re-resolves a sandbox's policy against the current config, so
 // an administrator change applies to running sandboxes.
 func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
+	eff, _, err := m.resolveBoxViolations(b)
+	return eff, err
+}
+
+// resolveBoxViolations is resolveBox with the clamps and refusals the
+// current configuration applies to the sandbox's run flags.
+func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
-	eff, _, err := m.resolve(m.config(), rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	eff, violations, err := m.resolve(m.config(), rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	m.mu.Lock()
 	b.eff = eff
 	m.mu.Unlock()
-	return eff, nil
+	return eff, violations, nil
+}
+
+// checkStart refuses to start a sandbox the current policy would not let
+// the user create: a harness, a live mount or learn mode the organization
+// disallowed since. Skip-permissions mode is not refused; the launch
+// settings follow the re-resolved policy (see launchYolo).
+func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effective, violations []packs.Violation) error {
+	if v := packs.FirstFatal(violations); v != nil {
+		return m.violationError(ctx, v, rec.Name)
+	}
+	actions := []packs.Action{packActionHarness(rec.Harness)}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && rec.Project != "" {
+		actions = append(actions, packs.Action{Kind: packs.ActionMount, Path: rec.Project})
+		for _, c := range rec.Flags.Context {
+			actions = append(actions, packs.Action{Kind: packs.ActionMount, Path: c})
+		}
+	}
+	if rec.Flags.Learn {
+		actions = append(actions, packs.Action{Kind: packs.ActionLearnMode})
+	}
+	for _, a := range actions {
+		if err := eff.Allow(a); err != nil {
+			return m.violationError(ctx, err, rec.Name)
+		}
+	}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
+		// The mount is part of the sandbox; it cannot become a copy.
+		for i := range violations {
+			if violations[i].Key == "workdir.mode" {
+				return m.violationError(ctx, &violations[i], rec.Name)
+			}
+		}
+		return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
+			Message: "the sandbox policy now runs this project in copy mode; delete the sandbox and run it again"}
+	}
+	return nil
+}
+
+// enforceApprovedRules removes the approved OpenShell rules the current
+// policy would refuse to approve now: destinations the administrator
+// blocked or left off an allow-only list, host ports and private networks
+// the administrator closed, and what DefenseClaw never opens. Approved
+// rules bypass the egress proxy, so an administrator change must reach
+// them too. Only triaged rules (allow_*) are judged; DefenseClaw renders
+// its own and the provider rules.
+func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
+	m.mu.Lock()
+	name, ready := b.rec.Name, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
+	m.mu.Unlock()
+	if !ready || eff == nil {
+		return
+	}
+	cfg, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil || cfg == nil || cfg.Policy == nil {
+		return
+	}
+	feed := m.feedMatcher()
+	var ops []openshell.PolicyMergeOperation
+	var removed []string
+	for ruleName, rule := range cfg.Policy.NetworkPolicies {
+		if !strings.HasPrefix(ruleName, "allow_") {
+			continue
+		}
+		p := triage.FromChunk(name, openshell.PolicyChunk{RuleName: ruleName, ProposedRule: &rule})
+		if err := triage.CheckProposal(eff, p, false, feed); !orgRefusal(err) {
+			continue
+		}
+		ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: ruleName}})
+		removed = append(removed, ruleName)
+	}
+	if len(ops) == 0 {
+		return
+	}
+	sort.Strings(removed)
+	res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
+		Annotations: map[string]string{"source": "defenseclaw", "reason": "admin-policy"},
+	})
+	if err != nil {
+		m.logf("%s: sandbox %s: remove rules the policy now refuses (%s): %v",
+			gatewaylog.ErrCodeOpenShellAdminViolation, name, strings.Join(removed, ", "), err)
+		return
+	}
+	m.logf("%s: sandbox %s: removed approved rules the policy now refuses: %s",
+		gatewaylog.ErrCodeOpenShellAdminViolation, name, strings.Join(removed, ", "))
+	m.mu.Lock()
+	id := b.identity()
+	if b.sb != nil && res != nil && res.Version != 0 {
+		b.sb.Status.CurrentPolicyVersion = res.Version
+		id.PolicyVersion = res.Version
+	}
+	m.mu.Unlock()
+	ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
+		Target: truncate(strings.Join(removed, ","), 256), Reason: "SANDBOX_ADMIN_POLICY", ChangeCount: len(removed), Timestamp: m.now()}
+	if res != nil {
+		ev.PolicyHash = res.PolicyHash
+	}
+	_ = m.tel.RecordSandboxPolicy(ctx, ev)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+		Reason: "admin_policy", Message: fmt.Sprintf("removed %d approved rule(s) %s", len(removed), sandboxapi.AdminMessage)})
+}
+
+// orgRefusal reports a refusal by the administrator or a DefenseClaw
+// invariant, as opposed to the user's own pack or profile.
+func orgRefusal(err error) bool {
+	var v *packs.Violation
+	return errors.As(err, &v) && (v.Admin() || v.Constraint == "defenseclaw")
+}
+
+// launchYolo reports whether the harness may start in skip-permissions
+// mode: the sandbox was created with it and the current policy still
+// allows it. Callers hold Manager.mu.
+func launchYolo(b *box) bool {
+	return b.rec.Yolo && b.eff != nil && b.eff.Yolo
 }
 
 func (m *Manager) gatewayPort() int {

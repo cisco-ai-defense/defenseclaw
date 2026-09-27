@@ -370,3 +370,25 @@ func TestAlwaysDecisionsAreUnblocks(t *testing.T) {
 		t.Fatalf("saved unblock applied after allow_unblock=false: %+v", dec)
 	}
 }
+
+// TestStrictProfileRevokesTheProxyCredential pins that a sandbox whose
+// policy becomes strict (an administrator raising min_profile) loses the
+// egress proxy instead of keeping open egress through it.
+func TestStrictProfileRevokesTheProxyCredential(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "strictbox"})
+	b, _ := e.store.Lookup("strictbox")
+	if _, ok := e.m.creds.Lookup(b.ID); !ok {
+		t.Fatal("no proxy credential")
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict })
+	e.m.refreshEgress()
+	if p, ok := e.m.creds.Lookup(b.ID); ok {
+		t.Fatalf("proxy credential still registered under strict: %+v", p)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MinProfile = "" })
+	e.m.refreshEgress()
+	if _, ok := e.m.creds.Lookup(b.ID); !ok {
+		t.Fatal("proxy credential not restored when the profile relaxed")
+	}
+}

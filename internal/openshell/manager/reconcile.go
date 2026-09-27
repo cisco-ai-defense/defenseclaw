@@ -160,6 +160,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.lastReconcile = m.now()
 	m.mu.Unlock()
 	m.refreshEgress()
+	m.enforceAll(ctx)
 	return nil
 }
 
@@ -197,22 +198,18 @@ func (m *Manager) adopt(sb *openshell.Sandbox) *box {
 	}
 	needCred := b.cred.Username == "" && b.rec.BindingID != "" && !b.orphaned
 	username := b.rec.EgressUser
-	rec := b.rec
 	m.mu.Unlock()
-	if needCred {
-		if cred, ok := recoverCredential(sb, username); ok {
-			eff, err := m.resolveBox(b)
-			if err == nil {
-				if err := m.creds.Register(cred, m.principal(rec.BindingID, scopeID(sb.ID, sb.Name), sb.Name, eff)); err == nil {
-					m.mu.Lock()
-					b.cred = cred
-					b.rec.EgressUser = cred.Username
-					m.mu.Unlock()
-				}
-			}
-		}
-	} else if _, err := m.resolveBox(b); err != nil {
+	eff, err := m.resolveBox(b)
+	if err != nil {
 		m.logf("resolve the policy of %s: %v", sb.Name, err)
+	} else if needCred {
+		if cred, ok := recoverCredential(sb, username); ok {
+			m.mu.Lock()
+			b.cred = cred
+			b.rec.EgressUser = cred.Username
+			m.mu.Unlock()
+			m.syncCredential(b, eff)
+		}
 	}
 	if b.orphaned {
 		m.logf("sandbox %s has DefenseClaw labels but no binding; its hooks cannot authenticate", sb.Name)

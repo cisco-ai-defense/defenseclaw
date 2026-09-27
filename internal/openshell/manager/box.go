@@ -227,12 +227,12 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	r := b.rec
 	v := sandboxapi.Sandbox{
 		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
-		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: r.Yolo,
+		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Workspace: r.Workspace, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned,
-		Launch:   sandboxapi.Launch{Yolo: r.Yolo, CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		Launch:   sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
 	}
 	if spec, ok := harness.Get(r.Harness); ok {
 		v.HarnessName = spec.DisplayName

@@ -472,6 +472,7 @@ func (m *Manager) configLoop(ctx context.Context) {
 			m.mu.Unlock()
 			if changed {
 				m.refreshEgress()
+				m.enforceAll(ctx)
 			}
 		}
 	}

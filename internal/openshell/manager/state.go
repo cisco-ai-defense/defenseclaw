@@ -96,6 +96,11 @@ type record struct {
 	HookContract   string `json:"hook_contract,omitempty"`
 	TamperTier     string `json:"tamper_tier,omitempty"`
 
+	// TokenDelivery is how the sandbox received its ingress token
+	// (openshell.token_delivery at create; empty in older records, see
+	// tokenDelivery).
+	TokenDelivery string `json:"token_delivery,omitempty"`
+
 	CredentialProfile string   `json:"credential_profile,omitempty"`
 	BedrockRegion     string   `json:"bedrock_region,omitempty"`
 	Providers         []string `json:"providers,omitempty"`

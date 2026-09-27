@@ -139,12 +139,7 @@ func (m *Manager) refreshEgress() {
 		if err != nil {
 			continue
 		}
-		m.mu.Lock()
-		cred, rec := b.cred, b.rec
-		m.mu.Unlock()
-		if cred.Username != "" && rec.BindingID != "" {
-			_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, eff))
-		}
+		m.syncCredential(b, eff)
 	}
 	if proxy == nil {
 		return
@@ -156,6 +151,50 @@ func (m *Manager) refreshEgress() {
 	}
 	if err := proxy.SetDecider(d); err != nil {
 		m.logf("egress decider: %v", err)
+	}
+}
+
+// syncCredential registers a sandbox's egress proxy credential with its
+// current principal, or revokes it while the sandbox's network mode is deny
+// (the strict profile, for example after an administrator raised
+// min_profile): the proxy then refuses the sandbox altogether instead of
+// serving it in open mode.
+func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
+	m.mu.Lock()
+	cred, rec := b.cred, b.rec
+	m.mu.Unlock()
+	if cred.Username == "" || rec.BindingID == "" || eff == nil {
+		return
+	}
+	if eff.NetworkMode == packs.NetworkDeny {
+		m.creds.Revoke(rec.BindingID)
+		return
+	}
+	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, eff))
+}
+
+// enforceAll re-checks the approved rules of every ready sandbox against
+// the current policy (enforceApprovedRules).
+func (m *Manager) enforceAll(ctx context.Context) {
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	var ready []*box
+	for _, b := range m.boxes {
+		if !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
+			ready = append(ready, b)
+		}
+	}
+	m.mu.Unlock()
+	for _, b := range ready {
+		if ctx.Err() != nil {
+			return
+		}
+		if eff, err := m.resolveBox(b); err == nil {
+			m.enforceApprovedRules(ctx, gw, b, eff)
+		}
 	}
 }
 
