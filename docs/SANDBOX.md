@@ -7,10 +7,12 @@ how the project folder is shared and taken back, and which measured OpenShell
 behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
-The operator guide for the sandbox commands will live on the
+The operator guide for the sandbox commands is the
 [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
-(`docs-site/content/docs/setup/sandbox.mdx`). Today that page covers only the
-removal of the legacy 0.0.x sandbox. Telemetry details are in
+(`docs-site/content/docs/setup/sandbox.mdx`): setup, running a harness, the
+session, the end-of-session review and undo, the run variations, MCP
+servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
+Telemetry details are in
 [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 
 ## Build status
