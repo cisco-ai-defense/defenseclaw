@@ -617,6 +617,9 @@ func (a *APIServer) finalizeAgentHook(
 			a.health.RecordToolInspectionFor(connectorName)
 		}
 	})
+	safeSection("sandbox", func() {
+		a.observeSandboxHookDecision(ctx, req, resp)
+	})
 
 	if !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {

@@ -281,6 +281,11 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
+
+	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
+	// (api_sandbox.go); nil when sandboxes are off.
+	sandboxCtlMu sync.RWMutex
+	sandboxCtl   SandboxController
 }
 
 // SetCiscoInspector wires the Cisco AI Defense client onto the API
@@ -978,6 +983,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// can roll up turn counts + completion reasons per session.
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
+	a.registerSandboxRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)

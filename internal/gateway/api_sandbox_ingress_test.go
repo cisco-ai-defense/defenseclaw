@@ -840,6 +840,43 @@ func TestSandboxIngressCodexContractComesFromBinding(t *testing.T) {
 	}
 }
 
+func TestSandboxIngressObservers(t *testing.T) {
+	var mu sync.Mutex
+	var routes []sandboxauth.Route
+	var decisions []SandboxHookDecision
+	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
+		c.OnRequest = func(b sandboxauth.Binding, r sandboxauth.Route) {
+			mu.Lock()
+			defer mu.Unlock()
+			if b.SandboxName != "dc-claude-app" {
+				t.Errorf("observed binding %s", b.SandboxName)
+			}
+			routes = append(routes, r)
+		}
+		c.OnHookDecision = func(d SandboxHookDecision) {
+			mu.Lock()
+			defer mu.Unlock()
+			decisions = append(decisions, d)
+		}
+	})
+	body := `{"hook_event_name":"PreToolUse","session_id":"sess-obs","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, body); rec.Code != http.StatusOK {
+		t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", "wrong-token", body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad token: %d", rec.Code)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(routes) != 1 || routes[0] != sandboxauth.RouteHook {
+		t.Fatalf("observed routes = %v", routes)
+	}
+	if len(decisions) != 1 || decisions[0].BindingID != f.claude.ID || decisions[0].SandboxName != "dc-claude-app" ||
+		decisions[0].Event != "PreToolUse" || decisions[0].Tool != "Bash" || decisions[0].Action == "" {
+		t.Fatalf("decisions = %+v", decisions)
+	}
+}
+
 func TestSandboxIngressIdempotentHookRetry(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	body := `{"hook_event_name":"UserPromptSubmit","session_id":"sess-idem","prompt":"hello","cwd":"/work/app"}`
@@ -1020,6 +1057,10 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/api/v1/ai-usage/confidence/policy", "/api/v1/ai-usage/confidence/policy/validate",
 		"/api/v1/codex/notify", "/v1/connectors", "/v1/config/providers", "/v1/config/providers/reload",
 		"/api/v1/ai-usage/components/x/y/locations", "/otlp/codex/token/v1/logs",
+		// The sandbox REST API (registerSandboxRoutes).
+		"/api/v1/sandbox/status", "/api/v1/sandbox/sandboxes", "/api/v1/sandbox/sandboxes/box",
+		"/api/v1/sandbox/sandboxes/box/stop", "/api/v1/sandbox/approvals", "/api/v1/sandbox/approvals/ap_1",
+		"/api/v1/sandbox/activity", "/api/v1/sandbox/egress/unblock", "/api/v1/sandbox/policy/explain",
 	}
 	registered := routesRegisteredInRun(t)
 	for _, path := range registered {

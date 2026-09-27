@@ -102,6 +102,11 @@ type Sidecar struct {
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
 
+	// sandboxRecorder is the process's one OpenShell sandbox telemetry
+	// recorder (sidecar_sandbox.go).
+	sandboxRecorderOnce sync.Once
+	sandboxRecorder     *audit.SandboxRecorder
+
 	webhooksMu        sync.RWMutex
 	aiDiscoveryMu     sync.RWMutex
 	aiRuntimeMu       sync.RWMutex
@@ -6223,6 +6228,15 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.SetHookAPITokens(scoped)
 	} else {
 		fmt.Fprintf(os.Stderr, "[sidecar] load hook API tokens: %v\n", err)
+	}
+	// OpenShell sandboxes: the hook ingress, the egress proxy and the
+	// manager live and restart with the API (apiNeedsRestart covers the
+	// enabled switch and both listener ports).
+	if rt, err := s.newSandboxRuntime(api); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] sandbox subsystem: %v\n", err)
+		s.health.SetSandbox(StateError, err.Error(), nil)
+	} else if rt != nil {
+		return rt.run(ctx, api.Run)
 	}
 	return api.Run(ctx)
 }

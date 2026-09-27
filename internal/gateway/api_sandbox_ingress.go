@@ -130,6 +130,28 @@ type SandboxIngressConfig struct {
 	// OTLPMaxBodyBytes caps one OTLP upload. Zero uses 4 MiB; it may not
 	// exceed the host receiver's cap.
 	OTLPMaxBodyBytes int64
+	// OnRequest observes every admitted request after authorization, before
+	// its handler runs: the sandbox manager's hook-coverage signal. It runs
+	// on the request goroutine and must not block.
+	OnRequest func(binding sandboxauth.Binding, route sandboxauth.Route)
+	// OnHookDecision observes every hook verdict reached for a sandbox
+	// binding. It must not block.
+	OnHookDecision func(SandboxHookDecision)
+}
+
+// SandboxHookDecision is one hook verdict for a sandbox binding.
+type SandboxHookDecision struct {
+	BindingID   string
+	SandboxName string
+	Connector   string
+	// Event is the harness hook event; Tool the tool it concerns.
+	Event string
+	Tool  string
+	// Action is the verdict (allow, block, alert, confirm).
+	Action     string
+	WouldBlock bool
+	Severity   string
+	Reason     string
 }
 
 type sandboxIngressState struct {
@@ -141,6 +163,9 @@ type sandboxIngressState struct {
 	fs       sandboxauth.FS
 	// otlpMaxBytes is the OTLP request body cap.
 	otlpMaxBytes int64
+	// onRequest and onHookDecision are the manager's observers.
+	onRequest      func(sandboxauth.Binding, sandboxauth.Route)
+	onHookDecision func(SandboxHookDecision)
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -177,13 +202,15 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		return fmt.Errorf("sandbox ingress: OTLP body cap must be between 1 and %d bytes", otlpRequestBodyMaxBytes)
 	}
 	st := &sandboxIngressState{
-		addr:         cfg.Addr,
-		bindings:     cfg.Bindings,
-		limiter:      cfg.Limiter,
-		inFlight:     cfg.InFlight,
-		fs:           cfg.FS,
-		otlpMaxBytes: otlpMaxBytes,
-		authFailures: rate.NewLimiter(10, 20),
+		addr:           cfg.Addr,
+		bindings:       cfg.Bindings,
+		limiter:        cfg.Limiter,
+		inFlight:       cfg.InFlight,
+		fs:             cfg.FS,
+		otlpMaxBytes:   otlpMaxBytes,
+		authFailures:   rate.NewLimiter(10, 20),
+		onRequest:      cfg.OnRequest,
+		onHookDecision: cfg.OnHookDecision,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -596,6 +623,9 @@ func (a *APIServer) sandboxIngressAuthorize(
 		defer release()
 		end := st.inFlight.Begin(binding.ID)
 		defer end()
+		if st.onRequest != nil {
+			st.onRequest(binding, route.class)
+		}
 
 		for _, header := range sandboxIdentityHeaders {
 			r.Header.Del(header)
@@ -649,6 +679,23 @@ func classifySandboxIngressRequest(
 		}, true
 	}
 	return sandboxIngressRoute{}, false
+}
+
+// observeSandboxHookDecision hands a sandbox hook verdict to the manager.
+func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHookRequest, resp agentHookResponse) {
+	binding, ok := sandboxauth.FromContext(ctx)
+	if !ok {
+		return
+	}
+	st := a.sandboxIngressState()
+	if st == nil || st.onHookDecision == nil {
+		return
+	}
+	st.onHookDecision(SandboxHookDecision{
+		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
+		Event: req.HookEventName, Tool: req.ToolName, Action: resp.Action, WouldBlock: resp.WouldBlock,
+		Severity: resp.Severity, Reason: resp.Reason,
+	})
 }
 
 func contextWithSandboxUser(ctx context.Context, binding sandboxauth.Binding) context.Context {
