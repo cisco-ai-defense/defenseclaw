@@ -3808,6 +3808,25 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_E2E_TOKEN_DELIVERY",
+      "category": "test_fixture",
+      "purpose": "openshell.token_delivery the live OpenShell sandbox E2E tests write into their daemon config: provider (default) or env, which runs the whole daemon test with the binding token in the sandbox environment.",
+      "default": "provider",
+      "accepted_values": [
+        "provider",
+        "env"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/daemon_e2e_test.go",
+          "description": "Live sandbox daemon, CLI and two-daemon tests"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_OPENSHELL_GATEWAY",
       "category": "test_fixture",
       "purpose": "OpenShell gateway name the live workspace mount and copy test and the live sandbox daemon test drive instead of the active gateway.",
