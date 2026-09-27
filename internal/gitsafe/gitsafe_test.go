@@ -54,7 +54,7 @@ func TestCommandScrubsEnvironmentAndPrependsFlags(t *testing.T) {
 		t.Fatalf("HOME=%q XDG_CONFIG_HOME=%q, want the same private temp dir", home, xdg)
 	}
 	args := strings.Join(cmd.Args, " ")
-	for _, flag := range []string{"core.fsmonitor=false", "core.hooksPath=/dev/null", "--no-optional-locks"} {
+	for _, flag := range []string{"core.fsmonitor=false", "core.hooksPath=/dev/null", "core.alternateRefsCommand=", "remote.ext.uploadpack=", "--no-optional-locks"} {
 		if !strings.Contains(args, flag) {
 			t.Fatalf("args %q missing %s", args, flag)
 		}

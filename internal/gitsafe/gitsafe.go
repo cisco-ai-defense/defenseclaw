@@ -49,16 +49,18 @@ import (
 // are emulated via `-c diff.external=` instead so the same flag
 // list works for ls-files, rev-parse, diff, log, etc.
 //
-//	-c protocol.version=2          stable wire format, avoids legacy v1 helpers
-//	-c core.fsmonitor=false        no helper invoked on index/working-tree IO
-//	-c core.hooksPath=/dev/null    repository hooks are bypassed
-//	-c core.useReplaceRefs=false   `replace` refs cannot redirect history reads
-//	-c protocol.file.allow=user    file:// submodules require explicit opt-in
-//	-c diff.external=              empty external diff helper (overrides config)
-//	-c core.editor=true            harmless editor (overrides hostile config)
-//	-c core.pager=cat              non-interactive pager
-//	-c uploadpack.packObjectsHook= empty pack-objects hook (overrides config)
-//	--no-optional-locks            avoids triggering helper-touching paths
+//	-c protocol.version=2              stable wire format, avoids legacy v1 helpers
+//	-c core.fsmonitor=false            no helper invoked on index/working-tree IO
+//	-c core.hooksPath=/dev/null        repository hooks are bypassed
+//	-c core.useReplaceRefs=false       `replace` refs cannot redirect history reads
+//	-c core.alternateRefsCommand=      no command runs when resolving refs from alternates
+//	-c protocol.file.allow=user        file:// submodules require explicit opt-in
+//	-c diff.external=                  empty external diff helper (overrides config)
+//	-c core.editor=true                harmless editor (overrides hostile config)
+//	-c core.pager=cat                  non-interactive pager
+//	-c uploadpack.packObjectsHook=     empty pack-objects hook (overrides config)
+//	-c remote.ext.uploadpack=          no uploadpack command for ext:: remotes
+//	--no-optional-locks                avoids triggering helper-touching paths
 //
 // The command-name is appended after this slice.
 var safeGitFlags = []string{
@@ -66,11 +68,13 @@ var safeGitFlags = []string{
 	"-c", "core.fsmonitor=false",
 	"-c", "core.hooksPath=/dev/null",
 	"-c", "core.useReplaceRefs=false",
+	"-c", "core.alternateRefsCommand=",
 	"-c", "protocol.file.allow=user",
 	"-c", "diff.external=",
 	"-c", "core.editor=true",
 	"-c", "core.pager=cat",
 	"-c", "uploadpack.packObjectsHook=",
+	"-c", "remote.ext.uploadpack=",
 	"--no-optional-locks",
 }
 
