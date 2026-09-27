@@ -444,6 +444,12 @@ func TestGatewayConfigRefusesBindMountsOnExposedGateway(t *testing.T) {
 		{name: "listens on every interface", want: openshell.ErrGatewayExposed, setup: func(t *testing.T, f *gatewayFixture) {
 			f.write(t, "gateway.env", "OPENSHELL_BIND_ADDRESS=0.0.0.0\n")
 		}},
+		{name: "empty listener settings are unset", setup: func(t *testing.T, f *gatewayFixture) {
+			f.write(t, "gateway.env", "OPENSHELL_BIND_ADDRESS=\nOPENSHELL_SERVER_PORT=\nOPENSHELL_OIDC_ISSUER=\n")
+		}},
+		{name: "IPv6 loopback listener", setup: func(t *testing.T, f *gatewayFixture) {
+			f.write(t, "gateway.env", "OPENSHELL_BIND_ADDRESS=::1\n")
+		}},
 		{name: "user manager disables TLS", want: openshell.ErrGatewayExposed, setup: func(t *testing.T, f *gatewayFixture) {
 			f.manager += "OPENSHELL_DISABLE_TLS=yes\n"
 		}},

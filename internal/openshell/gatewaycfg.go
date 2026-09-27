@@ -603,11 +603,12 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 		}
 		host, port = h, p
 	}
-	if v, ok := env[envBindAddress]; ok {
-		host = strings.TrimSpace(v)
+	// An empty variable counts as unset, as it does for the gateway.
+	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
+		host = v
 	}
-	if v, ok := env[envServerPort]; ok {
-		port = strings.TrimSpace(v)
+	if v := strings.TrimSpace(env[envServerPort]); v != "" {
+		port = v
 	}
 	if !isLoopbackHost(host) {
 		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
