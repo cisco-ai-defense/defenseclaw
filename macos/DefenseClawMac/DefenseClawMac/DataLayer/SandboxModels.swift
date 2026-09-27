@@ -135,6 +135,8 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
     var unblockable = false
     var approvalID = ""
     var tool = ""
+    /// An egress.unblocked event lifted this block since it happened.
+    var unblocked = false
 
     var id: String { "\(seq)|\(kind)|\(host)" }
     var isBlockedDestination: Bool { kind == "egress.blocked" && !host.isEmpty }
@@ -165,7 +167,9 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
             let why = category.isEmpty ? reason : category
             return SandboxFormat.hostPort(host, port) + (why.isEmpty ? "" : " (\(why))")
         case "approval.requested":
-            return "asks to reach " + (text.isEmpty ? SandboxFormat.hostPort(host, port) : text)
+            // The daemon's message is a whole sentence ("the sandbox asks to
+            // reach port 5432 on your machine"), as the Go CLI prints it.
+            return text.isEmpty ? "asks to reach " + SandboxFormat.hostPort(host, port) : text
         case "tool.blocked":
             return (tool.isEmpty ? "tool call" : tool) + " blocked" + (reason.isEmpty ? "" : ": \(reason)")
         default:
@@ -212,9 +216,28 @@ struct SandboxSnapshot: Sendable {
 
     var active: [SandboxRow] { sandboxes.filter(\.running) }
 
-    /// Unblockable blocked destinations, newest first.
+    /// Blocked destinations still in force, newest first: blocks an unblock
+    /// lifted, and blocks of sandboxes that no longer exist, are history.
     var recentBlocks: [SandboxActivity] {
-        activity.reversed().filter { $0.isBlockedDestination }
+        activity.reversed().filter { $0.isBlockedDestination && !$0.unblocked && sandboxExists($0.sandbox) }
+    }
+
+    private func sandboxExists(_ name: String) -> Bool {
+        // Before the first list read nothing is known to be gone.
+        name.isEmpty || !status.loaded || sandboxes.contains { $0.name == name }
+    }
+
+    /// Mark earlier blocks of `host` as lifted: in `sandbox`, or with
+    /// `always` in every sandbox. A later block arrives as a new event.
+    mutating func markUnblocked(sandbox: String, host: String, always: Bool) {
+        guard !host.isEmpty else { return }
+        for index in activity.indices {
+            let event = activity[index]
+            guard event.isBlockedDestination, !event.unblocked, always || event.sandbox == sandbox,
+                  SandboxFormat.hostMatches(host, event.host) else { continue }
+            activity[index].unblocked = true
+            activity[index].unblockable = false
+        }
     }
 
     var headline: String {
@@ -258,6 +281,10 @@ struct SandboxSnapshot: Sendable {
                 if event.seq > 0 && event.seq <= lastSeq { continue }
                 lastSeq = max(lastSeq, event.seq)
             }
+            if event.kind == "egress.unblocked", !event.host.isEmpty {
+                // Reason is the scope: "always" lifts the host everywhere.
+                markUnblocked(sandbox: event.sandbox, host: event.host, always: event.reason == "always")
+            }
             activity.append(event)
             if event.kind == "approval.resolved", !event.approvalID.isEmpty {
                 asks.removeAll { $0.id == event.approvalID }
@@ -291,12 +318,15 @@ struct SandboxSnapshot: Sendable {
             let key = event.approvalID.isEmpty ? "seq-\(event.seq)" : event.approvalID
             guard !notifiedAsks.contains(key) else { return nil }
             notifiedAsks.insert(key)
-            let target = event.message.isEmpty ? SandboxFormat.hostPort(event.host, event.port) : event.message
+            let message = event.message.trimmingCharacters(in: .whitespaces)
+            let what = message.isEmpty
+                ? "It wants to reach \(SandboxFormat.hostPort(event.host, event.port))."
+                : message.prefix(1).uppercased() + message.dropFirst() + (message.hasSuffix(".") ? "" : ".")
             return SandboxNotification(
                 kind: .ask,
                 id: "sandbox-ask-\(key)",
                 title: "\(event.sandbox.isEmpty ? "A sandbox" : event.sandbox) asks for access",
-                body: "It wants to reach \(target). Review it in DefenseClaw.",
+                body: "\(what) Review it in DefenseClaw.",
                 sandbox: event.sandbox,
                 approvalID: event.approvalID
             )
@@ -325,6 +355,22 @@ struct SandboxSnapshot: Sendable {
 enum SandboxFormat {
     static func hostPort(_ host: String, _ port: Int) -> String {
         (port == 0 || port == 80 || port == 443) ? host : "\(host):\(port)"
+    }
+
+    /// triage.NormalizeHost: lower case, no brackets, no trailing dot.
+    static func normalizeHost(_ host: String) -> String {
+        var text = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if text.hasPrefix("["), text.hasSuffix("]") { text = String(text.dropFirst().dropLast()) }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+
+    /// Whether an unblock pattern covers `host` (exact, or "*." for subdomains).
+    static func hostMatches(_ pattern: String, _ host: String) -> Bool {
+        let pattern = normalizeHost(pattern), host = normalizeHost(host)
+        guard !pattern.isEmpty, !host.isEmpty else { return false }
+        if pattern.hasPrefix("*.") { return host.hasSuffix(String(pattern.dropFirst())) }
+        return pattern == host
     }
 
     /// 59s, 12m, 3h05m, 2d04h.

@@ -987,7 +987,12 @@ final class AppState {
     func unblockSandboxDestination(host: String, sandbox name: String, always: Bool) async {
         let key = "unblock|\(always ? "*" : name)|\(host)"
         await runSandboxAction(key: key) {
-            try await self.gateway.unblockSandboxEgress(host: host, sandbox: always ? "" : name, always: always)
+            let message = try await self.gateway.unblockSandboxEgress(
+                host: host, sandbox: always ? "" : name, always: always
+            )
+            // The daemon's egress.unblocked event says the same; do not wait for it.
+            self.sandbox.markUnblocked(sandbox: name, host: host, always: always)
+            return message
         }
     }
 
@@ -1050,7 +1055,7 @@ final class AppState {
     func handleSandboxNotification(action: String, userInfo: [AnyHashable: Any]) {
         let host = (userInfo["host"] as? String) ?? ""
         let name = (userInfo["sandbox"] as? String) ?? ""
-        if action == AppDelegate.sandboxUnblockAction, !host.isEmpty {
+        if action == AppDelegate.sandboxUnblockAction, !host.isEmpty, !name.isEmpty {
             Task { await unblockSandboxDestination(host: host, sandbox: name, always: false) }
             return
         }

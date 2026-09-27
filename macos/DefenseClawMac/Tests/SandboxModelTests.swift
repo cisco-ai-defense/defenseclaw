@@ -15,6 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import UserNotifications
 
 @main
 struct SandboxModelTests {
@@ -32,6 +33,9 @@ struct SandboxModelTests {
         adminLocksMirrorThePythonEditor()
         decodingToleratesOmittedFields()
         unreachableHooksAreAnAlertAndANotification()
+        unblockedDestinationsAreNoLongerOffered()
+        askTextIsTheDaemonsSentence()
+        notificationUnblockNeedsAnUnlockedMac()
         if failureCount > 0 {
             FileHandle.standardError.write("\(failureCount) failure(s)\n".data(using: .utf8)!)
             exit(1)
@@ -224,6 +228,82 @@ struct SandboxModelTests {
         ]]), notify: true)
         expect(notes.count == 1 && notes[0].title == "x: hooks are not reaching DefenseClaw", "unreachable note")
         expect(notes.first?.body.hasPrefix(sandboxHooksUnreachableWarning) == true, "note body without the glyph")
+    }
+
+    private static func unblockedDestinationsAreNoLongerOffered() {
+        var snapshot = SandboxSnapshot()
+        snapshot.apply(
+            status: SandboxDecoding.status(from: ["enabled": true, "available": true]),
+            sandboxes: SandboxDecoding.sandboxes(from: ["sandboxes": [running, ["name": "other", "phase": "ready"]]]),
+            asks: []
+        )
+        var elsewhere = blocked
+        elsewhere["seq"] = 6
+        elsewhere["sandbox"] = "other"
+        _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [blocked, elsewhere]]), notify: false)
+        expect(snapshot.recentBlocks.count == 2, "two blocks")
+        _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [
+            ["seq": 7, "kind": "egress.unblocked", "sandbox": "myapp-claude-7f3a", "host": "WEBHOOK.site.",
+             "reason": "sandbox", "message": "unblocked webhook.site for sandbox myapp-claude-7f3a"],
+        ]]), notify: false)
+        expect(snapshot.recentBlocks.map(\.sandbox) == ["other"], "only that sandbox's block is lifted")
+        expect(snapshot.activity.first { $0.seq == 5 }?.unblocked == true, "the lifted block is marked")
+        expect(snapshot.activity.first { $0.seq == 5 }?.unblockable == false, "and no longer offers Unblock")
+        _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [
+            ["seq": 8, "kind": "egress.unblocked", "sandbox": "", "host": "webhook.site", "reason": "always"],
+        ]]), notify: false)
+        expect(snapshot.recentBlocks.isEmpty, "always lifts it everywhere")
+        var again = blocked
+        again["seq"] = 9
+        _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [again]]), notify: false)
+        expect(snapshot.recentBlocks.map(\.seq) == [9], "a later block is offered again")
+
+        var local = SandboxSnapshot()
+        local.apply(status: SandboxDecoding.status(from: ["enabled": true, "available": true]),
+                    sandboxes: SandboxDecoding.sandboxes(from: ["sandboxes": [running]]), asks: [])
+        _ = local.merge(events: SandboxDecoding.activity(from: ["events": [blocked]]), notify: false)
+        local.markUnblocked(sandbox: "myapp-claude-7f3a", host: "webhook.site", always: false)
+        expect(local.recentBlocks.isEmpty, "the app's own unblock lifts it without waiting for the event")
+
+        var gone = SandboxSnapshot()
+        _ = gone.merge(events: SandboxDecoding.activity(from: ["events": [blocked]]), notify: false)
+        expect(gone.recentBlocks.count == 1, "before the first list read the block shows")
+        gone.apply(status: SandboxDecoding.status(from: ["enabled": true, "available": true]),
+                   sandboxes: [], asks: [])
+        expect(gone.recentBlocks.isEmpty, "a deleted sandbox's block is not offered")
+        expect(SandboxFormat.hostMatches("*.example.com", "api.example.com"), "wildcard subdomain")
+        expect(!SandboxFormat.hostMatches("*.example.com", "example.com"), "wildcard is subdomains only")
+    }
+
+    private static func askTextIsTheDaemonsSentence() {
+        let sentence = SandboxActivity(kind: "approval.requested", sandbox: "myapp",
+                                       message: "the sandbox asks to reach port 5432 on your machine")
+        expect(sentence.summary == "the sandbox asks to reach port 5432 on your machine",
+               "summary: \(sentence.summary)")
+        let bare = SandboxActivity(kind: "approval.requested", host: "10.0.0.5", port: 22)
+        expect(bare.summary == "asks to reach 10.0.0.5:22", "bare summary: \(bare.summary)")
+        var snapshot = SandboxSnapshot()
+        let notes = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [
+            ["seq": 3, "kind": "approval.requested", "sandbox": "myapp", "approval_id": "a1",
+             "host": "host.openshell.internal", "port": 5432,
+             "message": "the sandbox asks to reach port 5432 on your machine"],
+            ["seq": 4, "kind": "approval.requested", "sandbox": "myapp", "approval_id": "a2",
+             "host": "10.0.0.5", "port": 22],
+        ]]), notify: true)
+        expect(notes.first?.body == "The sandbox asks to reach port 5432 on your machine. Review it in DefenseClaw.",
+               "ask body: \(notes.first?.body ?? "nil")")
+        expect(notes.last?.body == "It wants to reach 10.0.0.5:22. Review it in DefenseClaw.",
+               "bare ask body: \(notes.last?.body ?? "nil")")
+    }
+
+    private static func notificationUnblockNeedsAnUnlockedMac() {
+        expect(SandboxNotificationCategories.unblockOptions.contains(.authenticationRequired),
+               "Unblock from a notification needs the Mac unlocked")
+        let blocked = SandboxNotificationCategories.all.first { $0.identifier == SandboxNotificationCategories.blocked }
+        let unblock = blocked?.actions.first { $0.identifier == SandboxNotificationCategories.unblockAction }
+        expect(unblock?.options.contains(.authenticationRequired) == true, "the registered Unblock action")
+        expect(unblock?.options.contains(.foreground) == false, "Unblock still runs without opening the app")
+        expect(SandboxNotificationCategories.isSandboxCategory("dc.sandbox.review"), "review category")
     }
 
     private static func decodingToleratesOmittedFields() {

@@ -27,6 +27,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   -module-cache-path "$MODULE_CACHE" \
   "$ROOT/DefenseClawMac/DataLayer/Models.swift" \
   "$ROOT/DefenseClawMac/DataLayer/SandboxModels.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/SandboxNotifications.swift" \
   "$ROOT/Tests/SandboxModelTests.swift" \
   -o "$BUILD_DIR/SandboxModelTests"
 

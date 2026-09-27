@@ -236,6 +236,8 @@ struct SandboxesView: View {
                         Spacer()
                         if event.isBlockedDestination, event.unblockable {
                             SandboxUnblockMenu(event: event) { confirmAlwaysUnblock = event }
+                        } else if event.unblocked {
+                            Text("unblocked").font(.caption2).foregroundStyle(.secondary)
                         }
                     }
                 }

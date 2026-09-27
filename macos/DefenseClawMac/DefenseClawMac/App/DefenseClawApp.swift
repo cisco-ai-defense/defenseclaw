@@ -194,10 +194,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     static var recreateMainWindow: (() -> Void)?
     /// Set by AppState: (action identifier, userInfo) of a sandbox notification response.
     static var sandboxNotificationHandler: ((String, [AnyHashable: Any]) -> Void)?
-    static let sandboxBlockedCategory = "dc.sandbox.blocked"
-    static let sandboxReviewCategory = "dc.sandbox.review"
-    static let sandboxUnblockAction = "dc.sandbox.unblock"
-    static let sandboxOpenAction = "dc.sandbox.open"
+    static let sandboxBlockedCategory = SandboxNotificationCategories.blocked
+    static let sandboxReviewCategory = SandboxNotificationCategories.review
+    static let sandboxUnblockAction = SandboxNotificationCategories.unblockAction
+    static let sandboxOpenAction = SandboxNotificationCategories.openAction
     private var miniaturizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -242,25 +242,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
-    /// Blocked-destination notifications carry Unblock (this sandbox only;
-    /// "always" stays a deliberate choice in the app), asks carry Review.
+    /// Blocked-destination notifications carry Unblock (this sandbox only,
+    /// and only on an unlocked Mac; "always" stays a confirmed choice in the
+    /// app), asks carry Review. See SandboxNotificationCategories.
     private func registerSandboxNotificationCategories() {
         let center = UNUserNotificationCenter.current()
-        let unblock = UNNotificationAction(
-            identifier: Self.sandboxUnblockAction, title: "Unblock for this sandbox", options: []
-        )
-        let open = UNNotificationAction(identifier: Self.sandboxOpenAction, title: "Review", options: [.foreground])
-        center.setNotificationCategories([
-            UNNotificationCategory(identifier: Self.sandboxBlockedCategory, actions: [unblock, open],
-                                   intentIdentifiers: [], options: []),
-            UNNotificationCategory(identifier: Self.sandboxReviewCategory, actions: [open],
-                                   intentIdentifiers: [], options: []),
-        ])
+        center.setNotificationCategories(SandboxNotificationCategories.all)
         center.delegate = self
     }
 
     nonisolated private static func isSandboxCategory(_ category: String) -> Bool {
-        category == "dc.sandbox.blocked" || category == "dc.sandbox.review"
+        SandboxNotificationCategories.isSandboxCategory(category)
     }
 
     nonisolated func userNotificationCenter(
