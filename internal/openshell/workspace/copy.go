@@ -356,8 +356,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
 	}
-	top, _, _ := (gitCmd{dir: real}).outputCode(ctx, "rev-parse", "--show-toplevel")
-	if samePath(strings.TrimSpace(string(top)), real) {
+	if isGitTopLevel(ctx, real) {
 		rec.Kind = CopyGit
 		rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
 		err = stageGit(ctx, rec, opts, scanOpts, maxBytes)
@@ -374,6 +373,20 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	}
 	ok = true
 	return rec, dir, nil
+}
+
+// isGitTopLevel reports whether dir is the top of a git work tree. A folder
+// git does not recognize (rev-parse fails, e.g. "not a git repository …
+// stopping at filesystem boundary") is a plain folder: its empty answer
+// must never be compared as a path, which would name the process's working
+// directory, the project itself when the CLI runs there.
+func isGitTopLevel(ctx context.Context, dir string) bool {
+	out, code, err := (gitCmd{dir: dir}).outputCode(ctx, "rev-parse", "--show-toplevel")
+	if err != nil || code != 0 {
+		return false
+	}
+	top := strings.TrimSpace(string(out))
+	return top != "" && samePath(top, dir)
 }
 
 // installCopyDir puts dir, a copy directory from stageCopy, in place of

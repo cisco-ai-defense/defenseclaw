@@ -38,13 +38,21 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	e := newSerialEnv(t)
+	t.Parallel()
+	return e
+}
+
+// newSerialEnv is newEnv for a test that must not run in parallel with
+// others, such as one that changes the working directory.
+func newSerialEnv(t *testing.T) *env {
+	t.Helper()
 	if !platformSupported() {
 		t.Skip("workspaces are Linux/macOS only")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	t.Parallel()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

@@ -578,6 +578,29 @@ func TestCopyPlainFolder(t *testing.T) {
 	}
 }
 
+// The CLI stages the folder it runs in. A plain folder is still a plain
+// folder then: git's "not a git repository" answer to rev-parse is empty,
+// and an empty path must not be taken for the working directory, which
+// would make the folder look like the top of a repository.
+func TestStagePlainFolderFromInsideIt(t *testing.T) {
+	e := newSerialEnv(t)
+	writeFile(t, e.project, "notes.md", "a\n")
+	t.Chdir(e.project)
+	if samePath("", e.project) || samePath(".", e.project) {
+		t.Fatal("a relative path matched the working directory")
+	}
+	rec, err := Stage(bg, StageOptions{Project: e.project, Name: "p1", DataDir: e.data, Home: e.home})
+	if err != nil {
+		t.Fatalf("stage a plain folder from inside it: %v", err)
+	}
+	if rec.Kind != CopyPlain || rec.RemoteGitDir != "/sandbox/.dc/git" || rec.Baseline == "" || rec.Files != 1 {
+		t.Fatalf("plain record: %+v", rec)
+	}
+	if pathExists(filepath.Join(e.project, ".git")) {
+		t.Fatal("staging wrote a .git into the plain folder")
+	}
+}
+
 // tamperExec lets a test act as the agent between the capture and the
 // transfer of the result bundle, or replace the transfer outright (an
 // agent that swaps the file after the in-sandbox check).

@@ -315,6 +315,11 @@ func resolveExisting(p string) string {
 // string or, when both exist, by file identity (so case-insensitive
 // filesystems and bind mounts cannot sneak past a string compare).
 func samePath(a, b string) bool {
+	// A relative path (the empty one included) would resolve against the
+	// process's working directory, which says nothing about either path.
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
 	a, b = filepath.Clean(a), filepath.Clean(b)
 	if a == b {
 		return true

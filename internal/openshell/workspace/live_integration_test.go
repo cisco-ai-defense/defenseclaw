@@ -330,3 +330,62 @@ network_policies: {}
 		t.Fatalf("apply: %+v", res)
 	}
 }
+
+// TestLiveCopyPlainFolder runs a non-git folder through copy mode: the
+// hidden git dir lands outside the folder (/sandbox/.dc/git), the agent's
+// edits come back, and the folder in the sandbox never gets a .git.
+func TestLiveCopyPlainFolder(t *testing.T) {
+	cli := liveCLI(t)
+	e := liveEnv(t)
+	writeFile(t, e.project, "notes.md", "operator notes\n")
+	writeFile(t, e.project, ".env", "DCE2E_PLACEHOLDER=not-a-secret\n")
+	name := fmt.Sprintf("f1-live-plain-%d", time.Now().Unix()%100000)
+	t.Cleanup(func() { _ = DeleteCopy(e.data, name) })
+
+	rec, err := Stage(bg, StageOptions{Project: e.project, Name: name, DataDir: e.data, Home: e.home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Kind != CopyPlain {
+		t.Fatalf("kind = %s, want plain", rec.Kind)
+	}
+	policy := fmt.Sprintf(`version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /etc, /proc, /dev/urandom, /var/log, /opt]
+  read_write: [/tmp, /dev/null]
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: %q
+  run_as_group: %q
+network_policies: {}
+`, fmt.Sprint(os.Getuid()), fmt.Sprint(os.Getgid()))
+	sb := createLive(t, cli, name, policy, "", rec.Labels())
+	if _, err := Upload(bg, e.data, name, cli); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, name, cli); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, code := sb.sh("cd " + rec.RemoteDir + " && test ! -e .git && test ! -e .env && cat notes.md && echo agent >> notes.md && echo new > added.txt")
+	t.Logf("agent: code=%d out=%q err=%q", code, out, lastLines([]byte(stderr), 3))
+	if code != 0 || out != "operator notes\n" {
+		t.Fatalf("agent script failed: %s", stderr)
+	}
+	pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: name, Exec: cli})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := changePaths(pr.Changes); got != "A:added.txt M:notes.md" {
+		t.Fatalf("changes = %s", got)
+	}
+	res, err := Apply(bg, ApplyOptions{DataDir: e.data, Name: name, Mode: ApplyMerge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied || readFile(t, e.project, "notes.md") != "operator notes\nagent\n" || readFile(t, e.project, "added.txt") != "new\n" ||
+		readFile(t, e.project, ".env") != "DCE2E_PLACEHOLDER=not-a-secret\n" || pathExists(filepath.Join(e.project, ".git")) {
+		t.Fatalf("apply: %+v", res)
+	}
+}
