@@ -869,9 +869,16 @@ func (e *env) stopStart(sb *sandboxapi.Sandbox) {
 	if err != nil || stopped.Phase != "stopped" {
 		t.Fatalf("stop = %+v, %v", stopped, err)
 	}
-	started, err := e.api.Start(e.ctx(10*time.Minute), sb.Name, sandboxapi.StartRequest{})
+	// The earlier steps' sessions are accepted, so the review and undo
+	// below judge the next session alone.
+	started, err := e.api.Start(e.ctx(10*time.Minute), sb.Name, sandboxapi.StartRequest{NewSnapshot: true})
 	if err != nil || started.Phase != "ready" {
 		t.Fatalf("start = %+v, %v", started, err)
+	}
+	// Starting it again while it runs is refused: that would reset the
+	// session's snapshot, token and tool-call ledger.
+	if _, err := e.api.Start(e.ctx(time.Minute), sb.Name, sandboxapi.StartRequest{}); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("start of a running sandbox = %v, want a conflict", err)
 	}
 	// Hooks authenticate with the binding minted at start; a stale token
 	// would fail closed and deny the tool call.
