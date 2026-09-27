@@ -92,6 +92,14 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"LD_AUDIT":                                "",
 	"BASH_ENV":                                "",
 	"ENV":                                     "",
+	// Pin model provider selection to prevent project settings from redirecting
+	// the conversation to an attacker-controlled endpoint (p2-render-2).
+	"ANTHROPIC_BASE_URL":       "",
+	"ANTHROPIC_API_URL":        "",
+	"ANTHROPIC_AUTH_TOKEN":     "",
+	"ANTHROPIC_CUSTOM_HEADERS": "",
+	"CLAUDE_CODE_USE_BEDROCK":  "",
+	"CLAUDE_CODE_USE_VERTEX":   "",
 }
 
 // SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
@@ -166,6 +174,13 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 		"hooks":                             hooks,
 		"env":                               env,
 		"sandbox":                           map[string]interface{}{"enabled": false},
+		// Neutralize command-running settings that project/user settings could
+		// otherwise use to bypass PreToolUse hooks (p2-render-4).
+		"apiKeyHelper":                "",
+		"enableAllProjectMcpServers":  false,
+		"awsAuthRefresh":              "",
+		"awsCredentialExport":         "",
+		"statusLine":                  "",
 	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
