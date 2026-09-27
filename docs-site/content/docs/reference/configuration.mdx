@@ -382,6 +382,8 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
 
+### Routing and observability behavior
+
 The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
 OpenAI-compatible Chat Completions path. Hook connectors and other provider API
 shapes keep their existing path. `defenseclaw keys list` dynamically discovers
