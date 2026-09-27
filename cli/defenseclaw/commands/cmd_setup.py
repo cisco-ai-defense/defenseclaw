@@ -10749,10 +10749,16 @@ def _remove_connector(
         return False
 
     remaining = [c for c in configured if c != match]
+    # A configured name this build does not ship (an older release registered
+    # it) has no teardown owner: DefenseClaw drops it from config and its own
+    # state, but never guesses at that agent's config files.
+    unshipped = normalize_connector(match) not in _CONNECTOR_META
 
-    # WU8 D2=A — last-connector gate.
+    # WU8 D2=A — last-connector gate. An unshipped connector already enforces
+    # nothing (the gateway refuses to start while config names it), so
+    # removing it does not need --force.
     if not remaining:
-        if not force:
+        if not force and not unshipped:
             click.echo(
                 f"  ✗ Refusing to remove the last connector ({match!r}) — the gateway would enforce nothing.",
                 err=True,
@@ -10820,6 +10826,13 @@ def _remove_connector(
         return False
 
     click.echo(f"  ✓ Removed connector {match!r}")
+    if unshipped:
+        click.echo(
+            f"  ⚠ {match!r} is not a connector this DefenseClaw build ships, so DefenseClaw "
+            "did not change that agent's config files. Remove any DefenseClaw hook entries "
+            "there by hand; see Upgrade → Renamed and removed connectors in the docs.",
+            err=True,
+        )
     if remaining:
         click.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
     else:
@@ -10827,7 +10840,10 @@ def _remove_connector(
 
     if restart:
         click.echo()
-        click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
+        if unshipped:
+            click.echo("  Restarting gateway so it drops the removed connector's DefenseClaw state…")
+        else:
+            click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
         # The set-difference teardown (WU6b) runs at gateway boot and is
         # connector-agnostic, so a plain defense-gateway bounce is the
         # precise primitive here. _restart_defense_gateway also marks the
@@ -10850,10 +10866,16 @@ def _remove_connector(
         if ctx is not None:
             ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo()
-        click.echo(
-            "  --no-restart: config updated, but the removed connector's hooks are "
-            "still installed until you restart defenseclaw-gateway."
-        )
+        if unshipped:
+            click.echo(
+                "  --no-restart: config updated; restart defenseclaw-gateway so it drops "
+                "the removed connector's DefenseClaw state."
+            )
+        else:
+            click.echo(
+                "  --no-restart: config updated, but the removed connector's hooks are "
+                "still installed until you restart defenseclaw-gateway."
+            )
 
     remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
     _log_setup_action(
