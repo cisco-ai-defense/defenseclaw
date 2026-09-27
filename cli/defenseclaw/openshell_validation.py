@@ -12,10 +12,10 @@
 
 Mirrors ``OpenShellConfig.Validate`` and ``Config.ValidateOpenShell`` in
 internal/config/openshell.go for everything the v8 schema cannot express
-(host glob grammar, positive quantities, listener collisions), so a Python
-writer never saves a section the Go gateway refuses to load. The shared corpus
-testdata/openshell/config_validation_cases.yaml pins the parity; the input is a
-document that already passed the v8 schema.
+(host glob grammar, project-relative mask globs, positive quantities, listener
+collisions), so a Python writer never saves a section the Go gateway refuses to
+load. The shared corpus testdata/openshell/config_validation_cases.yaml pins the
+parity; the input is a document that already passed the v8 schema.
 """
 
 from __future__ import annotations
@@ -45,7 +45,10 @@ _MEMORY_MULTIPLIER = {
     "Ti": 1 << 40,
 }
 _PACK_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_DRIVE_LETTER = re.compile(r"[A-Za-z]:")
 _MAX_INT64 = (1 << 63) - 1
+# Go: MaxOpenShellProjectGlobBytes.
+MAX_PROJECT_GLOB_BYTES = 4096
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -76,6 +79,16 @@ def valid_host_glob(glob: str) -> bool:
         return False
     name = g[2:] if g.startswith("*.") else g
     return all(_HOST_LABEL.fullmatch(label) for label in name.split("."))
+
+
+def valid_project_glob(glob: str) -> bool:
+    """``ValidateOpenShellProjectGlob``: a project-relative glob that cannot escape the project."""
+    g = glob.strip()
+    if not g or len(g.encode("utf-8")) > MAX_PROJECT_GLOB_BYTES or "\x00" in g:
+        return False
+    if g.startswith(("/", "~")) or "\\" in g or _DRIVE_LETTER.match(g):
+        return False
+    return ".." not in g.split("/")
 
 
 def valid_cpu(value: str) -> bool:
@@ -123,6 +136,16 @@ def _globs_error(path: str, raw: Any) -> tuple[str, str] | None:
     return None
 
 
+def _project_globs_error(path: str, raw: Any) -> tuple[str, str] | None:
+    for index, glob in enumerate(raw if isinstance(raw, list) else []):
+        if not isinstance(glob, str) or not valid_project_glob(glob):
+            return (
+                f"{path}[{index}]",
+                'use a project-relative glob with forward slashes, without a leading "/" or "~" or a ".." segment',
+            )
+    return None
+
+
 def _port(value: Any, default: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
@@ -136,10 +159,18 @@ def openshell_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
         return None
     egress = _mapping(section.get("egress"))
     admin = _mapping(section.get("admin"))
+    workdir = _mapping(section.get("workdir"))
 
     ingress, egress_port = _port(section.get("ingress_port")), _port(section.get("egress_port"))
     if ingress != 0 and ingress == egress_port:
         return "openshell.egress_port", "use different ingress_port and egress_port values"
+    for path, raw in (
+        ("openshell.workdir.masks", workdir.get("masks")),
+        ("openshell.workdir.unmask", workdir.get("unmask")),
+    ):
+        error = _project_globs_error(path, raw)
+        if error is not None:
+            return error
     for path, raw in (
         ("openshell.egress.block", egress.get("block")),
         ("openshell.egress.allow", egress.get("allow")),

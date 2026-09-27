@@ -41,7 +41,14 @@ from defenseclaw.config import (
     load,
 )
 from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
-from defenseclaw.openshell_validation import openshell_error, valid_cpu, valid_host_glob, valid_memory
+from defenseclaw.openshell_validation import (
+    MAX_PROJECT_GLOB_BYTES,
+    openshell_error,
+    valid_cpu,
+    valid_host_glob,
+    valid_memory,
+    valid_project_glob,
+)
 
 _REPO = Path(__file__).resolve().parents[2]
 _PARITY_CORPUS = _REPO / "testdata" / "openshell" / "config_validation_cases.yaml"
@@ -221,6 +228,15 @@ class TestOpenShellValidation(unittest.TestCase):
                      ("a" * 60 + ".") * 5 + "example"):
             self.assertFalse(valid_host_glob(glob), glob)
 
+    def test_project_globs(self):
+        # The same cases as TestValidateOpenShellProjectGlob.
+        for glob in (".env", " .env.* ", "secrets/**", "**/*.pem", "a/b/c.key", "./certs/dev.pem", "a..b", "..env",
+                     "db:backup", "a" * MAX_PROJECT_GLOB_BYTES):
+            self.assertTrue(valid_project_glob(glob), glob)
+        for glob in ("", "  ", "/srv/app/.env", "~/notes.txt", "~notes", "certs\\dev.pem", "../x", "a/../b", "a/..",
+                     "..", "C:/work/.env", "c:env", "a\x00b", "a" * (MAX_PROJECT_GLOB_BYTES + 1)):
+            self.assertFalse(valid_project_glob(glob), glob)
+
     def test_quantities_mirror_go(self):
         # The same cases as TestParseOpenShellQuantities.
         for value in ("2", "1.5", "0.25", "500m", " 3 "):
@@ -236,6 +252,10 @@ class TestOpenShellValidation(unittest.TestCase):
         self.assertIsNone(openshell_error({"config_version": 8}))
         self.assertEqual(
             openshell_error({"openshell": {"egress": {"allow": ["pypi.org", "x:1"]}}})[0], "openshell.egress.allow[1]"
+        )
+        self.assertEqual(
+            openshell_error({"openshell": {"workdir": {"masks": [".env"], "unmask": [".env.example", "../x"]}}})[0],
+            "openshell.workdir.unmask[1]",
         )
         self.assertEqual(
             openshell_error({"openshell": {"enabled": True, "ingress_port": 18972}})[0], "openshell.egress_port"

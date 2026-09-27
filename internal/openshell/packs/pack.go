@@ -54,12 +54,11 @@ const PackFileName = "pack.yaml"
 const MaxPackBytes = 64 << 10
 
 const (
-	maxListEntries  = 1024
-	maxPatternBytes = 4096
-	maxFeeds        = 16
-	maxPorts        = 64
-	maxDescription  = 1024
-	maxUploadMB     = 1 << 20
+	maxListEntries = 1024
+	maxFeeds       = 16
+	maxPorts       = 64
+	maxDescription = 1024
+	maxUploadMB    = 1 << 20
 )
 
 // Network modes. They map onto the OpenShell policy profiles: open → open,
@@ -529,41 +528,20 @@ func (v *validator) ports(field string, ports []int) []int {
 	return out
 }
 
-// projectGlobs accepts project-relative globs: no absolute paths, no ".."
-// segments, no NUL bytes.
+// projectGlobs accepts project-relative globs under the same rules as the
+// openshell.workdir keys (config.ValidateOpenShellProjectGlob): no absolute
+// paths, no ".." segments, no NUL bytes.
 func (v *validator) projectGlobs(field string, globs []string) []string {
 	if !v.listLimit(field, len(globs), maxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(globs))
 	for i, glob := range globs {
-		entry := fmt.Sprintf("%s[%d]", field, i)
-		g := strings.TrimSpace(glob)
-		switch {
-		case g == "":
-			v.fail(entry, "invalid_value", "is empty")
-			continue
-		case len(g) > maxPatternBytes:
-			v.fail(entry, "invalid_value", "is longer than %d bytes", maxPatternBytes)
-			continue
-		case strings.ContainsRune(g, 0):
-			v.fail(entry, "invalid_value", "contains a NUL byte")
-			continue
-		case strings.HasPrefix(g, "/") || strings.HasPrefix(g, "~") || strings.Contains(g, `\`):
-			v.fail(entry, "invalid_value", "%q must be a project-relative glob with forward slashes", glob)
+		if err := config.ValidateOpenShellProjectGlob(glob); err != nil {
+			v.fail(fmt.Sprintf("%s[%d]", field, i), "invalid_value", "%v", err)
 			continue
 		}
-		escapes := false
-		for _, segment := range strings.Split(g, "/") {
-			if segment == ".." {
-				escapes = true
-			}
-		}
-		if escapes {
-			v.fail(entry, "invalid_value", "%q must not contain \"..\"", glob)
-			continue
-		}
-		out = appendUnique(out, g)
+		out = appendUnique(out, strings.TrimSpace(glob))
 	}
 	return out
 }

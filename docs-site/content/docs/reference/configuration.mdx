@@ -424,6 +424,10 @@ copy mode, harness prompts kept). A custom pack is one strict YAML file with
 the same sections; unknown keys, duplicate keys, anchors, symbolic links,
 world-writable files, and built-in names are refused.
 
+`workdir.masks`, `workdir.unmask`, and `sandbox run --unmask` take
+project-relative globs with forward slashes, like a pack's masks: absolute
+paths, `~`, drive letters, backslashes, and `..` segments are refused.
+
 Raising the profile above a pack's own network mode (for example
 `--profile balanced` on the `open` pack) brings in the `balanced` pack's
 curated allowlist. Allow entries that cover every host or a whole top-level

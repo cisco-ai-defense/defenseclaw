@@ -224,6 +224,9 @@ func TestOpenShellValidate(t *testing.T) {
 		{"feed", func(o *OpenShellConfig) { o.Egress.Feed = "custom" }, "egress.feed"},
 		{"token delivery", func(o *OpenShellConfig) { o.TokenDelivery = "file" }, "token_delivery"},
 		{"negative upload", func(o *OpenShellConfig) { o.Workdir.MaxUploadMB = -1 }, "max_upload_mb"},
+		{"absolute mask", func(o *OpenShellConfig) { o.Workdir.Masks = []string{".env", "/srv/app/.env"} }, "workdir.masks[1]"},
+		{"escaping unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"../../secrets/app.key"} }, "workdir.unmask[0]"},
+		{"home unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"~/notes.txt"} }, "workdir.unmask[0]"},
 		{"proxy port zero", func(o *OpenShellConfig) { o.Egress.Ports = []int{0} }, "egress.ports[0]"},
 		{"host port", func(o *OpenShellConfig) { o.MCP.HostPorts = []int{65536} }, "mcp.host_ports[0]"},
 		{"block glob", func(o *OpenShellConfig) { o.Egress.Block = []string{"https://x.example"} }, "egress.block[0]"},
@@ -256,6 +259,8 @@ func TestOpenShellValidate(t *testing.T) {
 	}
 
 	valid := DefaultConfig().OpenShell
+	valid.Workdir.Masks = []string{".env.*", "secrets/**", "**/*.pem"}
+	valid.Workdir.Unmask = []string{".env.example", "./certs/dev.pem"}
 	valid.Egress.Block = []string{"*", "Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]"}
 	valid.Resources = OpenShellResourcesConfig{CPU: "1.5", Memory: "512Mi"}
 	valid.Admin.Locked = append([]string(nil), OpenShellLockableKeys...)
@@ -327,6 +332,31 @@ func TestOpenShellInvalidSectionFailsLoad(t *testing.T) {
 	_, err := LoadFromFile(path)
 	if err == nil || !strings.Contains(err.Error(), "config: openshell:") {
 		t.Fatalf("LoadFromFile() = %v, want an openshell validation error", err)
+	}
+}
+
+// The same cases as TestOpenShellValidation.test_project_globs in
+// cli/tests/test_config_openshell.py.
+func TestValidateOpenShellProjectGlob(t *testing.T) {
+	for _, glob := range []string{
+		".env", " .env.* ", "secrets/**", "**/*.pem", "a/b/c.key", "./certs/dev.pem", "a..b", "..env", "db:backup",
+		strings.Repeat("a", MaxOpenShellProjectGlobBytes),
+	} {
+		if err := ValidateOpenShellProjectGlob(glob); err != nil {
+			t.Errorf("ValidateOpenShellProjectGlob(%q) = %v", glob, err)
+		}
+	}
+	for _, glob := range []string{
+		"", "  ", "/srv/app/.env", "~/notes.txt", "~notes", `certs\dev.pem`, "../x", "a/../b", "a/..", "..",
+		"C:/work/.env", "c:env", "a\x00b", strings.Repeat("a", MaxOpenShellProjectGlobBytes+1),
+	} {
+		if err := ValidateOpenShellProjectGlob(glob); err == nil {
+			t.Errorf("ValidateOpenShellProjectGlob(%q) accepted", glob)
+		}
+	}
+	if err := ValidateOpenShellProjectGlobs("workdir.unmask", []string{".env.example", "/x"}); err == nil ||
+		!strings.HasPrefix(err.Error(), "workdir.unmask[1]: ") {
+		t.Fatalf("list error = %v", err)
 	}
 }
 

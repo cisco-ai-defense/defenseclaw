@@ -501,6 +501,38 @@ func ValidateOpenShellHostGlob(glob string) error {
 	return nil
 }
 
+// MaxOpenShellProjectGlobBytes bounds one project-relative glob.
+const MaxOpenShellProjectGlobBytes = 4096
+
+// ValidateOpenShellProjectGlob accepts a project-relative glob (workdir masks
+// and unmask entries, `sandbox run --unmask`, and a sandbox pack's masks and
+// review globs): not empty, at most MaxOpenShellProjectGlobBytes, no NUL byte,
+// forward slashes only, and neither absolute ("/…", "~…", "C:…") nor escaping
+// the project through a ".." segment.
+func ValidateOpenShellProjectGlob(glob string) error {
+	g := strings.TrimSpace(glob)
+	switch {
+	case g == "":
+		return errors.New("project glob is empty")
+	case len(g) > MaxOpenShellProjectGlobBytes:
+		return fmt.Errorf("project glob is longer than %d bytes", MaxOpenShellProjectGlobBytes)
+	case strings.ContainsRune(g, 0):
+		return errors.New("project glob contains a NUL byte")
+	case strings.HasPrefix(g, "/") || strings.HasPrefix(g, "~") || strings.Contains(g, `\`) || hasDriveLetter(g):
+		return fmt.Errorf("%q must be a project-relative glob with forward slashes", glob)
+	}
+	for _, segment := range strings.Split(g, "/") {
+		if segment == ".." {
+			return fmt.Errorf("%q must not contain \"..\"", glob)
+		}
+	}
+	return nil
+}
+
+func hasDriveLetter(p string) bool {
+	return len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))
+}
+
 // ValidateOpenShell checks the openshell section (OpenShellConfig.Validate)
 // and, when the sandbox integration is enabled, that its effective listener
 // ports are usable and collide neither with each other nor with DefenseClaw's
@@ -587,6 +619,8 @@ func (o *OpenShellConfig) Validate() error {
 	for i, port := range o.MCP.HostPorts {
 		check(validateOpenShellPort(fmt.Sprintf("mcp.host_ports[%d]", i), port, false))
 	}
+	check(ValidateOpenShellProjectGlobs("workdir.masks", o.Workdir.Masks))
+	check(ValidateOpenShellProjectGlobs("workdir.unmask", o.Workdir.Unmask))
 	check(validateOpenShellHostGlobs("egress.block", o.Egress.Block))
 	check(validateOpenShellHostGlobs("egress.allow", o.Egress.Allow))
 	check(validateOpenShellNames("harnesses", o.Harnesses))
@@ -678,6 +712,17 @@ func validateOpenShellNames(field string, names []string) error {
 	for i, name := range names {
 		if !openShellNamePattern.MatchString(strings.TrimSpace(name)) {
 			return fmt.Errorf("%s[%d]: invalid name %q", field, i, name)
+		}
+	}
+	return nil
+}
+
+// ValidateOpenShellProjectGlobs checks every entry of a project glob list
+// (ValidateOpenShellProjectGlob) and names the first bad one by index.
+func ValidateOpenShellProjectGlobs(field string, globs []string) error {
+	for i, glob := range globs {
+		if err := ValidateOpenShellProjectGlob(glob); err != nil {
+			return fmt.Errorf("%s[%d]: %w", field, i, err)
 		}
 	}
 	return nil

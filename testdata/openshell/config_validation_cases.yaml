@@ -245,3 +245,52 @@ cases:
       config_version: 8
       openshell:
         admin: {required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f}
+
+  - name: workdir-project-globs
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: ['.env.*', 'secrets/**', '**/*.pem', 'a..b'], unmask: [.env.example, ./certs/dev.pem]}
+
+  - name: workdir-mask-absolute
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: [/srv/app/.env]}
+
+  - name: workdir-mask-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {masks: ['~/notes.txt']}
+
+  - name: workdir-unmask-escapes-the-project
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: [.env.example, ../../secrets/app.key]}
+
+  - name: workdir-unmask-drive-letter
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['C:/work/.env']}
+
+  - name: workdir-unmask-backslash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['certs\dev.pem']}
+
+  - name: workdir-unmask-blank
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {unmask: ['  ']}

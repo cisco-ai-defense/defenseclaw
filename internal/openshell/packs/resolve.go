@@ -348,6 +348,9 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		return nil, nil, err
 	}
 	o := cfg.OpenShell
+	if err := validateWorkdirGlobs(o); err != nil {
+		return nil, nil, err
+	}
 	home, _ := userHomeDir()
 	r := &resolver{
 		admin:   o.Admin,
@@ -403,6 +406,24 @@ func validateFlags(flags Flags) error {
 	}
 	if port := flags.OpenShellGatewayPort; port < 0 || port > 65535 {
 		return fmt.Errorf("sandbox policy: OpenShell gateway port %d must be between 1 and 65535", port)
+	}
+	for _, glob := range flags.Unmask {
+		if err := config.ValidateOpenShellProjectGlob(glob); err != nil {
+			return fmt.Errorf("sandbox policy: --unmask: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateWorkdirGlobs checks the user's mask and unmask globs the way pack
+// globs are checked, for configurations that did not come through the
+// loader's validation.
+func validateWorkdirGlobs(o config.OpenShellConfig) error {
+	if err := config.ValidateOpenShellProjectGlobs("openshell.workdir.masks", o.Workdir.Masks); err != nil {
+		return fmt.Errorf("sandbox policy: %w", err)
+	}
+	if err := config.ValidateOpenShellProjectGlobs("openshell.workdir.unmask", o.Workdir.Unmask); err != nil {
+		return fmt.Errorf("sandbox policy: %w", err)
 	}
 	return nil
 }

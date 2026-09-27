@@ -231,6 +231,7 @@ func TestParseRejects(t *testing.T) {
 		{"home mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['~/.ssh/*']}"), "invalid_value", "workspace.masks[0]"},
 		{"escaping review", replace("workspace: {mode: mount}", "workspace: {mode: mount, review: ['../x']}"), "invalid_value", "workspace.review[0]"},
 		{"backslash mask", replace("workspace: {mode: mount}", `workspace: {mode: mount, masks: ['a\b']}`), "invalid_value", "workspace.masks[0]"},
+		{"drive letter mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['C:/x']}"), "invalid_value", "workspace.masks[0]"},
 		{"empty mask", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: ['  ']}"), "invalid_value", "workspace.masks[0]"},
 		{"bad harness", replace("harness: {yolo: true}", "harness: {yolo: true, allowed: ['claude code']}"), "invalid_value", "harness.allowed[0]"},
 		{"bad blocked tool", replace("mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: false, blocked_tools: ['rm -rf']}"), "invalid_value", "mcp.blocked_tools[0]"},
