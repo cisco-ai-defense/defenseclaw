@@ -344,13 +344,13 @@ func TestPrivateNetworkHintMatchesConfig(t *testing.T) {
 		t.Errorf("hint %q suggests a CIDR, which openshell.egress.allow rejects", hint)
 	}
 	for _, entry := range []string{"wiki.example.com", "10.9.9.9", "fd00::9", "*.corp"} {
-		if err := config.ValidateOpenShellHostGlob(entry); err != nil {
+		if err := config.ValidateOpenShellEgressPattern(entry); err != nil {
 			t.Errorf("config rejects the hinted entry %q: %v", entry, err)
 		}
 	}
-	if config.ValidateOpenShellHostGlob("10.0.0.0/8") == nil {
-		t.Error("config accepts CIDRs now; the hint and DeciderOptions.Allow docs can offer them")
-	}
+	// Config also accepts CIDR prefixes (the proxy's pattern grammar); the
+	// hint deliberately suggests the simplest entries that open one private
+	// destination: the exact name, its address, or an intranet wildcard.
 	g, r, _ := newTestGuard(t)
 	r.set("wiki.example.com", []string{"10.9.9.9"})
 	r.set("git.corp", []string{"10.9.9.10"})
