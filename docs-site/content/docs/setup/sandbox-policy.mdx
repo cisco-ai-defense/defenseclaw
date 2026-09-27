@@ -196,7 +196,10 @@ These are the settings each pack controls. The
   for a call that was denied, or that never got a check, is a hook tamper.
   `stop` stops the sandbox; `alert` reports a high-severity finding and
   keeps it running. Both show in the activity feed. `open` alerts;
-  `balanced` and `strict` stop.
+  `balanced` and `strict` stop. Claude Code, Codex, Cursor Agent, OpenCode,
+  Amp and Kiro CLI sandboxes get this check. Copilot CLI and Devin CLI hooks
+  do not say which call they belong to, so for those two DefenseClaw relies
+  on noticing hooks that go silent.
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook

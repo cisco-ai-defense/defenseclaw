@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -150,9 +151,18 @@ type SandboxHookDecision struct {
 	// Event is the harness hook event; Tool the tool it concerns.
 	Event string
 	Tool  string
-	// ToolUseID is the harness's per-call ID (Claude Code and Codex
-	// tool_use_id): it pairs a call's PreToolUse with its PostToolUse.
+	// ToolUseID is the harness's per-call ID (Claude Code, Codex and Cursor
+	// tool_use_id, OpenCode callID, Amp toolUseID): it pairs a call's
+	// pre-tool event with its post-tool event.
 	ToolUseID string
+	// SessionID and ToolInput are the call's session and tool input (empty
+	// when the event carries none). They name a call whose harness sends no
+	// per-call ID (Kiro CLI).
+	SessionID string
+	ToolInput json.RawMessage
+	// ResultStatus is the status field a post-tool event reports (Amp's
+	// tool.result: done, error or cancelled).
+	ResultStatus string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
 	WouldBlock bool
@@ -707,8 +717,21 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 	st.onHookDecision(SandboxHookDecision{
 		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
 		Event: req.HookEventName, Tool: req.ToolName, ToolUseID: req.ToolInvocationID,
-		Action: resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
+		SessionID: req.SessionID, ToolInput: sandboxDecisionToolInput(req),
+		ResultStatus: strings.TrimSpace(payloadString(req.Payload, "status")),
+		Action:       resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
 	})
+}
+
+// sandboxDecisionToolInput is the tool input a hook event carries, or nil.
+// ToolArgs falls back to the whole payload when the event has no input
+// field, and that differs between a call's pre-tool and post-tool events,
+// so it never names a call.
+func sandboxDecisionToolInput(req agentHookRequest) json.RawMessage {
+	if firstValue(req.Payload, "tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments") == nil {
+		return nil
+	}
+	return req.ToolArgs
 }
 
 func contextWithSandboxUser(ctx context.Context, binding sandboxauth.Binding) context.Context {

@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -34,12 +35,24 @@ import (
 type HookDecision struct {
 	BindingID   string
 	SandboxName string
+	// Connector is the binding's connector. It selects the harness's
+	// tool-call hook events and how they pair (toolCallHooksByConnector);
+	// empty means Claude Code's.
+	Connector string
 	// Event is the harness hook event (PreToolUse, ...).
 	Event string
 	Tool  string
 	// ToolUseID is the harness's per-call ID (tool_use_id), which pairs a
-	// call's PreToolUse with its PostToolUse.
+	// call's pre-tool event with its post-tool event.
 	ToolUseID string
+	// SessionID and ToolInput are the call's session and tool input. They
+	// name a call whose harness sends no per-call ID (Kiro CLI); ToolInput
+	// is empty when the event carries no tool input.
+	SessionID string
+	ToolInput json.RawMessage
+	// ResultStatus is the status a post-tool event reports (Amp's
+	// tool.result: done, error or cancelled).
+	ResultStatus string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
 	WouldBlock bool
@@ -82,12 +95,17 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 
 // ObserveHookDecision counts tool calls and blocked tool calls for the
 // session summary, puts blocks on the activity feed, and correlates each
-// tool call's PreToolUse and PostToolUse to detect hook tamper.
+// tool call's pre-tool and post-tool events to detect hook tamper.
 func (m *Manager) ObserveHookDecision(d HookDecision) {
-	pre, result := toolHookEvent(d.Event)
+	hooks := toolCallHooksFor(d.Connector)
+	pre, result := hooks.classify(d.Event, d.ResultStatus)
 	counted := isToolEvent(d.Event)
 	if !pre && result == toolResultNone && !counted {
 		return
+	}
+	var call toolCallRef
+	if pre || result != toolResultNone {
+		call = hooks.ref(d)
 	}
 	blocked := isBlockAction(d.Action)
 	reason := displayReason(d.Reason)
@@ -100,9 +118,9 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	tamper := tamperNone
 	switch {
 	case pre:
-		m.toolCalls.ObservePre(d.BindingID, d.ToolUseID, blocked)
+		m.toolCalls.ObservePre(d.BindingID, call, blocked)
 	case result != toolResultNone:
-		tamper = m.toolCalls.ObserveResult(d.BindingID, d.ToolUseID, result)
+		tamper = m.toolCalls.ObserveResult(d.BindingID, call, result)
 	}
 	if counted {
 		b.hooks.toolCalls++
@@ -113,7 +131,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	}
 	var alarm *tamperAlarm
 	if tamper != tamperNone {
-		alarm = m.noteTamperLocked(b, d, tamper)
+		alarm = m.noteTamperLocked(b, d, hooks, tamper)
 	}
 	m.mu.Unlock()
 	if counted && blocked {
@@ -173,7 +191,10 @@ type tamperAlarm struct {
 	tool      string
 	event     string
 	toolUseID string
-	onTamper  string
+	// preHook names the harness's pre-tool hook (PreToolUse, preToolUse,
+	// tool.execute.before, ...).
+	preHook  string
+	onTamper string
 	// stop is set for the alarm that schedules the sandbox's stop; later
 	// alarms of the same session only report.
 	stop bool
@@ -181,12 +202,15 @@ type tamperAlarm struct {
 
 // noteTamperLocked counts a tamper on the box and decides the response.
 // Callers hold Manager.mu.
-func (m *Manager) noteTamperLocked(b *box, d HookDecision, kind tamperKind) *tamperAlarm {
+func (m *Manager) noteTamperLocked(b *box, d HookDecision, hooks toolCallHooks, kind tamperKind) *tamperAlarm {
 	b.hooks.tampered++
 	b.hooks.lastTamper = m.now()
 	a := &tamperAlarm{
 		kind: kind, identity: b.identity(), name: b.rec.Name, bindingID: d.BindingID,
-		tool: hookLabel(d.Tool, 64), event: d.Event, toolUseID: hookLabel(d.ToolUseID, 64),
+		tool: hookLabel(d.Tool, 64), event: d.Event, preHook: hooks.preHookName(),
+	}
+	if hooks.keying == keyByID {
+		a.toolUseID = hookLabel(d.ToolUseID, 64)
 	}
 	if b.eff != nil {
 		a.onTamper = b.eff.HookOnTamper
@@ -218,10 +242,10 @@ func (m *Manager) raiseTamper(b *box, a tamperAlarm) {
 		tool = "a tool"
 	}
 	title := "A tool ran without a DefenseClaw verdict"
-	what := fmt.Sprintf("%s ran in %s, but its PreToolUse hook never reached DefenseClaw.", tool, a.name)
+	what := fmt.Sprintf("%s ran in %s, but its %s hook never reached DefenseClaw.", tool, a.name, a.preHook)
 	if a.kind == tamperDenied {
 		title = "A tool DefenseClaw denied ran anyway"
-		what = fmt.Sprintf("%s ran in %s although DefenseClaw denied its PreToolUse.", tool, a.name)
+		what = fmt.Sprintf("%s ran in %s although DefenseClaw denied its %s.", tool, a.name, a.preHook)
 	}
 	description := what + " The workload likely killed or bypassed its DefenseClaw hook, so this call was not judged."
 	remediation := "DefenseClaw is stopping the sandbox (hooks.on_tamper: stop). Review the session's activity before you start it again."

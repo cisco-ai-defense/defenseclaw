@@ -194,7 +194,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		OnListening: func() { rt.setListening("ingress", true) },
 		OnHookDecision: func(d SandboxHookDecision) {
 			mgr.ObserveHookDecision(manager.HookDecision{
-				BindingID: d.BindingID, SandboxName: d.SandboxName, Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
+				BindingID: d.BindingID, SandboxName: d.SandboxName, Connector: d.Connector,
+				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
+				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
 			})
 		},

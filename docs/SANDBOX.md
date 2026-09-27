@@ -1118,19 +1118,37 @@ compromised hook shows:
   Commands the harness did not start, such as the CLI's probe, a copy-mode
   upload or pull, or your own `sandbox exec`, do not count.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
-  a tool that ran without a verdict. Claude Code and Codex send the same
-  per-call `tool_use_id` with a call's `PreToolUse` and its `PostToolUse`.
-  Per binding, the manager records each `PreToolUse` decision and pairs it
-  with the result. A `PostToolUse` whose `PreToolUse` was denied, or never
-  arrived, raises a HIGH `hook_tamper` finding, a `finding` activity entry
-  and a count in the sandbox's hook coverage (`tampered`,
-  `last_tamper_at`). Claude Code's `PostToolUseFailure` and `PermissionDenied`
-  close a call but never prove tamper: Claude can report a failure before
-  `PreToolUse` ran. The pairing reads only events named exactly
-  `PreToolUse` and `PostToolUse` that carry a per-call ID. Copilot CLI,
-  Cursor Agent, Kiro CLI, OpenCode and Amp name their events differently, so
-  for them hook silence is the backstop; their pre-tool events still count
-  in the session summary's tool calls and blocks.
+  a tool that ran without a verdict. Per binding, the manager records each
+  pre-tool decision and pairs it with the call's post-tool event. A
+  post-tool event whose pre-tool event was denied, or never arrived, raises
+  a HIGH `hook_tamper` finding, a `finding` activity entry and a count in
+  the sandbox's hook coverage (`tampered`, `last_tamper_at`). The pairing
+  reads each harness's own event names, exactly as the harness sends them:
+
+  | Connector | Pre-tool | Proves the tool ran | Closes a call only | The call is named by |
+  | --- | --- | --- | --- | --- |
+  | Claude Code | `PreToolUse` | `PostToolUse` | `PostToolUseFailure`, `PermissionDenied` | `tool_use_id` |
+  | Codex | `PreToolUse` | `PostToolUse` | | `tool_use_id` |
+  | Cursor Agent | `preToolUse` | `postToolUse` | `postToolUseFailure` | `tool_use_id` |
+  | OpenCode | `tool.execute.before` | `tool.execute.after` | | the plugin's `callID` |
+  | Amp | `tool.call` | `tool.result` with status `done` | `tool.result` with another status | the plugin's `toolUseID` |
+  | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
+  | Copilot CLI, Devin CLI | not paired | | | |
+
+  A failure event closes a call but never proves tamper: Claude Code can
+  report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
+  per-call ID, so the manager keys its calls by a digest of the call's
+  session, tool name and canonical tool input, which Kiro sends unchanged
+  with both events. Measured: Kiro sends `postToolUse` only for a tool that
+  ran (not for one a `preToolUse` exit 2 blocked, nor for one its own
+  permission check denied, which runs after `preToolUse`). Identical calls
+  share a key, so the ledger counts open ones, and each call's own verdict
+  decides: a retried call that DefenseClaw now allows is not tamper, and a
+  repeat of a call DefenseClaw allowed with the same input is not reported.
+  Copilot CLI and Devin CLI hooks carry no per-call ID either, and whether
+  their post-tool events fire for a call a hook denied is not measured, so
+  for them hook silence is the backstop. Every harness's pre-tool events
+  count in the session summary's tool calls and blocks.
 
 The pack's `hooks.on_tamper` picks the response: `stop` (the default in
 `balanced` and `strict`) stops the sandbox once per session; `alert` (the
@@ -1592,7 +1610,9 @@ These were measured on the pinned releases inside the community base image
   and MCP servers, so the tier is user. Headless with `--agent defenseclaw`, the
   triggers `userPromptSubmit`, `preToolUse`, `postToolUse` and `stop` fire
   (`agentSpawn` fires only for the default agent). The matcher `*` matches
-  every tool; `.*` matches none, so tool hooks with it never fire. Exit code
+  every tool; `.*` matches none, so tool hooks with it never fire. The tool
+  hooks' payloads carry `session_id`, `tool_name` and `tool_input` (and
+  `tool_response` after the tool), but no per-call ID. Exit code
   2 from `preToolUse` blocks the tool (Kiro reports it as failed); any other
   exit code shows as a warning and the tool runs. A missing or unparseable
   agent file makes Kiro print only `failed to set agent` and run the tool

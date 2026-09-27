@@ -46,7 +46,7 @@ func TestStartRefusesARunningSandbox(t *testing.T) {
 	token := ingress.Spec.Credentials[openshell.EnvSandboxToken]
 	snap := e.ws.snapshots["livebox"]
 	binding, _ := e.store.Lookup("livebox")
-	e.m.toolCalls.ObservePre(binding.ID, "toolu_1", false)
+	e.m.toolCalls.ObservePre(binding.ID, idRef("toolu_1"), false)
 	e.m.mu.Lock()
 	guard := e.m.boxes["livebox"].rec.Guard
 	e.m.mu.Unlock()

@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,27 +29,140 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
-func TestToolHookEvent(t *testing.T) {
+func TestToolCallHooksClassify(t *testing.T) {
 	for _, tt := range []struct {
-		event  string
-		pre    bool
-		result toolResult
+		connector, event, status string
+		pre                      bool
+		result                   toolResult
 	}{
-		{"PreToolUse", true, toolResultNone},
-		{"PostToolUse", false, toolResultRan},
-		{"PostToolUseFailure", false, toolResultFailed},
-		{"PermissionDenied", false, toolResultRefused},
-		// Exact vendor spellings only.
-		{"preToolUse", false, toolResultNone},
-		{"post_tool_use", false, toolResultNone},
-		{"PermissionRequest", false, toolResultNone},
-		{"PostToolBatch", false, toolResultNone},
-		{"SessionStart", false, toolResultNone},
+		// A decision that names no connector reads Claude Code's events.
+		{"", "PreToolUse", "", true, toolResultNone},
+		{"", "PostToolUse", "", false, toolResultRan},
+		{"", "PostToolUseFailure", "", false, toolResultFailed},
+		{"", "PermissionDenied", "", false, toolResultRefused},
+		{"claudecode", "PreToolUse", "", true, toolResultNone},
+		{"claudecode", "PostToolUse", "", false, toolResultRan},
+		{"claudecode", "PostToolUseFailure", "", false, toolResultFailed},
+		{"claudecode", "PermissionDenied", "", false, toolResultRefused},
+		{"codex", "PreToolUse", "", true, toolResultNone},
+		{"codex", "PostToolUse", "", false, toolResultRan},
+		{"cursor", "preToolUse", "", true, toolResultNone},
+		{"cursor", "postToolUse", "", false, toolResultRan},
+		{"cursor", "postToolUseFailure", "", false, toolResultFailed},
+		{"opencode", "tool.execute.before", "", true, toolResultNone},
+		{"opencode", "tool.execute.after", "", false, toolResultRan},
+		{"amp", "tool.call", "", true, toolResultNone},
+		{"amp", "tool.result", "done", false, toolResultRan},
+		{"amp", "tool.result", " done ", false, toolResultRan},
+		{"amp", "tool.result", "error", false, toolResultFailed},
+		{"amp", "tool.result", "cancelled", false, toolResultFailed},
+		{"amp", "tool.result", "", false, toolResultFailed},
+		{"amp", "tool.result", "Done", false, toolResultFailed},
+		{"kiro", "preToolUse", "", true, toolResultNone},
+		{"kiro", "postToolUse", "", false, toolResultRan},
+		{"copilot", "preToolUse", "", true, toolResultNone},
+		{"copilot", "postToolUse", "", false, toolResultRan},
+		{"copilot", "postToolUseFailure", "", false, toolResultFailed},
+		{"devin", "PreToolUse", "", true, toolResultNone},
+		{"devin", "PostToolUse", "", false, toolResultRan},
+		// Exact vendor spellings of each harness only.
+		{"", "preToolUse", "", false, toolResultNone},
+		{"claudecode", "post_tool_use", "", false, toolResultNone},
+		{"claudecode", "PermissionRequest", "", false, toolResultNone},
+		{"claudecode", "PostToolBatch", "", false, toolResultNone},
+		{"claudecode", "SessionStart", "", false, toolResultNone},
+		{"codex", "PermissionDenied", "", false, toolResultNone},
+		{"cursor", "PreToolUse", "", false, toolResultNone},
+		{"cursor", "beforeShellExecution", "", false, toolResultNone},
+		{"cursor", "afterShellExecution", "", false, toolResultNone},
+		{"kiro", "PreToolUse", "", false, toolResultNone},
+		{"kiro", "userPromptSubmit", "", false, toolResultNone},
+		{"kiro", "stop", "", false, toolResultNone},
+		{"copilot", "permissionRequest", "", false, toolResultNone},
+		{"opencode", "tool.execute.after", "done", false, toolResultRan},
+		{"amp", "agent.end", "done", false, toolResultNone},
+		{"kiro", "", "", false, toolResultNone},
+		// A connector with no reviewed tool-call hooks pairs nothing.
+		{"hermes", "pre_tool_call", "", false, toolResultNone},
+		{"future", "PreToolUse", "", false, toolResultNone},
 	} {
-		pre, result := toolHookEvent(tt.event)
+		pre, result := toolCallHooksFor(tt.connector).classify(tt.event, tt.status)
 		if pre != tt.pre || result != tt.result {
-			t.Errorf("toolHookEvent(%q) = %v, %v; want %v, %v", tt.event, pre, result, tt.pre, tt.result)
+			t.Errorf("%s: classify(%q, %q) = %v, %v; want %v, %v", tt.connector, tt.event, tt.status, pre, result, tt.pre, tt.result)
 		}
+	}
+}
+
+// Every sandboxed harness is listed, and each pairs by the identity its
+// hooks carry: a per-call ID (Claude Code, Codex, Cursor, OpenCode, Amp),
+// the call's content (Kiro CLI, measured to send none), or nothing (Copilot
+// CLI and Devin CLI, whose post-tool events on a denied call are not
+// measured).
+func TestToolCallHooksKeying(t *testing.T) {
+	want := map[string]toolCallKeying{
+		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID,
+		"kiro": keyByContent, "copilot": keyNone, "devin": keyNone,
+	}
+	if len(toolCallHooksByConnector) != len(want) {
+		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
+	}
+	for name, keying := range want {
+		hooks, ok := toolCallHooksByConnector[name]
+		if !ok || hooks.keying != keying || hooks.pre == "" || (hooks.ran == "" && hooks.statusResult == "") {
+			t.Errorf("%s: hooks %+v, want keying %d", name, hooks, keying)
+		}
+	}
+}
+
+func TestToolCallRefs(t *testing.T) {
+	if ref := idRef("  "); ref.key != "" {
+		t.Fatalf("blank ID names %+v", ref)
+	}
+	if ref := idRef(" toolu_1 "); ref.key != "toolu_1" || ref.byContent {
+		t.Fatalf("idRef = %+v", ref)
+	}
+	long := idRef(strings.Repeat("x", 4096))
+	if !strings.HasPrefix(long.key, "sha256:") || len(long.key) > 80 {
+		t.Fatalf("oversized ID = %q", long.key)
+	}
+
+	a := contentRef("sess-1", "shell", json.RawMessage(`{"command":"echo a","cwd":"/work"}`))
+	if a.key == "" || !a.byContent || !strings.HasPrefix(a.key, "call:") {
+		t.Fatalf("contentRef = %+v", a)
+	}
+	// The same call spelled with other whitespace and key order.
+	if b := contentRef(" sess-1 ", " shell ", json.RawMessage("{ \"cwd\": \"/work\",\n \"command\": \"echo a\" }")); b != a {
+		t.Fatalf("equivalent input keyed %q, want %q", b.key, a.key)
+	}
+	for name, other := range map[string]toolCallRef{
+		"input":   contentRef("sess-1", "shell", json.RawMessage(`{"command":"echo b","cwd":"/work"}`)),
+		"tool":    contentRef("sess-1", "fs_read", json.RawMessage(`{"command":"echo a","cwd":"/work"}`)),
+		"session": contentRef("sess-2", "shell", json.RawMessage(`{"command":"echo a","cwd":"/work"}`)),
+		// The fields are separated, so moving a byte across them changes
+		// the key.
+		"boundary": contentRef("sess-1s", "hell", json.RawMessage(`{"command":"echo a","cwd":"/work"}`)),
+		// Numbers are kept verbatim, not rounded through float64.
+		"number": contentRef("sess-1", "shell", json.RawMessage(`{"n":12345678901234567891}`)),
+	} {
+		if other.key == a.key {
+			t.Errorf("%s: a different call shares the key", name)
+		}
+	}
+	if n1, n2 := contentRef("s", "t", json.RawMessage(`{"n":12345678901234567891}`)), contentRef("s", "t", json.RawMessage(`{"n":12345678901234567892}`)); n1 == n2 {
+		t.Error("large numbers that differ share a key")
+	}
+	for _, missing := range []toolCallRef{
+		contentRef("sess-1", "", json.RawMessage(`{"command":"echo a"}`)),
+		contentRef("sess-1", "shell", nil),
+		contentRef("sess-1", "shell", json.RawMessage("  ")),
+	} {
+		if missing.key != "" {
+			t.Errorf("a call without a tool or input named %+v", missing)
+		}
+	}
+	// Input that is not JSON is keyed verbatim.
+	if raw := contentRef("s", "t", json.RawMessage("not json")); raw.key == "" {
+		t.Error("non-JSON input named no call")
 	}
 }
 
@@ -98,10 +212,10 @@ func TestHookTamperTrackerVerdicts(t *testing.T) {
 			}
 			for i, s := range tt.steps {
 				if s.pre {
-					tr.ObservePre("b1", "toolu_1", s.denied)
+					tr.ObservePre("b1", idRef("toolu_1"), s.denied)
 					continue
 				}
-				if got := tr.ObserveResult("b1", "toolu_1", s.result); got != s.want {
+				if got := tr.ObserveResult("b1", idRef("toolu_1"), s.result); got != s.want {
 					t.Fatalf("step %d: verdict %v, want %v", i, got, s.want)
 				}
 			}
@@ -109,14 +223,110 @@ func TestHookTamperTrackerVerdicts(t *testing.T) {
 	}
 }
 
+// A content key is shared by identical calls (Kiro CLI sends no per-call
+// ID), so the ledger counts open calls, and a later call's own verdict
+// decides rather than an earlier identical one's.
+func TestHookTamperTrackerContentKeys(t *testing.T) {
+	type step struct {
+		pre    bool
+		denied bool
+		result toolResult
+		want   tamperKind
+	}
+	for _, tt := range []struct {
+		name     string
+		complete bool
+		steps    []step
+	}{
+		{"allowed then ran", true, []step{{pre: true}, {result: toolResultRan}}},
+		{"denied then ran", true, []step{{pre: true, denied: true}, {result: toolResultRan, want: tamperDenied}}},
+		{"never seen then ran", true, []step{{result: toolResultRan, want: tamperUnseen}}},
+		{"two identical calls, both paired", true, []step{
+			{pre: true}, {pre: true}, {result: toolResultRan}, {result: toolResultRan},
+		}},
+		// The pre-tool hook of the second identical call was killed, but
+		// DefenseClaw allowed exactly this call: no verdict was bypassed.
+		{"repeat of an allowed call", true, []step{
+			{pre: true}, {result: toolResultRan}, {result: toolResultRan},
+		}},
+		// The agent retried a denied call and DefenseClaw allowed it the
+		// second time (an approval, a lifted block): not tamper.
+		{"denied, then allowed, then ran", true, []step{
+			{pre: true, denied: true}, {pre: true}, {result: toolResultRan},
+		}},
+		{"allowed, ran, denied, then ran", true, []step{
+			{pre: true}, {result: toolResultRan}, {pre: true, denied: true}, {result: toolResultRan, want: tamperDenied},
+		}},
+		{"denied twice then ran", true, []step{
+			{pre: true, denied: true}, {pre: true, denied: true}, {result: toolResultRan, want: tamperDenied}, {result: toolResultRan},
+		}},
+		// A denial of an identical call while one is open leaves the open
+		// call to pair with the next result.
+		{"denied while an identical call is open", true, []step{
+			{pre: true}, {pre: true, denied: true}, {result: toolResultRan}, {result: toolResultRan},
+		}},
+		{"failure closes one open call", true, []step{
+			{pre: true}, {pre: true}, {result: toolResultFailed}, {result: toolResultRan}, {result: toolResultRan},
+		}},
+		{"partial: never seen then ran", false, []step{{result: toolResultRan}}},
+		{"partial: denied then ran", false, []step{{pre: true, denied: true}, {result: toolResultRan, want: tamperDenied}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := newHookTamperTracker()
+			if tt.complete {
+				tr.Begin("b1")
+			}
+			call := contentRef("sess-1", "shell", json.RawMessage(`{"command":"echo dctamper"}`))
+			for i, s := range tt.steps {
+				if s.pre {
+					tr.ObservePre("b1", call, s.denied)
+					continue
+				}
+				if got := tr.ObserveResult("b1", call, s.result); got != s.want {
+					t.Fatalf("step %d: verdict %v, want %v", i, got, s.want)
+				}
+			}
+		})
+	}
+}
+
+// Open content calls stay bounded, and an evicted one is remembered as
+// seen.
+func TestHookTamperTrackerContentKeysBounded(t *testing.T) {
+	tr := newHookTamperTracker()
+	tr.Begin("b1")
+	task := contentRef("s", "shell", json.RawMessage(`{"command":"sleep 600"}`))
+	tr.ObservePre("b1", task, false)
+	tr.ObservePre("b1", task, false)
+	echo := func(i int) toolCallRef {
+		return contentRef("s", "shell", json.RawMessage(fmt.Sprintf(`{"command":"echo %d"}`, i)))
+	}
+	for i := 0; i < maxOpenToolCalls; i++ {
+		tr.ObservePre("b1", echo(i), false)
+	}
+	if got := tr.ObserveResult("b1", task, toolResultRan); got != tamperNone {
+		t.Fatalf("evicted open call = %v", got)
+	}
+	for i := 0; i < 3*maxOpenToolCalls; i++ {
+		tr.ObservePre("b1", echo(maxOpenToolCalls+i), false)
+		tr.ObservePre("b1", echo(maxOpenToolCalls+i), false)
+	}
+	tr.mu.Lock()
+	open, past := tr.bindings["b1"].open.Len(), tr.bindings["b1"].past.Len()
+	tr.mu.Unlock()
+	if open > maxOpenToolCalls || past > maxPastToolCalls {
+		t.Fatalf("open %d past %d, bounds %d and %d", open, past, maxOpenToolCalls, maxPastToolCalls)
+	}
+}
+
 func TestHookTamperTrackerIgnoresUncorrelatable(t *testing.T) {
 	tr := newHookTamperTracker()
 	tr.Begin("b1")
-	tr.ObservePre("b1", "", true)
-	if got := tr.ObserveResult("b1", "", toolResultRan); got != tamperNone {
+	tr.ObservePre("b1", idRef(""), true)
+	if got := tr.ObserveResult("b1", idRef(""), toolResultRan); got != tamperNone {
 		t.Fatalf("a result without a tool-use ID = %v", got)
 	}
-	if got := tr.ObserveResult("", "toolu_1", toolResultRan); got != tamperNone {
+	if got := tr.ObserveResult("", idRef("toolu_1"), toolResultRan); got != tamperNone {
 		t.Fatalf("a result without a binding = %v", got)
 	}
 	if n, _ := tr.tracked("b1"); n != 0 {
@@ -124,8 +334,8 @@ func TestHookTamperTrackerIgnoresUncorrelatable(t *testing.T) {
 	}
 	// Bindings do not share calls.
 	tr.Begin("b2")
-	tr.ObservePre("b1", "toolu_1", false)
-	if got := tr.ObserveResult("b2", "toolu_1", toolResultRan); got != tamperUnseen {
+	tr.ObservePre("b1", idRef("toolu_1"), false)
+	if got := tr.ObserveResult("b2", idRef("toolu_1"), toolResultRan); got != tamperUnseen {
 		t.Fatalf("another binding's call = %v", got)
 	}
 }
@@ -135,19 +345,19 @@ func TestHookTamperTrackerBoundedMemory(t *testing.T) {
 	tr.Begin("b1")
 	// An oversized ID is kept as its digest and still pairs.
 	long := strings.Repeat("x", 4096)
-	tr.ObservePre("b1", long, false)
-	if got := tr.ObserveResult("b1", long, toolResultRan); got != tamperNone {
+	tr.ObservePre("b1", idRef(long), false)
+	if got := tr.ObserveResult("b1", idRef(long), toolResultRan); got != tamperNone {
 		t.Fatalf("oversized ID did not pair: %v", got)
 	}
 	for i := 0; i < 5*(maxOpenToolCalls+maxPastToolCalls); i++ {
 		id := fmt.Sprintf("toolu_%d", i)
-		tr.ObservePre("b1", id, i%3 == 0)
+		tr.ObservePre("b1", idRef(id), i%3 == 0)
 		if i%2 == 0 {
-			tr.ObserveResult("b1", id, toolResultRan)
+			tr.ObserveResult("b1", idRef(id), toolResultRan)
 		}
 	}
 	for i := 0; i < 5*maxPastToolCalls; i++ {
-		tr.ObserveResult("b1", fmt.Sprintf("unseen_%d", i), toolResultRan)
+		tr.ObserveResult("b1", idRef(fmt.Sprintf("unseen_%d", i)), toolResultRan)
 	}
 	n, _ := tr.tracked("b1")
 	if n > maxOpenToolCalls+maxPastToolCalls {
@@ -167,11 +377,11 @@ func TestHookTamperTrackerBoundedMemory(t *testing.T) {
 func TestHookTamperTrackerEvictedOpenCallIsNotTamper(t *testing.T) {
 	tr := newHookTamperTracker()
 	tr.Begin("b1")
-	tr.ObservePre("b1", "toolu_task", false)
+	tr.ObservePre("b1", idRef("toolu_task"), false)
 	for i := 0; i < maxOpenToolCalls; i++ {
-		tr.ObservePre("b1", fmt.Sprintf("toolu_%d", i), false)
+		tr.ObservePre("b1", idRef(fmt.Sprintf("toolu_%d", i)), false)
 	}
-	if got := tr.ObserveResult("b1", "toolu_task", toolResultRan); got != tamperNone {
+	if got := tr.ObserveResult("b1", idRef("toolu_task"), toolResultRan); got != tamperNone {
 		t.Fatalf("evicted open call = %v", got)
 	}
 }
@@ -179,19 +389,19 @@ func TestHookTamperTrackerEvictedOpenCallIsNotTamper(t *testing.T) {
 func TestHookTamperTrackerForgetBeginRetain(t *testing.T) {
 	tr := newHookTamperTracker()
 	tr.Begin("b1")
-	tr.ObservePre("b1", "toolu_1", true)
+	tr.ObservePre("b1", idRef("toolu_1"), true)
 	tr.Forget("b1")
 	if _, ok := tr.tracked("b1"); ok {
 		t.Fatal("ledger survived Forget")
 	}
 	// Begin starts over: an earlier session's denial is gone.
 	tr.Begin("b2")
-	tr.ObservePre("b2", "toolu_1", true)
+	tr.ObservePre("b2", idRef("toolu_1"), true)
 	tr.Begin("b2")
-	if got := tr.ObserveResult("b2", "toolu_1", toolResultRan); got != tamperUnseen {
+	if got := tr.ObserveResult("b2", idRef("toolu_1"), toolResultRan); got != tamperUnseen {
 		t.Fatalf("after Begin = %v, want unseen", got)
 	}
-	tr.ObservePre("b3", "toolu_1", false)
+	tr.ObservePre("b3", idRef("toolu_1"), false)
 	tr.Retain(func(id string) bool { return id == "b3" })
 	if _, ok := tr.tracked("b2"); ok {
 		t.Fatal("Retain kept a dead binding")
@@ -280,6 +490,97 @@ func TestHookTamperAlert(t *testing.T) {
 	}
 }
 
+// Each sandboxed harness's own tool-call events pair: a killed pre-tool
+// hook, and a denied call that ran anyway, are reported for every harness
+// whose hooks name a call, and never for one whose hooks do not.
+func TestHookTamperPerHarness(t *testing.T) {
+	type call struct {
+		id, session string
+		input       json.RawMessage
+	}
+	for _, tc := range []struct {
+		connector, pre, post, status string
+		// byContent: the harness sends no per-call ID (Kiro CLI).
+		byContent bool
+		// paired is false for harnesses whose calls are not paired.
+		paired bool
+	}{
+		{connector: "claudecode", pre: "PreToolUse", post: "PostToolUse", paired: true},
+		{connector: "codex", pre: "PreToolUse", post: "PostToolUse", paired: true},
+		{connector: "cursor", pre: "preToolUse", post: "postToolUse", paired: true},
+		{connector: "opencode", pre: "tool.execute.before", post: "tool.execute.after", paired: true},
+		{connector: "amp", pre: "tool.call", post: "tool.result", status: "done", paired: true},
+		{connector: "kiro", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
+		{connector: "copilot", pre: "preToolUse", post: "postToolUse"},
+		{connector: "devin", pre: "PreToolUse", post: "PostToolUse"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			e := newEnv(t, nil)
+			sb := e.create(sandboxapi.CreateRequest{Name: "tamper" + tc.connector})
+			binding, _ := e.store.Lookup(sb.Name)
+			d := func(event, action string, c call) HookDecision {
+				out := HookDecision{BindingID: binding.ID, SandboxName: sb.Name, Connector: tc.connector,
+					Event: event, Tool: "shell", SessionID: c.session, ToolInput: c.input, Action: action}
+				if !tc.byContent {
+					out.ToolUseID = c.id
+				}
+				if event == tc.post {
+					out.ResultStatus = tc.status
+				}
+				return out
+			}
+			calls := map[string]call{}
+			for _, name := range []string{"ok", "killed", "denied", "refused"} {
+				calls[name] = call{id: "call_" + name, session: "sess-1", input: json.RawMessage(`{"command":"echo dctamper-` + name + `"}`)}
+			}
+			// A paired call: no tamper.
+			e.m.ObserveHookDecision(d(tc.pre, "allow", calls["ok"]))
+			e.m.ObserveHookDecision(d(tc.post, "allow", calls["ok"]))
+			if f := hookTamperFindings(e); len(f) != 0 {
+				t.Fatalf("a paired call raised %+v", f)
+			}
+			// The pre-tool hook was killed: only the post-tool event arrives.
+			e.m.ObserveHookDecision(d(tc.post, "allow", calls["killed"]))
+			// A denied call that ran anyway.
+			e.m.ObserveHookDecision(d(tc.pre, "block", calls["denied"]))
+			e.m.ObserveHookDecision(d(tc.post, "allow", calls["denied"]))
+
+			findings := hookTamperFindings(e)
+			if !tc.paired {
+				if len(findings) != 0 {
+					t.Fatalf("%s calls are not paired, but raised %+v", tc.connector, findings)
+				}
+				return
+			}
+			if len(findings) != 2 {
+				t.Fatalf("hook tamper findings = %+v", findings)
+			}
+			if !strings.Contains(findings[0].Title, "without a DefenseClaw verdict") ||
+				!strings.Contains(findings[0].Description, "its "+tc.pre+" hook never reached DefenseClaw") ||
+				!strings.Contains(findings[0].Evidence, "event="+tc.post) {
+				t.Fatalf("unseen finding = %+v", findings[0])
+			}
+			if !strings.Contains(findings[1].Title, "denied ran anyway") || !strings.Contains(findings[1].Description, "denied its "+tc.pre) {
+				t.Fatalf("denied finding = %+v", findings[1])
+			}
+			if tc.byContent == strings.Contains(findings[0].Evidence, "tool_use_id=") {
+				t.Fatalf("evidence %q: a tool_use_id belongs to ID-keyed calls only", findings[0].Evidence)
+			}
+			if tc.connector == "amp" {
+				// A tool.result that is not done closes the call without
+				// proving it ran, even for a call DefenseClaw denied.
+				e.m.ObserveHookDecision(d(tc.pre, "block", calls["refused"]))
+				refused := d(tc.post, "allow", calls["refused"])
+				refused.ResultStatus = "cancelled"
+				e.m.ObserveHookDecision(refused)
+				if f := hookTamperFindings(e); len(f) != 2 {
+					t.Fatalf("a cancelled tool.result raised %+v", f[2:])
+				}
+			}
+		})
+	}
+}
+
 func TestHookTamperStop(t *testing.T) {
 	e := newEnv(t, nil)
 	sb := e.create(sandboxapi.CreateRequest{Name: "tamperstop", Pack: "balanced"})
@@ -355,7 +656,7 @@ func TestHookTamperIgnoresStaleBindingAndForgets(t *testing.T) {
 		t.Fatal("the revoked binding's ledger survived the delete")
 	}
 	// A decision that raced the revoke is collected by the next prune.
-	e.m.toolCalls.ObservePre(binding.ID, "toolu_2", false)
+	e.m.toolCalls.ObservePre(binding.ID, idRef("toolu_2"), false)
 	e.m.pruneToolCalls()
 	if _, ok := e.m.toolCalls.tracked(binding.ID); ok {
 		t.Fatal("prune kept a dead binding's ledger")
