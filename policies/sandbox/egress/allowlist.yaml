@@ -11,8 +11,14 @@
 # documentation. LLM and provider hosts are not listed because that traffic
 # goes directly through OpenShell provider rules, never through the proxy.
 #
-# CONNECT tunnels are opaque, so "fetch-only" GitHub access is not enforced
-# here; pushes need a credential that only `--github-write` provides.
+# The list limits where traffic can go, not what it does there. CONNECT
+# tunnels are opaque, so the proxy cannot tell a read from a write, and every
+# host below with a write API accepts whatever credential the agent holds,
+# including one a prompt injection hands it: GitHub (git push, gists and
+# repositories through api.github.com), GitLab, Bitbucket, and the registries'
+# publish endpoints (registry.npmjs.org, crates.io, rubygems.org,
+# api.nuget.org, hex.pm, pub.dev). The balanced profile narrows the
+# destinations; it is not an exfiltration barrier for these hosts.
 #
 # Host patterns:
 #   example.com     exactly that host
