@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -377,79 +376,61 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		}
 		res.Warnings = append(res.Warnings, warnings...)
 		res.SavedRefs = savedRefs
-		if len(savedRefs) > 0 {
-			refList := strings.Join(savedRefs, ", ")
-			msg := fmt.Sprintf("Your session's branch and tag changes have been saved under refs/defenseclaw/post-refs/%s/. To recover a branch, run: git branch <new-name> refs/defenseclaw/post-refs/%s/<branch-name>. Changed/deleted: %s", rec.Name, rec.Name, refList)
-			res.Warnings = append(res.Warnings, msg)
-		}
 	}
-	// Before resetting the tree, identify files that existed as ignored files
-	// before the session but are now visible because the agent removed their
-	// ignore rule. These must be preserved.
-	const maxPreserveBytes = 128 << 20 // 128 MB cap
-	type preservedFile struct {
-		data []byte
-		mode fs.FileMode
-	}
-	// Read through the project's os.Root and refuse symlinked parents: the
-	// session may have replaced a directory with a symlink, and a plain
-	// Lstat follows every component but the last, so it would read (and
-	// later copy into the project) a file from elsewhere on the host.
-	r, err := openRootFS(rec.Project)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	preserveIgnored := make(map[string]preservedFile)
-	totalBytes := int64(0)
-	var overCapWarned bool
+	// Before resetting the tree, drop pre-existing ignored files from the
+	// shadow index so read-tree --reset -u never touches them. These files
+	// existed before the session and should stay exactly as they are on disk.
+	var toPreserve []string
 	for _, c := range allChanges {
-		if c.Status != "A" || !wasIgnored(c.Path, gs.Ignored) {
-			continue
+		if c.Status == "A" && wasIgnored(c.Path, gs.Ignored) {
+			toPreserve = append(toPreserve, c.Path)
 		}
-		rel := path.Clean(c.Path)
-		if err := r.realParents(rel); err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("did not keep %s: %v", rel, err))
-			continue
-		}
-		info, err := r.root.Lstat(rel)
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if totalBytes+info.Size() > maxPreserveBytes {
-			if !overCapWarned {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("pre-existing ignored files exceed %d MB; some will not be removed to avoid data loss", maxPreserveBytes>>20))
-				overCapWarned = true
-			}
-			continue
-		}
-		data, err := r.readRegular(rel, maxPreserveBytes-totalBytes)
+	}
+	if len(toPreserve) > 0 {
+		// Read through the project's os.Root to verify no parent is symlinked
+		// before removing from the index.
+		r, err := openRootFS(rec.Project)
 		if err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("did not keep %s: %v", rel, err))
-			continue
+			return err
 		}
-		preserveIgnored[c.Path] = preservedFile{data: data, mode: info.Mode()}
-		totalBytes += int64(len(data))
+		var verified []string
+		for _, p := range toPreserve {
+			rel := path.Clean(p)
+			if err := r.realParents(rel); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("cannot preserve %s: %v", rel, err))
+				continue
+			}
+			verified = append(verified, p)
+		}
+		r.Close()
+		if len(verified) > 0 {
+			// Remove these paths from the shadow index in batches.
+			const batchSize = 100
+			for i := 0; i < len(verified); i += batchSize {
+				end := i + batchSize
+				if end > len(verified) {
+					end = len(verified)
+				}
+				batch := verified[i:end]
+				var stdin bytes.Buffer
+				for _, p := range batch {
+					stdin.WriteString(p)
+					stdin.WriteByte('\n')
+				}
+				g := st.sh.git()
+				g.stdin = &stdin
+				if err := g.run(ctx, "update-index", "--force-remove", "--stdin"); err != nil {
+					res.Warnings = append(res.Warnings, fmt.Sprintf("could not preserve some ignored files: %v", err))
+					break
+				}
+			}
+		}
 	}
 
 	// The shadow index holds the capture just taken, so a one-way reset
 	// removes what the session created and rewrites what it changed.
 	if err := st.sh.git().run(ctx, "read-tree", "--reset", "-u", gs.Commit); err != nil {
 		return fmt.Errorf("workspace: restore the working tree: %w", err)
-	}
-
-	// Restore pre-existing ignored files that the reset removed.
-	for relPath, pf := range preserveIgnored {
-		slashPath := path.Clean(relPath)
-		// Create parent directories with restrictive permissions.
-		if err := r.ensureDirMode(path.Dir(slashPath), 0o700); err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("could not restore pre-existing ignored file %s: %v", relPath, err))
-			continue
-		}
-		// Write the file atomically with O_EXCL to prevent following symlinks.
-		if err := r.writeFileNoFollow(slashPath, bytes.NewReader(pf.data), pf.mode, time.Time{}); err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("could not restore pre-existing ignored file %s: %v", relPath, err))
-		}
 	}
 	if err := removeNestedRepos(ctx, st.sh, rec.Project, gs.Tree, res.NestedRepos); err != nil {
 		return err
@@ -625,32 +606,54 @@ func restoreObjectFiles(sh *shadow) error {
 
 // restoreRefs resets branches, tags and HEAD in one update-ref transaction.
 // Before any ref is deleted or rewound, its post-session tip is saved under
-// refs/defenseclaw/post-refs/<name>/ so the session's work is recoverable.
+// refs/defenseclaw/post-refs/<name>/<undo-id>/ so the session's work is recoverable
+// even across multiple undos.
 func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name string, changes []RefChange) ([]string, []string, error) {
 	var warnings []string
 	var savedRefs []string
-	// First, save all post-session ref tips under refs/defenseclaw/post-refs/<name>/.
+	if len(changes) == 0 {
+		return warnings, savedRefs, nil
+	}
+	// Generate a unique undo ID: UTC timestamp + random suffix.
+	undoID := time.Now().UTC().Format("20060102T150405Z") + "-" + randomSuffix()[:8]
+	// First, save all post-session ref tips under refs/defenseclaw/post-refs/<name>/<undo-id>/.
 	var saveStdin bytes.Buffer
+	refsSaved := make(map[string]bool)
 	for _, c := range changes {
 		if c.After != "" {
 			// Save the post-session tip, whether it's being moved or deleted.
-			savedRef := "refs/defenseclaw/post-refs/" + name + "/" + c.Ref
+			savedRef := "refs/defenseclaw/post-refs/" + name + "/" + undoID + "/" + c.Ref
 			fmt.Fprintf(&saveStdin, "create %s %s\n", savedRef, c.After)
-			savedRefs = append(savedRefs, c.Ref)
+			refsSaved[c.Ref] = false // Mark as pending
 		}
 	}
 	if saveStdin.Len() > 0 {
 		g := st.proj
 		g.stdin = &saveStdin
-		if err := g.run(ctx, "update-ref", "-m", "defenseclaw: save post-session refs before undo", "--stdin"); err != nil {
+		if err := g.run(ctx, "update-ref", "-m", "defenseclaw: save post-session refs before undo "+undoID, "--stdin"); err != nil {
 			warnings = append(warnings, "could not save post-session ref tips: "+err.Error())
-			savedRefs = nil // Clear savedRefs if the save failed
+			// Mark all refs as failed to save
+			for ref := range refsSaved {
+				refsSaved[ref] = false
+			}
+		} else {
+			// Mark all refs as successfully saved
+			for ref := range refsSaved {
+				refsSaved[ref] = true
+				savedRefs = append(savedRefs, ref)
+			}
 		}
 	}
 
-	// Now restore the pre-session refs.
+	// Now restore the pre-session refs, but only for refs that were successfully saved.
 	var stdin bytes.Buffer
+	var skippedRefs []string
 	for _, c := range changes {
+		// If this ref had a post-session tip and we failed to save it, skip restoring it.
+		if c.After != "" && !refsSaved[c.Ref] {
+			skippedRefs = append(skippedRefs, c.Ref)
+			continue
+		}
 		switch {
 		case c.Before == "":
 			fmt.Fprintf(&stdin, "delete %s %s\n", c.Ref, c.After)
@@ -659,6 +662,9 @@ func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name st
 		default:
 			fmt.Fprintf(&stdin, "update %s %s %s\n", c.Ref, c.Before, c.After)
 		}
+	}
+	if len(skippedRefs) > 0 {
+		warnings = append(warnings, fmt.Sprintf("refs not reset because their post-session tips could not be saved: %s", strings.Join(skippedRefs, ", ")))
 	}
 	if stdin.Len() > 0 {
 		g := st.proj
@@ -676,6 +682,15 @@ func restoreRefs(ctx context.Context, st *sessionState, gs *GitSnapshot, name st
 		if err := st.proj.run(ctx, "update-ref", "--no-deref", "-m", "defenseclaw: undo sandbox session", "HEAD", gs.Head); err != nil {
 			return warnings, savedRefs, fmt.Errorf("workspace: restore HEAD: %w", err)
 		}
+	}
+	// Update the hint to show the actual save location with the undo ID.
+	if len(savedRefs) > 0 {
+		sort.Strings(savedRefs)
+		refList := strings.Join(savedRefs, ", ")
+		example := savedRefs[0]
+		msg := fmt.Sprintf("Your session's branch and tag changes have been saved under refs/defenseclaw/post-refs/%s/%s/. To recover a branch, run: git branch <new-name> refs/defenseclaw/post-refs/%s/%s/%s. Changed/deleted: %s",
+			name, undoID, name, undoID, example, refList)
+		warnings = append(warnings, msg)
 	}
 	return warnings, savedRefs, nil
 }
