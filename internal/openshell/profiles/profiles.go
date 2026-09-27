@@ -136,9 +136,20 @@ func BedrockProfileID(template, region string) string {
 
 var (
 	ingressProfileRE = regexp.MustCompile(`^` + regexp.QuoteMeta(IngressID) + `-([1-9][0-9]{0,4})$`)
-	bedrockProfileRE = regexp.MustCompile(`^(?:` + regexp.QuoteMeta(ClaudeBedrockMantleID) + `|` +
-		regexp.QuoteMeta(CodexBedrockMantleID) + `)-` + regionPattern + `$`)
+	// bedrockProfileRE matches the regional id of every Mantle template.
+	bedrockProfileRE = regexp.MustCompile(`^(?:` + strings.Join(quotedIDs(kindBedrock), "|") + `)-` + regionPattern + `$`)
 )
+
+// quotedIDs are the regexp-quoted template IDs of kind, sorted.
+func quotedIDs(kind profileKind) []string {
+	var out []string
+	for _, id := range IDs() {
+		if catalog[id] == kind {
+			out = append(out, regexp.QuoteMeta(id))
+		}
+	}
+	return out
+}
 
 // IngressPort returns the port of an IngressProfileID, and whether id is
 // one (the legacy gateway-wide profile is not).

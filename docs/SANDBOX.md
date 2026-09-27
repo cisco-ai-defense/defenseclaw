@@ -581,10 +581,10 @@ ahead of time):
 | `defenseclaw-codex-bedrock-mantle-<region>` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` |
 | `defenseclaw-opencode-anthropic` | `ANTHROPIC_API_KEY` | `x-api-key` | `api.anthropic.com:443` |
 | `defenseclaw-opencode-openai` | `OPENAI_API_KEY` | bearer | `api.openai.com:443` |
-| `defenseclaw-opencode-bedrock-mantle` | `BEDROCK_MANTLE_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
+| `defenseclaw-opencode-bedrock-mantle-<region>` | `BEDROCK_MANTLE_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
 | `defenseclaw-copilot-github` | `COPILOT_GITHUB_TOKEN` | bearer | `api.github.com:443` and the Copilot API hosts |
 | `defenseclaw-copilot-anthropic` | `COPILOT_PROVIDER_API_KEY` | `x-api-key` | `api.anthropic.com:443` |
-| `defenseclaw-copilot-bedrock-mantle` | `COPILOT_PROVIDER_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
+| `defenseclaw-copilot-bedrock-mantle-<region>` | `COPILOT_PROVIDER_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
 | `defenseclaw-amp` | `AMP_API_KEY` | bearer | `ampcode.com:443` |
 | `defenseclaw-cursor` | `CURSOR_API_KEY` | bearer | `api2.cursor.sh:443`, `api3.cursor.sh:443`, `repo42.cursor.sh:443` |
 | `defenseclaw-kiro` | `KIRO_API_KEY` | bearer | `q.us-east-1.amazonaws.com:443`, `runtime.us-east-1.kiro.dev:443`, `management.us-east-1.kiro.dev:443`, `prod.us-east-1.auth.desktop.kiro.dev:443` |

@@ -210,6 +210,8 @@ func TestProfileIDHelpers(t *testing.T) {
 		"defenseclaw-claude-bedrock-mantle-eu-west-1": true, "defenseclaw-codex-bedrock-mantle-us-gov-west-1": true,
 		"defenseclaw-openai-us-east-1": false, "defenseclaw-claude-bedrock-mantle-evil": false, "defenseclaw-egress": false,
 		"defenseclaw-ingress-0": false, "dc-cred-0123456789ab": false, "user-profile": false,
+		"defenseclaw-opencode-bedrock-mantle-eu-west-1": true, "defenseclaw-copilot-bedrock-mantle-us-east-1": true,
+		"defenseclaw-opencode-anthropic-us-east-1": false,
 	} {
 		if got := IsDefenseClaw(id); got != want {
 			t.Errorf("IsDefenseClaw(%s) = %t, want %t", id, got, want)

@@ -182,7 +182,7 @@ func liveImportMantle(t *testing.T, harnessName, prefix, suffix string, binaries
 	}
 	id := prefix + "-mantle-" + suffix
 	file := filepath.Join(t.TempDir(), "mantle.yaml")
-	if err := os.WriteFile(file, bytes.Replace(rendered.YAML, []byte("id: "+spec.profile), []byte("id: "+id), 1), 0o600); err != nil {
+	if err := os.WriteFile(file, bytes.Replace(rendered.YAML, []byte("id: "+rendered.ID+"\n"), []byte("id: "+id+"\n"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := liveOpenShell(t, 2*time.Minute, nil, "profile", "import", "-f", file, "--global"); err != nil {
@@ -523,7 +523,7 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	}
 	profileID := prefix + "-ingress-" + suffix
 	profileFile := filepath.Join(t.TempDir(), "profile.yaml")
-	if err := os.WriteFile(profileFile, bytes.Replace(ingressProfile.YAML, []byte("id: "+profiles.IngressID), []byte("id: "+profileID), 1), 0o600); err != nil {
+	if err := os.WriteFile(profileFile, bytes.Replace(ingressProfile.YAML, []byte("id: "+ingressProfile.ID+"\n"), []byte("id: "+profileID+"\n"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := liveOpenShell(t, 2*time.Minute, nil, "profile", "import", "-f", profileFile, "--global"); err != nil {
