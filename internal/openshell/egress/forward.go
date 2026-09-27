@@ -181,6 +181,12 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.untrack(t)
 
+	// Recheck ends a request whose sandbox may no longer make it; until a
+	// request upgrades, the HTTP server owns its connections, so it is
+	// ended through its context.
+	reqCtx, cancelReq := context.WithCancel(r.Context())
+	defer cancelReq()
+	t.setCloser(cancelReq)
 	st := &forwardState{p: p, gen: gen, decider: d, tunnel: t, scheme: scheme, explicit: explicit}
 	// A request that began before SetDecider hands its upstream connection
 	// back to the retired generation's pool once it is done; close it there.
@@ -193,7 +199,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 
-	ctx := context.WithValue(r.Context(), forwardKey{}, st)
+	ctx := context.WithValue(reqCtx, forwardKey{}, st)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			remote := info.Conn.RemoteAddr().String()
@@ -243,7 +249,10 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		e := p.event(EventClosed, pr, r.Method, dec)
 		e.TunnelID, e.RemoteAddr, e.Status = t.id, st.remoteAddr(), cw.status()
 		e.BytesUp, e.BytesDown, e.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-		e.Terminated = t.cut.Load() || t.idled.Load()
+		e.Terminated = t.cut.Load() || t.idled.Load() || t.revoked.Load()
+		if t.revoked.Load() {
+			e.Reason = revokedReason
+		}
 		p.emit(e)
 	}()
 	p.forwarder.ServeHTTP(cw, out)
@@ -439,6 +448,8 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	status, reason := http.StatusBadGateway, "the upstream request failed"
 	var netErr net.Error
 	switch {
+	case t.revoked.Load():
+		status, reason = http.StatusForbidden, "the sandbox's egress policy no longer allows it"
 	case de != nil:
 		status, reason = de.status, de.reason
 	case errors.Is(err, context.Canceled):

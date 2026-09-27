@@ -119,13 +119,27 @@ func (m *Manager) refreshEgress() {
 	if proxy == nil {
 		return
 	}
-	d, err := m.Decider()
-	if err != nil {
+	if d, err := m.Decider(); err != nil {
 		m.logf("egress decider: %v", err)
+	} else if err := proxy.SetDecider(d); err != nil {
+		m.logf("egress decider: %v", err)
+	}
+	m.recheckTunnels()
+}
+
+// recheckTunnels has the proxy decide its open tunnels again under the
+// current credentials and deciders (egress.Proxy.Recheck): a sandbox whose
+// credential was revoked, or whose policy now refuses a destination,
+// otherwise keeps the connections it opened before.
+func (m *Manager) recheckTunnels() {
+	m.mu.Lock()
+	proxy := m.proxy
+	m.mu.Unlock()
+	if proxy == nil {
 		return
 	}
-	if err := proxy.SetDecider(d); err != nil {
-		m.logf("egress decider: %v", err)
+	if n := proxy.Recheck(m.creds.Lookup); n > 0 {
+		m.logf("closed %d egress tunnel(s) the sandbox policy no longer allows", n)
 	}
 }
 
@@ -142,7 +156,9 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		return
 	}
 	if eff.NetworkMode == packs.NetworkDeny || d == nil {
-		m.creds.Revoke(rec.BindingID)
+		if m.creds.Revoke(rec.BindingID) {
+			m.recheckTunnels()
+		}
 		return
 	}
 	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d))

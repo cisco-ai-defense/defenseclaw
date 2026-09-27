@@ -402,7 +402,11 @@ sandbox's traffic. The manager re-registers every credential with a rebuilt
 decider after creates, deletes, configuration changes and reconciles.
 Unblocks take effect at once, because the decider looks them up live. The
 proxy's own decider (`Options.Decider`, `SetDecider`) is only the fallback
-for a principal without one.
+for a principal without one. After every such refresh, and whenever it
+revokes a credential, the manager has the proxy decide its open tunnels and
+in-flight requests again (`Proxy.Recheck`): the ones the sandbox's current
+decider refuses, or whose credential is gone, are closed, so a tightening
+reaches connections opened before it.
 
 A sandbox whose policy stops resolving fails closed. This happens when its
 custom pack is deleted or edited into one that no longer loads, or when the

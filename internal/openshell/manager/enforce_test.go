@@ -17,7 +17,13 @@
 package manager
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
+	"errors"
+	"io"
+	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -84,6 +90,64 @@ func TestBlockListRemovesApprovedRules(t *testing.T) {
 	e.tel.mu.Unlock()
 	if !recorded {
 		t.Fatal("no rule_remove record for the blocked destination")
+	}
+}
+
+// hold opens a CONNECT tunnel for sandbox's credential and keeps it open.
+func (lp *liveProxy) hold(t *testing.T, e *harnessEnv, sandbox, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	e.m.mu.Lock()
+	cred := e.m.boxes[sandbox].cred
+	e.m.mu.Unlock()
+	conn, err := net.DialTimeout("tcp", lp.addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	auth := base64.StdEncoding.EncodeToString([]byte(cred.Username + ":" + cred.Password))
+	if _, err := io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\nProxy-Authorization: Basic "+auth+"\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT %s = %v, %v", target, resp, err)
+	}
+	return conn, br
+}
+
+// closedSoon reports whether the proxy closes a held tunnel within wait.
+func closedSoon(conn net.Conn, br *bufio.Reader, wait time.Duration) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(wait))
+	_, err := br.ReadByte()
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// TestPolicyChangesCloseOpenTunnels pins that tightening a running
+// sandbox's egress reaches its open proxy tunnels, not only new ones: a
+// destination added to the block list, and a credential revoked when the
+// sandbox's network mode becomes deny.
+func TestPolicyChangesCloseOpenTunnels(t *testing.T) {
+	e := newEnv(t, nil)
+	proxy := startLiveProxy(t, e)
+	e.create(sandboxapi.CreateRequest{Name: "tunnelbox"})
+	blocked, blockedR := proxy.hold(t, e, "tunnelbox", "drop.example.org:443")
+	kept, keptR := proxy.hold(t, e, "tunnelbox", "keep.example.org:443")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"drop.example.org"} })
+	e.m.refreshEgress()
+	if !closedSoon(blocked, blockedR, 3*time.Second) {
+		t.Fatal("the tunnel to the newly blocked destination is still open")
+	}
+	if closedSoon(kept, keptR, 300*time.Millisecond) {
+		t.Fatal("a tunnel the policy still allows was closed")
+	}
+	// The administrator raises the floor to strict: no web egress at all.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict })
+	e.m.refreshEgress()
+	if !closedSoon(kept, keptR, 3*time.Second) {
+		t.Fatal("a tunnel survived the revocation of its sandbox's credential")
 	}
 }
 

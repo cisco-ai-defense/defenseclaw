@@ -77,10 +77,13 @@ type HostUser struct {
 
 // ProxyControl is the running egress proxy. *egress.Proxy satisfies it.
 // Each sandbox's proxy credential carries the sandbox's own decider; the
-// manager sets the default after re-registering them (refreshEgress).
+// manager sets the default after re-registering them (refreshEgress), and
+// has the proxy decide its open tunnels again (Recheck) whenever a
+// credential is revoked or a decider changes.
 type ProxyControl interface {
 	SetDecider(d *egress.Decider) error
 	Counter() *egress.Counter
+	Recheck(current func(bindingID string) (egress.Principal, bool)) int
 }
 
 // Options configure a Manager.

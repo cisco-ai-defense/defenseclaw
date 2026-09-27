@@ -41,6 +41,8 @@ type fakeProxy struct {
 	counter *egress.Counter
 }
 
+func (p *fakeProxy) Recheck(func(string) (egress.Principal, bool)) int { return 0 }
+
 func (p *fakeProxy) SetDecider(d *egress.Decider) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

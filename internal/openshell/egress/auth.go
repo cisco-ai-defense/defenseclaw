@@ -167,8 +167,8 @@ func (s *CredentialStore) Register(c Credential, p Principal) error {
 }
 
 // Revoke removes the credential registered for bindingID and reports
-// whether there was one. Tunnels already open stay open; the manager closes
-// the sandbox itself.
+// whether there was one. Tunnels already open stay open until
+// Proxy.Recheck closes them.
 func (s *CredentialStore) Revoke(bindingID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -445,11 +445,15 @@ type tunnel struct {
 	// refused marks a CONNECT tunnel ended for its TLS server name or its
 	// plaintext content.
 	refused atomic.Bool
+	// revoked marks a tunnel or request Recheck ended: the sandbox's
+	// credential was revoked, or its decider no longer allows it.
+	revoked atomic.Bool
 
 	closeMu sync.Mutex
-	// closeFn force-closes the tunnel's connections. It stays nil while the
-	// HTTP server owns them (plain forwarded requests) and is set once a
-	// CONNECT is established or a forwarded request upgrades.
+	// closeFn force-closes the tunnel's connections: a CONNECT's once it is
+	// established, an upgraded request's once it upgrades. While the HTTP
+	// server owns a plain forwarded request's connections it cancels the
+	// request instead.
 	closeFn func()
 	closed  bool
 }
@@ -504,6 +508,40 @@ func (p *Proxy) activeTunnels() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.tunnels)
+}
+
+// revokedReason is the closed event's reason for a tunnel Recheck ended.
+const revokedReason = "closed: the sandbox's egress policy no longer allows it"
+
+// Recheck decides every open tunnel and in-flight forwarded request again
+// and closes the ones now refused. current returns the principal registered
+// for a binding now (CredentialStore.Lookup); ok false means its credential
+// was revoked, which closes every one of its tunnels. The others are
+// decided again by the principal's current decider (or the default), so a
+// block list, admin or network-mode change reaches connections already
+// open: without it they keep the decision they were opened with.
+// Upstream connections pooled for requests are retired by SetDecider. It
+// reports how many it closed.
+func (p *Proxy) Recheck(current func(bindingID string) (Principal, bool)) int {
+	p.mu.Lock()
+	open := make([]*tunnel, 0, len(p.tunnels))
+	for t := range p.tunnels {
+		open = append(open, t)
+	}
+	p.mu.Unlock()
+	gen := p.gen.Load()
+	closed := 0
+	for _, t := range open {
+		if pr, ok := current(t.principal.BindingID); ok {
+			if deciderFor(pr, gen).Decide(pr, t.dec.Host, t.dec.Port).Allowed {
+				continue
+			}
+		}
+		t.revoked.Store(true)
+		t.close()
+		closed++
+	}
+	return closed
 }
 
 func (p *Proxy) closeTunnels() {
@@ -711,7 +749,10 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	closed := p.event(EventClosed, pr, http.MethodConnect, dec)
 	closed.TunnelID, closed.RemoteAddr, closed.Status = t.id, remote.String(), http.StatusOK
 	closed.BytesUp, closed.BytesDown, closed.Duration = flow.up.Load(), flow.down.Load(), time.Since(start)
-	closed.Terminated = t.idled.Load() || t.cut.Load() || t.refused.Load()
+	closed.Terminated = t.idled.Load() || t.cut.Load() || t.refused.Load() || t.revoked.Load()
+	if t.revoked.Load() {
+		closed.Reason = revokedReason
+	}
 	p.emit(closed)
 }
 
