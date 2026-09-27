@@ -28,6 +28,7 @@ package policy
 
 import (
 	"fmt"
+	"net/netip"
 	"path"
 	"regexp"
 	"sort"
@@ -120,6 +121,11 @@ const (
 	// LandlockHardRequirement refuses to start on kernels without the
 	// required Landlock ABI instead of silently running unconfined.
 	LandlockHardRequirement = "hard_requirement"
+	// DefaultAPIPort is DefenseClaw's loopback-trusted main API, which a
+	// sandbox must never reach.
+	DefaultAPIPort = 18970
+	// DefaultGatewayPort is the local OpenShell gateway.
+	DefaultGatewayPort = 17670
 )
 
 // systemReadOnly is the read-only base every harness needs (measured with
@@ -159,8 +165,22 @@ type Input struct {
 	HarnessReadOnly []string
 	// ExtraRules are additional allow rules (for example consented host
 	// ports). Keys must not use the reserved defenseclaw_ or _provider_
-	// prefixes.
+	// prefixes. An endpoint may reach host.openshell.internal (in any
+	// spelling) only on a port listed in HostPorts; wildcard hosts that
+	// could match it, loopback aliases and IP literals in loopback,
+	// link-local, metadata, CGNAT or OpenShell's synthetic range are
+	// refused, and so are such ranges in allowed_ips.
 	ExtraRules map[string]v1.NetworkPolicyRule
+	// HostPorts are the host-loopback ports the user consented to expose
+	// to the sandbox (a local database, a dev server). None may be the
+	// ingress, egress, DefenseClaw API or OpenShell gateway port.
+	HostPorts []int
+	// APIPort is the DefenseClaw main API port; zero selects
+	// DefaultAPIPort.
+	APIPort int
+	// GatewayPort is the local OpenShell gateway port; zero selects
+	// DefaultGatewayPort.
+	GatewayPort int
 }
 
 var (
@@ -255,6 +275,17 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 			Binaries: []v1.PolicyNetworkBinary{{Path: AnyBinary}},
 		}
 	}
+	reserved := reservedHostPorts(in)
+	consented := map[uint32]bool{}
+	for _, port := range in.HostPorts {
+		if err := validatePort("host", port); err != nil {
+			return nil, err
+		}
+		if label, ok := reserved[uint32(port)]; ok {
+			return nil, fmt.Errorf("openshell policy: host port %d is the %s and is never exposed to a sandbox", port, label)
+		}
+		consented[uint32(port)] = true
+	}
 	names := make([]string, 0, len(in.ExtraRules))
 	for name := range in.ExtraRules {
 		names = append(names, name)
@@ -267,8 +298,8 @@ func Render(in Input) (*v1.SandboxPolicy, error) {
 		rule := cloneRule(in.ExtraRules[name])
 		rule.Name = name
 		for _, ep := range rule.Endpoints {
-			if ep.Host == EgressHost && (int(ep.Port) == in.IngressPort || int(ep.Port) == in.EgressPort) {
-				return nil, fmt.Errorf("openshell policy: rule %q may not target the DefenseClaw ingress or egress port", name)
+			if err := validateExtraEndpoint(name, ep, consented, reserved); err != nil {
+				return nil, err
 			}
 		}
 		rules[name] = rule
@@ -372,6 +403,11 @@ func validateEndpoint(rule string, ep v1.PolicyNetworkEndpoint) error {
 			return fmt.Errorf("openshell policy: rule %q endpoint %s port %d is out of range", rule, ep.Host, port)
 		}
 	}
+	for _, entry := range ep.AllowedIPs {
+		if err := validateAllowedIP(rule, entry); err != nil {
+			return err
+		}
+	}
 	switch ep.Protocol {
 	case "tcp", "rest", "":
 	default:
@@ -387,6 +423,179 @@ func validateEndpoint(rule string, ep v1.PolicyNetworkEndpoint) error {
 	}
 	if ep.CredentialBinding != nil || ep.ProviderCredentialed || ep.AdvisorProposed {
 		return fmt.Errorf("openshell policy: rule %q carries gateway-derived credential or advisor fields", rule)
+	}
+	return nil
+}
+
+// reservedHostPorts maps every host-loopback listener a sandbox must never
+// reach to its name.
+func reservedHostPorts(in Input) map[uint32]string {
+	api, gateway := in.APIPort, in.GatewayPort
+	if api == 0 {
+		api = DefaultAPIPort
+	}
+	if gateway == 0 {
+		gateway = DefaultGatewayPort
+	}
+	reserved := map[uint32]string{}
+	for _, p := range []struct {
+		port  int
+		label string
+	}{
+		{gateway, "OpenShell gateway port"},
+		{api, "DefenseClaw API port"},
+		{in.EgressPort, "DefenseClaw egress proxy port"},
+		{in.IngressPort, "DefenseClaw hook ingress port"},
+	} {
+		if p.port > 0 && p.port <= 65535 {
+			reserved[uint32(p.port)] = p.label
+		}
+	}
+	return reserved
+}
+
+// loopbackAliases are host names that reach the host or the workload's own
+// loopback outside host.openshell.internal.
+var loopbackAliases = []string{"localhost", "host.docker.internal", "gateway.docker.internal", "host.containers.internal"}
+
+// validateExtraEndpoint keeps a caller-supplied rule away from DefenseClaw's
+// and OpenShell's own listeners: host.openshell.internal (compared
+// case-insensitively, on every port of the endpoint) only on consented host
+// ports, no wildcard that could match it, no other loopback alias, and no IP
+// literal in a range deniedPrefixes covers.
+func validateExtraEndpoint(rule string, ep v1.PolicyNetworkEndpoint, consented map[uint32]bool, reserved map[uint32]string) error {
+	host := strings.ToLower(ep.Host)
+	ports := append([]uint32(nil), ep.Ports...)
+	if ep.Port != 0 {
+		ports = append(ports, ep.Port)
+	}
+	pattern, wildcard := strings.CutPrefix(host, "**.")
+	if !wildcard {
+		pattern, wildcard = strings.CutPrefix(host, "*.")
+	}
+	if wildcard {
+		if hostWithin(EgressHost, pattern) || hostWithin(pattern, "openshell.internal") {
+			return fmt.Errorf("openshell policy: rule %q wildcard host %q could match %s", rule, ep.Host, EgressHost)
+		}
+		for _, alias := range loopbackAliases {
+			if hostWithin(alias, pattern) || hostWithin(pattern, alias) {
+				return fmt.Errorf("openshell policy: rule %q wildcard host %q could match the loopback name %s", rule, ep.Host, alias)
+			}
+		}
+	}
+	if host == EgressHost {
+		for _, port := range ports {
+			if label, ok := reserved[port]; ok {
+				return fmt.Errorf("openshell policy: rule %q may not reach the %s (%s:%d)", rule, label, EgressHost, port)
+			}
+			if !consented[port] {
+				return fmt.Errorf("openshell policy: rule %q reaches %s:%d, which is not a consented host port", rule, EgressHost, port)
+			}
+		}
+		return nil
+	}
+	if hostWithin(host, "openshell.internal") {
+		return fmt.Errorf("openshell policy: rule %q host %q is reserved by OpenShell", rule, ep.Host)
+	}
+	for _, alias := range loopbackAliases {
+		if hostWithin(host, alias) {
+			return fmt.Errorf("openshell policy: rule %q host %q is a loopback name", rule, ep.Host)
+		}
+	}
+	if numericHost(pattern) {
+		// Resolvers accept 127.1, 2130706433 and 0x7f000001 as IPv4
+		// literals; only canonical dotted quads are accepted here. Names
+		// that resolve into a denied range are refused by OpenShell at
+		// connect time, which is why allowed_ips may not reopen them.
+		addr, err := netip.ParseAddr(host)
+		if wildcard || err != nil || !addr.Is4() {
+			return fmt.Errorf("openshell policy: rule %q host %q is not a canonical IPv4 literal or DNS name", rule, ep.Host)
+		}
+		if denied := deniedOverlap(netip.PrefixFrom(addr, addr.BitLen())); denied != "" {
+			return fmt.Errorf("openshell policy: rule %q host %q is in the %s range", rule, ep.Host, denied)
+		}
+	}
+	return nil
+}
+
+// numericHost reports whether every label of host is decimal or 0x-prefixed
+// hex, the forms inet_aton reads as an IPv4 address.
+func numericHost(host string) bool {
+	for _, label := range strings.Split(host, ".") {
+		digits := "0123456789"
+		if rest, ok := strings.CutPrefix(label, "0x"); ok {
+			label, digits = rest, "0123456789abcdef"
+		}
+		if strings.Trim(label, digits) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// hostWithin reports whether host equals domain or is a subdomain of it.
+func hostWithin(host, domain string) bool {
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+// deniedPrefixes can never be named by an allow rule: loopback, "this
+// network", link-local (cloud metadata lives there), CGNAT, OpenShell's
+// synthetic address range (host.openshell.internal resolves into it inside
+// the workload), multicast and broadcast, plus their IPv6 counterparts.
+// IPv4 entries are also checked in their IPv4-mapped IPv6 form.
+var deniedPrefixes = []struct {
+	prefix netip.Prefix
+	label  string
+}{
+	{netip.MustParsePrefix("0.0.0.0/8"), "this-network"},
+	{netip.MustParsePrefix("127.0.0.0/8"), "loopback"},
+	{netip.MustParsePrefix("169.254.0.0/16"), "link-local and metadata"},
+	{netip.MustParsePrefix("100.64.0.0/10"), "CGNAT"},
+	{netip.MustParsePrefix("198.18.0.0/15"), "OpenShell synthetic"},
+	{netip.MustParsePrefix("224.0.0.0/4"), "multicast"},
+	{netip.MustParsePrefix("255.255.255.255/32"), "broadcast"},
+	{netip.MustParsePrefix("::/128"), "unspecified"},
+	{netip.MustParsePrefix("::1/128"), "loopback"},
+	{netip.MustParsePrefix("fe80::/10"), "link-local"},
+	{netip.MustParsePrefix("fd00:ec2::254/128"), "metadata"},
+	{netip.MustParsePrefix("ff00::/8"), "multicast"},
+}
+
+// deniedOverlap returns the label of the first denied range p overlaps.
+func deniedOverlap(p netip.Prefix) string {
+	for _, d := range deniedPrefixes {
+		if p.Overlaps(d.prefix) {
+			return d.label
+		}
+		if d.prefix.Addr().Is4() {
+			mapped := netip.PrefixFrom(netip.AddrFrom16(d.prefix.Addr().As16()), d.prefix.Bits()+96)
+			if p.Overlaps(mapped) {
+				return d.label
+			}
+		}
+	}
+	return ""
+}
+
+// validateAllowedIP accepts one allowed_ips entry: an address or CIDR that
+// overlaps none of deniedPrefixes.
+func validateAllowedIP(rule, entry string) error {
+	var prefix netip.Prefix
+	if strings.Contains(entry, "/") {
+		p, err := netip.ParsePrefix(entry)
+		if err != nil || p != p.Masked() {
+			return fmt.Errorf("openshell policy: rule %q allowed_ips entry %q is not a canonical CIDR", rule, entry)
+		}
+		prefix = p
+	} else {
+		addr, err := netip.ParseAddr(entry)
+		if err != nil || addr.Zone() != "" {
+			return fmt.Errorf("openshell policy: rule %q allowed_ips entry %q is not an IP address or CIDR", rule, entry)
+		}
+		prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	if denied := deniedOverlap(prefix); denied != "" {
+		return fmt.Errorf("openshell policy: rule %q allowed_ips entry %q overlaps the %s range", rule, entry, denied)
 	}
 	return nil
 }

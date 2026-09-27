@@ -72,6 +72,7 @@ func goldenCases() map[string]Input {
 	cases["balanced-claudecode-context"] = context
 
 	hostPort := baseInput(ProfileStrict, "codex")
+	hostPort.HostPorts = []int{5432}
 	hostPort.ExtraRules = map[string]v1.NetworkPolicyRule{
 		"host_port_5432": {
 			Endpoints: []v1.PolicyNetworkEndpoint{{Host: "host.openshell.internal", Port: 5432, Protocol: "tcp", TLS: v1.NetworkTLSModeSkip}},
@@ -315,6 +316,124 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Render(in); err == nil {
 				t.Fatal("unsafe input rendered")
+			}
+		})
+	}
+}
+
+// TestRenderKeepsExtraRulesOffReservedEndpoints covers every spelling of a
+// DefenseClaw or OpenShell listener an extra rule could use: other ports,
+// the Ports list, host case, wildcards, loopback aliases, IP literals and
+// allowed_ips ranges.
+func TestRenderKeepsExtraRulesOffReservedEndpoints(t *testing.T) {
+	endpoint := func(ep v1.PolicyNetworkEndpoint) map[string]v1.NetworkPolicyRule {
+		if ep.Protocol == "" {
+			ep.Protocol = "tcp"
+		}
+		return map[string]v1.NetworkPolicyRule{"x": {Endpoints: []v1.PolicyNetworkEndpoint{ep}, Binaries: []v1.PolicyNetworkBinary{{Path: "/**"}}}}
+	}
+	refused := map[string]struct {
+		ep        v1.PolicyNetworkEndpoint
+		hostPorts []int
+		want      string
+	}{
+		"ingress-in-ports-list":  {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Ports: []uint32{18971}}, nil, "hook ingress"},
+		"egress-in-ports-list":   {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Ports: []uint32{5432, 18972}}, []int{5432}, "egress proxy"},
+		"upper-case-ingress":     {v1.PolicyNetworkEndpoint{Host: "HOST.OPENSHELL.INTERNAL", Port: 18971}, nil, "hook ingress"},
+		"mixed-case-api":         {v1.PolicyNetworkEndpoint{Host: "Host.OpenShell.Internal", Port: 18970}, nil, "DefenseClaw API"},
+		"main-api":               {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Port: 18970}, nil, "DefenseClaw API"},
+		"openshell-gateway":      {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Port: 17670}, nil, "OpenShell gateway"},
+		"unconsented-host-port":  {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Port: 5433}, []int{5432}, "not a consented host port"},
+		"wildcard-openshell":     {v1.PolicyNetworkEndpoint{Host: "*.openshell.internal", Port: 18972}, nil, "could match host.openshell.internal"},
+		"double-wildcard-tld":    {v1.PolicyNetworkEndpoint{Host: "**.internal", Port: 443}, nil, "could match host.openshell.internal"},
+		"wildcard-openshell-sub": {v1.PolicyNetworkEndpoint{Host: "*.x.openshell.internal", Port: 443}, nil, "could match host.openshell.internal"},
+		"wildcard-docker-host":   {v1.PolicyNetworkEndpoint{Host: "*.docker.internal", Port: 443}, nil, "loopback name"},
+		"wildcard-localhost":     {v1.PolicyNetworkEndpoint{Host: "*.localhost", Port: 443}, nil, "loopback name"},
+		"openshell-name":         {v1.PolicyNetworkEndpoint{Host: "gateway.openshell.internal", Port: 443}, nil, "reserved by OpenShell"},
+		"localhost":              {v1.PolicyNetworkEndpoint{Host: "localhost", Port: 18970}, nil, "loopback name"},
+		"localhost-subdomain":    {v1.PolicyNetworkEndpoint{Host: "api.localhost", Port: 80}, nil, "loopback name"},
+		"docker-desktop-host":    {v1.PolicyNetworkEndpoint{Host: "host.docker.internal", Port: 18970}, nil, "loopback name"},
+		"loopback-literal":       {v1.PolicyNetworkEndpoint{Host: "127.0.0.1", Port: 18970}, nil, "loopback"},
+		"short-loopback":         {v1.PolicyNetworkEndpoint{Host: "127.1", Port: 18970}, nil, "canonical"},
+		"decimal-loopback":       {v1.PolicyNetworkEndpoint{Host: "2130706433", Port: 18970}, nil, "canonical"},
+		"hex-loopback":           {v1.PolicyNetworkEndpoint{Host: "0x7f000001", Port: 18970}, nil, "canonical"},
+		"zero-padded-loopback":   {v1.PolicyNetworkEndpoint{Host: "127.000.000.001", Port: 18970}, nil, "canonical"},
+		"metadata-literal":       {v1.PolicyNetworkEndpoint{Host: "169.254.169.254", Port: 80}, nil, "link-local"},
+		"synthetic-literal":      {v1.PolicyNetworkEndpoint{Host: "198.18.0.2", Port: 18971}, nil, "OpenShell synthetic"},
+		"cgnat-literal":          {v1.PolicyNetworkEndpoint{Host: "100.100.100.200", Port: 80}, nil, "CGNAT"},
+		"wildcard-ip":            {v1.PolicyNetworkEndpoint{Host: "*.0.0.1", Port: 80}, nil, "canonical"},
+		"allowed-loopback":       {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 5432, AllowedIPs: []string{"127.0.0.0/8"}}, nil, "loopback"},
+		"allowed-loopback-addr":  {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 5432, AllowedIPs: []string{"127.0.0.2"}}, nil, "loopback"},
+		"allowed-metadata":       {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"169.254.169.254/32"}}, nil, "link-local"},
+		"allowed-cgnat":          {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"100.64.0.0/10"}}, nil, "CGNAT"},
+		"allowed-everything":     {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"0.0.0.0/0"}}, nil, "overlaps"},
+		"allowed-synthetic":      {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"198.18.0.0/16"}}, nil, "OpenShell synthetic"},
+		"allowed-v6-loopback":    {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"::1/128"}}, nil, "loopback"},
+		"allowed-v4-mapped":      {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"::ffff:127.0.0.1"}}, nil, "loopback"},
+		"allowed-v4-mapped-all":  {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"::ffff:0:0/96"}}, nil, "overlaps"},
+		"allowed-v6-link-local":  {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"fe80::/10"}}, nil, "link-local"},
+		"allowed-v6-everything":  {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"::/0"}}, nil, "overlaps"},
+		"allowed-not-canonical":  {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"10.0.0.1/8"}}, nil, "canonical CIDR"},
+		"allowed-garbage":        {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 80, AllowedIPs: []string{"db.internal"}}, nil, "not an IP"},
+	}
+	for name, tc := range refused {
+		t.Run(name, func(t *testing.T) {
+			in := baseInput(ProfileOpen, "codex")
+			in.HostPorts = tc.hostPorts
+			in.ExtraRules = endpoint(tc.ep)
+			_, err := Render(in)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one mentioning %q", err, tc.want)
+			}
+		})
+	}
+
+	// Consented host ports themselves may not name a reserved listener.
+	for name, ports := range map[string][]int{
+		"consent-ingress": {18971}, "consent-egress": {18972}, "consent-api": {18970},
+		"consent-gateway": {17670}, "consent-out-of-range": {70000}, "consent-zero": {0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := baseInput(ProfileOpen, "codex")
+			in.HostPorts = ports
+			if _, err := Render(in); err == nil {
+				t.Fatal("reserved or invalid host port consented")
+			}
+		})
+	}
+	// Custom API and gateway ports move the reservation with them.
+	moved := baseInput(ProfileOpen, "codex")
+	moved.APIPort, moved.GatewayPort = 28970, 27670
+	moved.HostPorts = []int{18970, 17670}
+	moved.ExtraRules = endpoint(v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Ports: []uint32{18970, 17670}})
+	if _, err := Render(moved); err != nil {
+		t.Fatalf("ports freed by a custom API and gateway port: %v", err)
+	}
+	moved.HostPorts = []int{28970}
+	moved.ExtraRules = nil
+	if _, err := Render(moved); err == nil || !strings.Contains(err.Error(), "DefenseClaw API") {
+		t.Fatalf("custom API port consented: %v", err)
+	}
+
+	accepted := map[string]struct {
+		ep        v1.PolicyNetworkEndpoint
+		hostPorts []int
+	}{
+		"consented-host-port":  {v1.PolicyNetworkEndpoint{Host: "host.openshell.internal", Port: 5432}, []int{5432}},
+		"consented-port-list":  {v1.PolicyNetworkEndpoint{Host: "HOST.openshell.internal", Ports: []uint32{5432, 8080}}, []int{8080, 5432}},
+		"public-literal":       {v1.PolicyNetworkEndpoint{Host: "93.184.216.34", Port: 443}, nil},
+		"public-wildcard":      {v1.PolicyNetworkEndpoint{Host: "**.example.org", Port: 443}, nil},
+		"hex-looking-name":     {v1.PolicyNetworkEndpoint{Host: "0xproject.example.org", Port: 443}, nil},
+		"lan-allowed-ips":      {v1.PolicyNetworkEndpoint{Host: "db.lan.example.org", Port: 5432, AllowedIPs: []string{"10.0.0.0/24", "192.168.1.20"}}, nil},
+		"public-v6-allowed-ip": {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 5432, AllowedIPs: []string{"2001:db8::/32"}}, nil},
+	}
+	for name, tc := range accepted {
+		t.Run(name, func(t *testing.T) {
+			in := baseInput(ProfileOpen, "codex")
+			in.HostPorts = tc.hostPorts
+			in.ExtraRules = endpoint(tc.ep)
+			if _, err := Render(in); err != nil {
+				t.Fatalf("Render: %v", err)
 			}
 		})
 	}
