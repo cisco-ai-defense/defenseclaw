@@ -40,6 +40,8 @@ func baseInput(profile Profile, harness string) Input {
 		RunAsGroup:  "1000",
 		IngressPort: 18971,
 		EgressPort:  18972,
+		APIPort:     DefaultAPIPort,
+		GatewayPort: DefaultGatewayPort,
 	}
 }
 
