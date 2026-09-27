@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -31,10 +32,15 @@ import (
 //
 //	<data>/snapshots/<name>/snapshot.json   snapshot record
 //	<data>/snapshots/<name>/tree/           non-git copy snapshot
-//	<data>/snapshots/git/<project-key>.git  shadow git dir shared by a project
+//	<data>/shadows/<project-key>.git        shadow git dir shared by a project
 //	<data>/sandboxes/<name>/workspace/      mask files and mount state
 //	<data>/sandboxes/<name>/copy/           copy-mode record, base.git, pulls
 //	<data>/sandboxes/<name>/copy.new-<rnd>/ a copy being staged, swapped in whole
+//
+// A directory derived from a sandbox name only sits in a root that holds
+// nothing but per-name directories (snapshots/, sandboxes/). Storage that
+// several sandboxes share (shadows/) has a root of its own, so no sandbox
+// name can point a per-name delete at it.
 type layout struct {
 	dataDir string
 }
@@ -56,8 +62,9 @@ func (l layout) snapshotRecord(name string) string {
 	return filepath.Join(l.snapshotDir(name), "snapshot.json")
 }
 func (l layout) plainTree(name string) string { return filepath.Join(l.snapshotDir(name), "tree") }
+func (l layout) shadowsRoot() string          { return filepath.Join(l.dataDir, "shadows") }
 func (l layout) shadowDir(projectKey string) string {
-	return filepath.Join(l.snapshotsRoot(), "git", projectKey+".git")
+	return filepath.Join(l.shadowsRoot(), projectKey+".git")
 }
 func (l layout) sandboxDir(name string) string {
 	return filepath.Join(l.dataDir, "sandboxes", name)
@@ -104,6 +111,44 @@ func readJSON(path string, v any) error {
 	}
 	if err := json.Unmarshal(data, v); err != nil {
 		return fmt.Errorf("workspace: decode %s: %w", path, err)
+	}
+	return nil
+}
+
+// snapshotDirEntries are the only names Snapshot writes into a snapshot
+// directory, besides safefile's ".safefile-*" temporaries.
+var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true}
+
+// checkSnapshotDir refuses a snapshot directory that holds anything
+// Snapshot does not write there, so a per-name write or delete never mixes
+// with other data. (Older builds kept every project's shadow under
+// snapshots/git, which a sandbox named "git" would have taken with it.)
+func checkSnapshotDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("workspace: read %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !snapshotDirEntries[e.Name()] && !strings.HasPrefix(e.Name(), ".safefile-") {
+			return fmt.Errorf("workspace: %s holds %q, which is not part of a snapshot; refusing to use or delete it", dir, e.Name())
+		}
+	}
+	return nil
+}
+
+// removeSnapshotDir deletes one snapshot directory after checkSnapshotDir.
+func removeSnapshotDir(dir string) error {
+	if err := checkSnapshotDir(dir); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		_ = chmodTree(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("workspace: remove %s: %w", dir, err)
+		}
 	}
 	return nil
 }

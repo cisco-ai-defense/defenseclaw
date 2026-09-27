@@ -186,30 +186,34 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 			return nil, err
 		}
 	}
-	if err := ensurePrivateDir(lay.snapshotDir(opts.Name)); err != nil {
+	dir := lay.snapshotDir(opts.Name)
+	if err := checkSnapshotDir(dir); err != nil {
+		return nil, err
+	}
+	if err := ensurePrivateDir(dir); err != nil {
 		return nil, err
 	}
 	if src.Git != nil {
 		rec.Kind = SnapshotGit
 		if err := snapshotGit(ctx, lay, src, opts, rec); err != nil {
-			_ = os.RemoveAll(lay.snapshotDir(opts.Name))
+			_ = removeSnapshotDir(dir)
 			return nil, err
 		}
 	} else {
 		rec.Kind = SnapshotCopy
 		if err := snapshotCopy(lay, src, opts, rec); err != nil {
-			_ = os.RemoveAll(lay.snapshotDir(opts.Name))
+			_ = removeSnapshotDir(dir)
 			return nil, err
 		}
 	}
 	sentinels, err := scanSentinels(src.Path, opts.Skip)
 	if err != nil {
-		_ = os.RemoveAll(lay.snapshotDir(opts.Name))
+		_ = removeSnapshotDir(dir)
 		return nil, err
 	}
 	rec.Sentinels, rec.NestedRepos, rec.DependencyDirs, rec.SentinelsCapped = sentinels.files, sentinels.nested, sentinels.deps, sentinels.capped
 	if err := writeJSON(lay.snapshotRecord(opts.Name), rec); err != nil {
-		_ = os.RemoveAll(lay.snapshotDir(opts.Name))
+		_ = removeSnapshotDir(dir)
 		return nil, err
 	}
 	return rec, nil
@@ -735,6 +739,10 @@ func removeSnapshotData(ctx context.Context, lay layout, name string, keepShadow
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
 		return err
 	}
+	// Refuse before touching any ref, so a refused delete changes nothing.
+	if err := checkSnapshotDir(lay.snapshotDir(name)); err != nil {
+		return fmt.Errorf("workspace: remove snapshot %s: %w", name, err)
+	}
 	if rec != nil && rec.Git != nil {
 		gs := rec.Git
 		if sh, unlock, err := reopenShadow(ctx, gs.Shadow, rec.Project, gs.GitDir); err == nil {
@@ -750,17 +758,29 @@ func removeSnapshotData(ctx context.Context, lay layout, name string, keepShadow
 			}
 		}
 	}
-	if err := os.RemoveAll(lay.snapshotDir(name)); err != nil {
-		_ = chmodTree(lay.snapshotDir(name))
-		if err := os.RemoveAll(lay.snapshotDir(name)); err != nil {
-			return fmt.Errorf("workspace: remove snapshot %s: %w", name, err)
-		}
+	if err := removeSnapshotDir(lay.snapshotDir(name)); err != nil {
+		return fmt.Errorf("workspace: remove snapshot %s: %w", name, err)
 	}
-	if rec != nil && rec.Git != nil && !keepShadow && !shadowInUse(lay, rec.Git.Shadow) {
+	if rec != nil && rec.Git != nil && !keepShadow && ownShadow(lay, rec.Git.Shadow) && !shadowInUse(lay, rec.Git.Shadow) {
 		_ = os.RemoveAll(rec.Git.Shadow)
 		_ = os.Remove(rec.Git.Shadow + ".lock")
 	}
 	return nil
+}
+
+// ownShadow reports whether dir is a shadow git dir DefenseClaw created:
+// directly under the shadows root (or the snapshots/git root older builds
+// used) and carrying its project marker. Anything else is never deleted.
+func ownShadow(lay layout, dir string) bool {
+	parent := filepath.Dir(filepath.Clean(dir))
+	if parent != lay.shadowsRoot() && parent != filepath.Join(lay.snapshotsRoot(), "git") {
+		return false
+	}
+	if !strings.HasSuffix(dir, ".git") {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dir, "defenseclaw-project.json"))
+	return err == nil && info.Mode().IsRegular()
 }
 
 func shadowInUse(lay layout, dir string) bool {
