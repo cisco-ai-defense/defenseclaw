@@ -1305,6 +1305,20 @@ Even in scripted mode Kiro called its service through the proxy:
 us-gov-west-1, `q.us-east-1.amazonaws.com` and
 `desktop-release.q.us-east-1.amazonaws.com`.
 
+The same runs check the shells the launchers do not start. In the shell
+`openshell sandbox connect` attaches to, and in a login-shell
+`openshell sandbox exec`, the proxy settings came from
+`/etc/profile.d/defenseclaw-sandbox.sh` and the harness command was the
+exported function that starts the launcher. A `--no-login-shell` command
+through `sandbox-env` had the proxy and the shim. A plain `curl` reached
+example.org through the DefenseClaw proxy in each, and a bare
+`--no-login-shell` command had no proxy settings. OpenShell logged a few
+`DENIED` lines for the egress proxy port itself (`L7 tunnel closed before
+inspection because policy changed: policy generation is stale`): tunnels
+the harness opened through the proxy right after start (OpenCode's
+registry installs, Kiro's service calls), cut at the first settings poll.
+The harness retried them.
+
 Cursor Agent and Devin CLI images build and pass the static probe (pinned
 version, binary realpaths and digests) but stay unverified: both CLIs need a
 vendor account before any agent turn and fire no hook without one.
