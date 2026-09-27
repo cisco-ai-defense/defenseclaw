@@ -1133,6 +1133,102 @@ plus `{{if .Sandbox}}` branches) differs from the host hooks:
   so one hook can wait about 21 seconds. Codex's `SessionEnd` gets 1 second
   per attempt, because Codex caps that hook at three seconds.
 
+## Sandboxed connectors
+
+Each connector below has an overlay image recipe (`internal/openshell/harness`)
+and rendered hook artifacts (`SandboxArtifacts` in
+`internal/gateway/connector`). The tamper tier says where the hook
+registration lives in the image:
+
+- **managed**: a root-owned system or managed policy that user and project
+  settings cannot switch off;
+- **user**: a file in the image HOME that the agent can edit or delete. For
+  these connectors the hook-silence detector and OpenShell's egress
+  enforcement are the backstop.
+
+A connector is **verified** when its image passes the hook-fire probe (the
+harness runs headless against the built-in mock LLM, its hooks reach a
+stand-in ingress with the sandbox token and an idempotency key, a blocked
+tool call has no side effect, an allowed one has, and hostile user and project
+settings change nothing) and it has run end to end in an OpenShell sandbox.
+An **unverified** connector has everything up to that run implemented. Its
+images stay unverified, so they are never selected for a sandbox.
+
+| Connector | Pinned harness | Hook registration in the image | Tier | Yolo flag | Credential profiles | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
+| Codex | 0.146.0 (npm) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
+| OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json` | managed | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
+| GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
+| Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |
+
+OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
+(`TestLiveSandboxHookOnlyHarness` in `internal/gateway`), with the project
+bind-mounted, the DefenseClaw hook ingress holding a real binding, and the
+DefenseClaw egress proxy, once against the E2E mock model and once against
+`anthropic.claude-haiku-4-5` on Bedrock Mantle through each harness's curated
+Mantle profile (the key reached the model only as an OpenShell credential
+placeholder). Every hook arrived authenticated with an idempotency key, the
+allowed tool call ran, the proxy allowed example.org and blocked webhook.site,
+and a connection that bypassed the proxy was refused by OpenShell. Besides
+the model endpoint, OpenCode contacted `models.opencode.ai` (its model
+catalog) and `registry.npmjs.org` (it installs its plugin SDK into each config
+directory in the background; a failure is only logged). Copilot CLI in
+offline bring-your-own-provider mode contacted nothing else.
+
+### Harness facts
+
+These were measured on the pinned releases inside the community base image
+(Linux arm64) in September 2026.
+
+- **OpenCode 1.18.31.** The managed config directory is `/etc/opencode` on
+  Linux. OpenCode reads it after every user, project and
+  `OPENCODE_CONFIG_CONTENT` layer and merges plugin lists across layers, so a
+  plugin registered there with a `file://` URL loads last, and
+  `plugin: []` in user or project config cannot remove it. Throwing from
+  `tool.execute.before` blocks the tool. `--pure` (or `OPENCODE_PURE=1`) runs
+  with no external plugin at all, and `OPENCODE_TEST_MANAGED_CONFIG_DIR`
+  replaces `/etc/opencode`. The DefenseClaw launcher refuses `--pure` and
+  drops both variables. As with Claude Code's bare mode, an agent can still
+  start a nested `opencode --pure` as a tool call. DefenseClaw sees that call
+  but not the nested session's tools. `opencode run --auto` is the headless
+  skip-permissions mode. The base image ships OpenCode 1.2.18, which is
+  outside every hook contract. The image removes it.
+- **GitHub Copilot CLI 1.0.88.** Copilot loads hook documents from
+  `/etc/github-copilot/policy.d/*.json` whatever `COPILOT_HOME` says, and runs
+  them even with `disableAllHooks: true` in the user settings or config. With
+  `allowManagedHooksOnly: true` in the device managed-settings file
+  (`/etc/github-copilot/managed-settings.json`), user (`~/.copilot/hooks`) and
+  repository (`.github/hooks`) hooks are dropped. Exit code 2 from a
+  `preToolUse` hook denies the tool, and so does a
+  `permissionDecision: "deny"` verdict on stdout. Exit code 2 from another
+  event shows as a warning and does not stop the session. The executable
+  extracts its JavaScript into `~/.cache/copilot/pkg` on first run. Unless
+  auto-update is off, it prefers the newest package it finds in any cache
+  under HOME, so the workload could make the next launch run other code. The
+  image pre-extracts the pinned package into a root-owned cache, and the
+  launcher sets `COPILOT_PKG_CACHE_HOME` to it with `COPILOT_AUTO_UPDATE=false`.
+  The hook-fire probe plants newer packages in both user caches to prove they
+  are ignored. Bring-your-own-provider mode (`COPILOT_PROVIDER_BASE_URL`,
+  `COPILOT_PROVIDER_TYPE=anthropic`) needs no GitHub login, and
+  `COPILOT_OFFLINE=true` stops every other request. The GitHub-token profile's
+  hosts (`api.github.com`, `api.githubcopilot.com` and the per-plan Copilot
+  API hosts) come from the CLI, not from a live run: no Copilot-entitled
+  account was available.
+- **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
+  `~/.config/amp/plugins` and a project's `.amp/plugins`.
+  `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
+  user. Amp ignores `AMP_DISABLE_PLUGINS` outside its development builds. The
+  plugin loads before Amp contacts its service. Every run then starts with an
+  authenticated `getUserInfo` call to `AMP_URL` (`https://ampcode.com` by
+  default, JSON-RPC under `/api/internal?<method>`, bearer `AMP_API_KEY`), and
+  all model traffic goes through that service. Without an Amp account key the
+  run stops before any agent turn, and there is no local or
+  bring-your-own model endpoint that a mock or Bedrock could serve. So hook
+  firing at the ingress, blocking, and the service's endpoint set are
+  unverified. The plugin's executable contract (token from the environment,
+  an idempotency key, one retry, fail closed) is covered by unit tests.
+
 ## Policy packs and admin constraints
 
 `internal/openshell/packs` resolves the sandbox posture for one run. A pack
@@ -1276,6 +1372,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |
 | A binary glob of `/**` is accepted. A catch-all host `**.*.*` is accepted but covers only hosts with three or more labels. | The egress rule allows every binary; there is no catch-all host rule. |
 | curl, Node `fetch` (with `NODE_USE_ENV_PROXY=1`), npm, pip, uv, git over HTTPS and Python urllib all honour `HTTPS_PROXY` through the relay. | The proxy environment covers the common tools. |
+| `sandbox create --env` does not deliver the proxy variables: with `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and `NODE_USE_ENV_PROXY` passed at create, none of them reach processes started with `sandbox exec`, while every other variable does and OpenShell adds its own CA bundle variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and others). Measured with OpenCode and Copilot CLI sandboxes, where the harness and hooks still reached the ingress and the mock model directly, and curl reached the DefenseClaw egress proxy only with an explicit `--proxy`. | The proxy settings have to be exported inside the sandbox (by the harness launcher), not passed at create. |
 | A direct connection to an unknown host is refused (`policy_dns_ineligible`, then `transparent_tcp_policy_denied`) and a draft proposal is filed. The metadata address is denied. | Non-proxy-aware clients surface as proposals for triage. |
 
 ### Credentials
@@ -1291,6 +1388,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Behaviour | Design consequence |
 | --- | --- |
 | Image `ENV` is not propagated; `sandbox create --env` is. `--from <local tag>` uses the local image. | Startup variables travel in `SandboxArtifacts.Env` and `harness.Spec.Env`. |
+| Sandbox names are capped at 19 characters (`name exceeds maximum length`). | Test and probe names stay short. |
 | Bind mounts need `allow_driver_config` and `enable_bind_mounts` for the docker driver and resource admission off in `gateway.toml`, then a gateway restart. | `GatewayConfigurator` plans the TOML-preserving edit, runs the gateway's preflight, backs up, restarts and rolls back if the gateway does not come up. |
 | A read-only over-mount refuses writes, a bind-mounted file is effectively read-only, and an empty-file mask reads as empty. | Git internals and secrets are protected by the mounts themselves (Landlock cannot narrow a subtree of a read-write grant). |
 | `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
