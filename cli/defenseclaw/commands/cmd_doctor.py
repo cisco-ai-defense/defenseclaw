@@ -862,6 +862,132 @@ def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
     )
 
 
+# ``defenseclaw-gateway sandbox doctor --json`` probes Docker, the OpenShell
+# service and CLI, and the daemon; each probe has its own short deadline.
+SANDBOX_DOCTOR_TIMEOUT_SECONDS = 90
+_SANDBOX_DOCTOR_MAX_OUTPUT_CHARS = 1_000_000
+_SANDBOX_DOCTOR_STATUSES = frozenset({"pass", "warn", "fail", "skip"})
+
+
+def _sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
+    """Run the Go sandbox doctor and return its JSON report, or why not."""
+    try:
+        completed = subprocess.run(
+            [binary, "sandbox", "doctor", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=SANDBOX_DOCTOR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"'defenseclaw-gateway sandbox doctor' did not finish within {SANDBOX_DOCTOR_TIMEOUT_SECONDS}s"
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not run 'defenseclaw-gateway sandbox doctor': {exc}"
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if len(stdout) > _SANDBOX_DOCTOR_MAX_OUTPUT_CHARS:
+        return None, "'defenseclaw-gateway sandbox doctor' returned an oversized report"
+    try:
+        report = json.loads(stdout) if stdout.strip() else None
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or not isinstance(report.get("checks"), list):
+        stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+        first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        first = first.lstrip("✗").strip()
+        if first:
+            return None, first
+        return None, (
+            f"'defenseclaw-gateway sandbox doctor --json' exited {completed.returncode} without a report; "
+            "this gateway may predate OpenShell 0.1 sandboxes (run 'defenseclaw upgrade')"
+        )
+    return report, ""
+
+
+def _check_sandbox(cfg, r: _DoctorResult) -> None:
+    """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
+
+    Skipped (one row) while ``openshell.enabled`` is off, so hosts that never
+    set sandboxes up do not pay for Docker and OpenShell probes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    openshell = getattr(cfg, "openshell", None)
+    # Identity check: a stand-in config object must not read as enabled.
+    enabled = getattr(openshell, "enabled", False) is True
+    if host_os() == "windows":
+        _emit(
+            "warn" if enabled else "skip",
+            "Sandboxes",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            r=r,
+            check_id="doctor.sandbox.platform",
+            reason_code="sandbox-platform-unsupported",
+        )
+        return
+    if not enabled:
+        _emit(
+            "skip",
+            "Sandboxes",
+            "off (openshell.enabled is false); run 'defenseclaw sandbox setup' to run agents in OpenShell sandboxes",
+            r=r,
+            check_id="doctor.sandbox.enabled",
+            reason_code="sandbox-disabled",
+        )
+        return
+    binary = resolve_gateway_binary()
+    if not binary:
+        _emit(
+            "fail",
+            "Sandbox doctor",
+            "defenseclaw-gateway is not installed, so the sandbox checks cannot run",
+            r=r,
+            check_id="doctor.sandbox.gateway-binary",
+            reason_code="sandbox-gateway-missing",
+            remediation="run 'defenseclaw upgrade' to install the gateway binary",
+        )
+        return
+    report, problem = _sandbox_doctor_report(binary)
+    if report is None:
+        _emit(
+            "warn",
+            "Sandbox doctor",
+            problem,
+            r=r,
+            check_id="doctor.sandbox.report",
+            reason_code="sandbox-doctor-unavailable",
+            remediation="run 'defenseclaw sandbox doctor' for the full output",
+        )
+        return
+    for check in report["checks"]:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status") or "").strip().lower()
+        tag = status if status in _SANDBOX_DOCTOR_STATUSES else "warn"
+        check_id = str(check.get("id") or "").strip()
+        title = str(check.get("title") or check_id or "Sandbox check").strip()
+        detail = str(check.get("detail") or "").strip()
+        fix = check.get("fix") if isinstance(check.get("fix"), dict) else {}
+        remediation = str(fix.get("summary") or "").strip()
+        command = str(fix.get("command") or "").strip()
+        if command:
+            remediation = f"{remediation}: {command}" if remediation else command
+        if fix.get("automatic") and tag != "pass":
+            remediation += " (or 'defenseclaw sandbox doctor --fix')"
+        _emit(
+            tag,
+            title,
+            detail,
+            r=r,
+            check_id=f"doctor.sandbox.{check_id}" if check_id else "",
+            reason_code=f"sandbox-{check_id}" if check_id and tag != "pass" else "",
+            remediation=remediation if tag != "pass" else "",
+        )
+        if tag in {"warn", "fail"} and remediation:
+            _emit_hint(remediation)
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
@@ -7638,6 +7764,10 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    if not json_out:
+        _doctor_subsection("Sandbox")
+    r.set_section("sandbox")
+    _check_sandbox(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
     # The registry at internal/envvars/registry.json is the single
