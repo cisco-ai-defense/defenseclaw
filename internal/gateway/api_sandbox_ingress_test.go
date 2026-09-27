@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -31,12 +32,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1263,71 +1266,346 @@ func TestRunSandboxIngressServesAndShutsDown(t *testing.T) {
 	}
 }
 
-// TestSandboxIngressCopyModeNeverTouchesHostFS drives every path-reading
-// Claude Code hook event of a copy-mode sandbox through the real ingress
-// with an injected filesystem that counts calls: none may happen, even
-// though the named host paths exist and would produce findings.
-func TestSandboxIngressCopyModeNeverTouchesHostFS(t *testing.T) {
-	p := newSandboxProject(t)
-	p.write(t, "src/creds.go", "var k = \"AKIA"+"ABCDEFGHIJKLMNOP\"\n", 0o644)
-	p.write(t, "build.sh", "#!/bin/sh\necho hi\n", 0o755)
-	p.write(t, "CLAUDE.md", "instructions\n", 0o644)
+// copyModeHookEvent is one hook post of the copy-mode host-FS test.
+type copyModeHookEvent struct {
+	connector string
+	body      string
+}
+
+// copyModeHookEvents names paths inside the host tree root directly, as if
+// the sandbox's paths happened to coincide with host paths, and covers every
+// hook that stats, reads or runs something from payload paths: session and
+// directory events, instruction and changed-file events, tool calls that
+// execute or edit files (including a FIFO), tool results whose diff matches
+// a host source file, and Stop scans.
+func copyModeHookEvents(root string) []copyModeHookEvent {
+	in := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
+	diff := strings.Join([]string{
+		"diff --git a/internal/gateway/rules.go b/internal/gateway/rules.go",
+		"index 1111111..2222222 100644",
+		"--- a/internal/gateway/rules.go",
+		"+++ b/internal/gateway/rules.go",
+		"@@ -1 +1,2 @@",
+		" package gateway",
+		"+" + codexObserveSourceTrustLiteral(),
+	}, "\n")
+	quote := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			panic(err)
+		}
+		return string(b)
+	}
+	claude := func(fields map[string]any) copyModeHookEvent {
+		fields["session_id"] = "copy-c1"
+		if _, ok := fields["cwd"]; !ok {
+			fields["cwd"] = root
+		}
+		return copyModeHookEvent{connector: "claudecode", body: quote(fields)}
+	}
+	codex := func(fields map[string]any) copyModeHookEvent {
+		fields["session_id"] = "copy-x1"
+		fields["turn_id"] = "copy-x1-t1"
+		if _, ok := fields["cwd"]; !ok {
+			fields["cwd"] = root
+		}
+		return copyModeHookEvent{connector: "codex", body: quote(fields)}
+	}
+	bash := func(command string) map[string]any { return map[string]any{"command": command} }
+	return []copyModeHookEvent{
+		claude(map[string]any{"hook_event_name": "SessionStart", "source": "startup", "cwd": "/work/app"}),
+		claude(map[string]any{"hook_event_name": "SessionStart", "source": "startup"}),
+		claude(map[string]any{"hook_event_name": "CwdChanged", "old_cwd": root, "new_cwd": in("src")}),
+		claude(map[string]any{"hook_event_name": "InstructionsLoaded", "file_path": in("CLAUDE.md")}),
+		claude(map[string]any{"hook_event_name": "InstructionsLoaded", "file_path": "/work/app/CLAUDE.md"}),
+		claude(map[string]any{"hook_event_name": "FileChanged", "file_path": in("src/creds.go")}),
+		claude(map[string]any{"hook_event_name": "FileChanged", "file_path": "src/creds.go"}),
+		claude(map[string]any{"hook_event_name": "FileChanged", "file_path": in("pipe")}),
+		claude(map[string]any{"hook_event_name": "ConfigChange", "file_path": in(".claude/settings.json")}),
+		claude(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "c-t1",
+			"tool_input": bash("bash ./build.sh")}),
+		claude(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "c-t2",
+			"tool_input": bash("sh " + in("build.sh") + " && . " + in("pipe"))}),
+		claude(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_use_id": "c-t3",
+			"tool_input": map[string]any{"file_path": in("CLAUDE.md"), "old_string": "instructions", "new_string": "changed"}}),
+		// Whether this edit touches an active instruction file depends on
+		// what the InstructionsLoaded events above could prove.
+		claude(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_use_id": "c-t3b",
+			"tool_input": map[string]any{"file_path": in("AGENTS.md"), "old_string": "instructions", "new_string": "changed"}}),
+		claude(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "c-t4",
+			"tool_input":    bash("git diff -- internal/gateway/rules.go"),
+			"tool_response": map[string]any{"stdout": diff}}),
+		claude(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_use_id": "c-t5",
+			"tool_input":    map[string]any{"file_path": in("internal/gateway/rules.go")},
+			"tool_response": "package gateway\n" + codexObserveSourceTrustLiteral() + "\n"}),
+		claude(map[string]any{"hook_event_name": "Stop", "stop_hook_active": false}),
+		claude(map[string]any{"hook_event_name": "SessionEnd", "reason": "exit"}),
+		codex(map[string]any{"hook_event_name": "SessionStart", "source": "startup"}),
+		codex(map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "run the build"}),
+		codex(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "x-t1",
+			"tool_input": bash("sh " + in("build.sh"))}),
+		codex(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "x-t2",
+			"tool_input":    bash("git diff -- internal/gateway/rules.go"),
+			"tool_response": map[string]any{"stdout": diff}}),
+		codex(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "x-t3",
+			"tool_input":    bash("cat internal/gateway/rules.go"),
+			"tool_response": "package gateway\n" + codexObserveSourceTrustLiteral() + "\n"}),
+		codex(map[string]any{"hook_event_name": "Stop", "stop_hook_active": false}),
+	}
+}
+
+// copyModeHookRun is what one pass of copy-mode hook traffic produced.
+type copyModeHookRun struct {
+	responses []string
+	extras    []map[string]any
+	viewCalls int
+}
+
+// runCopyModeHooks sends copyModeHookEvents through a fresh gateway whose
+// two copy-mode sandboxes record root as a context mount. Each post must
+// finish promptly: a blocking open of the FIFO would park it.
+func runCopyModeHooks(t *testing.T, root string) copyModeHookRun {
+	t.Helper()
+	store, logger := testStoreAndLogger(t)
 	dataDir := t.TempDir()
 	cfg := &config.Config{DataDir: dataDir, Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
-	cfg.Guardrail.Connector = "claudecode"
-	cfg.ClaudeCode.ScanOnStop = true
-	cfg.ClaudeCode.ScanPaths = []string{"src/creds.go", filepath.Join(p.root, "src", "creds.go")}
-	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
-	store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(dataDir))
+	cfg.Guardrail.Mode = "observe"
+	scanPaths := []string{"src/creds.go", filepath.Join(root, "src", "creds.go"), filepath.Join(root, "pipe")}
+	for _, hook := range []*config.AgentHookConfig{&cfg.ClaudeCode, &cfg.Codex} {
+		hook.Enabled = true
+		hook.ScanOnStop = true
+		hook.ScanOnSessionStart = true
+		hook.ScanPaths = scanPaths
+	}
+	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, store, logger, cfg)
+	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(dataDir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, token, err := store.Mint(sandboxauth.Spec{
-		SandboxName: "dc-claude-copy", Connector: "claudecode",
-		AgentVersion: "2.1.156", HookContractID: "claudecode-hooks-v1",
-		Workdir: sandboxauth.Workdir{
-			Mode: sandboxauth.WorkdirCopy,
-			// A recorded context mount grants nothing in copy mode.
-			Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: p.root, ReadOnly: true}},
-		},
+	// A recorded context mount grants nothing in copy mode.
+	workdir := sandboxauth.Workdir{
+		Mode:   sandboxauth.WorkdirCopy,
+		Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: root, ReadOnly: true}},
+	}
+	_, claudeToken, err := bindings.Mint(sandboxauth.Spec{
+		SandboxName: "dc-claude-copy", SandboxID: "sbx-claude-copy", Connector: "claudecode",
+		AgentVersion: "2.1.156", HookContractID: "claudecode-hooks-v1", Workdir: workdir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, codexToken, err := bindings.Mint(sandboxauth.Spec{
+		SandboxName: "dc-codex-copy", SandboxID: "sbx-codex-copy", Connector: "codex",
+		AgentVersion: "0.128.0", HookContractID: "codex-hooks-v1", Workdir: workdir,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fsys := &countingFS{}
-	if err := api.SetSandboxIngress(SandboxIngressConfig{Addr: "127.0.0.1:18971", Bindings: store, FS: fsys}); err != nil {
+	if err := api.SetSandboxIngress(SandboxIngressConfig{Addr: "127.0.0.1:18971", Bindings: bindings, FS: fsys}); err != nil {
 		t.Fatal(err)
 	}
 	handler, err := api.SandboxIngressHandler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := []string{
-		`{"hook_event_name":"SessionStart","session_id":"c1","cwd":"/work/app","source":"startup"}`,
-		`{"hook_event_name":"CwdChanged","session_id":"c1","cwd":"/work/app","old_cwd":"/work/app","new_cwd":"/work/app/src"}`,
-		`{"hook_event_name":"InstructionsLoaded","session_id":"c1","cwd":"/work/app","file_path":"/work/app/CLAUDE.md"}`,
-		`{"hook_event_name":"FileChanged","session_id":"c1","cwd":"/work/app","file_path":"/work/app/src/creds.go"}`,
-		`{"hook_event_name":"FileChanged","session_id":"c1","cwd":"/work/app","file_path":"` + filepath.Join(p.root, "src", "creds.go") + `"}`,
-		`{"hook_event_name":"PreToolUse","session_id":"c1","cwd":"/work/app","tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"bash ./build.sh"}}`,
-		`{"hook_event_name":"PreToolUse","session_id":"c1","cwd":"/work/app","tool_name":"Bash","tool_use_id":"t2","tool_input":{"command":"sh ` + filepath.Join(p.root, "build.sh") + `"}}`,
-		`{"hook_event_name":"Stop","session_id":"c1","cwd":"/work/app"}`,
-	}
-	for _, body := range events {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(body))
+	var run copyModeHookRun
+	for _, event := range copyModeHookEvents(root) {
+		path, token := "/api/v1/claude-code/hook", claudeToken
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(event.body))
+		if event.connector == "codex" {
+			path, token = "/api/v1/codex/hook", codexToken
+			req = httptest.NewRequest(http.MethodPost, path, strings.NewReader(event.body))
+			var fields map[string]any
+			_ = json.Unmarshal([]byte(event.body), &fields)
+			req.Header.Set("X-DefenseClaw-Hook-Event", fmt.Sprint(fields["hook_event_name"]))
+			req.Header.Set("X-DefenseClaw-Hook-Contract", "codex-hooks-v1")
+		}
 		req.RemoteAddr = "127.0.0.1:43210"
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
+		req.Header.Set("X-DefenseClaw-Client", event.connector+"-hook/1.0")
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: %d %s", body, rec.Code, rec.Body.String())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			handler.ServeHTTP(rec, req)
+		}()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			// Release a reader parked on the FIFO before failing.
+			if w, err := os.OpenFile(filepath.Join(root, "pipe"), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				_ = w.Close()
+			}
+			t.Fatalf("copy-mode hook blocked on a host path: %s", event.body)
 		}
-		if strings.Contains(rec.Body.String(), "CG-CRED-002") {
-			t.Fatalf("copy-mode hook read a host file: %s", rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", event.body, rec.Code, rec.Body.String())
+		}
+		run.responses = append(run.responses, normalizeCopyModeHookResponse(t, rec.Body.Bytes()))
+	}
+	events, err := store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Action != "connector-hook" {
+			continue
+		}
+		// Everything that describes the decision; per-request and per-run
+		// identifiers (times, evaluation and binding IDs) are left out.
+		row := map[string]any{"connector": ev.Connector}
+		for _, key := range []string{
+			"event", "result", "action", "raw_action", "severity", "mode", "reason",
+			"would_block", "rule_ids", "enforced",
+		} {
+			row[key] = ev.Structured[key]
+		}
+		extra, _ := ev.Structured["extra"].(map[string]any)
+		for _, key := range []string{"sandbox_name", "sandbox_workdir", "sandbox_coverage_gaps", "hook_contract_id"} {
+			row[key] = extra[key]
+		}
+		run.extras = append(run.extras, row)
+	}
+	fsys.mu.Lock()
+	run.viewCalls = fsys.calls
+	fsys.mu.Unlock()
+	return run
+}
+
+// normalizeCopyModeHookResponse drops the per-request identifiers from a hook
+// response so two runs can be compared.
+func normalizeCopyModeHookResponse(t *testing.T, body []byte) string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("hook response is not JSON: %s", body)
+	}
+	var scrub func(any) any
+	scrub = func(v any) any {
+		switch typed := v.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				switch key {
+				case "evaluation_id", "request_id", "trace_id", "event_id":
+					delete(typed, key)
+				default:
+					typed[key] = scrub(child)
+				}
+			}
+		case []any:
+			for i, child := range typed {
+				typed[i] = scrub(child)
+			}
+		}
+		return v
+	}
+	out, err := json.Marshal(scrub(value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestSandboxIngressCopyModeNeverTouchesHostFS drives the path-reading hook
+// events of copy-mode Claude Code and Codex sandboxes through the real
+// ingress, naming paths inside a populated host tree. No host access may
+// happen: none through the FSView (counted), and none directly through os.*
+// or host git either. Direct access is caught two ways. On Linux, inotify
+// reports any open of a file or directory in the tree. And the same traffic
+// runs twice, once with the tree readable and once with it made unreadable
+// (chmod 000): a handler that stats or reads the host tree itself would see
+// different files and answer differently. A blocking open of the FIFO in the
+// tree would also stall the readable pass.
+func TestSandboxIngressCopyModeNeverTouchesHostFS(t *testing.T) {
+	root, err := filepath.EvalSymlinks(codexObserveTestWorkspace(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, content := range map[string]string{
+		"internal/gateway/rules.go": "package gateway\n" + codexObserveSourceTrustLiteral() + "\n",
+		"src/creds.go":              "var k = \"AKIA" + "ABCDEFGHIJKLMNOP\"\n",
+		"build.sh":                  "#!/bin/sh\necho hi\n",
+		"CLAUDE.md":                 "instructions\n",
+		"AGENTS.md":                 "instructions\n",
+		".claude/settings.json":     "{\"hooks\":{}}\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if fsys.calls != 0 {
-		t.Fatalf("copy-mode sandbox hooks made %d host filesystem calls through the view", fsys.calls)
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Logf("git init unavailable (%v): %s", err, out)
+	}
+
+	opened := watchHostTreeOpens(t, root)
+	readable := runCopyModeHooks(t, root)
+	if paths := opened(); len(paths) != 0 {
+		t.Fatalf("copy-mode sandbox hooks opened host paths directly: %v", paths)
+	}
+	if readable.viewCalls != 0 {
+		t.Fatalf("copy-mode sandbox hooks made %d host filesystem calls through the view", readable.viewCalls)
+	}
+	for i, response := range readable.responses {
+		if strings.Contains(response, "CG-CRED-002") {
+			t.Fatalf("copy-mode hook %d read a host file: %s", i, response)
+		}
+	}
+	// Every check the copy-mode sandbox skipped is reported on its audit row.
+	reported := map[string]bool{}
+	for _, extra := range readable.extras {
+		if extra["sandbox_name"] == nil {
+			t.Fatalf("copy-mode hook audit row has no sandbox identity: %v", extra)
+		}
+		gaps, _ := extra["sandbox_coverage_gaps"].(string)
+		for _, gap := range strings.Split(gaps, ",") {
+			reported[fmt.Sprint(extra["connector"], "/", extra["event"], "/", gap)] = true
+		}
+	}
+	for _, want := range []string{
+		"claudecode/Stop/" + sandboxGapStopScanNoHostView,
+		"codex/Stop/" + sandboxGapStopScanNoHostView,
+		"claudecode/PreToolUse/" + sandboxGapArtifactUnreadable,
+		"codex/PreToolUse/" + sandboxGapArtifactUnreadable,
+		"claudecode/FileChanged/" + sandboxGapEventFileUnreadable,
+		"claudecode/SessionStart/" + sandboxGapComponentScanSkipped,
+		"codex/SessionStart/" + sandboxGapComponentScanSkipped,
+	} {
+		if !reported[want] {
+			t.Errorf("copy-mode audit rows do not report %s", want)
+		}
+	}
+
+	if err := os.Chmod(root, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	if _, err := os.ReadDir(root); err == nil {
+		t.Skip("permissions do not restrict this user (root?); the unreadable pass cannot run")
+	}
+	unreadable := runCopyModeHooks(t, root)
+	if unreadable.viewCalls != 0 {
+		t.Fatalf("unreadable pass made %d host filesystem calls through the view", unreadable.viewCalls)
+	}
+	if !slices.Equal(readable.responses, unreadable.responses) {
+		for i := range readable.responses {
+			if i < len(unreadable.responses) && readable.responses[i] != unreadable.responses[i] {
+				t.Errorf("hook %d depends on the host tree:\n readable:   %s\n unreadable: %s",
+					i, readable.responses[i], unreadable.responses[i])
+			}
+		}
+		t.Fatal("copy-mode hook responses depend on host files")
+	}
+	if fmt.Sprint(readable.extras) != fmt.Sprint(unreadable.extras) {
+		t.Fatalf("copy-mode hook audit rows depend on host files:\n readable:   %v\n unreadable: %v",
+			readable.extras, unreadable.extras)
 	}
 }
