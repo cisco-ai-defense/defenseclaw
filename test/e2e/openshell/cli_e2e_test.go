@@ -50,7 +50,8 @@ import (
 //   - the nested-repository guard quarantines a .git created in the mount;
 //   - review, undo (the project is restored), approvals, delete;
 //   - `run codex --detach` with the mock Responses server: the marker
-//     command is denied;
+//     command is denied, and a tool call's plain curl reaches the allowed
+//     host through the proxy Codex's launcher exports;
 //   - copy mode (`--copy`) with a git project: the run uploads before it
 //     probes, the agent's edit stays in the copy, held-back secrets are not
 //     in it, and `pull --branch`, `--patch-out` and `--apply` (a conflict
@@ -612,6 +613,18 @@ func (c *cliEnv) runCodex() {
 		}
 		return nil
 	})
+	// Codex's own tool calls reach the web through the DefenseClaw proxy
+	// its launcher exports: a plain curl (no --proxy) in a tool call.
+	argv, err := harness.Codex.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: true,
+		Prompt: "Run the DCE2E-FETCH scenario.", Args: c.codexMockArgs()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, rc := c.execOut(c.codex, argv...)
+	t.Logf("codex fetch exited %d: %s", rc, truncate(strings.TrimSpace(out), 300))
+	if got, _ := c.execOut(c.codex, "cat", "/tmp/dce2e-fetch.txt"); strings.TrimSpace(got) != "200" {
+		t.Fatalf("Codex's fetch of %s = %q, want 200 through the proxy", allowedHost, got)
+	}
 }
 
 // runCopy starts a detached copy-mode Claude Code run of prompt in dir

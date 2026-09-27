@@ -9,6 +9,14 @@
       ]
     },
     {
+      "name": "dc-fetch",
+      "match": "DCE2E-FETCH",
+      "turns": [
+        {"shell": "curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://example.org > /tmp/dce2e-fetch.txt; cat /tmp/dce2e-fetch.txt"},
+        {"text": "Fetched."}
+      ]
+    },
+    {
       "name": "default",
       "match": "",
       "turns": [
