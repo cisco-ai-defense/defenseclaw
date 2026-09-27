@@ -173,6 +173,12 @@ type CredentialProfile struct {
 	Env map[string]string
 	// LaunchArgs are harness flags the provider needs.
 	LaunchArgs []string
+	// DefaultModel is the model a sandbox with this profile runs because
+	// the provider does not serve the harness's own default. It travels
+	// with ModelProvider into the run's managed configuration, above user
+	// config and configuration overrides; only the harness's model flag
+	// picks another (Spec.Model).
+	DefaultModel string
 	// ModelProvider is the Codex model provider the profile selects; the
 	// sandbox manager pins it in the per-run managed configuration. Claude
 	// Code profiles select their provider through Env instead.
@@ -268,6 +274,12 @@ type Spec struct {
 	// env is harness-level sandbox env that depends on the install layout
 	// (the connector artifacts cannot know it).
 	env map[string]string
+	// modelArg returns the model the caller's pass-through arguments name
+	// with the harness's model flag and with a configuration override
+	// ("" when they name none); modelFlag is that flag. Harnesses without
+	// them never report a model.
+	modelArg  func(args []string) (flag, override string)
+	modelFlag string
 }
 
 // InstallRoot is the harness's root-owned install prefix.
@@ -312,6 +324,27 @@ func (s *Spec) CredentialProfiles(region string) []CredentialProfile {
 		out = append(out, resolveCredentialProfile(cp, region))
 	}
 	return out
+}
+
+// Model reports the model a launch with credential profile profileID and
+// pass-through args runs: the one the harness's model flag names, else the
+// profile's DefaultModel (isDefault; pinned above configuration overrides),
+// else the one a configuration override names. It is empty when none says,
+// and the harness picks its own. flag is how a user picks another model.
+func (s *Spec) Model(profileID string, args []string) (model string, isDefault bool, flag string) {
+	if s.modelArg == nil {
+		return "", false, ""
+	}
+	byFlag, byOverride := s.modelArg(args)
+	if byFlag != "" {
+		return byFlag, false, s.modelFlag
+	}
+	for _, cp := range s.credentialProfiles {
+		if profileID != "" && cp.ProfileID == profileID && cp.DefaultModel != "" {
+			return cp.DefaultModel, true, s.modelFlag
+		}
+	}
+	return byOverride, false, s.modelFlag
 }
 
 // Login returns the harness's in-sandbox vendor login, if it has one.
@@ -459,11 +492,17 @@ func (s *Spec) BypassArgs(args []string) (kept, dropped []string) {
 // tomlStringIs reports whether a -c override's value (a TOML literal, or a
 // bare string Codex accepts) is want.
 func tomlStringIs(value, want string) bool {
+	return tomlStringValue(value) == want
+}
+
+// tomlStringValue is a -c override's value (a TOML literal, or a bare
+// string Codex accepts) without its quotes.
+func tomlStringValue(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 		value = value[1 : len(value)-1]
 	}
-	return value == want
+	return value
 }
 
 // Env returns the environment for `openshell sandbox create --env`: the
@@ -549,10 +588,14 @@ func resolveCredentialProfile(cp CredentialProfile, region string) CredentialPro
 		region = profiles.DefaultBedrockRegion
 	}
 	host := profiles.BedrockMantleHost(region)
-	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Unverified: cp.Unverified, Env: map[string]string{}}
+	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Unverified: cp.Unverified, DefaultModel: cp.DefaultModel, Env: map[string]string{}}
 	if cp.ModelProvider != nil {
 		p := *cp.ModelProvider
 		p.BaseURL = strings.ReplaceAll(p.BaseURL, bedrockHostToken, host)
+		// The run's managed configuration pins the profile's default
+		// model with its provider, so every harness start in the sandbox
+		// gets it.
+		p.DefaultModel = cp.DefaultModel
 		out.ModelProvider = &p
 	}
 	for _, h := range cp.Hosts {

@@ -77,7 +77,15 @@ type SandboxModelProvider struct {
 	BaseURL string
 	EnvKey  string
 	WireAPI string
+	// DefaultModel, when set, is the model the run pins for the provider
+	// because it does not serve the harness's own default. Codex pins it
+	// in the managed config, above user config and -c overrides; a -m at
+	// launch still picks another.
+	DefaultModel string
 }
+
+// sandboxModelNamePattern is a model id a run may pin.
+var sandboxModelNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
 // SandboxModelProviderOpenAI is Codex's built-in OpenAI provider id.
 const SandboxModelProviderOpenAI = "openai"
@@ -229,6 +237,9 @@ func validateSandboxModelProvider(p *SandboxModelProvider) error {
 	u, err := url.Parse(p.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
 		return fmt.Errorf("model provider %s: base URL %q must be an http(s) URL without credentials", p.ID, p.BaseURL)
+	}
+	if p.DefaultModel != "" && !sandboxModelNamePattern.MatchString(p.DefaultModel) {
+		return fmt.Errorf("model provider %s: default model %q is not a plain model id", p.ID, p.DefaultModel)
 	}
 	if p.ID == SandboxModelProviderOpenAI {
 		if p.Name != "" || p.EnvKey != "" || p.WireAPI != "" {

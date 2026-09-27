@@ -99,13 +99,19 @@ var Codex = register(&Spec{
 		{
 			ProfileID: profiles.CodexBedrockMantleID,
 			Hosts:     []string{bedrockHostToken},
+			// Mantle does not serve Codex's default OpenAI model (Codex's
+			// requests for it fail with a validation error); gpt-oss-20b is
+			// the Mantle model Codex's hooks and tool calls are verified
+			// with. The run's managed config pins it, so every Codex the
+			// sandbox starts gets it; -m picks another.
+			DefaultModel: CodexMantleDefaultModel,
 			LaunchArgs: append(codexProviderArgs(codexMantleProvider),
 				// Mantle's OpenAI-compatible models do not serve these tools.
 				"--disable", "multi_agent",
 				"-c", `web_search="disabled"`,
 			),
 			ModelProvider: &codexMantleProvider,
-			Note:          "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route",
+			Note:          "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route (default model " + CodexMantleDefaultModel + ")",
 		},
 	},
 	customization: []CustomizationPath{
@@ -119,7 +125,13 @@ var Codex = register(&Spec{
 		"store the OPENAI_API_KEY placeholder with `codex login --with-api-key` before interactive runs",
 		"export the OTLP Authorization header from DEFENSECLAW_SANDBOX_TOKEN as OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_HEADERS (managed_config.toml cannot carry a revision-scoped value, and a command-line flag would show the token to every process in the sandbox)",
 	},
+	modelArg:  codexModelArg,
+	modelFlag: "-m",
 })
+
+// CodexMantleDefaultModel is the model Codex runs on Amazon Bedrock Mantle
+// unless the caller picks another with -m.
+const CodexMantleDefaultModel = "openai.gpt-oss-20b"
 
 // CodexLauncherPath is the in-image Codex launcher.
 const CodexLauncherPath = LauncherDir + "/codex-launch"
@@ -140,6 +152,41 @@ func codexProviderArgs(p connector.SandboxModelProvider) []string {
 		"-c", `model_providers.` + p.ID + `.env_key="` + p.EnvKey + `"`,
 		"-c", `model_providers.` + p.ID + `.wire_api="` + p.WireAPI + `"`,
 	}
+}
+
+// codexModelArg returns the models Codex's arguments name: the last -m or
+// --model (flag), which Codex applies above every configuration layer, the
+// managed config included, and the last -c model= (override), which the
+// managed config beats. Arguments after "--" are never flags.
+func codexModelArg(args []string) (flag, override string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		name, inline, hasInline := strings.Cut(arg, "=")
+		value := func() string {
+			if hasInline {
+				return inline
+			}
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch {
+		case name == "-m" || name == "--model":
+			flag = strings.TrimSpace(value())
+		case !strings.HasPrefix(arg, "--") && strings.HasPrefix(arg, "-m") && len(arg) > 2:
+			flag = strings.TrimSpace(arg[2:]) // -mMODEL
+		case name == "-c" || name == "--config":
+			if key, v, ok := strings.Cut(value(), "="); ok && strings.TrimSpace(key) == "model" {
+				override = tomlStringValue(v)
+			}
+		}
+	}
+	return flag, override
 }
 
 // codexApprovalNever matches a -c override that sets approval_policy to

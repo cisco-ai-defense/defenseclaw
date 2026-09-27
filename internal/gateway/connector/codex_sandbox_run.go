@@ -40,7 +40,7 @@ var codexSandboxSafeSandboxModes = []string{"read-only", "danger-full-access"}
 // codexSandboxRunManagedKeys and codexSandboxRunRequirementKeys are the keys
 // the run adds; the image files must not already set them.
 var (
-	codexSandboxRunManagedKeys     = []string{"mcp_servers", "model_provider", "model_providers", "openai_base_url"}
+	codexSandboxRunManagedKeys     = []string{"mcp_servers", "model", "model_provider", "model_providers", "openai_base_url"}
 	codexSandboxRunRequirementKeys = []string{"allowed_approval_policies", "allowed_sandbox_modes", "mcp_servers"}
 )
 
@@ -55,8 +55,10 @@ var (
 //     openai_base_url for the built-in OpenAI provider, or the custom
 //     provider's model_providers table), which a user config.toml the
 //     workload wrote could otherwise redirect (Codex 0.146 ignores these
-//     keys in a project's .codex/config.toml); and the imported MCP servers,
-//     with cwd and env_vars pinned;
+//     keys in a project's .codex/config.toml), plus the provider's default
+//     model when it does not serve Codex's own (a -m at launch still picks
+//     another, in every Codex the sandbox starts); and the imported MCP
+//     servers, with cwd and env_vars pinned;
 //   - requirements.toml: in safe mode allowed_approval_policies without
 //     "never" (Codex falls back to untrusted when a flag, the user or the
 //     project asks for never) and allowed_sandbox_modes; with project
@@ -143,6 +145,9 @@ func (c *CodexConnector) SandboxRunFiles(target SandboxRenderTarget, run Sandbox
 func addCodexSandboxRunManaged(managed map[string]interface{}, run SandboxRunConfig) {
 	if p := run.ModelProvider; p != nil {
 		managed["model_provider"] = p.ID
+		if p.DefaultModel != "" {
+			managed["model"] = p.DefaultModel
+		}
 		if p.ID == SandboxModelProviderOpenAI {
 			managed["openai_base_url"] = p.BaseURL
 		} else {
@@ -269,6 +274,9 @@ func verifyCodexSandboxRunPolicy(requirementsBody, managedBody []byte, run Sandb
 		if managed["model_provider"] != p.ID {
 			return fmt.Errorf("verify Codex run managed config: model_provider = %#v", managed["model_provider"])
 		}
+		if model, set := managed["model"]; (p.DefaultModel == "" && set) || (p.DefaultModel != "" && model != p.DefaultModel) {
+			return fmt.Errorf("verify Codex run managed config: model = %#v, want %q", model, p.DefaultModel)
+		}
 		if p.ID == SandboxModelProviderOpenAI {
 			if managed["openai_base_url"] != p.BaseURL {
 				return fmt.Errorf("verify Codex run managed config: openai_base_url = %#v", managed["openai_base_url"])
@@ -280,8 +288,8 @@ func verifyCodexSandboxRunPolicy(requirementsBody, managedBody []byte, run Sandb
 				return fmt.Errorf("verify Codex run managed config: model_providers.%s = %#v", p.ID, table)
 			}
 		}
-	} else if managed["model_provider"] != nil {
-		return fmt.Errorf("verify Codex run managed config: a model provider is pinned without a run provider")
+	} else if managed["model_provider"] != nil || managed["model"] != nil {
+		return fmt.Errorf("verify Codex run managed config: a model provider or model is pinned without a run provider")
 	}
 	return nil
 }

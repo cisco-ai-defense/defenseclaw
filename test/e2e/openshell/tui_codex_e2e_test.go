@@ -654,18 +654,22 @@ func (x *tuiCodex) bedrockTUI() {
 	// never on a command line.
 	m := x.term("bedrock", []string{"AWS_BEARER_TOKEN_BEDROCK=" + key})
 	bin := filepath.Join(x.work, "bin", "defenseclaw-gateway")
+	// No -m: the Mantle profile's default model.
 	m.line(shellJoin(bin, "sandbox", "run", "codex", "--new", "--name", x.bedrock, "--llm", "bedrock",
-		"--bedrock-region", envOr("AWS_REGION", "us-east-1"), "--", "-m", "openai.gpt-oss-20b"))
-	m.waitFor(20*time.Minute, "the Bedrock Codex TUI", func(s string) bool {
-		return strings.Contains(s, codexBanner) && strings.Contains(s, "openai.gpt-oss-20b") && strings.Contains(s, "› ")
+		"--bedrock-region", envOr("AWS_REGION", "us-east-1")))
+	screen := m.waitFor(20*time.Minute, "the Bedrock Codex TUI", func(s string) bool {
+		return strings.Contains(s, codexBanner) && strings.Contains(s, harness.CodexMantleDefaultModel) && strings.Contains(s, "› ")
 	})
+	if !strings.Contains(screen, harness.CodexMantleDefaultModel+" (the default;") {
+		t.Fatalf("the banner does not name the default model:\n%s", screen)
+	}
 	since := time.Now()
 	m.submit("Use the shell tool to run exactly this command: echo dce2e-allowed > /tmp/dce2e-allowed.txt . Then reply with the single word done.")
 	rows := x.waitRowsWithin(x.bedrock, since, 4*time.Minute, "PostToolUse", "Stop")
 	m.submit("/new")
 	since = time.Now()
 	m.submit("Use the shell tool to run exactly this command: echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt . If it is blocked, reply with the word blocked and the reason.")
-	screen := m.waitFor(4*time.Minute, "the real model's blocked call", func(s string) bool {
+	screen = m.waitFor(4*time.Minute, "the real model's blocked call", func(s string) bool {
 		return strings.Contains(s, "PreToolUse hook (blocked)")
 	})
 	rows = append(rows, x.waitRowsWithin(x.bedrock, since, 4*time.Minute, "Stop")...)

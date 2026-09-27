@@ -47,9 +47,11 @@ package image
 //     passthrough flag ask for it.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -113,15 +115,31 @@ func TestLiveRunConfig(t *testing.T) {
 	}
 }
 
-// countingLLM counts every request an endpoint receives.
+// countingLLM counts every request an endpoint receives and remembers the
+// model the last one asked for.
 type countingLLM struct {
-	h http.Handler
-	n atomic.Int64
+	h     http.Handler
+	n     atomic.Int64
+	model atomic.Value
 }
 
 func (c *countingLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.n.Add(1)
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	var req struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &req) == nil && req.Model != "" {
+		c.model.Store(req.Model)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
 	c.h.ServeHTTP(w, r)
+}
+
+// lastModel is the model of the last request that named one.
+func (c *countingLLM) lastModel() string {
+	m, _ := c.model.Load().(string)
+	return m
 }
 
 type liveRig struct {
@@ -518,4 +536,41 @@ func (r *liveRig) codex(ctx context.Context) {
 		t.Fatalf("control: without the run files Codex ran with %q (side effect %s), not never; the scenario proves nothing", report, sideEffect(control))
 	}
 	t.Logf("CONTROL safe mode: requirements forced approval %q against user/project approval_policy never and the bypass flag, and the marker command did not run (without: %q, it ran)", refused.Report, control.Report)
+
+	// (e) A provider's default model (Codex on Mantle: Codex's own default
+	// is not served there) reaches every Codex the sandbox starts without
+	// -m, a user config.toml and a -c model= cannot replace it, and a -m
+	// at launch still picks another.
+	var noModel []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-m" {
+			i++
+			continue
+		}
+		noModel = append(noModel, args[i])
+	}
+	pinned := *provider
+	pinned.DefaultModel = "mock-model"
+	model := func(name string, pin *connector.SandboxModelProvider, extra ...string) string {
+		sc := allow(name)
+		sc.setup = userConfig("model = \"user-model\"\n")
+		opts := HookFireOptions{Env: env, Args: append(append([]string{}, noModel...), extra...)}
+		opts.RunFiles = r.files(connector.SandboxRunConfig{ModelProvider: pin})
+		r.run(ctx, opts, sc)
+		return r.primary.lastModel()
+	}
+	if got := model("codex-default-model", &pinned); got != "mock-model" {
+		t.Fatalf("default model: Codex asked for %q, want the pinned mock-model", got)
+	}
+	if got := model("codex-default-model-override", &pinned, "-c", `model="override-model"`); got != "mock-model" {
+		t.Fatalf("default model: with -c model= Codex asked for %q, want the pinned mock-model", got)
+	}
+	if got := model("codex-default-model-flag", &pinned, "-m", "flag-model"); got != "flag-model" {
+		t.Fatalf("default model: with -m Codex asked for %q, want flag-model", got)
+	}
+	unpinned := model("codex-default-model-control", provider)
+	if unpinned == "mock-model" {
+		t.Fatal("control: without the pin Codex still asked for mock-model; the scenario proves nothing")
+	}
+	t.Logf("CONTROL default model: the pin reached Codex over a user config.toml and -c model=, -m replaced it; without the pin Codex asked for %q", unpinned)
 }

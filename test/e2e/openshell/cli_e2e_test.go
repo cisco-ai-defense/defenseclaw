@@ -1008,8 +1008,13 @@ func (c *cliEnv) bedrockCodex() {
 		t.Skip("AWS_BEARER_TOKEN_BEDROCK is not set")
 	}
 	name := c.prefix + "-bx"
-	c.ok(45*time.Minute, "run", "codex", "--detach", "--new", "--name", name, "--llm", "bedrock", "--bedrock-region", envOr("AWS_REGION", "us-east-1"),
-		"--prompt", "Run `echo dce2e-allowed > /tmp/dce2e-allowed.txt` in the shell, then say done.", "--", "-m", "openai.gpt-oss-20b")
+	// No -m: Codex on Mantle runs the profile's default model (Codex's own
+	// default is not served there), and the banner says which.
+	out := c.ok(45*time.Minute, "run", "codex", "--detach", "--new", "--name", name, "--llm", "bedrock", "--bedrock-region", envOr("AWS_REGION", "us-east-1"),
+		"--prompt", "Run `echo dce2e-allowed > /tmp/dce2e-allowed.txt` in the shell, then say done.")
+	if !strings.Contains(out, "Model     "+harness.CodexMantleDefaultModel+" (the default; -- -m MODEL picks another) · ") {
+		t.Fatalf("the banner does not name the default model:\n%s", out)
+	}
 	code, logs := c.waitRun(name, 8*time.Minute)
 	t.Logf("bedrock codex exited %d:\n%s", code, truncate(logs, 1500))
 	if code != 0 || c.status(name).Hooks.ToolCalls == 0 {

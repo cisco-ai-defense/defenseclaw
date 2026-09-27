@@ -1047,6 +1047,60 @@ func TestBypassArgs(t *testing.T) {
 	}
 }
 
+// TestSpecModel pins the model the launch banner reports, the way Codex
+// picks it: -m or --model (the last one, nothing after "--") above
+// everything, then the Mantle profile's default, which the run's managed
+// config pins above any -c model= override, then a -c model= for a profile
+// without one; nothing for a profile or harness that leaves the model to
+// the harness.
+func TestSpecModel(t *testing.T) {
+	mantle := profiles.CodexBedrockMantleID
+	for _, tc := range []struct {
+		name        string
+		spec        *Spec
+		profile     string
+		args        []string
+		want        string
+		wantDefault bool
+	}{
+		{"mantle default", Codex, mantle, nil, CodexMantleDefaultModel, true},
+		{"-m", Codex, mantle, []string{"-m", "openai.gpt-oss-120b"}, "openai.gpt-oss-120b", false},
+		{"-mMODEL", Codex, mantle, []string{"-mopenai.gpt-oss-120b"}, "openai.gpt-oss-120b", false},
+		{"-m=MODEL", Codex, mantle, []string{"-m=openai.gpt-oss-120b"}, "openai.gpt-oss-120b", false},
+		{"--model=", Codex, mantle, []string{"--model=a", "--model", "b"}, "b", false},
+		{"managed default beats -c model", Codex, mantle, []string{"-c", `model = "c1"`}, CodexMantleDefaultModel, true},
+		{"-c model without a default", Codex, profiles.OpenAIID, []string{"-c", `model = "c1"`, "--config", "model='c2'"}, "c2", false},
+		{"-m beats -c", Codex, mantle, []string{"-m", "m1", "-c", `model="c1"`}, "m1", false},
+		{"other -c keys", Codex, mantle, []string{"-c", `model_reasoning_effort="high"`, "-c", `profiles.x.model="p"`}, CodexMantleDefaultModel, true},
+		{"after --", Codex, mantle, []string{"--", "-m", "x"}, CodexMantleDefaultModel, true},
+		{"resume subcommand", Codex, mantle, []string{"resume", "--last", "-m", "r"}, "r", false},
+		{"openai has no default", Codex, profiles.OpenAIID, nil, "", false},
+		{"openai with -m", Codex, profiles.OpenAIID, []string{"-m", "gpt-5"}, "gpt-5", false},
+		{"no profile", Codex, "", nil, "", false},
+		{"harness without a model parser", ClaudeCode, profiles.ClaudeBedrockMantleID, []string{"--model", "opus"}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, isDefault, flag := tc.spec.Model(tc.profile, tc.args)
+			if got != tc.want || isDefault != tc.wantDefault {
+				t.Fatalf("Model = %q (default %t), want %q (default %t)", got, isDefault, tc.want, tc.wantDefault)
+			}
+			if tc.spec == Codex && flag != "-m" {
+				t.Fatalf("flag = %q", flag)
+			}
+		})
+	}
+	// The default survives region resolution and travels with the model
+	// provider the manager pins in the run's managed config; the OpenAI
+	// provider carries none.
+	if cp, _ := Codex.CredentialProfile(mantle, "eu-west-1"); cp.DefaultModel != CodexMantleDefaultModel ||
+		cp.ModelProvider == nil || cp.ModelProvider.DefaultModel != CodexMantleDefaultModel {
+		t.Fatalf("resolved profile lost its default model: %#v", cp)
+	}
+	if cp, _ := Codex.CredentialProfile(profiles.OpenAIID, ""); cp.ModelProvider == nil || cp.ModelProvider.DefaultModel != "" {
+		t.Fatalf("the OpenAI provider pins a model: %#v", cp.ModelProvider)
+	}
+}
+
 func TestCodexProfilesPinTheirProvider(t *testing.T) {
 	openai, err := Codex.CredentialProfile(profiles.OpenAIID, "")
 	if err != nil || openai.ModelProvider == nil || openai.ModelProvider.ID != connector.SandboxModelProviderOpenAI ||

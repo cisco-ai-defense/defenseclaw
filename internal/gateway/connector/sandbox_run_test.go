@@ -255,6 +255,7 @@ func TestSandboxRunConfigRejectsBadInput(t *testing.T) {
 		"custom no name":  {ID: "m", BaseURL: "https://x", EnvKey: "K", WireAPI: "responses"},
 		"custom bad wire": {ID: "m", Name: "m", BaseURL: "https://x", EnvKey: "K", WireAPI: "grpc"},
 		"bad url":         {ID: "m", Name: "m", BaseURL: "ftp://x", EnvKey: "K", WireAPI: "responses"},
+		"bad model":       {ID: "m", Name: "m", BaseURL: "https://x", EnvKey: "K", WireAPI: "responses", DefaultModel: "a\"b"},
 	} {
 		if _, err := cx.SandboxRunFiles(codexRunTarget, SandboxRunConfig{ModelProvider: p}); err == nil {
 			t.Errorf("codex provider %s: accepted", name)
@@ -265,7 +266,8 @@ func TestSandboxRunConfigRejectsBadInput(t *testing.T) {
 func TestCodexSandboxRunFiles(t *testing.T) {
 	stdio := SandboxMCPServer{Name: "github", Command: "npx", Args: []string{"-y", "srv"}, Env: map[string]string{"LOG": "1"}}
 	remote := SandboxMCPServer{Name: "linear", URL: "https://mcp.linear.app/mcp"}
-	mantle := &SandboxModelProvider{ID: "mantle", Name: "mantle", BaseURL: "https://bedrock-mantle.us-east-1.api.aws/v1", EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses"}
+	mantle := &SandboxModelProvider{ID: "mantle", Name: "mantle", BaseURL: "https://bedrock-mantle.us-east-1.api.aws/v1", EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses",
+		DefaultModel: "openai.gpt-oss-20b"}
 	for _, tc := range []struct {
 		name string
 		run  SandboxRunConfig
@@ -335,17 +337,22 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 			}
 			switch p := tc.run.ModelProvider; {
 			case p == nil:
-				if managed["model_provider"] != nil {
+				if managed["model_provider"] != nil || managed["model"] != nil {
 					t.Fatal("pinned a provider without one")
 				}
 			case p.ID == SandboxModelProviderOpenAI:
-				if managed["model_provider"] != "openai" || managed["openai_base_url"] != p.BaseURL || managed["model_providers"] != nil {
+				if managed["model_provider"] != "openai" || managed["openai_base_url"] != p.BaseURL || managed["model_providers"] != nil || managed["model"] != nil {
 					t.Fatalf("openai pin = %v", managed)
 				}
 			default:
 				table := managed["model_providers"].(map[string]interface{})[p.ID].(map[string]interface{})
 				if managed["model_provider"] != p.ID || table["base_url"] != p.BaseURL || table["wire_api"] != "responses" {
 					t.Fatalf("custom pin = %v", table)
+				}
+				// A provider that does not serve Codex's default model
+				// pins its own for every Codex start in the sandbox.
+				if managed["model"] != p.DefaultModel {
+					t.Fatalf("model pin = %v, want %q", managed["model"], p.DefaultModel)
 				}
 			}
 		})

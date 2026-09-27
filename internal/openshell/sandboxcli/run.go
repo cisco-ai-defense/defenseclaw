@@ -716,6 +716,31 @@ type bannerInfo struct {
 	shown map[string]bool
 }
 
+// launchModel is the banner's model: the one a launch of sb with the
+// pass-through args runs (named by args, or its provider profile's default),
+// when DefenseClaw knows it.
+func launchModel(sb *sandboxapi.Sandbox, args []string) string {
+	spec, ok := harness.Get(sb.Harness)
+	if !ok {
+		return ""
+	}
+	model, isDefault, flag := spec.Model(sb.Launch.CredentialProfile, args)
+	if model != "" && isDefault && flag != "" {
+		model += " (the default; -- " + flag + " MODEL picks another)"
+	}
+	return model
+}
+
+func joinNonEmpty(sep string, parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
+}
+
 // banner prints the plan's launch banner.
 func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
@@ -742,10 +767,14 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	default:
 		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir)
 	}
-	if b.llm.Credential != nil {
-		row("Model", b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)")
-	} else if b.llm.Note != "" {
-		row("Model", b.llm.Note)
+	model := launchModel(sb, b.o.Args)
+	switch {
+	case b.llm.Credential != nil:
+		row("Model", joinNonEmpty(" · ", model, b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)"))
+	case b.llm.Note != "":
+		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
+	case model != "":
+		row("Model", model)
 	}
 	for _, c := range sbCredentials(b.o) {
 		row("Secret", c)

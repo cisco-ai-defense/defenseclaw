@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -328,8 +329,23 @@ func TestRunConfigCodexPinsProfileProvider(t *testing.T) {
 	if err := toml.Unmarshal(e.runFiles("cx-openai")[connector.CodexSandboxManagedConfigPath], &managed); err != nil {
 		t.Fatal(err)
 	}
-	if managed["model_provider"] != "openai" || managed["openai_base_url"] != "https://api.openai.com/v1" {
-		t.Fatalf("provider pin = %v %v", managed["model_provider"], managed["openai_base_url"])
+	if managed["model_provider"] != "openai" || managed["openai_base_url"] != "https://api.openai.com/v1" || managed["model"] != nil {
+		t.Fatalf("provider pin = %v %v, model %v", managed["model_provider"], managed["openai_base_url"], managed["model"])
+	}
+
+	// Mantle does not serve Codex's own default model: the run pins the
+	// profile's, so every Codex the sandbox starts without -m uses it.
+	e.create(sandboxapi.CreateRequest{
+		Name: "cx-mantle", Harness: "codex", Project: e.otherProject("mantle"),
+		LLM: &sandboxapi.LLMCredential{Profile: profiles.CodexBedrockMantleID, BedrockRegion: "eu-west-1",
+			Credentials: map[string]string{"BEDROCK_MANTLE_API_KEY": "bedrock-test"}},
+	})
+	managed = nil
+	if err := toml.Unmarshal(e.runFiles("cx-mantle")[connector.CodexSandboxManagedConfigPath], &managed); err != nil {
+		t.Fatal(err)
+	}
+	if managed["model_provider"] != "mantle" || managed["model"] != harness.CodexMantleDefaultModel {
+		t.Fatalf("mantle pin = %v, model %v", managed["model_provider"], managed["model"])
 	}
 }
 

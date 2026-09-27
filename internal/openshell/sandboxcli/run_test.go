@@ -303,6 +303,43 @@ func TestRunSafeDropsBypassFlags(t *testing.T) {
 	}
 }
 
+// TestRunBannerShowsTheModel pins the banner's model: Codex on Bedrock runs
+// the Mantle profile's default model (the daemon pins it in the run's
+// managed config) unless -m picks another, and the banner names it either
+// way (Mantle does not serve Codex's own default).
+func TestRunBannerShowsTheModel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "Model     openai.gpt-oss-20b (the default; -- -m MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)"},
+		{"-m", []string{"-m", "openai.gpt-oss-120b"}, "Model     openai.gpt-oss-120b · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.env[EnvBedrockToken] = "bedrock-test-not-a-secret"
+			ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+			if err := ta.Run(context.Background(), RunOptions{Harness: "codex", LLM: LLMBedrock, Args: tc.args}); err != nil {
+				t.Fatalf("Run: %v\n%s", err, ta.output())
+			}
+			if out := ta.output(); !strings.Contains(out, tc.want) || strings.Contains(out, "bedrock-test-not-a-secret") {
+				t.Fatalf("output lacks %q (or prints the key):\n%s", tc.want, out)
+			}
+		})
+	}
+	// A harness DefenseClaw cannot tell the model of prints none.
+	ta := newTestApp(t, "")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
+	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Args: []string{"--model", "sonnet"}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out := ta.output(); !strings.Contains(out, "Model     ANTHROPIC_API_KEY → api.anthropic.com only") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
 func TestRunProbeFailureDeletesSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.stream.answer = func([]string) (int, string) { return 124, "timed out" }
