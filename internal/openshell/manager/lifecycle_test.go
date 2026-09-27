@@ -21,7 +21,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -96,5 +100,31 @@ func TestLifecycleCallsDuringCreateFailFast(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s waited for the create", name)
 		}
+	}
+}
+
+// TestFailedStopRestoresThePhase pins that a stop OpenShell refused leaves
+// the sandbox in the phase OpenShell reports (so triage, enforcement and
+// the hook-silence check keep following it) and lets a later hook tamper
+// schedule another stop.
+func TestFailedStopRestoresThePhase(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "stuckbox"})
+	e.m.mu.Lock()
+	b := e.m.boxes["stuckbox"]
+	b.tamperStop = true
+	e.m.mu.Unlock()
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "driver busy"})
+	if _, err := e.m.Stop(context.Background(), "stuckbox"); err == nil {
+		t.Fatal("stop succeeded")
+	}
+	e.m.mu.Lock()
+	phase, tamperStop := b.phase, b.tamperStop
+	e.m.mu.Unlock()
+	if phase != audit.SandboxPhaseReady {
+		t.Fatalf("phase after the failed stop = %s, want ready", phase)
+	}
+	if tamperStop {
+		t.Fatal("a failed stop keeps later tamper alarms from stopping the sandbox")
 	}
 }

@@ -195,10 +195,12 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
+		m.stopFailed(ctx, gw, b)
 		return upstream("stop sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil {
+		m.stopFailed(ctx, gw, b)
 		return upstream("wait for sandbox "+name+" to stop", err)
 	}
 	m.mu.Lock()
@@ -206,6 +208,29 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// stopFailed puts a sandbox whose stop failed back into the phase OpenShell
+// reports, so triage, enforcement and the hook-silence check (which all
+// follow ready sandboxes only) resume for one still running, and lets the
+// next hook tamper of its session schedule another stop.
+func (m *Manager) stopFailed(ctx context.Context, gw *Gateway, b *box) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	m.mu.Lock()
+	name := b.rec.Name
+	b.tamperStop = false
+	m.mu.Unlock()
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	b.sb = sb
+	m.mu.Unlock()
+	if phase := auditPhase(sb.Status.Phase); phase != audit.SandboxPhaseStopping && phase != audit.SandboxPhaseUnknown {
+		m.lifecycle(ctx, b, phase, audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
+	}
 }
 
 // Start starts a stopped sandbox. The ingress token is rotated first, so a
