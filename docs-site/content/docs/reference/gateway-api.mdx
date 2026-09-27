@@ -151,6 +151,10 @@ for the OpenShell sandbox runtime:
 - `disabled`, with the reason, on a platform or in a deployment that can't
   run sandboxes: any platform but Linux and macOS, or a `managed_enterprise`
   install;
+- `error`, with the cause in `last_error`, when the sandbox runtime can't be
+  set up at all, for example because its binding store or image store can't
+  be opened. The sandbox routes then answer 503 `unavailable`, and sandbox
+  hooks fail closed;
 - `stopped` while the API listener restarts.
 
 On a host that still carries the removed legacy standalone sandbox (see
@@ -560,8 +564,13 @@ tool-response handlers currently reveal without that extra audit event.
 
 The routes under `/api/v1/sandbox/` manage NVIDIA OpenShell sandboxes. The
 `defenseclaw sandbox` CLI, the TUI Sandboxes panel, and the macOS app call
-them. The daemon is the only writer of sandbox bindings, OpenShell providers,
-sandboxes, approvals, and egress rules. The CLI keeps the terminal, the
+them. The daemon is the only writer of sandbox bindings, approvals, and the
+sandboxes' OpenShell policy rules, and it creates and changes the OpenShell
+sandboxes and providers. Two CLI commands also write to the OpenShell
+gateway directly: `sandbox teardown` deletes the sandboxes and providers the
+daemon doesn't delete (it is down, or doesn't know them) and removes unused
+DefenseClaw provider profiles, and `sandbox setup` imports the hook ingress
+provider profile when the gateway lacks it. The CLI keeps the terminal, the
 copy-mode workspace, the image builds, and the installer; see
 [Sandbox CLI](/docs/reference/sandbox-cli). The wire types are in
 [`internal/openshell/sandboxapi`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/openshell/sandboxapi/types.go),
@@ -612,7 +621,7 @@ it for `sandbox run`.
 | --- | --- |
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
-| `name` | Optional. Empty picks `dc-<harness>-<folder>-<random>`. |
+| `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
 | `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
@@ -687,7 +696,7 @@ events after `since`, or after the `Last-Event-ID` header, which wins over
 ```text
 id: 42
 event: activity
-data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"dc-claude-myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
+data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
 ```
 
 A `: keepalive` comment follows the replay and repeats every 15 seconds.
@@ -922,7 +931,10 @@ The proxy also counts bytes per destination and reports an upload of more
 than the configured threshold to a destination the sandbox had not contacted
 before. The threshold is `openshell.egress.large_upload_mb`, or else the
 configured pack's `egress.large_upload_mb` (25 MiB in `open`, 10 MiB in
-`balanced`; `0` in a pack turns the report off). The report is an
+`balanced`; `0` in a pack turns the report off). It is one threshold for every sandbox
+of the daemon, whatever pack a run chose, and it is read when the sandbox
+runtime starts: a change takes effect when the daemon restarts, or when the
+API listener restarts with the sandbox runtime. The report is an
 `egress.large_upload` activity event and a finding; the upload itself is not
 cut off.
 
