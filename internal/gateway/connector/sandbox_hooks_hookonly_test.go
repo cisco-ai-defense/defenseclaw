@@ -265,12 +265,26 @@ func TestSandboxHookOnlyArtifacts(t *testing.T) {
 			}
 			switch tc.name {
 			case "hermes":
-				if a.TamperTier != SandboxTamperTierManaged {
+				// The hooks are registered in the root-owned managed layer,
+				// but Hermes reads .env files and imports plugins from its
+				// workload-writable home, so the tier is user.
+				if a.TamperTier != SandboxTamperTierUser {
 					t.Fatalf("tier %s", a.TamperTier)
 				}
 				managed, ok := files[HermesSandboxManagedConfigPath]
 				if !ok || managed.Owner != SandboxOwnerRoot {
 					t.Fatalf("managed config %#v", managed)
+				}
+				// The managed .env pins the switches Hermes would otherwise
+				// take from ~/.hermes/.env.
+				env, ok := files[HermesSandboxManagedEnvPath]
+				if !ok || env.Owner != SandboxOwnerRoot || env.Mode != 0o644 {
+					t.Fatalf("managed env %#v", env)
+				}
+				for _, pin := range []string{"\nHERMES_SAFE_MODE=0\n", "\nHERMES_ENABLE_PROJECT_PLUGINS=0\n", "\nHERMES_ACCEPT_HOOKS=1\n", "\nTIRITH_ENABLED=0\n", "\nHERMES_DISABLE_LAZY_INSTALLS=1\n"} {
+					if !strings.Contains(string(env.Data), pin) {
+						t.Fatalf("managed env lacks %q:\n%s", pin, env.Data)
+					}
 				}
 				if user := files[HermesSandboxUserConfigPath]; user.Owner != SandboxOwnerUser {
 					t.Fatalf("user preseed %#v", user)
@@ -325,10 +339,15 @@ func TestVerifyHermesSandboxManagedConfigRejectsTampering(t *testing.T) {
 		"second-handler": mutate(func(d map[string]interface{}) {
 			hooks(d)["on_session_start"] = append(hooks(d)["on_session_start"].([]interface{}), map[string]interface{}{"command": "/tmp/x.sh"})
 		}),
-		"auto-accept-off":  mutate(func(d map[string]interface{}) { d["hooks_auto_accept"] = false }),
-		"plugins-enabled":  mutate(func(d map[string]interface{}) { d["plugins"] = map[string]interface{}{"enabled": []interface{}{"x"}} }),
-		"plugins-unpinned": mutate(func(d map[string]interface{}) { delete(d, "plugins") }),
-		"remote-terminal":  mutate(func(d map[string]interface{}) { d["terminal"] = map[string]interface{}{"backend": "ssh"} }),
+		"auto-accept-off":   mutate(func(d map[string]interface{}) { d["hooks_auto_accept"] = false }),
+		"plugins-enabled":   mutate(func(d map[string]interface{}) { d["plugins"] = map[string]interface{}{"enabled": []interface{}{"x"}} }),
+		"plugins-unpinned":  mutate(func(d map[string]interface{}) { delete(d, "plugins") }),
+		"remote-terminal":   mutate(func(d map[string]interface{}) { d["terminal"] = map[string]interface{}{"backend": "ssh"} }),
+		"code-execution-on": mutate(func(d map[string]interface{}) { delete(d, "agent") }),
+		"tirith-on": mutate(func(d map[string]interface{}) {
+			d["security"] = map[string]interface{}{"tirith_enabled": true, "allow_lazy_installs": false}
+		}),
+		"lazy-installs-on": mutate(func(d map[string]interface{}) { d["security"] = map[string]interface{}{"tirith_enabled": false} }),
 		"provider-pinned-url": mutate(func(d map[string]interface{}) {
 			d["providers"].(map[string]interface{})[HermesSandboxProviderName].(map[string]interface{})["base_url"] = "http://example.invalid/v1"
 		}),

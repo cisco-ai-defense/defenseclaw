@@ -1,7 +1,7 @@
 {
   "connector": "hermes",
   "hook_contract": "hermes-hooks-v1",
-  "tamper_tier": "managed",
+  "tamper_tier": "user",
   "env": {},
   "binaries": [
     {
@@ -74,10 +74,15 @@
     }
   ],
   "files": {
+    "/etc/hermes/.env": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "533b47ee6519eead8f5287b391949590b0d35bb088c198a10d66479b37825857"
+    },
     "/etc/hermes/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "7bdd49272b64fe36176506c66194bfa628e6b7373a38dbe3e730f9e3eeca92a4"
+      "sha256": "065167eba8baf1958b9e74d27efbfadc668b95c8b8e3d2c47ca13fde8a366979"
     },
     "/sandbox/.hermes/config.yaml": {
       "mode": "-rw-------",

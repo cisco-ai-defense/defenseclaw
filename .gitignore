@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+# Sandbox artifact goldens (a harness's root-owned managed .env, no secrets).
+!internal/gateway/connector/testdata/sandbox/**/.env.golden
 
 # Generated config copies (canonical source: internal/configs/providers.json)
 extensions/defenseclaw/src/providers.json

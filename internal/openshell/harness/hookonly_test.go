@@ -49,6 +49,14 @@ type hookOnlyLauncher struct {
 
 func newHookOnlyLauncher(t *testing.T, spec *Spec) hookOnlyLauncher {
 	t.Helper()
+	return newHookOnlyLauncherWith(t, spec, nil)
+}
+
+// newHookOnlyLauncherWith is newHookOnlyLauncher with further replacements
+// in the launcher text (old -> new), applied last. The launcher's pinned
+// HOME becomes the caller's, so tests choose the image home.
+func newHookOnlyLauncherWith(t *testing.T, spec *Spec, replace map[string]string) hookOnlyLauncher {
+	t.Helper()
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
 	}
@@ -56,7 +64,9 @@ func newHookOnlyLauncher(t *testing.T, spec *Spec) hookOnlyLauncher {
 	l := hookOnlyLauncher{path: filepath.Join(dir, "launch"), record: filepath.Join(dir, "record"), canonical: filepath.Join(dir, "canonical.json")}
 	stub := filepath.Join(dir, "stub")
 	body := "#!/bin/bash\n{ printf 'ARG %s\\n' \"$@\"; for v in HERMES_DEFENSECLAW_API_KEY HERMES_ACCEPT_HOOKS HERMES_SAFE_MODE HERMES_MANAGED_DIR LLM_API_KEY OPENHANDS_SUPPRESS_BANNER" +
-		" OMNIGENT_CONFIG OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN OMNIGENT_RUNNER_ENV_PASSTHROUGH HTTPS_PROXY NO_PROXY no_proxy; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done; } >>" + l.record + "\n"
+		" OMNIGENT_CONFIG OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN OMNIGENT_RUNNER_ENV_PASSTHROUGH HTTPS_PROXY NO_PROXY no_proxy" +
+		" HOME HERMES_HOME OPENAI_API_KEY OMNIGENT_DATA_DIR HERMES_PYTHON_SRC_ROOT HERMES_LAZY_INSTALL_TARGET; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done;" +
+		" env | /usr/bin/grep '^PYTHON' | sed 's/^/PYENV /'; } >>" + l.record + "\n"
 	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +76,10 @@ func newHookOnlyLauncher(t *testing.T, spec *Spec) hookOnlyLauncher {
 	script := strings.ReplaceAll(string(spec.Launcher().Data), harnessBinaries[spec.Name], stub)
 	for _, canonical := range []string{connector.OpenHandsSandboxCanonicalHooksPath, connector.AntigravitySandboxCanonicalHooksPath} {
 		script = strings.ReplaceAll(script, canonical, l.canonical)
+	}
+	script = strings.ReplaceAll(script, "HOME="+connector.SandboxHomeDir+"\n", "HOME=\"$HOME\"\n")
+	for old, repl := range replace {
+		script = strings.ReplaceAll(script, old, repl)
 	}
 	if err := os.WriteFile(l.path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)

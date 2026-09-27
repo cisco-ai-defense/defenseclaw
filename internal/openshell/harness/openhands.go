@@ -46,7 +46,7 @@ var OpenHands = register(&Spec{
 	Provider:       connector.NewOpenHandsConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
 	verification: Verification{Status: VerifiedLive,
-		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=openhands): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock"},
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=openhands): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a replaced user hooks.json, a planted sitecustomize in the launch environment and a hooks path replaced by a directory (refused). Verified with the E2E mock model behind a --credential binding only: no curated provider profile has carried a real model inside a sandbox. The Mantle endpoint set (LiteLLM openai/<model>, bearer) answered the pinned OpenHands host-direct with openai.gpt-oss-20b; the OpenAI and Anthropic profiles are unverified"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/bin/env", "OPENHANDS_SUPPRESS_BANNER=1", "/usr/local/bin/openhands", "--version"},
 		VersionRE:       regexp.MustCompile(`^OpenHands CLI ([0-9]+\.[0-9]+\.[0-9]+)`),
@@ -58,7 +58,8 @@ var OpenHands = register(&Spec{
 	launcher: openHandsLauncher,
 	// --always-approve (alias --yolo) approves every action, --llm-approve
 	// every action its LLM analyzer does not rate high risk.
-	bypassFlags: []bypassFlag{{name: "--always-approve"}, {name: "--yolo"}, {name: "--llm-approve"}},
+	// OpenHands' parser resolves the prefixes down to --a, --y and --ll.
+	bypassFlags: []bypassFlag{{name: "--always-approve", abbrev: "--a"}, {name: "--yolo", abbrev: "--y"}, {name: "--llm-approve", abbrev: "--ll"}},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{OpenHandsLauncherPath}
 		if opts.Mode == Headless {
@@ -76,12 +77,14 @@ var OpenHands = register(&Spec{
 			Hosts:      []string{"api.openai.com"},
 			LaunchArgs: []string{"--override-with-envs"},
 			Note:       "OPENAI_API_KEY copied to LLM_API_KEY and sent as a bearer by LiteLLM (LLM_MODEL=openai/<model>)",
+			Unverified: "no OpenAI account on the verification host; only the E2E mock was run",
 		},
 		{
 			ProfileID:  profiles.AnthropicID,
 			Hosts:      []string{"api.anthropic.com"},
 			LaunchArgs: []string{"--override-with-envs"},
 			Note:       "ANTHROPIC_API_KEY copied to LLM_API_KEY and sent as x-api-key by LiteLLM (LLM_MODEL=anthropic/<model>)",
+			Unverified: "no Anthropic account on the verification host; only the E2E mock was run",
 		},
 		{
 			ProfileID:  profiles.BedrockMantleOpenAIID,
@@ -107,7 +110,7 @@ var OpenHands = register(&Spec{
 const OpenHandsLauncherPath = LauncherDir + "/openhands-launch"
 
 var openHandsLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v2
+# defenseclaw-sandbox-launcher v3
 # DefenseClaw OpenHands launcher (OpenShell sandbox images, root-owned).
 # OpenHands has no managed hook tier: it loads the first of
 # <workdir>/.openhands/hooks.json and ~/.openhands/hooks.json. Before every
@@ -115,9 +118,8 @@ var openHandsLauncher = `#!/bin/bash -p
 # refuses a working directory whose own hooks file would replace it, then
 # execs the pinned OpenHands CLI with the caller's arguments.
 set -u
-` + launcherPreamble + `home="${HOME:-/sandbox}"
+` + launcherPreamble + pythonStartupScrub + `home="${HOME:-/sandbox}"
 workdir="${OPENHANDS_WORK_DIR:-$(pwd -P 2>/dev/null || pwd)}"
-canonical="` + connector.OpenHandsSandboxCanonicalHooksPath + `"
 # Started in HOME, the "project" hooks file is the user file restored below.
 workdir_real="$(cd "$workdir" 2>/dev/null && pwd -P)" || workdir_real="$workdir"
 home_real="$(cd "$home" 2>/dev/null && pwd -P)" || home_real="$home"
@@ -125,21 +127,8 @@ if [ "$workdir_real" != "$home_real" ] && { [ -e "$workdir/.openhands/hooks.json
   echo "defenseclaw: $workdir/.openhands/hooks.json would replace DefenseClaw's hooks (OpenHands loads only the first hooks file it finds); rename it to run OpenHands in this sandbox" >&2
   exit 2
 fi
-if [ -L "$home/.openhands" ] || [ -L "$home/.openhands/hooks.json" ]; then
-  echo "defenseclaw: $home/.openhands or its hooks.json is a symbolic link; refusing to start OpenHands" >&2
-  exit 2
-fi
-if ! /bin/mkdir -p "$home/.openhands" 2>/dev/null; then
-  echo "defenseclaw: cannot create $home/.openhands; refusing to start OpenHands without DefenseClaw's hooks" >&2
-  exit 2
-fi
-tmp="$(/usr/bin/mktemp "$home/.openhands/hooks.json.XXXXXX" 2>/dev/null)" || tmp=""
-if [ -z "$tmp" ] || ! /bin/cat "$canonical" >"$tmp" 2>/dev/null || ! /bin/mv -f "$tmp" "$home/.openhands/hooks.json"; then
-  [ -z "$tmp" ] || /bin/rm -f "$tmp"
-  echo "defenseclaw: cannot restore $home/.openhands/hooks.json; refusing to start OpenHands without DefenseClaw's hooks" >&2
-  exit 2
-fi
-
+` + restoreUserHooksScript("OpenHands", connector.OpenHandsSandboxCanonicalHooksPath, "$home/.openhands", "$home/.openhands/hooks.json",
+	"$home/.openhands", "$home/.openhands/hooks.json") + `
 # --override-with-envs reads the key from LLM_API_KEY; the sandbox's provider
 # profile delivers the placeholder under its own name.
 if [ -z "${LLM_API_KEY:-}" ]; then

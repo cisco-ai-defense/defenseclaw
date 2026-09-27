@@ -62,7 +62,7 @@ var Antigravity = register(&Spec{
 	Provider:       connector.NewAntigravityConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
 	verification: Verification{Status: VerifiedLive,
-		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=antigravity, Gemini-API mock through GEMINI_API_KEY): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; Google sign-in inside a sandbox is untested"},
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=antigravity, Gemini-API mock through GEMINI_API_KEY): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a replaced user hooks.json and a hooks path replaced by a directory (refused). Verified with the Gemini-API mock only: the defenseclaw-gemini profile has not carried a real Gemini key (no account), and Google sign-in inside a sandbox is untested"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/agy", "--version"},
 		VersionRE:       regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`),
@@ -71,7 +71,11 @@ var Antigravity = register(&Spec{
 	install:  antigravityInstallSteps,
 	launcher: antigravityLauncher,
 	// A passthrough --dangerously-skip-permissions would skip agy's prompts.
-	bypassFlags: []bypassFlag{{name: "--dangerously-skip-permissions"}},
+	// agy parses Go flags: one or two dashes, and =true (strconv.ParseBool).
+	bypassFlags: []bypassFlag{
+		{name: "--dangerously-skip-permissions", inline: goBoolTrue},
+		{name: "-dangerously-skip-permissions", inline: goBoolTrue},
+	},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{AntigravityLauncherPath}
 		if opts.Mode == Headless {
@@ -85,9 +89,10 @@ var Antigravity = register(&Spec{
 	},
 	credentialProfiles: []CredentialProfile{
 		{
-			ProfileID: profiles.GeminiID,
-			Hosts:     []string{"generativelanguage.googleapis.com"},
-			Note:      "GEMINI_API_KEY sent as x-goog-api-key; the launcher selects agy's gemini model provider when the key is present",
+			ProfileID:  profiles.GeminiID,
+			Hosts:      []string{"generativelanguage.googleapis.com"},
+			Note:       "GEMINI_API_KEY sent as x-goog-api-key; the launcher selects agy's gemini model provider when the key is present",
+			Unverified: "no Gemini API account on the verification host; only the Gemini-API mock was run",
 		},
 	},
 	customization: []CustomizationPath{
@@ -148,7 +153,7 @@ func antigravityInstallSteps(version string) ([]InstallStep, error) {
 const AntigravityLauncherPath = LauncherDir + "/antigravity-launch"
 
 var antigravityLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v2
+# defenseclaw-sandbox-launcher v3
 # DefenseClaw Antigravity launcher (OpenShell sandbox images, root-owned).
 # agy has no managed hook tier: its global hooks live in
 # ~/.gemini/config/hooks.json, which this restores from the root-owned
@@ -157,30 +162,16 @@ var antigravityLauncher = `#!/bin/bash -p
 # selects agy's gemini model provider, then execs the pinned agy.
 set -u
 ` + launcherPreamble + `home="${HOME:-/sandbox}"
-canonical="` + connector.AntigravitySandboxCanonicalHooksPath + `"
 workspace="$(pwd -P 2>/dev/null || pwd)"
 if [ -f "$workspace/.agents/hooks.json" ] && /usr/bin/grep -qF ` + shellQuote(`"`+connector.AntigravitySandboxHookKeyPrefix) + ` "$workspace/.agents/hooks.json" 2>/dev/null; then
   echo "defenseclaw: $workspace/.agents/hooks.json reuses a DefenseClaw hook key and could replace DefenseClaw's hooks; refusing to start agy" >&2
   exit 2
 fi
-if [ -L "$home/.gemini" ] || [ -L "$home/.gemini/config" ] || [ -L "$home/.gemini/config/hooks.json" ]; then
-  echo "defenseclaw: $home/.gemini/config is reached through a symbolic link; refusing to start agy" >&2
-  exit 2
-fi
-if ! /bin/mkdir -p "$home/.gemini/config" 2>/dev/null; then
-  echo "defenseclaw: cannot create $home/.gemini/config; refusing to start agy without DefenseClaw's hooks" >&2
-  exit 2
-fi
-tmp="$(/usr/bin/mktemp "$home/.gemini/config/hooks.json.XXXXXX" 2>/dev/null)" || tmp=""
-if [ -z "$tmp" ] || ! /bin/cat "$canonical" >"$tmp" 2>/dev/null || ! /bin/mv -f "$tmp" "$home/.gemini/config/hooks.json"; then
-  [ -z "$tmp" ] || /bin/rm -f "$tmp"
-  echo "defenseclaw: cannot restore $home/.gemini/config/hooks.json; refusing to start agy without DefenseClaw's hooks" >&2
-  exit 2
-fi
-
+` + restoreUserHooksScript("agy", connector.AntigravitySandboxCanonicalHooksPath, "$home/.gemini/config", "$home/.gemini/config/hooks.json",
+	"$home/.gemini", "$home/.gemini/config", "$home/.gemini/config/hooks.json") + `
 # An API key skips the Google sign-in only with the gemini model provider.
 settings="$home/.gemini/antigravity-cli/settings.json"
-if [ -n "${GEMINI_API_KEY:-}" ] && [ -x /usr/bin/jq ] && [ ! -L "$settings" ] && /bin/mkdir -p "$home/.gemini/antigravity-cli" 2>/dev/null; then
+if [ -n "${GEMINI_API_KEY:-}" ] && [ -x /usr/bin/jq ] && [ ! -L "$settings" ] && { [ ! -e "$settings" ] || [ -f "$settings" ]; } && /bin/mkdir -p "$home/.gemini/antigravity-cli" 2>/dev/null; then
   current='{}'
   if [ -s "$settings" ]; then
     current="$(/bin/cat "$settings" 2>/dev/null)" || current='{}'

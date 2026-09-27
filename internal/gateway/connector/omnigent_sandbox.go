@@ -47,8 +47,8 @@ var OmnigentSandboxPolicyDir = SandboxCanonicalDir("omnigent")
 // OmnigentSandboxPolicyModulePath is the bridge module file.
 var OmnigentSandboxPolicyModulePath = path.Join(OmnigentSandboxPolicyDir, omnigentPolicyModuleName+".py")
 
-// OmnigentSandboxAgentPath is the agent the image ships for sandboxes
-// (`omnigent run <this dir> --model <m>`): an openai-agents coding agent
+// OmnigentSandboxAgentPath is the agent the image ships for sandboxes, and
+// the default agent of `omnigent run --model <m>`: an openai-agents coding agent
 // whose os_env shell runs in the caller process without OmniGent's own
 // bubblewrap sandbox, which cannot nest inside OpenShell. Every tool call
 // still passes the DefenseClaw policy.
@@ -131,9 +131,14 @@ func renderOmnigentSandboxPolicy(rt resolvedSandboxTarget) ([]byte, error) {
 	return []byte(rendered + string(tail)), nil
 }
 
-// omnigentSandboxConfig is the server configuration the image pins.
+// omnigentSandboxConfig is the server configuration the image pins. The CLI
+// reads the same file as its global configuration, so default_agent makes a
+// bare `omnigent run` start the sandbox agent: without it OmniGent falls
+// back to its first-run plan (polly, Codex or Pi), which needs native CLIs
+// and a bubblewrap sandbox the image does not have.
 func omnigentSandboxConfig() map[string]interface{} {
 	return map[string]interface{}{
+		"default_agent":  OmnigentSandboxAgentPath,
 		"policy_modules": []interface{}{omnigentPolicyModuleName},
 		"policies": map[string]interface{}{
 			omnigentPolicyConfigKey: map[string]interface{}{"type": "function", "handler": omnigentPolicyHandler},

@@ -169,7 +169,9 @@ print(json.dumps(module.defenseclaw_policy(json.loads(sys.argv[2]))))
 		{"allow", "tok", []omnigentReply{{200, `{"action":"allow"}`}}, false, "ALLOW", "", 1},
 		{"alert-allows", "tok", []omnigentReply{{200, `{"action":"alert"}`}}, false, "ALLOW", "", 1},
 		{"block", "tok", []omnigentReply{{200, `{"action":"block","reason":"rule X"}`}}, false, "DENY", "rule X", 1},
-		{"confirm", "tok", []omnigentReply{{200, `{"action":"confirm","reason":"ask me"}`}}, false, "ASK", "ask me", 1},
+		// OmniGent's approval routes are open to the whole sandbox, so a
+		// confirm verdict denies instead of parking an ASK.
+		{"confirm-denies", "tok", []omnigentReply{{200, `{"action":"confirm","reason":"ask me"}`}}, false, "DENY", "ask me Approval is not available for OmniGent in a DefenseClaw sandbox", 1},
 		{"relay-502-retried", "tok", []omnigentReply{{502, `{}`}, {200, `{"action":"allow"}`}}, false, "ALLOW", "", 2},
 		{"relay-502-twice", "tok", []omnigentReply{{502, `{}`}, {503, `{}`}}, false, "DENY", "failed closed", 2},
 		{"unauthorized-not-retried", "tok", []omnigentReply{{401, `{"error":"bad token"}`}}, false, "DENY", "failed closed", 1},

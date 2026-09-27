@@ -385,6 +385,30 @@ func (s *Spec) LaunchArgv(opts LaunchOptions) ([]string, error) {
 type bypassFlag struct {
 	name  string
 	value func(string) bool
+	// abbrev, for a harness whose argparse parser accepts abbreviations
+	// (allow_abbrev), is the shortest prefix of name the parser resolves to
+	// it: every prefix at least that long counts as the flag.
+	abbrev string
+	// inline, for a flag without value, also counts name=<v> when
+	// inline(v) (Go's flag package takes -flag=true for a boolean).
+	inline func(string) bool
+}
+
+// names reports whether an argument's name part (before any "=") is f.
+func (f bypassFlag) names(name string) bool {
+	if name == f.name {
+		return true
+	}
+	return f.abbrev != "" && len(name) >= len(f.abbrev) && strings.HasPrefix(f.name, name)
+}
+
+// goBoolTrue reports whether Go's strconv.ParseBool reads v as true.
+func goBoolTrue(v string) bool {
+	switch v {
+	case "1", "t", "T", "TRUE", "true", "True":
+		return true
+	}
+	return false
 }
 
 // BypassArgs splits passthrough args into the ones a safe (non-yolo) run
@@ -392,7 +416,9 @@ type bypassFlag struct {
 // --dangerously-skip-permissions, --allow-dangerously-skip-permissions and
 // --permission-mode bypassPermissions; Codex's
 // --dangerously-bypass-approvals-and-sandbox, --ask-for-approval never and
-// -c approval_policy="never". Arguments after "--" are never flags. The
+// -c approval_policy="never"; for argparse harnesses (Hermes, OpenHands)
+// every prefix the parser resolves to a bypass flag, and for agy (Go flags)
+// the single-dash and =true forms. Arguments after "--" are never flags. The
 // filter spares the user a confusing refusal; the enforcement is the
 // sandbox's managed configuration, which refuses bypass mode whatever the
 // harness is asked.
@@ -407,11 +433,13 @@ func (s *Spec) BypassArgs(args []string) (kept, dropped []string) {
 		name, inline, hasInline := strings.Cut(arg, "=")
 		matched := false
 		for _, f := range s.bypassFlags {
-			if name != f.name {
+			if !f.names(name) {
 				continue
 			}
 			switch {
 			case f.value == nil && !hasInline:
+				dropped, matched = append(dropped, arg), true
+			case f.value == nil && hasInline && f.inline != nil && f.inline(inline):
 				dropped, matched = append(dropped, arg), true
 			case f.value != nil && hasInline && f.value(inline):
 				dropped, matched = append(dropped, arg), true

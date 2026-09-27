@@ -13,7 +13,7 @@
     "/etc/omnigent/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "4d9f8805819350ab3ac397a0a4e4b4bdd319a780c8250460cb0d2cc440703f8c"
+      "sha256": "234041b661525866966987be1e234410e3bb2aca8bf4961597e1d0e316aae1a2"
     },
     "/usr/local/lib/defenseclaw/omnigent/agent/config.yaml": {
       "mode": "-rw-r--r--",
@@ -23,7 +23,7 @@
     "/usr/local/lib/defenseclaw/omnigent/defenseclaw_omnigent_policy.py": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "3228ad47fab292b2ba64ba9a1d797647e1f7e114b7c601f5525cfb51b2a2071d"
+      "sha256": "622ecf2645e9f76e0f165f425c309ab70f8e3f4473555ccfcad0e827d28576c1"
     }
   }
 }

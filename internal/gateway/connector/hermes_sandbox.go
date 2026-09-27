@@ -21,6 +21,7 @@ import (
 	"path"
 	"reflect"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -31,9 +32,27 @@ import (
 // one leaf, so a user or project setting can add hooks for other events but
 // cannot drop or replace DefenseClaw's; hooks_auto_accept pinned true
 // registers them without the first-use consent prompt; plugins.enabled
-// pinned empty keeps in-process Python plugins (which could unregister
-// hooks) from loading; terminal.backend pinned local keeps approved commands
-// inside the sandbox rather than on a remote backend.
+// pinned empty keeps the general in-process Python plugins (which could
+// unregister hooks) from loading; terminal.backend pinned local keeps
+// approved commands inside the sandbox rather than on a remote backend;
+// agent.disabled_toolsets drops the code_execution toolset, whose
+// execute_code tool runs model-written Python that DefenseClaw's command
+// rules cannot judge (commands go through the terminal tool instead); and
+// security.tirith_enabled pinned false keeps Hermes from downloading its
+// Tirith scanner into the workload-writable ~/.hermes/bin at every start and
+// running it on every command (DefenseClaw judges the commands);
+// security.allow_lazy_installs pinned false stops runtime pip installs of
+// optional backends, which download from PyPI outside the pin (and fail in
+// the root-owned install anyway).
+//
+// Hermes also applies /etc/hermes/.env last, over the user's ~/.hermes/.env
+// and the process environment, per variable. The image pins there the
+// variables that would switch the hooks off or re-enable Tirith; the one
+// that moves the managed scope itself (HERMES_MANAGED_DIR) cannot be pinned
+// from inside it, so the launcher refuses a user .env that names it. The
+// harness's home stays workload-writable (plugins, .env, profiles), so the
+// connector is user tier: the launcher's checks, not file ownership, keep
+// the hooks in place.
 //
 // The layer also defines one named OpenAI-compatible provider, selected with
 // `--provider defenseclaw`, whose endpoint and key come from the process
@@ -45,6 +64,8 @@ import (
 const (
 	HermesSandboxManagedDir        = "/etc/hermes"
 	HermesSandboxManagedConfigPath = HermesSandboxManagedDir + "/config.yaml"
+	// HermesSandboxManagedEnvPath is the managed environment layer.
+	HermesSandboxManagedEnvPath    = HermesSandboxManagedDir + "/.env"
 	hermesSandboxHookTimeoutSecond = 30
 
 	// HermesSandboxProviderName is the managed provider's name.
@@ -77,6 +98,29 @@ func hermesSandboxProvider() map[string]interface{} {
 	}
 }
 
+// hermesSandboxManagedEnv are the variables the managed .env pins: safe
+// mode and project plugins off (a user .env or shell export of either would
+// otherwise switch the hooks off or load a repository's plugins), hook
+// consent given, Tirith off (TIRITH_ENABLED overrides the config key) and
+// runtime installs off.
+var hermesSandboxManagedEnv = [][2]string{
+	{"HERMES_SAFE_MODE", "0"},
+	{"HERMES_ENABLE_PROJECT_PLUGINS", "0"},
+	{"HERMES_ACCEPT_HOOKS", "1"},
+	{"TIRITH_ENABLED", "0"},
+	{"HERMES_DISABLE_LAZY_INSTALLS", "1"},
+}
+
+func renderHermesSandboxManagedEnv() []byte {
+	var b strings.Builder
+	b.WriteString("# DefenseClaw managed Hermes environment (OpenShell sandbox image, root-owned).\n" +
+		"# Hermes applies it last, over ~/.hermes/.env and the process environment.\n")
+	for _, kv := range hermesSandboxManagedEnv {
+		b.WriteString(kv[0] + "=" + kv[1] + "\n")
+	}
+	return []byte(b.String())
+}
+
 func init() {
 	registerHookOnlySandboxRenderer("hermes", renderHermesSandboxArtifacts)
 }
@@ -95,12 +139,13 @@ func renderHermesSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget
 	}
 	files := append(hookFiles,
 		SandboxFile{Path: HermesSandboxManagedConfigPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: managed},
+		SandboxFile{Path: HermesSandboxManagedEnvPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: renderHermesSandboxManagedEnv()},
 		SandboxFile{Path: HermesSandboxUserConfigPath, Mode: 0o600, Owner: SandboxOwnerUser, Data: []byte(hermesSandboxUserPreseed)},
 	)
 	return SandboxArtifacts{
 		Connector:    c.name,
 		HookContract: rt.contract.ContractID,
-		TamperTier:   SandboxTamperTierManaged,
+		TamperTier:   SandboxTamperTierUser,
 		Files:        files,
 		Env:          map[string]string{},
 		Binaries:     append(sandboxHookRuntimeBinaries(), SandboxBinary{Name: "hermes", Role: SandboxBinaryHarness}),
@@ -149,6 +194,8 @@ func renderHermesSandboxManagedConfig(rt resolvedSandboxTarget) ([]byte, error) 
 		"plugins":           map[string]interface{}{"enabled": []interface{}{}},
 		"providers":         map[string]interface{}{HermesSandboxProviderName: hermesSandboxProvider()},
 		"terminal":          map[string]interface{}{"backend": "local"},
+		"agent":             map[string]interface{}{"disabled_toolsets": []interface{}{"code_execution"}},
+		"security":          map[string]interface{}{"tirith_enabled": false, "allow_lazy_installs": false},
 	}
 	body, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -178,6 +225,14 @@ func verifyHermesSandboxManagedConfig(data []byte, rt resolvedSandboxTarget) err
 	terminal, _ := cfg["terminal"].(map[string]interface{})
 	if terminal["backend"] != "local" {
 		return fmt.Errorf("verify Hermes sandbox managed config: terminal.backend is not pinned local")
+	}
+	agent, _ := cfg["agent"].(map[string]interface{})
+	if disabled, _ := agent["disabled_toolsets"].([]interface{}); !reflect.DeepEqual(disabled, []interface{}{"code_execution"}) {
+		return fmt.Errorf("verify Hermes sandbox managed config: agent.disabled_toolsets is not pinned to code_execution")
+	}
+	security, _ := cfg["security"].(map[string]interface{})
+	if security["tirith_enabled"] != false || security["allow_lazy_installs"] != false {
+		return fmt.Errorf("verify Hermes sandbox managed config: security.tirith_enabled and allow_lazy_installs are not pinned false")
 	}
 	providers, _ := cfg["providers"].(map[string]interface{})
 	if !reflect.DeepEqual(providers, map[string]interface{}{HermesSandboxProviderName: hermesSandboxProvider()}) {

@@ -567,7 +567,15 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:  # noqa: F811
         if action == "block":
             return {"result": "DENY", "reason": reason or "DefenseClaw blocked this action."}
         if action == "confirm":
-            return {"result": "ASK", "reason": reason or "DefenseClaw requires approval."}
+            # OmniGent parks an ASK on its local server, whose approval
+            # routes answer any process in the sandbox without
+            # authentication: the workload could approve its own call. In a
+            # sandbox a confirm verdict therefore denies.
+            return {
+                "result": "DENY",
+                "reason": (reason or "DefenseClaw requires approval.")
+                + " Approval is not available for OmniGent in a DefenseClaw sandbox, so this action was denied.",
+            }
         return _sandbox_deny("gateway response had no valid action")
     except Exception as exc:
         return _sandbox_deny(f"bridge error ({type(exc).__name__})")

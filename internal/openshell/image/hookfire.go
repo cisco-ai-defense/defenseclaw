@@ -876,8 +876,12 @@ func (b *Builder) hookFireRun(
 				harnessCmd + " </dev/null >/tmp/dc-hookfire-refusal.out 2>&1; rc=$?\n" +
 				"if grep -qF -- " + shQuote(r.message) + " /tmp/dc-hookfire-refusal.out; then named=1; else named=0; fi\n" +
 				"echo \"::refusal=" + r.label + " $rc $named\"\n" +
-				"if [ \"$named\" = 0 ]; then echo '::refusal-output-begin'; head -c 800 /tmp/dc-hookfire-refusal.out; echo; echo '::refusal-output-end'; fi\n" +
-				"rm -f " + shQuote(r.file) + "\n"
+				"if [ \"$named\" = 0 ]; then echo '::refusal-output-begin'; head -c 800 /tmp/dc-hookfire-refusal.out; echo; echo '::refusal-output-end'; fi\n"
+			if r.cleanup != "" {
+				script += r.cleanup
+			} else {
+				script += "rm -f " + shQuote(r.file) + "\n"
+			}
 		}
 	}
 	if sc.sideEffect != "" {

@@ -107,3 +107,24 @@ func (u uvTool) installSteps(displayName, version string) []InstallStep {
 		Run:     run,
 	}}
 }
+
+// pythonStartupScrub is the launcher fragment that drops every PYTHON*
+// variable before a Python harness starts. The uv tool entry points run the
+// interpreter without -I, so it reads them: PYTHONPATH names directories
+// searched before the root-owned site-packages (a sitecustomize module there
+// is imported at every start), PYTHONHOME and PYTHONUSERBASE move the
+// standard library and user site, PYTHONSTARTUP runs a file,
+// PYTHONPYCACHEPREFIX loads compiled code from a directory the workload can
+// write, and PYTHONWARNINGS and PYTHONBREAKPOINT import the modules they
+// name. OpenShell runs the connect and exec shells as login shells, which
+// read start-up files in the workload-writable HOME, so one exported line
+// there would run code inside the next harness start. It is the Python
+// counterpart of launcherScrubbedEnv, and like it relies on the launcher
+// running under bash (${!prefix@} lists the variables with a prefix).
+const pythonStartupScrub = `# The Python interpreter reads PYTHON* variables at start-up (PYTHONPATH can
+# import a sitecustomize module from the workload-writable HOME).
+for name in ${!PYTHON@}; do
+  unset "$name"
+done
+unset name
+`
