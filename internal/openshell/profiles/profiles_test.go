@@ -32,6 +32,9 @@ const (
 	copilotRealpath        = "/opt/defenseclaw-harness/copilot/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot"
 	copilotRuntimeRealpath = "/opt/defenseclaw-harness/copilot/cache/pkg/linux-arm64/1.0.88/prebuilds/linux-arm64/copilot-runtime"
 	ampRealpath            = "/opt/defenseclaw-harness/amp/lib/node_modules/@ampcode/cli/bin/amp.exe"
+	cursorRealpath         = "/opt/defenseclaw-harness/cursor/node"
+	kiroChatRealpath       = "/opt/defenseclaw-harness/kiro/bin/kiro-cli-chat"
+	kiroRealpath           = "/opt/defenseclaw-harness/kiro/bin/kiro-cli"
 )
 
 func goldenInputs() map[string]Input {
@@ -51,6 +54,8 @@ func goldenInputs() map[string]Input {
 		CopilotAnthropicID:      {Binaries: copilot},
 		CopilotBedrockMantleID:  {Binaries: copilot, BedrockRegion: "eu-west-1"},
 		AmpID:                   {Binaries: []string{ampRealpath}},
+		CursorID:                {Binaries: []string{cursorRealpath}},
+		KiroID:                  {Binaries: []string{kiroChatRealpath, kiroRealpath}},
 	}
 }
 
@@ -243,6 +248,11 @@ func TestRenderHookOnlyHarnessProfiles(t *testing.T) {
 		{CopilotAnthropicID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"api.anthropic.com"}, []string{copilotRuntimeRealpath, copilotRealpath}},
 		{CopilotBedrockMantleID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"bedrock-mantle.us-east-1.api.aws"}, []string{copilotRuntimeRealpath, copilotRealpath}},
 		{AmpID, Input{Binaries: []string{ampRealpath}}, "AMP_API_KEY", "bearer", "authorization", []string{"ampcode.com"}, []string{ampRealpath}},
+		{CursorID, Input{Binaries: []string{cursorRealpath}}, "CURSOR_API_KEY", "bearer", "authorization",
+			[]string{"api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh"}, []string{cursorRealpath}},
+		{KiroID, Input{Binaries: []string{kiroRealpath, kiroChatRealpath}}, "KIRO_API_KEY", "bearer", "authorization",
+			[]string{"q.us-east-1.amazonaws.com", "runtime.us-east-1.kiro.dev", "management.us-east-1.kiro.dev", "prod.us-east-1.auth.desktop.kiro.dev"},
+			[]string{kiroRealpath, kiroChatRealpath}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {

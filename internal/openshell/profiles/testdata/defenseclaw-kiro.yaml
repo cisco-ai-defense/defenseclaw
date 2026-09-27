@@ -1,0 +1,34 @@
+id: defenseclaw-kiro
+display_name: Kiro service for Kiro CLI (DefenseClaw)
+description: Binds a Kiro Pro API key (KIRO_API_KEY) to the Kiro and Amazon Q service endpoints in us-east-1 as a bearer; only the Kiro CLI binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Kiro API key for headless use (Kiro Pro)
+    env_vars: [KIRO_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: q.us-east-1.amazonaws.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: runtime.us-east-1.kiro.dev
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: management.us-east-1.kiro.dev
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: prod.us-east-1.auth.desktop.kiro.dev
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/kiro/bin/kiro-cli", "/opt/defenseclaw-harness/kiro/bin/kiro-cli-chat"]

@@ -101,6 +101,11 @@ const (
 	CopilotBedrockMantleID = "defenseclaw-copilot-bedrock-mantle"
 	// AmpID binds AMP_API_KEY (bearer) to the Amp service.
 	AmpID = "defenseclaw-amp"
+	// CursorID binds CURSOR_API_KEY (bearer) to Cursor's service.
+	CursorID = "defenseclaw-cursor"
+	// KiroID binds KIRO_API_KEY (bearer) to the Kiro and Amazon Q service
+	// endpoints.
+	KiroID = "defenseclaw-kiro"
 )
 
 // LegacyIngressID is the gateway-wide ingress profile of earlier releases,
@@ -191,6 +196,8 @@ var catalog = map[string]profileKind{
 	CopilotAnthropicID:      kindHarness,
 	CopilotBedrockMantleID:  kindBedrock,
 	AmpID:                   kindHarness,
+	CursorID:                kindHarness,
+	KiroID:                  kindHarness,
 }
 
 // IDs lists every profile template, sorted.
