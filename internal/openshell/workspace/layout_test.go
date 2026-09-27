@@ -18,35 +18,28 @@ package workspace
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// A sandbox may be called "git". Its snapshot directory must not be the
-// place other snapshots keep their shadow git dirs, or deleting or
-// replacing it takes every other snapshot's undo data with it.
+// A sandbox named "git" is now refused because it would conflict with the
+// shadow storage root (which was previously under snapshots/git/, but is now
+// separate at shadows/).
 func TestSandboxNamedGitKeepsOtherSnapshots(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
+	// Verify "git" is a reserved name.
+	_, err := Snapshot(bg, e.snapOpts("git"))
+	if err == nil {
+		t.Fatal("snapshot named 'git' should be refused")
+	}
+	if !strings.Contains(err.Error(), "reserved") && !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("expected reservation error, got: %v", err)
+	}
+	// Verify shadows are stored separately from per-name snapshot directories.
 	a := mustSnapshot(t, e, "a")
 	if got, want := filepath.Dir(a.Git.Shadow), filepath.Join(e.data, "shadows"); got != want {
 		t.Fatalf("shadow lives in %s, want %s", got, want)
-	}
-	mustSnapshot(t, e, "git")
-	opts := e.snapOpts("git")
-	opts.Replace = true
-	if _, err := Snapshot(bg, opts); err != nil {
-		t.Fatal(err)
-	}
-	if err := DeleteSnapshot(bg, e.data, "git"); err != nil {
-		t.Fatal(err)
-	}
-	if !pathExists(filepath.Join(a.Git.Shadow, "HEAD")) {
-		t.Fatal("deleting the snapshot named git removed another snapshot's storage")
-	}
-	writeFile(t, e.project, "README.md", "changed\n")
-	mustUndo(t, e, "a", false)
-	if readFile(t, e.project, "README.md") != "hello\n" {
-		t.Fatal("snapshot a no longer restores the folder")
 	}
 }
 

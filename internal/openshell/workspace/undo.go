@@ -800,9 +800,14 @@ func currentIndexTree(ctx context.Context, sh *shadow) (string, error) {
 // ignored (via git ls-files --others --ignored --exclude-standard), so this
 // is a simple membership check. Git's own matching handles nested .gitignore
 // files, negation, directory patterns, anchored patterns, etc.
+// Directory patterns end with "/" and match any file under that directory.
 func wasIgnored(p string, ignoredPaths []string) bool {
 	for _, ignored := range ignoredPaths {
 		if ignored == p {
+			return true
+		}
+		// Check if p is under an ignored directory (ends with /).
+		if strings.HasSuffix(ignored, "/") && strings.HasPrefix(p, ignored) {
 			return true
 		}
 	}

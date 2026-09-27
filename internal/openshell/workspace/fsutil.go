@@ -376,6 +376,7 @@ func (r *rootFS) symlink(rel, target string) error {
 }
 
 // ensureDirMode makes every component of rel a real directory with the given mode.
+// It refuses to operate if any component is a symlink (to prevent directory traversal attacks).
 func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
 	rel = path.Clean(rel)
 	if rel == "." || rel == "" {
@@ -392,6 +393,9 @@ func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
 		switch {
 		case err == nil && info.IsDir():
 			continue
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			// Refuse to replace symlinks - potential directory traversal attack.
+			return fmt.Errorf("refusing to create directory at %s: path component is a symlink", cur)
 		case err == nil:
 			if err := r.root.Remove(cur); err != nil {
 				return err
@@ -408,17 +412,10 @@ func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
 
 // writeFileNoFollow writes a file atomically with O_NOFOLLOW to prevent
 // following symlinks and O_EXCL to ensure atomicity. It refuses to write if
-// any parent path component is a symlink.
+// any parent path component is a symlink by checking each component before
+// creating directories.
 func (r *rootFS) writeFileNoFollow(rel string, src io.Reader, mode fs.FileMode, mtime time.Time) error {
-	// Verify no parent component is a symlink.
-	parts := strings.Split(path.Clean(rel), "/")
-	for i := 1; i < len(parts); i++ {
-		parentPath := strings.Join(parts[:i], "/")
-		if info, err := r.root.Lstat(parentPath); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to write through symlink at %s", parentPath)
-		}
-	}
-
+	rel = path.Clean(rel)
 	if err := r.ensureDirMode(path.Dir(rel), 0o700); err != nil {
 		return err
 	}
