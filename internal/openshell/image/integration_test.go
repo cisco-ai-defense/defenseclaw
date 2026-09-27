@@ -30,7 +30,9 @@ package image
 // The mock URLs are the harness-spike servers (mock_anthropic.py with
 // scripts-claude.json, mock_openai.py with scripts-codex.json): "write the
 // marker" answers with one allowed shell tool call and "BLOCKME" with one the
-// stand-in ingress denies. Without them the hook-fire probe is skipped.
+// stand-in ingress denies; for Claude Code the probe repeats "write the
+// marker" with hostile user and project settings planted. Without them the
+// hook-fire probe is skipped.
 
 import (
 	"context"

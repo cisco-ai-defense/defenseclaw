@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -44,12 +45,19 @@ type containerSim struct {
 	badToken      bool
 	noKey         bool
 	ignoreVerdict bool
+	// hostileEvents replaces events in the hostile-settings run (nil keeps
+	// events), and plantedRan is what that run reports as planted programs
+	// that ran.
+	hostileEvents []string
+	plantedRan    string
 }
 
 func (s containerSim) handle(args []string) (string, int) {
-	host, token, script := "", "", ""
+	host, token, script, user := "", "", "", ""
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
+		case "--user":
+			user = args[i+1]
 		case "--add-host":
 			host = strings.TrimPrefix(args[i+1], connector.SandboxIngressHost+":")
 		case "-e":
@@ -69,8 +77,20 @@ func (s containerSim) handle(args []string) (string, int) {
 	if s.badToken {
 		token = "forged"
 	}
+	hostile := strings.Contains(script, hostileRanLog)
+	uid, gid, _ := strings.Cut(user, ":")
+	if hostile != containsSeq(args, "--tmpfs", fmt.Sprintf("%s:uid=%s,gid=%s,mode=0755", harness.WorkRoot, uid, gid)) {
+		s.t.Errorf("hostile-settings run and workload-owned work-root tmpfs disagree: %v", args)
+	}
+	if hostile && !strings.Contains(script, "cd '/work/dc-hookfire-project' || exit 97") {
+		s.t.Errorf("hostile-settings run does not start in the planted project: %s", script)
+	}
+	events := s.events
+	if hostile && s.hostileEvents != nil {
+		events = s.hostileEvents
+	}
 	blocked := false
-	for _, event := range s.events {
+	for _, event := range events {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"hook_event_name": event,
 			"tool_input":      map[string]string{"command": script},
@@ -98,6 +118,9 @@ func (s containerSim) handle(args []string) (string, int) {
 		} else {
 			out += "::side-effect=present\n"
 		}
+	}
+	if hostile && s.plantedRan != "" {
+		out += "::planted-ran=" + s.plantedRan + "\n"
 	}
 	return out + "::output-begin\nok\n::output-end\n", 0
 }
@@ -134,8 +157,13 @@ func TestHookFireProbePassesWhenHooksFire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HookFireProbe: %v", err)
 	}
-	if len(res.Runs) != 2 || len(res.Runs[0].Events) != len(fullClaudeRun) {
+	if len(res.Runs) != 3 || len(res.Runs[0].Events) != len(fullClaudeRun) {
 		t.Fatalf("runs = %+v", res.Runs)
+	}
+	for i, want := range []string{ScenarioAllow, ScenarioBlock, ScenarioHostileSettings} {
+		if res.Runs[i].Scenario != want {
+			t.Fatalf("run %d is %q, want %q", i, res.Runs[i].Scenario, want)
+		}
 	}
 	blocked := false
 	for _, ev := range res.Runs[1].Events {
@@ -143,6 +171,9 @@ func TestHookFireProbePassesWhenHooksFire(t *testing.T) {
 	}
 	if !blocked || res.Runs[1].SideEffectPresent == nil || *res.Runs[1].SideEffectPresent {
 		t.Fatalf("block run = %+v", res.Runs[1])
+	}
+	if hostile := res.Runs[2]; len(hostile.Events) != len(fullClaudeRun) || len(hostile.PlantedRan) != 0 {
+		t.Fatalf("hostile-settings run = %+v", hostile)
 	}
 }
 
@@ -156,6 +187,21 @@ func TestHookFireProbeFailures(t *testing.T) {
 		"forged-token":       {containerSim{events: fullClaudeRun, badToken: true}, false, "without the sandbox token"},
 		"no-idempotency-key": {containerSim{events: fullClaudeRun, noKey: true}, false, "no idempotency key"},
 		"verdict-ignored":    {containerSim{events: fullClaudeRun, ignoreVerdict: true}, true, "still ran"},
+		// A settings knob that diverts the hooks: the planted wrapper
+		// swallows them, so none reaches the sink.
+		"hostile-settings-swallow-hooks": {
+			containerSim{events: fullClaudeRun, hostileEvents: []string{}, plantedRan: "project:shell-prefix"},
+			false, "with hostile user and project settings, hook SessionStart never fired",
+		},
+		"hostile-settings-host-token": {
+			containerSim{events: fullClaudeRun, hostileEvents: []string{"SessionStart", "UserPromptSubmit", "Stop"}},
+			false, "with hostile user and project settings, hook PreToolUse never fired",
+		},
+		// Hooks still fire, but a planted shell ran the approved Bash command.
+		"hostile-settings-planted-shell": {
+			containerSim{events: fullClaudeRun, plantedRan: "project:shell user:bash-env"},
+			false, "planted by hostile user and project settings ran: project:shell, user:bash-env",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -170,6 +216,9 @@ func TestHookFireProbeFailures(t *testing.T) {
 			_, err := b.HookFireProbe(context.Background(), c, opts)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if !errors.Is(err, ErrHooksNotFired) {
+				t.Fatalf("error = %v, want ErrHooksNotFired", err)
 			}
 		})
 	}
@@ -300,10 +349,10 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyHooks: %v", err)
 	}
-	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 1 {
+	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 2 {
 		t.Fatalf("verified record = %+v runs=%d", rec, len(res.Runs))
 	}
-	if len(images) != 1 || images[0] != built.ImageID {
+	if len(images) != 2 || images[0] != built.ImageID || images[1] != built.ImageID {
 		t.Fatalf("hook-fire ran %v, want the recorded image ID %s", images, built.ImageID)
 	}
 	if got, ok := current(); !ok || got.Tag != c.Tag || !got.HookFireVerified {

@@ -42,7 +42,10 @@ import (
 // the only proof that an image enforces is a harness run whose hooks reach
 // an ingress. The hook-fire probe runs the harness headless in the built
 // image against a mock LLM (supplied by the caller) and a stand-in hook
-// ingress it serves itself on the image's baked port.
+// ingress it serves itself on the image's baked port. For harnesses with a
+// hostile-settings plan it repeats the allowed run with hostile user and
+// project settings planted, which the image's managed policy must
+// neutralise.
 
 // ErrHooksNotFired marks a hook-fire probe that ran the harness to completion
 // and proved the image does not enforce: a required hook never fired,
@@ -71,8 +74,8 @@ type HookFireOptions struct {
 	Env map[string]string
 	// Args are extra harness arguments (for example a Codex mock provider).
 	Args []string
-	// Prompt drives the allow scenario; the mock must answer it with one
-	// tool call.
+	// Prompt drives the allow scenario, and the hostile-settings scenario of
+	// harnesses that have one; the mock must answer it with one tool call.
 	Prompt string
 	// Block, when set, adds a scenario whose tool call the hook must deny.
 	Block *BlockScenario
@@ -108,7 +111,25 @@ type HookFireRun struct {
 	Events            []HookEvent `json:"events"`
 	OTLPRequests      int         `json:"otlp_requests"`
 	SideEffectPresent *bool       `json:"side_effect_present,omitempty"`
-	Output            string      `json:"output"`
+	// PlantedRan lists the programs planted by hostile settings that ran
+	// (hostile-settings scenario only; always empty for an enforcing image).
+	PlantedRan []string `json:"planted_ran,omitempty"`
+	Output     string   `json:"output"`
+}
+
+// Hook-fire scenario names, as recorded in HookFireRun.Scenario.
+const (
+	ScenarioAllow           = "allow"
+	ScenarioBlock           = "block"
+	ScenarioHostileSettings = "hostile-settings"
+)
+
+// hookFireScenario is one harness run of the probe.
+type hookFireScenario struct {
+	name    string
+	prompt  string
+	block   *BlockScenario
+	hostile *hostileSettings
 }
 
 // HookFireResult is the outcome of HookFireProbe.
@@ -164,8 +185,9 @@ func (b *Builder) VerifyHooks(ctx context.Context, c *Context, opts HookFireOpti
 
 // HookFireProbe runs the image's harness against the caller's mock LLM and
 // verifies that every required hook fires with the sandbox token and an
-// idempotency key, and that a blocked tool call has no side effect. It only
-// reports: VerifyHooks is the path that records the verdict.
+// idempotency key, also with hostile user and project settings planted, and
+// that a blocked tool call has no side effect. It only reports: VerifyHooks
+// is the path that records the verdict.
 func (b *Builder) HookFireProbe(ctx context.Context, c *Context, opts HookFireOptions) (HookFireResult, error) {
 	return b.hookFireProbe(ctx, c, c.Tag, opts)
 }
@@ -207,30 +229,14 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	}()
 
 	var result HookFireResult
-	allow, err := b.hookFireRun(ctx, c, ref, opts, host, sink, "allow", opts.Prompt, nil)
+	allow, err := b.hookFireRun(ctx, c, ref, opts, host, sink, hookFireScenario{name: ScenarioAllow, prompt: opts.Prompt})
 	result.Runs = append(result.Runs, allow)
 	if err != nil {
 		return result, err
 	}
-	var problems []string
-	seen := map[string]bool{}
-	for _, ev := range allow.Events {
-		if !ev.Authorized {
-			problems = append(problems, fmt.Sprintf("%s %s arrived without the sandbox token", ev.Path, ev.Event))
-			continue
-		}
-		if strings.HasSuffix(ev.Path, "/hook") && ev.IdempotencyKey == "" {
-			problems = append(problems, fmt.Sprintf("%s %s carried no idempotency key", ev.Path, ev.Event))
-		}
-		seen[ev.Event] = true
-	}
-	for _, event := range required {
-		if !seen[event] {
-			problems = append(problems, "hook "+event+" never fired")
-		}
-	}
+	problems := requiredHookProblems(allow, required)
 	if opts.Block != nil {
-		blocked, err := b.hookFireRun(ctx, c, ref, opts, host, sink, "block", opts.Block.Prompt, opts.Block)
+		blocked, err := b.hookFireRun(ctx, c, ref, opts, host, sink, hookFireScenario{name: ScenarioBlock, prompt: opts.Block.Prompt, block: opts.Block})
 		result.Runs = append(result.Runs, blocked)
 		if err != nil {
 			return result, err
@@ -246,24 +252,60 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 			problems = append(problems, "the blocked tool call still ran ("+opts.Block.SideEffect+" exists)")
 		}
 	}
+	if plan, ok := hostileSettingsPlans[c.Spec.Harness.Name]; ok {
+		hostile, err := b.hookFireRun(ctx, c, ref, opts, host, sink, hookFireScenario{name: ScenarioHostileSettings, prompt: opts.Prompt, hostile: &plan})
+		result.Runs = append(result.Runs, hostile)
+		if err != nil {
+			return result, err
+		}
+		for _, problem := range requiredHookProblems(hostile, required) {
+			problems = append(problems, "with hostile user and project settings, "+problem)
+		}
+		if len(hostile.PlantedRan) > 0 {
+			problems = append(problems, "programs planted by hostile user and project settings ran: "+strings.Join(hostile.PlantedRan, ", "))
+		}
+	}
 	if len(problems) > 0 {
 		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
 	return result, nil
 }
 
+// requiredHookProblems reports every hook of run that arrived without the
+// sandbox token or an idempotency key, and every required hook that never
+// arrived authenticated.
+func requiredHookProblems(run HookFireRun, required []string) []string {
+	var problems []string
+	seen := map[string]bool{}
+	for _, ev := range run.Events {
+		if !ev.Authorized {
+			problems = append(problems, fmt.Sprintf("%s %s arrived without the sandbox token", ev.Path, ev.Event))
+			continue
+		}
+		if strings.HasSuffix(ev.Path, "/hook") && ev.IdempotencyKey == "" {
+			problems = append(problems, fmt.Sprintf("%s %s carried no idempotency key", ev.Path, ev.Event))
+		}
+		seen[ev.Event] = true
+	}
+	for _, event := range required {
+		if !seen[event] {
+			problems = append(problems, "hook "+event+" never fired")
+		}
+	}
+	return problems
+}
+
 func (b *Builder) hookFireRun(
-	ctx context.Context, c *Context, ref string, opts HookFireOptions, host string, sink *hookSink,
-	scenario, prompt string, block *BlockScenario,
+	ctx context.Context, c *Context, ref string, opts HookFireOptions, host string, sink *hookSink, sc hookFireScenario,
 ) (HookFireRun, error) {
-	run := HookFireRun{Scenario: scenario}
-	argv, err := c.Spec.Harness.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: true, Prompt: prompt, Args: opts.Args})
+	run := HookFireRun{Scenario: sc.name}
+	argv, err := c.Spec.Harness.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: true, Prompt: sc.prompt, Args: opts.Args})
 	if err != nil {
 		return run, err
 	}
 	sideEffect := ""
-	if block != nil {
-		sideEffect = block.SideEffect
+	if sc.block != nil {
+		sideEffect = sc.block.SideEffect
 		if !safePathRE.MatchString(sideEffect) {
 			return run, fmt.Errorf("openshell image: side effect %q must be a plain absolute path", sideEffect)
 		}
@@ -272,7 +314,13 @@ func (b *Builder) hookFireRun(
 	for i, a := range argv {
 		quoted[i] = shQuote(a)
 	}
-	script := "cd " + shQuote(connector.SandboxHomeDir) + " || exit 97\n"
+	workdir := connector.SandboxHomeDir
+	script := ""
+	if sc.hostile != nil {
+		workdir = sc.hostile.workdir
+		script += sc.hostile.setup
+	}
+	script += "cd " + shQuote(workdir) + " || exit 97\n"
 	if sideEffect != "" {
 		script += "rm -f " + shQuote(sideEffect) + "\n"
 	}
@@ -280,6 +328,9 @@ func (b *Builder) hookFireRun(
 		"echo \"::rc=$?\"\n"
 	if sideEffect != "" {
 		script += "if [ -e " + shQuote(sideEffect) + " ]; then echo '::side-effect=present'; else echo '::side-effect=absent'; fi\n"
+	}
+	if sc.hostile != nil {
+		script += "if [ -s " + shQuote(hostileRanLog) + " ]; then echo \"::planted-ran=$(sort -u " + shQuote(hostileRanLog) + " | tr '\\n' ' ')\"; fi\n"
 	}
 	script += "echo '::output-begin'; tail -c 4000 /tmp/dc-hookfire.out; echo; echo '::output-end'\n"
 
@@ -291,12 +342,18 @@ func (b *Builder) hookFireRun(
 	if prefix == "" {
 		prefix = "defenseclaw-hookfire"
 	}
-	name := prefix + "-" + c.Spec.Harness.Name + "-" + scenario + "-" + suffix
+	name := prefix + "-" + c.Spec.Harness.Name + "-" + sc.name + "-" + suffix
 	args := []string{"run", "--rm", "--name", name, "--network", "host",
 		"--add-host", connector.SandboxIngressHost + ":" + host,
 		"--user", strconv.Itoa(c.Spec.UID) + ":" + strconv.Itoa(c.Spec.GID),
 		"-e", "HOME=" + connector.SandboxHomeDir,
 		"-e", connector.SandboxTokenEnv + "=" + sink.token,
+	}
+	if sc.hostile != nil {
+		// The image's work root is root-owned; a workload-owned tmpfs lets
+		// the probe create a project below it, where the pre-seeded trust
+		// applies as it does to a mounted repository.
+		args = append(args, "--tmpfs", fmt.Sprintf("%s:uid=%d,gid=%d,mode=0755", harness.WorkRoot, c.Spec.UID, c.Spec.GID))
 	}
 	env := map[string]string{}
 	for key, value := range c.Artifacts.Env {
@@ -319,7 +376,7 @@ func (b *Builder) hookFireRun(
 	if timeout <= 0 {
 		timeout = 3 * time.Minute
 	}
-	sink.begin(block)
+	sink.begin(sc.block)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	out, err := output(runCtx, b.Docker, nil, args...)
 	cancel()
@@ -332,7 +389,7 @@ func (b *Builder) hookFireRun(
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_, _ = output(cleanupCtx, b.Docker, nil, "rm", "-f", name)
 		cleanupCancel()
-		return run, fmt.Errorf("openshell image: hook-fire %s run: %w", scenario, err)
+		return run, fmt.Errorf("openshell image: hook-fire %s run: %w", sc.name, err)
 	}
 	for _, line := range strings.Split(out, "\n") {
 		switch {
@@ -344,6 +401,8 @@ func (b *Builder) hookFireRun(
 		case line == "::side-effect=absent":
 			present := false
 			run.SideEffectPresent = &present
+		case strings.HasPrefix(line, "::planted-ran="):
+			run.PlantedRan = strings.Fields(strings.TrimPrefix(line, "::planted-ran="))
 		}
 	}
 	return run, nil
