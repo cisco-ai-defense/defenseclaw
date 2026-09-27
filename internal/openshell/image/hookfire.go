@@ -298,7 +298,19 @@ type HookFireRun struct {
 	// Report holds the "::report=" lines a scenario's post-run checks
 	// print.
 	Report []string `json:"report,omitempty"`
-	Output string   `json:"output"`
+	// Refusals are the launcher's answers to the plantings it must refuse
+	// (hostile-settings scenario of harnesses that have them).
+	Refusals []HookFireRefusal `json:"refusals,omitempty"`
+	Output   string            `json:"output"`
+}
+
+// HookFireRefusal is one harness start the launcher had to refuse.
+type HookFireRefusal struct {
+	// Label names the planting.
+	Label    string `json:"label"`
+	ExitCode int    `json:"exit_code"`
+	// Named reports whether the refusal named the planted file.
+	Named bool `json:"named"`
 }
 
 // Hook-fire scenario names, as recorded in HookFireRun.Scenario.
@@ -611,11 +623,34 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		if len(hostile.PlantedRan) > 0 {
 			problems = append(problems, "programs planted by hostile user and project settings ran: "+strings.Join(hostile.PlantedRan, ", "))
 		}
+		problems = append(problems, refusalProblems(plan.refusals, hostile.Refusals)...)
 	}
 	if len(problems) > 0 {
 		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
 	return result, nil
+}
+
+// refusalProblems reports every planting the launcher had to refuse but
+// started the harness with, refused without naming, or was never tried.
+func refusalProblems(want []hostileRefusal, got []HookFireRefusal) []string {
+	byLabel := map[string]HookFireRefusal{}
+	for _, r := range got {
+		byLabel[r.Label] = r
+	}
+	var problems []string
+	for _, w := range want {
+		r, ok := byLabel[w.label]
+		switch {
+		case !ok:
+			problems = append(problems, "the launcher was never started with the planted "+w.label+" ("+w.file+")")
+		case r.ExitCode == 0:
+			problems = append(problems, "the launcher started the harness with the planted "+w.label+" ("+w.file+")")
+		case !r.Named:
+			problems = append(problems, fmt.Sprintf("the launcher exited %d with the planted %s without the refusal naming %s", r.ExitCode, w.label, w.file))
+		}
+	}
+	return problems
 }
 
 // requiredHookProblems reports every hook of run that arrived without the
@@ -662,10 +697,24 @@ func (b *Builder) hookFireRun(
 			return run, fmt.Errorf("openshell image: run file %q -> %q is not a plain absolute mount", m.HostPath, m.Path)
 		}
 	}
-	quoted := make([]string, len(argv))
-	for i, a := range argv {
-		quoted[i] = shQuote(a)
+	var quoted []string
+	if sc.hostile != nil && len(sc.hostile.env) > 0 {
+		// Only the harness gets the hostile env: the probe's own shell
+		// would read a planted BASH_ENV too.
+		keys := make([]string, 0, len(sc.hostile.env))
+		for key := range sc.hostile.env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		quoted = append(quoted, "/usr/bin/env")
+		for _, key := range keys {
+			quoted = append(quoted, shQuote(key+"="+sc.hostile.env[key]))
+		}
 	}
+	for _, a := range argv {
+		quoted = append(quoted, shQuote(a))
+	}
+	harnessCmd := strings.Join(quoted, " ")
 	workdir := connector.SandboxHomeDir
 	script := netw.scriptPrefix(c.Spec.IngressPort)
 	if sc.hostile != nil {
@@ -678,10 +727,23 @@ func (b *Builder) hookFireRun(
 	}
 	script += sc.setup
 	script += "cd " + shQuote(workdir) + " || exit 97\n"
+	if sc.hostile != nil {
+		for _, r := range sc.hostile.refusals {
+			if !refusalLabelRE.MatchString(r.label) || !safePathRE.MatchString(r.file) {
+				return run, fmt.Errorf("openshell image: hostile refusal %q (%s) is not a plain label and path", r.label, r.file)
+			}
+			script += r.setup +
+				harnessCmd + " </dev/null >/tmp/dc-hookfire-refusal.out 2>&1; rc=$?\n" +
+				"if grep -qF -- " + shQuote(r.message) + " /tmp/dc-hookfire-refusal.out; then named=1; else named=0; fi\n" +
+				"echo \"::refusal=" + r.label + " $rc $named\"\n" +
+				"if [ \"$named\" = 0 ]; then echo '::refusal-output-begin'; head -c 800 /tmp/dc-hookfire-refusal.out; echo; echo '::refusal-output-end'; fi\n" +
+				"rm -f " + shQuote(r.file) + "\n"
+		}
+	}
 	if sc.sideEffect != "" {
 		script += "rm -f " + shQuote(sc.sideEffect) + "\n"
 	}
-	script += strings.Join(quoted, " ") + " </dev/null >/tmp/dc-hookfire.out 2>&1\n" +
+	script += harnessCmd + " </dev/null >/tmp/dc-hookfire.out 2>&1\n" +
 		"echo \"::rc=$?\"\n"
 	script += sc.post
 	for _, marker := range sc.markers {
@@ -779,6 +841,14 @@ func (b *Builder) hookFireRun(
 			run.Markers[file] = state == "present"
 		case strings.HasPrefix(line, "::report="):
 			run.Report = append(run.Report, strings.TrimPrefix(line, "::report="))
+		case strings.HasPrefix(line, "::refusal="):
+			if f := strings.Fields(strings.TrimPrefix(line, "::refusal=")); len(f) == 3 {
+				code, err := strconv.Atoi(f[1])
+				if err != nil {
+					continue
+				}
+				run.Refusals = append(run.Refusals, HookFireRefusal{Label: f[0], ExitCode: code, Named: f[2] == "1"})
+			}
 		}
 	}
 	return run, nil

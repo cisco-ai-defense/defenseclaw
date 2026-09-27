@@ -62,6 +62,9 @@ type containerSim struct {
 	// that ran.
 	hostileEvents []string
 	plantedRan    string
+	// refusals is what the hostile-settings run reports as the launcher's
+	// refusals.
+	refusals string
 }
 
 var (
@@ -163,6 +166,9 @@ func (s containerSim) handle(args []string) (string, int) {
 	}
 	if hostile && s.plantedRan != "" {
 		out += "::planted-ran=" + s.plantedRan + "\n"
+	}
+	if hostile {
+		out += s.refusals
 	}
 	return out + "::output-begin\nok\n::output-end\n", 0
 }
@@ -352,6 +358,86 @@ func TestHookFireProbeFailures(t *testing.T) {
 			}
 			if !errors.Is(err, ErrHooksNotFired) {
 				t.Fatalf("error = %v, want ErrHooksNotFired", err)
+			}
+		})
+	}
+}
+
+// TestHookFireHostileLaunchEnvAndRefusals runs a hostile plan with a launch
+// env and two plantings the launcher must refuse: the env reaches only the
+// harness command (never the probe's shell or the container env), each
+// planting is tried on its own before the hostile-settings run, and the
+// probe fails when the launcher started the harness, refused without naming
+// the file, or was never tried.
+func TestHookFireHostileLaunchEnvAndRefusals(t *testing.T) {
+	saved := hostileSettingsPlans["claudecode"]
+	t.Cleanup(func() { hostileSettingsPlans["claudecode"] = saved })
+	plan := saved
+	plan.env = map[string]string{"BASH_ENV": hostileRoot + "/bash-env", "PATH": hostileRoot + "/bin:/usr/bin:/bin"}
+	plan.refusals = []hostileRefusal{
+		{label: "project-plugin", file: hostileProject + "/.opencode/plugins/x.js", setup: ": plant-project\n", message: "refusing: project"},
+		{label: "user-plugin", file: "/sandbox/.config/opencode/plugins/x.js", setup: ": plant-user\n", message: "refusing: user"},
+	}
+	hostileSettingsPlans["claudecode"] = plan
+	for name, tc := range map[string]struct{ refusals, want string }{
+		"refused": {"::refusal=project-plugin 2 1\n::refusal=user-plugin 2 1\n", ""},
+		"started": {"::refusal=project-plugin 0 0\n::refusal=user-plugin 2 1\n", "the launcher started the harness with the planted project-plugin (" + hostileProject + "/.opencode/plugins/x.js)"},
+		"unnamed": {"::refusal=project-plugin 2 1\n::refusal=user-plugin 2 0\n", "the launcher exited 2 with the planted user-plugin without the refusal naming /sandbox/.config/opencode/plugins/x.js"},
+		"untried": {"::refusal=project-plugin 2 1\n", "the launcher was never started with the planted user-plugin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := hookFireContext(t)
+			sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, refusals: tc.refusals}
+			var scripts []string
+			b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+				for i := 0; i+1 < len(args); i++ {
+					if args[i] == "-e" && (strings.HasPrefix(args[i+1], "BASH_ENV=") || strings.HasPrefix(args[i+1], "PATH=")) {
+						t.Errorf("the hostile launch env reached the container env: %v", args)
+					}
+				}
+				scripts = append(scripts, args[len(args)-1])
+				return sim.handle(args)
+			}}}
+			res, err := b.HookFireProbe(context.Background(), c, hostOpts(true))
+			if tc.want != "" {
+				if !errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error = %v, want %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("HookFireProbe: %v", err)
+			}
+			if got := res.Runs[2].Refusals; len(got) != 2 || !got[0].Named || got[1].ExitCode != 2 {
+				t.Fatalf("refusals = %+v", got)
+			}
+			if len(scripts) != 3 {
+				t.Fatalf("%d runs", len(scripts))
+			}
+			launch := "/usr/bin/env 'BASH_ENV=" + hostileRoot + "/bash-env' 'PATH=" + hostileRoot + "/bin:/usr/bin:/bin' '" + harness.ClaudeCodeLauncherPath + "'"
+			for _, script := range scripts[:2] {
+				if strings.Contains(script, "/usr/bin/env 'BASH_ENV") || strings.Contains(script, "::refusal=") {
+					t.Errorf("a clean run got the hostile launch env or refusals:\n%s", script)
+				}
+			}
+			hostile := scripts[2]
+			if strings.Count(hostile, launch) != 3 || strings.Contains(hostile, "export BASH_ENV") {
+				t.Errorf("the hostile env is not confined to the three harness starts:\n%s", hostile)
+			}
+			order := []string{
+				"cd '/work/dc-hookfire-project' || exit 97",
+				": plant-project\n" + launch, "grep -qF -- 'refusing: project' /tmp/dc-hookfire-refusal.out", "::refusal=project-plugin $rc $named",
+				"rm -f '" + hostileProject + "/.opencode/plugins/x.js'",
+				": plant-user\n" + launch, "::refusal=user-plugin $rc $named", "rm -f '/sandbox/.config/opencode/plugins/x.js'",
+				launch, "</dev/null >/tmp/dc-hookfire.out 2>&1",
+			}
+			at := 0
+			for _, want := range order {
+				i := strings.Index(hostile[at:], want)
+				if i < 0 {
+					t.Fatalf("hostile script lacks %q after offset %d:\n%s", want, at, hostile)
+				}
+				at += i + len(want)
 			}
 		})
 	}

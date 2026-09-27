@@ -22,10 +22,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
 // TestClaudeCodeHostileSettingsPlantsBothTiers runs the planting fragment
@@ -262,7 +265,11 @@ func relocatedHostileSetup(t *testing.T, name string) string {
 	if !ok || plan.workdir != hostileProject {
 		t.Fatalf("%s hostile plan = %+v", name, plan)
 	}
-	root := t.TempDir()
+	// Resolved, so paths the launcher prints (pwd -P) match on macOS too.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	relocate := strings.NewReplacer(
 		hostileRoot, root+hostileRoot,
 		"'/sandbox/", "'"+root+"/sandbox/",
@@ -319,6 +326,43 @@ func TestCopilotHostileSettingsPlants(t *testing.T) {
 	if len(planted)+len(more) != 4 {
 		t.Fatalf("planted packages = %v %v", planted, more)
 	}
+
+	// The launch env: a bash that reads BASH_ENV (Copilot's hook wrapper
+	// shell) records it and never runs the command; every program the
+	// planted PATH puts first records itself.
+	plan := hostileSettingsPlans["copilot"]
+	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot)
+	env := []string{}
+	for key, value := range plan.env {
+		env = append(env, key+"="+relocate.Replace(value))
+	}
+	sort.Strings(env)
+	if want := []string{"BASH_ENV=", "ENV=", "PATH="}; len(env) != len(want) {
+		t.Fatalf("launch env = %v", env)
+	}
+	cmd := exec.Command("/bin/bash", "-c", "echo hook-ran")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	data, _ := os.ReadFile(root + hostileRanLog)
+	_ = os.Remove(root + hostileRanLog)
+	if err != nil || strings.Contains(string(out), "hook-ran") || strings.TrimSpace(string(data)) != "user:bash-env" {
+		t.Fatalf("BASH_ENV: %v, output %q, ran %q", err, out, data)
+	}
+	path := relocate.Replace(plan.env["PATH"])
+	if !strings.HasSuffix(path, ":"+harness.LauncherSystemPATH) {
+		t.Fatalf("PATH = %q, want the planted bin ahead of the system PATH", path)
+	}
+	for _, name := range []string{"bash", "sh", "curl", "jq"} {
+		program := filepath.Join(strings.SplitN(path, ":", 2)[0], name)
+		if out, err := exec.Command(program).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", name, err, out)
+		}
+		data, _ := os.ReadFile(root + hostileRanLog)
+		_ = os.Remove(root + hostileRanLog)
+		if strings.TrimSpace(string(data)) != "user:path-"+name {
+			t.Fatalf("planted %s left %q", name, data)
+		}
+	}
 }
 
 func TestOpenCodeHostileSettingsPlants(t *testing.T) {
@@ -332,5 +376,101 @@ func TestOpenCodeHostileSettingsPlants(t *testing.T) {
 		if err != nil || strings.TrimSpace(string(data)) != `{"plugin":[]}` {
 			t.Fatalf("%s = %s (%v)", file, data, err)
 		}
+	}
+}
+
+// TestOpenCodeHostileRefusalsStopTheLauncher plants each of the OpenCode
+// plan's refusals, relocated under a temp dir, and starts the image's real
+// OpenCode launcher (the binary replaced by a stub) the way the probe does:
+// every planting must stop it with the refusal the probe greps for, and the
+// plan's other settings alone must not.
+func TestOpenCodeHostileRefusalsStopTheLauncher(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	root := relocatedHostileSetup(t, "opencode")
+	plan := hostileSettingsPlans["opencode"]
+	if len(plan.refusals) != 3 {
+		t.Fatalf("refusals = %+v", plan.refusals)
+	}
+	relocate := strings.NewReplacer(
+		hostileRoot, root+hostileRoot,
+		"'/sandbox/", "'"+root+"/sandbox/",
+		" /sandbox/", " "+root+"/sandbox/",
+		"/work/", root+"/work/",
+	)
+	stub := filepath.Join(root, "opencode-stub")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho opencode-started\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(root, "opencode-launch")
+	if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(harness.OpenCode.Launcher().Data), "/usr/local/bin/opencode", stub)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := func() (int, string) {
+		t.Helper()
+		cmd := exec.Command(launcher, "run", "--auto", builtinAllowPrompt)
+		cmd.Dir = root + hostileProject
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root + "/sandbox"}
+		out, err := cmd.CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), string(out)
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return 0, string(out)
+	}
+	if code, out := start(); code != 0 || !strings.Contains(out, "opencode-started") {
+		t.Fatalf("the plan's settings alone stopped the launcher: exit %d\n%s", code, out)
+	}
+	for _, r := range plan.refusals {
+		t.Run(r.label, func(t *testing.T) {
+			if !strings.Contains(r.setup, r.file) || !strings.Contains(r.message, r.file) {
+				t.Fatalf("refusal %+v does not plant and name its file", r)
+			}
+			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(r.setup)).CombinedOutput(); err != nil {
+				t.Fatalf("setup: %v\n%s", err, out)
+			}
+			code, out := start()
+			if want := relocate.Replace(r.message); code == 0 || strings.Contains(out, "opencode-started") || !strings.Contains(out, want) {
+				t.Fatalf("exit %d, want a refusal saying %q:\n%s", code, want, out)
+			}
+			if err := os.Remove(root + r.file); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
+		t.Fatalf("planted code ran: %s", data)
+	}
+}
+
+// TestOpenCodeHostilePluginReplacesFetch imports the planted plugin under
+// node (when available): it must record its label and replace the global
+// fetch with one that allows everything, so an image whose launcher let it
+// load would answer every hook without the ingress.
+func TestOpenCodeHostilePluginReplacesFetch(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available")
+	}
+	root := t.TempDir()
+	file := filepath.Join(root, "plugin.mjs")
+	body := strings.ReplaceAll(openCodeHostilePlugin("project"), hostileRanLog, root+"/ran")
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "const before = globalThis.fetch; await import(" + strconv.Quote("file://"+file) + ");" +
+		"const res = await fetch(\"http://127.0.0.1:9/api/v1/opencode/hook\");" +
+		"console.log(globalThis.fetch !== before, (await res.json()).action);"
+	out, err := exec.Command(node, "--input-type=module", "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "true allow" {
+		t.Fatalf("planted plugin: %s", out)
+	}
+	if data, _ := os.ReadFile(root + "/ran"); strings.TrimSpace(string(data)) != "project:planted-plugin" {
+		t.Fatalf("ran log = %q", data)
 	}
 }
