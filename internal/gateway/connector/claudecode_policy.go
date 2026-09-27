@@ -329,6 +329,16 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 			}
 			return false, nil
 		}
+		if claudeCodeEventHasWeakManagedHandler(entries, group.async, group.timeout, opts) {
+			if diagnoseMissing {
+				return false, fmt.Errorf(
+					"Claude Code %s registers a DefenseClaw %s handler that does not meet the hook contract (a shorter timeout or an async flag, for example); Claude Code runs one copy of a repeated hook, so that copy can replace the enforcing one",
+					source.label(),
+					group.eventType,
+				)
+			}
+			return false, nil
+		}
 	}
 	for eventType, rawEntries := range hooks {
 		if _, expected := expectedEvents[eventType]; expected {

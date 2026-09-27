@@ -382,3 +382,158 @@ func TestClaudeOSAdminRefusalNamesTheExportForTheTargetContract(t *testing.T) {
 		})
 	}
 }
+
+// claudeOSAdminRenderedEntry is a fresh copy of the one hook entry DefenseClaw
+// renders for event.
+func claudeOSAdminRenderedEntry(t *testing.T, opts SetupOpts, event string) map[string]interface{} {
+	t.Helper()
+	document, err := ClaudeCodeManagedHookPolicyDocument(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported struct {
+		Hooks map[string][]map[string]interface{} `json:"hooks"`
+	}
+	if err := json.Unmarshal(document, &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Hooks[event]) != 1 {
+		t.Fatalf("rendered %s entries = %d, want 1", event, len(exported.Hooks[event]))
+	}
+	return exported.Hooks[event][0]
+}
+
+// claudeOSAdminAppendEntries appends entries to the event's hook list in a
+// policy document.
+func claudeOSAdminAppendEntries(t *testing.T, raw, event string, entries ...map[string]interface{}) string {
+	t.Helper()
+	var settings map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = map[string]interface{}{}
+		settings["hooks"] = hooks
+	}
+	list, _ := hooks[event].([]interface{})
+	for _, entry := range entries {
+		list = append(list, entry)
+	}
+	hooks[event] = list
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// TestClaudeOSAdminPolicyRefusesAChangedDefenseClawCopyBesideTheRenderedOne
+// is the #899 review regression for a second DefenseClaw copy beside the
+// rendered entry. Claude Code runs one copy of a repeated command hook (keyed
+// by command, argv and condition, not by timeout or async flag; Claude Code
+// 2.1.283 keeps the last one registered), so a one-second or asynchronous copy
+// after the rendered entry is the one that runs, and PreToolUse fails open.
+// Admission took the rendered entry as proof, under carry and merge, and so
+// did the guardian audit.
+func TestClaudeOSAdminPolicyRefusesAChangedDefenseClawCopyBesideTheRenderedOne(t *testing.T) {
+	opts := claudeOSAdminTestOpts(t, "2.1.250")
+	handler := func(entry map[string]interface{}) map[string]interface{} {
+		return entry["hooks"].([]interface{})[0].(map[string]interface{})
+	}
+	changes := map[string]func(map[string]interface{}){
+		"one-second copy": func(entry map[string]interface{}) { handler(entry)["timeout"] = 1 },
+		"async copy":      func(entry map[string]interface{}) { handler(entry)["async"] = true },
+		"one-second copy under a narrower matcher": func(entry map[string]interface{}) {
+			entry["matcher"] = "Bash"
+			handler(entry)["timeout"] = 1
+		},
+	}
+	changed := func(t *testing.T, change func(map[string]interface{})) map[string]interface{} {
+		entry := claudeOSAdminRenderedEntry(t, opts, "PreToolUse")
+		change(entry)
+		return entry
+	}
+	bases := map[string]string{
+		"carried":            claudeOSAdminSettings(t, opts, nil),
+		"carried and merged": claudeOSAdminSettings(t, opts, map[string]interface{}{"managedSourcesBehavior": "merge"}),
+		"merged":             claudeOSAdminAppendEntries(t, `{"managedSourcesBehavior":"merge"}`, "PreToolUse", claudeOSAdminRenderedEntry(t, opts, "PreToolUse")),
+		// The drop-in supplies the rendered entry under merge.
+		"merged without the rendered entry": `{"managedSourcesBehavior":"merge"}`,
+	}
+	for baseName, base := range bases {
+		for changeName, change := range changes {
+			base, change := base, change
+			t.Run(baseName+"/"+changeName, func(t *testing.T) {
+				raw := claudeOSAdminAppendEntries(t, base, "PreToolUse", changed(t, change))
+				err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, claudeOSAdminLabel, opts)
+				if err == nil {
+					t.Fatal("a changed DefenseClaw copy was admitted")
+				}
+				for _, want := range []string{claudeOSAdminLabel, "PreToolUse", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.250"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("refusal %q does not mention %q", err, want)
+					}
+				}
+			})
+		}
+	}
+
+	// A carried policy keeps one DefenseClaw handler per event, as the drop-in
+	// verify requires. Under merge the drop-in repeats the rendered entry
+	// anyway, and identical copies run once.
+	rendered := claudeOSAdminRenderedEntry(t, opts, "PreToolUse")
+	twice := claudeOSAdminAppendEntries(t, claudeOSAdminSettings(t, opts, nil), "PreToolUse", rendered)
+	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(twice, claudeOSAdminLabel, opts); err == nil ||
+		!strings.Contains(err.Error(), "PreToolUse hook 2 times") {
+		t.Fatalf("carried policy with the PreToolUse entry twice = %v, want a repeat refusal", err)
+	}
+	mergedTwice := claudeOSAdminAppendEntries(t, `{"managedSourcesBehavior":"merge"}`, "PreToolUse", rendered, rendered)
+	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(mergedTwice, claudeOSAdminLabel, opts); err != nil {
+		t.Fatalf("merge with the rendered PreToolUse entry twice was refused: %v", err)
+	}
+	// A DefenseClaw handler inside another administrator entry is not the
+	// rendered entry either.
+	shared := claudeOSAdminRenderedEntry(t, opts, "PreToolUse")
+	shared["hooks"] = append([]interface{}{map[string]interface{}{"type": "command", "command": `C:\audit.exe`}}, shared["hooks"].([]interface{})...)
+	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
+		claudeOSAdminAppendEntries(t, `{"managedSourcesBehavior":"merge"}`, "PreToolUse", shared), claudeOSAdminLabel, opts,
+	); err == nil {
+		t.Fatal("merge with a DefenseClaw handler inside another administrator entry was admitted")
+	}
+
+	// The guardian audit fails when any DefenseClaw copy falls short, for the
+	// carried policy alone and for the union with the drop-in under merge.
+	short := changed(t, changes["one-second copy"])
+	carried := claudeOSAdminSource(t, claudeOSAdminAppendEntries(t, claudeOSAdminSettings(t, opts, nil), "PreToolUse", short))
+	if present, err := claudeCodeSourceHasHookContract(carried, opts, true); present || err == nil ||
+		!strings.Contains(err.Error(), "PreToolUse") || !strings.Contains(err.Error(), "does not meet the hook contract") {
+		t.Fatalf("audit of a carried policy with a one-second copy = (present=%v, err=%v)", present, err)
+	}
+	document, err := ClaudeCodeManagedHookPolicyDocument(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := &claudeCodeSettingsSource{name: "file"}
+	if file.settings, err = decodeClaudeCodeSettings(document, "file"); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range changes {
+		osAdmin := claudeOSAdminSource(t, claudeOSAdminAppendEntries(t, `{"managedSourcesBehavior":"merge"}`, "PreToolUse", changed(t, change)))
+		merged, err := claudeCodeMergedManagedSource(osAdmin, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present, err := claudeCodeSourceHasHookContract(merged, opts, false); present || err != nil {
+			t.Fatalf("audit of the union with a %s = (present=%v, err=%v), want the contract missing", name, present, err)
+		}
+	}
+	exact := claudeOSAdminSource(t, mergedTwice)
+	merged, err := claudeCodeMergedManagedSource(exact, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present, err := claudeCodeSourceHasHookContract(merged, opts, false); !present || err != nil {
+		t.Fatalf("audit of the union with rendered copies = (present=%v, err=%v), want the contract", present, err)
+	}
+}

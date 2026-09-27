@@ -211,13 +211,22 @@ func claudeCodeOSAdminHooks(source *claudeCodeSettingsSource) (map[string]interf
 }
 
 // claudeCodeOSAdminCarriesManagedHooks reports whether an OS-admin policy
-// carries every DefenseClaw hook entry exactly as rendered for opts. A
+// carries the DefenseClaw hooks exactly as rendered for opts: on every event
+// of the contract, one DefenseClaw handler, in the rendered entry. A
 // first-wins client then loads this copy instead of the DefenseClaw drop-in,
-// which verify compares exactly, so the copy is held to the same rule: the
-// same matcher, timeout, async flag and argv. A shorter timeout, for
+// which verify holds to the same rule: the same matcher, timeout, async flag
+// and argv, and one DefenseClaw handler per event. A shorter timeout, for
 // example, lets Claude stop the hook before it can deny. Only the handler
 // command compares by path identity, so a path typed in another case still
 // matches. Other administrator entries and handlers may sit beside these.
+//
+// A DefenseClaw handler anywhere else on a contract event is refused under
+// carry and merge alike. Claude Code runs one copy of a repeated command
+// hook: it keys the copies by command, argv and condition, not by timeout or
+// async flag, and keeps one of them (the last registered, in Claude Code
+// 2.1.283). A shorter or asynchronous copy beside the rendered entry, in this
+// policy or in the union with the drop-in under merge, can then be the copy
+// that runs, and a fail-closed hook fails open.
 func claudeCodeOSAdminCarriesManagedHooks(source *claudeCodeSettingsSource, opts SetupOpts) (bool, error) {
 	hooks, err := claudeCodeOSAdminHooks(source)
 	if err != nil || hooks == nil {
@@ -234,25 +243,79 @@ func claudeCodeOSAdminCarriesManagedHooks(source *claudeCodeSettingsSource, opts
 		return false, fmt.Errorf("parse rendered Claude Code managed hook policy: %w", err)
 	}
 	command, _ := claudeCodeManagedHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-	for event, wanted := range rendered.Hooks {
-		entries, _ := hooks[event].([]interface{})
-		present := make(map[string]struct{}, len(entries))
-		for _, entry := range entries {
-			if text, ok := claudeCodeCanonicalOSAdminHookEntry(entry, command, opts); ok {
-				present[text] = struct{}{}
-			}
-		}
+	events := make([]string, 0, len(rendered.Hooks))
+	for event := range rendered.Hooks {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	carries := true
+	repeatedEvent, repeatedCount := "", 0
+	for _, event := range events {
+		wanted := rendered.Hooks[event]
+		renderedEntries := make(map[string]struct{}, len(wanted))
 		for _, entry := range wanted {
 			text, ok := claudeCodeCanonicalJSON(entry)
 			if !ok {
 				return false, fmt.Errorf("canonicalize the rendered Claude Code %s hook", event)
 			}
-			if _, found := present[text]; !found {
-				return false, nil
+			renderedEntries[text] = struct{}{}
+		}
+		entries, _ := hooks[event].([]interface{})
+		present := make(map[string]struct{}, len(entries))
+		handlers := 0
+		for _, entry := range entries {
+			owned := claudeCodeOSAdminEntryManagedHandlers(entry, opts)
+			if owned == 0 {
+				continue
 			}
+			text, ok := claudeCodeCanonicalOSAdminHookEntry(entry, command, opts)
+			if _, exact := renderedEntries[text]; !ok || !exact {
+				return false, fmt.Errorf(
+					"Claude Code %s registers a DefenseClaw %s hook that differs from the entry DefenseClaw renders for it; Claude Code runs one copy of a repeated hook whatever its timeout or async flag, so that copy can replace the enforcing one. Keep only the DefenseClaw hooks printed by %s",
+					source.label(),
+					event,
+					claudeCodeManagedPolicyExportCommandFor(opts),
+				)
+			}
+			present[text] = struct{}{}
+			handlers += owned
+		}
+		if len(present) != len(renderedEntries) {
+			carries = false
+		} else if handlers != len(wanted) && repeatedEvent == "" {
+			repeatedEvent, repeatedCount = event, handlers
 		}
 	}
+	if !carries {
+		return false, nil
+	}
+	if repeatedEvent != "" {
+		return false, fmt.Errorf(
+			"Claude Code %s registers the DefenseClaw %s hook %d times; keep one copy of each DefenseClaw hook printed by %s",
+			source.label(),
+			repeatedEvent,
+			repeatedCount,
+			claudeCodeManagedPolicyExportCommandFor(opts),
+		)
+	}
 	return true, nil
+}
+
+// claudeCodeOSAdminEntryManagedHandlers counts the DefenseClaw handlers in
+// one policy hook entry.
+func claudeCodeOSAdminEntryManagedHandlers(raw interface{}, opts SetupOpts) int {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	handlers, _ := entry["hooks"].([]interface{})
+	owned := 0
+	for _, rawHandler := range handlers {
+		if handler, ok := rawHandler.(map[string]interface{}); ok && claudeCodeHandlerTargetsCurrentRuntime(handler, opts) {
+			owned++
+		}
+	}
+	return owned
 }
 
 // claudeCodeCanonicalOSAdminHookEntry is the canonical JSON of one policy

@@ -1000,6 +1000,30 @@ func claudeCodeEventHasEnforcingHook(
 	return false
 }
 
+// claudeCodeEventHasWeakManagedHandler reports whether any DefenseClaw
+// handler on the event, under any matcher, falls short of the contract.
+// Claude Code runs one copy of a repeated command hook: it keys the copies by
+// command, argv and condition, not by timeout or async flag, and keeps one of
+// them. One enforcing copy therefore proves nothing while another copy with a
+// shorter timeout or an async flag sits beside it.
+func claudeCodeEventHasWeakManagedHandler(entries []interface{}, requiredAsync bool, requiredTimeout int, opts SetupOpts) bool {
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		handlers, _ := entry["hooks"].([]interface{})
+		for _, rawHandler := range handlers {
+			handler, ok := rawHandler.(map[string]interface{})
+			if ok && claudeCodeHandlerTargetsCurrentRuntime(handler, opts) &&
+				!claudeCodeHandlerMatchesContract(handler, requiredAsync, requiredTimeout, opts) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func claudeCodeEventTargetsCurrentRuntime(entries []interface{}, opts SetupOpts) bool {
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]interface{})

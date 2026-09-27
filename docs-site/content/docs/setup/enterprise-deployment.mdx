@@ -1378,12 +1378,16 @@ DefenseClaw drop-in. Enrollment accepts it when it sets
 `"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
 which then becomes the approved-client floor) or already carries the
 DefenseClaw hook entries exactly (same matcher, timeout, `async` flag and
-arguments), which the installed CLI prints with `enterprise windows
-export-claude-policy --agent-version <x.y.z>` for the Claude Code version the
-endpoints run; any other HKLM policy is refused with both fixes named, and the
+arguments, one copy of each), which the installed CLI prints with `enterprise
+windows export-claude-policy --agent-version <x.y.z>`, where `<x.y.z>` is the
+`agent_version` recorded for the target (the version its enrollment refusal
+names); any other HKLM policy is refused with both fixes named, and the
 refusal names the export command for its target. Without `--agent-version` the
 export prints the oldest supported hook contract. A policy that registers a
-DefenseClaw hook outside the target's hook contract is refused either way.
+DefenseClaw hook outside the target's hook contract, or anywhere but in the
+exported entry, is refused either way: Claude Code runs one copy of a repeated
+hook whatever its timeout or `async` flag, so a changed copy could replace the
+exported one.
 Claude loads only an HKLM policy that carries the
 matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
 and while the lock is enforced no HKLM policy may set it to `false`; setting

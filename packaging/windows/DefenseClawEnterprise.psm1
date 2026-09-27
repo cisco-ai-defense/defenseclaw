@@ -18084,12 +18084,218 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
+function ConvertFrom-DefenseClawStrictJsonString {
+    param([Parameter(Mandatory)][string]$Token)
+    # The value of a JSON string token that ConvertFrom-DefenseClawStrictJson
+    # has already validated, quotes included.
+    $body = $Token.Substring(1, $Token.Length - 2)
+    if ($body.IndexOf([char]'\') -lt 0) {
+        return $body
+    }
+    $builder = [Text.StringBuilder]::new($body.Length)
+    $index = 0
+    while ($index -lt $body.Length) {
+        $slash = $body.IndexOf([char]'\', $index)
+        if ($slash -lt 0) {
+            [void]$builder.Append($body, $index, $body.Length - $index)
+            break
+        }
+        [void]$builder.Append($body, $index, $slash - $index)
+        $escape = $body[$slash + 1]
+        $index = $slash + 2
+        if ($escape -ceq 'u') {
+            [void]$builder.Append([char][Convert]::ToInt32($body.Substring($index, 4), 16))
+            $index += 4
+        }
+        elseif ($escape -ceq 'b') {
+            [void]$builder.Append([char]8)
+        }
+        elseif ($escape -ceq 'f') {
+            [void]$builder.Append([char]12)
+        }
+        elseif ($escape -ceq 'n') {
+            [void]$builder.Append([char]10)
+        }
+        elseif ($escape -ceq 'r') {
+            [void]$builder.Append([char]13)
+        }
+        elseif ($escape -ceq 't') {
+            [void]$builder.Append([char]9)
+        }
+        else {
+            # '"', '\' and '/' stand for themselves.
+            [void]$builder.Append($escape)
+        }
+    }
+    return $builder.ToString()
+}
+
+function ConvertFrom-DefenseClawStrictJson {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # One JSON document (RFC 8259), read the way Claude Code (JSON.parse) and
+    # the gateway (encoding/json) read settings: no comments, trailing commas,
+    # single quotes, NaN or leading zeros, and only JSON whitespace around the
+    # value. Keys are case-sensitive and a repeated key keeps its last value.
+    # ConvertFrom-Json differs from both, and between Windows PowerShell 5.1
+    # and PowerShell 7: it accepts some of those forms and rejects keys that
+    # differ only in case. An object is a Dictionary[string, object] with
+    # ordinal keys, an array a List[object] and a number a double. Throws on
+    # anything else.
+    $tokens = [regex]::new(
+        '\G[\t\n\r ]*(?:(?<string>"(?>(?:[^"\\\x00-\x1f]+|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*)")|' +
+            '(?<number>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)|' +
+            '(?<literal>true|false|null)|(?<punctuation>[{}\[\]:,])|(?<end>\z))',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    $stack = [Collections.Generic.Stack[hashtable]]::new()
+    # value: a value is due; first-value: a value or ']' after '[';
+    # first-key: a key or '}' after '{'; key: a key after ','; colon: ':';
+    # next: ',' or the closing bracket; end: only whitespace may follow.
+    $state = 'value'
+    $position = 0
+    $root = $null
+    while ($true) {
+        $match = $tokens.Match($Text, $position)
+        if (-not $match.Success) {
+            throw "invalid JSON at offset $position"
+        }
+        $position = $match.Index + $match.Length
+        if ($match.Groups['end'].Success) {
+            if ($state -cne 'end') {
+                throw 'unexpected end of JSON input'
+            }
+            return , $root
+        }
+        if ($state -ceq 'end') {
+            throw "invalid JSON after the top-level value at offset $($match.Index)"
+        }
+        $punctuation = ''
+        if ($match.Groups['punctuation'].Success) {
+            $punctuation = $match.Groups['punctuation'].Value
+        }
+        $frame = $null
+        if ($stack.Count -gt 0) {
+            $frame = $stack.Peek()
+        }
+        $value = $null
+        if ($state -ceq 'colon') {
+            if ($punctuation -cne ':') {
+                throw "invalid JSON at offset $($match.Index): expected ':'"
+            }
+            $state = 'value'
+            continue
+        }
+        elseif ($state -ceq 'next') {
+            if ($punctuation -ceq ',') {
+                $state = if ([bool]$frame['object']) { 'key' } else { 'value' }
+                continue
+            }
+            if (($punctuation -ceq '}' -and [bool]$frame['object']) -or
+                ($punctuation -ceq ']' -and -not [bool]$frame['object'])) {
+                [void]$stack.Pop()
+                $value = $frame['container']
+            }
+            else {
+                throw "invalid JSON at offset $($match.Index): expected ',' or a closing bracket"
+            }
+        }
+        elseif ($state -ceq 'first-key' -or $state -ceq 'key') {
+            if ($state -ceq 'first-key' -and $punctuation -ceq '}') {
+                [void]$stack.Pop()
+                $value = $frame['container']
+            }
+            elseif ($match.Groups['string'].Success) {
+                $frame['key'] = ConvertFrom-DefenseClawStrictJsonString -Token $match.Groups['string'].Value
+                $state = 'colon'
+                continue
+            }
+            else {
+                throw "invalid JSON at offset $($match.Index): expected a string key"
+            }
+        }
+        elseif ($state -ceq 'first-value' -and $punctuation -ceq ']') {
+            [void]$stack.Pop()
+            $value = $frame['container']
+        }
+        elseif ($punctuation -ceq '{' -or $punctuation -ceq '[') {
+            # encoding/json refuses nesting deeper than 10000.
+            if ($stack.Count -ge 10000) {
+                throw 'JSON nesting exceeds 10000 levels'
+            }
+            if ($punctuation -ceq '{') {
+                $stack.Push(@{
+                    object = $true
+                    key = ''
+                    container = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+                })
+                $state = 'first-key'
+            }
+            else {
+                $stack.Push(@{
+                    object = $false
+                    key = ''
+                    container = [Collections.Generic.List[object]]::new()
+                })
+                $state = 'first-value'
+            }
+            continue
+        }
+        elseif ($match.Groups['string'].Success) {
+            $value = ConvertFrom-DefenseClawStrictJsonString -Token $match.Groups['string'].Value
+        }
+        elseif ($match.Groups['number'].Success) {
+            $number = $match.Groups['number'].Value
+            try {
+                $value = [double]::Parse(
+                    $number,
+                    [Globalization.NumberStyles]::Float,
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+            }
+            catch {
+                # Windows PowerShell 5.1 throws on overflow where PowerShell 7
+                # returns infinity.
+                $value = if ($number.StartsWith('-')) { [double]::NegativeInfinity } else { [double]::PositiveInfinity }
+            }
+        }
+        elseif ($match.Groups['literal'].Success) {
+            $literal = $match.Groups['literal'].Value
+            if ($literal -ceq 'true') {
+                $value = $true
+            }
+            elseif ($literal -ceq 'false') {
+                $value = $false
+            }
+        }
+        else {
+            throw "invalid JSON at offset $($match.Index): expected a value"
+        }
+        if ($stack.Count -eq 0) {
+            $root = $value
+            $state = 'end'
+            continue
+        }
+        $parent = $stack.Peek()
+        if ([bool]$parent['object']) {
+            $parent['container'][[string]$parent['key']] = $value
+        }
+        else {
+            [void]$parent['container'].Add($value)
+        }
+        $state = 'next'
+    }
+}
+
+function Test-DefenseClawJsonObject {
+    param([AllowNull()]$Value)
+    return [bool]($Value -is [Collections.Generic.Dictionary[string, object]])
+}
+
 function ConvertTo-DefenseClawCanonicalJsonText {
     param([AllowNull()]$Value)
-    # Key-sorted compact JSON, so two parsed documents compare by content
-    # rather than by key order or whitespace. Numbers compare by value:
-    # Windows PowerShell 5.1 parses 30.0 as a decimal and PowerShell 7 as a
-    # double, and the gateway treats both as 30.
+    # Key-sorted compact JSON of a ConvertFrom-DefenseClawStrictJson value, so
+    # two documents compare by content rather than by key order or
+    # whitespace. Numbers compare by value, as the gateway compares them.
     if ($null -eq $Value) {
         return 'null'
     }
@@ -18102,12 +18308,12 @@ function ConvertTo-DefenseClawCanonicalJsonText {
         }
         return 'false'
     }
-    if ($Value -is [Management.Automation.PSCustomObject]) {
-        $names = [string[]]@($Value.PSObject.Properties | Microsoft.PowerShell.Core\ForEach-Object { $_.Name })
+    if (Test-DefenseClawJsonObject -Value $Value) {
+        $names = [string[]]@($Value.Keys)
         [Array]::Sort($names, [StringComparer]::Ordinal)
         $members = @(foreach ($name in $names) {
             (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $name -Compress) + ':' +
-                (ConvertTo-DefenseClawCanonicalJsonText -Value $Value.PSObject.Properties[$name].Value)
+                (ConvertTo-DefenseClawCanonicalJsonText -Value (Get-DefenseClawJsonMember -Object $Value -Name $name).Value)
         })
         return '{' + ($members -join ',') + '}'
     }
@@ -18124,240 +18330,254 @@ function ConvertTo-DefenseClawCanonicalJsonText {
     return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
-# The HKLM Status view below mirrors the Go admission rules in
-# internal/gateway/connector (claudeCodeOSAdminAdmitsManagedHooks,
-# claudeCodeSourceHasHookContract, claudeCodeMatcherCovers,
-# claudeCodeHandlerMatchesContract, claudeCodeOSAdminKeepsManagedHooksOnly),
-# so Status reports the policy the way the gateway enrolls Claude under it.
-# JSON member names are compared case-sensitively, as Claude and Go read them.
 function Get-DefenseClawJsonMember {
     param(
         [AllowNull()]$Object,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name
     )
-    if ($Object -isnot [Management.Automation.PSCustomObject]) {
+    # One member of a ConvertFrom-DefenseClawStrictJson object, by exact case
+    # as Claude Code and the gateway read settings keys, or $null.
+    if (-not (Test-DefenseClawJsonObject -Value $Object)) {
         return $null
     }
-    $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property -or $property.Name -cne $Name) {
+    $value = $null
+    if (-not $Object.TryGetValue($Name, [ref]$value)) {
         return $null
     }
-    return $property
+    return [pscustomobject]@{
+        Name = $Name
+        Value = $value
+    }
 }
 
-function Test-DefenseClawClaudeMatcherCovers {
-    param(
-        [Parameter(Mandatory)][string]$EventType,
-        [AllowNull()]$Matcher,
-        [AllowEmptyString()][string]$Required = ''
-    )
-    # Claude ignores matchers for these events, so their value cannot narrow
-    # the effective registration.
-    if ($EventType -cin @(
-        'UserPromptSubmit',
-        'PostToolBatch',
-        'Stop',
-        'TeammateIdle',
-        'TaskCreated',
-        'TaskCompleted',
-        'WorktreeRemove',
-        'CwdChanged'
-    )) {
-        return $true
+function Get-DefenseClawClaudeInstalledHookContract {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # The DefenseClaw managed-settings.d policy the gateway rendered: its hook
+    # entries (the selected hook contract), the handler command and argv, and
+    # whether it carries the managed-hooks-only lock, which the gateway omits
+    # only under claude_code.allow_unmanaged_hooks. $null when not installed.
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ClaudeManagedPolicyPath `
+        -PathType Leaf)) {
+        return $null
     }
-    $text = ''
-    if ($null -ne $Matcher) {
-        if ($Matcher -isnot [string]) {
-            return $false
-        }
-        $text = [string]$Matcher
+    try {
+        $installed = ConvertFrom-DefenseClawStrictJson -Text (
+            [IO.File]::ReadAllText([string]$Layout.ClaudeManagedPolicyPath, [Text.Encoding]::UTF8)
+        )
     }
-    # Empty and "*" match every occurrence.
-    if ($text -ceq '' -or $text -ceq '*' -or $text -ceq $Required) {
-        return $true
+    catch {
+        # A drop-in that does not parse is reported by verify; it carries no
+        # contract to compare with here.
+        return $null
     }
-    if ($EventType -ceq 'FileChanged') {
-        $actualFiles = @($text.Split('|'))
-        foreach ($requiredFile in $Required.Split('|')) {
-            if ($requiredFile -cnotin $actualFiles) {
-                return $false
+    $hooks = Get-DefenseClawJsonMember -Object $installed -Name 'hooks'
+    if ($null -eq $hooks -or -not (Test-DefenseClawJsonObject -Value $hooks.Value)) {
+        return $null
+    }
+    $command = $null
+    $arguments = $null
+    foreach ($eventName in @($hooks.Value.Keys)) {
+        foreach ($entry in @((Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName).Value)) {
+            $handlers = Get-DefenseClawJsonMember -Object $entry -Name 'hooks'
+            if ($null -eq $handlers) {
+                continue
+            }
+            foreach ($handler in @($handlers.Value)) {
+                $handlerCommand = Get-DefenseClawJsonMember -Object $handler -Name 'command'
+                $handlerArgs = Get-DefenseClawJsonMember -Object $handler -Name 'args'
+                if ($null -ne $handlerCommand -and $handlerCommand.Value -is [string] -and $null -ne $handlerArgs) {
+                    $command = [string]$handlerCommand.Value
+                    $arguments = ConvertTo-DefenseClawCanonicalJsonText -Value $handlerArgs.Value
+                    break
+                }
+            }
+            if ($null -ne $command) {
+                break
             }
         }
-        return $true
+        if ($null -ne $command) {
+            break
+        }
     }
-    return $false
-}
-
-function Get-DefenseClawClaudeHandlerAsyncState {
-    param([AllowNull()]$Handler)
-    # Every spelling Claude accepts makes a handler asynchronous. Returns
-    # $null for a non-boolean value, which no contract accepts.
-    if ($Handler -isnot [Management.Automation.PSCustomObject]) {
+    if ($null -eq $command) {
         return $null
     }
-    $active = $false
-    foreach ($key in @('async', 'asyncRewake', 'async_rewake')) {
-        $property = Get-DefenseClawJsonMember -Object $Handler -Name $key
-        if ($null -eq $property) {
-            continue
-        }
-        if ($property.Value -isnot [bool]) {
-            return $null
-        }
-        $active = $active -or [bool]$property.Value
+    $lock = Get-DefenseClawJsonMember -Object $installed -Name 'allowManagedHooksOnly'
+    return [pscustomobject]@{
+        hooks = $hooks.Value
+        command = $command
+        arguments = $arguments
+        locked = [bool]($null -ne $lock -and $lock.Value -is [bool] -and [bool]$lock.Value)
     }
-    return $active
+}
+
+function Test-DefenseClawClaudeHookPathSame {
+    param(
+        [AllowNull()]$Left,
+        [AllowNull()]$Right
+    )
+    if ($Left -isnot [string] -or $Right -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    try {
+        return [bool]([IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right))
+    }
+    catch {
+        return $false
+    }
 }
 
 function Test-DefenseClawClaudeHandlerTargetsHook {
     param(
         [AllowNull()]$Handler,
-        [Parameter(Mandatory)][string]$Command,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments
+        [Parameter(Mandatory)]$Contract
     )
+    # A command handler that runs the installed DefenseClaw hook with the
+    # DefenseClaw argv (claudeCodeHandlerTargetsCurrentRuntime).
     $type = Get-DefenseClawJsonMember -Object $Handler -Name 'type'
-    $commandProperty = Get-DefenseClawJsonMember -Object $Handler -Name 'command'
-    $argumentsProperty = Get-DefenseClawJsonMember -Object $Handler -Name 'args'
-    if ($null -eq $type -or $type.Value -isnot [string] -or
-        [string]$type.Value -cne 'command' -or
-        $null -eq $commandProperty -or $commandProperty.Value -isnot [string] -or
-        $null -eq $argumentsProperty -or
-        $argumentsProperty.Value -isnot [Collections.IList]) {
+    $command = Get-DefenseClawJsonMember -Object $Handler -Name 'command'
+    $arguments = Get-DefenseClawJsonMember -Object $Handler -Name 'args'
+    if ($null -eq $type -or $type.Value -isnot [string] -or [string]$type.Value -cne 'command' -or
+        $null -eq $command -or $null -eq $arguments -or
+        $arguments.Value -isnot [Collections.IList]) {
         return $false
     }
-    $actualArguments = @($argumentsProperty.Value)
-    if ($actualArguments.Count -ne $Arguments.Count) {
+    if (-not (Test-DefenseClawClaudeHookPathSame -Left $command.Value -Right $Contract.command)) {
         return $false
     }
-    for ($index = 0; $index -lt $actualArguments.Count; $index++) {
-        if ($actualArguments[$index] -isnot [string] -or
-            [string]$actualArguments[$index] -cne $Arguments[$index]) {
-            return $false
-        }
-    }
-    return Test-DefenseClawSamePathIdentity `
-        -Left ([string]$commandProperty.Value) `
-        -Right $Command
+    return [bool]((ConvertTo-DefenseClawCanonicalJsonText -Value $arguments.Value) -ceq $Contract.arguments)
 }
 
-function Get-DefenseClawPathIdentityForComparison {
+function Get-DefenseClawClaudeEntryHookHandlerCount {
     param(
-        [Parameter(Mandatory)][Type]$NativeSecurityType,
-        [Parameter(Mandatory)][string]$Path
+        [AllowNull()]$Entry,
+        [Parameter(Mandatory)]$Contract
     )
-    # The volume serial and file index of the object at Path (reparse points
-    # followed, as os.Stat does), '' when it does not exist, and $null when
-    # the lookup fails any other way.
-    try {
-        return ([string]$NativeSecurityType::GetFileIdentity($Path)).ToLowerInvariant()
+    # The DefenseClaw handlers in one policy hook entry
+    # (claudeCodeOSAdminEntryManagedHandlers).
+    $handlers = Get-DefenseClawJsonMember -Object $Entry -Name 'hooks'
+    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
+        return 0
     }
-    catch {
-        $exception = $_.Exception
-        while ($null -ne $exception -and
-            $exception -isnot [ComponentModel.Win32Exception]) {
-            $exception = $exception.InnerException
+    $count = 0
+    foreach ($handler in $handlers.Value) {
+        if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $Contract) {
+            $count++
         }
-        # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND and ERROR_BAD_NETPATH,
-        # the codes Go reports as os.ErrNotExist.
-        if ($null -ne $exception -and
-            [int]$exception.NativeErrorCode -in @(2, 3, 53)) {
-            return ''
-        }
-        return $null
     }
+    return $count
 }
 
-function Test-DefenseClawSamePathIdentity {
+function ConvertTo-DefenseClawClaudeCanonicalHookEntry {
     param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Left,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Right
+        [AllowNull()]$Entry,
+        [Parameter(Mandatory)]$Contract
     )
-    # Mirrors internal/pathidentity.Same, which the gateway uses to match a
-    # handler command to the hook binary. Two existing paths match only when
-    # they open the same file, so a junction, hard link, short name, or
-    # extended-length or UNC spelling of the hook binary matches it. Two
-    # missing paths match when their full paths are equal ignoring case. An
-    # existing and a missing path, or any other lookup failure, never match.
-    $paths = [Collections.Generic.List[string]]::new()
-    foreach ($value in @($Left, $Right)) {
-        try {
-            $full = [IO.Path]::GetFullPath($value)
-            $root = [IO.Path]::GetPathRoot($full)
-        }
-        catch {
-            return $false
-        }
-        if ($null -ne $root -and $full.Length -gt $root.Length) {
-            $full = $full.TrimEnd('\')
-        }
-        $paths.Add($full)
+    # Canonical JSON of one policy hook entry with each DefenseClaw handler's
+    # command spelled as installed, so a path typed in another case matches.
+    $handlers = Get-DefenseClawJsonMember -Object $Entry -Name 'hooks'
+    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
+        return (ConvertTo-DefenseClawCanonicalJsonText -Value $Entry)
     }
-    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
-    $leftIdentity = Get-DefenseClawPathIdentityForComparison `
-        -NativeSecurityType $nativeSecurityType `
-        -Path $paths[0]
-    $rightIdentity = Get-DefenseClawPathIdentityForComparison `
-        -NativeSecurityType $nativeSecurityType `
-        -Path $paths[1]
-    if ($null -eq $leftIdentity -or $null -eq $rightIdentity) {
-        return $false
-    }
-    if ($leftIdentity.Length -eq 0 -and $rightIdentity.Length -eq 0) {
-        return [string]::Equals(
-            $paths[0],
-            $paths[1],
-            [StringComparison]::OrdinalIgnoreCase
-        )
-    }
-    return [bool]($leftIdentity.Length -ne 0 -and $leftIdentity -ceq $rightIdentity)
+    $names = [string[]]@($Entry.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $members = @(foreach ($name in $names) {
+        $value = (Get-DefenseClawJsonMember -Object $Entry -Name $name).Value
+        $text = if ($name -ceq 'hooks') {
+            $items = @(foreach ($handler in $value) {
+                if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $Contract) {
+                    $handlerNames = [string[]]@($handler.Keys)
+                    [Array]::Sort($handlerNames, [StringComparer]::Ordinal)
+                    $handlerMembers = @(foreach ($handlerName in $handlerNames) {
+                        $handlerValue = if ($handlerName -ceq 'command') {
+                            $Contract.command
+                        }
+                        else {
+                            (Get-DefenseClawJsonMember -Object $handler -Name $handlerName).Value
+                        }
+                        (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $handlerName -Compress) + ':' +
+                            (ConvertTo-DefenseClawCanonicalJsonText -Value $handlerValue)
+                    })
+                    '{' + ($handlerMembers -join ',') + '}'
+                }
+                else {
+                    ConvertTo-DefenseClawCanonicalJsonText -Value $handler
+                }
+            })
+            '[' + ($items -join ',') + ']'
+        }
+        else {
+            ConvertTo-DefenseClawCanonicalJsonText -Value $value
+        }
+        (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $name -Compress) + ':' + $text
+    })
+    return '{' + ($members -join ',') + '}'
 }
 
-function Test-DefenseClawClaudeHandlerMatchesContract {
+function Get-DefenseClawClaudeHKLMHookCopies {
     param(
-        [AllowNull()]$Handler,
-        [Parameter(Mandatory)][bool]$RequiredAsync,
-        [Parameter(Mandatory)][string]$Command,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments
+        [Parameter(Mandatory)]$Settings,
+        [Parameter(Mandatory)]$Contract
     )
-    # The timeout is not part of the contract.
-    $asynchronous = Get-DefenseClawClaudeHandlerAsyncState -Handler $Handler
-    if ($null -eq $asynchronous -or [bool]$asynchronous -ne $RequiredAsync) {
-        return $false
+    # How the policy registers the installed DefenseClaw hooks
+    # (connector claudeCodeOSAdminCarriesManagedHooks). carries: every
+    # installed entry is present exactly, with the same matcher, timeout,
+    # async flag and argv; other administrator entries may sit beside them.
+    # differs: the first installed event, in ordinal order, with a DefenseClaw
+    # handler in any other entry. Claude Code runs one copy of a repeated
+    # command hook, keyed by command, argv and condition but not by timeout or
+    # async flag, so such a copy can replace the enforcing one under carry and
+    # merge alike. repeated: the first event
+    # with more DefenseClaw handlers than installed entries, with its count.
+    $result = [ordered]@{
+        carries = $false
+        differs = $null
+        repeated = $null
+        repeated_count = 0
     }
-    $condition = Get-DefenseClawJsonMember -Object $Handler -Name 'if'
-    if ($null -ne $condition -and
-        ($condition.Value -isnot [string] -or [string]$condition.Value -cne '')) {
-        return $false
+    $policyHooks = Get-DefenseClawJsonMember -Object $Settings -Name 'hooks'
+    if ($null -eq $policyHooks -or -not (Test-DefenseClawJsonObject -Value $policyHooks.Value)) {
+        return [pscustomobject]$result
     }
-    return Test-DefenseClawClaudeHandlerTargetsHook `
-        -Handler $Handler `
-        -Command $Command `
-        -Arguments $Arguments
-}
-
-function Test-DefenseClawClaudeInstalledPolicyLocksManagedHooks {
-    param([Parameter(Mandatory)][hashtable]$Layout)
-    # The gateway renders allowManagedHooksOnly=true into the DefenseClaw
-    # policy unless the administrator opted out with
-    # claude_code.allow_unmanaged_hooks, so the installed policy records which
-    # form applies. Without a readable policy, assume the default lock.
-    try {
-        if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.ClaudeManagedPolicyPath `
-            -PathType Leaf)) {
-            return $true
+    $carries = $true
+    $events = [string[]]@($Contract.hooks.Keys)
+    [Array]::Sort($events, [StringComparer]::Ordinal)
+    foreach ($eventName in $events) {
+        $installedEntries = @((Get-DefenseClawJsonMember -Object $Contract.hooks -Name $eventName).Value)
+        $wanted = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($entry in $installedEntries) {
+            [void]$wanted.Add((ConvertTo-DefenseClawCanonicalJsonText -Value $entry))
         }
-        $installed = Microsoft.PowerShell.Management\Get-Content `
-            -LiteralPath $Layout.ClaudeManagedPolicyPath `
-            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
-        $lock = Get-DefenseClawJsonMember -Object $installed -Name 'allowManagedHooksOnly'
-        # Only an absent key is the rendered opt-out; anything but true or
-        # absent is not a DefenseClaw rendering, so keep the default.
-        return $null -ne $lock
+        $present = Get-DefenseClawJsonMember -Object $policyHooks.Value -Name $eventName
+        $found = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $handlers = 0
+        if ($null -ne $present -and $present.Value -is [Collections.IList]) {
+            foreach ($entry in $present.Value) {
+                $owned = Get-DefenseClawClaudeEntryHookHandlerCount -Entry $entry -Contract $Contract
+                if ($owned -eq 0) {
+                    continue
+                }
+                $text = ConvertTo-DefenseClawClaudeCanonicalHookEntry -Entry $entry -Contract $Contract
+                if (-not $wanted.Contains($text)) {
+                    $result.differs = $eventName
+                    return [pscustomobject]$result
+                }
+                [void]$found.Add($text)
+                $handlers += $owned
+            }
+        }
+        if ($found.Count -ne $wanted.Count) {
+            $carries = $false
+        }
+        elseif ($handlers -ne $installedEntries.Count -and $null -eq $result.repeated) {
+            $result.repeated = $eventName
+            $result.repeated_count = $handlers
+        }
     }
-    catch {
-        return $true
-    }
+    $result.carries = $carries
+    return [pscustomobject]$result
 }
 
 function Test-DefenseClawClaudeHKLMCarriesInstalledHooks {
@@ -18366,131 +18586,19 @@ function Test-DefenseClawClaudeHKLMCarriesInstalledHooks {
         [Parameter(Mandatory)][hashtable]$Layout,
         $Contract = $null
     )
-    # True when the policy carries the installed DefenseClaw hook matrix:
-    # every installed event registration is covered by an entry whose matcher
-    # covers it and that holds an equivalent handler, and no DefenseClaw
-    # handler sits under an event outside that matrix. A hooks value that is
-    # not an object throws, because the gateway refuses such a policy.
-    $policyHooks = Get-DefenseClawJsonMember -Object $Settings -Name 'hooks'
-    if ($null -ne $policyHooks -and
-        $policyHooks.Value -isnot [Management.Automation.PSCustomObject]) {
-        throw 'its hooks value is not a JSON object'
+    # Whether the policy carries the installed DefenseClaw hooks exactly
+    # (connector claudeCodeOSAdminCarriesManagedHooks): every installed entry,
+    # with the same matcher, timeout, async flag and argv, and no other
+    # DefenseClaw handler on those events. Other administrator entries may sit
+    # beside them. $Settings is a ConvertFrom-DefenseClawStrictJson object.
+    if ($null -eq $Contract) {
+        $Contract = Get-DefenseClawClaudeInstalledHookContract -Layout $Layout
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.ClaudeManagedPolicyPath `
-        -PathType Leaf)) {
+    if ($null -eq $Contract) {
         return $false
     }
-    $installed = Microsoft.PowerShell.Management\Get-Content `
-        -LiteralPath $Layout.ClaudeManagedPolicyPath `
-        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
-    $installedHooks = Get-DefenseClawJsonMember -Object $installed -Name 'hooks'
-    if ($null -eq $installedHooks -or $null -eq $policyHooks -or
-        $installedHooks.Value -isnot [Management.Automation.PSCustomObject]) {
-        return $false
-    }
-    $installedEvents = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::Ordinal
-    )
-    $hookIdentities = [Collections.Generic.List[object]]::new()
-    foreach ($eventHooks in @($installedHooks.Value.PSObject.Properties)) {
-        [void]$installedEvents.Add([string]$eventHooks.Name)
-        $present = Get-DefenseClawJsonMember `
-            -Object $policyHooks.Value `
-            -Name ([string]$eventHooks.Name)
-        if ($null -eq $present -or $present.Value -isnot [Collections.IList] -or
-            $eventHooks.Value -isnot [Collections.IList]) {
-            return $false
-        }
-        $presentEntries = @($present.Value)
-        foreach ($installedEntry in @($eventHooks.Value)) {
-            $installedMatcher = Get-DefenseClawJsonMember -Object $installedEntry -Name 'matcher'
-            $requiredMatcher = if ($null -ne $installedMatcher -and
-                $installedMatcher.Value -is [string]) {
-                [string]$installedMatcher.Value
-            }
-            else {
-                ''
-            }
-            $installedHandlers = Get-DefenseClawJsonMember -Object $installedEntry -Name 'hooks'
-            if ($null -eq $installedHandlers -or
-                $installedHandlers.Value -isnot [Collections.IList]) {
-                return $false
-            }
-            foreach ($installedHandler in @($installedHandlers.Value)) {
-                $requiredAsync = Get-DefenseClawClaudeHandlerAsyncState -Handler $installedHandler
-                $command = Get-DefenseClawJsonMember -Object $installedHandler -Name 'command'
-                $arguments = Get-DefenseClawJsonMember -Object $installedHandler -Name 'args'
-                if ($null -eq $requiredAsync -or
-                    $null -eq $command -or $command.Value -isnot [string] -or
-                    $null -eq $arguments -or $arguments.Value -isnot [Collections.IList]) {
-                    return $false
-                }
-                $identity = [pscustomobject]@{
-                    Command = [string]$command.Value
-                    Arguments = [string[]]@($arguments.Value)
-                }
-                $hookIdentities.Add($identity)
-                $covered = $false
-                foreach ($presentEntry in $presentEntries) {
-                    if ($presentEntry -isnot [Management.Automation.PSCustomObject]) {
-                        continue
-                    }
-                    $matcher = Get-DefenseClawJsonMember -Object $presentEntry -Name 'matcher'
-                    $matcherValue = if ($null -eq $matcher) { $null } else { $matcher.Value }
-                    if (-not (Test-DefenseClawClaudeMatcherCovers `
-                        -EventType ([string]$eventHooks.Name) `
-                        -Matcher $matcherValue `
-                        -Required $requiredMatcher)) {
-                        continue
-                    }
-                    $handlers = Get-DefenseClawJsonMember -Object $presentEntry -Name 'hooks'
-                    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
-                        continue
-                    }
-                    foreach ($handler in @($handlers.Value)) {
-                        if (Test-DefenseClawClaudeHandlerMatchesContract `
-                            -Handler $handler `
-                            -RequiredAsync ([bool]$requiredAsync) `
-                            -Command $identity.Command `
-                            -Arguments $identity.Arguments) {
-                            $covered = $true
-                            break
-                        }
-                    }
-                    if ($covered) {
-                        break
-                    }
-                }
-                if (-not $covered) {
-                    return $false
-                }
-            }
-        }
-    }
-    foreach ($eventHooks in @($policyHooks.Value.PSObject.Properties)) {
-        if ($installedEvents.Contains([string]$eventHooks.Name) -or
-            $eventHooks.Value -isnot [Collections.IList]) {
-            continue
-        }
-        foreach ($entry in @($eventHooks.Value)) {
-            $handlers = Get-DefenseClawJsonMember -Object $entry -Name 'hooks'
-            if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
-                continue
-            }
-            foreach ($handler in @($handlers.Value)) {
-                foreach ($identity in $hookIdentities) {
-                    if (Test-DefenseClawClaudeHandlerTargetsHook `
-                        -Handler $handler `
-                        -Command $identity.Command `
-                        -Arguments $identity.Arguments) {
-                        return $false
-                    }
-                }
-            }
-        }
-    }
-    return $true
+    $copies = Get-DefenseClawClaudeHKLMHookCopies -Settings $Settings -Contract $Contract
+    return [bool]([bool]$copies.carries -and $null -eq $copies.differs -and $null -eq $copies.repeated)
 }
 
 function Get-DefenseClawClaudeMergePendingTargets {
@@ -18553,15 +18661,16 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
     # and either way keeps the managed-hooks-only lock. These are the rules of
     # connector.ClaudeCodeOSAdminPolicyAdmitsManagedHooks, which compares
     # against the policy it renders; this compares against the installed
-    # drop-in. Settings keys match by exact case and values by JSON type, as
-    # Claude reads them. Both implementations run the documents in
+    # drop-in. The value is parsed as strict JSON with case-sensitive keys and
+    # settings compare by JSON type, as Claude reads them. Both
+    # implementations run the documents in
     # internal/gateway/connector/testdata/claude_hklm_admission_vectors.json,
     # so change them together. Never throws.
     $policyName = 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings'
     $mergeFloor = $script:ClaudeManagedSourcesMergeMinimumClientVersion
     $export = (
         'defenseclaw-gateway enterprise windows export-claude-policy ' +
-        '--agent-version <the Claude Code version your endpoints run>'
+        '--agent-version <the agent_version recorded for the target, which the enrollment refusal names>'
     )
     $optOut = 'or set claude_code.allow_unmanaged_hooks: true in the DefenseClaw config'
     $remedy = (
@@ -18579,20 +18688,19 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
         detail = $null
     }
     try {
-        $text = if ($null -eq $Raw) { '' } else { $Raw.Trim() }
         # An empty value, JSON null and an empty object carry no settings, so
         # Claude falls through to the file tier.
-        if ([string]::IsNullOrWhiteSpace($text) -or $text -ceq 'null') {
+        if ([string]::IsNullOrWhiteSpace($Raw)) {
             return [pscustomobject]$state
         }
-        if (-not $text.StartsWith('{')) {
+        $settings = ConvertFrom-DefenseClawStrictJson -Text $Raw
+        if ($null -eq $settings) {
+            return [pscustomobject]$state
+        }
+        if (-not (Test-DefenseClawJsonObject -Value $settings)) {
             throw 'the Settings value is not a JSON object'
         }
-        $settings = $text | Microsoft.PowerShell.Utility\ConvertFrom-Json
-        if ($settings -isnot [Management.Automation.PSCustomObject]) {
-            throw 'the Settings value is not a JSON object'
-        }
-        if (@($settings.PSObject.Properties).Count -eq 0) {
+        if ($settings.Count -eq 0) {
             return [pscustomobject]$state
         }
         $contract = Get-DefenseClawClaudeInstalledHookContract -Layout $Layout
@@ -18632,7 +18740,7 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
             $state.detail = "$policyName sets strictPluginOnlyCustomization to a value Claude Code does not accept"
             return [pscustomobject]$state
         }
-        if ($null -ne $hooks -and $hooks.Value -isnot [Management.Automation.PSCustomObject]) {
+        if ($null -ne $hooks -and -not (Test-DefenseClawJsonObject -Value $hooks.Value)) {
             $state.shadowed = $true
             $state.detail = "$policyName sets hooks to a value that is not a JSON object"
             return [pscustomobject]$state
@@ -18642,8 +18750,9 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
         # One on an event outside the installed contract comes from an export
         # for another Claude Code version, and the gateway refuses it.
         if ($null -ne $contract -and $null -ne $hooks) {
-            foreach ($eventHooks in @($hooks.Value.PSObject.Properties)) {
-                if ($null -ne (Get-DefenseClawJsonMember -Object $contract.hooks -Name $eventHooks.Name) -or
+            foreach ($eventName in @($hooks.Value.Keys)) {
+                $eventHooks = Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName
+                if ($null -ne (Get-DefenseClawJsonMember -Object $contract.hooks -Name $eventName) -or
                     $eventHooks.Value -isnot [Collections.IList]) {
                     continue
                 }
@@ -18655,7 +18764,7 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
                     foreach ($handler in $handlers.Value) {
                         if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $contract) {
                             $state.shadowed = $true
-                            $state.detail = "$policyName registers the DefenseClaw $($eventHooks.Name) hook, which is outside the installed DefenseClaw hook contract; replace the DefenseClaw hooks in it with the ones printed by $export"
+                            $state.detail = "$policyName registers the DefenseClaw $eventName hook, which is outside the installed DefenseClaw hook contract; replace the DefenseClaw hooks in it with the ones printed by $export"
                             return [pscustomobject]$state
                         }
                     }
@@ -18667,10 +18776,28 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
         $unlocks = [bool]($null -ne $lock -and -not [bool]$lock.Value)
         $locks = [bool]($null -ne $lock -and [bool]$lock.Value)
         $lockConflict = "$policyName sets allowManagedHooksOnly false, which conflicts with the DefenseClaw managed-hooks-only lock; remove the setting $optOut"
+        # Claude Code runs one copy of a repeated command hook whatever its
+        # timeout or async flag, so a DefenseClaw handler outside the installed
+        # entry is refused under carry and merge alike, and a carried policy
+        # keeps one DefenseClaw handler per event, as the drop-in verify does.
+        $carries = $false
+        if ($null -ne $contract) {
+            $copies = Get-DefenseClawClaudeHKLMHookCopies -Settings $settings -Contract $contract
+            if ($null -ne $copies.differs) {
+                $state.shadowed = $true
+                $state.detail = "$policyName registers a DefenseClaw $($copies.differs) hook that differs from the installed entry; Claude Code runs one copy of a repeated hook whatever its timeout or async flag, so that copy can replace the enforcing one. Keep only the DefenseClaw hooks printed by $export"
+                return [pscustomobject]$state
+            }
+            if ([bool]$copies.carries -and $null -ne $copies.repeated) {
+                $state.shadowed = $true
+                $state.detail = "$policyName registers the DefenseClaw $($copies.repeated) hook $($copies.repeated_count) times; keep one copy of each DefenseClaw hook printed by $export"
+                return [pscustomobject]$state
+            }
+            $carries = [bool]$copies.carries
+        }
         # A policy that carries the hooks is the one a first-wins client loads
         # alone, merge or not, so it must keep the lock itself.
-        if ($null -ne $contract -and
-            (Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $Layout -Contract $contract)) {
+        if ($carries) {
             $state.managed_sources_merge = $merge
             if (-not $lockWaived -and $unlocks) {
                 $state.shadowed = $true
@@ -18690,10 +18817,10 @@ function Get-DefenseClawClaudeHKLMPolicyVerdict {
                 return [pscustomobject]$state
             }
             if ($null -ne $hooks) {
-                foreach ($eventHooks in @($hooks.Value.PSObject.Properties)) {
-                    if ($eventHooks.Value -isnot [Collections.IList]) {
+                foreach ($eventName in @($hooks.Value.Keys)) {
+                    if ((Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName).Value -isnot [Collections.IList]) {
                         $state.shadowed = $true
-                        $state.detail = "$policyName sets hooks.$($eventHooks.Name) to a value that is not a list, so Claude Code cannot merge it"
+                        $state.detail = "$policyName sets hooks.$eventName to a value that is not a list, so Claude Code cannot merge it"
                         return [pscustomobject]$state
                     }
                 }
@@ -18739,18 +18866,6 @@ function Get-DefenseClawClaudeHKLMPolicyState {
                 [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
             )
         }
-        if (-not [string]::IsNullOrWhiteSpace($raw)) {
-            $settings = $raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
-            if ($settings -isnot [Management.Automation.PSCustomObject]) {
-                throw 'the Settings value is not a JSON object'
-            }
-            Set-DefenseClawClaudeHKLMPolicyDecision `
-                -State $state `
-                -Settings $settings `
-                -Layout $Layout `
-                -PolicyName $policyName `
-                -Remedy $remedy
-        }
     }
     catch {
         return [pscustomobject][ordered]@{
@@ -18769,96 +18884,6 @@ function Get-DefenseClawClaudeHKLMPolicyState {
         }
     }
     return (Get-DefenseClawClaudeHKLMPolicyVerdict -Raw $raw -Layout $Layout)
-}
-
-function Set-DefenseClawClaudeHKLMPolicyDecision {
-    param(
-        [Parameter(Mandatory)][Collections.IDictionary]$State,
-        [Parameter(Mandatory)]$Settings,
-        [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$PolicyName,
-        [Parameter(Mandatory)][string]$Remedy
-    )
-    # Mirrors ClaudeCodeOSAdminPolicyAdmitsManagedHooks: the gateway enrolls
-    # Claude targets under this policy only when it admits the DefenseClaw
-    # hooks, so a policy it refuses is reported as shadowing them. Throws
-    # only for a hooks value the gateway cannot read.
-    if ($Settings -isnot [Management.Automation.PSCustomObject]) {
-        throw 'the Settings value is not a JSON object'
-    }
-    $mergeFloor = $script:ClaudeManagedSourcesMergeMinimumClientVersion
-    $optOut = 'or set claude_code.allow_unmanaged_hooks: true in the DefenseClaw config'
-    $disable = Get-DefenseClawJsonMember -Object $Settings -Name 'disableAllHooks'
-    $helper = Get-DefenseClawJsonMember -Object $Settings -Name 'policyHelper'
-    $behavior = Get-DefenseClawJsonMember -Object $Settings -Name 'managedSourcesBehavior'
-    $lock = Get-DefenseClawJsonMember -Object $Settings -Name 'allowManagedHooksOnly'
-    $strict = Get-DefenseClawJsonMember -Object $Settings -Name 'strictPluginOnlyCustomization'
-    $strictValid = $null -eq $strict -or $strict.Value -is [bool] -or (
-        $strict.Value -is [Collections.IList] -and
-        @(@($strict.Value) | Microsoft.PowerShell.Core\Where-Object {
-            $_ -isnot [string]
-        }).Count -eq 0
-    )
-    if ($null -ne $disable -and
-        ($disable.Value -isnot [bool] -or [bool]$disable.Value)) {
-        $State.shadowed = $true
-        $State.detail = "$PolicyName sets disableAllHooks, which disables the DefenseClaw hooks"
-        return
-    }
-    if ($null -ne $helper -and $null -ne $helper.Value) {
-        $State.shadowed = $true
-        $State.detail = "$PolicyName sets policyHelper, which supersedes file-based managed hooks; add the hooks printed by defenseclaw-gateway enterprise windows export-claude-policy to the helper output"
-        return
-    }
-    if (($null -ne $lock -and $lock.Value -isnot [bool]) -or -not $strictValid) {
-        $State.shadowed = $true
-        $State.detail = "$PolicyName sets allowManagedHooksOnly or strictPluginOnlyCustomization to an unsupported value, so the gateway refuses it; $Remedy"
-        return
-    }
-    $merge = [bool](
-        $null -ne $behavior -and
-        $behavior.Value -is [string] -and
-        [string]$behavior.Value -ceq 'merge'
-    )
-    $State.managed_sources_merge = $merge
-    # Without the administrator opt-out the DefenseClaw lock must survive the
-    # outranking policy, however the sources combine.
-    $lockRequired = Test-DefenseClawClaudeInstalledPolicyLocksManagedHooks -Layout $Layout
-    $locked = [bool]($null -ne $lock -and [bool]$lock.Value)
-    $explicitUnlock = [bool]($null -ne $lock -and -not [bool]$lock.Value)
-    if (Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $Settings -Layout $Layout) {
-        # First-wins selects this policy on every client, so it must carry
-        # the lock itself.
-        if ($lockRequired -and -not $locked) {
-            $State.shadowed = $true
-            $State.detail = "$PolicyName carries the DefenseClaw hooks and outranks the DefenseClaw managed-settings.d policy, so the managed-hooks-only lock in that policy does not apply; add `"allowManagedHooksOnly`": true (printed by defenseclaw-gateway enterprise windows export-claude-policy) to it, $optOut"
-        }
-        return
-    }
-    if (-not $merge) {
-        $State.shadowed = $true
-        $State.detail = "$PolicyName outranks the DefenseClaw managed-settings.d policy; $Remedy"
-        return
-    }
-    if ($lockRequired -and $explicitUnlock) {
-        $State.shadowed = $true
-        $State.detail = "$PolicyName sets allowManagedHooksOnly=false, which conflicts with the DefenseClaw managed-hooks-only lock; remove the setting $optOut"
-        return
-    }
-    $policyHooks = Get-DefenseClawJsonMember -Object $Settings -Name 'hooks'
-    if ($null -ne $policyHooks) {
-        foreach ($eventHooks in @($policyHooks.Value.PSObject.Properties)) {
-            if ($eventHooks.Value -isnot [Collections.IList]) {
-                # A merge-honoring client unions both tiers' hook lists; the
-                # gateway refuses a list it cannot merge.
-                $State.shadowed = $true
-                $State.detail = "$PolicyName hooks for $($eventHooks.Name) are not a list, so the gateway cannot merge them with the DefenseClaw managed-settings.d policy"
-                return
-            }
-        }
-    }
-    $State.merge_client_floor_required = $true
-    $State.detail = "$PolicyName requests managedSourcesBehavior merge; Claude Code clients older than $mergeFloor ignore it and load only that policy, so approved-client application control must require Claude Code $mergeFloor or newer"
 }
 
 function ConvertTo-DefenseClawBoundedDiagnostic {
