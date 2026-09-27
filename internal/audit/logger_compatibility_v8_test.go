@@ -13,6 +13,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -125,6 +126,52 @@ func TestCompatibilityAuditV8CarriesSandboxIdentity(t *testing.T) {
 	ApplyEnvelope(&pinned, CorrelationEnvelope{SandboxID: "sbx-ctx", SandboxName: "dc-ctx"})
 	if pinned.SandboxID != "sbx-pinned" || pinned.SandboxName != "dc-ctx" {
 		t.Fatalf("ApplyEnvelope = %+v", pinned)
+	}
+}
+
+// TestCompatibilityAuditV8OmitsMalformedSandboxIdentity pins the shape
+// check on the body's sandbox attribution: a value that is not a bounded
+// sandbox identifier is omitted and the other one is kept.
+func TestCompatibilityAuditV8OmitsMalformedSandboxIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name, id, sandboxName string
+		wantID, wantName      bool
+	}{
+		{name: "both valid", id: "sbx-1", sandboxName: "dc-codex-app", wantID: true, wantName: true},
+		{name: "id with spaces", id: "sbx 1", sandboxName: "dc-codex-app", wantName: true},
+		{name: "name with markup", id: "sbx-1", sandboxName: "<dc-codex-app>", wantID: true},
+		{name: "leading dash", id: "-sbx", sandboxName: "-dc"},
+		{name: "oversized", id: strings.Repeat("i", maxSandboxIDBytes+1), sandboxName: strings.Repeat("n", maxSandboxNameBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logger := newTestLogger(t)
+			runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+			logger.SetRuntimeV8Emitter(runtime)
+			if err := logger.LogEvent(Event{
+				Action: string(ActionCodexNotify), Target: "codex.session", Actor: "codex", Severity: "INFO",
+				SandboxID: test.id, SandboxName: test.sandboxName,
+			}); err != nil {
+				t.Fatalf("LogEvent: %v", err)
+			}
+			_, records := runtime.snapshot()
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want 1", len(records))
+			}
+			body, ok := records[0].Body()
+			if !ok {
+				t.Fatal("record has no body")
+			}
+			object, err := body.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, present := object["sandbox_id"]; present != test.wantID || (present && got != test.id) {
+				t.Fatalf("sandbox_id = %#v present=%v, want present=%v", got, present, test.wantID)
+			}
+			if got, present := object["sandbox_name"]; present != test.wantName || (present && got != test.sandboxName) {
+				t.Fatalf("sandbox_name = %#v present=%v, want present=%v", got, present, test.wantName)
+			}
+		})
 	}
 }
 

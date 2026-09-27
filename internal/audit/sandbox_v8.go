@@ -505,6 +505,7 @@ func NewSandboxRecorder(logger *Logger) *SandboxRecorder {
 
 const (
 	maxSandboxNameBytes          = 128
+	maxSandboxIDBytes            = 256
 	maxSandboxConditionMessage   = 1024
 	maxSandboxEgressReasonBytes  = 512
 	maxSandboxEgressOutcomeBytes = 4096
@@ -1375,7 +1376,7 @@ func (identity SandboxIdentity) validate(requireName bool) error {
 	if identity.Name != "" && !sandboxIdentifier(identity.Name, maxSandboxNameBytes) {
 		return fmt.Errorf("audit: sandbox name is not a bounded identifier")
 	}
-	if identity.ID != "" && !sandboxIdentifier(identity.ID, 256) {
+	if identity.ID != "" && !sandboxIdentifier(identity.ID, maxSandboxIDBytes) {
 		return fmt.Errorf("audit: sandbox id is not a bounded identifier")
 	}
 	if identity.Connector != "" && !observability.IsStableToken(identity.Connector) {

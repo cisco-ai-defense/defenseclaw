@@ -192,12 +192,13 @@ func compatibilityAuditV8Body(event Event) (map[string]any, map[string]observabi
 	}
 	// Sandbox attribution has no generic correlation field yet, so a
 	// sandbox's codex notify, inspect and other generic rows carry it in
-	// the body.
-	if event.SandboxID != "" {
+	// the body. A value outside the shape of defenseclaw.sandbox.id or
+	// defenseclaw.sandbox.name is omitted, never rewritten.
+	if sandboxIdentifier(event.SandboxID, maxSandboxIDBytes) {
 		body["sandbox_id"] = event.SandboxID
 		classes["/sandbox_id"] = observability.FieldClassIdentifier
 	}
-	if event.SandboxName != "" {
+	if sandboxIdentifier(event.SandboxName, maxSandboxNameBytes) {
 		body["sandbox_name"] = event.SandboxName
 		classes["/sandbox_name"] = observability.FieldClassIdentifier
 	}
