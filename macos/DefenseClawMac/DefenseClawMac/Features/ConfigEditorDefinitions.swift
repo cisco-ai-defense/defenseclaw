@@ -88,8 +88,15 @@ enum ConfigFieldValidation {
             guard let number = Int(value) else {
                 return Result(severity: "error", message: "expected an integer")
             }
-            if field.key.contains("port"), !(1...65535).contains(number) {
-                return Result(severity: "error", message: "port must be between 1 and 65535")
+            // openshell ingress/egress ports: 0 derives them from gateway.api_port.
+            let derivable = ["openshell.ingress_port", "openshell.egress_port"].contains(field.key)
+            if field.key.contains("port"), !(1...65535).contains(number), !(derivable && number == 0) {
+                return Result(severity: "error", message: derivable
+                    ? "port must be 0 (derived) or between 1 and 65535"
+                    : "port must be between 1 and 65535")
+            }
+            if field.key.hasPrefix("openshell."), number < 0 {
+                return Result(severity: "error", message: "value must be zero or greater")
             }
             if ["timeout", "interval", "retries", "max_"].contains(where: field.key.contains), number < 0 {
                 return Result(severity: "error", message: "value must be zero or greater")
@@ -204,9 +211,108 @@ enum ConfigEditorCatalog {
         return out
     }
 
+    /// The `openshell:` keys (OpenShell 0.1 sandboxes), a port of the TUI's
+    /// `_openshell_section`. Pack-governed keys offer "(inherit)"; keys an
+    /// administrator constrains (openshell.admin) are read-only with the
+    /// reason, and every key is in managed_enterprise.
+    static func openShellSection(config: YAMLNode?) -> ConfigEditorSection {
+        let admin = config?["openshell.admin"]?.mapping ?? [:]
+        var adminValues: [String: Any] = [:]
+        for (key, node) in admin {
+            switch node {
+            case .scalar(let value): adminValues[key] = value
+            case .sequence(let items): adminValues[key] = items.compactMap(\.string)
+            case .mapping: break
+            }
+        }
+        let mode = (config?["deployment_mode"]?.string ?? "").lowercased()
+        let managed = mode == "managed_enterprise" || mode == "managed"
+        let minProfile = (adminValues["min_profile"] as? String) ?? ""
+        let profiles = ["open", "balanced", "strict"]
+        let floor = profiles.firstIndex(of: minProfile) ?? 0
+        let inheritBool = ["", "true", "false"]
+
+        var fields: [ConfigEditorField] = [
+            .init(label: "Enabled", key: "openshell.enabled", kind: .bool,
+                  hint: "Sandbox listeners and API on the daemon (sandbox setup turns it on)."),
+            .init(label: "OpenShell Binary", key: "openshell.binary", hint: "The upstream openshell CLI."),
+            .init(label: "Gateway Name", key: "openshell.gateway.name",
+                  hint: "OpenShell gateway registration; empty uses the active one."),
+            .init(label: "Gateway Workspace", key: "openshell.gateway.workspace", hint: "OpenShell workspace; empty is default."),
+            .init(label: "Ingress Port", key: "openshell.ingress_port", kind: .int, hint: "Sandbox hook ingress; 0 is api_port+1."),
+            .init(label: "Egress Port", key: "openshell.egress_port", kind: .int, hint: "DefenseClaw egress proxy; 0 is api_port+2."),
+            .init(label: "Pack", key: "openshell.pack", hint: "Policy pack: open, balanced, strict, a custom pack, or a path."),
+            .init(label: "Pack Dir", key: "openshell.pack_dir", hint: "Custom packs as <name>/pack.yaml."),
+            .init(label: "Profile", key: "openshell.profile", kind: .choice, options: [""] + Array(profiles[floor...]),
+                  hint: "Network profile; (inherit) takes the pack's."
+                      + (minProfile.isEmpty ? "" : " Your organization requires at least \(minProfile).")),
+            .init(label: "Skip-permissions (yolo)", key: "openshell.yolo", kind: .choice, options: inheritBool,
+                  hint: "--dangerously-skip-permissions by default."),
+            .init(label: "Workdir Mode", key: "openshell.workdir.mode", kind: .choice, options: ["", "mount", "copy"],
+                  hint: "mount: live folder; copy: untrusted repos."),
+            .init(label: "Secret Masks", key: "openshell.workdir.masks", hint: "Extra secret-file globs, comma-separated."),
+            .init(label: "Unmask", key: "openshell.workdir.unmask", hint: "Masked paths to share, comma-separated."),
+            .init(label: "Max Upload MB", key: "openshell.workdir.max_upload_mb", kind: .int, hint: "Copy-mode upload cap; 0 inherits."),
+            .init(label: "Git Depth", key: "openshell.workdir.git_depth", kind: .int, hint: "Copy-mode history depth."),
+            .init(label: "On Exit", key: "openshell.workdir.on_exit", kind: .choice, options: ["ask", "keep", "undo"],
+                  hint: "End-of-session default."),
+            .init(label: "Egress Block", key: "openshell.egress.block", hint: "Blocked hosts, comma-separated."),
+            .init(label: "Egress Allow", key: "openshell.egress.allow", hint: "Allowlist for balanced/strict, comma-separated."),
+            .init(label: "Egress Unblocked", key: "openshell.egress.unblocked",
+                  hint: "'Always' unblocks the daemon wrote, comma-separated."),
+            .init(label: "Egress Ports", key: "openshell.egress.ports", hint: "Proxy ports, comma-separated; empty inherits."),
+            .init(label: "Large Upload MB", key: "openshell.egress.large_upload_mb", kind: .int,
+                  hint: "First-seen-host upload alert; 0 inherits."),
+            .init(label: "Blocklist Feed", key: "openshell.egress.feed", kind: .choice, options: ["", "builtin", "none"],
+                  hint: "The pack's feeds unless set."),
+            .init(label: "Base Image", key: "openshell.image.base", hint: "Overlay base image; empty is the pinned NVIDIA base."),
+            .init(label: "Approval Debounce ms", key: "openshell.approvals.debounce_ms", kind: .int,
+                  hint: "Batch approvals until hooks are quiet."),
+            .init(label: "Agent Proposals", key: "openshell.approvals.agent_proposals", kind: .choice, options: inheritBool,
+                  hint: "Let the agent propose rules (default on)."),
+            .init(label: "CPU", key: "openshell.resources.cpu", hint: "Per-sandbox CPU, for example 2 or 500m."),
+            .init(label: "Memory", key: "openshell.resources.memory", hint: "Per-sandbox memory, for example 4Gi."),
+            .init(label: "Harnesses", key: "openshell.harnesses", hint: "claudecode, codex (feeds the policy connectors)."),
+            .init(label: "Shell Wrappers", key: "openshell.wrappers", kind: .header,
+                  headerValue: "Change with: defenseclaw sandbox enable|disable <harness>"),
+            .init(label: "MCP Import", key: "openshell.mcp.import", kind: .choice, options: inheritBool,
+                  hint: "Bring the harness's MCP servers along."),
+            .init(label: "MCP Host Ports", key: "openshell.mcp.host_ports",
+                  hint: "Localhost ports opened for host MCP servers, comma-separated."),
+            .init(label: "Upstream Telemetry", key: "openshell.upstream_telemetry", kind: .bool,
+                  hint: "Keep OpenShell's anonymous usage telemetry."),
+            .init(label: "Token Delivery", key: "openshell.token_delivery", kind: .choice, options: ["provider", "env"],
+                  hint: "How the sandbox token reaches hooks."),
+            .init(label: "Middleware (experimental)", key: "openshell.middleware.enabled", kind: .bool,
+                  hint: "Supervisor middleware; Phase 3."),
+            .init(label: "Organization Policy", key: "openshell.admin", kind: .header,
+                  headerValue: managed ? "Administrator-owned (managed_enterprise)" : "Edit config.yaml directly"),
+        ]
+        let locks = SandboxAdminLocks.locks(admin: adminValues, managed: managed, keys: fields.map(\.key))
+        fields = fields.map { field in
+            guard field.kind != .header, let reason = locks[field.key] else { return field }
+            var locked = field
+            locked.kind = .header
+            locked.headerValue = "read-only: \(sandboxAdminMessage); \(reason)"
+            return locked
+        }
+        if let legacy = config?["openshell.mode"]?.string {
+            fields.append(.init(label: "Legacy Mode", key: "openshell.mode", kind: .header,
+                                headerValue: "\(legacy) — run: defenseclaw sandbox legacy-cleanup --dry-run"))
+        }
+        return ConfigEditorSection(
+            name: "OpenShell Sandboxes",
+            summary: "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
+                + (managed ? " Administrator-owned (managed_enterprise): read-only." : ""),
+            help: "Pack-governed keys show (inherit) until set. Run `defenseclaw sandbox policy explain` to see every "
+                + "resolved setting and where it comes from.",
+            fields: fields
+        )
+    }
+
     /// The full section catalog, in TUI order. Per-connector override groups
     /// are generated for the active roster.
-    static func sections(activeConnectors: [String]) -> [ConfigEditorSection] {
+    static func sections(activeConnectors: [String], config: YAMLNode? = nil) -> [ConfigEditorSection] {
         var sections: [ConfigEditorSection] = []
 
         sections.append(ConfigEditorSection(
@@ -635,20 +741,7 @@ enum ConfigEditorCatalog {
             ]
         ))
 
-        // Legacy standalone sandbox keys stay visible (read-only) so an old
-        // install can be recognised; binary/policy_dir/version/auto_pair/
-        // host_networking are ignored by the runtime and fall through to the
-        // read-only "Other (uncatalogued)" section if still present.
-        sections.append(ConfigEditorSection(
-            name: "OpenShell (legacy - read-only)",
-            summary: "Legacy standalone sandbox settings (read by `defenseclaw sandbox legacy-cleanup` only). "
-                + "OpenShell 0.1 support is being rebuilt.",
-            help: "On the Linux host, run `defenseclaw sandbox legacy-cleanup --dry-run` to review the cleanup.",
-            fields: [
-                .init(label: "Mode", key: "openshell.mode", kind: .header),
-                .init(label: "Sandbox Home", key: "openshell.sandbox_home", kind: .header),
-            ]
-        ))
+        sections.append(openShellSection(config: config))
 
         sections.append(ConfigEditorSection(
             name: "Inspect LLM (legacy - read-only)",

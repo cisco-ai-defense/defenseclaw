@@ -2000,6 +2000,7 @@ enum GatewayError: LocalizedError {
 
 enum GatewayErrorBody {
     static func userFacingMessage(status: Int, body: String) -> String? {
+        if let sandbox = sandboxMessage(body: body) { return sandbox }
         guard status == 503,
               let data = body.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -2010,6 +2011,24 @@ enum GatewayErrorBody {
             return nil
         }
         return "AI Discovery is disabled. Enable it before starting a scan."
+    }
+
+    /// The sandbox API's {"code","error"} refusal sentence; admin refusals
+    /// start with the organization-policy sentence (sandboxapi.AdminMessage).
+    static func sandboxMessage(body: String) -> String? {
+        let codes: Set<String> = [
+            "disabled", "unavailable", "invalid_request", "not_found", "conflict", "admin_violation",
+            "policy_violation", "pack_invalid", "image_unavailable", "policy_rejected", "upstream_error",
+        ]
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = object["code"] as? String, codes.contains(code),
+              let message = object["error"] as? String, !message.isEmpty
+        else { return nil }
+        let violation = object["violation"] as? [String: Any]
+        let admin = code == "admin_violation" || (violation?["admin"] as? Bool) == true
+        let prefix = "blocked by your organization's DefenseClaw policy"
+        return admin && !message.contains(prefix) ? "\(prefix): \(message)" : message
     }
 }
 

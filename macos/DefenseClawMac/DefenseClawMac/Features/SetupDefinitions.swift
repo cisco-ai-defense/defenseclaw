@@ -67,8 +67,7 @@ enum TUIWizards {
         splunk,
         observability,
         webhooks,
-        // No sandbox wizard: the legacy standalone OpenShell `sandbox setup`
-        // was removed, and the OpenShell 0.1 setup flow has not landed yet.
+        sandbox,
         registries,
         notificationsRouting,
         aiDiscovery,
@@ -776,6 +775,75 @@ enum TUIWizards {
             WizardField(key: "scan", label: "Scan immediately", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
         ]
     )
+
+    /// OpenShell sandbox setup (TUI Setup slot 13). The argv mirrors the TUI's
+    /// `_build_sandbox_args` byte for byte. The OpenShell installer needs sudo
+    /// and so a terminal; the app never passes --install-openshell.
+    private static let sandbox = WizardDefinition(
+        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
+        blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
+            + "Needs Docker. If OpenShell is missing, run `defenseclaw sandbox setup --install-openshell` "
+            + "in a terminal (it uses sudo).",
+        baseArgs: ["sandbox", "setup"],
+        commandBuilder: sandboxCommands,
+        validation: sandboxValidation,
+        liveDefaults: sandboxLiveDefaults,
+        fields: [
+            WizardField(key: "action", label: "Action", kind: .choice(options: ["setup", "doctor"]),
+                        defaultValue: "setup",
+                        help: "setup: the one-time sandbox setup. doctor: only check this machine."),
+            WizardField(key: "harness-claudecode", label: "Claude Code", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `claude` in a sandbox (--harness claudecode)."),
+            WizardField(key: "harness-codex", label: "Codex", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `codex` in a sandbox (--harness codex)."),
+            WizardField(key: "mounts", label: "Mount the project folder", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts "
+                            + "the folder you launch from. Off: every run works on a copy."),
+            WizardField(key: "disable-telemetry", label: "Disable OpenShell telemetry", kind: .bool,
+                        defaultValue: "yes", visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Turn OpenShell's anonymous usage telemetry off."),
+            WizardField(key: "wrappers", label: "Shell wrappers", kind: .bool, defaultValue: "no",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Make `claude` and `codex` run sandboxed when you type them "
+                            + "(undo: defenseclaw sandbox disable <harness>)."),
+            WizardField(key: "build-images", label: "Build images now", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "The first build is about 3 GB. Off: the first run builds them."),
+        ]
+    )
+
+    static func sandboxCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+        func on(_ key: String, _ fallback: String) -> Bool { value(v, key, fallback) == "yes" }
+        if value(v, "action", "setup") == "doctor" { return [["sandbox", "doctor"]] }
+        var args = ["sandbox", "setup", "--non-interactive"]
+        for harness in ["claudecode", "codex"] where on("harness-\(harness)", "yes") {
+            args += ["--harness", harness]
+        }
+        if !on("mounts", "yes") { args.append("--no-mounts") }
+        if !on("disable-telemetry", "yes") { args.append("--upstream-telemetry") }
+        args.append(on("wrappers", "no") ? "--wrappers" : "--no-wrappers")
+        if !on("build-images", "yes") { args.append("--skip-images") }
+        return [args]
+    }
+
+    static func sandboxValidation(_ values: [String: String]) -> String? {
+        guard value(values, "action", "setup") == "setup" else { return nil }
+        let any = ["claudecode", "codex"].contains { value(values, "harness-\($0)", "yes") == "yes" }
+        return any ? nil : "Choose at least one harness (Claude Code or Codex)."
+    }
+
+    static func sandboxLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        guard case .sequence(let items)? = raw["openshell.harnesses"] else { return [:] }
+        let harnesses = items.compactMap(\.string)
+        guard !harnesses.isEmpty else { return [:] }
+        return [
+            "harness-claudecode": harnesses.contains("claudecode") ? "yes" : "no",
+            "harness-codex": harnesses.contains("codex") ? "yes" : "no",
+        ]
+    }
 
     private static let splunkDashboards = WizardDefinition(
         id: "splunk-dashboards", title: "Splunk Dashboards", icon: "rectangle.3.group.bubble.left",

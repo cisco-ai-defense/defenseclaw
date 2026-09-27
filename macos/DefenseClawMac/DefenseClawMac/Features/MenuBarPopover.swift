@@ -30,6 +30,13 @@ struct MenuBarPopover: View {
             Divider()
             connectorLines
             enforcementBars
+            if appState.sandbox.status.loaded, appState.sandbox.status.enabled {
+                Divider()
+                SandboxMenuSection {
+                    appState.openSandboxes()
+                    openMainWindow()
+                }
+            }
             Divider()
             recentAlerts
             Divider()

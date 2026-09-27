@@ -120,6 +120,7 @@ struct SetupDefinitionsParityTests {
         webhookBuilderCoversCurrentNotifierOptions()
         webhookValidationRequiresProviderCredentials()
         removedStandaloneSandboxWizardStaysHidden()
+        sandboxWizardMatchesTheTUIWizard()
         print("Setup definition parity tests passed")
     }
 
@@ -680,6 +681,56 @@ struct SetupDefinitionsParityTests {
             TUIWizards.all.allSatisfy { wizard in wizard.fields.allSatisfy { !legacyKeys.contains($0.key) } },
             "no setup wizard offers the removed standalone sandbox options"
         )
+    }
+
+    private static func sandboxWizardMatchesTheTUIWizard() {
+        let wizard = TUIWizards.all.first { $0.id == "sandbox" }
+        expect(wizard != nil, "the Sandbox wizard is listed")
+        expect(wizard?.fields.contains { $0.key == "install-openshell" } == false,
+               "the app never runs the sudo installer (it needs a terminal)")
+        // The same literal the TUI test pins (test_sandbox_setup_wizard.py).
+        let defaults = Dictionary(uniqueKeysWithValues: (wizard?.fields ?? []).map { ($0.key, $0.defaultValue) })
+        expect(TUIWizards.sandboxCommands(defaults, false) == [[
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
+        ]], "defaults match the TUI wizard")
+        expect(TUIWizards.sandboxCommands([
+            "harness-codex": "no", "mounts": "no", "disable-telemetry": "no", "wrappers": "yes", "build-images": "no",
+        ], false) == [[
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--no-mounts",
+            "--upstream-telemetry", "--wrappers", "--skip-images",
+        ]], "every consent flag")
+        expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
+        expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
+               "a harness is required")
+        let config: YAMLNode = .mapping(["openshell": .mapping(["harnesses": .sequence([.scalar("codex")])])])
+        expect(TUIWizards.sandboxLiveDefaults(config) == ["harness-claudecode": "no", "harness-codex": "yes"],
+               "configured harnesses seed the toggles")
+
+        // Every flag the TUI builder can emit is one the app emits too, except
+        // the sudo installer.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let python = (try? String(
+            contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
+            encoding: .utf8
+        )) ?? ""
+        guard let start = python.range(of: "def _build_sandbox_args("),
+              let end = python.range(of: "\ndef ", range: start.upperBound..<python.endIndex)
+        else {
+            expect(false, "the TUI sandbox argv builder was not found in setup.py")
+            return
+        }
+        let body = String(python[start.upperBound..<end.lowerBound])
+        let pattern = try! NSRegularExpression(pattern: #""(--[a-z-]+)""#)
+        let matches = pattern.matches(in: body, range: NSRange(body.startIndex..., in: body))
+        let tuiFlags = Set(matches.compactMap { match in
+            Range(match.range(at: 1), in: body).map { String(body[$0]) }
+        })
+        let swiftFlags: Set<String> = [
+            "--non-interactive", "--harness", "--no-mounts", "--upstream-telemetry", "--wrappers", "--no-wrappers",
+            "--skip-images",
+        ]
+        expect(tuiFlags == swiftFlags.union(["--install-openshell"]),
+               "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {

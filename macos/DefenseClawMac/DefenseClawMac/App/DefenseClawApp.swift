@@ -20,6 +20,7 @@
 
 import SwiftUI
 import ServiceManagement
+import UserNotifications
 
 @main
 struct DefenseClawApp: App {
@@ -128,6 +129,10 @@ struct DefenseClawApp: App {
                         // ⌘⇧3 would collide with macOS's screenshot hotkey.
                         Button(panel.title) { appState.selectedPanel = panel }
                             .keyboardShortcut("s", modifiers: [.command, .shift])
+                    } else if panel == .sandboxes {
+                        // ⌘⇧4 and ⌘⇧5 are macOS screenshot and recording hotkeys.
+                        Button(panel.title) { appState.selectedPanel = panel }
+                            .keyboardShortcut("b", modifiers: [.command, .shift])
                     } else {
                         Button(panel.title) { appState.selectedPanel = panel }
                             .keyboardShortcut(KeyEquivalent(Character("\(index - 9)")), modifiers: [.command, .shift])
@@ -185,13 +190,20 @@ private struct MenuBarIcon: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     static var recreateMainWindow: (() -> Void)?
+    /// Set by AppState: (action identifier, userInfo) of a sandbox notification response.
+    static var sandboxNotificationHandler: ((String, [AnyHashable: Any]) -> Void)?
+    static let sandboxBlockedCategory = "dc.sandbox.blocked"
+    static let sandboxReviewCategory = "dc.sandbox.review"
+    static let sandboxUnblockAction = "dc.sandbox.unblock"
+    static let sandboxOpenAction = "dc.sandbox.open"
     private var miniaturizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyActivationPolicy()
         DCToolbarQuickHelpMonitor.shared.start()
+        registerSandboxNotificationCategories()
 
         // Optional hide-instead-of-minimize behavior. Standard macOS minimize is
         // the default; people can opt into a menu-bar-only transition in Settings.
@@ -228,6 +240,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { AppDelegate.openMainWindow() }
         return true
+    }
+
+    /// Blocked-destination notifications carry Unblock (this sandbox only;
+    /// "always" stays a deliberate choice in the app), asks carry Review.
+    private func registerSandboxNotificationCategories() {
+        let center = UNUserNotificationCenter.current()
+        let unblock = UNNotificationAction(
+            identifier: Self.sandboxUnblockAction, title: "Unblock for this sandbox", options: []
+        )
+        let open = UNNotificationAction(identifier: Self.sandboxOpenAction, title: "Review", options: [.foreground])
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: Self.sandboxBlockedCategory, actions: [unblock, open],
+                                   intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: Self.sandboxReviewCategory, actions: [open],
+                                   intentIdentifiers: [], options: []),
+        ])
+        center.delegate = self
+    }
+
+    nonisolated private static func isSandboxCategory(_ category: String) -> Bool {
+        category == "dc.sandbox.blocked" || category == "dc.sandbox.review"
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let content = response.notification.request.content
+        guard Self.isSandboxCategory(content.categoryIdentifier) else { return }
+        let action = response.actionIdentifier
+        let host = (content.userInfo["host"] as? String) ?? ""
+        let sandbox = (content.userInfo["sandbox"] as? String) ?? ""
+        let kind = (content.userInfo["kind"] as? String) ?? ""
+        await MainActor.run {
+            AppDelegate.sandboxNotificationHandler?(action, ["host": host, "sandbox": sandbox, "kind": kind])
+        }
+    }
+
+    /// Sandbox notifications also show while the app is frontmost (a block is
+    /// actionable now); every other notification keeps the default behavior.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        Self.isSandboxCategory(notification.request.content.categoryIdentifier) ? [.banner, .list, .sound] : []
     }
 
     func applyActivationPolicy() {

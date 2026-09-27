@@ -913,6 +913,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
 	macos/DefenseClawMac/script/test_ai_runtime_models.sh
+	macos/DefenseClawMac/script/test_sandbox_models.sh
 	macos/DefenseClawMac/script/test_panel_registry.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
