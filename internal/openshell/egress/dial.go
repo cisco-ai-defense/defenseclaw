@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -126,7 +127,7 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 		own       bool
 	)
 	resolve := resolverFunc(func(ctx context.Context, host string) ([]net.IPAddr, error) {
-		ips, err := g.resolver.LookupIPAddr(ctx, host)
+		ips, err := g.resolver.LookupIPAddr(ctx, rootedName(host))
 		if err != nil {
 			return nil, err
 		}
@@ -195,6 +196,18 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 	default:
 		return nil, selected, &dialError{status: http.StatusBadGateway, reason: "connecting to the destination failed", retry: true, err: err}
 	}
+}
+
+// rootedName makes a destination name fully qualified. Decisions work on
+// names without the trailing dot, but a resolver treats such a name as
+// relative: it tries the host's DNS search domains (glibc and Go when the
+// name has fewer dots than ndots, and after it fails to resolve), so
+// "ci.build" could reach ci.build.<search domain> on the internal network.
+func rootedName(host string) string {
+	if strings.HasSuffix(host, ".") {
+		return host
+	}
+	return host + "."
 }
 
 // dialedConn reports the validated address as its remote address (the

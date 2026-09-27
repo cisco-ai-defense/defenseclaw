@@ -307,3 +307,24 @@ func TestGuardDialTimeout(t *testing.T) {
 		t.Error("canceled dial succeeded")
 	}
 }
+
+// Names are resolved fully qualified, so the host's DNS search domains never
+// turn a public-looking name such as ci.build into an internal machine
+// (ci.build.<search domain>). Decisions keep the name without the dot.
+func TestGuardDialResolvesRootedNames(t *testing.T) {
+	g, r, _ := newTestGuard(t)
+	r.set("ci.build", []string{publicV4})
+	for _, host := range []string{"ci.build", "ci.build."} {
+		conn, _, err := g.dial(context.Background(), host, 443, nil)
+		if err != nil {
+			t.Fatalf("dial(%s) = %v", host, err)
+		}
+		_ = conn.Close()
+	}
+	if got := r.names(); len(got) != 2 || got[0] != "ci.build." || got[1] != "ci.build." {
+		t.Errorf("resolver asked for %q, want the rooted name twice", got)
+	}
+	if got := rootedName("example.com"); got != "example.com." {
+		t.Errorf("rootedName = %q", got)
+	}
+}

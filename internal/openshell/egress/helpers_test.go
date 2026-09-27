@@ -36,11 +36,14 @@ import (
 
 // fakeResolver answers from a table. A host with several answer sets
 // returns them in turn (the last one repeats), which models rebinding.
+// Names are looked up without their trailing dot; asked records the names
+// exactly as the proxy passed them.
 type fakeResolver struct {
 	mu      sync.Mutex
 	answers map[string][][]string
 	errs    map[string]error
 	calls   map[string]int
+	asked   []string
 }
 
 func newFakeResolver() *fakeResolver {
@@ -65,9 +68,18 @@ func (r *fakeResolver) callCount(host string) int {
 	return r.calls[host]
 }
 
-func (r *fakeResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+// names returns the names the resolver was asked for, as asked.
+func (r *fakeResolver) names() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return slices.Clone(r.asked)
+}
+
+func (r *fakeResolver) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.asked = append(r.asked, name)
+	host := strings.TrimSuffix(name, ".")
 	n := r.calls[host]
 	r.calls[host] = n + 1
 	if err := r.errs[host]; err != nil {

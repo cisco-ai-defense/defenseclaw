@@ -49,7 +49,8 @@
 // Operator block and allow lists and per-sandbox or persistent unblock
 // decisions layer on top.
 //
-// Hostnames are resolved on the proxy side. Every DNS answer is checked by
+// Hostnames are resolved on the proxy side as fully qualified names, never
+// through the host's DNS search domains. Every DNS answer is checked by
 // the netguard SSRF policy immediately before the connection and the dial
 // targets the checked address literal, so private, loopback, link-local,
 // CGNAT, ULA, metadata, reserved and translated addresses, and this machine's
