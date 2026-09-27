@@ -161,7 +161,7 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 		}
 		return
 	}
-	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d))
+	_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff))
 }
 
 // enforceAll re-checks the approved rules of every ready sandbox against
@@ -474,13 +474,27 @@ func categoryText(e egress.Event) string {
 
 // LargeUploadBytes is the configured first-seen-host upload alert threshold
 // for the proxy's counter (openshell.egress.large_upload_mb, 0 disables).
+// It applies only to a principal without its own: every sandbox's proxy
+// credential carries the threshold of its resolved pack (largeUploadBytes),
+// re-registered whenever its policy is.
 func (m *Manager) LargeUploadBytes() int64 {
 	eff, err := m.baseEffective(m.config())
 	if err != nil {
 		return egress.DefaultLargeUploadBytes
 	}
-	if eff.Egress.LargeUploadMB <= 0 {
+	return largeUploadBytes(eff)
+}
+
+// largeUploadBytes is eff's large-upload threshold as a principal carries
+// it: negative when its pack turns the signal off, zero (the counter's)
+// without a policy.
+func largeUploadBytes(eff *packs.Effective) int64 {
+	switch {
+	case eff == nil:
+		return 0
+	case eff.Egress.LargeUploadMB <= 0:
 		return -1
+	default:
+		return int64(eff.Egress.LargeUploadMB) << 20
 	}
-	return int64(eff.Egress.LargeUploadMB) << 20
 }

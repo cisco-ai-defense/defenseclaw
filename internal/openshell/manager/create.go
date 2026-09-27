@@ -347,7 +347,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		if cred, err = egress.NewCredential(); err != nil {
 			return nil, err
 		}
-		if err := m.creds.Register(cred, m.principal(binding.ID, "", name, egressDec)); err != nil {
+		if err := m.creds.Register(cred, m.principal(binding.ID, "", name, egressDec, eff)); err != nil {
 			return nil, err
 		}
 		rb.add("revoke proxy credential", func(context.Context) error { m.creds.Revoke(binding.ID); return nil })
@@ -481,7 +481,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "record the sandbox id on its binding: %v", err)
 	}
 	if cred.Username != "" {
-		_ = m.creds.Register(cred, m.principal(binding.ID, scopeID(sb.ID, name), name, egressDec))
+		_ = m.creds.Register(cred, m.principal(binding.ID, scopeID(sb.ID, name), name, egressDec, eff))
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return nil, err
@@ -682,9 +682,11 @@ func (m *Manager) revokeBinding(id string) error {
 }
 
 // principal is the egress identity of a sandbox, carrying the sandbox's own
-// decider (egressDecider), so the proxy decides it by its policy alone.
-func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider) egress.Principal {
-	return egress.Principal{BindingID: bindingID, SandboxID: sandboxID, SandboxName: name, Decider: d}
+// decider (egressDecider) and large-upload threshold, so the proxy decides
+// and counts it by its policy alone.
+func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider, eff *packs.Effective) egress.Principal {
+	return egress.Principal{BindingID: bindingID, SandboxID: sandboxID, SandboxName: name, Decider: d,
+		LargeUploadBytes: largeUploadBytes(eff)}
 }
 
 // reserve claims name for a create.

@@ -617,20 +617,20 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 	}
 	if !exemptFromUploadBlock(dec) && p.counter.uploadBlocked(pr, dec.Host) {
 		release()
-		refused := p.largeUploadRefusal(d, dec, "")
+		refused := p.largeUploadRefusal(pr, d, dec, "")
 		return nil, &refused
 	}
 	return release, nil
 }
 
-// largeUploadRefusal is dec, made by d, refused by the large-upload block;
-// scope names the domain or address total that crossed, empty for the
-// destination's own. An unblock of the destination lifts the block.
-func (p *Proxy) largeUploadRefusal(d *Decider, dec Decision, scope string) Decision {
+// largeUploadRefusal is dec, made by d for pr, refused by the large-upload
+// block; scope names the domain or address total that crossed, empty for
+// the destination's own. An unblock of the destination lifts the block.
+func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string) Decision {
 	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-	refused.Reason, refused.Unblockable = p.largeUploadReason(), d.UnblocksAllowed()
+	refused.Reason, refused.Unblockable = p.largeUploadReason(pr), d.UnblocksAllowed()
 	if scope != "" {
-		refused.Reason = p.largeUploadScopeReason(scope)
+		refused.Reason = p.largeUploadScopeReason(pr, scope)
 	}
 	return refused
 }
@@ -642,13 +642,13 @@ func exemptFromUploadBlock(dec Decision) bool {
 	return dec.Source == SourceUnblock || dec.Source == SourceOperator || dec.Source == SourceAdmin
 }
 
-func (p *Proxy) largeUploadReason() string {
-	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", formatBytes(p.counter.LargeUploadBytes()))
+func (p *Proxy) largeUploadReason(pr Principal) string {
+	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", formatBytes(p.counter.thresholdFor(pr)))
 }
 
-func (p *Proxy) largeUploadScopeReason(scope string) string {
+func (p *Proxy) largeUploadScopeReason(pr Principal, scope string) string {
 	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
-		formatBytes(p.counter.LargeUploadBytes()), scope)
+		formatBytes(p.counter.thresholdFor(pr)), scope)
 }
 
 func formatBytes(n int64) string {
@@ -715,7 +715,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		// refuse it now, with a body and an event, instead of cutting it
 		// silently after the 200.
 		_ = upstream.Close()
-		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(d, dec, scope), start)
+		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope), start)
 		return
 	}
 	t := &tunnel{
@@ -984,9 +984,9 @@ func (p *Proxy) emitFailed(pr Principal, method string, dec Decision, status int
 func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e := p.event(EventLargeUpload, t.principal, t.method, t.dec)
 	e.TunnelID = t.id
-	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason()
+	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason(t.principal)
 	if v.scope != "" {
-		e.Reason = p.largeUploadScopeReason(v.scope)
+		e.Reason = p.largeUploadScopeReason(t.principal, v.scope)
 	}
 	e.BytesUp = v.total
 	if d := t.flow.dest.Load(); d != nil {

@@ -229,7 +229,7 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 		d, _ = m.egressDecider(cfg, eff)
 	}
 	return triage.Policy{
-		Effective: eff, Decider: d, Principal: m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d),
+		Effective: eff, Decider: d, Principal: m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff),
 		Resolver: m.opts.Resolver, AgentProposals: cfg.OpenShell.Approvals.AgentProposalsEnabled(),
 	}
 }

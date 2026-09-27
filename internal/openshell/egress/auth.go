@@ -46,6 +46,12 @@ type Principal struct {
 	// (Options.Decider, SetDecider). Re-registering the credential with a
 	// new decider applies it to later tunnels and requests.
 	Decider *Decider
+	// LargeUploadBytes is the sandbox's own large-upload threshold (its
+	// pack's egress.large_upload_mb): zero uses the counter's
+	// (CounterOptions.LargeUploadBytes), negative turns the signal off for
+	// the sandbox. Re-registering the credential applies a new value to
+	// later tunnels and requests.
+	LargeUploadBytes int64
 }
 
 // Authenticator maps a proxy credential to its principal. Implementations

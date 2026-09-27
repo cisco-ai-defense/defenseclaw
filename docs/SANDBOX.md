@@ -527,7 +527,10 @@ applied to sandboxes.
 The `Counter` keeps bytes up and down per tunnel and per destination. When
 the bytes sent to a destination this sandbox had not contacted before cross
 the large-upload threshold (`large_upload_mb`, 25 MiB in the `open` pack), it
-raises a `large_upload` event once. Uploads to first-seen hosts are also
+raises a `large_upload` event once. The threshold is the sandbox's own: its
+proxy credential carries the value of its resolved pack
+(`Principal.LargeUploadBytes`) and follows configuration changes; the
+counter's own value applies only to a principal without one. Uploads to first-seen hosts are also
 totalled per registrable domain and per resolved address (per /64 for IPv6),
 so rotating subdomains or domains that point at one server does not reset the
 count. `CounterOptions.BlockLargeUploads` can also cut the tunnel; no

@@ -24,6 +24,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,6 +151,45 @@ func TestPolicyChangesCloseOpenTunnels(t *testing.T) {
 	e.m.refreshEgress()
 	if !closedSoon(kept, keptR, 3*time.Second) {
 		t.Fatal("a tunnel survived the revocation of its sandbox's credential")
+	}
+}
+
+// TestSandboxLargeUploadThresholdIsItsOwn pins that each sandbox's proxy
+// credential carries its own pack's large-upload threshold, and follows a
+// configuration change, instead of one process-wide value.
+func TestSandboxLargeUploadThresholdIsItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	pack := strings.Replace(teamPack, "name: team", "name: small", 1)
+	pack = strings.Replace(pack, "ports: [443, 8443]", "ports: [443, 8443]\n  large_upload_mb: 7", 1)
+	if err := os.MkdirAll(filepath.Join(dir, "small"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "small", "pack.yaml"), []byte(pack), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = dir })
+	e.create(sandboxapi.CreateRequest{Name: "smallbox", Pack: "small"})
+	e.create(sandboxapi.CreateRequest{Name: "defaultbox", Project: e.otherProject("default")})
+	threshold := func(name string) int64 {
+		t.Helper()
+		b, _ := e.store.Lookup(name)
+		pr, ok := e.m.creds.Lookup(b.ID)
+		if !ok {
+			t.Fatalf("%s has no proxy credential", name)
+		}
+		return pr.LargeUploadBytes
+	}
+	if got := threshold("smallbox"); got != 7<<20 {
+		t.Fatalf("smallbox threshold = %d, want its pack's 7 MiB", got)
+	}
+	base := threshold("defaultbox")
+	if base <= 0 || base == 7<<20 {
+		t.Fatalf("defaultbox threshold = %d, want the default pack's", base)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.LargeUploadMB = 3 })
+	e.m.refreshEgress()
+	if got := threshold("defaultbox"); got != 3<<20 {
+		t.Fatalf("defaultbox threshold after the change = %d, want 3 MiB", got)
 	}
 }
 

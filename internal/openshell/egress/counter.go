@@ -161,6 +161,10 @@ type destination struct {
 	key       destKey
 	firstSeen time.Time
 	novel     bool
+	// threshold is the large-upload threshold of the principal at first
+	// contact; eviction ranks the destination by it. Uploads are checked
+	// against the threshold of the flow's own principal.
+	threshold int64
 
 	lastSeen atomic.Int64
 	up       atomic.Int64
@@ -231,8 +235,18 @@ func NewCounter(opts CounterOptions) *Counter {
 	return c
 }
 
-// LargeUploadBytes returns the effective threshold (<= 0 when disabled).
+// LargeUploadBytes returns the default threshold (<= 0 when disabled), for
+// principals without their own.
 func (c *Counter) LargeUploadBytes() int64 { return c.threshold }
+
+// thresholdFor is p's large-upload threshold (<= 0 when disabled): its own
+// (Principal.LargeUploadBytes), else the counter's.
+func (c *Counter) thresholdFor(p Principal) int64 {
+	if p.LargeUploadBytes != 0 {
+		return p.LargeUploadBytes
+	}
+	return c.threshold
+}
 
 // contact returns p's record for host, creating it at the first contact,
 // and reports whether it was created.
@@ -259,7 +273,7 @@ func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 	if len(c.dests) >= c.max {
 		c.evictLocked()
 	}
-	d := &destination{key: key, firstSeen: now, novel: novel}
+	d := &destination{key: key, firstSeen: now, novel: novel, threshold: c.thresholdFor(p)}
 	if r := c.refused[key]; r != nil {
 		d.firstSeen = r.firstSeen
 		d.blocked.Store(r.count)
@@ -272,7 +286,7 @@ func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 
 // armedUp is the upload counted toward the large-upload signal.
 func (c *Counter) armedUp(d *destination) int64 {
-	if c.threshold <= 0 || !d.novel {
+	if d.threshold <= 0 || !d.novel {
 		return 0
 	}
 	return d.up.Load()
@@ -353,7 +367,7 @@ func (c *Counter) evictRefusedLocked() {
 // is refused once its flow opens (flow.uploadRefused), and a forwarded
 // request's first upload chunk is cut.
 func (c *Counter) uploadBlocked(p Principal, host string) bool {
-	if !c.block || c.threshold <= 0 {
+	if !c.block || c.thresholdFor(p) <= 0 {
 		return false
 	}
 	c.mu.Lock()
@@ -471,7 +485,7 @@ func (f *flow) openAt(remote netip.Addr) bool {
 		}
 		c := f.counter
 		d, created := c.contact(f.principal, f.host)
-		if c.threshold > 0 && d.novel {
+		if c.thresholdFor(f.principal) > 0 && d.novel {
 			f.aggs = c.aggregatesFor(f.principal, f.host, remote)
 		}
 		d.tunnels.Add(1)
@@ -490,7 +504,7 @@ func (f *flow) openAt(remote netip.Addr) bool {
 // host and its domain (uploadBlocked); only an open flow knows its address.
 func (f *flow) uploadRefused(exempt bool) (scope string, refused bool) {
 	c, d := f.counter, f.dest.Load()
-	if d == nil || exempt || !c.block || c.threshold <= 0 || !d.novel {
+	if d == nil || exempt || !c.block || c.thresholdFor(f.principal) <= 0 || !d.novel {
 		return "", false
 	}
 	if d.flagged.Load() {
@@ -531,7 +545,8 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 		return uploadVerdict{cut: true} // closed before it opened: nothing more is relayed
 	}
 	now := c.now().UnixNano()
-	armed := c.threshold > 0 && d.novel
+	threshold := c.thresholdFor(f.principal)
+	armed := threshold > 0 && d.novel
 	aggs := f.aggs
 	if exempt {
 		aggs = nil
@@ -545,17 +560,17 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 		defer c.reserve.Unlock()
 	}
 	if armed && c.block && !exempt {
-		over := d.flagged.Load() || d.up.Load()+n > c.threshold
+		over := d.flagged.Load() || d.up.Load()+n > threshold
 		for _, a := range aggs {
-			over = over || a.flagged.Load() || a.up.Load()+n > c.threshold
+			over = over || a.flagged.Load() || a.up.Load()+n > threshold
 		}
 		if over {
 			v := uploadVerdict{cut: true, total: d.up.Load()}
-			if d.up.Load()+n > c.threshold && d.flagged.CompareAndSwap(false, true) {
+			if d.up.Load()+n > threshold && d.flagged.CompareAndSwap(false, true) {
 				v.signal = true
 			}
 			for _, a := range aggs {
-				if a.up.Load()+n > c.threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
+				if a.up.Load()+n > threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
 					v.signal, v.scope, v.total = true, a.scope(), a.up.Load()
 				}
 			}
@@ -565,13 +580,13 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 	f.up.Add(n)
 	v := uploadVerdict{total: d.up.Add(n)}
 	d.lastSeen.Store(now)
-	if armed && v.total > c.threshold && d.flagged.CompareAndSwap(false, true) {
+	if armed && v.total > threshold && d.flagged.CompareAndSwap(false, true) {
 		v.signal = true
 	}
 	for _, a := range aggs {
 		total := a.up.Add(n)
 		a.lastSeen.Store(now)
-		if total > c.threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
+		if total > threshold && a.flagged.CompareAndSwap(false, true) && !v.signal {
 			v.signal, v.scope, v.total = true, a.scope(), total
 		}
 	}
