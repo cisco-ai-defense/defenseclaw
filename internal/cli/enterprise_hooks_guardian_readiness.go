@@ -24,6 +24,10 @@ var guardianReadinessStateTrustCheck = func(path string) error {
 	return managed.ValidateTrustedFilePath(path, "hook guardian readiness state")
 }
 
+// enterpriseHookGuardianReadinessFileWriter publishes the readiness file
+// body. Tests replace it to fail a publication before its atomic replace.
+var enterpriseHookGuardianReadinessFileWriter = writeEnterpriseHookProtectedFile
+
 // writeEnterpriseHookGuardianReadinessState publishes the guardian's
 // waiting_for_targets / ready literal at guardianstate.PathForDataDir, the
 // same path newGuardianReadinessStateReader resolves in the gateway. The
@@ -32,6 +36,13 @@ var guardianReadinessStateTrustCheck = func(path string) error {
 // the protected machine-file writer, with the administrator-owned
 // gateway-read-only ownership, and re-verified afterwards. It never creates
 // or re-permissions the directory, so it cannot widen who may write there.
+//
+// Withdrawing ready must not depend on that publication succeeding. When a
+// waiting_for_targets write fails in the trusted directory (a full disk, a
+// temp-file ownership failure, a replace that kept failing), the previous
+// ready would stay on disk and the gateway would honor it until
+// guardianstate.ReadyMaxAge. The file is removed instead: the reader maps a
+// missing file to the safe waiting_for_targets default.
 func writeEnterpriseHookGuardianReadinessState(dataDir, state string) (string, error) {
 	path := guardianstate.PathForDataDir(dataDir)
 	body, err := guardianstate.Encode(state)
@@ -52,19 +63,47 @@ func writeEnterpriseHookGuardianReadinessState(dataDir, state string) (string, e
 	if err := enterpriseHookAuthorizationDirTrustCheck(dir); err != nil {
 		return path, err
 	}
-	if err := writeEnterpriseHookProtectedFile(path, body); err != nil {
-		return path, err
-	}
-	if err := os.Chmod(path, 0o640); err != nil {
-		return path, fmt.Errorf("make hook guardian readiness state readable: %w", err)
-	}
-	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
-		return path, fmt.Errorf("set hook guardian readiness state ownership: %w", err)
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
-		return path, err
+	if err := publishEnterpriseHookGuardianReadinessFile(path, body); err != nil {
+		if state == guardianstate.StateReady {
+			return path, err
+		}
+		return path, withdrawEnterpriseHookGuardianReadinessFile(path, err)
 	}
 	return path, nil
+}
+
+func publishEnterpriseHookGuardianReadinessFile(path string, body []byte) error {
+	if err := enterpriseHookGuardianReadinessFileWriter(path, body); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return fmt.Errorf("make hook guardian readiness state readable: %w", err)
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return fmt.Errorf("set hook guardian readiness state ownership: %w", err)
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
+}
+
+// withdrawEnterpriseHookGuardianReadinessFile removes the readiness file
+// after a failed non-ready publication in the already-trusted directory. It
+// removes only a regular, non-link file and always returns an error that
+// wraps cause, so the failed publication is still reported.
+func withdrawEnterpriseHookGuardianReadinessFile(path string, cause error) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cause
+	}
+	if err != nil {
+		return fmt.Errorf("%w; inspect readiness state to withdraw it: %v", cause, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w; readiness state is not a regular file and was left in place", cause)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w; remove readiness state to withdraw it: %v", cause, err)
+	}
+	return fmt.Errorf("%w; removed the readiness state file instead", cause)
 }
 
 // newGuardianReadinessStateReader is the gateway sidecar's probe for the

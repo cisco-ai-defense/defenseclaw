@@ -11,10 +11,14 @@
 //   - Guardian writes exactly one of the string literals
 //     `waiting_for_targets` or `ready` using write-to-temp + rename so a
 //     partial write is impossible. It publishes `waiting_for_targets`
-//     when it starts (before its first reconcile) and when it stops,
-//     publishes the outcome of every reconcile (`ready` only for a clean
-//     reconcile with no failed target and no state-publication error),
-//     and re-publishes a `ready` at least every RefreshInterval.
+//     when it starts (before its first reconcile) and when it stops
+//     (a Windows service stop, or SIGTERM/SIGINT from launchd, systemd
+//     or a terminal), publishes the outcome of every reconcile (`ready`
+//     only for a clean reconcile with no failed target and no
+//     state-publication error), and re-publishes a `ready` at least
+//     every RefreshInterval. When a `waiting_for_targets` write fails,
+//     it removes the file instead, so a failed retraction cannot leave
+//     a fresh `ready` behind.
 //
 //   - Sidecar reads best-effort every ~5 s to update the health
 //     snapshot's `configuration.state` field through ReadCurrentState. A

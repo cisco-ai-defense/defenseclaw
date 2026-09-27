@@ -325,6 +325,13 @@ type guardianWatchReadinessFixture struct {
 
 func newGuardianWatchReadinessFixture(t *testing.T) guardianWatchReadinessFixture {
 	t.Helper()
+	return newGuardianWatchReadinessFixtureAt(t, t.TempDir())
+}
+
+// newGuardianWatchReadinessFixtureAt lays the fixture out under root, which
+// may outlive the test (a parent test reads a child process's state file).
+func newGuardianWatchReadinessFixtureAt(t *testing.T, root string) guardianWatchReadinessFixture {
+	t.Helper()
 	stubGuardianReadinessTrust(t)
 	previousInterval := enterpriseHookWatchInterval
 	previousDebounce := enterpriseHookWatchDebounce
@@ -338,7 +345,6 @@ func newGuardianWatchReadinessFixture(t *testing.T) guardianWatchReadinessFixtur
 		enterpriseHookWatchReconcileOnce = previousReconcile
 		enterpriseHookGuardianReadinessRefresh = previousRefresh
 	})
-	root := t.TempDir()
 	dataDir := filepath.Join(root, "runtime")
 	authDir := filepath.Join(root, "hook-guardian-state")
 	manifestDir := filepath.Join(root, "hook-guardian")
@@ -553,5 +559,87 @@ func TestGuardianWaitingWriteIsSilentWithoutAuthorizationDir(t *testing.T) {
 	writeGuardianStateOrLog(&log, guardianstate.StateReady)
 	if !strings.Contains(log.String(), "does not exist yet") {
 		t.Fatalf("ready write without an authorization dir did not warn: %q", log.String())
+	}
+}
+
+// TestGuardianWaitingWriteFailureWithdrawsReady is the #896 review
+// regression for a failed retraction: when the waiting_for_targets write
+// fails before its atomic replace, the previous ready must not stay on disk
+// for the gateway to honor until guardianstate.ReadyMaxAge. A failed ready
+// write never removes the published state.
+func TestGuardianWaitingWriteFailureWithdrawsReady(t *testing.T) {
+	stubGuardianReadinessTrust(t)
+	previousWriter := enterpriseHookGuardianReadinessFileWriter
+	t.Cleanup(func() { enterpriseHookGuardianReadinessFileWriter = previousWriter })
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, t.TempDir())
+	dataDir := t.TempDir()
+	cfg = &config.Config{DataDir: dataDir}
+	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
+	reader := newGuardianReadinessStateReader(dataDir)
+	failWrites := func(string, []byte) error { return errors.New("no space left on device") }
+
+	path, err := writeEnterpriseHookGuardianReadinessState(dataDir, guardianstate.StateReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reader(); got != guardianstate.StateReady {
+		t.Fatalf("published ready reads as %q", got)
+	}
+	enterpriseHookGuardianReadinessFileWriter = failWrites
+	var log bytes.Buffer
+	writeGuardianStateOrLog(&log, guardianstate.StateWaitingForTargets)
+	if got := reader(); got == guardianstate.StateReady {
+		t.Fatal("a failed waiting_for_targets write left ready for the gateway")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness file after a failed retraction: %v, want it removed", err)
+	}
+	if !strings.Contains(log.String(), "no space left on device") ||
+		!strings.Contains(log.String(), "removed the readiness state file instead") {
+		t.Fatalf("failed retraction log = %q, want the write error and the removal", log.String())
+	}
+
+	// Nothing left to withdraw: still reported, nothing created.
+	log.Reset()
+	writeGuardianStateOrLog(&log, guardianstate.StateWaitingForTargets)
+	if !strings.Contains(log.String(), "no space left on device") {
+		t.Fatalf("failed retraction without a file logged %q, want the write error", log.String())
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness file after a failed retraction without a file: %v", err)
+	}
+
+	// A failed ready write leaves the published waiting_for_targets alone.
+	enterpriseHookGuardianReadinessFileWriter = previousWriter
+	if _, err := writeEnterpriseHookGuardianReadinessState(dataDir, guardianstate.StateWaitingForTargets); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHookGuardianReadinessFileWriter = failWrites
+	log.Reset()
+	writeGuardianStateOrLog(&log, guardianstate.StateReady)
+	body, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(body)) != guardianstate.StateWaitingForTargets {
+		t.Fatalf("readiness after a failed ready write = %q (%v), want waiting_for_targets kept", body, err)
+	}
+	if strings.Contains(log.String(), "removed") {
+		t.Fatalf("failed ready write removed the readiness file: %q", log.String())
+	}
+
+	// Only a regular file is removed.
+	enterpriseHookGuardianReadinessFileWriter = previousWriter
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHookGuardianReadinessFileWriter = failWrites
+	log.Reset()
+	writeGuardianStateOrLog(&log, guardianstate.StateWaitingForTargets)
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Fatalf("non-regular readiness path after a failed retraction: %v, want it left in place", err)
+	}
+	if !strings.Contains(log.String(), "not a regular file") {
+		t.Fatalf("failed retraction over a directory logged %q", log.String())
 	}
 }

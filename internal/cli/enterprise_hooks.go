@@ -2194,6 +2194,20 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
+	// launchd and systemd stop the guardian with SIGTERM, and the Go runtime
+	// exits at once on an unhandled SIGTERM without running deferred calls,
+	// so the readiness retraction below never ran on macOS or Linux. Turn a
+	// stop signal into a cancellation of the command context instead: the
+	// loop returns through ctx.Done() (ExecuteContext maps that to exit 0)
+	// and the deferred retraction runs. The native Windows service host
+	// already cancels the context on SERVICE_CONTROL_STOP.
+	parentCtx := cmd.Context()
+	watchCtx, stopWatchSignals := enterpriseHookWatchStopContext(parentCtx)
+	defer func() {
+		stopWatchSignals()
+		cmd.SetContext(parentCtx)
+	}()
+	cmd.SetContext(watchCtx)
 	// Guardian readiness (spec 003 REQ-19, #896). The state file outlives
 	// this process (it sits in the protected authorization directory, which
 	// survives restarts and non-purge uninstall), so retract any ready a
