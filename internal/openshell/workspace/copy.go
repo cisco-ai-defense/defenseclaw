@@ -241,6 +241,14 @@ func DeleteCopy(dataDir, name string) error {
 	if err != nil {
 		return err
 	}
+	// The undo handle of the last apply goes with the sandbox, so a later
+	// sandbox of the same name cannot revert this one's apply; the
+	// pre-apply ref, the operator's copy of the folder before it, stays.
+	if rec, err := LoadCopy(dataDir, name); err == nil && rec.Kind == CopyGit && checkProjectPath(rec.Project) == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		_ = applyGit(rec).run(ctx, "update-ref", "-d", applyRef(name, "post-apply"))
+		cancel()
+	}
 	live := lay.copyDir(name)
 	dirs := []string{live}
 	if entries, err := os.ReadDir(filepath.Dir(live)); err == nil {

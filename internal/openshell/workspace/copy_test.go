@@ -236,6 +236,180 @@ func TestCopyRoundTripApplyMerge(t *testing.T) {
 	}
 }
 
+func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	pull(t, e, fs, "c1")
+	first, err := apply(e, "c1", ApplyMerge, nil)
+	if err != nil || !first.Applied {
+		t.Fatalf("first apply: %+v, %v", first, err)
+	}
+	pre := e.git(e.project, "rev-parse", first.PreApplyRef)
+
+	// The same work again: nothing to apply, and the state before the
+	// first apply is still the undo point.
+	pull(t, e, fs, "c1")
+	again, err := apply(e, "c1", ApplyMerge, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Applied || !again.UpToDate || len(again.Changes) != 0 {
+		t.Fatalf("second apply = %+v, want up to date", again)
+	}
+	if now := e.git(e.project, "rev-parse", first.PreApplyRef); now != pre {
+		t.Fatalf("a second apply of the same work moved %s from %s to %s", first.PreApplyRef, pre, now)
+	}
+	if got := e.git(e.project, "show", first.PreApplyRef+":README.md"); got != "hello" {
+		t.Fatalf("pre-apply README = %q", got)
+	}
+
+	// A conflicting apply leaves the undo point alone too.
+	writeFile(t, e.project, "README.md", "host version\n")
+	fs.write(remoteRepo+"/README.md", "agent version 2\n")
+	pull(t, e, fs, "c1")
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || len(res.Conflicts) == 0 {
+		t.Fatalf("conflicting apply: %+v, %v", res, err)
+	}
+	if now := e.git(e.project, "rev-parse", first.PreApplyRef); now != pre {
+		t.Fatalf("a conflicting apply moved %s", first.PreApplyRef)
+	}
+
+	// A real second apply moves it, and the reflog keeps the first one.
+	writeFile(t, e.project, "README.md", "agent version\n")
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	fs.write(remoteRepo+"/NEW.md", "new\n")
+	pull(t, e, fs, "c1")
+	second, err := apply(e, "c1", ApplyMerge, nil)
+	if err != nil || !second.Applied {
+		t.Fatalf("second real apply: %+v, %v", second, err)
+	}
+	if now := e.git(e.project, "rev-parse", first.PreApplyRef); now == pre {
+		t.Fatal("a real apply did not move the pre-apply ref")
+	}
+	if log := e.git(e.project, "reflog", "show", "--format=%H", first.PreApplyRef); !strings.Contains(log, pre) {
+		t.Fatalf("the reflog of %s lost the first apply's state:\n%s", first.PreApplyRef, log)
+	}
+}
+
+func undoApply(e *env, name string, preview bool) (*UndoApplyResult, error) {
+	return UndoApply(bg, UndoApplyOptions{DataDir: e.data, Name: name, Preview: preview})
+}
+
+func TestCopyUndoApplyKeepsLaterEdits(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "wip.txt", "operator wip\n")
+	_, fs := launchCopy(t, e, "c1", nil)
+	if _, err := undoApply(e, "c1", true); !errors.Is(err, ErrNothingApplied) {
+		t.Fatalf("undo before any apply = %v", err)
+	}
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	fs.write(remoteRepo+"/NEW.md", "new\n")
+	fs.agent(remoteRepo, "rm", "-q", "src/app.go")
+	pull(t, e, fs, "c1")
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("apply: %+v, %v", res, err)
+	}
+	// The operator keeps working after the apply.
+	writeFile(t, e.project, "wip.txt", "more operator wip\n")
+
+	prev, err := undoApply(e, "c1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := changePaths(prev.Changes); got != "A:src/app.go D:NEW.md M:README.md" || prev.Undone || prev.PreApplyRef == "" {
+		t.Fatalf("preview = %s %+v", got, prev)
+	}
+	if readFile(t, e.project, "README.md") != "agent version\n" {
+		t.Fatal("the preview changed the folder")
+	}
+	res, err := undoApply(e, "c1", false)
+	if err != nil || !res.Undone {
+		t.Fatalf("undo: %+v, %v", res, err)
+	}
+	if readFile(t, e.project, "README.md") != "hello\n" || pathExists(filepath.Join(e.project, "NEW.md")) || readFile(t, e.project, "src/app.go") != "package main\n" {
+		t.Fatal("the apply was not reverted")
+	}
+	if readFile(t, e.project, "wip.txt") != "more operator wip\n" {
+		t.Fatal("undo lost an edit made after the apply")
+	}
+	if cached := e.git(e.project, "diff", "--cached", "--name-only"); cached != "" {
+		t.Fatalf("undo touched the index: %q", cached)
+	}
+	if _, err := undoApply(e, "c1", true); !errors.Is(err, ErrNothingApplied) {
+		t.Fatalf("a second undo = %v", err)
+	}
+	// The work can be brought back, and taken back again.
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("re-apply: %+v, %v", res, err)
+	}
+	if res, err := undoApply(e, "c1", false); err != nil || !res.Undone || readFile(t, e.project, "README.md") != "hello\n" {
+		t.Fatalf("second undo: %+v, %v", res, err)
+	}
+	// Deleting the sandbox drops the undo handle of an apply, not the
+	// operator's pre-apply ref.
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("third apply: %+v, %v", res, err)
+	}
+	if err := DeleteCopy(e.data, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	refs := e.git(e.project, "for-each-ref", "--format=%(refname)", "refs/defenseclaw/copy/c1/")
+	if refs != "refs/defenseclaw/copy/c1/pre-apply" {
+		t.Fatalf("refs after delete = %q", refs)
+	}
+}
+
+func TestCopyUndoApplyRefusesOverlappingEdits(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	pull(t, e, fs, "c1")
+	if _, err := apply(e, "c1", ApplyMerge, nil); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.project, "README.md", "the operator's rewrite\n")
+	res, err := undoApply(e, "c1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Undone || strings.Join(res.Conflicts, ",") != "README.md" {
+		t.Fatalf("overlapping undo = %+v", res)
+	}
+	if readFile(t, e.project, "README.md") != "the operator's rewrite\n" {
+		t.Fatal("a refused undo changed the folder")
+	}
+	// Once the operator resolves it by hand, the apply can still be undone.
+	writeFile(t, e.project, "README.md", "agent version\n")
+	if res, err := undoApply(e, "c1", false); err != nil || !res.Undone || readFile(t, e.project, "README.md") != "hello\n" {
+		t.Fatalf("undo after resolving: %+v, %v", res, err)
+	}
+}
+
+func TestCopyUndoApplyPlainFolder(t *testing.T) {
+	e := newEnv(t)
+	writeFile(t, e.project, "notes.txt", "one\n")
+	_, fs := launchCopy(t, e, "p1", nil)
+	fs.write(remoteRepo+"/notes.txt", "one\ntwo\n")
+	pull(t, e, fs, "p1")
+	if res, err := apply(e, "p1", ApplyMerge, nil); err != nil || !res.Applied || res.PreApplyRef != "" {
+		t.Fatalf("apply: %+v, %v", res, err)
+	}
+	res, err := undoApply(e, "p1", false)
+	if err != nil || !res.Undone || res.PreApplyRef != "" {
+		t.Fatalf("undo: %+v, %v", res, err)
+	}
+	if readFile(t, e.project, "notes.txt") != "one\n" {
+		t.Fatal("the apply was not reverted")
+	}
+	if pathExists(filepath.Join(e.project, ".git")) {
+		t.Fatal("undo created a git repository in the plain folder")
+	}
+}
+
 func TestCopyKeepsLineEndingSettingsConsistent(t *testing.T) {
 	e := newEnv(t)
 	e.git(e.project, "init", "-q", "-b", "main")

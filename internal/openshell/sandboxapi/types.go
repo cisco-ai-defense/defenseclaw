@@ -377,6 +377,9 @@ type UndoResponse struct {
 	Restarted bool                    `json:"restarted,omitempty"`
 	Summary   string                  `json:"summary,omitempty"`
 	Review    *workspace.ReviewReport `json:"review,omitempty"`
+	// Apply is the result of undoing a copy-mode sandbox's last
+	// `pull --apply`, which the CLI runs itself (Result is nil then).
+	Apply *workspace.UndoApplyResult `json:"apply,omitempty"`
 }
 
 // ReviewRequest is POST /sandboxes/{name}/review.
@@ -398,11 +401,14 @@ type ReviewResponse struct {
 const (
 	WorkspaceUpload = "upload"
 	WorkspacePull   = "pull"
+	// WorkspaceUndo is the revert of the last `pull --apply`.
+	WorkspaceUndo = "undo"
 )
 
 // WorkspaceReport is POST /sandboxes/{name}/workspace: a copy-mode
-// workspace step the CLI ran (upload, or pull with apply/branch/patch), so
-// the daemon records it with the sandbox's identity. Counts are optional.
+// workspace step the CLI ran (upload, pull with apply/branch/patch, or the
+// undo of an apply), so the daemon records it with the sandbox's identity.
+// Counts are optional.
 type WorkspaceReport struct {
 	Operation string `json:"operation"`
 	// Result is applied, completed, failed, no_change, partial or skipped

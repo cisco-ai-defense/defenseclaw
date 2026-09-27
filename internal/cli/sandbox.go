@@ -422,7 +422,11 @@ func newSandboxUndoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "undo <name>",
 		Short: "Restore the project folder to its pre-session snapshot",
-		Args:  nameArg("sandbox"),
+		Long: "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git ignores\n" +
+			"(dependency directories, build output) have no copy in the snapshot: undo deletes what the session\n" +
+			"wrote to Python bytecode caches and names the rest, with what to do about them.\n\n" +
+			"For a copy-mode sandbox, undo reverts its last `pull --apply` instead; edits you made since stay.",
+		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {

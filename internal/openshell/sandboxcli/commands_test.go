@@ -411,6 +411,94 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	}
 }
 
+func copySandbox(name string) sandboxapi.Sandbox {
+	sb := sampleSandbox(name)
+	sb.WorkdirMode, sb.Workdir, sb.Phase = "copy", "/sandbox/work/proj", "stopped"
+	return sb
+}
+
+func TestUndoCopyModeRevertsTheLastApply(t *testing.T) {
+	undoCalls := func(ta *testApp) int { return len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/copybox/undo")) }
+
+	// Nothing was applied: say so, not "never changed the folder".
+	ta := newTestApp(t, "")
+	ta.daemon.add(copySandbox("copybox"))
+	if err := ta.Undo(context.Background(), UndoOptions{Name: "copybox"}); err != nil {
+		t.Fatal(err)
+	}
+	if out := ta.output(); !strings.Contains(out, "nothing to undo: copybox works on a copy, and `pull --apply` has not brought its work into your folder") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if undoCalls(ta) != 0 {
+		t.Fatal("a copy-mode undo went to the daemon's mount undo")
+	}
+
+	// An apply: preview, consent, revert, report.
+	ta = newTestApp(t, "y\n")
+	ta.daemon.add(copySandbox("copybox"))
+	ta.copy.undo = &workspace.UndoApplyResult{Name: "copybox", Project: ta.project, PreApplyRef: "refs/defenseclaw/copy/copybox/pre-apply",
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}, {Path: "NEW.md", Status: "D"}}}
+	if err := ta.Undo(context.Background(), UndoOptions{Name: "copybox"}); err != nil {
+		t.Fatalf("Undo: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	for _, want := range []string{"Undo will revert the last `pull --apply` of copybox", "revert  README.md", "remove  NEW.md",
+		"edits you made since the apply stay", "reverted the last apply: 2 paths"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if !slices.Equal(ta.copy.steps, []string{"undo-apply copybox preview=true", "undo-apply copybox preview=false"}) {
+		t.Errorf("steps = %v", ta.copy.steps)
+	}
+	reports := ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/copybox/workspace")
+	if len(reports) != 1 || !strings.Contains(string(reports[0].Body), `"operation":"undo"`) || !strings.Contains(string(reports[0].Body), `"file_count":2`) {
+		t.Errorf("reports = %+v", reports)
+	}
+	if undoCalls(ta) != 0 {
+		t.Error("a copy-mode undo went to the daemon's mount undo")
+	}
+
+	// Edits since the apply overlap it: refuse, change nothing, and say
+	// where the old folder is.
+	ta = newTestApp(t, "y\n")
+	ta.daemon.add(copySandbox("copybox"))
+	ta.copy.undo = &workspace.UndoApplyResult{Name: "copybox", Project: ta.project, PreApplyRef: "refs/defenseclaw/copy/copybox/pre-apply",
+		Conflicts: []string{"README.md"}}
+	err := ta.Undo(context.Background(), UndoOptions{Name: "copybox"})
+	if err == nil || !strings.Contains(err.Error(), "you also changed README.md since the apply") || !strings.Contains(err.Error(), "diff refs/defenseclaw/copy/copybox/pre-apply") {
+		t.Fatalf("conflicting undo = %v", err)
+	}
+	if len(ta.copy.steps) != 1 {
+		t.Errorf("a conflicting undo went past the preview: %v", ta.copy.steps)
+	}
+
+	// -o json: one document on stdout.
+	ta = newTestApp(t, "y\n")
+	ta.daemon.add(copySandbox("copybox"))
+	ta.copy.undo = &workspace.UndoApplyResult{Name: "copybox", Project: ta.project, Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}}}
+	if err := ta.Undo(context.Background(), UndoOptions{Name: "copybox", Output: OutputJSON}); err != nil {
+		t.Fatal(err)
+	}
+	var res sandboxapi.UndoResponse
+	if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Apply == nil || !res.Apply.Undone {
+		t.Fatalf("stdout is not one undo response (%v):\n%s", err, ta.out.String())
+	}
+}
+
+func TestPullApplyThatIsAlreadyInTheFolder(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.add(copySandbox("copybox"))
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyMerge, UpToDate: true}
+	if err := ta.Pull(context.Background(), PullOptions{Name: "copybox", Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	out := ta.output()
+	if !strings.Contains(out, "nothing to apply: ") || !strings.Contains(out, "already has these changes") || strings.Contains(out, "applied 0 changes") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
 // With -o json stdout holds exactly one JSON document; the preview, the
 // prompt and the progress lines go to stderr.
 func TestUndoJSONKeepsStdoutParseable(t *testing.T) {

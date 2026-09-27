@@ -583,15 +583,19 @@ type ApplyResult struct {
 	Conflicts []string `json:"conflicts,omitempty"`
 	Branch    string   `json:"branch,omitempty"`
 	PatchPath string   `json:"patch_path,omitempty"`
-	// PreApplyRef keeps the working tree as it was before the merge.
+	// UpToDate reports that the working tree already holds the result (an
+	// earlier apply brought it), so the merge changed nothing.
+	UpToDate bool `json:"up_to_date,omitempty"`
+	// PreApplyRef keeps the working tree as it was before the merge; its
+	// reflog keeps the state before each earlier apply.
 	PreApplyRef string   `json:"pre_apply_ref,omitempty"`
 	Warnings    []string `json:"warnings,omitempty"`
 }
 
 // Apply lands the last pull of a copy-mode sandbox in the project. When
-// the result reached the working tree, a branch or the requested patch
-// file, the pull is marked applied, which lets Refresh replace the copy
-// without Force.
+// the result reached the working tree (now or by an earlier apply), a
+// branch or the requested patch file, the pull is marked applied, which
+// lets Refresh replace the copy without Force.
 func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	rec, err := LoadCopy(opts.DataDir, opts.Name)
 	if err != nil {
@@ -605,7 +609,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if res.Applied || res.Branch != "" || res.Mode == ApplyPatch {
+	if res.Applied || res.UpToDate || res.Branch != "" || res.Mode == ApplyPatch {
 		t := time.Now().UTC()
 		pr.AppliedAt = &t
 		lay, _ := newLayout(opts.DataDir)
@@ -746,37 +750,29 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 	return branch, nil
 }
 
-func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, opts ApplyOptions) (*ApplyResult, error) {
-	v, err := hostGitVersion(ctx, rec.Project)
-	if err != nil {
-		return nil, err
-	}
-	out := &ApplyResult{Mode: ApplyMerge}
-	var g gitCmd
-	var result, baseline, parent string
+// applyGit runs git against the working tree Apply and UndoApply change:
+// the project's own repository, or for a plain folder the copy's base.git
+// with the folder as its work tree.
+func applyGit(rec *CopyRecord) gitCmd {
 	if rec.Kind == CopyGit {
-		g = gitCmd{dir: rec.Project, config: lineEndingArgs(rec.LineEndings)}
-		if result, baseline, err = importResult(ctx, rec, g); err != nil {
-			return nil, err
-		}
-		head, _, err := resolveHead(ctx, g)
-		if err != nil {
-			return nil, err
-		}
-		parent = head
-	} else {
-		g = gitCmd{dir: rec.Project, gitDir: rec.BaseGit, workTree: rec.Project}
-		result, baseline, parent = pr.Effective, rec.Baseline, rec.Baseline
+		return gitCmd{dir: rec.Project, config: lineEndingArgs(rec.LineEndings)}
 	}
-	if !v.atLeast(2, 38) {
-		out.Warnings = append(out.Warnings, "git "+v.String()+" cannot merge without touching the working tree (git 2.38+ can)")
-		return fallback(ctx, lay, rec, pr, opts, out, nil)
-	}
+	return gitCmd{dir: rec.Project, gitDir: rec.BaseGit, workTree: rec.Project}
+}
 
-	// Capture the operator's current working tree (they may have kept
-	// working) through a scratch index.
+// applyRef names a ref Apply keeps for a sandbox, in the project (git) or
+// in base.git (plain folders): pre-apply is the working tree before the
+// last apply (its reflog holds the earlier ones), post-apply the tree that
+// apply left, on top of pre-apply, which UndoApply reverts.
+func applyRef(name, which string) string { return "refs/defenseclaw/copy/" + name + "/" + which }
+
+// captureWorkTree records the operator's working tree (they may have kept
+// working) as a tree, through a scratch index seeded from the real one so
+// the real index is never touched. It returns g on the scratch index, the
+// tree, and the scratch index's cleanup.
+func captureWorkTree(ctx context.Context, lay layout, rec *CopyRecord, g gitCmd) (gitCmd, string, func(), error) {
 	idx := filepath.Join(lay.copyDir(rec.Name), "apply-"+randomSuffix()+".index")
-	defer os.Remove(idx)
+	cleanup := func() { _ = os.Remove(idx) }
 	if rec.Kind == CopyGit {
 		if real, err := g.line(ctx, "rev-parse", "--git-path", "index"); err == nil {
 			if !filepath.IsAbs(real) {
@@ -784,7 +780,7 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 			}
 			if pathExists(real) {
 				if err := copyRegular(real, idx, 0o600, time.Time{}); err != nil {
-					return nil, err
+					return gitCmd{}, "", nil, err
 				}
 			}
 		}
@@ -797,12 +793,75 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	}
 	addArgs = append(append(addArgs, "--", "."), heavyExcludePathspecs()...)
 	if err := gi.run(ctx, addArgs...); err != nil {
-		return nil, err
+		cleanup()
+		return gitCmd{}, "", nil, err
 	}
-	curTree, err := gi.line(ctx, "write-tree")
+	tree, err := gi.line(ctx, "write-tree")
+	if err != nil {
+		cleanup()
+		return gitCmd{}, "", nil, err
+	}
+	return gi, tree, cleanup, nil
+}
+
+// mergeTrees runs a merge-tree of ours and theirs (commits) and returns the
+// merged tree, or the conflicting paths.
+func mergeTrees(ctx context.Context, g gitCmd, args []string, ours, theirs string) (string, []string, error) {
+	mergeArgs := append([]string{"merge-tree", "--write-tree", "-z", "--name-only", "--no-messages"}, args...)
+	raw, code, err := g.outputCode(ctx, append(mergeArgs, ours, theirs)...)
+	if err != nil {
+		return "", nil, err
+	}
+	parts := splitNUL(raw)
+	if len(parts) == 0 || !isOID(parts[0]) {
+		return "", nil, fmt.Errorf("workspace: unexpected merge-tree output")
+	}
+	if code != 1 {
+		return parts[0], nil, nil
+	}
+	var conflicts []string
+	for _, p := range parts[1:] {
+		if p != "" {
+			conflicts = append(conflicts, p)
+		}
+	}
+	return "", dedupe(conflicts), nil
+}
+
+func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, opts ApplyOptions) (*ApplyResult, error) {
+	v, err := hostGitVersion(ctx, rec.Project)
 	if err != nil {
 		return nil, err
 	}
+	out := &ApplyResult{Mode: ApplyMerge}
+	g := applyGit(rec)
+	var result, baseline, parent string
+	if rec.Kind == CopyGit {
+		if result, baseline, err = importResult(ctx, rec, g); err != nil {
+			return nil, err
+		}
+		defer func() {
+			_ = g.run(ctx, "update-ref", "-d", result)
+			_ = g.run(ctx, "update-ref", "-d", baseline)
+		}()
+		head, _, err := resolveHead(ctx, g)
+		if err != nil {
+			return nil, err
+		}
+		parent = head
+	} else {
+		result, baseline, parent = pr.Effective, rec.Baseline, rec.Baseline
+	}
+	if !v.atLeast(2, 38) {
+		out.Warnings = append(out.Warnings, "git "+v.String()+" cannot merge without touching the working tree (git 2.38+ can)")
+		return fallback(ctx, lay, rec, pr, opts, out, nil)
+	}
+
+	gi, curTree, cleanup, err := captureWorkTree(ctx, lay, rec, g)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	commitArgs := []string{"commit-tree", curTree, "-m", "defenseclaw: working tree before applying sandbox " + rec.Name}
 	if parent != "" {
 		commitArgs = append(commitArgs, "-p", parent)
@@ -811,52 +870,55 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	if err != nil {
 		return nil, err
 	}
-	preRef := "refs/defenseclaw/copy/" + rec.Name + "/pre-apply"
-	if err := g.run(ctx, "update-ref", preRef, cur); err != nil {
+
+	mergeArgs := []string{"--allow-unrelated-histories"}
+	if v.atLeast(2, 40) {
+		mergeArgs = []string{"--merge-base=" + baseline}
+	}
+	merged, conflicts, err := mergeTrees(ctx, g, mergeArgs, cur, result)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: merge the sandbox result: %w", err)
+	}
+	if len(conflicts) > 0 {
+		return fallback(ctx, lay, rec, pr, opts, out, conflicts)
+	}
+	preRef := applyRef(rec.Name, "pre-apply")
+	if merged == curTree {
+		// An earlier apply already brought the result: nothing changes,
+		// and that apply's undo point stays where it is.
+		out.UpToDate = true
+		return out, nil
+	}
+	if out.Changes, err = diffTrees(ctx, g, curTree, merged); err != nil {
+		return nil, err
+	}
+	// The undo point goes first, so the working tree never changes without
+	// one; the reflog keeps the state before each earlier apply.
+	prevPre, _ := g.line(ctx, "rev-parse", "-q", "--verify", preRef)
+	if err := g.run(ctx, "update-ref", "--create-reflog", "-m", "defenseclaw: before applying sandbox "+rec.Name, preRef, cur); err != nil {
 		return nil, err
 	}
 	if rec.Kind == CopyGit {
 		out.PreApplyRef = preRef
 	}
-
-	mergeArgs := []string{"merge-tree", "--write-tree", "-z", "--name-only", "--no-messages"}
-	if v.atLeast(2, 40) {
-		mergeArgs = append(mergeArgs, "--merge-base="+baseline)
-	} else {
-		mergeArgs = append(mergeArgs, "--allow-unrelated-histories")
-	}
-	mergeArgs = append(mergeArgs, cur, result)
-	raw, code, err := g.outputCode(ctx, mergeArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("workspace: merge the sandbox result: %w", err)
-	}
-	parts := splitNUL(raw)
-	if len(parts) == 0 || !isOID(parts[0]) {
-		return nil, fmt.Errorf("workspace: unexpected merge-tree output")
-	}
-	merged := parts[0]
-	if code == 1 {
-		var conflicts []string
-		for _, p := range parts[1:] {
-			if p != "" {
-				conflicts = append(conflicts, p)
-			}
-		}
-		return fallback(ctx, lay, rec, pr, opts, out, dedupe(conflicts))
-	}
-	if out.Changes, err = diffTrees(ctx, g, curTree, merged); err != nil {
-		return nil, err
-	}
 	// Two-way switch from the captured tree to the merge: files the
 	// operator changed since the capture make this fail instead of being
 	// overwritten; the real index is never touched.
 	if err := gi.run(ctx, "read-tree", "-m", "-u", curTree, merged); err != nil {
+		if prevPre != "" {
+			_ = g.run(ctx, "update-ref", "-m", "defenseclaw: the apply of sandbox "+rec.Name+" failed", preRef, prevPre, cur)
+		} else {
+			_ = g.run(ctx, "update-ref", "-d", preRef, cur)
+		}
 		return nil, fmt.Errorf("workspace: update the working tree: %w", err)
 	}
 	out.Applied = true
-	if rec.Kind == CopyGit {
-		_ = g.run(ctx, "update-ref", "-d", result)
-		_ = g.run(ctx, "update-ref", "-d", baseline)
+	post, err := g.line(ctx, "commit-tree", merged, "-p", cur, "-m", "defenseclaw: working tree after applying sandbox "+rec.Name)
+	if err == nil {
+		err = g.run(ctx, "update-ref", "-m", "defenseclaw: applied sandbox "+rec.Name, applyRef(rec.Name, "post-apply"), post)
+	}
+	if err != nil {
+		out.Warnings = append(out.Warnings, "the apply was not recorded for undo ("+err.Error()+"); the folder before it is kept at "+preRef)
 	}
 	return out, nil
 }

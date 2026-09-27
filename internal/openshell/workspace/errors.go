@@ -63,6 +63,9 @@ var (
 	ErrNotGitProject = errors.New("workspace: the project is not a git repository")
 	// ErrNoChanges: the sandbox result equals the baseline.
 	ErrNoChanges = errors.New("workspace: no changes to bring back")
+	// ErrNothingApplied: no 3-way apply of a copy-mode sandbox's work is
+	// recorded that UndoApply could revert.
+	ErrNothingApplied = errors.New("workspace: no apply to undo")
 	// ErrScanIncomplete: the secret scan could not look at the whole
 	// folder, so a live mount is refused rather than showing files nobody
 	// checked.

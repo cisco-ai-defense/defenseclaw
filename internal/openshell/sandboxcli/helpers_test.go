@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -518,7 +519,24 @@ type fakeCopy struct {
 	steps    []string
 	pull     *workspace.PullResult
 	apply    []workspace.ApplyOptions
+	applied  *workspace.ApplyResult
 	timeline *timeline
+	// undo is what UndoApply answers (ErrNothingApplied when nil).
+	undo    *workspace.UndoApplyResult
+	undoErr error
+}
+
+func (f *fakeCopy) UndoApply(_ context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
+	f.step(fmt.Sprintf("undo-apply %s preview=%v", o.Name, o.Preview))
+	if f.undoErr != nil {
+		return nil, f.undoErr
+	}
+	if f.undo == nil {
+		return nil, workspace.ErrNothingApplied
+	}
+	r := *f.undo
+	r.Preview, r.Undone = o.Preview, !o.Preview && len(r.Conflicts) == 0
+	return &r, nil
 }
 
 func (f *fakeCopy) step(s string) {
@@ -562,6 +580,10 @@ func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspac
 	f.mu.Lock()
 	f.apply = append(f.apply, o)
 	f.mu.Unlock()
+	if f.applied != nil {
+		r := *f.applied
+		return &r, nil
+	}
 	return &workspace.ApplyResult{Mode: o.Mode, Applied: true, Branch: o.Branch, PatchPath: o.PatchPath,
 		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}}, nil
 }

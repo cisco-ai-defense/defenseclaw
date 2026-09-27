@@ -666,7 +666,10 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 	rec, retained := b.rec, b.retained
 	m.mu.Unlock()
 	if rec.WorkdirMode != config.OpenShellWorkdirMount {
-		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "undo applies to mounted projects; a copy-mode sandbox never changed the folder")
+		// Copy mode changes the folder only through `pull --apply`, which
+		// the CLI runs as the user; so does the undo of it.
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
+			"%s works on a copy, which changes your folder only through `pull --apply`; `defenseclaw sandbox undo %s` reverts the last apply", name, name)
 	}
 	// Undo restores the whole folder: another sandbox mounting it (or a
 	// folder inside or around it) must not be running meanwhile.
@@ -832,8 +835,13 @@ func (m *Manager) ReportWorkspace(ctx context.Context, name string, r sandboxapi
 		default:
 			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "pull_mode must be apply, branch or patch")
 		}
+	case sandboxapi.WorkspaceUndo:
+		ev.Operation = audit.SandboxWorkspaceUndo
+		if r.PullMode != "" {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "pull_mode applies to pulls only")
+		}
 	default:
-		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "operation must be upload or pull")
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "operation must be upload, pull or undo")
 	}
 	switch ev.Result {
 	case "", audit.SandboxWorkspaceApplied, audit.SandboxWorkspaceCompleted, audit.SandboxWorkspaceFailed,
@@ -853,8 +861,11 @@ func (m *Manager) ReportWorkspace(ctx context.Context, name string, r sandboxapi
 		return &sandboxapi.Error{Code: sandboxapi.CodeInvalid, Message: "the workspace report was not recorded", Detail: err.Error()}
 	}
 	msg := "uploaded the project copy"
-	if ev.Operation == audit.SandboxWorkspacePull {
+	switch ev.Operation {
+	case audit.SandboxWorkspacePull:
 		msg = "pulled the sandbox's changes (" + r.PullMode + ")"
+	case audit.SandboxWorkspaceUndo:
+		msg = "reverted the last apply of the sandbox's changes"
 	}
 	if ev.Result == audit.SandboxWorkspaceFailed {
 		msg += " — failed"

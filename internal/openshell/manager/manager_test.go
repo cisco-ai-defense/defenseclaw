@@ -636,7 +636,8 @@ func TestUndoAndReview(t *testing.T) {
 	}
 
 	copyBox := e.create(sandboxapi.CreateRequest{Name: "copyundo", Copy: true})
-	if _, err := e.m.Undo(context.Background(), copyBox.Name, sandboxapi.UndoRequest{Stop: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+	if _, err := e.m.Undo(context.Background(), copyBox.Name, sandboxapi.UndoRequest{Stop: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) ||
+		!strings.Contains(err.Error(), "pull --apply") || strings.Contains(err.Error(), "never changed") {
 		t.Fatalf("copy undo: %v", err)
 	}
 }
@@ -654,9 +655,17 @@ func TestReportWorkspace(t *testing.T) {
 	if last.Operation != audit.SandboxWorkspacePull || last.PullMode != "branch" || *last.FileCount != 3 || last.Sandbox.Name != "copyrep" {
 		t.Fatalf("workspace record = %+v", last)
 	}
+	// The CLI reverts a copy-mode apply itself and reports it as an undo.
+	if err := e.m.ReportWorkspace(context.Background(), "copyrep", sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUndo, FileCount: &files}); err != nil {
+		t.Fatal(err)
+	}
+	if last := e.tel.workspace[len(e.tel.workspace)-1]; last.Operation != audit.SandboxWorkspaceUndo || last.PullMode != "" {
+		t.Fatalf("undo record = %+v", last)
+	}
 	negative := int64(-1)
 	for _, bad := range []sandboxapi.WorkspaceReport{
-		{Operation: "undo"},
+		{Operation: "restore"},
+		{Operation: sandboxapi.WorkspaceUndo, PullMode: "apply"},
 		{Operation: sandboxapi.WorkspacePull},
 		{Operation: sandboxapi.WorkspaceUpload, PullMode: "apply"},
 		{Operation: sandboxapi.WorkspaceUpload, Result: "exploded"},

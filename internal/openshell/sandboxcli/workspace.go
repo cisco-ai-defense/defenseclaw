@@ -38,6 +38,7 @@ type CopyWorkspace interface {
 	Refresh(ctx context.Context, opts workspace.RefreshOptions) (*workspace.CopyRecord, error)
 	Pull(ctx context.Context, opts workspace.PullOptions) (*workspace.PullResult, error)
 	Apply(ctx context.Context, opts workspace.ApplyOptions) (*workspace.ApplyResult, error)
+	UndoApply(ctx context.Context, opts workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error)
 }
 
 type defaultCopyWorkspace struct{}
@@ -60,6 +61,9 @@ func (defaultCopyWorkspace) Pull(ctx context.Context, o workspace.PullOptions) (
 func (defaultCopyWorkspace) Apply(ctx context.Context, o workspace.ApplyOptions) (*workspace.ApplyResult, error) {
 	return workspace.Apply(ctx, o)
 }
+func (defaultCopyWorkspace) UndoApply(ctx context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
+	return workspace.UndoApply(ctx, o)
+}
 
 // UndoOptions are the `sandbox undo` flags.
 type UndoOptions struct {
@@ -72,12 +76,16 @@ type UndoOptions struct {
 }
 
 // Undo restores a mounted project to its pre-session snapshot after a
-// preview. With -o json stdout carries the restore's response, or the
-// preview's (result.preview true) when nothing was restored.
+// preview, or for a copy-mode sandbox reverts its last `pull --apply`.
+// With -o json stdout carries the restore's response, or the preview's
+// (result.preview true) when nothing was restored.
 func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	api, err := a.api()
 	if err != nil {
 		return err
+	}
+	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+		return a.undoApply(ctx, api, sb, o)
 	}
 	preview, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Preview: true, KeepRefs: o.KeepRefs})
 	if err != nil {
@@ -145,6 +153,122 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		a.ok("restarted " + o.Name)
 	}
 	return nil
+}
+
+// undoApply reverts a copy-mode sandbox's last `pull --apply` after a
+// preview. It runs in the CLI, as the apply did, and reports the result to
+// the daemon. Edits made in the folder since the apply stay; when they
+// overlap the apply's changes nothing is changed.
+func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o UndoOptions) error {
+	stdout, restore := a.jsonOutput(o.Output)
+	defer restore()
+	if o.KeepRefs || o.Restart {
+		a.warn("--keep-refs and --restart apply to mounted projects; " + sb.Name + " works on a copy")
+	}
+	opts := workspace.UndoApplyOptions{DataDir: a.dataDir(), Name: sb.Name, Preview: true}
+	preview, err := a.Workspace.UndoApply(ctx, opts)
+	if errors.Is(err, workspace.ErrNothingApplied) {
+		if stdout != nil {
+			return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: &workspace.UndoApplyResult{Name: sb.Name, Project: sb.Project, Preview: true}})
+		}
+		a.ok("nothing to undo: " + sb.Name + " works on a copy, and `pull --apply` has not brought its work into your folder")
+		a.note("a branch or patch file its work went to is yours to delete")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("undo %s: %w", sb.Name, err)
+	}
+	resp := sandboxapi.UndoResponse{Name: sb.Name, Apply: preview}
+	if len(preview.Conflicts) > 0 {
+		if stdout != nil {
+			_ = writeJSON(stdout, resp)
+		}
+		return a.undoApplyConflict(preview)
+	}
+	if len(preview.Changes) == 0 {
+		if stdout != nil {
+			return writeJSON(stdout, resp)
+		}
+		a.ok("nothing to undo: " + a.tildePath(preview.Project) + " no longer has the changes of " + sb.Name + "'s last apply")
+		return nil
+	}
+	if stdout != nil && o.Preview {
+		return writeJSON(stdout, resp)
+	}
+	a.line(a.bold("Undo will revert the last `pull --apply` of "+sb.Name+" in "+a.tildePath(preview.Project)) +
+		fmt.Sprintf(" (%s):", plural(int64(len(preview.Changes)), "path", "paths")))
+	for i, c := range preview.Changes {
+		if i == 20 {
+			a.line(fmt.Sprintf("  … %d more", len(preview.Changes)-20))
+			break
+		}
+		// Changes run from the folder now to the folder without the apply.
+		verb := "revert "
+		switch c.Status {
+		case "A":
+			verb = "restore"
+		case "D":
+			verb = "remove "
+		}
+		a.line("  " + verb + " " + c.Path)
+	}
+	a.note("edits you made since the apply stay")
+	if o.Preview {
+		return nil
+	}
+	yes, err := a.confirm("Revert the apply in "+a.tildePath(preview.Project)+"?", o.Yes)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		a.note("nothing changed")
+		if stdout != nil {
+			return writeJSON(stdout, resp)
+		}
+		return nil
+	}
+	opts.Preview = false
+	res, err := a.Workspace.UndoApply(ctx, opts)
+	report := sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUndo}
+	switch {
+	case err != nil:
+		report.Result, report.FailureClass = "failed", "undo_failed"
+	case len(res.Conflicts) > 0:
+		report.Result = "skipped"
+	default:
+		files := int64(len(res.Changes))
+		report.FileCount = &files
+		if files == 0 {
+			report.Result = "no_change"
+		}
+	}
+	if rerr := api.ReportWorkspace(context.WithoutCancel(ctx), sb.Name, report); rerr != nil {
+		a.warn("could not record the undo with the daemon: " + apiError(rerr).Error())
+	}
+	if err != nil {
+		return fmt.Errorf("undo %s: %w", sb.Name, err)
+	}
+	if len(res.Conflicts) > 0 {
+		return a.undoApplyConflict(res)
+	}
+	if stdout != nil {
+		return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: res})
+	}
+	a.ok(fmt.Sprintf("reverted the last apply: %s in %s", plural(int64(len(res.Changes)), "path", "paths"), a.tildePath(res.Project)))
+	a.note("bring the work back with `" + CommandName + " pull " + sb.Name + " --apply`")
+	return nil
+}
+
+// undoApplyConflict is the error for an apply undo that would overwrite
+// the operator's edits.
+func (a *App) undoApplyConflict(r *workspace.UndoApplyResult) error {
+	kept := "DefenseClaw keeps the folder as it was before the apply"
+	if r.PreApplyRef != "" {
+		kept = "the folder as it was before the apply is kept at " + r.PreApplyRef +
+			" (`git -C " + a.tildePath(r.Project) + " diff " + r.PreApplyRef + "` shows what changed since)"
+	}
+	return fmt.Errorf("you also changed %s since the apply, so undo cannot revert it without losing your edits; nothing changed. %s",
+		strings.Join(firstN(r.Conflicts, 6), ", "), kept)
 }
 
 func shortOID(s string) string {
@@ -464,10 +588,15 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		if applied.PatchPath != "" {
 			a.ok("and in " + applied.PatchPath)
 		}
+	case applied.Mode == workspace.ApplyMerge && applied.UpToDate:
+		a.ok("nothing to apply: " + a.tildePath(sb.Project) + " already has these changes")
 	case applied.Mode == workspace.ApplyMerge:
 		a.ok(fmt.Sprintf("applied %s to %s", plural(int64(len(applied.Changes)), "change", "changes"), a.tildePath(sb.Project)))
+		undo := "`" + CommandName + " undo " + sb.Name + "` reverts the apply"
 		if applied.PreApplyRef != "" {
-			a.note("your previous working tree is kept at " + applied.PreApplyRef)
+			a.note("your previous working tree is kept at " + applied.PreApplyRef + "; " + undo)
+		} else {
+			a.note(undo)
 		}
 	case applied.Mode == workspace.ApplyBranch:
 		a.ok("the changes are on branch " + applied.Branch + " (your checkout is unchanged)")
