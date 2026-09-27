@@ -35,6 +35,8 @@ type HookDecision struct {
 	// Event is the harness hook event (PreToolUse, ...).
 	Event string
 	Tool  string
+	// ToolUseID is the connector's per-call identifier for correlation.
+	ToolUseID string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
 	WouldBlock bool
@@ -66,8 +68,22 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 }
 
 // ObserveHookDecision counts tool calls and blocked tool calls for the
-// session summary and puts blocks on the activity feed.
+// session summary, puts blocks on the activity feed, and tracks PreToolUse/
+// PostToolUse correlation for tamper detection.
 func (m *Manager) ObserveHookDecision(d HookDecision) {
+	// Track PreToolUse events for tamper detection.
+	if isPreToolUseEvent(d.Event) {
+		blocked := isBlockAction(d.Action)
+		m.tamperTracker.ObservePreToolUse(d.BindingID, d.ToolUseID, d.Tool, d.Event, blocked)
+	}
+
+	// Check PostToolUse events for tamper.
+	if isPostToolUseEvent(d.Event) {
+		if tampered, tamperReason := m.tamperTracker.CheckPostToolUse(d.BindingID, d.ToolUseID, d.Event); tampered {
+			m.handleHookTamper(d.BindingID, d.SandboxName, d.Tool, d.Event, tamperReason)
+		}
+	}
+
 	if !isToolEvent(d.Event) {
 		return
 	}
@@ -119,6 +135,80 @@ func isBlockAction(action string) bool {
 		return true
 	}
 	return false
+}
+
+// handleHookTamper handles a detected hook tamper event: emits a high
+// finding, feeds the activity log, and either stops the sandbox or alerts
+// based on the pack's hooks.on_tamper setting.
+func (m *Manager) handleHookTamper(bindingID, sandboxName, tool, event, tamperReason string) {
+	ctx := context.Background()
+	now := m.now()
+
+	m.mu.Lock()
+	b := m.boxes[sandboxName]
+	if b == nil || b.rec.BindingID != bindingID {
+		m.mu.Unlock()
+		return
+	}
+	onTamper := b.effectivePack.HookOnTamper
+	// Reset hook silence: tamper detection counts as hook traffic.
+	b.silentSince, b.silenceSent = time.Time{}, false
+	m.mu.Unlock()
+
+	title := "Hook tamper detected: tool executed without DefenseClaw approval"
+	description := tamperReason + ". "
+	if tool != "" {
+		description += "Tool: " + tool + ". "
+	}
+	description += "This indicates the sandboxed workload killed its DefenseClaw hook or manipulated the tool-call lifecycle to bypass policy."
+
+	remediation := "Stop the sandbox immediately and investigate. "
+	if onTamperShouldStop(onTamper) {
+		remediation += "This sandbox will be stopped automatically per the pack's hooks.on_tamper=stop setting."
+	} else {
+		remediation += "The pack's hooks.on_tamper=alert setting means the sandbox continues; consider stopping it manually."
+	}
+
+	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		Sandbox: audit.SandboxIdentity{
+			Name:      sandboxName,
+			BindingID: bindingID,
+		},
+		Kind:        audit.SandboxFindingHookTamper,
+		Severity:    "HIGH",
+		Title:       title,
+		Description: description,
+		Remediation: remediation,
+		TargetRef:   sandboxName,
+		Timestamp:   now,
+	})
+
+	msg := "⚠ hook tamper detected"
+	if onTamperShouldStop(onTamper) {
+		msg += " → stopping sandbox"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{
+		Kind:     sandboxapi.ActivityFinding,
+		Sandbox:  sandboxName,
+		Tool:     tool,
+		Event:    event,
+		Severity: "HIGH",
+		Reason:   string(audit.SandboxFindingHookTamper),
+		Message:  msg,
+	})
+
+	// Stop the sandbox if configured to do so.
+	if onTamperShouldStop(onTamper) {
+		go func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := m.Stop(stopCtx, sandboxName, false); err != nil {
+				m.logf("hook tamper: failed to stop %s: %v", sandboxName, err)
+			} else {
+				m.logf("hook tamper: stopped %s", sandboxName)
+			}
+		}()
+	}
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose

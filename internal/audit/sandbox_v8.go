@@ -369,6 +369,8 @@ const (
 	SandboxFindingTamperAttempt SandboxFindingKind = "tamper_attempt"
 	// SandboxFindingHookSilence is harness activity with no hook traffic.
 	SandboxFindingHookSilence SandboxFindingKind = "hook_silence"
+	// SandboxFindingHookTamper is a PostToolUse for a denied or never-seen PreToolUse.
+	SandboxFindingHookTamper SandboxFindingKind = "hook_tamper"
 	// SandboxFindingLargeUpload is a large upload to a first-seen host.
 	SandboxFindingLargeUpload SandboxFindingKind = "large_upload"
 )

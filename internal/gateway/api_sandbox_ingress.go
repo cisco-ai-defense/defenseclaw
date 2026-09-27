@@ -147,6 +147,8 @@ type SandboxHookDecision struct {
 	// Event is the harness hook event; Tool the tool it concerns.
 	Event string
 	Tool  string
+	// ToolUseID is the connector's per-call identifier (tool_use_id, toolUseID).
+	ToolUseID string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
 	WouldBlock bool
@@ -693,8 +695,8 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 	}
 	st.onHookDecision(SandboxHookDecision{
 		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
-		Event: req.HookEventName, Tool: req.ToolName, Action: resp.Action, WouldBlock: resp.WouldBlock,
-		Severity: resp.Severity, Reason: resp.Reason,
+		Event: req.HookEventName, Tool: req.ToolName, ToolUseID: req.ToolInvocationID,
+		Action: resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
 	})
 }
 

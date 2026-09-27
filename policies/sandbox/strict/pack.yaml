@@ -92,3 +92,4 @@ mcp:
 
 hooks:
   fail_mode: closed
+  on_tamper: stop

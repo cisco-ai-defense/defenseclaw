@@ -88,6 +88,14 @@ const FeedBuiltin = "builtin"
 // cannot reach DefenseClaw denies the tool call.
 const FailModeClosed = "closed"
 
+// OnTamperStop stops the sandbox when hook tamper is detected (default in
+// balanced and strict).
+const OnTamperStop = "stop"
+
+// OnTamperAlert emits a high-severity finding and notifies when hook tamper
+// is detected (default in open).
+const OnTamperAlert = "alert"
+
 var (
 	packNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	blockedToolPattern = regexp.MustCompile(`^[A-Za-z0-9_.:*-]{1,256}$`)
@@ -178,6 +186,10 @@ type MCPPolicy struct {
 // HooksPolicy configures the sandbox hook variant.
 type HooksPolicy struct {
 	FailMode string `yaml:"fail_mode" json:"fail_mode"`
+	// OnTamper is the response when PreToolUse/PostToolUse correlation detects
+	// a hook was killed or bypassed: "stop" stops the sandbox (default in
+	// balanced/strict), "alert" emits a finding and notifies (default in open).
+	OnTamper string `yaml:"on_tamper" json:"on_tamper"`
 }
 
 // Profile returns the OpenShell policy profile the pack's network mode maps
@@ -312,6 +324,7 @@ type mcpFile struct {
 
 type hooksFile struct {
 	FailMode *string `yaml:"fail_mode"`
+	OnTamper *string `yaml:"on_tamper"`
 }
 
 // Defaults for optional pack keys.
@@ -414,6 +427,15 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 		hooks = &hooksFile{}
 	}
 	p.Hooks.FailMode = v.enum("hooks.fail_mode", hooks.FailMode, FailModeClosed)
+	// OnTamper defaults: stop in balanced/strict, alert in open.
+	defaultOnTamper := OnTamperStop
+	if p.Network.Mode == NetworkOpen {
+		defaultOnTamper = OnTamperAlert
+	}
+	p.Hooks.OnTamper = v.enum("hooks.on_tamper", hooks.OnTamper, OnTamperStop, OnTamperAlert)
+	if hooks.OnTamper == nil {
+		p.Hooks.OnTamper = defaultOnTamper
+	}
 
 	if p.Network.Mode != NetworkDeny && p.Egress.Ports != nil && len(p.Egress.Ports) == 0 {
 		v.fail("egress.ports", "invalid_value", "must list at least one port unless network.mode is deny")

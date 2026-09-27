@@ -151,11 +151,12 @@ type Manager struct {
 	logf    func(string, ...any)
 	host    HostUser
 
-	feed     *Feed
-	creds    *egress.CredentialStore
-	unblocks *egress.MemoryUnblocks
-	batcher  *triage.Batcher
-	sink     *egressSink
+	feed          *Feed
+	creds         *egress.CredentialStore
+	unblocks      *egress.MemoryUnblocks
+	batcher       *triage.Batcher
+	sink          *egressSink
+	tamperTracker *hookTamperTracker
 
 	runMu  sync.Mutex
 	runCtx context.Context
@@ -235,18 +236,19 @@ func New(opts Options) (*Manager, error) {
 	}
 	unblocks, _ := egress.NewMemoryUnblocks()
 	m := &Manager{
-		opts:      opts,
-		ws:        opts.Workspace,
-		tel:       opts.Telemetry,
-		records:   newRecordStore(opts.DataDir),
-		now:       opts.Now,
-		logf:      opts.Logf,
-		host:      host,
-		feed:      NewFeed(DefaultFeedSize, opts.Now),
-		creds:     egress.NewCredentialStore(),
-		unblocks:  unblocks,
-		boxes:     map[string]*box{},
-		approvals: map[string]*approval{},
+		opts:          opts,
+		ws:            opts.Workspace,
+		tel:           opts.Telemetry,
+		records:       newRecordStore(opts.DataDir),
+		now:           opts.Now,
+		logf:          opts.Logf,
+		host:          host,
+		feed:          NewFeed(DefaultFeedSize, opts.Now),
+		creds:         egress.NewCredentialStore(),
+		unblocks:      unblocks,
+		tamperTracker: newHookTamperTracker(),
+		boxes:         map[string]*box{},
+		approvals:     map[string]*approval{},
 	}
 	if m.tel == nil {
 		m.tel = nopTelemetry{}

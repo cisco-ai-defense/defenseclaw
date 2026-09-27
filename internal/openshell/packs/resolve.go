@@ -275,6 +275,7 @@ type Effective struct {
 	Resources        Resources   `json:"resources"`
 	Learn            bool        `json:"learn"`
 	HookFailMode     string      `json:"hook_fail_mode"`
+	HookOnTamper     string      `json:"hook_on_tamper"`
 	Admin            AdminStatus `json:"admin"`
 
 	admin config.OpenShellAdminConfig
@@ -298,7 +299,7 @@ var explainOrder = []string{
 	"egress.feeds", "egress.block", "egress.admin_block", "egress.allow", "egress.allow_only",
 	"egress.ports", "egress.large_upload_mb",
 	"mcp.import", "mcp.host_port_access", "mcp.host_ports", "mcp.blocked_tools",
-	"resources.cpu", "resources.memory", "learn", "hooks.fail_mode",
+	"resources.cpu", "resources.memory", "learn", "hooks.fail_mode", "hooks.on_tamper",
 }
 
 // Explain returns every resolved setting with its provenance, in a stable
@@ -405,6 +406,8 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.resolveLearn(flags)
 	r.eff.HookFailMode = pack.Hooks.FailMode
 	r.set("hooks.fail_mode", pack.Hooks.FailMode, r.packLayer)
+	r.eff.HookOnTamper = pack.Hooks.OnTamper
+	r.set("hooks.on_tamper", pack.Hooks.OnTamper, r.packLayer)
 	r.eff.policySources = r.policySources(o)
 	return r.eff, r.violations, nil
 }
