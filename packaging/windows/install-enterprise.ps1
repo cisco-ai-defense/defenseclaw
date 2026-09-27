@@ -3009,6 +3009,45 @@ function Resolve-DefenseClawConnectorMetadataVersion {
     return ConvertTo-DefenseClawConnectorMetadataVersion -Value $MinimumVersion
 }
 
+# Minimum Claude Code version of each Claude hook contract, oldest first
+# (cli/defenseclaw/inventory/hook_contracts.json; a contract test pins them).
+$script:DefenseClawClaudeHookContractMinimums = @('2.1.154', '2.1.219')
+
+function Get-DefenseClawClaudeBootstrapPlaceholder {
+    param(
+        [AllowNull()][AllowEmptyCollection()][string[]]$DetectedVersions,
+        [Parameter(Mandatory)][string]$Default
+    )
+    # The DefenseClaw Claude managed policy is one machine-wide file, rendered
+    # from the hook contract of the row being enrolled, and its digest binds
+    # the Claude effective-policy evidence (#895). Rows on different contracts
+    # rewrite it in turn. A user with no client yet therefore takes the
+    # minimum of the newest contract a detected client on this host resolves
+    # to, so the rows written here share one contract. Only exact release
+    # versions are considered; without one, the bootstrap default applies.
+    $best = $null
+    $bestText = ''
+    foreach ($detected in @($DetectedVersions)) {
+        $text = [string]$detected
+        $parsed = $null
+        if ($text -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+            -not [Version]::TryParse($text, [ref]$parsed)) {
+            continue
+        }
+        foreach ($minimum in $script:DefenseClawClaudeHookContractMinimums) {
+            $floor = [Version]::Parse($minimum)
+            if ($parsed -ge $floor -and ($null -eq $best -or $floor -gt $best)) {
+                $best = $floor
+                $bestText = $minimum
+            }
+        }
+    }
+    if ($null -eq $best) {
+        return $Default
+    }
+    return $bestText
+}
+
 function Get-DefenseClawRenderedEnterpriseTargets {
     param(
         [Parameter(Mandatory)][string[]]$Connectors,
@@ -3061,17 +3100,26 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     # the connector's Windows minimum — see
     # requireWindowsEnterpriseManagedAgentVersion in
     # internal/enterprisehooks/install_windows.go (codex >= 0.131.0,
-    # claudecode >= 2.1.152). When no agent metadata exists yet (the common
-    # state on managed rollouts where AVC pushes DefenseClaw first), use the
-    # exact minimum as a bootstrap placeholder. A detected native package
+    # claudecode >= its lowest hook contract, 2.1.154). A contract test pins
+    # these to that gate and to cli/defenseclaw/inventory/hook_contracts.json:
+    # a placeholder below the Claude contract table would pass manifest
+    # validation and then fail to render any managed policy. When no agent
+    # metadata exists yet (the common state on managed rollouts where AVC
+    # pushes DefenseClaw first), use the exact minimum as a bootstrap
+    # placeholder. For Claude the placeholder is the minimum of the newest
+    # hook contract a detected client on this host resolves to, and this
+    # exact minimum only when no client is detected (see
+    # Get-DefenseClawClaudeBootstrapPlaceholder). A detected native package
     # whose identity/version cannot be authenticated never receives that
     # fallback. A valid below-minimum version remains exact so downstream
     # manifest validation fails closed instead of certifying a placeholder.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
-        'claudecode' = '2.1.152'
+        'claudecode' = '2.1.154'
         'cursor'     = '1.7.0'
     }
+    $discoveredRows = [Collections.Generic.List[object]]::new()
+    $detectedClaudeVersions = [Collections.Generic.List[string]]::new()
     foreach ($u in $users) {
         $deferTarget = (
             $DeferInactiveProfiles -and
@@ -3094,32 +3142,55 @@ function Get-DefenseClawRenderedEnterpriseTargets {
                 $version = ''
                 $metadataDiscoveryFailed = $true
             }
-            $minimumVersion = if (
-                $script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)
-            ) {
-                $script:DefenseClawWindowsAgentVersionMinimum[$c]
+            $detected = ConvertTo-DefenseClawConnectorMetadataVersion -Value $version
+            if ($c -ceq 'claudecode' -and -not [string]::IsNullOrWhiteSpace($detected)) {
+                $detectedClaudeVersions.Add($detected)
             }
-            else {
-                ''
-            }
-            $version = Resolve-DefenseClawConnectorMetadataVersion `
-                -DiscoveredVersion $version `
-                -MinimumVersion $minimumVersion `
-                -NativeCandidateObserved $nativeCandidateObserved `
-                -DiscoveryFailed $metadataDiscoveryFailed
-            [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
-            [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
-            [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
-            [void]$sb.AppendLine("    connector: `"$c`"")
-            if ([string]::IsNullOrWhiteSpace($version)) {
-                [void]$sb.AppendLine('    enabled: false')
-            }
-            else {
-                [void]$sb.AppendLine("    agent_version: `"$version`"")
-                [void]$sb.AppendLine('    enabled: true')
-                if ($deferTarget) {
-                    [void]$sb.AppendLine('    deferred: true')
-                }
+            $discoveredRows.Add([pscustomobject]@{
+                User = $u
+                Connector = $c
+                Version = $version
+                NativeCandidateObserved = $nativeCandidateObserved
+                DiscoveryFailed = $metadataDiscoveryFailed
+                Deferred = $deferTarget
+            })
+        }
+    }
+    $claudePlaceholder = Get-DefenseClawClaudeBootstrapPlaceholder `
+        -DetectedVersions $detectedClaudeVersions.ToArray() `
+        -Default ([string]$script:DefenseClawWindowsAgentVersionMinimum['claudecode'])
+    foreach ($row in $discoveredRows) {
+        $u = $row.User
+        $c = [string]$row.Connector
+        $deferTarget = [bool]$row.Deferred
+        $minimumVersion = if ($c -ceq 'claudecode') {
+            $claudePlaceholder
+        }
+        elseif ($script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)) {
+            $script:DefenseClawWindowsAgentVersionMinimum[$c]
+        }
+        else {
+            ''
+        }
+        $nativeCandidateObserved = [bool]$row.NativeCandidateObserved
+        $metadataDiscoveryFailed = [bool]$row.DiscoveryFailed
+        $version = Resolve-DefenseClawConnectorMetadataVersion `
+            -DiscoveredVersion $row.Version `
+            -MinimumVersion $minimumVersion `
+            -NativeCandidateObserved $nativeCandidateObserved `
+            -DiscoveryFailed $metadataDiscoveryFailed
+        [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
+        [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
+        [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
+        [void]$sb.AppendLine("    connector: `"$c`"")
+        if ([string]::IsNullOrWhiteSpace($version)) {
+            [void]$sb.AppendLine('    enabled: false')
+        }
+        else {
+            [void]$sb.AppendLine("    agent_version: `"$version`"")
+            [void]$sb.AppendLine('    enabled: true')
+            if ($deferTarget) {
+                [void]$sb.AppendLine('    deferred: true')
             }
         }
     }
