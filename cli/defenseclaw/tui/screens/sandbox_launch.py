@@ -40,6 +40,34 @@ class SandboxLaunchError(ValueError):
     """The launch dialog cannot build a run."""
 
 
+def _within(path: str, root: str) -> bool:
+    root = root.rstrip(os.sep) or os.sep
+    return path == root or path.startswith(root if root.endswith(os.sep) else root + os.sep)
+
+
+def launch_folder_problem(folder: str) -> str:
+    """Why a run would refuse ``folder``, in Go's words (workspace.ValidateSource), or "".
+
+    The daemon checks again (and more: system and credential folders); this
+    keeps the common mistakes in the dialog.
+    """
+    if not folder:
+        return "choose a project folder"
+    path = os.path.abspath(os.path.expanduser(folder))
+    if not os.path.isdir(path):
+        return f"{path} is not a folder"
+    real = os.path.realpath(path)
+    refusing = f"refusing to share {real} with a sandbox: "
+    if real == os.sep or real.count(os.sep) < 2:
+        return refusing + "it is a top-level system directory"
+    home = os.path.realpath(os.path.expanduser("~"))
+    if home and real == home:
+        return refusing + "it is your home directory (launch from a project folder inside it)"
+    if home and _within(home, real):
+        return refusing + "it contains your home directory"
+    return ""
+
+
 @dataclass(frozen=True)
 class SandboxLaunch:
     """A validated run: argv after the gateway binary, and its working folder."""
@@ -62,14 +90,10 @@ class SandboxLaunchValues:
         harness = self.harness.strip()
         if not harness:
             raise SandboxLaunchError("choose a harness")
-        folder = os.path.abspath(os.path.expanduser(self.folder.strip() or os.getcwd()))
-        if not os.path.isdir(folder):
-            raise SandboxLaunchError(f"{folder} is not a folder")
-        # The daemon refuses these too (workspace.ValidateSource); saying so
-        # here keeps the operator in the dialog.
-        home = os.path.abspath(os.path.expanduser("~"))
-        if folder == home or home.startswith(folder.rstrip(os.sep) + os.sep):
-            raise SandboxLaunchError("run in a project folder inside your home folder, not the home folder itself")
+        problem = launch_folder_problem(self.folder.strip())
+        if problem:
+            raise SandboxLaunchError(problem)
+        folder = os.path.abspath(os.path.expanduser(self.folder.strip()))
         argv: list[str] = ["sandbox", "run", harness]
         name = self.name.strip()
         if name:
@@ -107,7 +131,8 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
     }}
 
     #sandbox-launch-dialog {{
-        width: 84;
+        width: 100%;
+        max-width: 84;
         height: auto;
         max-height: 95%;
         padding: 1 2;
@@ -131,8 +156,11 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
 
     #sandbox-launch-status {{
         height: auto;
-        margin-top: 1;
         color: {DEFAULT_TOKENS.accent_amber};
+    }}
+
+    #sandbox-launch-status.-empty {{
+        display: none;
     }}
 
     #sandbox-launch-buttons {{
@@ -159,11 +187,13 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
     ) -> None:
         super().__init__()
         self.harnesses = harnesses or tuple((label, name) for name, label in SANDBOX_HARNESSES)
-        self.folder = folder or os.getcwd()
+        self.folder = folder
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="sandbox-launch-dialog"):
             yield Static("New sandboxed run", id="sandbox-launch-title")
+            # At the top: a refusal must be visible without scrolling.
+            yield Static("", id="sandbox-launch-status", classes="-empty", markup=False)
             yield Static(
                 "The harness gets this terminal; the TUI comes back when it exits.",
                 classes="sandbox-launch-label",
@@ -171,7 +201,9 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
             yield Static("Harness", classes="sandbox-launch-label")
             yield Select(self.harnesses, value=self.harnesses[0][1], allow_blank=False, id="sandbox-launch-harness")
             yield Static("Project folder (the agent sees only this folder)", classes="sandbox-launch-label")
-            yield Input(value=self.folder, id="sandbox-launch-folder")
+            yield Input(
+                value=self.folder, placeholder="a project folder, e.g. ~/code/myapp", id="sandbox-launch-folder"
+            )
             yield Static("Name (optional)", classes="sandbox-launch-label")
             yield Input(placeholder="dc-<harness>-<folder>-<random>", id="sandbox-launch-name")
             yield Static("Network profile", classes="sandbox-launch-label")
@@ -183,10 +215,21 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
             )
             yield Checkbox("Work on a copy (untrusted repository or task)", id="sandbox-launch-copy")
             yield Checkbox("Keep the harness's own permission prompts (--safe)", id="sandbox-launch-safe")
-            yield Static("", id="sandbox-launch-status")
             with Horizontal(id="sandbox-launch-buttons"):
                 yield Button("Cancel", id="sandbox-launch-cancel")
                 yield Button("Start", id="sandbox-launch-submit", variant="success")
+
+    def on_mount(self) -> None:
+        self.query_one("#sandbox-launch-harness", Select).focus()
+        if not self.folder:
+            self._show_status("Choose the project folder the agent may see (not your home folder).")
+
+    def _show_status(self, text: str) -> None:
+        status = self.query_one("#sandbox-launch-status", Static)
+        status.update(text)
+        status.set_class(not text, "-empty")
+        if text:
+            self.query_one("#sandbox-launch-dialog", VerticalScroll).scroll_home(animate=False)
 
     def values(self) -> SandboxLaunchValues:
         harness = self.query_one("#sandbox-launch-harness", Select).value
@@ -204,7 +247,8 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
         try:
             launch = self.values().build()
         except SandboxLaunchError as exc:
-            self.query_one("#sandbox-launch-status", Static).update(str(exc))
+            message = str(exc)
+            self._show_status(message[:1].upper() + message[1:] + ".")
             return
         self.dismiss(launch)
 

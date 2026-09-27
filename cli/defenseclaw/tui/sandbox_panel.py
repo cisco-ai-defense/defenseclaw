@@ -41,6 +41,7 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunch,
     SandboxLaunchScreen,
     harness_choices,
+    launch_folder_problem,
 )
 from defenseclaw.tui.services.sandbox_state import (
     ADMIN_MESSAGE,
@@ -765,11 +766,32 @@ class SandboxPanelMixin:
         if not choices:
             self.notify_toast("warn", f"No harness may run: {ADMIN_MESSAGE}.")  # type: ignore[attr-defined]
             return
-        launch = await self.push_screen_wait(SandboxLaunchScreen(choices, folder=os.getcwd()))  # type: ignore[attr-defined]
+        launch = await self.push_screen_wait(  # type: ignore[attr-defined]
+            SandboxLaunchScreen(choices, folder=self._sandbox_default_folder())
+        )
         if launch is None:
             self._set_status("New run cancelled.")  # type: ignore[attr-defined]
             return
         self._run_sandbox_terminal(launch)
+
+    def _sandbox_default_folder(self) -> str:
+        """The launch dialog's folder: the selected, else the newest, sandbox's project.
+
+        The TUI's own folder only when it could be a project (it is often the
+        home folder, which a run refuses).
+        """
+        model = self.sandbox_model
+        selected = model.selected_sandbox()
+        newest = sorted(
+            (row for row in model.rows if row.project),
+            key=lambda row: row.created_at.timestamp() if row.created_at else 0.0,
+            reverse=True,
+        )
+        for row in ([selected] if selected is not None else []) + newest:
+            if row.project and os.path.isdir(row.project):
+                return row.project
+        cwd = os.getcwd()
+        return "" if launch_folder_problem(cwd) else cwd
 
     async def _sandbox_connect(self, name: str) -> None:
         launch = SandboxLaunch(("sandbox", "connect", name), os.getcwd(), f"sandbox connect {name}")

@@ -574,9 +574,16 @@ def test_launch_values_refuse_bad_folders(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(home))
     with pytest.raises(SandboxLaunchError, match="not a folder"):
         SandboxLaunchValues(folder=str(home / "missing")).build()
-    for folder in (home, tmp_path, Path("/")):
-        with pytest.raises(SandboxLaunchError, match="home folder"):
+    # Go's words (workspace.ValidateSource), one reason each.
+    for folder, reason in (
+        (home, "it is your home directory"),
+        (tmp_path, "it contains your home directory"),
+        (Path("/"), "it is a top-level system directory"),
+    ):
+        with pytest.raises(SandboxLaunchError, match=reason):
             SandboxLaunchValues(folder=str(folder)).build()
+    with pytest.raises(SandboxLaunchError, match="choose a project folder"):
+        SandboxLaunchValues(folder="").build()
     with pytest.raises(SandboxLaunchError, match="unknown profile"):
         SandboxLaunchValues(folder=str(home / "code"), profile="loose").build()
     assert SandboxLaunchValues(folder=str(home / "code")).build().cwd == str(home / "code")
@@ -1243,3 +1250,45 @@ async def test_the_unblock_menu_shows_what_each_scope_does() -> None:
         await pilot.pause()
         rows = list(app.screen.query(Button))
         assert all(row.region.height >= 4 for row in rows), [row.region for row in rows]
+
+
+# --- review fixes: the launch dialog ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_launch_dialog_fits_80_columns_and_shows_why_it_refuses(tmp_path: Path) -> None:
+    from defenseclaw.tui.screens.sandbox_launch import SandboxLaunchScreen
+    from textual.app import App
+    from textual.widgets import Select, Static
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(SandboxLaunchScreen((("Codex", "codex"),), folder=""))
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        dialog = screen.query_one("#sandbox-launch-dialog")
+        assert dialog.region.right <= 80
+        assert isinstance(app.focused, Select), app.focused
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        status = screen.query_one("#sandbox-launch-status", Static)
+        assert str(status.render()) == "Choose a project folder."
+        assert status.region.height >= 1 and status.region.bottom <= 24
+
+
+def test_the_launch_dialog_starts_in_a_sandbox_project(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "myapp"
+    project.mkdir()
+    app = DefenseClawTUI(config=_config())
+    app.sandbox_model.set_snapshot(STATUS, [{**RUNNING, "project": str(project)}, STOPPED], [])
+    app.sandbox_model.cursor = 1  # docs: no project, so the newest with one
+    assert app._sandbox_default_folder() == str(project)  # noqa: SLF001
+    app.sandbox_model.set_snapshot(STATUS, [], [])
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(home)
+    assert app._sandbox_default_folder() == ""  # noqa: SLF001 - never the home folder
