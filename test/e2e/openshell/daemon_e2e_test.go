@@ -23,7 +23,10 @@
 // Anthropic server (mock_anthropic.py) standing in for the model:
 //
 //   - create (overlay image build and hook-fire verification when missing),
-//     then a tool call whose hook reaches the sandbox ingress;
+//     with an ingress provider of this daemon's own listener profile
+//     (defenseclaw-ingress-<port>), then a tool call whose hook reaches the
+//     sandbox ingress (DEFENSECLAW_E2E_TOKEN_DELIVERY=env runs the whole
+//     test with openshell.token_delivery: env instead);
 //   - the per-run managed configuration: the run drop-in is mounted
 //     read-only, the project's committed .claude/settings.json points Claude
 //     Code at an endpoint nothing serves (every harness step still reaches
@@ -82,10 +85,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -129,6 +135,9 @@ type env struct {
 	readme  string
 	// stopProject is the second sandbox's project.
 	stopProject string
+	// tokenDelivery is openshell.token_delivery (DEFENSECLAW_E2E_TOKEN_DELIVERY,
+	// default provider).
+	tokenDelivery string
 
 	gw  openshell.Client
 	api *sandboxapi.Client
@@ -137,7 +146,10 @@ type env struct {
 	mockPx *exec.Cmd
 
 	profilesBefore map[string]bool
-	imagesBefore   map[string]bool
+	// usedProfiles are the provider profiles this run's providers were
+	// created from; cleanup considers no others (a concurrent run's stay).
+	usedProfiles sync.Map
+	imagesBefore map[string]bool
 }
 
 func TestSandboxDaemon(t *testing.T) {
@@ -147,8 +159,9 @@ func TestSandboxDaemon(t *testing.T) {
 	}
 	e := &env{
 		t: t, root: t, prefix: envOr("DEFENSECLAW_E2E_PREFIX", "dc-e2e"),
-		apiPort: envInt(t, "DEFENSECLAW_E2E_API_PORT", 28970),
-		mock:    envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921),
+		apiPort:       envInt(t, "DEFENSECLAW_E2E_API_PORT", 28970),
+		mock:          envInt(t, "DEFENSECLAW_E2E_MOCK_PORT", 28921),
+		tokenDelivery: e2eTokenDelivery(t),
 	}
 	if !openshell.ValidSandboxName(e.prefix) {
 		t.Fatalf("DEFENSECLAW_E2E_PREFIX %q is not a valid sandbox name", e.prefix)
@@ -308,9 +321,10 @@ gateway:
 openshell:
   enabled: true
   harnesses: [claudecode]
+  token_delivery: %s
   approvals:
     debounce_ms: 500
-`, dc, e.apiPort+10, e.apiPort)
+`, dc, e.apiPort+10, e.apiPort, e.tokenDelivery)
 	writeFile(t, filepath.Join(dc, "config.yaml"), []byte(cfg), 0o600)
 
 	var raw [24]byte
@@ -438,9 +452,7 @@ func (e *env) create() *sandboxapi.Sandbox {
 	if got.Labels[manager.LabelManaged] != "true" || got.Labels[manager.LabelOwner] == "" || got.Labels[manager.LabelHarness] != "claudecode" {
 		t.Fatalf("sandbox labels = %v, want the io.defenseclaw/* management labels", got.Labels)
 	}
-	if n := len(e.prefixedProviders(e.ctx(30 * time.Second))); n < 2 {
-		t.Fatalf("providers named after the sandbox = %d, want the ingress and the credential binding", n)
-	}
+	e.checkIngressProvider(sb)
 	list, err := e.api.List(e.ctx(30 * time.Second))
 	if err != nil || !slices.ContainsFunc(list, func(s sandboxapi.Sandbox) bool { return s.Name == sb.Name }) {
 		t.Fatalf("list = %v, %v", names(list), err)
@@ -450,6 +462,52 @@ func (e *env) create() *sandboxapi.Sandbox {
 	e.exec(sb, 30*time.Second, true, "true")
 	return sb
 }
+
+// checkIngressProvider checks how the sandbox reaches its own daemon's hook
+// ingress. With token_delivery: provider it is an ingress provider created
+// from this listener's own profile (profiles.IngressProfileID), whose one
+// endpoint is this daemon's ingress port; with env it is the policy's
+// ingress rule, and there is no ingress provider. The credential binding
+// has a provider either way.
+func (e *env) checkIngressProvider(sb *sandboxapi.Sandbox) {
+	t := e.t
+	ctx := e.ctx(30 * time.Second)
+	port := e.ingressPort()
+	providers := e.prefixedProviders(ctx)
+	e.recordProfiles(ctx, providers)
+	ingressName := sb.Name + "-ingress"
+	if e.tokenDelivery == config.OpenShellTokenDeliveryEnv {
+		if slices.Contains(providers, ingressName) || len(providers) != 1 {
+			t.Fatalf("providers named after the sandbox = %v, want only the credential binding's", providers)
+		}
+		cfg, err := e.gw.SandboxConfig(ctx, sb.Name)
+		if err != nil || cfg == nil || cfg.Policy == nil {
+			t.Fatalf("sandbox config of %s: %+v, %v", sb.Name, cfg, err)
+		}
+		rule, ok := cfg.Policy.NetworkPolicies[policy.IngressRuleName]
+		if !ok || len(rule.Endpoints) != 1 || rule.Endpoints[0].Host != connector.SandboxIngressHost || rule.Endpoints[0].Port != uint32(port) {
+			t.Fatalf("policy ingress rule = %+v (present %t), want %s:%d", rule, ok, connector.SandboxIngressHost, port)
+		}
+		t.Logf("token_delivery env: no ingress provider; policy rule %s -> %s:%d", policy.IngressRuleName, connector.SandboxIngressHost, port)
+		return
+	}
+	if !slices.Contains(providers, ingressName) || len(providers) < 2 {
+		t.Fatalf("providers named after the sandbox = %v, want the ingress and the credential binding", providers)
+	}
+	ingress, err := e.gw.GetProvider(ctx, ingressName)
+	if err != nil || ingress.Type != profiles.IngressProfileID(port) {
+		t.Fatalf("ingress provider %s = %+v, %v; want type %s", ingressName, ingress, err, profiles.IngressProfileID(port))
+	}
+	prof, err := e.gw.GetProfile(ctx, ingress.Type)
+	if err != nil || len(prof.Endpoints) != 1 || prof.Endpoints[0].Host != connector.SandboxIngressHost || prof.Endpoints[0].Port != uint32(port) {
+		t.Fatalf("ingress profile %s = %+v, %v; want the one endpoint %s:%d", ingress.Type, prof, err, connector.SandboxIngressHost, port)
+	}
+	t.Logf("ingress provider %s: profile %s -> %s:%d", ingressName, ingress.Type, connector.SandboxIngressHost, port)
+}
+
+// ingressPort is the daemon's hook ingress port (api_port+1: the config
+// sets no openshell.ingress_port).
+func (e *env) ingressPort() int { return e.apiPort + 1 }
 
 func (e *env) hookReachesIngress(sb *sandboxapi.Sandbox) {
 	t := e.t
@@ -839,10 +897,30 @@ func (e *env) harness(sb *sandboxapi.Sandbox, prompt string) string {
 	}
 	out := truncate(strings.TrimSpace(string(res.Stdout)), 300)
 	if res.ExitCode != 0 {
+		e.logSandbox(sb.Name)
 		e.t.Fatalf("harness %q exited %d: %s / %s", prompt, res.ExitCode, out, truncate(string(res.Stderr), 300))
 	}
 	e.t.Logf("harness %q: %s", prompt, out)
 	return out
+}
+
+// logSandbox logs the sandbox's recent OpenShell network decisions, before
+// a failure's cleanup deletes the sandbox and its log with it.
+func (e *env) logSandbox(name string) {
+	out, err := exec.Command("openshell", "logs", "-n", "60", "--source", "sandbox", name).CombinedOutput()
+	if err != nil {
+		e.t.Logf("openshell logs %s: %v", name, err)
+	}
+	var keep []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "NET:") || strings.Contains(line, "HTTP:") || strings.Contains(line, "L7") {
+			keep = append(keep, truncate(line, 300))
+		}
+	}
+	if len(keep) > 20 {
+		keep = keep[len(keep)-20:]
+	}
+	e.t.Logf("openshell logs %s (network, last %d):\n%s", name, len(keep), strings.Join(keep, "\n"))
 }
 
 type curlOut struct{ connect, code, rc string }
@@ -968,9 +1046,20 @@ func (e *env) sweep(ctx context.Context) {
 	}
 }
 
+// recordProfiles notes the profiles the named providers were created from.
+func (e *env) recordProfiles(ctx context.Context, names []string) {
+	for _, name := range names {
+		if p, err := e.gw.GetProvider(ctx, name); err == nil {
+			e.usedProfiles.Store(p.Type, true)
+		}
+	}
+}
+
 // deleteProfiles deletes the DefenseClaw provider profiles the daemon
-// imported during this run: ones that did not exist before it and that no
-// remaining provider (another user's sandbox) uses.
+// imported during this run: this daemon's ingress profile and the ones its
+// providers used, that did not exist before the run and that no remaining
+// provider (another user's sandbox) uses. Profiles a concurrent run
+// imported meanwhile are not this run's.
 func (e *env) deleteProfiles() {
 	if e.gw == nil || e.profilesBefore == nil {
 		return
@@ -987,7 +1076,9 @@ func (e *env) deleteProfiles() {
 		return
 	}
 	for _, p := range list {
-		ours := slices.Contains(profiles.IDs(), p.ID) || strings.HasPrefix(p.ID, "dc-cred-")
+		_, used := e.usedProfiles.Load(p.ID)
+		ours := p.ID == profiles.IngressProfileID(e.ingressPort()) ||
+			(used && (profiles.IsDefenseClaw(p.ID) || strings.HasPrefix(p.ID, "dc-cred-")))
 		if e.profilesBefore[p.ID] || !ours {
 			continue
 		}
@@ -1003,8 +1094,14 @@ func (e *env) deleteProfiles() {
 	}
 }
 
-func sandboxImages() (map[string]bool, error) {
-	out, err := exec.Command("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "defenseclaw/sandbox").Output()
+// sandboxImages lists the overlay image tags, only those of one image store
+// owner when owner is set.
+func sandboxImages(owner ...string) (map[string]bool, error) {
+	args := []string{"image", "ls", "--format", "{{.Repository}}:{{.Tag}}"}
+	for _, o := range owner {
+		args = append(args, "--filter", "label="+image.LabelOwner+"="+o)
+	}
+	out, err := exec.Command("docker", append(args, "defenseclaw/sandbox")...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker image ls: %w", err)
 	}
@@ -1015,12 +1112,23 @@ func sandboxImages() (map[string]bool, error) {
 	return set, nil
 }
 
-// removeImages removes the overlay images this run built.
+// removeImages removes the overlay images this run's daemon built: new
+// since setup and labelled with its data dir's image store owner, so a
+// concurrent run's images stay.
 func (e *env) removeImages() {
 	if e.imagesBefore == nil || os.Getenv("DEFENSECLAW_E2E_KEEP_IMAGE") == "1" {
 		return
 	}
-	now, err := sandboxImages()
+	store := image.NewStore(filepath.Join(e.work, "dc"))
+	if _, err := os.Stat(store.Path()); err != nil {
+		return // the daemon never resolved an image
+	}
+	owner, err := store.Owner()
+	if err != nil {
+		e.t.Logf("cleanup: image store owner: %v", err)
+		return
+	}
+	now, err := sandboxImages(owner)
 	if err != nil {
 		e.t.Logf("cleanup: %v", err)
 		return
@@ -1140,6 +1248,16 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// e2eTokenDelivery is DEFENSECLAW_E2E_TOKEN_DELIVERY: provider (default) or
+// env.
+func e2eTokenDelivery(t *testing.T) string {
+	v := strings.ToLower(envOr("DEFENSECLAW_E2E_TOKEN_DELIVERY", config.OpenShellTokenDeliveryProvider))
+	if v != config.OpenShellTokenDeliveryProvider && v != config.OpenShellTokenDeliveryEnv {
+		t.Fatalf("DEFENSECLAW_E2E_TOKEN_DELIVERY %q is not provider or env", v)
+	}
+	return v
 }
 
 func envInt(t *testing.T, key string, def int) int {
