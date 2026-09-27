@@ -325,9 +325,11 @@ The credential's principal also carries the sandbox's own `Decider`
 (`Principal.Decider`). The manager builds it from that sandbox's resolved
 pack and admin policy (`packs.Effective.EgressDecider`) and its unblocks. One
 sandbox's block list, ports, mode or unblocks therefore never decide another
-sandbox's traffic. The manager re-registers the credential whenever the
-policy is re-resolved. The proxy's own decider (`Options.Decider`,
-`SetDecider`) is only the fallback for a principal without one.
+sandbox's traffic. The manager re-registers every credential with a rebuilt
+decider after creates, deletes, configuration changes and reconciles.
+Unblocks take effect at once, because the decider looks them up live. The
+proxy's own decider (`Options.Decider`, `SetDecider`) is only the fallback
+for a principal without one.
 
 ### Request handling
 
