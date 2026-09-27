@@ -159,9 +159,9 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	sort.Strings(removed)
 	sort.Strings(rebound)
 	all := append(append([]string{}, removed...), rebound...)
-	reason, code, eventReason := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation), "SANDBOX_ADMIN_POLICY"
+	reason, code := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation)
 	if len(removed) == 0 {
-		reason, code, eventReason = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST", "SANDBOX_RULE_RESOLVES_TO_HOST"
+		reason, code = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST"
 	}
 	res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
 		Annotations: map[string]string{"source": "defenseclaw", "reason": reason},
@@ -178,12 +178,23 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		id.PolicyVersion = res.Version
 	}
 	m.mu.Unlock()
-	ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
-		Target: truncate(strings.Join(all, ","), 256), Reason: eventReason, ChangeCount: len(all), Timestamp: m.now()}
-	if res != nil {
-		ev.PolicyHash = res.PolicyHash
+	// One mandatory record per removed rule: the record's target names one
+	// rule (a bounded identifier), and the revision is the same for all.
+	for _, list := range []struct {
+		rules  []string
+		reason string
+	}{{removed, policyReasonAdmin}, {rebound, policyReasonResolvesToHost}} {
+		for _, rule := range list.rules {
+			ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
+				Target: rule, Reason: list.reason, ChangeCount: 1, Timestamp: m.now()}
+			if res != nil {
+				ev.PolicyHash = res.PolicyHash
+			}
+			if err := m.tel.RecordSandboxPolicy(ctx, ev); err != nil {
+				m.logf("policy telemetry for %s of %s: %v", rule, name, err)
+			}
+		}
 	}
-	_ = m.tel.RecordSandboxPolicy(ctx, ev)
 	if len(removed) > 0 {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: "admin_policy", Message: fmt.Sprintf("removed %d approved rule(s) %s", len(removed), sandboxapi.AdminMessage)})
@@ -238,7 +249,7 @@ func (m *Manager) violationError(ctx context.Context, err error, sandbox string)
 	if v.Admin() {
 		m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
 		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
-			State: audit.SandboxHealthDegraded, ErrorCode: string(gatewaylog.ErrCodeOpenShellAdminViolation),
+			State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellAdminViolation),
 			ErrorSummary: truncate(v.Key+": "+v.Constraint, 512), Timestamp: m.now(),
 		})
 		msg := v.Message

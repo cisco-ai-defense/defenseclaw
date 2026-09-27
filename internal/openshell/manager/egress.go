@@ -249,10 +249,12 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if ident.Name == "" {
 		ident = audit.SandboxIdentity{Name: "all", Runtime: audit.SandboxRuntimeOpenShell}
 	}
-	_ = m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 		Sandbox: ident, Operation: audit.SandboxEgressUnblock, Actor: "operator", Origin: "api", Target: host,
-		Reason: "SANDBOX_EGRESS_UNBLOCK", ChangeCount: 1, Timestamp: m.now(),
-	})
+		Reason: policyReasonUnblock, ChangeCount: 1, Timestamp: m.now(),
+	}); err != nil {
+		m.logf("policy telemetry for the unblock of %s: %v", host, err)
+	}
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
 	return resp, nil

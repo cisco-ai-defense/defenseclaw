@@ -351,7 +351,9 @@ const (
 type SandboxHealthEvent struct {
 	Sandbox SandboxIdentity
 	State   SandboxHealthState
-	// ErrorCode is a stable token, typically a gatewaylog error code.
+	// ErrorCode is a stable token (lower case), typically a gatewaylog
+	// error code in lower case: openshell_watch_failed, not
+	// OPENSHELL_WATCH_FAILED, which the recorder refuses.
 	ErrorCode    string
 	ErrorSummary string
 	Timestamp    time.Time

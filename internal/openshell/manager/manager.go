@@ -35,12 +35,14 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -403,7 +405,7 @@ func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 	if err != nil {
 		if m.gwErr == nil || m.gwErr.Error() != err.Error() {
 			m.logf("OpenShell gateway unavailable: %v", err)
-			m.health(ctx, audit.SandboxHealthDegraded, "OPENSHELL_UNAVAILABLE", err.Error())
+			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, err.Error())
 		}
 		m.gwErr, m.gwErrAt = err, m.now()
 		if m.opts.OnGateway != nil {
@@ -455,11 +457,33 @@ func (m *Manager) closeGateway() {
 	m.gw = nil
 }
 
-func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, code, summary string) {
+func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, code gatewaylog.ErrorCode, summary string) {
 	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
-		State: state, ErrorCode: code, ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
+		State: state, ErrorCode: errorToken(code), ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
 }
+
+// errorToken is a gateway error code as audit records carry it: a stable
+// token, which is lower case (OPENSHELL_UNAVAILABLE is recorded as
+// openshell_unavailable). The recorder refuses the upper-case form.
+func errorToken(code gatewaylog.ErrorCode) string {
+	return strings.ToLower(string(code))
+}
+
+// Reason codes of the sandbox policy records (audit.SandboxPolicyEvent
+// Reason): stable tokens, as the recorder refuses anything else.
+const (
+	// policyReasonApproval: an approved proposal was merged.
+	policyReasonApproval = "approval"
+	// policyReasonUnblock: an egress unblock was added.
+	policyReasonUnblock = "egress_unblock"
+	// policyReasonAdmin: an approved rule the organization's policy now
+	// refuses was removed.
+	policyReasonAdmin = "admin_policy"
+	// policyReasonResolvesToHost: an approved rule whose destination now
+	// resolves to this machine was removed.
+	policyReasonResolvesToHost = "rule_resolves_to_host"
+)
 
 func (m *Manager) config() *config.Config {
 	cfg := m.opts.Config()

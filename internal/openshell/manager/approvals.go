@@ -638,10 +638,12 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			continue
 		}
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalApproved, a.actor)
-		_ = m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+		if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 			Sandbox: ident, Operation: audit.SandboxPolicyRuleAdd, PolicyHash: r.PolicyHash, Actor: approvalActor(a.actor),
-			Origin: originFor(a.actor), Target: a.decision.Host, Reason: "SANDBOX_APPROVAL", ChangeCount: 1, Timestamp: m.now(),
-		})
+			Origin: originFor(a.actor), Target: a.decision.Host, Reason: policyReasonApproval, ChangeCount: 1, Timestamp: m.now(),
+		}); err != nil {
+			m.logf("policy telemetry for approval %s: %v", a.id, err)
+		}
 		msg := "approved " + a.decision.Host
 		if r.Forced {
 			msg += " (applied while hooks were busy)"

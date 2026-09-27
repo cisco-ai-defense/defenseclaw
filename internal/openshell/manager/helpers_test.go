@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
@@ -206,9 +207,17 @@ func (f *fakeImporter) Import(ctx context.Context, _ string, p profiles.Profile,
 	return err
 }
 
-// memTelemetry keeps every sandbox record.
+// memTelemetry keeps every sandbox record the production recorder
+// accepts. Each record first goes through a real audit.SandboxRecorder,
+// whose runtime builds the generated family record: one the audit schema
+// refuses (a reason that is not a stable token, a target that is not a
+// bounded reference) is not kept and is reported by the environment's
+// cleanup, instead of vanishing as it does in production, where the manager
+// drops the recorder's error.
 type memTelemetry struct {
 	mu        sync.Mutex
+	check     *audit.SandboxRecorder
+	refused   []string
 	lifecycle []audit.SandboxLifecycleEvent
 	egress    []audit.SandboxEgressEvent
 	approvals []audit.SandboxApprovalEvent
@@ -218,52 +227,120 @@ type memTelemetry struct {
 	workspace []audit.SandboxWorkspaceEvent
 }
 
-func (t *memTelemetry) RecordSandboxLifecycle(_ context.Context, e audit.SandboxLifecycleEvent) error {
+func newMemTelemetry() *memTelemetry {
+	logger := audit.NewLogger(nil)
+	logger.SetRuntimeV8Emitter(buildingRuntime{})
+	return &memTelemetry{check: audit.NewSandboxRecorder(logger)}
+}
+
+// accepted runs the production recorder on a record and notes a refusal.
+// Callers hold t.mu, which also serializes the recorder's tracked phases.
+func (t *memTelemetry) accepted(kind string, err error) error {
+	if err != nil {
+		t.refused = append(t.refused, kind+": "+err.Error())
+	}
+	return err
+}
+
+// refusedRecords lists the records the production recorder refused.
+func (t *memTelemetry) refusedRecords() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return append([]string(nil), t.refused...)
+}
+
+func (t *memTelemetry) RecordSandboxLifecycle(ctx context.Context, e audit.SandboxLifecycleEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.accepted("lifecycle", t.check.RecordSandboxLifecycle(ctx, e)); err != nil {
+		return err
+	}
 	t.lifecycle = append(t.lifecycle, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxEgress(_ context.Context, e audit.SandboxEgressEvent) error {
+func (t *memTelemetry) RecordSandboxEgress(ctx context.Context, e audit.SandboxEgressEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("egress", t.check.RecordSandboxEgress(ctx, e)); err != nil {
+		return err
+	}
 	t.egress = append(t.egress, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxApproval(_ context.Context, e audit.SandboxApprovalEvent) error {
+func (t *memTelemetry) RecordSandboxApproval(ctx context.Context, e audit.SandboxApprovalEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("approval", t.check.RecordSandboxApproval(ctx, e)); err != nil {
+		return err
+	}
 	t.approvals = append(t.approvals, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxPolicy(_ context.Context, e audit.SandboxPolicyEvent) error {
+func (t *memTelemetry) RecordSandboxPolicy(ctx context.Context, e audit.SandboxPolicyEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("policy "+string(e.Operation)+" "+e.Target+" "+e.Reason, t.check.RecordSandboxPolicy(ctx, e)); err != nil {
+		return err
+	}
 	t.policy = append(t.policy, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxHealth(_ context.Context, e audit.SandboxHealthEvent) error {
+func (t *memTelemetry) RecordSandboxHealth(ctx context.Context, e audit.SandboxHealthEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("health", t.check.RecordSandboxHealth(ctx, e)); err != nil {
+		return err
+	}
 	t.health = append(t.health, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxFinding(_ context.Context, e audit.SandboxFindingEvent) error {
+func (t *memTelemetry) RecordSandboxFinding(ctx context.Context, e audit.SandboxFindingEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("finding", t.check.RecordSandboxFinding(ctx, e)); err != nil {
+		return err
+	}
 	t.findings = append(t.findings, e)
 	return nil
 }
 
-func (t *memTelemetry) RecordSandboxWorkspace(_ context.Context, e audit.SandboxWorkspaceEvent) error {
+func (t *memTelemetry) RecordSandboxWorkspace(ctx context.Context, e audit.SandboxWorkspaceEvent) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if err := t.accepted("workspace", t.check.RecordSandboxWorkspace(ctx, e)); err != nil {
+		return err
+	}
 	t.workspace = append(t.workspace, e)
+	return nil
+}
+
+// buildingRuntime admits every sandbox record and builds its generated
+// family record, which runs the schema's field validation, without
+// exporting anything.
+type buildingRuntime struct{}
+
+func buildingRuntimeContext() audit.RuntimeV8BuildContext {
+	return audit.RuntimeV8BuildContext{ConfigGeneration: 1, ConfigDigest: strings.Repeat("ab", 32)}
+}
+
+func (buildingRuntime) EmitRuntimeV8(_ context.Context, _ router.Metadata, build audit.RuntimeV8Builder) (audit.RuntimeV8EmitOutcome, error) {
+	if _, err := build(buildingRuntimeContext(), router.AdmissionOrdinary); err != nil {
+		return audit.RuntimeV8EmitOutcome{}, err
+	}
+	return audit.RuntimeV8EmitOutcome{Admission: router.AdmissionOrdinary, LocalPersisted: true}, nil
+}
+
+func (buildingRuntime) RecordRuntimeV8GeneratedMetricBatch(_ context.Context, metrics []audit.RuntimeV8GeneratedMetric) error {
+	for _, metric := range metrics {
+		if _, err := metric.Build(buildingRuntimeContext()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -511,7 +588,12 @@ func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	}}
 	e.ws = newFakeWorkspace()
 	e.importer = &fakeImporter{c: e.client}
-	e.tel = &memTelemetry{}
+	e.tel = newMemTelemetry()
+	t.Cleanup(func() {
+		if refused := e.tel.refusedRecords(); len(refused) > 0 {
+			t.Errorf("the audit recorder refused %d sandbox record(s):\n%s", len(refused), strings.Join(refused, "\n"))
+		}
+	})
 	e.persist = &fakePersister{}
 	e.watch = newFakeWatch()
 	e.dns = newFakeDNS()

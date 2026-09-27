@@ -148,7 +148,7 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 		id := b.identity()
 		m.mu.Unlock()
 		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-			ErrorCode: string(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
+			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
 	case stream.KindConnected:
 		// A reconnect may have missed a draft notification.
 		m.triageSandbox(ctx, b)

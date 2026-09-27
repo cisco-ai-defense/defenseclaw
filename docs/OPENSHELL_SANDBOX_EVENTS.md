@@ -143,6 +143,13 @@ and `sandbox.egress.block`. The record carries the new OpenShell revision as
 code, and a change count. The outcome is `applied`, or `no_change` for a
 no-op.
 
+The sandbox manager's reason codes are `approval` (a rule added by an
+approved proposal), `egress_unblock` (an unblock), `admin_policy` (an
+approved rule removed because the administrator's policy now refuses it) and
+`rule_resolves_to_host` (an approved rule removed because its destination
+now resolves to this machine). A pass that removes several rules writes one
+record per rule, with the rule name as the target.
+
 ### Health
 
 `defenseclaw.health.subsystem` is `openshell`. States map to families:
@@ -155,8 +162,9 @@ no-op.
 | `restored` | `log.subsystem.restored` | `completed` | INFO |
 | `degraded`, `failed` | `log.subsystem.degraded` | `failed` | HIGH |
 
-A stable error code (typically an `OPENSHELL_*` gateway error code) goes in
-`defenseclaw.schema.error_code`, the summary in
+A stable error code goes in `defenseclaw.schema.error_code`: an `OPENSHELL_*`
+gateway error code in lower case (`openshell_admin_violation`), because the
+field holds only stable tokens. The summary goes in
 `defenseclaw.health.error_summary`. A health record about the integration as a
 whole (for example the watch stream) has no sandbox name.
 

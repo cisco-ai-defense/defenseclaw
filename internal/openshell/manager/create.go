@@ -459,7 +459,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 		m.lifecycle(context.WithoutCancel(ctx), b, audit.SandboxPhaseDeleted, audit.SandboxTriggerCreate, false, nil, nil)
 	}
 	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
-		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: string(gatewaylog.ErrCodeOpenShellSandboxFailed),
+		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
 		ErrorSummary: truncate(err.Error(), 512), Timestamp: m.now(),
 	})
 }

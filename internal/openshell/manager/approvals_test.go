@@ -196,7 +196,8 @@ func TestApprovalAdminDenials(t *testing.T) {
 	}
 	var adminHealth bool
 	for _, h := range e.tel.health {
-		adminHealth = adminHealth || h.ErrorCode == "OPENSHELL_ADMIN_VIOLATION"
+		// The recorder carries gateway error codes as lower-case tokens.
+		adminHealth = adminHealth || h.ErrorCode == "openshell_admin_violation"
 	}
 	if !adminHealth {
 		t.Fatal("admin violation not logged")
@@ -666,5 +667,73 @@ func TestReconcileRemovesRulesThatResolveToThisMachine(t *testing.T) {
 	}
 	if !fed {
 		t.Fatal("no feed event for the removed rule")
+	}
+}
+
+// TestRemovedRulesAreAudited pins the mandatory log.policy.updated records
+// of one enforcement pass that removes several approved rules, some the
+// administrator now blocks and some that resolve to this machine: one
+// record per rule, naming it, with a registered reason token. The
+// environment's telemetry runs the production recorder, which refuses an
+// upper-case reason or a comma-joined target.
+func TestRemovedRulesAreAudited(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "auditbox"})
+	e.watch.waitStarted(t, sb.Name)
+	rules := map[string]string{
+		"allow_keep_example_org_443":   "keep.example.org",
+		"allow_org1_example_org_443":   "org1.example.org",
+		"allow_org2_example_org_443":   "org2.example.org",
+		"allow_later1_example_org_443": "later1.example.org",
+		"allow_later2_example_org_443": "later2.example.org",
+	}
+	var ids []string
+	for rule, host := range rules {
+		ids = append(ids, addChunk(e, sb.Name, chunk(rule, host, 443)))
+	}
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "approvals applied", func() bool {
+		for _, id := range ids {
+			if chunkStatus(e, sb.Name, id) != "approved" {
+				return false
+			}
+		}
+		return true
+	})
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressBlock = []string{"org1.example.org", "org2.example.org"}
+	})
+	e.dns.set("later1.example.org", "127.0.0.1")
+	e.dns.set("later2.example.org", "169.254.169.254")
+	e.m.enforceAll(context.Background())
+
+	want := map[string]string{
+		"allow_org1_example_org_443":   "admin_policy",
+		"allow_org2_example_org_443":   "admin_policy",
+		"allow_later1_example_org_443": "rule_resolves_to_host",
+		"allow_later2_example_org_443": "rule_resolves_to_host",
+	}
+	got := map[string]string{}
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		if p.Operation == audit.SandboxPolicyRuleRemove {
+			if p.ChangeCount != 1 || p.PolicyHash == "" {
+				t.Errorf("rule_remove record %+v, want one change and the policy hash", p)
+			}
+			got[p.Target] = p.Reason
+		}
+	}
+	e.tel.mu.Unlock()
+	if len(got) != len(want) {
+		t.Fatalf("rule_remove records = %v, want %v", got, want)
+	}
+	for rule, reason := range want {
+		if got[rule] != reason {
+			t.Fatalf("rule_remove %s reason = %q, want %q (records %v)", rule, got[rule], reason, got)
+		}
+	}
+	if refused := e.tel.refusedRecords(); len(refused) > 0 {
+		t.Fatalf("the audit recorder refused records: %v", refused)
 	}
 }
