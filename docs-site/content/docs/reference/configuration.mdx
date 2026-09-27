@@ -470,18 +470,19 @@ The full LLM configuration story — picking a role, binding a custom-provider i
 ## OpenShell sandbox settings
 
 The `openshell:` block configures the NVIDIA OpenShell 0.1 sandbox
-integration. Policy packs, how the layers combine, and
+integration, which is being rebuilt. Policy packs, how the layers combine, and
 the administrator's `openshell.admin` limits are explained in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
 
-<Callout title="Sandbox commands are not available yet">
-`defenseclaw sandbox legacy-cleanup` is the only `sandbox` command today.
-Nothing creates or runs a sandbox yet, and the sidecar does not start the
-sandbox hook ingress or the egress proxy. Setting `openshell.enabled: true`
-only makes config validation check the two sandbox ports, and turning it on or
-off (or moving a port while it is on) restarts the API server. The sandbox CLI
-guide will live on the [sandbox setup page](/docs/setup/sandbox), which today
-covers only the legacy cleanup.
+<Callout title="Accepted and validated, not used yet">
+`config.yaml` already accepts every key below. The v8 schema and DefenseClaw's
+load-time checks validate them, and the gateway reloads them. No DefenseClaw
+command starts an OpenShell 0.1 sandbox yet. Apart from the checks and the
+listener restart described under [Validation and reload](#validation-and-reload)
+and the [legacy keys](#legacy-keys), the keys are reserved for the sandbox
+runtime. The packs and admin limits take
+effect once sandbox support ships. The [Sandbox guide](/docs/setup/sandbox)
+covers the `sandbox` command as it is today.
 </Callout>
 
 The posture is layered. The selected **sandbox policy pack** supplies every
@@ -494,7 +495,7 @@ block, and allow lists add to the pack's lists.
 
 ```yaml
 openshell:
-  enabled: false               # listen for sandboxes (hook ingress + egress proxy)
+  enabled: false               # sandbox integration switch; reserved, no listener yet
   binary: openshell            # the upstream openshell CLI
   gateway:
     name: ""                   # OpenShell gateway registration; "" = the active one
@@ -543,8 +544,8 @@ openshell:
 
 | Key | Default | Values and rules |
 | --- | --- | --- |
-| `enabled` | `false` | Turns on the sandbox hook ingress listener, the egress proxy, and the sandbox API. |
-| `binary` | `openshell` | The upstream `openshell` CLI, used for terminal attach, file transfer, port forwarding, and gateway registration. |
+| `enabled` | `false` | The sandbox integration switch, reserved for the sandbox runtime and its hook ingress and egress proxy listeners. No sandbox listener opens yet. Today `true` turns on the port checks under [Validation and reload](#validation-and-reload), and a change restarts the API listener. |
+| `binary` | `openshell` | The upstream `openshell` CLI the sandbox runtime will use for terminal attach, file transfer, and port forwarding. |
 | `gateway.name` | `""` | The local OpenShell gateway registration. Empty selects the active registration. At most 128 characters. |
 | `gateway.workspace` | `""` | The OpenShell workspace (tenant). Empty selects `default`. At most 128 characters. |
 | `ingress_port` | `0` | The sandbox hook ingress port, 0–65535. `0` means `gateway.api_port + 1` (18971 by default). |
@@ -566,17 +567,17 @@ openshell:
 | `egress.feed` | `""` | `builtin` turns the built-in blocklist feed on, `none` turns the feeds off. Empty follows the pack. |
 | `image.base` | `""` | A bring-your-own base image. The image build refuses a base that isn't pinned by digest (`<image>@sha256:<64 hex digits>`). Empty selects the pinned NVIDIA OpenShell community base image. |
 | `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
-| `approvals.debounce_ms` | `3000` | 0–600000. Every OpenShell policy reload closes open connections, so approvals are batched until hooks have been quiet this long. |
-| `approvals.agent_proposals` | `null` | Whether the agent may submit its own connection requests for triage. `null` means `true`. |
+| `approvals.debounce_ms` | `3000` | 0–600000. Reserved for batching approvals: every OpenShell policy reload closes open connections, so the sandbox runtime is to hold approvals until hooks have been quiet this long. |
+| `approvals.agent_proposals` | `null` | Reserved: whether the agent may submit its own connection requests for triage. `null` means `true`. |
 | `resources.cpu` | `""` | CPU request: cores (`"2"`, `"1.5"`) or millicores (`"500m"`). Empty means unlimited. |
 | `resources.memory` | `""` | Memory request: bytes with an optional `Ki`, `Mi`, `Gi`, `Ti` or `k`, `K`, `M`, `G`, `T` suffix (`"512Mi"`, `"4Gi"`). Empty means unlimited. |
-| `harnesses` | `[]` | Harnesses enabled for sandboxes, such as `claudecode` and `codex`. DefenseClaw also serves their rule packs and hook configuration when the harness isn't installed on the host. At most 64, unique. |
-| `wrappers` | `[]` | Harnesses with the shell wrapper that runs them in a sandbox. At most 64, unique. |
+| `harnesses` | `[]` | Reserved: the harnesses to enable for sandboxes, such as `claudecode` and `codex`. At most 64, unique. |
+| `wrappers` | `[]` | Reserved: the harnesses that get a shell wrapper to run them in a sandbox. At most 64, unique. |
 | `mcp.import` | `null` | Whether the harness's MCP servers come along. `null` follows the pack. |
 | `mcp.host_ports` | `[]` | Host ports you agreed to open for MCP servers running on your machine, 1–65535, unique, at most 64. Each port is still checked against the pack and `openshell.admin`. |
-| `upstream_telemetry` | `false` | Whether OpenShell's own anonymous usage telemetry (`OPENSHELL_TELEMETRY_ENABLED` in the OpenShell gateway's environment) should be on. |
-| `token_delivery` | `provider` | How a sandbox receives its hook ingress token: as an OpenShell provider credential, so the agent only sees a placeholder (`provider`), or as a plain environment variable (`env`). |
-| `middleware.enabled` | `false` | The experimental supervisor-middleware switch. |
+| `upstream_telemetry` | `false` | Reserved: whether OpenShell's own anonymous usage telemetry (`OPENSHELL_TELEMETRY_ENABLED` in the OpenShell gateway's environment) should be on. DefenseClaw doesn't change that setting yet. |
+| `token_delivery` | `provider` | Reserved: how a sandbox is to receive its hook ingress token, as an OpenShell provider credential so the agent only sees a placeholder (`provider`), or as a plain environment variable (`env`). |
+| `middleware.enabled` | `false` | Reserved for an experimental supervisor-middleware switch. |
 
 **Host globs** are `*`, an exact host name, `*.<host>` (every subdomain, not
 the host itself), or an IP address. Schemes, ports, paths, and wildcards
@@ -615,8 +616,8 @@ unset key adds no limit, and the `allow_*` switches restrict only when set to
 | `locked` | Up to 16 of `pack`, `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import`, `mcp.host_ports`, `resources` | Keys per-run options may not loosen. |
 
 In a `managed_enterprise` install the administrator owns `config.yaml`, so the
-admin block is authoritative. Elsewhere it is still enforced, but it is
-advisory because you can edit the file.
+admin block is authoritative. Elsewhere it is advisory, because you can edit
+the file.
 
 ### Validation and reload
 
@@ -633,9 +634,15 @@ refuses to load a `config.yaml` whose `openshell` values break these rules:
 - `admin.required_pack_digest` must be a well-formed digest and needs
   `admin.required_pack`, and every `admin.locked` entry must be a lockable key.
 
-The running gateway reloads the `openshell` block without a restart. Sandbox
-settings are read each time a sandbox starts. Only turning `enabled` on or off,
-or moving the ports of an enabled integration, rebinds the sandbox listeners.
+The checks don't open pack files, so a missing or broken custom pack named in
+`pack` or `admin.required_pack` isn't reported when the config loads.
+
+The gateway reloads the `openshell` block in place, with either
+`gateway.config_reload.mode`. A change that fails these checks is rejected,
+and the running config stays in place. Turning `enabled` on or off, or moving
+`ingress_port` or `egress_port` while `enabled` is `true`, restarts the API
+listener inside the running gateway. The one exception is entering or leaving
+the legacy standalone mode (`openshell.mode`), which needs a gateway restart.
 
 ### Legacy keys
 
