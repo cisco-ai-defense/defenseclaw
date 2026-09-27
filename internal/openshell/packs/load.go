@@ -34,10 +34,13 @@ import (
 // maxCustomPacks bounds how many entries of a pack directory List inspects.
 const maxCustomPacks = 256
 
-// userHomeDir and validateTrustedFile are swapped in tests.
+// userHomeDir, validateTrustedFile, currentUID and fileOwner are swapped in
+// tests.
 var (
 	userHomeDir         = os.UserHomeDir
 	validateTrustedFile = managed.ValidateTrustedFilePath
+	currentUID          = os.Getuid
+	fileOwner           = statOwner
 )
 
 // BuiltinNames lists the built-in packs from loosest to strictest.
@@ -188,8 +191,9 @@ func loadNamed(name, packDir string) (*Pack, error) {
 // LoadFile loads a custom pack from an absolute path to a pack.yaml or to the
 // directory holding one ("~/" expands to the home directory). The pack
 // directory and the file must not be symbolic links, the file must be a
-// regular file of at most MaxPackBytes that is not world-writable, and the
-// pack may not claim a built-in name.
+// regular file of at most MaxPackBytes, no other local user may have written
+// it or be able to replace it (checkPackOwnership), and the pack may not
+// claim a built-in name.
 func LoadFile(p string) (*Pack, error) {
 	raw := strings.TrimSpace(p)
 	expanded, err := expandHome(raw)
@@ -230,14 +234,8 @@ func LoadFile(p string) (*Pack, error) {
 		return nil, packErr(target, "", "too_large", "pack exceeds %d bytes", MaxPackBytes)
 	}
 	if runtime.GOOS != "windows" {
-		if info.Mode().Perm()&0o002 != 0 {
-			return nil, packErr(target, "", "world_writable", "the pack file is writable by every user; run chmod o-w on it")
-		}
-		// Any user could replace the file in a world-writable directory
-		// unless the sticky bit protects it.
-		if dir, err := os.Stat(filepath.Dir(target)); err == nil &&
-			dir.Mode().Perm()&0o002 != 0 && dir.Mode()&fs.ModeSticky == 0 {
-			return nil, packErr(target, "", "world_writable", "the pack directory is writable by every user; run chmod o-w on it")
+		if err := checkPackOwnership(target, info); err != nil {
+			return nil, err
 		}
 	}
 	data, err := safefile.ReadRegularFileBounded(target, MaxPackBytes)
@@ -252,6 +250,48 @@ func LoadFile(p string) (*Pack, error) {
 		return nil, packErr(target, "name", "reserved_name", "%q is a built-in pack name; custom packs need their own name", pack.Name)
 	}
 	return pack, nil
+}
+
+// checkPackOwnership refuses a pack file that another local user wrote or
+// could replace. The file and its directory must be owned by the current
+// user or root, and neither may be world-writable, with one exception: a
+// root-owned file may sit in a sticky world-writable directory, where no
+// other user can replace it. A file of the user's own in such a directory
+// (for example under /tmp) is refused, because the directory's contents are
+// not the user's to vouch for.
+func checkPackOwnership(file string, info fs.FileInfo) error {
+	uid := currentUID()
+	owner, ok := fileOwner(info)
+	switch {
+	case !ok:
+		return packErr(file, "", "unreadable", "cannot inspect the pack file's owner")
+	case owner != uid && owner != 0:
+		return packErr(file, "", "foreign_owner",
+			"the pack file is owned by another user (uid %d); only packs you or root own are loaded", owner)
+	case info.Mode().Perm()&0o002 != 0:
+		return packErr(file, "", "world_writable", "the pack file is writable by every user; run chmod o-w on it")
+	}
+	dir, err := os.Stat(filepath.Dir(file))
+	if err != nil {
+		return packErr(file, "", "unreadable", "cannot inspect the pack directory")
+	}
+	dirOwner, ok := fileOwner(dir)
+	switch {
+	case !ok:
+		return packErr(file, "", "unreadable", "cannot inspect the pack directory's owner")
+	case dirOwner != uid && dirOwner != 0:
+		// The directory's owner can replace any file in it.
+		return packErr(file, "", "foreign_owner",
+			"the pack directory is owned by another user (uid %d); keep packs in a directory you or root own", dirOwner)
+	case dir.Mode().Perm()&0o002 == 0:
+		return nil
+	case dir.Mode()&fs.ModeSticky == 0:
+		return packErr(file, "", "world_writable", "the pack directory is writable by every user; run chmod o-w on it")
+	case owner != 0:
+		return packErr(file, "", "world_writable",
+			"the pack is in a directory every user can write to; move it to a directory only you can write to")
+	}
+	return nil
 }
 
 // Validate strictly loads a pack file for `defenseclaw sandbox pack validate`.

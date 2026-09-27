@@ -171,16 +171,101 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 	_, err = LoadFile(teamDir)
 	wantPackError(t, err, "world_writable", "")
 
-	// A sticky world-writable directory (like /tmp) protects the file.
+	// A sticky world-writable directory (like /tmp) is not the user's to
+	// vouch for: only a root-owned pack loads from it.
 	if err := os.Chmod(teamDir, 0o777|fs.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(teamDir); err != nil || info.Mode()&fs.ModeSticky == 0 {
 		t.Skip("sticky bit unsupported here")
 	}
-	if _, err := LoadFile(teamDir); err != nil {
-		t.Fatalf("sticky directory: %v", err)
+	fakeOwners(t, func(fs.FileInfo) int { return testUID })
+	_, err = LoadFile(teamDir)
+	if e := wantPackError(t, err, "world_writable", ""); !strings.Contains(e.Reason, "every user can write to") {
+		t.Fatalf("sticky directory: %v", e)
 	}
+	fakeOwners(t, func(info fs.FileInfo) int {
+		if info.IsDir() {
+			return testUID
+		}
+		return 0
+	})
+	if _, err := LoadFile(teamDir); err != nil {
+		t.Fatalf("root-owned pack in a sticky directory: %v", err)
+	}
+	// Without the sticky bit any user could replace even a root-owned file.
+	if err := os.Chmod(teamDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadFile(teamDir)
+	wantPackError(t, err, "world_writable", "")
+}
+
+// testUID is the current user's uid while fakeOwners is in effect.
+const testUID = 4242
+
+// fakeOwners makes testUID the current user and reports every inspected
+// file's owner through owner, so ownership tests do not depend on who runs
+// them.
+func fakeOwners(t *testing.T, owner func(fs.FileInfo) int) {
+	t.Helper()
+	previousUID, previousOwner := currentUID, fileOwner
+	currentUID = func() int { return testUID }
+	fileOwner = func(info fs.FileInfo) (int, bool) { return owner(info), true }
+	t.Cleanup(func() { currentUID, fileOwner = previousUID, previousOwner })
+}
+
+func TestLoadRefusesPacksOtherUsersOwn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX ownership")
+	}
+	root := t.TempDir()
+	teamDir := writePack(t, root, "team", customPack("team"))
+	const otherUID = 5151
+	for _, tc := range []struct {
+		name          string
+		file, dir     int
+		code, subject string
+	}{
+		{"own file and directory", testUID, testUID, "", ""},
+		{"root-owned file and directory", 0, 0, "", ""},
+		{"own file in a root-owned directory", testUID, 0, "", ""},
+		{"root-owned file in own directory", 0, testUID, "", ""},
+		{"file another user owns", otherUID, testUID, "foreign_owner", "pack file"},
+		{"directory another user owns", testUID, otherUID, "foreign_owner", "pack directory"},
+		{"root-owned file in a directory another user owns", 0, otherUID, "foreign_owner", "pack directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeOwners(t, func(info fs.FileInfo) int {
+				if info.IsDir() {
+					return tc.dir
+				}
+				return tc.file
+			})
+			for _, ref := range []string{teamDir, filepath.Join(teamDir, PackFileName)} {
+				pack, err := LoadFile(ref)
+				if tc.code == "" {
+					if err != nil || pack.Name != "team" {
+						t.Fatalf("LoadFile(%s) = %v, %v", ref, pack, err)
+					}
+					continue
+				}
+				if e := wantPackError(t, err, tc.code, ""); !strings.Contains(e.Reason, tc.subject) {
+					t.Fatalf("LoadFile(%s) = %v, want a refusal naming the %s", ref, e, tc.subject)
+				}
+			}
+			// Named packs and pack listings apply the same check.
+			if _, err := Load("team", root); (err == nil) != (tc.code == "") {
+				t.Fatalf("Load(team) = %v", err)
+			}
+		})
+	}
+
+	previous := fileOwner
+	fileOwner = func(fs.FileInfo) (int, bool) { return 0, false }
+	t.Cleanup(func() { fileOwner = previous })
+	_, err := LoadFile(teamDir)
+	wantPackError(t, err, "unreadable", "")
 }
 
 func TestListPacks(t *testing.T) {
