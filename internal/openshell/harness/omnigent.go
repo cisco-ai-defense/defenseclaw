@@ -109,8 +109,12 @@ esac
 # The host daemon keeps the proxy variables, but the runner that executes the
 # agent's tools inherits only its own allowlist and the names listed in
 # OMNIGENT_RUNNER_ENV_PASSTHROUGH. List the proxy settings there, so tool
-# commands also go through the DefenseClaw egress proxy.
+# commands also go through the DefenseClaw egress proxy. The CLI, daemon,
+# server and runner talk to each other over loopback, which stays off the
+# proxy: through it, 127.0.0.1 would be the proxy's own host.
 if [ -n "${HTTPS_PROXY:-}" ]; then
+  NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"; no_proxy="$NO_PROXY"
+  export NO_PROXY no_proxy
   OMNIGENT_RUNNER_ENV_PASSTHROUGH="${OMNIGENT_RUNNER_ENV_PASSTHROUGH:+$OMNIGENT_RUNNER_ENV_PASSTHROUGH,}` + omnigentRunnerProxyPassthrough + `"
   export OMNIGENT_RUNNER_ENV_PASSTHROUGH
 fi

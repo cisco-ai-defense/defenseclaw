@@ -133,9 +133,14 @@ func TestLaunchersScrubShellStartupEnv(t *testing.T) {
 			if !strings.Contains(got, "\nPATH="+LauncherSystemPATH+":"+agentBin+":") {
 				t.Errorf("PATH does not lead with the system directories:\n%s", got)
 			}
+			wantNoProxy := noProxy
+			if name == "omnigent" {
+				// OmniGent's processes talk to each other over loopback.
+				wantNoProxy += ",127.0.0.1,localhost,::1"
+			}
 			for _, want := range []string{
 				"HTTPS_PROXY=" + proxy, "HTTP_PROXY=" + proxy, "https_proxy=" + proxy, "http_proxy=" + proxy,
-				"NODE_USE_ENV_PROXY=1", "NO_PROXY=" + noProxy, "no_proxy=" + noProxy,
+				"NODE_USE_ENV_PROXY=1", "NO_PROXY=" + wantNoProxy, "no_proxy=" + wantNoProxy,
 			} {
 				if !strings.Contains(got, "\n"+want+"\n") {
 					t.Errorf("missing %s:\n%s", want, got)

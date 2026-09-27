@@ -56,7 +56,7 @@ func newHookOnlyLauncher(t *testing.T, spec *Spec) hookOnlyLauncher {
 	l := hookOnlyLauncher{path: filepath.Join(dir, "launch"), record: filepath.Join(dir, "record"), canonical: filepath.Join(dir, "canonical.json")}
 	stub := filepath.Join(dir, "stub")
 	body := "#!/bin/bash\n{ printf 'ARG %s\\n' \"$@\"; for v in HERMES_DEFENSECLAW_API_KEY HERMES_ACCEPT_HOOKS HERMES_SAFE_MODE HERMES_MANAGED_DIR LLM_API_KEY OPENHANDS_SUPPRESS_BANNER" +
-		" OMNIGENT_CONFIG OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN OMNIGENT_RUNNER_ENV_PASSTHROUGH HTTPS_PROXY; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done; } >>" + l.record + "\n"
+		" OMNIGENT_CONFIG OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN OMNIGENT_RUNNER_ENV_PASSTHROUGH HTTPS_PROXY NO_PROXY no_proxy; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done; } >>" + l.record + "\n"
 	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +387,9 @@ func TestOmniGentLauncher(t *testing.T) {
 		// after anything the user already passes through.
 		"ENV OMNIGENT_RUNNER_ENV_PASSTHROUGH=MY_TOOL_VAR," + omnigentRunnerProxyPassthrough + "\n",
 		"ENV HTTPS_PROXY=http://10.200.0.1:28772\n",
+		// Loopback between OmniGent's own processes stays off the proxy.
+		"ENV NO_PROXY=host.openshell.internal,127.0.0.1,localhost,::1\n",
+		"ENV no_proxy=host.openshell.internal,127.0.0.1,localhost,::1\n",
 	} {
 		if !strings.Contains(got.record, want) {
 			t.Fatalf("omnigent record lacks %q:\n%s", want, got.record)
