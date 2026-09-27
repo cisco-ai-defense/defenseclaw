@@ -163,7 +163,10 @@ type SandboxCondition struct {
 
 // SandboxLifecycleEvent is one observed or initiated phase change. The new
 // phase is Sandbox.Phase (required). PreviousPhase defaults to the last phase
-// this recorder saw for the same sandbox name; it stays absent otherwise.
+// this recorder recorded for the same sandbox name; it stays absent otherwise.
+// A transition from an unknown phase is counted only when it enters
+// SandboxPhaseCreating, so a restarted daemon reconciling existing sandboxes
+// or a repeated deleted event does not count a sandbox twice.
 type SandboxLifecycleEvent struct {
 	Sandbox       SandboxIdentity
 	PreviousPhase SandboxPhase
@@ -441,13 +444,21 @@ type SandboxWorkspaceEvent struct {
 }
 
 // SandboxRecorder implements SandboxTelemetry on top of the Logger's bound v8
-// runtime. It also tracks the last phase of each sandbox name so it can supply
-// the previous phase and publish the metric.defenseclaw.sandbox.active gauge.
+// runtime. It also tracks the last recorded phase of each sandbox name so it
+// can supply the previous phase and publish the
+// metric.defenseclaw.sandbox.active gauge. The gauge is derived from this
+// state, so a process holds one recorder.
 type SandboxRecorder struct {
 	logger *Logger
 
-	mu     sync.Mutex
-	phases map[string]sandboxTrackedPhase
+	// lifecycle serializes lifecycle records end to end. The tracked phase is
+	// read, the log emitted, the new phase committed, and the gauge recorded
+	// under it, so gauge points reach the runtime in the order the phases
+	// changed (a gauge keeps the last value written) and a failed emission
+	// leaves the tracked phase untouched for the caller's retry. Lifecycle
+	// events are rare; the other producers never take it.
+	lifecycle sync.Mutex
+	phases    map[string]sandboxTrackedPhase
 }
 
 type sandboxTrackedPhase struct {
@@ -485,7 +496,9 @@ var (
 
 // RecordSandboxLifecycle emits log.sandbox.lifecycle and, when the phase
 // changed, metric.defenseclaw.sandbox.transitions, then refreshes the
-// metric.defenseclaw.sandbox.active gauge for the sandbox's connector.
+// metric.defenseclaw.sandbox.active gauge for the sandbox's connector. The
+// new phase is tracked only once the log was accepted, so a failed call can be
+// retried with the same event.
 func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, input SandboxLifecycleEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -507,10 +520,11 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	if err != nil {
 		return err
 	}
-	tracked, activeCounts := recorder.observePhase(identity.Name, identity.Connector, identity.Phase)
+	recorder.lifecycle.Lock()
+	defer recorder.lifecycle.Unlock()
 	previous := input.PreviousPhase
-	if previous == "" {
-		previous = tracked
+	if tracked, known := recorder.phases[identity.Name]; previous == "" && known {
+		previous = tracked.phase
 	}
 	fields := sandboxV8FieldsFor(identity)
 	condition := sandboxConditionFields(input.Condition)
@@ -543,14 +557,22 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 			})
 		},
 	}
-	metrics := make([]RuntimeV8GeneratedMetric, 0, 1+len(activeCounts))
-	if previous != identity.Phase {
-		metrics = append(metrics, newSandboxTransitionMetric(event, previous, identity.Phase))
+	binding, disposition, err := recorder.admit(ctx, log)
+	if err != nil {
+		return err
 	}
+	activeCounts := recorder.commitPhaseLocked(identity.Name, identity.Connector, identity.Phase)
+	// Gauges lead the batch: a batch stops at its first failure, and a lost
+	// gauge point stays stale until the next lifecycle event.
+	metrics := make([]RuntimeV8GeneratedMetric, 0, len(activeCounts)+1)
 	for _, count := range activeCounts {
 		metrics = append(metrics, newSandboxActiveMetric(event, count.connector, count.active))
 	}
-	return recorder.emit(ctx, log, metrics)
+	if previous != identity.Phase && (previous != "" || identity.Phase == SandboxPhaseCreating) {
+		metrics = append(metrics, newSandboxTransitionMetric(event, identity.Connector, previous, identity.Phase))
+	}
+	recorder.recordCompanions(ctx, binding, log, disposition, metrics)
+	return nil
 }
 
 // RecordSandboxEgress emits log.egress.allowed or log.egress.blocked with the
@@ -649,7 +671,9 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 			})
 		},
 	}
-	return recorder.emit(ctx, log, []RuntimeV8GeneratedMetric{newSandboxEgressMetric(event, decision, string(input.Source))})
+	return recorder.emit(ctx, log, []RuntimeV8GeneratedMetric{
+		newSandboxEgressMetric(event, identity.Connector, decision, string(input.Source)),
+	})
 }
 
 // RecordSandboxApproval emits log.approval.requested or log.approval.resolved
@@ -1122,20 +1146,32 @@ func (recorder *SandboxRecorder) ready() error {
 }
 
 // emit sends one log through the bound runtime, then records the family's
-// companion metrics and the audit-event counter. Companion metrics are
-// best-effort: once the log is admitted, a metric failure must not report the
-// occurrence as failed and invite a duplicating retry.
+// companion metrics and the audit-event counter.
 func (recorder *SandboxRecorder) emit(
 	ctx context.Context,
 	log sandboxV8Log,
 	metrics []RuntimeV8GeneratedMetric,
 ) error {
+	binding, disposition, err := recorder.admit(ctx, log)
+	if err != nil {
+		return err
+	}
+	recorder.recordCompanions(ctx, binding, log, disposition, metrics)
+	return nil
+}
+
+// admit sends one log through the bound runtime and returns the binding it
+// used, so the companion metrics land on the same runtime generation.
+func (recorder *SandboxRecorder) admit(
+	ctx context.Context,
+	log sandboxV8Log,
+) (runtimeV8Binding, auditV8Disposition, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	binding := recorder.logger.runtimeV8BindingSnapshot()
 	if binding.emitter == nil {
-		return fmt.Errorf("audit: sandbox v8 runtime is unavailable")
+		return runtimeV8Binding{}, auditV8Unhandled, fmt.Errorf("audit: sandbox v8 runtime is unavailable")
 	}
 	classification := observability.ClassificationContext{
 		Bucket: log.bucket, EventName: observability.EventName(log.eventName),
@@ -1146,7 +1182,7 @@ func (recorder *SandboxRecorder) emit(
 		observability.SourceGateway, log.event.Connector, observability.ProducerKey(log.action),
 	)
 	if err != nil {
-		return fmt.Errorf("audit: classify %s: %w", log.action, err)
+		return runtimeV8Binding{}, auditV8Unhandled, fmt.Errorf("audit: classify %s: %w", log.action, err)
 	}
 	correlation := controlPlaneV8Correlation(log.event)
 	result, err := binding.emitter.EmitRuntimeV8(ctx, metadata,
@@ -1174,11 +1210,28 @@ func (recorder *SandboxRecorder) emit(
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("audit: emit %s: %w", log.action, err)
+		return runtimeV8Binding{}, auditV8Unhandled, fmt.Errorf("audit: emit %s: %w", log.action, err)
 	}
 	disposition, err := runtimeV8Disposition(result, log.mandatory)
 	if err != nil {
-		return fmt.Errorf("audit: %s: %w", log.action, err)
+		return runtimeV8Binding{}, auditV8Unhandled, fmt.Errorf("audit: %s: %w", log.action, err)
+	}
+	return binding, disposition, nil
+}
+
+// recordCompanions records an admitted log's companion metrics and, when the
+// log was persisted, the audit-event counter. They are best-effort: once the
+// log is admitted, a metric failure must not report the occurrence as failed
+// and invite a duplicating retry.
+func (recorder *SandboxRecorder) recordCompanions(
+	ctx context.Context,
+	binding runtimeV8Binding,
+	log sandboxV8Log,
+	disposition auditV8Disposition,
+	metrics []RuntimeV8GeneratedMetric,
+) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if disposition == auditV8Persisted {
 		if metric, metricErr := newAuditEventRuntimeV8GeneratedMetric(log.event); metricErr == nil {
@@ -1188,7 +1241,6 @@ func (recorder *SandboxRecorder) emit(
 	if len(metrics) > 0 {
 		_ = recorder.logger.recordRuntimeV8GeneratedMetricBatch(ctx, binding, metrics)
 	}
-	return nil
 }
 
 func (recorder *SandboxRecorder) newEvent(
@@ -1212,15 +1264,13 @@ func (recorder *SandboxRecorder) newEvent(
 	return event
 }
 
-// observePhase records name's new phase and returns the phase it replaced
-// plus the active-sandbox counts of every connector whose count may have
-// changed. A deleted sandbox is forgotten.
-func (recorder *SandboxRecorder) observePhase(
+// commitPhaseLocked records name's new phase and returns the active-sandbox
+// counts of every connector whose count may have changed. A deleted sandbox
+// is forgotten. The caller holds recorder.lifecycle.
+func (recorder *SandboxRecorder) commitPhaseLocked(
 	name, connector string,
 	phase SandboxPhase,
-) (SandboxPhase, []sandboxActiveCount) {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
+) []sandboxActiveCount {
 	previous, known := recorder.phases[name]
 	if phase == SandboxPhaseDeleted {
 		delete(recorder.phases, name)
@@ -1241,10 +1291,7 @@ func (recorder *SandboxRecorder) observePhase(
 		}
 		counts = append(counts, sandboxActiveCount{connector: candidate, active: active})
 	}
-	if !known {
-		return "", counts
-	}
-	return previous.phase, counts
+	return counts
 }
 
 type sandboxActiveCount struct {
@@ -1611,7 +1658,16 @@ func sandboxMetricBuilder(event Event) (*observability.FamilyBuilder, error) {
 	)
 }
 
-func newSandboxTransitionMetric(event Event, from, to SandboxPhase) RuntimeV8GeneratedMetric {
+// sandboxMetricEvent carries the identity connector onto a sandbox metric.
+// The record connector may come from the context envelope; sandbox metrics
+// always use SandboxIdentity.Connector, the key the active gauge is kept by.
+func sandboxMetricEvent(event Event, connector string) Event {
+	event.Connector = connector
+	return event
+}
+
+func newSandboxTransitionMetric(event Event, connector string, from, to SandboxPhase) RuntimeV8GeneratedMetric {
+	event = sandboxMetricEvent(event, connector)
 	return RuntimeV8GeneratedMetric{
 		family: observability.EventName(observability.TelemetryInstrumentDefenseClawSandboxTransitions),
 		build: func(snapshot RuntimeV8BuildContext) (observability.Record, error) {
@@ -1625,7 +1681,7 @@ func newSandboxTransitionMetric(event Event, from, to SandboxPhase) RuntimeV8Gen
 			}
 			return builder.BuildMetricDefenseClawSandboxTransitions(observability.MetricDefenseClawSandboxTransitionsInput{
 				Envelope: envelope, Value: 1,
-				DefenseClawConnectorSource:  optionalSandboxEnum(event.Connector),
+				DefenseClawConnectorSource:  optionalSandboxEnum(connector),
 				DefenseClawSandboxPhaseFrom: optionalSandboxEnum(string(from)),
 				DefenseClawSandboxPhaseTo:   optionalSandboxEnum(string(to)),
 			})
@@ -1634,12 +1690,11 @@ func newSandboxTransitionMetric(event Event, from, to SandboxPhase) RuntimeV8Gen
 }
 
 func newSandboxActiveMetric(event Event, connector string, active int64) RuntimeV8GeneratedMetric {
+	event = sandboxMetricEvent(event, connector)
 	return RuntimeV8GeneratedMetric{
 		family: observability.EventName(observability.TelemetryInstrumentDefenseClawSandboxActive),
 		build: func(snapshot RuntimeV8BuildContext) (observability.Record, error) {
-			metricEvent := event
-			metricEvent.Connector = connector
-			envelope, err := sandboxMetricEnvelope(metricEvent, snapshot)
+			envelope, err := sandboxMetricEnvelope(event, snapshot)
 			if err != nil {
 				return observability.Record{}, err
 			}
@@ -1655,7 +1710,8 @@ func newSandboxActiveMetric(event Event, connector string, active int64) Runtime
 	}
 }
 
-func newSandboxEgressMetric(event Event, decision, source string) RuntimeV8GeneratedMetric {
+func newSandboxEgressMetric(event Event, connector, decision, source string) RuntimeV8GeneratedMetric {
+	event = sandboxMetricEvent(event, connector)
 	return RuntimeV8GeneratedMetric{
 		family: observability.EventName(observability.TelemetryInstrumentDefenseClawEgressEvents),
 		build: func(snapshot RuntimeV8BuildContext) (observability.Record, error) {

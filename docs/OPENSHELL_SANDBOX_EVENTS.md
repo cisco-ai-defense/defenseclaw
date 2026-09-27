@@ -57,6 +57,13 @@ binding that authenticated the hook (`audit.CorrelationEnvelope.SandboxID` and
 | `defenseclaw.sandbox.active` (gauge) | `defenseclaw.connector.source`; sandboxes provisioning, starting, ready, or stopping |
 | `defenseclaw.egress.events` (counter) | Existing egress metric; `source` is `openshell` or `dc-egress-proxy` |
 
+The recorder keeps the last recorded phase of each sandbox and publishes the
+gauge in the order the phases changed. A lifecycle call that fails leaves the
+tracked phase unchanged, so the caller can retry it. A transition out of an
+unknown phase is counted only when it enters `creating`, so a restarted gateway
+reconciling running sandboxes, or a repeated `deleted`, does not count a
+sandbox twice.
+
 ## Retired legacy events
 
 The legacy standalone sandbox's events were retired with it: the

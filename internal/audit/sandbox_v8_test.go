@@ -247,15 +247,19 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 func TestSandboxLifecycleConditionOnlyUpdateSkipsTransitionMetric(t *testing.T) {
 	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
 	identity := testSandboxIdentity()
-	for _, condition := range []*SandboxCondition{
+	for index, condition := range []*SandboxCondition{
 		{Type: "Ready", Status: "True", Reason: "SupervisorReady"},
 		{
 			Type: "ConfigurationReady", Status: "False", Reason: "not a token!",
 			Message: strings.Repeat("é", 1000),
 		},
 	} {
+		previous := SandboxPhase("")
+		if index == 0 {
+			previous = SandboxPhaseStarting
+		}
 		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-			Sandbox: identity, Trigger: SandboxTriggerWatch, Condition: condition,
+			Sandbox: identity, PreviousPhase: previous, Trigger: SandboxTriggerWatch, Condition: condition,
 		}); err != nil {
 			t.Fatalf("RecordSandboxLifecycle: %v", err)
 		}
@@ -311,40 +315,209 @@ func TestSandboxLifecycleActiveGaugeIsPerConnector(t *testing.T) {
 	}
 }
 
-func TestSandboxLifecycleConcurrentRecordsAreConsistent(t *testing.T) {
-	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
-	const sandboxes = 16
-	var group sync.WaitGroup
-	errs := make(chan error, sandboxes*2)
-	for index := 0; index < sandboxes; index++ {
-		group.Add(1)
-		go func(index int) {
-			defer group.Done()
-			identity := SandboxIdentity{Name: fmt.Sprintf("dc-codex-repo-%04d", index), Connector: "codex"}
-			for _, phase := range []SandboxPhase{SandboxPhaseProvisioning, SandboxPhaseReady} {
-				identity.Phase = phase
-				errs <- recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
+// TestSandboxLifecycleConcurrentGaugeIsOrdered races lifecycle events from
+// many sandboxes on two connectors. A gauge keeps the last value written, so
+// the points must reach the runtime in the order the phases changed: each
+// connector's gauge moves by at most one per point and ends at the true count.
+func TestSandboxLifecycleConcurrentGaugeIsOrdered(t *testing.T) {
+	harness := newSandboxHarness(t)
+	const rounds, sandboxes = 4, 24
+	for round := 0; round < rounds; round++ {
+		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+		want := map[string]int64{}
+		var group sync.WaitGroup
+		errs := make(chan error, sandboxes*4)
+		events := 0
+		for index := 0; index < sandboxes; index++ {
+			connector := "codex"
+			if index%3 == 0 {
+				connector = "claudecode"
 			}
-		}(index)
-	}
-	group.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
+			phases := []SandboxPhase{SandboxPhaseCreating, SandboxPhaseProvisioning, SandboxPhaseReady}
+			if index%4 == 0 {
+				phases = append(phases, SandboxPhaseStopped)
+			} else {
+				want[connector]++
+			}
+			events += len(phases)
+			group.Add(1)
+			go func(identity SandboxIdentity, phases []SandboxPhase) {
+				defer group.Done()
+				for _, phase := range phases {
+					identity.Phase = phase
+					errs <- recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
+				}
+			}(SandboxIdentity{Name: fmt.Sprintf("dc-%s-repo-%04d", connector, index), Connector: connector}, phases)
+		}
+		group.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, records := runtime.snapshot(); len(records) != events {
+			t.Fatalf("round %d records=%d want %d", round, len(records), events)
+		}
+		if transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions); len(transitions) != events {
+			t.Fatalf("round %d transition metrics=%d want %d", round, len(transitions), events)
+		}
+		last := map[string]int64{}
+		for _, metric := range sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive) {
+			connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
+			value := sandboxMetricValue(t, metric)
+			if step := value - last[connector]; step > 1 || step < -1 {
+				t.Fatalf("round %d %s gauge jumped %d -> %d: points reached the runtime out of order",
+					round, connector, last[connector], value)
+			}
+			last[connector] = value
+		}
+		for connector, active := range want {
+			if last[connector] != active {
+				t.Fatalf("round %d final %s gauge=%d want %d (all=%#v)", round, connector, last[connector], active, last)
+			}
 		}
 	}
-	if _, records := runtime.snapshot(); len(records) != sandboxes*2 {
-		t.Fatalf("records=%d want %d", len(records), sandboxes*2)
+}
+
+// flakyRuntimeV8Emitter fails the next log emission on demand, standing in for
+// a runtime detached during a reload or a rejected emission.
+type flakyRuntimeV8Emitter struct {
+	*testRuntimeV8Emitter
+	failNext bool
+}
+
+func (emitter *flakyRuntimeV8Emitter) EmitRuntimeV8(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder RuntimeV8Builder,
+) (RuntimeV8EmitOutcome, error) {
+	if emitter.failNext {
+		emitter.failNext = false
+		return RuntimeV8EmitOutcome{}, fmt.Errorf("runtime reloading")
 	}
-	var maximum int64
-	for _, metric := range sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive) {
-		if value := sandboxMetricValue(t, metric); value > maximum {
-			maximum = value
+	return emitter.testRuntimeV8Emitter.EmitRuntimeV8(ctx, metadata, builder)
+}
+
+// TestSandboxLifecycleTrackingEdges shares one store across the tracked-phase
+// edge cases; each case binds a fresh runtime and recorder.
+func TestSandboxLifecycleTrackingEdges(t *testing.T) {
+	harness := newSandboxHarness(t)
+	t.Run("failed emit does not advance the phase", func(t *testing.T) {
+		testSandboxLifecycleFailedEmitDoesNotAdvancePhase(t, harness)
+	})
+	t.Run("unknown previous counts only creation", func(t *testing.T) {
+		testSandboxLifecycleUnknownPreviousCountsOnlyCreation(t, harness)
+	})
+	t.Run("metrics use the identity connector", func(t *testing.T) {
+		testSandboxLifecycleMetricsUseIdentityConnector(t, harness)
+	})
+}
+
+func testSandboxLifecycleFailedEmitDoesNotAdvancePhase(t *testing.T, harness *sandboxHarness) {
+	runtime := &flakyRuntimeV8Emitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, harness.logger.store, router.AdmissionOrdinary)}
+	harness.logger.SetRuntimeV8Emitter(runtime)
+	recorder := NewSandboxRecorder(harness.logger)
+	identity := testSandboxIdentity()
+	record := func(phase SandboxPhase) error {
+		identity.Phase = phase
+		return recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
+	}
+	if err := record(SandboxPhaseCreating); err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+	runtime.failNext = true
+	if err := record(SandboxPhaseProvisioning); err == nil {
+		t.Fatal("a failed emission reported success")
+	}
+	if tracked := recorder.phases[identity.Name]; tracked.phase != SandboxPhaseCreating {
+		t.Fatalf("failed emission advanced the tracked phase to %q", tracked.phase)
+	}
+	if active := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive); len(active) != 1 {
+		t.Fatalf("failed emission published a gauge point: %d points", len(active))
+	}
+	if err := record(SandboxPhaseProvisioning); err != nil {
+		t.Fatalf("retried provisioning: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("records=%d want 2", len(records))
+	}
+	if previous := securityActionBody(t, records[1])["defenseclaw.sandbox.phase.previous"]; previous != "creating" {
+		t.Fatalf("retried record previous phase=%#v want creating", previous)
+	}
+	transitions := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
+	if len(transitions) != 2 || metricAttributes(t, transitions[1])["defenseclaw.sandbox.phase.from"] != "creating" {
+		t.Fatalf("transitions after retry=%d", len(transitions))
+	}
+	active := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive)
+	if last := active[len(active)-1]; sandboxMetricValue(t, last) != 1 {
+		t.Fatalf("active gauge after retry=%d want 1", sandboxMetricValue(t, last))
+	}
+}
+
+// testSandboxLifecycleUnknownPreviousCountsOnlyCreation covers a restarted
+// daemon reconciling a running sandbox and a repeated deleted event: neither
+// knows the previous phase, and neither is a new sandbox.
+func testSandboxLifecycleUnknownPreviousCountsOnlyCreation(t *testing.T, harness *sandboxHarness) {
+	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+	identity := testSandboxIdentity()
+	for _, step := range []struct {
+		phase       SandboxPhase
+		previous    SandboxPhase
+		transitions int
+		active      int64
+	}{
+		{phase: SandboxPhaseReady, transitions: 0, active: 1},
+		{phase: SandboxPhaseStopping, transitions: 1, active: 1},
+		{phase: SandboxPhaseDeleted, transitions: 2},
+		{phase: SandboxPhaseDeleted, transitions: 2},
+		{phase: SandboxPhaseStopped, previous: SandboxPhaseStopping, transitions: 3},
+	} {
+		identity.Phase = step.phase
+		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
+			Sandbox: identity, PreviousPhase: step.previous, Trigger: SandboxTriggerReconcile,
+		}); err != nil {
+			t.Fatalf("%s: %v", step.phase, err)
+		}
+		transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
+		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
+		if len(transitions) != step.transitions || sandboxMetricValue(t, active[len(active)-1]) != step.active {
+			t.Fatalf("%s: transitions=%d want %d, active=%d want %d", step.phase, len(transitions), step.transitions,
+				sandboxMetricValue(t, active[len(active)-1]), step.active)
 		}
 	}
-	if maximum != sandboxes {
-		t.Fatalf("maximum active gauge=%d want %d", maximum, sandboxes)
+	_, records := runtime.snapshot()
+	if _, present := securityActionBody(t, records[3])["defenseclaw.sandbox.phase.previous"]; present {
+		t.Fatalf("a repeated deleted event claimed a previous phase")
+	}
+}
+
+// testSandboxLifecycleMetricsUseIdentityConnector keeps the transition counter
+// and the active gauge on the same connector key even when the context
+// envelope names a different connector for the record.
+func testSandboxLifecycleMetricsUseIdentityConnector(t *testing.T, harness *sandboxHarness) {
+	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+	ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{Connector: "codex"})
+	if err := recorder.RecordSandboxLifecycle(ctx, SandboxLifecycleEvent{
+		Sandbox: SandboxIdentity{Name: "dc-unbound-repo-0001", Phase: SandboxPhaseCreating},
+	}); err != nil {
+		t.Fatalf("RecordSandboxLifecycle: %v", err)
+	}
+	if _, record := onlySandboxRecord(t, runtime); record.Connector() != "codex" {
+		t.Fatalf("record connector=%q want the envelope's codex", record.Connector())
+	}
+	for _, instrument := range []string{
+		observability.TelemetryInstrumentDefenseClawSandboxTransitions,
+		observability.TelemetryInstrumentDefenseClawSandboxActive,
+	} {
+		metrics := sandboxMetrics(t, runtime, instrument)
+		if len(metrics) != 1 {
+			t.Fatalf("%s points=%d want 1", instrument, len(metrics))
+		}
+		if connector, present := metricAttributes(t, metrics[0])["defenseclaw.connector.source"]; present {
+			t.Fatalf("%s took connector %#v from the envelope, not the sandbox identity", instrument, connector)
+		}
 	}
 }
 
