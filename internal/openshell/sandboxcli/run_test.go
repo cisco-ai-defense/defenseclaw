@@ -323,13 +323,28 @@ func TestRunBannerShowsTheModel(t *testing.T) {
 			if err := ta.Run(context.Background(), RunOptions{Harness: "codex", LLM: LLMBedrock, Args: tc.args}); err != nil {
 				t.Fatalf("Run: %v\n%s", err, ta.output())
 			}
-			if out := ta.output(); !strings.Contains(out, tc.want) || strings.Contains(out, "bedrock-test-not-a-secret") {
+			out := ta.output()
+			if !strings.Contains(out, tc.want) || strings.Contains(out, "bedrock-test-not-a-secret") {
 				t.Fatalf("output lacks %q (or prints the key):\n%s", tc.want, out)
+			}
+			// Mantle's multi-turn limit is said before the session starts.
+			if !strings.Contains(out, "⚠ Bedrock Mantle rejects every turn after the first of a Codex conversation") {
+				t.Fatalf("output lacks the Mantle caveat:\n%s", out)
 			}
 		})
 	}
-	// A harness DefenseClaw cannot tell the model of prints none.
+	// A one-prompt run has no second turn to warn about.
 	ta := newTestApp(t, "")
+	ta.IO.TTY = false
+	ta.env[EnvBedrockToken] = "bedrock-test-not-a-secret"
+	if err := ta.Run(context.Background(), RunOptions{Harness: "codex", LLM: LLMBedrock, Prompt: "fix the tests"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	if out := ta.output(); strings.Contains(out, "rejects every turn") || !strings.Contains(out, "Model     openai.gpt-oss-20b") {
+		t.Fatalf("headless banner:\n%s", out)
+	}
+	// A harness DefenseClaw cannot tell the model of prints none.
+	ta = newTestApp(t, "")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
 	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Args: []string{"--model", "sonnet"}}); err != nil {

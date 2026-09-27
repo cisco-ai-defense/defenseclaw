@@ -316,7 +316,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		_, err = a.Terminal.Run(ctx, inv)
 		return err
 	}
-	a.banner(sb, bannerInfo{llm: sandboxLLM(spec, sb), o: RunOptions{Args: o.Args}, keptSnapshot: kept})
+	a.banner(sb, bannerInfo{llm: sandboxLLM(spec, sb), o: RunOptions{Args: o.Args, Prompt: o.Prompt}, keptSnapshot: kept})
 	opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
 		CredentialProfile: sb.Launch.CredentialProfile, BedrockRegion: sb.Launch.BedrockRegion,
 		Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}

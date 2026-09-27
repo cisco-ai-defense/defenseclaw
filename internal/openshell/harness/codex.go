@@ -111,7 +111,12 @@ var Codex = register(&Spec{
 				"-c", `web_search="disabled"`,
 			),
 			ModelProvider: &codexMantleProvider,
-			Note:          "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route (default model " + CodexMantleDefaultModel + ")",
+			// Mantle drops the id and status of the assistant replies Codex
+			// replays and then fails its own validation of them (an SSE error
+			// event Codex reports as a lost stream); a reply sent as plain
+			// string content would pass, which Codex 0.146 cannot be told to do.
+			Caveat: "Bedrock Mantle rejects every turn after the first of a Codex conversation (\"stream disconnected before completion\"): start each request with /new",
+			Note:   "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route (default model " + CodexMantleDefaultModel + ")",
 		},
 	},
 	customization: []CustomizationPath{

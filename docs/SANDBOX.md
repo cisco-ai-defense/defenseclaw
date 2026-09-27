@@ -1247,7 +1247,8 @@ shows:
   Mantle limitation no provider setting avoids (Codex 0.146 has only
   `wire_api = "responses"` and no setting for how it serializes history).
   Start each task with `/new` in the TUI (or one `codex exec` per task);
-  tool calls within one turn work.
+  tool calls within one turn work. The launch banner of an interactive
+  Codex session on Bedrock says so (`harness.CredentialProfile.Caveat`).
 
 ### Per-sandbox managed configuration
 

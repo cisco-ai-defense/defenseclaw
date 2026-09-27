@@ -731,6 +731,20 @@ func launchModel(sb *sandboxapi.Sandbox, args []string) string {
 	return model
 }
 
+// launchCaveat is the provider limit an interactive session of sb should
+// know about (harness.CredentialProfile.Caveat); a one-prompt run has none.
+func launchCaveat(sb *sandboxapi.Sandbox, o RunOptions) string {
+	spec, ok := harness.Get(sb.Harness)
+	if !ok || sb.Launch.CredentialProfile == "" || o.Prompt != "" || printMode(spec, o.Args) {
+		return ""
+	}
+	cp, err := spec.CredentialProfile(sb.Launch.CredentialProfile, sb.Launch.BedrockRegion)
+	if err != nil {
+		return ""
+	}
+	return cp.Caveat
+}
+
 func joinNonEmpty(sep string, parts ...string) string {
 	var kept []string
 	for _, p := range parts {
@@ -775,6 +789,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
 	case model != "":
 		row("Model", model)
+	}
+	if caveat := launchCaveat(sb, b.o); caveat != "" {
+		row("", "⚠ "+caveat)
 	}
 	for _, c := range sbCredentials(b.o) {
 		row("Secret", c)
