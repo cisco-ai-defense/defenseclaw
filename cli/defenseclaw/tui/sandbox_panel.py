@@ -48,6 +48,7 @@ from defenseclaw.tui.services.sandbox_state import (
     SandboxesPanelModel,
     SandboxPanelAction,
     review_pairs,
+    undo_is_empty,
     undo_preview_text,
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
@@ -554,10 +555,16 @@ class SandboxPanelMixin:
 
     async def _sandbox_undo(self, name: str) -> None:
         preview = await self._sandbox_call("undo_sandbox", name, preview=True, stop=False)
+        if undo_is_empty(preview):
+            message = f"Nothing to undo: {name}'s folder matches its pre-session snapshot."
+            self._set_status(message)  # type: ignore[attr-defined]
+            self.notify_toast("info", message)  # type: ignore[attr-defined]
+            return
+        row = next((row for row in self.sandbox_model.rows if row.name == name), None)
+        stops = " (it stops the sandbox first)" if row is not None and row.running else ""
         confirmed = await self._confirm(
             f"Undo {name}?",
-            "Puts the project folder back to its pre-session snapshot and stops the sandbox. "
-            + undo_preview_text(preview),
+            f"Puts the project folder back to its pre-session snapshot{stops}. " + undo_preview_text(preview),
             MenuAction("undo", "Undo everything", variant="warning"),
         )
         if not confirmed:

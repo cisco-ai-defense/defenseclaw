@@ -687,6 +687,27 @@ async def test_undo_previews_then_stops_and_restores(fetch, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_undo_with_nothing_to_undo_asks_nothing(fetch, monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"result": {"kind": "git", "head_before": "a", "head_after": "a"}})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", lambda _screen: pytest.fail("confirmation shown"))
+    async with app.run_test(size=(160, 44)):
+        await app._sandbox_undo("docs")  # noqa: SLF001
+    assert [method for method, _args, _kwargs in calls.calls] == ["undo_sandbox"]
+
+
+def test_undo_is_empty_mirrors_go() -> None:
+    from defenseclaw.tui.panels.sandboxes import undo_is_empty
+
+    assert undo_is_empty({}) is True
+    assert undo_is_empty({"result": {"head_before": "a", "head_after": "a"}}) is True
+    assert undo_is_empty({"result": {"head_before": "a", "head_after": "b"}}) is False
+    assert undo_is_empty({"result": {"nested_repos": ["vendor/x"]}}) is False
+    assert undo_is_empty({"result": {"changes": [{"path": "a"}]}}) is False
+
+
+@pytest.mark.asyncio
 async def test_delete_needs_confirmation(fetch, monkeypatch) -> None:
     app = DefenseClawTUI(config=_config())
     calls = _Calls({"deleted": True})

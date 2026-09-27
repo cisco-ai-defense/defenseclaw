@@ -1012,3 +1012,16 @@ def undo_preview_text(response: Any) -> str:
     if data.get("summary"):
         parts.insert(0, _text(data.get("summary")))
     return " ".join(parts) or "Nothing changed since the snapshot; undo has nothing to do."
+
+
+def undo_is_empty(response: Any) -> bool:
+    """Whether the folder already matches the snapshot (``UndoResult.Empty``)."""
+    result = _dict(_dict(response).get("result"))
+    if not result:
+        return True
+    lists = ("changes", "ref_changes", "control_changes", "nested_repos", "lost_objects")
+    if any(_list(result.get(key)) for key in lists):
+        return False
+    return _text(result.get("head_before")) == _text(result.get("head_after")) and _text(
+        result.get("branch_before")
+    ) == _text(result.get("branch_after"))

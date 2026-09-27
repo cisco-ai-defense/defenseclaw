@@ -139,6 +139,14 @@ def test_setup_runs_in_the_terminal_and_doctor_does_not() -> None:
     assert doctor.intent.args == ("sandbox", "doctor")
 
 
+def test_either_action_clears_the_running_badge() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    for args in (("sandbox", "setup", "--non-interactive"), ("sandbox", "doctor")):
+        model.wizard_status[SetupWizard.SANDBOX] = "running..."
+        model.mark_wizard_complete(args, success=True)
+        assert model.wizard_status[SetupWizard.SANDBOX] == "done", args
+
+
 def test_credential_summary_names_sources_never_values(tmp_path: Path) -> None:
     (tmp_path / ".codex").mkdir()
     (tmp_path / ".codex" / "auth.json").write_text("{}", encoding="utf-8")

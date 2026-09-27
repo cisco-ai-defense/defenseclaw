@@ -1368,6 +1368,9 @@ class SetupPanelModel:
             if len(command) > best_len:
                 best = wizard
                 best_len = len(command)
+        if best is None and tuple(args[:1]) == ("sandbox",):
+            # The Sandbox wizard also runs ``sandbox doctor``.
+            best = SetupWizard.SANDBOX
         if best is None:
             return
         self.wizard_status[best] = "done" if success else "failed"
