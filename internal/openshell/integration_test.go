@@ -342,19 +342,35 @@ func TestLiveInstallerDigest(t *testing.T) {
 }
 
 // noRestart runs real commands but never restarts the shared gateway.
-type noRestart struct{ openshell.ExecRunner }
+// With dir set it reports a service that reads dir's files, so a scratch
+// configuration passes the service check.
+type noRestart struct {
+	openshell.ExecRunner
+	dir string
+}
 
 func (r noRestart) Output(ctx context.Context, c openshell.Command) ([]byte, error) {
 	if c.Name == "systemctl" && len(c.Args) > 1 && c.Args[1] == "restart" {
 		return nil, nil
 	}
+	if c.Name == "systemctl" && r.dir != "" && len(c.Args) > 1 && c.Args[1] == "show-environment" {
+		return []byte("HOME=/nonexistent\nXDG_CONFIG_HOME=" + filepath.Dir(r.dir) + "\n"), nil
+	}
+	if c.Name == "systemctl" && r.dir != "" && len(c.Args) > 1 && c.Args[1] == "show" {
+		return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nEnvironmentFiles=" +
+			filepath.Join(r.dir, "gateway.env") + " (ignore_errors=yes)\n"), nil
+	}
 	return r.ExecRunner.Output(ctx, c)
 }
 
 // TestLivePreflight runs the real `openshell-gateway config preflight` on
-// DefenseClaw's edit of a scratch gateway.toml.
+// DefenseClaw's edit of a scratch gateway.toml, and the real client
+// certificate probe against the live gateway.
 func TestLivePreflight(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "openshell")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	orig := "# scratch\n[openshell]\nversion = 2 # schema\n\n# docker driver\n[openshell.drivers.docker]\nenable_bind_mounts = false # off\n"
 	if err := os.WriteFile(filepath.Join(dir, "gateway.toml"), []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
@@ -365,9 +381,9 @@ func TestLivePreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &openshell.GatewayConfigurator{Dir: dir, Runner: noRestart{}, VerifyGateway: func(context.Context) error { return nil },
+	g := &openshell.GatewayConfigurator{Dir: dir, Runner: noRestart{dir: dir}, VerifyGateway: func(context.Context) error { return nil },
 		Discover: openshell.DiscoverOptions{ConfigDir: real, Gateway: os.Getenv("DC_OPENSHELL_GATEWAY")}}
-	plan, err := g.Plan(openshell.GatewayChanges{EnableBindMounts: true, Env: map[string]string{openshell.EnvTelemetryEnabled: "false"}})
+	plan, err := g.Plan(context.Background(), openshell.GatewayChanges{EnableBindMounts: true, Env: map[string]string{openshell.EnvTelemetryEnabled: "false"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +399,7 @@ func TestLivePreflight(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "gateway.toml"), []byte("[openshell.drivers.docker]\nallow_driver_config = false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err = g.Plan(openshell.GatewayChanges{EnableBindMounts: true})
+	plan, err = g.Plan(context.Background(), openshell.GatewayChanges{EnableBindMounts: true})
 	if err != nil {
 		t.Fatal(err)
 	}

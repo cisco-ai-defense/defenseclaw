@@ -57,6 +57,15 @@ type doctorFixture struct {
 	busy     map[string]bool
 	started  time.Time
 	verified int
+	// probe answers ProbeClientAuth; probes counts the calls.
+	probe  error
+	probes int
+}
+
+// unit renders the service as systemd reports it, started at f.started
+// and reading f.dir's gateway.env.
+func (f *doctorFixture) unit(active, fileState string) string {
+	return systemdUnit(active, fileState, f.started, filepath.Join(f.dir, "gateway.env"))
 }
 
 func dockerInfoJSON(version, os string, extra map[string]any) string {
@@ -94,8 +103,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	f.runner.On("docker info", dockerInfoJSON("29.4.0", "Ubuntu 24.04.4 LTS", nil), nil)
 	f.runner.On("loginctl show-user dev", "yes\n", nil)
 	f.runner.OnFunc("systemctl --user show openshell-gateway", func(context.Context, openshell.Command) ([]byte, error) {
-		return []byte(fmt.Sprintf("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nActiveEnterTimestamp=@%d\n", f.started.Unix())), nil
+		return []byte(f.unit("active", "enabled")), nil
 	})
+	f.runner.On("systemctl --user show-environment", systemdManager(f.dir), nil)
 	f.runner.On("/usr/bin/openshell --version", "openshell 0.1.1\n", nil)
 	f.runner.On("systemctl --user restart openshell-gateway", "", nil)
 	f.runner.On("systemctl --user enable --now openshell-gateway", "", nil)
@@ -116,7 +126,8 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			return f.fake.Client(openshell.ClientOptions{}), nil
 		},
 		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner,
-			VerifyGateway: func(context.Context) error { f.verified++; return nil }},
+			VerifyGateway:   func(context.Context) error { f.verified++; return nil },
+			ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe }},
 		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
 		LandlockABI:   func() (int, error) { return 6, nil },
 		DiskFree:      func(string) (uint64, error) { return 40 << 30, nil },
@@ -568,7 +579,7 @@ func TestDoctorRegistrationAndMTLS(t *testing.T) {
 			t.Fatal("doctor dialed a plaintext gateway")
 		}
 		// The bind-mount edit itself refuses too.
-		if _, err := f.doctor.Gateway.Plan(openshell.GatewayChanges{EnableBindMounts: true}); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrUnauthenticatedGateway) {
+		if _, err := f.doctor.Gateway.Plan(context.Background(), openshell.GatewayChanges{EnableBindMounts: true}); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrUnauthenticatedGateway) {
 			t.Fatalf("Plan = %v", err)
 		}
 	})
@@ -680,6 +691,49 @@ func TestDoctorGatewayConfig(t *testing.T) {
 			t.Fatalf("fix = %+v", c.Fix)
 		}
 	})
+	t.Run("written earlier in the second the gateway started", func(t *testing.T) {
+		// systemd reports the start to the microsecond, so a file written
+		// 600ms before the start is not mistaken for a later change.
+		f := newDoctorFixture(t)
+		second := f.started
+		f.started = second.Add(900 * time.Millisecond)
+		f.writeTOML(enabledTOML, second.Add(300*time.Millisecond))
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
+		f.writeTOML(enabledTOML, second.Add(950*time.Millisecond))
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
+	})
+	t.Run("pending restart mark", func(t *testing.T) {
+		mark := func(f *doctorFixture, at time.Time) {
+			path := filepath.Join(f.dir, ".defenseclaw-restart-pending")
+			writeFile(t, path, at.UTC().Format(time.RFC3339Nano)+"\n", 0o600)
+			if err := os.Chtimes(path, at, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Homebrew reports no start time; the mark DefenseClaw left
+		// before a restart that never happened still shows.
+		f := newDoctorFixture(t)
+		f.doctor.GOOS, f.doctor.Gateway.GOOS = "darwin", "darwin"
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		f.runner.On("brew services restart nvidia/openshell/openshell", "", nil)
+		mark(f, f.started.Add(-time.Minute))
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
+		if c.Fix.Command != "brew services restart nvidia/openshell/openshell" {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDBindMounts, nil }); err != nil {
+			t.Fatal(err)
+		}
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
+
+		// On systemd a mark from before the last start is stale.
+		f = newDoctorFixture(t)
+		mark(f, f.started.Add(-time.Second))
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
+		mark(f, f.started.Add(time.Second))
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
+	})
 	t.Run("telemetry differs from config", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		off := false
@@ -692,6 +746,73 @@ func TestDoctorGatewayConfig(t *testing.T) {
 		st, _ := f.doctor.Gateway.Read()
 		if st.TelemetryEnabled() {
 			t.Fatal("telemetry still on after the fix")
+		}
+	})
+}
+
+// TestDoctorBindMountsNeedAPrivateGateway covers bind mounts judged by
+// the gateway the service runs, not only by the CLI's registration files.
+func TestDoctorBindMountsNeedAPrivateGateway(t *testing.T) {
+	exposedCases := []struct {
+		name  string
+		setup func(f *doctorFixture)
+	}{
+		{"TLS disabled in gateway.env", func(f *doctorFixture) {
+			writeFile(t, filepath.Join(f.dir, "gateway.env"), "OPENSHELL_DISABLE_TLS=true\n", 0o600)
+		}},
+		{"mTLS auth off", func(f *doctorFixture) {
+			writeFile(t, filepath.Join(f.dir, "gateway.env"), "OPENSHELL_ENABLE_MTLS_AUTH=false\nOPENSHELL_BIND_ADDRESS=0.0.0.0\n", 0o600)
+		}},
+		{"probe gets in without a certificate", func(f *doctorFixture) {
+			f.probe = fmt.Errorf("%w: accepted a TLS session", openshell.ErrGatewayExposed)
+		}},
+	}
+	for _, tc := range exposedCases {
+		t.Run("enabled: "+tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			tc.setup(f)
+			c := expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "others can reach the gateway and mount any host path")
+			if c.Fix == nil || c.Fix.Automatic {
+				t.Fatalf("fix = %+v", c.Fix)
+			}
+		})
+		t.Run("disabled: "+tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
+			tc.setup(f)
+			c := expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
+			if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || !strings.Contains(c.Fix.Summary, "reachable by you alone") {
+				t.Fatalf("bind mounts offered an automatic fix on an exposed gateway: %+v", c.Fix)
+			}
+		})
+	}
+	t.Run("registration reaches another gateway", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		dev := writeRegistration(t, f.dir, "dev", map[string]any{"gateway_endpoint": "https://127.0.0.1:18080", "auth_mode": "mtls"}, nil)
+		for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
+			chmod(t, filepath.Join(dev, file), mode)
+		}
+		writeFile(t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o600)
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "reaches https://127.0.0.1:18080, but the openshell-gateway service listens on port 17670")
+	})
+	t.Run("service reads another configuration", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show-environment", "HOME=/home/dev\n", nil)
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "home/dev/.config/openshell/gateway.toml, not")
+		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusWarn, "does not match")
+	})
+	t.Run("probe inconclusive", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.probe = errors.New("could not confirm that the gateway requires a client certificate: i/o timeout")
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "could not confirm")
+	})
+	t.Run("gateway not answering is not probed", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
+		if f.probes != 0 {
+			t.Fatalf("probed a gateway that is not answering %d times", f.probes)
 		}
 	})
 }
@@ -747,7 +868,7 @@ func TestDoctorPorts(t *testing.T) {
 func TestDoctorApplyFixesConsent(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-	f.runner.On("systemctl --user show openshell-gateway", "LoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=enabled\n", nil)
+	f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
 	f.runner.On("systemctl --user enable --now openshell-gateway", "Job failed", errors.New("exit status 1"))
 	r := f.run()
 	var asked []string

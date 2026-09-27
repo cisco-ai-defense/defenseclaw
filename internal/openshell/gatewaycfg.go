@@ -23,10 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +61,21 @@ const (
 	// envGatewayConfig points the gateway at a different gateway.toml.
 	envGatewayConfig = "OPENSHELL_GATEWAY_CONFIG"
 
+	// Gateway settings that decide who can reach the gateway. The
+	// variables override their gateway.toml counterparts.
+	envDisableTLS     = "OPENSHELL_DISABLE_TLS"
+	envEnableMTLSAuth = "OPENSHELL_ENABLE_MTLS_AUTH"
+	envOIDCIssuer     = "OPENSHELL_OIDC_ISSUER"
+	envBindAddress    = "OPENSHELL_BIND_ADDRESS"
+	envServerPort     = "OPENSHELL_SERVER_PORT"
+	// defaultGatewayPort is where the package gateway listens.
+	defaultGatewayPort = 17670
+
+	// restartPendingFile marks configuration DefenseClaw wrote that the
+	// gateway has not been restarted on yet. It lives in the config
+	// directory and survives a crash between the write and the restart.
+	restartPendingFile = ".defenseclaw-restart-pending"
+
 	maxGatewayFileBytes = 1 << 20
 )
 
@@ -69,6 +86,12 @@ var (
 	// ErrPreflight means `openshell-gateway config preflight` rejected the
 	// configuration. Nothing was written.
 	ErrPreflight = errors.New("openshell: gateway configuration failed preflight")
+	// ErrGatewayMismatch means the gateway service is not the one
+	// DefenseClaw configures: the service reads another gateway.env or
+	// gateway.toml than DefenseClaw would edit (XDG_CONFIG_HOME differs
+	// between this process and the systemd user manager, for instance), or
+	// the registration reaches another port than the service listens on.
+	ErrGatewayMismatch = errors.New("openshell: the gateway service does not match DefenseClaw's view of it")
 )
 
 var (
@@ -108,8 +131,12 @@ type GatewayConfigurator struct {
 	// VerifyGateway waits for the restarted gateway (default
 	// WaitForGateway with RestartWait).
 	VerifyGateway func(context.Context) error
-	RestartWait   time.Duration
-	Now           func() time.Time
+	// ProbeClientAuth checks that the gateway refuses a client without a
+	// certificate, before bind mounts are enabled and again once the
+	// gateway runs with them (default ProbeClientAuth).
+	ProbeClientAuth func(context.Context, *Registration) error
+	RestartWait     time.Duration
+	Now             func() time.Time
 }
 
 func (g *GatewayConfigurator) defaults() error {
@@ -143,6 +170,9 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.VerifyGateway == nil {
 		g.VerifyGateway = func(ctx context.Context) error { return WaitForGateway(ctx, g.Discover, g.RestartWait) }
 	}
+	if g.ProbeClientAuth == nil {
+		g.ProbeClientAuth = ProbeClientAuth
+	}
 	if g.Now == nil {
 		g.Now = time.Now
 	}
@@ -170,12 +200,7 @@ func (g *GatewayConfigurator) TOMLPath() (string, error) {
 		return "", err
 	}
 	if p := parseEnvFile(data)[envGatewayConfig]; p != "" && filepath.IsAbs(p) {
-		p = filepath.Clean(p)
-		dir, err := resolveConfigDir(filepath.Dir(p))
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(dir, filepath.Base(p)), nil
+		return resolveFilePath(filepath.Clean(p))
 	}
 	return filepath.Join(g.Dir, GatewayTOMLFile), nil
 }
@@ -204,6 +229,28 @@ type GatewayConfigState struct {
 	EnvExists   bool              `json:"env_exists"`
 	EnvModTime  time.Time         `json:"env_mtime"`
 	Env         map[string]string `json:"env"`
+	// RestartPendingSince is when DefenseClaw wrote configuration the
+	// gateway has not been restarted on (zero: none).
+	RestartPendingSince time.Time `json:"restart_pending_since"`
+	// server holds the gateway.toml listener and authentication settings.
+	server gatewayServer
+}
+
+// gatewayServer is the [openshell.gateway] part of gateway.toml that
+// decides who can reach the gateway.
+type gatewayServer struct {
+	// BindAddress is "ip:port".
+	BindAddress string `toml:"bind_address"`
+	DisableTLS  *bool  `toml:"disable_tls"`
+	MTLSAuth    struct {
+		Enabled *bool `toml:"enabled"`
+	} `toml:"mtls_auth"`
+	OIDC struct {
+		Issuer string `toml:"issuer"`
+	} `toml:"oidc"`
+	Auth struct {
+		AllowUnauthenticatedUsers *bool `toml:"allow_unauthenticated_users"`
+	} `toml:"auth"`
 }
 
 // TelemetryEnabled reports whether OpenShell's usage telemetry is on (the
@@ -236,6 +283,9 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 	if envInfo != nil {
 		st.EnvExists, st.EnvModTime = true, envInfo.ModTime()
 	}
+	if info, err := os.Lstat(g.restartPendingPath()); err == nil && info.Mode().IsRegular() {
+		st.RestartPendingSince = info.ModTime()
+	}
 	tomlData, tomlInfo, err := readGatewayFile(tomlPath)
 	if err != nil {
 		return nil, err
@@ -246,6 +296,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 	st.TOMLExists, st.TOMLModTime = true, tomlInfo.ModTime()
 	var doc struct {
 		OpenShell struct {
+			Gateway gatewayServer `toml:"gateway"`
 			Drivers struct {
 				Docker struct {
 					AllowDriverConfig bool `toml:"allow_driver_config"`
@@ -260,6 +311,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 	if err := toml.Unmarshal(tomlData, &doc); err != nil {
 		return st, fmt.Errorf("openshell: parse %s: %w", tomlPath, err)
 	}
+	st.server = doc.OpenShell.Gateway
 	d := doc.OpenShell.Drivers.Docker
 	st.BindMounts = BindMounts{AllowDriverConfig: d.AllowDriverConfig, EnableBindMounts: d.EnableBindMounts, ResourceAdmission: true}
 	if d.ResourceAdmission.Enabled != nil {
@@ -272,8 +324,11 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 type GatewayChanges struct {
 	// EnableBindMounts turns on docker-driver bind mounts. They let a
 	// sandbox mount any host path through the gateway's root Docker
-	// daemon, so Plan and Apply refuse them unless the registration passes
-	// Discover: only the caller, over mTLS, can reach the gateway.
+	// daemon, so Plan and Apply refuse them unless only the caller, over
+	// mTLS, can reach the gateway: the registration passes Discover and
+	// reaches the service's port, the service's settings keep TLS client
+	// authentication on and the listener on loopback, and the gateway
+	// turns away a client without a certificate (ProbeClientAuth).
 	EnableBindMounts bool
 	// Env sets gateway.env entries (e.g. EnvTelemetryEnabled=false). The
 	// plan summary prints the values, so they must not be secrets.
@@ -333,14 +388,22 @@ func (p *GatewayPlan) String() string {
 	return b.String()
 }
 
-// Plan computes the changes without touching anything.
-func (g *GatewayConfigurator) Plan(ch GatewayChanges) (*GatewayPlan, error) {
+// Plan computes the changes without touching anything. On Linux it first
+// checks that the gateway service reads the files it would edit.
+func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*GatewayPlan, error) {
 	if err := g.defaults(); err != nil {
 		return nil, err
 	}
 	plan := &GatewayPlan{Restart: strings.Join(g.restartCommand().argv(), " ")}
+	if !ch.EnableBindMounts && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 {
+		return plan, nil
+	}
+	env, err := g.serviceEnvironment(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if ch.EnableBindMounts {
-		if err := g.requirePrivateGateway(); err != nil {
+		if err := g.requirePrivateGateway(ctx, env); err != nil {
 			return nil, err
 		}
 		path, err := g.TOMLPath()
@@ -409,9 +472,11 @@ type GatewayApplyResult struct {
 }
 
 // Apply writes the plan, restarts the gateway and waits for it. A file
-// that changed since Plan, a TOML preflight failure or an unsafe path
-// aborts before anything is written. When the restart or the health check
-// fails, the previous files are restored and the gateway restarted again.
+// that changed since Plan, a TOML preflight failure, an unsafe path or a
+// gateway that fails Plan's checks aborts before anything is written.
+// When the restart or the health check fails, or the restarted gateway
+// with bind mounts no longer turns away a client without a certificate,
+// the previous files are restored and the gateway restarted again.
 func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*GatewayApplyResult, error) {
 	if err := g.defaults(); err != nil {
 		return nil, err
@@ -420,13 +485,18 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if plan.Empty() {
 		return res, nil
 	}
-	for _, f := range plan.Files {
-		if f.TOML {
-			// gateway.toml changes only enable bind mounts.
-			if err := g.requirePrivateGateway(); err != nil {
-				return nil, err
-			}
+	env, err := g.serviceEnvironment(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// gateway.toml changes only enable bind mounts.
+	mounts := slices.ContainsFunc(plan.Files, func(f *FileChange) bool { return f.TOML })
+	if mounts {
+		if err := g.requirePrivateGateway(ctx, env); err != nil {
+			return nil, err
 		}
+	}
+	for _, f := range plan.Files {
 		current, info, err := readGatewayFile(f.Path)
 		if err != nil {
 			return nil, err
@@ -439,6 +509,9 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 				return nil, err
 			}
 		}
+	}
+	if err := g.markRestartPending(); err != nil {
+		return nil, err
 	}
 	for _, f := range plan.Files {
 		applied := AppliedFile{Path: f.Path}
@@ -460,20 +533,102 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err := g.Restart(ctx); err != nil {
 		return res, g.rollbackAfter(ctx, res, err, true)
 	}
+	if mounts {
+		// Check again against the gateway that now honours bind mounts.
+		if err := g.requirePrivateGateway(ctx, env); err != nil {
+			return res, g.rollbackAfter(ctx, res, err, true)
+		}
+	}
 	res.Restarted = true
 	return res, nil
 }
 
-// ErrBindMountsRefused means bind mounts were not enabled because the
-// gateway's registration is unusable (for instance a plaintext gateway or
-// files other users can change).
+// ErrBindMountsRefused means bind mounts were not enabled because someone
+// other than the caller might reach the gateway: its registration is
+// unusable (a plaintext gateway, files other users can change), points at
+// another gateway than the service DefenseClaw configures, or the
+// service's settings or a probe show that it lets in clients without the
+// registration's certificate.
 var ErrBindMountsRefused = errors.New("openshell: refusing to enable bind mounts")
 
-func (g *GatewayConfigurator) requirePrivateGateway() error {
-	if _, err := Discover(g.Discover); err != nil {
+// requirePrivateGateway refuses bind mounts unless only the caller can
+// drive the gateway. env is the service's environment (nil when unknown).
+func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map[string]string) error {
+	refuse := func(err error) error {
 		return fmt.Errorf("%w: the gateway must be reachable only by you over mTLS: %w", ErrBindMountsRefused, err)
 	}
+	reg, err := Discover(g.Discover)
+	if err != nil {
+		return refuse(err)
+	}
+	st, err := g.Read()
+	if err != nil {
+		return err
+	}
+	if err := gatewayExposure(reg, st, env); err != nil {
+		return refuse(err)
+	}
+	if err := g.ProbeClientAuth(ctx, reg); err != nil {
+		return refuse(err)
+	}
 	return nil
+}
+
+// gatewayExposure checks the settings the gateway service starts with:
+// env (the service's environment, nil when unknown) overrides gateway.toml,
+// as it does for the gateway. It returns ErrGatewayExposed for settings
+// that let in clients without the registration's certificate or listen
+// beyond loopback, and ErrGatewayMismatch when the registration reaches
+// another port than the service listens on.
+func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string) error {
+	s := st.server
+	var issues []string
+	if v, ok := env[envDisableTLS]; ok && envFlag(v) || !ok && s.DisableTLS != nil && *s.DisableTLS {
+		issues = append(issues, "TLS is disabled ("+envDisableTLS+" or disable_tls)")
+	}
+	if v, ok := env[envEnableMTLSAuth]; ok && strings.EqualFold(strings.TrimSpace(v), "false") || !ok && s.MTLSAuth.Enabled != nil && !*s.MTLSAuth.Enabled {
+		issues = append(issues, "client certificate authentication is off ("+envEnableMTLSAuth+" or [openshell.gateway.mtls_auth] enabled)")
+	}
+	if v := strings.TrimSpace(env[envOIDCIssuer]); v != "" || s.OIDC.Issuer != "" {
+		issues = append(issues, "OIDC authentication is configured ("+envOIDCIssuer+" or [openshell.gateway.oidc] issuer)")
+	}
+	if a := s.Auth.AllowUnauthenticatedUsers; a != nil && *a {
+		issues = append(issues, "[openshell.gateway.auth] allow_unauthenticated_users is on")
+	}
+	host, port := "127.0.0.1", strconv.Itoa(defaultGatewayPort)
+	if s.BindAddress != "" {
+		h, p, err := net.SplitHostPort(s.BindAddress)
+		if err != nil {
+			return fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, s.BindAddress, st.TOMLPath)
+		}
+		host, port = h, p
+	}
+	if v, ok := env[envBindAddress]; ok {
+		host = strings.TrimSpace(v)
+	}
+	if v, ok := env[envServerPort]; ok {
+		port = strings.TrimSpace(v)
+	}
+	if !isLoopbackHost(host) {
+		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
+	}
+	if len(issues) > 0 {
+		return fmt.Errorf("%w: %s", ErrGatewayExposed, strings.Join(issues, "; "))
+	}
+	if _, regPort, err := net.SplitHostPort(reg.Target()); err != nil || regPort != port {
+		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
+	}
+	return nil
+}
+
+// envFlag reads a boolean flag variable the way the gateway's command
+// line parser does: anything but an empty or false-like value is true.
+func envFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "f", "false", "n", "no", "off":
+		return false
+	}
+	return true
 }
 
 // rollbackAfter restores what Apply wrote after cause, restarting the
@@ -486,6 +641,9 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 		if err := g.Restart(ctx); err != nil {
 			return fmt.Errorf("%w; the previous configuration was restored but the gateway did not come back: %v", cause, err)
 		}
+	} else {
+		// The gateway never saw the new files; the restored ones are what it runs.
+		g.clearRestartPending()
 	}
 	return fmt.Errorf("%w (the previous configuration was restored)", cause)
 }
@@ -498,10 +656,35 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if res == nil || len(res.Files) == 0 {
 		return nil
 	}
+	if err := g.markRestartPending(); err != nil {
+		return err
+	}
 	if err := g.restore(res); err != nil {
 		return err
 	}
 	return g.Restart(ctx)
+}
+
+func (g *GatewayConfigurator) restartPendingPath() string {
+	return filepath.Join(g.Dir, restartPendingFile)
+}
+
+// markRestartPending records, before configuration is written, that the
+// gateway must be restarted on it; Restart clears the mark. Doctor reads
+// it on every platform, including Homebrew, which reports no start time.
+func (g *GatewayConfigurator) markRestartPending() error {
+	if err := os.MkdirAll(g.Dir, 0o700); err != nil {
+		return fmt.Errorf("openshell: create %s: %w", g.Dir, err)
+	}
+	stamp := g.Now().UTC().Format(time.RFC3339Nano) + "\n"
+	if err := safefile.Write(g.restartPendingPath(), []byte(stamp)); err != nil {
+		return fmt.Errorf("openshell: record the pending gateway restart: %w", err)
+	}
+	return nil
+}
+
+func (g *GatewayConfigurator) clearRestartPending() {
+	_ = os.Remove(g.restartPendingPath())
 }
 
 func (g *GatewayConfigurator) restore(res *GatewayApplyResult) error {
@@ -611,6 +794,7 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	if err := g.VerifyGateway(ctx); err != nil {
 		return fmt.Errorf("openshell: the restarted gateway is not healthy: %w", err)
 	}
+	g.clearRestartPending()
 	return nil
 }
 
@@ -623,9 +807,22 @@ type ServiceState struct {
 	Active    bool   `json:"active"`
 	Enabled   bool   `json:"enabled"`
 	Status    string `json:"status"`
-	// StartedAt is when the service last became active (zero: unknown).
+	// StartedAt is when the service last became active, to the
+	// microsecond (zero: unknown, as under Homebrew).
 	StartedAt time.Time `json:"started_at"`
+	// EnvironmentFiles are the files systemd loads the service's
+	// environment from, in order (systemd only).
+	EnvironmentFiles []string `json:"environment_files,omitempty"`
+	// Environment is what the service starts with before its
+	// EnvironmentFiles: the user manager's environment overlaid with the
+	// unit's Environment= settings, limited to HOME, XDG_CONFIG_HOME and
+	// OPENSHELL_* (systemd only). Values may be sensitive.
+	Environment map[string]string `json:"-"`
 }
+
+// systemdTimestamp is how `systemctl show --timestamp=us+utc` prints a
+// time.
+const systemdTimestamp = "Mon 2006-01-02 15:04:05.000000 MST"
 
 // ServiceState asks systemd (Linux) or Homebrew (macOS) about the gateway.
 func (g *GatewayConfigurator) ServiceState(ctx context.Context) (*ServiceState, error) {
@@ -636,27 +833,231 @@ func (g *GatewayConfigurator) ServiceState(ctx context.Context) (*ServiceState, 
 		return g.brewServiceState(ctx)
 	}
 	st := &ServiceState{Manager: "systemd", Unit: GatewayService}
-	out, err := g.Runner.Output(ctx, Command{Name: "systemctl", Args: []string{"--user", "show", GatewayService, "--timestamp=unix",
-		"-p", "LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp"}, Timeout: 30 * time.Second})
+	out, err := g.Runner.Output(ctx, Command{Name: "systemctl", Args: []string{"--user", "show", GatewayService, "--timestamp=us+utc",
+		"-p", "LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,Environment,EnvironmentFiles"}, Timeout: 30 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: systemctl --user show %s: %v: %s", GatewayService, err, strings.TrimSpace(string(out)))
 	}
 	props := map[string]string{}
 	for _, line := range strings.Split(string(out), "\n") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
-			props[k] = v
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
 		}
+		if k == "EnvironmentFiles" {
+			// One line per file: "<path> (ignore_errors=yes)".
+			if p, _, _ := strings.Cut(v, " (ignore_errors="); p != "" {
+				st.EnvironmentFiles = append(st.EnvironmentFiles, p)
+			}
+			continue
+		}
+		props[k] = v
 	}
 	st.Installed = props["LoadState"] == "loaded"
 	st.Active = props["ActiveState"] == "active"
 	st.Enabled = props["UnitFileState"] == "enabled" || props["UnitFileState"] == "linked"
 	st.Status = strings.TrimSpace(props["ActiveState"] + " (" + props["SubState"] + ")")
-	if ts := strings.TrimPrefix(props["ActiveEnterTimestamp"], "@"); ts != "" {
-		if secs, err := strconv.ParseInt(ts, 10, 64); err == nil && secs > 0 {
-			st.StartedAt = time.Unix(secs, 0)
+	if t, err := time.Parse(systemdTimestamp, props["ActiveEnterTimestamp"]); err == nil {
+		st.StartedAt = t
+	}
+	if st.Environment, err = g.managerEnvironment(ctx); err != nil {
+		return nil, err
+	}
+	for _, kv := range splitSystemdWords(props["Environment"]) {
+		if k, v, ok := strings.Cut(kv, "="); ok && serviceEnvKey(k) {
+			st.Environment[k] = v
 		}
 	}
 	return st, nil
+}
+
+// managerEnvironment reads the systemd user manager's environment, which
+// every user service inherits.
+func (g *GatewayConfigurator) managerEnvironment(ctx context.Context) (map[string]string, error) {
+	out, err := g.Runner.Output(ctx, Command{Name: "systemctl", Args: []string{"--user", "show-environment"}, Timeout: 30 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("openshell: systemctl --user show-environment: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && serviceEnvKey(k) {
+			env[k] = unquoteSystemdValue(v)
+		}
+	}
+	return env, nil
+}
+
+// serviceEnvKey selects the variables that locate or configure the
+// gateway.
+func serviceEnvKey(k string) bool {
+	return k == "HOME" || k == "XDG_CONFIG_HOME" || strings.HasPrefix(k, "OPENSHELL_")
+}
+
+// unquoteSystemdValue undoes the $'...' quoting show-environment applies
+// to values with special characters.
+func unquoteSystemdValue(v string) string {
+	if len(v) < 3 || !strings.HasPrefix(v, "$'") || !strings.HasSuffix(v, "'") {
+		return v
+	}
+	inner := v[2 : len(v)-1]
+	var b strings.Builder
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c == '\\' && i+1 < len(inner) {
+			i++
+			switch inner[i] {
+			case 'n':
+				c = '\n'
+			case 't':
+				c = '\t'
+			default:
+				c = inner[i]
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// splitSystemdWords splits a `systemctl show` string list: words are
+// separated by spaces and double-quoted, with backslash escapes, when they
+// contain special characters.
+func splitSystemdWords(s string) []string {
+	var words []string
+	var b strings.Builder
+	inWord, quoted := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && quoted && i+1 < len(s):
+			i++
+			b.WriteByte(s[i])
+		case c == '"':
+			quoted, inWord = !quoted, true
+		case c == ' ' && !quoted:
+			if inWord {
+				words = append(words, b.String())
+				b.Reset()
+				inWord = false
+			}
+		default:
+			b.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, b.String())
+	}
+	return words
+}
+
+// serviceEnvironment checks that the gateway service reads the files
+// DefenseClaw edits and returns the environment it starts with. Under
+// Homebrew it returns nil: launchd does not read gateway.env.
+func (g *GatewayConfigurator) serviceEnvironment(ctx context.Context) (map[string]string, error) {
+	if g.GOOS == "darwin" {
+		return nil, nil
+	}
+	svc, err := g.ServiceState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return g.serviceEnv(svc)
+}
+
+// serviceEnv merges the service's environment the way systemd does (the
+// manager's, then Environment=, then each EnvironmentFile in order) and
+// returns ErrGatewayMismatch unless the unit reads EnvPath and resolves
+// gateway.toml to TOMLPath.
+func (g *GatewayConfigurator) serviceEnv(svc *ServiceState) (map[string]string, error) {
+	if err := g.defaults(); err != nil {
+		return nil, err
+	}
+	if g.GOOS == "darwin" {
+		return nil, nil
+	}
+	if svc == nil {
+		return nil, errors.New("openshell: the gateway service's state is unknown")
+	}
+	if !svc.Installed {
+		return nil, fmt.Errorf("openshell: the %s user service is not installed", GatewayService)
+	}
+	envPath, err := g.EnvPath()
+	if err != nil {
+		return nil, err
+	}
+	env := map[string]string{}
+	for k, v := range svc.Environment {
+		env[k] = v
+	}
+	reads := false
+	for _, file := range svc.EnvironmentFiles {
+		path, err := resolveFilePath(file)
+		if err != nil {
+			return nil, err
+		}
+		var data []byte
+		if path == envPath {
+			reads = true
+			data, _, err = readGatewayFile(path)
+		} else if data, err = safefile.ReadRegularFileBounded(path, maxGatewayFileBytes); errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+			// The user manager cannot read it either.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("openshell: the %s service's environment file: %w", GatewayService, err)
+		}
+		for k, v := range parseEnvFile(data) {
+			env[k] = v
+		}
+	}
+	if !reads {
+		files := "no file"
+		if len(svc.EnvironmentFiles) > 0 {
+			files = strings.Join(svc.EnvironmentFiles, ", ")
+		}
+		return nil, fmt.Errorf("%w: the %s service reads its environment from %s, not %s; run DefenseClaw with the XDG_CONFIG_HOME the systemd user manager uses",
+			ErrGatewayMismatch, GatewayService, files, envPath)
+	}
+	tomlPath, err := g.TOMLPath()
+	if err != nil {
+		return nil, err
+	}
+	serviceTOML, err := serviceTOMLPath(env)
+	if err != nil {
+		return nil, err
+	}
+	if serviceTOML != tomlPath {
+		return nil, fmt.Errorf("%w: the %s service reads %s, not %s; set %s in %s or run DefenseClaw with the XDG_CONFIG_HOME the systemd user manager uses",
+			ErrGatewayMismatch, GatewayService, serviceTOML, tomlPath, envGatewayConfig, envPath)
+	}
+	return env, nil
+}
+
+// serviceTOMLPath is the gateway.toml the service loads: the absolute
+// OPENSHELL_GATEWAY_CONFIG, else XDG discovery in its environment.
+func serviceTOMLPath(env map[string]string) (string, error) {
+	if p := env[envGatewayConfig]; p != "" && filepath.IsAbs(p) {
+		return resolveFilePath(filepath.Clean(p))
+	}
+	base := env["XDG_CONFIG_HOME"]
+	if !filepath.IsAbs(base) {
+		home := env["HOME"]
+		if !filepath.IsAbs(home) {
+			return "", fmt.Errorf("openshell: the systemd user manager has no absolute HOME or XDG_CONFIG_HOME, so the %s service's gateway.toml is unknown", GatewayService)
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return resolveFilePath(filepath.Join(base, "openshell", GatewayTOMLFile))
+}
+
+// resolveFilePath resolves the links in a file's directory.
+func resolveFilePath(p string) (string, error) {
+	dir, err := resolveConfigDir(filepath.Dir(p))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(p)), nil
 }
 
 func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceState, error) {

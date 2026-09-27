@@ -356,7 +356,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkCLI(ctx)
 	r.checkRegistration()
 	r.checkGateway(ctx)
-	r.checkGatewayConfig()
+	r.checkGatewayConfig(ctx)
 	r.checkPorts()
 	return r.report
 }
@@ -663,10 +663,10 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		c.Fix = &Fix{Summary: "install OpenShell", Command: installOpenShellCommand}
 	case !st.Active:
 		c.Status, c.Detail = StatusFail, st.Unit+" is "+st.Status
-		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start)}
+		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
-		c.Fix = &Fix{Summary: "enable the gateway at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start)}
+		c.Fix = &Fix{Summary: "enable the gateway at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, false)}
 	default:
 		c.Status, c.Detail = StatusPass, st.Unit+" "+st.Status
 	}
@@ -680,8 +680,9 @@ func (r *doctorRun) startCommand() serviceCommand {
 }
 
 // runAndWait runs a service command, then waits for a healthy gateway
-// the way a configuration change does.
-func (r *doctorRun) runAndWait(c serviceCommand) func(context.Context) error {
+// the way a configuration change does. starts marks a command that starts
+// a stopped gateway, which then runs the configuration on disk.
+func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Context) error {
 	return func(ctx context.Context) error {
 		if err := r.Gateway.defaults(); err != nil {
 			return err
@@ -689,7 +690,13 @@ func (r *doctorRun) runAndWait(c serviceCommand) func(context.Context) error {
 		if out, err := r.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 			return fmt.Errorf("%s: %v: %s", c, err, strings.TrimSpace(string(out)))
 		}
-		return r.Gateway.VerifyGateway(ctx)
+		if err := r.Gateway.VerifyGateway(ctx); err != nil {
+			return err
+		}
+		if starts {
+			r.Gateway.clearRestartPending()
+		}
+		return nil
 	}
 }
 
@@ -857,7 +864,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 			version.Detail = "the gateway reports unhealthy"
 		}
 		start := r.startCommand()
-		version.Fix = &Fix{Summary: "start or restart the gateway", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start)}
+		version.Fix = &Fix{Summary: "start or restart the gateway", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}
 		skipRest("the gateway is not answering")
 		return
 	}
@@ -914,7 +921,7 @@ func hasDockerDriver(info *GatewayInfo) bool {
 	return false
 }
 
-func (r *doctorRun) checkGatewayConfig() {
+func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	mounts := Check{ID: CheckIDBindMounts, Title: "Project bind mounts"}
 	tele := Check{ID: CheckIDTelemetry, Title: "OpenShell telemetry"}
 	defer func() { r.add(mounts); r.add(tele) }()
@@ -924,31 +931,40 @@ func (r *doctorRun) checkGatewayConfig() {
 		tele.Status, tele.Detail = StatusSkip, "gateway configuration unreadable"
 		return
 	}
-	restartPending := r.service != nil && !r.service.StartedAt.IsZero() &&
-		(st.TOMLModTime.After(r.service.StartedAt) || st.EnvModTime.After(r.service.StartedAt))
+	env, envErr := r.Gateway.serviceEnv(r.service)
 	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
 	// Bind mounts reach any host path through the gateway's root Docker
 	// daemon: they are only for a gateway nobody else can drive.
-	private := r.reg != nil && r.regErr == nil
+	blocked, unverified := r.bindMountSafety(ctx, st, env, envErr)
 	switch {
-	case st.BindMounts.Enabled() && errors.Is(r.regErr, ErrUnauthenticatedGateway):
+	case st.BindMounts.Enabled() && errors.Is(blocked, ErrUnauthenticatedGateway):
 		mounts.Status = StatusFail
 		mounts.Detail = fmt.Sprintf("enabled in %s on a gateway that accepts unauthenticated calls: any local user can mount host paths into a sandbox", st.TOMLPath)
 		mounts.Fix = &Fix{Summary: "serve the gateway over mTLS, or set enable_bind_mounts = false in " + st.TOMLPath + " and restart it"}
+	case st.BindMounts.Enabled() && errors.Is(blocked, ErrGatewayMismatch):
+		mounts.Status, mounts.Detail = StatusFail, fmt.Sprintf("enabled in %s, but %v", st.TOMLPath, blocked)
+		mounts.Fix = &Fix{Summary: "run DefenseClaw against the configuration and gateway the openshell-gateway service uses"}
+	case st.BindMounts.Enabled() && blocked != nil:
+		mounts.Status = StatusFail
+		mounts.Detail = fmt.Sprintf("enabled in %s, but others can reach the gateway and mount any host path into a sandbox: %v", st.TOMLPath, blocked)
+		mounts.Fix = &Fix{Summary: "serve the gateway over mTLS with client certificates on loopback only, or set enable_bind_mounts = false in " + st.TOMLPath + " and restart it"}
 	case !st.BindMounts.Enabled():
 		mounts.Status = StatusFail
 		if r.BindMountsOptional {
 			mounts.Status = StatusWarn
 		}
 		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
-		if private {
+		switch why := errors.Join(blocked, unverified); {
+		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
 				Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
-		} else {
-			mounts.Fix = &Fix{Summary: "fix the gateway registration first: DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS"}
+		default:
+			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
-	case restartPending:
+	case restartPending(st, r.service):
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
+	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
+		mounts.Status, mounts.Detail = StatusWarn, "enabled, but DefenseClaw could not confirm that only you can reach the gateway: "+unverified.Error()
 	default:
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
@@ -958,6 +974,8 @@ func (r *doctorRun) checkGatewayConfig() {
 	switch {
 	case r.GOOS == "darwin":
 		tele.Status, tele.Detail = StatusSkip, "gateway.env is read by the systemd unit only"
+	case errors.Is(envErr, ErrGatewayMismatch):
+		tele.Status, tele.Detail = StatusWarn, envErr.Error()
 	case r.WantTelemetry != nil && *r.WantTelemetry != on:
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
@@ -969,11 +987,63 @@ func (r *doctorRun) checkGatewayConfig() {
 	}
 }
 
+// bindMountSafety decides whether bind mounts are safe on the gateway.
+// blocked is evidence against them: an unauthenticated registration, a
+// service that is not the gateway DefenseClaw configures, or settings or a
+// probe showing that clients without the certificate get in. unverified
+// means DefenseClaw could not check (another check already explains why,
+// or the probe was inconclusive).
+func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState, env map[string]string, envErr error) (blocked, unverified error) {
+	if errors.Is(r.regErr, ErrUnauthenticatedGateway) {
+		return r.regErr, nil
+	}
+	if errors.Is(envErr, ErrGatewayMismatch) {
+		return envErr, nil
+	}
+	if envErr != nil {
+		return nil, envErr
+	}
+	if r.reg == nil || r.regErr != nil {
+		return nil, errors.New("the gateway registration is unusable")
+	}
+	if err := gatewayExposure(r.reg, st, env); err != nil {
+		return err, nil
+	}
+	if r.gateway == nil || !r.gateway.Healthy {
+		return nil, errors.New("the gateway is not answering")
+	}
+	if err := r.Gateway.ProbeClientAuth(ctx, r.reg); err != nil {
+		if errors.Is(err, ErrGatewayExposed) {
+			return err, nil
+		}
+		return nil, err
+	}
+	return nil, nil
+}
+
+// restartPending reports configuration the running gateway has not
+// loaded: DefenseClaw's pending-restart mark from before the service last
+// started (or on Homebrew, which reports no start time), or a file changed
+// after the start. systemd reports the start to the microsecond.
+func restartPending(st *GatewayConfigState, svc *ServiceState) bool {
+	var started time.Time
+	if svc != nil {
+		started = svc.StartedAt
+	}
+	if !st.RestartPendingSince.IsZero() && (started.IsZero() || !started.After(st.RestartPendingSince)) {
+		return true
+	}
+	if started.IsZero() {
+		return false
+	}
+	return st.TOMLModTime.Truncate(time.Microsecond).After(started) || st.EnvModTime.Truncate(time.Microsecond).After(started)
+}
+
 func (c serviceCommand) String() string { return strings.Join(c.argv(), " ") }
 
 func (r *doctorRun) applyGateway(ch GatewayChanges) func(context.Context) error {
 	return func(ctx context.Context) error {
-		plan, err := r.Gateway.Plan(ch)
+		plan, err := r.Gateway.Plan(ctx, ch)
 		if err != nil {
 			return err
 		}
