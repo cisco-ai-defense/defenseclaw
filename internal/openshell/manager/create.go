@@ -394,6 +394,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	b.eff = eff
 	b.cred = cred
 	m.mu.Unlock()
+	// Once the box holds its binding: the harness has not run yet, so the
+	// session's tool-call ledger is complete.
+	m.toolCalls.Begin(rec.BindingID)
 	m.lifecycle(ctx, b, audit.SandboxPhaseCreating, audit.SandboxTriggerCreate, false, nil, nil)
 	sbSpec := &openshell.SandboxSpec{Environment: envOut, Template: tmpl, Providers: providerNames, Policy: pol}
 	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
@@ -577,7 +580,7 @@ func (m *Manager) revokeBinding(id string) error {
 	if m.opts.ForgetBinding != nil {
 		m.opts.ForgetBinding(id)
 	}
-	m.tamperTracker.ForgetBinding(id)
+	m.toolCalls.Forget(id)
 	return err
 }
 

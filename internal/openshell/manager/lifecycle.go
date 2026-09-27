@@ -254,7 +254,6 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if m.opts.ForgetBinding != nil {
 			m.opts.ForgetBinding(binding.ID)
 		}
-		m.tamperTracker.ForgetBinding(rec.BindingID)
 		pname := providerName(rec.Name, roleIngress, 0)
 		p, err := gw.Client.GetProvider(ctx, pname)
 		if err != nil {
@@ -277,6 +276,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		m.recordSnapshot(ctx, b)
 	}
+	// The harness starts with the sandbox: every tool call of the new
+	// session reaches this process, so its tool-call ledger is complete.
+	m.toolCalls.Begin(rec.BindingID)
+	m.mu.Lock()
+	b.tamperStop = false
+	m.mu.Unlock()
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)

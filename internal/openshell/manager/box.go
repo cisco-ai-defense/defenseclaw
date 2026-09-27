@@ -56,6 +56,8 @@ type box struct {
 	hooks       hookStats
 	activeAt    time.Time
 	silentSince time.Time
+	// tamperStop is set once a hook tamper scheduled this session's stop.
+	tamperStop  bool
 	silenceSent bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
 	// to the inbox's pending chunks on every poll.
@@ -84,6 +86,9 @@ type hookStats struct {
 	toolCalls   int64
 	toolBlocked int64
 	lastBlocked string
+	// tampered counts tool calls that ran without a DefenseClaw verdict.
+	tampered   int64
+	lastTamper time.Time
 }
 
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -263,6 +268,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
 		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
+		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 	}
 	for _, a := range m.approvals {

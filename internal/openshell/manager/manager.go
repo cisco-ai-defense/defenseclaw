@@ -151,12 +151,14 @@ type Manager struct {
 	logf    func(string, ...any)
 	host    HostUser
 
-	feed          *Feed
-	creds         *egress.CredentialStore
-	unblocks      *egress.MemoryUnblocks
-	batcher       *triage.Batcher
-	sink          *egressSink
-	tamperTracker *hookTamperTracker
+	feed      *Feed
+	creds     *egress.CredentialStore
+	unblocks  *egress.MemoryUnblocks
+	batcher   *triage.Batcher
+	sink      *egressSink
+	toolCalls *hookTamperTracker
+	// tamperStops tracks the stops hook tamper started.
+	tamperStops sync.WaitGroup
 
 	runMu  sync.Mutex
 	runCtx context.Context
@@ -236,19 +238,19 @@ func New(opts Options) (*Manager, error) {
 	}
 	unblocks, _ := egress.NewMemoryUnblocks()
 	m := &Manager{
-		opts:          opts,
-		ws:            opts.Workspace,
-		tel:           opts.Telemetry,
-		records:       newRecordStore(opts.DataDir),
-		now:           opts.Now,
-		logf:          opts.Logf,
-		host:          host,
-		feed:          NewFeed(DefaultFeedSize, opts.Now),
-		creds:         egress.NewCredentialStore(),
-		unblocks:      unblocks,
-		tamperTracker: newHookTamperTracker(),
-		boxes:         map[string]*box{},
-		approvals:     map[string]*approval{},
+		opts:      opts,
+		ws:        opts.Workspace,
+		tel:       opts.Telemetry,
+		records:   newRecordStore(opts.DataDir),
+		now:       opts.Now,
+		logf:      opts.Logf,
+		host:      host,
+		feed:      NewFeed(DefaultFeedSize, opts.Now),
+		creds:     egress.NewCredentialStore(),
+		unblocks:  unblocks,
+		toolCalls: newHookTamperTracker(),
+		boxes:     map[string]*box{},
+		approvals: map[string]*approval{},
 	}
 	if m.tel == nil {
 		m.tel = nopTelemetry{}
@@ -339,20 +341,17 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer silence.Stop()
 	drafts := time.NewTicker(m.opts.TriageInterval)
 	defer drafts.Stop()
-	tamperCleanup := time.NewTicker(5 * time.Minute)
-	defer tamperCleanup.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-silence.C:
 			m.checkHookSilence(ctx)
+			m.pruneToolCalls()
 		case <-drafts.C:
 			if m.gatewayUp() {
 				m.triageSweep(ctx)
 			}
-		case <-tamperCleanup.C:
-			m.tamperTracker.Cleanup(m.now())
 		case <-reconcile.C:
 			if _, err := m.gateway(ctx); err != nil {
 				reconcile.Reset(m.opts.ConnectRetry)

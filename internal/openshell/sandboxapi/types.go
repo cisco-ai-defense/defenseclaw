@@ -213,8 +213,13 @@ type HookCoverage struct {
 	HookRequests int64 `json:"hook_requests"`
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
-	// LastBlocked is the reason of the most recent denied tool call.
+	// LastBlocked is the plain reason of the most recent denied tool call
+	// (rule ID, title and what to do instead; never matched content).
 	LastBlocked string `json:"last_blocked,omitempty"`
+	// Tampered counts tool calls that ran without a DefenseClaw verdict: a
+	// PostToolUse whose PreToolUse was denied or never arrived.
+	Tampered     int64     `json:"tampered,omitempty"`
+	LastTamperAt time.Time `json:"last_tamper_at,omitzero"`
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`

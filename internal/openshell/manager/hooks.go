@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -35,7 +37,8 @@ type HookDecision struct {
 	// Event is the harness hook event (PreToolUse, ...).
 	Event string
 	Tool  string
-	// ToolUseID is the connector's per-call identifier for correlation.
+	// ToolUseID is the harness's per-call ID (tool_use_id), which pairs a
+	// call's PreToolUse with its PostToolUse.
 	ToolUseID string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
@@ -68,40 +71,42 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 }
 
 // ObserveHookDecision counts tool calls and blocked tool calls for the
-// session summary, puts blocks on the activity feed, and tracks PreToolUse/
-// PostToolUse correlation for tamper detection.
+// session summary, puts blocks on the activity feed, and correlates each
+// tool call's PreToolUse and PostToolUse to detect hook tamper.
 func (m *Manager) ObserveHookDecision(d HookDecision) {
-	// Track PreToolUse events for tamper detection.
-	if isPreToolUseEvent(d.Event) {
-		blocked := isBlockAction(d.Action)
-		m.tamperTracker.ObservePreToolUse(d.BindingID, d.ToolUseID, d.Tool, d.Event, blocked)
-	}
-
-	// Check PostToolUse events for tamper.
-	if isPostToolUseEvent(d.Event) {
-		if tampered, tamperReason := m.tamperTracker.CheckPostToolUse(d.BindingID, d.ToolUseID, d.Event); tampered {
-			m.handleHookTamper(d.BindingID, d.SandboxName, d.Tool, d.Event, tamperReason)
-		}
-	}
-
-	if !isToolEvent(d.Event) {
+	pre, result := toolHookEvent(d.Event)
+	counted := isToolEvent(d.Event)
+	if !pre && result == toolResultNone && !counted {
 		return
 	}
 	blocked := isBlockAction(d.Action)
+	reason := displayReason(d.Reason)
 	m.mu.Lock()
 	b := m.boxes[d.SandboxName]
 	if b == nil || b.rec.BindingID != d.BindingID {
 		m.mu.Unlock()
 		return
 	}
-	reason := displayReason(d.Reason)
-	b.hooks.toolCalls++
-	if blocked {
-		b.hooks.toolBlocked++
-		b.hooks.lastBlocked = truncate(firstNonEmpty(reason, d.Tool), 200)
+	tamper := tamperNone
+	switch {
+	case pre:
+		m.toolCalls.ObservePre(d.BindingID, d.ToolUseID, blocked)
+	case result != toolResultNone:
+		tamper = m.toolCalls.ObserveResult(d.BindingID, d.ToolUseID, result)
+	}
+	if counted {
+		b.hooks.toolCalls++
+		if blocked {
+			b.hooks.toolBlocked++
+			b.hooks.lastBlocked = truncate(firstNonEmpty(reason, d.Tool), 200)
+		}
+	}
+	var alarm *tamperAlarm
+	if tamper != tamperNone {
+		alarm = m.noteTamperLocked(b, d, tamper)
 	}
 	m.mu.Unlock()
-	if blocked {
+	if counted && blocked {
 		msg := "✗ tool call blocked by DefenseClaw"
 		if d.Tool != "" {
 			msg = "✗ " + d.Tool + " blocked by DefenseClaw"
@@ -112,13 +117,18 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
+	if alarm != nil {
+		m.raiseTamper(b, *alarm)
+	}
 }
 
-// displayReason drops a verdict reason the gateway already redacted (it
-// only carries a length and digest).
+// displayReason keeps a verdict reason fit for the session summary and the
+// activity feed. The gateway gives sandbox verdicts a plain reason built
+// from rule metadata; a reason still carrying a redaction placeholder
+// explains nothing and is dropped.
 func displayReason(reason string) string {
 	reason = strings.TrimSpace(reason)
-	if strings.HasPrefix(reason, "<redacted") {
+	if strings.Contains(reason, "<redacted") {
 		return ""
 	}
 	return reason
@@ -137,79 +147,165 @@ func isBlockAction(action string) bool {
 	return false
 }
 
-// handleHookTamper handles a detected hook tamper event: emits a high
-// finding, feeds the activity log, and either stops the sandbox or alerts
-// based on the pack's hooks.on_tamper setting.
-func (m *Manager) handleHookTamper(bindingID, sandboxName, tool, event, tamperReason string) {
-	ctx := context.Background()
-	now := m.now()
+// tamperAlarm is one detected hook tamper, captured under Manager.mu.
+type tamperAlarm struct {
+	kind      tamperKind
+	identity  audit.SandboxIdentity
+	name      string
+	bindingID string
+	tool      string
+	event     string
+	toolUseID string
+	onTamper  string
+	// stop is set for the alarm that schedules the sandbox's stop; later
+	// alarms of the same session only report.
+	stop bool
+}
 
-	m.mu.Lock()
-	b := m.boxes[sandboxName]
-	if b == nil || b.rec.BindingID != bindingID {
-		m.mu.Unlock()
-		return
+// noteTamperLocked counts a tamper on the box and decides the response.
+// Callers hold Manager.mu.
+func (m *Manager) noteTamperLocked(b *box, d HookDecision, kind tamperKind) *tamperAlarm {
+	b.hooks.tampered++
+	b.hooks.lastTamper = m.now()
+	a := &tamperAlarm{
+		kind: kind, identity: b.identity(), name: b.rec.Name, bindingID: d.BindingID,
+		tool: hookLabel(d.Tool, 64), event: d.Event, toolUseID: hookLabel(d.ToolUseID, 64),
 	}
-	onTamper := ""
 	if b.eff != nil {
-		onTamper = b.eff.HookOnTamper
+		a.onTamper = b.eff.HookOnTamper
 	}
-	identity := b.identity()
-	// Reset hook silence: tamper detection counts as hook traffic.
-	b.silentSince, b.silenceSent = time.Time{}, false
-	m.mu.Unlock()
+	return a
+}
 
-	title := "Hook tamper detected: tool executed without DefenseClaw approval"
-	description := tamperReason + ". "
-	if tool != "" {
-		description += "Tool: " + tool + ". "
+// raiseTamper reports a hook tamper as a HIGH hook_tamper finding and on
+// the activity feed, and responds per the pack's hooks.on_tamper: stop
+// stops the sandbox, alert leaves it running.
+func (m *Manager) raiseTamper(b *box, a tamperAlarm) {
+	if a.onTamper == "" {
+		// A sandbox adopted after a restart has no resolved policy yet.
+		if eff, err := m.resolveBox(b); err == nil {
+			a.onTamper = eff.HookOnTamper
+		}
 	}
-	description += "This indicates the sandboxed workload killed its DefenseClaw hook or manipulated the tool-call lifecycle to bypass policy."
-
-	remediation := "Stop the sandbox immediately and investigate. "
-	if onTamperShouldStop(onTamper) {
-		remediation += "This sandbox will be stopped automatically per the pack's hooks.on_tamper=stop setting."
-	} else {
-		remediation += "The pack's hooks.on_tamper=alert setting means the sandbox continues; consider stopping it manually."
+	stop := a.onTamper != packs.OnTamperAlert // an unknown response fails toward stopping
+	if stop {
+		m.mu.Lock()
+		if b.rec.BindingID == a.bindingID && !b.tamperStop {
+			b.tamperStop, a.stop = true, true
+		}
+		m.mu.Unlock()
 	}
 
-	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
-		Sandbox:     identity,
-		Kind:        audit.SandboxFindingHookTamper,
-		Severity:    "HIGH",
-		Title:       title,
-		Description: description,
-		Remediation: remediation,
-		TargetRef:   sandboxName,
-		Timestamp:   now,
-	})
-
-	msg := "⚠ hook tamper detected"
-	if onTamperShouldStop(onTamper) {
-		msg += " → stopping sandbox"
+	tool := a.tool
+	if tool == "" {
+		tool = "a tool"
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{
-		Kind:     sandboxapi.ActivityFinding,
-		Sandbox:  sandboxName,
-		Tool:     tool,
-		Event:    event,
-		Severity: "HIGH",
-		Reason:   string(audit.SandboxFindingHookTamper),
-		Message:  msg,
-	})
+	title := "A tool ran without a DefenseClaw verdict"
+	what := fmt.Sprintf("%s ran in %s, but its PreToolUse hook never reached DefenseClaw.", tool, a.name)
+	if a.kind == tamperDenied {
+		title = "A tool DefenseClaw denied ran anyway"
+		what = fmt.Sprintf("%s ran in %s although DefenseClaw denied its PreToolUse.", tool, a.name)
+	}
+	description := what + " The workload likely killed or bypassed its DefenseClaw hook, so this call was not judged."
+	remediation := "DefenseClaw is stopping the sandbox (hooks.on_tamper: stop). Review the session's activity before you start it again."
+	if !stop {
+		remediation = "The sandbox keeps running (hooks.on_tamper: alert). Review the session's activity and stop the sandbox if you did not expect this."
+	}
+	evidence := "event=" + a.event
+	if a.tool != "" {
+		evidence += " tool=" + a.tool
+	}
+	if a.toolUseID != "" {
+		evidence += " tool_use_id=" + a.toolUseID
+	}
+	now := m.now()
+	if err := m.tel.RecordSandboxFinding(context.Background(), audit.SandboxFindingEvent{
+		Sandbox: a.identity, Kind: audit.SandboxFindingHookTamper, Severity: "HIGH",
+		Title: title, Description: description, Evidence: evidence, Remediation: remediation,
+		TargetRef: a.name, Timestamp: now,
+	}); err != nil {
+		m.logf("hook tamper: record the finding for %s: %v", a.name, err)
+	}
 
-	// Stop the sandbox if configured to do so.
-	if onTamperShouldStop(onTamper) {
+	msg := "⚠ hook tamper: " + tool + " ran without a DefenseClaw verdict"
+	if a.kind == tamperDenied {
+		msg = "⚠ hook tamper: " + tool + " ran although DefenseClaw denied it"
+	}
+	switch {
+	case a.stop:
+		msg += "; stopping the sandbox"
+	case stop:
+		msg += "; the sandbox is already stopping"
+	default:
+		msg += "; the sandbox keeps running (hooks.on_tamper: alert)"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: a.name, Tool: a.tool,
+		Event: a.event, Severity: "HIGH", Reason: string(audit.SandboxFindingHookTamper), Message: msg})
+
+	if a.stop {
+		m.tamperStops.Add(1)
 		go func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if _, err := m.Stop(stopCtx, sandboxName); err != nil {
-				m.logf("hook tamper: failed to stop %s: %v", sandboxName, err)
-			} else {
-				m.logf("hook tamper: stopped %s", sandboxName)
-			}
+			defer m.tamperStops.Done()
+			m.stopForTamper(a.name, a.bindingID)
 		}()
 	}
+}
+
+// stopForTamper stops a sandbox whose hooks were tampered with, unless the
+// session that tampered is already over.
+func (m *Manager) stopForTamper(name, bindingID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	defer cancel()
+	b, unlock, err := m.lockBox(name)
+	if err != nil {
+		m.logf("hook tamper: stop %s: %v", name, err)
+		return
+	}
+	defer unlock()
+	m.mu.Lock()
+	current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := m.stop(ctx, b); err != nil {
+		m.logf("hook tamper: stop %s: %v", name, err)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+			Reason: string(audit.SandboxFindingHookTamper), Message: "⚠ DefenseClaw could not stop the tampered sandbox: stop it yourself"})
+		return
+	}
+	m.logf("hook tamper: stopped %s", name)
+}
+
+// pruneToolCalls drops the tool-call ledgers of bindings no sandbox holds
+// any more (a revoke already drops its own; this catches a decision that
+// raced one).
+func (m *Manager) pruneToolCalls() {
+	m.mu.Lock()
+	live := make(map[string]bool, len(m.boxes))
+	for _, b := range m.boxes {
+		if !b.deleted && b.rec.BindingID != "" {
+			live[b.rec.BindingID] = true
+		}
+	}
+	m.mu.Unlock()
+	m.toolCalls.Retain(func(id string) bool { return live[id] })
+}
+
+// hookLabel keeps a workload-supplied label (a tool name or tool-use ID)
+// fit for a finding and the feed: printable, without spaces, bounded.
+func hookLabel(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	var out strings.Builder
+	for _, r := range s {
+		if out.Len() >= limit {
+			break
+		}
+		if unicode.IsPrint(r) && !unicode.IsSpace(r) && r != '"' && r != '\\' {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
