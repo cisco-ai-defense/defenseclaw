@@ -50,8 +50,8 @@ var OmniGent = register(&Spec{
 	DefaultVersion: "0.13.0",
 	Provider:       connector.NewOmnigentConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	verification: Verification{Status: Unverified,
-		Note: "the image hook-fire probe passed (sandbox agent on a mock model: request, llm_request, tool_call, tool_result and response policy events reached the stand-in ingress, BLOCKME denied, a hostile user config ignored); no run through the DefenseClaw daemon in an OpenShell sandbox yet"},
+	verification: Verification{Status: VerifiedLive,
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=omnigent, the sandbox agent on a Responses mock): policy events at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy from a tool command with the blocklist and a sandbox unblock"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/bin/env", "OMNIGENT_NO_UPDATE_CHECK=1", "/usr/local/bin/omnigent", "--version"},
 		VersionRE:       regexp.MustCompile(`^omnigent ([0-9]+\.[0-9]+\.[0-9]+)`),

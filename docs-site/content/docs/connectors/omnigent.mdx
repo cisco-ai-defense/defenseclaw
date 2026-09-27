@@ -218,16 +218,30 @@ exist only in the image; nothing on your host changes.
   `defenseclaw-anthropic` (`ANTHROPIC_API_KEY`); OmniGent picks up either key
   from the environment. OmniGent has no skip-permissions switch: approval
   pauses come from its policies, including DefenseClaw's native ASK.
-- **Other traffic.** Apart from the model, a mock-model run reached
-  `chatgpt.com`, `config.omnigent-telemetry.io`, `github.com` and `models.dev`
-  (the model catalog). The launcher sets `OMNIGENT_NO_UPDATE_CHECK=1`. That
+- **Tool commands and the proxy.** OmniGent runs the agent's tools in a
+  runner that inherits only an allowlisted environment. The launcher lists the
+  proxy settings in `OMNIGENT_RUNNER_ENV_PASSTHROUGH`, so tool commands also
+  go through the DefenseClaw egress proxy. Loopback traffic between
+  OmniGent's own processes stays off the proxy.
+- **Other traffic.** Apart from the model, a daemon run on a mock model
+  reached `config.omnigent-telemetry.io` and `api.omnigent-telemetry.io`
+  (telemetry), `github.com` and `release-assets.githubusercontent.com`. An
+  earlier mock-model run also reached `chatgpt.com` and `models.dev` (the
+  model catalog). The launcher sets `OMNIGENT_NO_UPDATE_CHECK=1`. That
   traffic goes through the DefenseClaw egress proxy, which logs it and
   applies the blocklist.
-- **Status.** The image passes the hook-fire probe with the sandbox agent on a
-  mock model. The request, llm_request, tool_call, tool_result and response
-  policy events reach the ingress, and a blocked tool call does not run. A
-  run through the DefenseClaw daemon in an OpenShell sandbox is still
-  pending.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, with the sandbox agent on a mock model behind a
+  credential binding, showed:
+  - policy events reaching the sandbox ingress, with OpenShell substituting
+    the model key;
+  - a command that a DefenseClaw rule blocks denied by the policy, with the
+    rule's reason passed back to the model;
+  - egress through the proxy from a tool command, and a blocklisted host that
+    a sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe with the request, llm_request,
+  tool_call, tool_result and response policy events.
 
 ## Disable
 

@@ -61,8 +61,8 @@ var Antigravity = register(&Spec{
 	DefaultVersion: "1.2.12",
 	Provider:       connector.NewAntigravityConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
-	verification: Verification{Status: Unverified,
-		Note: "the image hook-fire probe passed (Gemini mock through GEMINI_API_KEY: all five lifecycle hooks reached the stand-in ingress, BLOCKME denied, a replaced ~/.gemini/config/hooks.json restored); no run through the DefenseClaw daemon in an OpenShell sandbox yet, and Google sign-in inside a sandbox is untested"},
+	verification: Verification{Status: VerifiedLive,
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=antigravity, Gemini-API mock through GEMINI_API_KEY): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; Google sign-in inside a sandbox is untested"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/agy", "--version"},
 		VersionRE:       regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`),
