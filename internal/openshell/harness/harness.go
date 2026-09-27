@@ -20,7 +20,9 @@
 // state from revision-scoped credential placeholders, launch argv for
 // interactive, headless and skip-permissions runs, the environment passed at
 // sandbox creation, the credential profiles and the user customization paths
-// worth importing. Phase 1 covers claudecode and codex.
+// worth importing, plus the tamper tier of the hook registration and the
+// evidence the harness was verified with. It covers claudecode, codex,
+// opencode, copilot and amp.
 package harness
 
 import (
@@ -127,6 +129,30 @@ type CredentialProfile struct {
 	// Code profiles select their provider through Env instead.
 	ModelProvider *connector.SandboxModelProvider
 	Note          string
+	// Unverified, when set, says why the endpoint set was not pinned from a
+	// live run (for example a vendor account DefenseClaw could not use).
+	Unverified string
+}
+
+// VerificationStatus says how far a harness was proven inside OpenShell.
+type VerificationStatus string
+
+const (
+	// Verified: the overlay image's hook-fire probe passes (hooks fire,
+	// a blocked tool call has no side effect, an allowed one has) and the
+	// harness ran end to end in an OpenShell sandbox.
+	Verified VerificationStatus = "verified"
+	// Unverified: everything up to the harness run is implemented, but the
+	// harness could not be driven (see Verification.Reason). Its images
+	// never pass VerifyHooks with the built-in mock and stay unselectable.
+	Unverified VerificationStatus = "unverified"
+)
+
+// Verification records the evidence behind a harness spec.
+type Verification struct {
+	Status VerificationStatus
+	// Reason says what was measured, or exactly what is missing.
+	Reason string
 }
 
 // ProbeSpec tells the image probe how to identify the installed harness.
@@ -153,6 +179,14 @@ type Spec struct {
 	DefaultVersion string
 	// Provider renders the connector's overlay artifacts.
 	Provider connector.SandboxArtifactProvider
+	// TamperTier is where the hook registration lives in the image:
+	// connector.SandboxTamperTierManaged (a root-owned system/managed policy
+	// that user and project settings cannot switch off) or
+	// connector.SandboxTamperTierUser (a file in the image HOME the agent can
+	// edit). It always equals the rendered artifacts' tier.
+	TamperTier string
+	// Verification is the evidence behind this spec.
+	Verification Verification
 
 	probe              ProbeSpec
 	install            func(version string) ([]InstallStep, error)
@@ -162,6 +196,12 @@ type Spec struct {
 	credentialProfiles []CredentialProfile
 	customization      []CustomizationPath
 	preseedRefresh     []string
+	// versionPattern overrides the exact-release pattern for harnesses
+	// whose releases carry a build suffix (Amp).
+	versionPattern *regexp.Regexp
+	// env is harness-level sandbox env that depends on the install layout
+	// (the connector artifacts cannot know it).
+	env map[string]string
 }
 
 // InstallRoot is the harness's root-owned install prefix.
@@ -222,7 +262,11 @@ func (s *Spec) InstallSteps(version string) ([]InstallStep, error) {
 	if version == "" {
 		version = s.DefaultVersion
 	}
-	if !versionRE.MatchString(version) {
+	pattern := versionRE
+	if s.versionPattern != nil {
+		pattern = s.versionPattern
+	}
+	if !pattern.MatchString(version) {
 		return nil, fmt.Errorf("harness %s: version %q is not an exact release", s.Name, version)
 	}
 	if err := CheckContract(s.Name, version); err != nil {
@@ -328,6 +372,9 @@ func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 	for key, value := range opts.Artifacts.Env {
 		env[key] = value
 	}
+	for key, value := range s.env {
+		env[key] = value
+	}
 	if opts.SandboxID != "" {
 		env["DEFENSECLAW_SANDBOX_ID"] = opts.SandboxID
 	}
@@ -411,7 +458,7 @@ func resolveCredentialProfile(cp CredentialProfile, region string) CredentialPro
 		region = profiles.DefaultBedrockRegion
 	}
 	host := profiles.BedrockMantleHost(region)
-	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Env: map[string]string{}}
+	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Unverified: cp.Unverified, Env: map[string]string{}}
 	if cp.ModelProvider != nil {
 		p := *cp.ModelProvider
 		p.BaseURL = strings.ReplaceAll(p.BaseURL, bedrockHostToken, host)

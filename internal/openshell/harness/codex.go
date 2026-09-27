@@ -33,6 +33,11 @@ var Codex = register(&Spec{
 	Command:        "codex",
 	DefaultVersion: "0.146.0",
 	Provider:       connector.NewCodexConnector(),
+	TamperTier:     connector.SandboxTamperTierManaged,
+	Verification: Verification{
+		Status: Verified,
+		Reason: "hook-fire probe (built-in mock LLM) and live OpenShell runs with Bedrock Mantle",
+	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/codex", "--version"},
 		VersionRE:   regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)`),
