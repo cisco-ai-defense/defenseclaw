@@ -284,7 +284,7 @@ you need from `policies/sandbox/balanced/pack.yaml`.
 | `egress.feeds` | No | `[builtin]` | Only `builtin`; `[]` turns the feed off. At most 16. |
 | `egress.block` | No | `[]` | Host globs. At most 1024. |
 | `egress.allow` | No | `[]` | Host globs, but never `*` or a whole top-level domain such as `*.com` or `*.co.uk`. At most 1024. |
-| `egress.ports` | No | `[80, 443]` | Ports 1–65535; duplicates are dropped. At least one unless `network.mode` is `deny`. At most 64. |
+| `egress.ports` | No | `[80, 443]` | Ports 1–65535; duplicates are dropped. At least one unless `network.mode` is `deny`; a `deny` pack that lists none gets 80 and 443 when a profile turns the proxy on. At most 64. |
 | `egress.large_upload_mb` | No | `25` | 0–1048576; `0` turns the alert off. |
 | `workspace.mode` | Yes | | `mount` or `copy`. |
 | `workspace.masks` | No | `[]` | Project globs. At most 1024. |

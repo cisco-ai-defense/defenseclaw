@@ -1086,12 +1086,24 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 
 // resolvePorts applies openshell.egress.ports, which replaces the pack's
 // list. Over a required pack only the pack's own ports can be kept.
+//
+// A deny-mode pack may list no ports, as it runs without the proxy. Under a
+// profile that runs the proxy it gets the default ports, as a pack that
+// leaves the list out does: the proxy's decider relays those for an empty
+// list anyway (egress.DeciderOptions.Ports), and triage checks proposals
+// against this list, so an empty one would refuse every proposal the
+// proxy's ports allow.
 func (r *resolver) resolvePorts(o config.OpenShellConfig) {
 	pack := r.eff.Pack
 	eg := &r.eff.Egress
 	eg.Ports = append([]int{}, pack.Egress.Ports...)
+	packFrom := r.packLayer
+	if len(eg.Ports) == 0 && r.eff.NetworkMode != NetworkDeny {
+		eg.Ports = append([]int{}, defaultPorts...)
+		packFrom = layer{SourceDefault, "defenseclaw default (" + r.packLayer.origin + " lists no ports)"}
+	}
 	if len(o.Egress.Ports) == 0 {
-		r.set("egress.ports", joinInts(eg.Ports), r.packLayer)
+		r.set("egress.ports", joinInts(eg.Ports), packFrom)
 		return
 	}
 	requested := uniqueInts(o.Egress.Ports)

@@ -19,6 +19,8 @@ package triage
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,6 +188,29 @@ func TestClassify(t *testing.T) {
 				t.Fatal("decision without a message")
 			}
 		})
+	}
+}
+
+// Triage checks a proposal's port against the ports the sandbox's proxy
+// relays. A deny-mode pack that lists no ports, run under a profile that
+// turns the proxy on, relays the default ports, so triage must not refuse
+// every proposal on them.
+func TestClassifyDenyPackWithoutPortsUnderOpenProfile(t *testing.T) {
+	dir := t.TempDir()
+	pack := "version: 1\nname: noports\nnetwork: {mode: deny}\napprovals: {mode: auto}\negress: {ports: []}\n" +
+		"workspace: {mode: mount}\nharness: {yolo: true}\nmcp: {import: true, host_ports: false}\nhooks: {fail_mode: closed}\n"
+	if err := os.MkdirAll(filepath.Join(dir, "noports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "noports", packs.PackFileName), []byte(pack), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eff := effective(t, func(o *config.OpenShellConfig) { o.PackDir = dir }, packs.Flags{Pack: "noports", Profile: "open"})
+	if got := Classify(context.Background(), proposal("registry.example.org", 443), testPolicy(eff)); got.Verdict != Approve {
+		t.Fatalf("Classify(registry.example.org:443) = %+v, want approved on a port the proxy relays", got)
+	}
+	if got := Classify(context.Background(), proposal("db.example.org", 5432), testPolicy(eff)); got.Reason != ReasonPortNotAllowed {
+		t.Fatalf("Classify(db.example.org:5432) = %+v, want the port refused", got)
 	}
 }
 

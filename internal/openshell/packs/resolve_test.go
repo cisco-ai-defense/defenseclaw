@@ -995,6 +995,50 @@ func TestResolveRequiredPackFloors(t *testing.T) {
 	}
 }
 
+// A deny-mode pack may list no ports. Under a profile that runs the proxy
+// it gets the default ports, the ones the proxy's decider relays for an
+// empty list, so the effective list, DecideEgress and the decider agree;
+// under its own profile the list stays empty.
+func TestResolveDenyPackWithoutPortsUnderAProxyProfile(t *testing.T) {
+	root := t.TempDir()
+	writePack(t, root, "noports", strings.Replace(customPack("noports"), "network: {mode: open}",
+		"network: {mode: deny}\negress: {ports: []}", 1))
+	for _, tc := range []struct {
+		profile string
+		ports   []int
+	}{
+		{"open", []int{80, 443}},
+		{"balanced", []int{80, 443}},
+		{"", []int{}},
+	} {
+		t.Run("profile "+tc.profile, func(t *testing.T) {
+			eff, _ := mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.PackDir = root }),
+				Flags{Pack: "noports", Profile: tc.profile})
+			if !reflect.DeepEqual(eff.Egress.Ports, tc.ports) {
+				t.Fatalf("ports = %v, want %v", eff.Egress.Ports, tc.ports)
+			}
+			if eff.NetworkMode == NetworkDeny {
+				wantSetting(t, eff, "egress.ports", "(none)", SourcePack, "pack noports")
+				return
+			}
+			wantSetting(t, eff, "egress.ports", "80, 443", SourceDefault, "defenseclaw default (pack noports lists no ports)")
+			d, err := eff.EgressDecider(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(d.Ports(), eff.Egress.Ports) {
+				t.Fatalf("decider ports %v, effective ports %v", d.Ports(), eff.Egress.Ports)
+			}
+			if got := eff.DecideEgress("pypi.org", 443); got.Rule == RulePort {
+				t.Fatalf("DecideEgress(pypi.org:443) = %+v", got)
+			}
+			if got := eff.DecideEgress("pypi.org", 8443); got.Rule != RulePort {
+				t.Fatalf("DecideEgress(pypi.org:8443) = %+v, want the port refused", got)
+			}
+		})
+	}
+}
+
 func TestResolveRequiredPackTrust(t *testing.T) {
 	root := t.TempDir()
 	corpDir := writePack(t, root, "corp", strings.Replace(customPack("corp"), "network: {mode: open}",
