@@ -31,9 +31,13 @@ var ampSandboxStartupEnv = map[string]string{
 	"AMP_SKIP_UPDATE_CHECK": "1",
 }
 
+func init() {
+	registerHookOnlySandboxRenderer("amp", renderAmpSandboxArtifacts)
+}
+
 // renderAmpSandboxArtifacts renders the Amp overlay: the sandbox bridge
 // plugin, owned by the sandbox user.
-func renderAmpSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, error) {
+func renderAmpSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error) {
 	plugin, err := renderSandboxPlugin("amp-plugin.ts", rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
@@ -42,12 +46,12 @@ func renderAmpSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, erro
 	for key, value := range ampSandboxStartupEnv {
 		env[key] = value
 	}
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return SandboxArtifacts{
 		Connector:    "amp",
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,
 		Files:        []SandboxFile{{Path: AmpSandboxPluginPath, Mode: 0o600, Owner: SandboxOwnerUser, Data: plugin}},
 		Env:          env,
 		Binaries:     []SandboxBinary{harnessBinary("amp")},
-	})
+	}, nil
 }

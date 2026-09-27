@@ -113,7 +113,7 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		// connectors that render overlay-image files, "pending" for the rest.
 		// internal/openshell/harness checks the tier, hook file and pin.
 		wantSandbox := "pending"
-		if HasSandboxVariant(conn) {
+		if SandboxArtifactsSupported(conn) {
 			wantSandbox = "artifacts"
 		}
 		if row.sandboxStatus != wantSandbox {

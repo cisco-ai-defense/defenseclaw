@@ -439,7 +439,6 @@ func sandboxHookRuntimeBinaries() []SandboxBinary {
 var (
 	_ SandboxArtifactProvider = (*ClaudeCodeConnector)(nil)
 	_ SandboxArtifactProvider = (*CodexConnector)(nil)
-	_ SandboxArtifactProvider = (*hookOnlyConnector)(nil)
 	_ SandboxArtifactProvider = (*AMPConnector)(nil)
 	_ SandboxArtifactProvider = (*KiroConnector)(nil)
 )

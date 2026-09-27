@@ -46,11 +46,15 @@ var copilotSandboxStartupEnv = map[string]string{
 	"COPILOT_AUTO_UPDATE": "false",
 }
 
+func init() {
+	registerHookOnlySandboxRenderer("copilot", renderCopilotSandboxArtifacts)
+}
+
 // renderCopilotSandboxArtifacts renders the Copilot overlay: the sandbox hook
 // scripts, the root-owned policy.d hook document for every event of the
 // resolved contract, the managed settings that admit only managed hooks, and
 // a pre-seeded ~/.copilot/config.json that trusts /work and HOME.
-func renderCopilotSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, error) {
+func renderCopilotSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error) {
 	hookFiles, err := renderSandboxHookFiles("copilot", rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
@@ -79,14 +83,14 @@ func renderCopilotSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, 
 	for key, value := range copilotSandboxStartupEnv {
 		env[key] = value
 	}
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return SandboxArtifacts{
 		Connector:    "copilot",
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierManaged,
 		Files:        files,
 		Env:          env,
 		Binaries:     append(sandboxHookRuntimeBinaries(), harnessBinary("copilot")),
-	})
+	}, nil
 }
 
 // copilotSandboxHookScript is the in-image Copilot hook.

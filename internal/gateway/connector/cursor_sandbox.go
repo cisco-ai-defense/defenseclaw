@@ -35,11 +35,15 @@ func cursorSandboxHookScript() string {
 	return path.Join(SandboxHookDir, "cursor-hook.sh")
 }
 
+func init() {
+	registerHookOnlySandboxRenderer("cursor", renderCursorSandboxArtifacts)
+}
+
 // renderCursorSandboxArtifacts renders the Cursor Agent overlay: the sandbox
 // hook scripts and the root-owned enterprise hooks.json that registers the
 // hook for every event of the resolved contract with failClosed, so a hook
 // that fails, times out or prints no valid object denies the action.
-func renderCursorSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, error) {
+func renderCursorSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error) {
 	hookFiles, err := renderSandboxHookFiles("cursor", rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
@@ -54,14 +58,14 @@ func renderCursorSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, e
 	files := append(hookFiles,
 		SandboxFile{Path: CursorSandboxHooksPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: hooks},
 	)
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return SandboxArtifacts{
 		Connector:    "cursor",
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierManaged,
 		Files:        files,
 		Env:          map[string]string{},
 		Binaries:     append(sandboxHookRuntimeBinaries(), harnessBinary("cursor-agent")),
-	})
+	}, nil
 }
 
 // cursorSandboxEvents are the resolved contract's events; the host setup
@@ -103,11 +107,11 @@ func renderCursorSandboxHooks(rt resolvedSandboxTarget) ([]byte, error) {
 	for _, event := range events {
 		hooks[event] = []interface{}{cursorSandboxHookEntry()}
 	}
-	body, err := json.MarshalIndent(map[string]interface{}{"version": 1, "hooks": hooks}, "", "  ")
+	body, err := marshalSandboxJSON(map[string]interface{}{"version": 1, "hooks": hooks})
 	if err != nil {
 		return nil, fmt.Errorf("marshal Cursor sandbox hooks: %w", err)
 	}
-	return append(body, '\n'), nil
+	return body, nil
 }
 
 // verifyCursorSandboxHooks reads the document back through the verifier the

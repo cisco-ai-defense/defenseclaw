@@ -48,10 +48,14 @@ func devinSandboxHookScript() string {
 	return path.Join(SandboxHookDir, "devin-hook.sh")
 }
 
+func init() {
+	registerHookOnlySandboxRenderer("devin", renderDevinSandboxArtifacts)
+}
+
 // renderDevinSandboxArtifacts renders the Devin CLI overlay: the sandbox hook
 // scripts and a user config.json that registers the hook for every event of
 // the resolved contract, with its root-owned template.
-func renderDevinSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, error) {
+func renderDevinSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error) {
 	hookFiles, err := renderSandboxHookFiles("devin", rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
@@ -63,18 +67,15 @@ func renderDevinSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, er
 	if err := verifyDevinSandboxConfig(config, rt); err != nil {
 		return SandboxArtifacts{}, err
 	}
-	files := append(hookFiles,
-		SandboxFile{Path: DevinSandboxConfigTemplatePath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: config},
-		SandboxFile{Path: DevinSandboxConfigPath, Mode: 0o600, Owner: SandboxOwnerUser, Data: config},
-	)
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	files := append(hookFiles, userTierHookFiles("devin", path.Base(DevinSandboxConfigTemplatePath), DevinSandboxConfigPath, config)...)
+	return SandboxArtifacts{
 		Connector:    "devin",
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,
 		Files:        files,
 		Env:          map[string]string{},
 		Binaries:     append(sandboxHookRuntimeBinaries(), harnessBinary("devin")),
-	})
+	}, nil
 }
 
 // devinSandboxEvents are the resolved contract's events, each one the
@@ -120,11 +121,11 @@ func renderDevinSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 	for _, event := range events {
 		hooks[event] = []interface{}{devinSandboxHookGroup()}
 	}
-	body, err := json.MarshalIndent(map[string]interface{}{"hooks": hooks}, "", "  ")
+	body, err := marshalSandboxJSON(map[string]interface{}{"hooks": hooks})
 	if err != nil {
 		return nil, fmt.Errorf("marshal Devin sandbox config: %w", err)
 	}
-	return append(body, '\n'), nil
+	return body, nil
 }
 
 // verifyDevinSandboxConfig reads the config back and requires exactly one

@@ -52,19 +52,39 @@ func sandboxFile(t *testing.T, artifacts SandboxArtifacts, path string) SandboxF
 }
 
 func TestHookOnlySandboxArtifactsRefuseConnectorsWithoutVariant(t *testing.T) {
-	for _, conn := range []*hookOnlyConnector{NewHermesConnector(), NewGeminiCLIConnector(), NewOpenHandsConnector(), NewAntigravityConnector()} {
+	// Gemini CLI is out of scope for sandboxes and Windsurf has no Linux
+	// agent CLI; neither ever registers a sandbox renderer.
+	for _, conn := range []*hookOnlyConnector{NewGeminiCLIConnector(), NewWindsurfConnector()} {
 		_, err := conn.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.0.0"})
 		if err == nil || !strings.Contains(err.Error(), "no OpenShell sandbox variant") {
 			t.Fatalf("%s: err = %v", conn.Name(), err)
 		}
-		if HasSandboxVariant(conn) {
+		if SandboxArtifactsSupported(conn) {
 			t.Fatalf("%s reports a sandbox variant it cannot render", conn.Name())
 		}
 	}
 	for _, conn := range []Connector{NewCursorConnector(), NewDevinConnector(), NewCopilotConnector(), NewOpenCodeConnector(), NewKiroConnector(), NewAMPConnector(), &ClaudeCodeConnector{}, &CodexConnector{}} {
-		if !HasSandboxVariant(conn) {
+		if !SandboxArtifactsSupported(conn) {
 			t.Fatalf("%s renders sandbox artifacts but reports no variant", conn.Name())
 		}
+	}
+}
+
+// TestRegisterHookOnlySandboxRendererRefusesDuplicates keeps each
+// <name>_sandbox.go the only renderer of its connector.
+func TestRegisterHookOnlySandboxRendererRefusesDuplicates(t *testing.T) {
+	for _, name := range []string{"amp", "copilot", "cursor", "devin", "opencode"} {
+		if _, ok := hookOnlySandboxRenderers[name]; !ok {
+			t.Fatalf("%s has no registered sandbox renderer", name)
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("a second %s renderer registered", name)
+				}
+			}()
+			registerHookOnlySandboxRenderer(name, hookOnlySandboxRenderers[name])
+		}()
 	}
 }
 

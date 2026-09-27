@@ -18,34 +18,25 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
+	"path"
 )
 
-// hookOnlySandboxRenderers holds the OpenShell overlay renderer of every
-// hook-only connector with a reviewed sandbox variant. The target is already
-// validated (ingress address, fail-closed, Known Linux hook contract) when a
-// renderer runs. Each connector keeps its renderer in its own
-// <connector>_sandbox.go file.
-var hookOnlySandboxRenderers = map[string]func(resolvedSandboxTarget) (SandboxArtifacts, error){
-	"amp":      renderAmpSandboxArtifacts,
-	"copilot":  renderCopilotSandboxArtifacts,
-	"cursor":   renderCursorSandboxArtifacts,
-	"devin":    renderDevinSandboxArtifacts,
-	"opencode": renderOpenCodeSandboxArtifacts,
-}
+// hookOnlySandboxRenderer renders the OpenShell overlay artifacts of one
+// hook-only connector from a validated target. The dispatcher finalizes the
+// result (path checks, sorting).
+type hookOnlySandboxRenderer func(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error)
 
-// HasSandboxVariant reports whether conn renders OpenShell overlay
-// artifacts. Every hook-only connector implements SandboxArtifactProvider,
-// but only those with a reviewed sandbox variant render; the others refuse.
-func HasSandboxVariant(conn Connector) bool {
-	if hookOnly, ok := conn.(*hookOnlyConnector); ok {
-		_, ok := hookOnlySandboxRenderers[hookOnly.name]
-		return ok
+// hookOnlySandboxRenderers holds the hook-only connectors that have an
+// OpenShell sandbox variant. Each registers from its own <name>_sandbox.go.
+var hookOnlySandboxRenderers = map[string]hookOnlySandboxRenderer{}
+
+func registerHookOnlySandboxRenderer(name string, render hookOnlySandboxRenderer) {
+	if _, dup := hookOnlySandboxRenderers[name]; dup {
+		panic("connector: duplicate sandbox renderer for " + name)
 	}
-	_, ok := conn.(SandboxArtifactProvider)
-	return ok
+	hookOnlySandboxRenderers[name] = render
 }
 
 // SandboxArtifacts renders the connector's OpenShell overlay artifacts, or
@@ -53,71 +44,80 @@ func HasSandboxVariant(conn Connector) bool {
 func (c *hookOnlyConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
 	render, ok := hookOnlySandboxRenderers[c.name]
 	if !ok {
-		return SandboxArtifacts{}, fmt.Errorf("connector %q has no OpenShell sandbox variant", c.name)
+		return SandboxArtifacts{}, fmt.Errorf("connector %s has no OpenShell sandbox variant", c.name)
 	}
 	rt, err := resolveSandboxTarget(c.name, target)
 	if err != nil {
 		return SandboxArtifacts{}, err
 	}
-	artifacts, err := render(rt)
+	artifacts, err := render(c, rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
 	}
 	if artifacts.Connector != c.name {
-		return SandboxArtifacts{}, fmt.Errorf("connector %s rendered %q sandbox artifacts", c.name, artifacts.Connector)
+		return SandboxArtifacts{}, fmt.Errorf("%s sandbox renderer returned %q artifacts", c.name, artifacts.Connector)
 	}
-	return artifacts, nil
+	return finalizeSandboxArtifacts(artifacts)
 }
 
-// sandboxPluginHostOnlyMarkers must never survive into a rendered sandbox
-// plugin: each one reads a host token file or an unresolved template input.
-var sandboxPluginHostOnlyMarkers = []string{"DC_TOKEN_FILE", "DC_MAX_TOKEN_FILE_BYTES", ".token", "127.0.0.1", "{{"}
+// sandboxArtifactsGate is implemented by connector types whose
+// SandboxArtifacts method exists for more connectors than have a sandbox
+// variant. A type that embeds *hookOnlyConnector and defines its own
+// SandboxArtifacts must override sandboxArtifactsSupported as well.
+type sandboxArtifactsGate interface {
+	sandboxArtifactsSupported() bool
+}
 
-// sandboxPluginRequiredMarkers must appear in a rendered sandbox plugin: the
-// runtime binding token, the idempotency key and the baked closed fail mode.
-var sandboxPluginRequiredMarkers = []string{SandboxTokenEnv, "X-DefenseClaw-Hook-Idempotency-Key", "sandbox hooks always fail closed"}
+func (c *hookOnlyConnector) sandboxArtifactsSupported() bool {
+	_, ok := hookOnlySandboxRenderers[c.name]
+	return ok
+}
 
-// renderSandboxPlugin renders a JS/TS bridge plugin template in its OpenShell
-// sandbox variant (baked ingress, fail closed, token from the environment,
-// retried requests with an idempotency key) and checks the result carries
-// no host-only input.
-func renderSandboxPlugin(asset string, rt resolvedSandboxTarget) ([]byte, error) {
-	body, err := renderHookTemplate(asset, templateData{
-		APIAddr:                  rt.ingressAddr,
-		FailMode:                 rt.failMode,
-		Managed:                  true,
-		ConnectorName:            rt.contract.Connector,
-		Sandbox:                  true,
-		SandboxConnectTimeout:    sandboxHookConnectTimeoutSeconds,
-		SandboxMaxTime:           sandboxHookMaxTimeSeconds,
-		SandboxRetryMaxTime:      sandboxHookRetryMaxTimeSeconds,
-		SandboxSessionEndMaxTime: sandboxHookSessionEndMaxTimeSeconds,
-	})
-	if err != nil {
+// SandboxArtifactsSupported reports whether conn renders OpenShell overlay
+// artifacts. Every hook-only connector shares one Go type (and amp embeds
+// it), so implementing SandboxArtifactProvider does not answer it: only the
+// ones with a registered sandbox variant do.
+func SandboxArtifactsSupported(conn Connector) bool {
+	if _, ok := conn.(SandboxArtifactProvider); !ok {
+		return false
+	}
+	if gate, ok := conn.(sandboxArtifactsGate); ok {
+		return gate.sandboxArtifactsSupported()
+	}
+	return true
+}
+
+// SandboxCanonicalDir holds the root-owned reference copies of user-tier
+// harness configuration. A connector whose harness reads its hooks only from
+// a user-scope file ships the reviewed file here, and the in-image launcher
+// restores the user copy from it before every start: an agent that edits
+// the user copy mid-session changes nothing after its next launch.
+func SandboxCanonicalDir(connectorName string) string {
+	return path.Join(SandboxLibDir, connectorName)
+}
+
+// userTierHookFiles returns a hook configuration twice: root-owned and
+// read-only at SandboxCanonicalDir(connector)/name, and seeded in the
+// workload HOME at userPath, which is what the harness reads.
+func userTierHookFiles(connectorName, name, userPath string, data []byte) []SandboxFile {
+	return []SandboxFile{
+		{Path: path.Join(SandboxCanonicalDir(connectorName), name), Mode: 0o644, Owner: SandboxOwnerRoot, Data: data},
+		{Path: userPath, Mode: 0o600, Owner: SandboxOwnerUser, Data: data},
+	}
+}
+
+// marshalSandboxJSON renders a deterministic, indented JSON document with a
+// trailing newline and no HTML escaping (hook commands carry '&' and '<'
+// rarely, but a reviewer should read them verbatim).
+func marshalSandboxJSON(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
-	for _, marker := range sandboxPluginHostOnlyMarkers {
-		if bytes.Contains(body, []byte(marker)) {
-			return nil, fmt.Errorf("sandbox plugin %s still references host-only %q", asset, marker)
-		}
-	}
-	for _, marker := range sandboxPluginRequiredMarkers {
-		if !bytes.Contains(body, []byte(marker)) {
-			return nil, fmt.Errorf("sandbox plugin %s lacks %q", asset, marker)
-		}
-	}
-	if !bytes.Contains(body, []byte(`"`+rt.ingressAddr+`"`)) {
-		return nil, fmt.Errorf("sandbox plugin %s does not bake the ingress %s", asset, rt.ingressAddr)
-	}
-	if bytes.Count(body, []byte("const DC_FAIL_MODE")) != 1 || !sandboxPluginFailModeRE.Match(body) {
-		return nil, fmt.Errorf("sandbox plugin %s does not bake exactly one closed fail mode", asset)
-	}
-	return body, nil
+	return buf.Bytes(), nil
 }
 
-var sandboxPluginFailModeRE = regexp.MustCompile(`const DC_FAIL_MODE(?:: string)? = "closed"`)
-
-// harnessBinary names the agent CLI an overlay image must provide.
-func harnessBinary(name string) SandboxBinary {
-	return SandboxBinary{Name: strings.TrimSpace(name), Role: SandboxBinaryHarness}
-}
+var _ SandboxArtifactProvider = (*hookOnlyConnector)(nil)

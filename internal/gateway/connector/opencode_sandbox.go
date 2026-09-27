@@ -45,10 +45,14 @@ var openCodeSandboxStartupEnv = map[string]string{
 	"OPENCODE_DISABLE_AUTOUPDATE": "1",
 }
 
+func init() {
+	registerHookOnlySandboxRenderer("opencode", renderOpenCodeSandboxArtifacts)
+}
+
 // renderOpenCodeSandboxArtifacts renders the OpenCode overlay: the sandbox
 // bridge plugin (root-owned) and the managed config that registers it and
 // pins the update check and session sharing off.
-func renderOpenCodeSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts, error) {
+func renderOpenCodeSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarget) (SandboxArtifacts, error) {
 	plugin, err := renderSandboxPlugin("opencode-plugin.js", rt)
 	if err != nil {
 		return SandboxArtifacts{}, err
@@ -64,7 +68,7 @@ func renderOpenCodeSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts,
 	for key, value := range openCodeSandboxStartupEnv {
 		env[key] = value
 	}
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return SandboxArtifacts{
 		Connector:    "opencode",
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,
@@ -74,7 +78,7 @@ func renderOpenCodeSandboxArtifacts(rt resolvedSandboxTarget) (SandboxArtifacts,
 		},
 		Env:      env,
 		Binaries: []SandboxBinary{harnessBinary("opencode")},
-	})
+	}, nil
 }
 
 // openCodeSandboxPluginURL is how the managed config names the plugin.

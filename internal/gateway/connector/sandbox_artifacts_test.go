@@ -186,7 +186,7 @@ func TestRenderSandboxHookFilesRefusesConnectorsWithoutVariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"hermes", "openclaw", "windsurf", ""} {
+	for _, name := range []string{"geminicli", "openclaw", "windsurf", ""} {
 		if _, err := renderSandboxHookFiles(name, rt); err == nil {
 			t.Fatalf("connector %q rendered sandbox hooks without a sandbox template variant", name)
 		}
