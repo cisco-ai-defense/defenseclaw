@@ -237,9 +237,11 @@ func (s *FileStore) Revoke(id string) error {
 }
 
 // Update applies fn to a binding's spec, e.g. to record the sandbox id once
-// OpenShell has assigned it or the contract of a rebuilt image. The
-// credential, connector and sandbox name are fixed for a binding's life:
-// changing what a live credential may call requires a new binding.
+// OpenShell has assigned it or the contract of a rebuilt image. What a live
+// credential may reach is fixed for the binding's life: its connector,
+// sandbox name, routes and workdir (mode, mounts and masks, which decide the
+// host paths the gateway reads for it). Changing any of them requires
+// revoking the binding and minting a new one.
 func (s *FileStore) Update(id string, fn func(*Spec) error) (Binding, error) {
 	var updated Binding
 	err := s.mutate(func(state *storeFile) error {
@@ -258,6 +260,13 @@ func (s *FileStore) Update(id string, fn func(*Spec) error) (Binding, error) {
 		}
 		if spec.Connector != current.Connector || spec.SandboxName != current.SandboxName {
 			return invalid("connector and sandbox name cannot change; mint a new binding")
+		}
+		if !slices.Equal(spec.Routes, current.Routes) {
+			return invalid("routes cannot change on a live credential; mint a new binding")
+		}
+		currentWorkdir, err := current.Workdir.normalize()
+		if err != nil || !sameWorkdir(spec.Workdir, currentWorkdir) {
+			return invalid("workdir mode, mounts and masks cannot change on a live credential; mint a new binding")
 		}
 		next := bindingFromSpec(current.ID, spec)
 		next.TokenHash = current.TokenHash
@@ -565,6 +574,12 @@ func bindingFromSpec(id string, spec Spec) Binding {
 		RateLimit:      spec.RateLimit,
 		TTLSeconds:     int64(spec.TTL / time.Second),
 	}
+}
+
+// sameWorkdir compares two normalized workdirs, whose mounts and masks are
+// sorted.
+func sameWorkdir(a, b Workdir) bool {
+	return a.Mode == b.Mode && slices.Equal(a.Mounts, b.Mounts) && slices.Equal(a.Masks, b.Masks)
 }
 
 func cloneBinding(b Binding) Binding {

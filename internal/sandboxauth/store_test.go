@@ -218,14 +218,56 @@ func TestUpdate(t *testing.T) {
 	if got, err := s.Match(token); err != nil || got.HookContractID != "codex-hooks-v4" {
 		t.Fatalf("Match after update = %+v, %v", got, err)
 	}
+	// Non-authority fields stay editable, and restating the same routes or
+	// workdir in another order is not a change.
+	updated, err = s.Update(b.ID, func(spec *Spec) error {
+		spec.AgentVersion = "0.130.0"
+		spec.PolicyProfile = "strict"
+		spec.RateLimit = RateLimit{RequestsPerSecond: 5}
+		spec.TTL = time.Hour
+		spec.Routes = []Route{RouteOTLP, RouteNotify, RouteHook, RouteHook}
+		spec.Workdir.Masks = append(spec.Workdir.Masks, spec.Workdir.Masks...)
+		return nil
+	})
+	if err != nil || updated.AgentVersion != "0.130.0" || updated.PolicyProfile != "strict" ||
+		updated.TTLSeconds != 3600 || updated.ExpiresAt.IsZero() {
+		t.Fatalf("Update of non-authority fields = %+v, %v", updated, err)
+	}
 	for name, mutate := range map[string]func(*Spec) error{
 		"connector": func(spec *Spec) error { spec.Connector = "claudecode"; return nil },
 		"name":      func(spec *Spec) error { spec.SandboxName = "dc-renamed"; return nil },
 		"invalid":   func(spec *Spec) error { spec.Workdir.Mode = "bogus"; return nil },
+		"add route": func(spec *Spec) error { spec.Routes = append(spec.Routes, RouteInspect); return nil },
+		"drop route": func(spec *Spec) error {
+			spec.Routes = []Route{RouteHook}
+			return nil
+		},
+		"mode": func(spec *Spec) error {
+			spec.Workdir = Workdir{Mode: WorkdirCopy}
+			return nil
+		},
+		"mount host path": func(spec *Spec) error {
+			spec.Workdir.Mounts[0].HostPath = "/home/dev"
+			return nil
+		},
+		"add mount": func(spec *Spec) error {
+			spec.Workdir.Mounts = append(spec.Workdir.Mounts, Mount{SandboxPath: "/work/other", HostPath: "/home/dev/other"})
+			return nil
+		},
+		"read-only flag": func(spec *Spec) error { spec.Workdir.Mounts[0].ReadOnly = true; return nil },
+		"drop mask":      func(spec *Spec) error { spec.Workdir.Masks = nil; return nil },
+		"add mask": func(spec *Spec) error {
+			spec.Workdir.Masks = append(spec.Workdir.Masks, "/work/app/secrets.json")
+			return nil
+		},
 	} {
 		if _, err := s.Update(b.ID, mutate); !errors.Is(err, ErrInvalidSpec) {
 			t.Errorf("update %s: %v", name, err)
 		}
+	}
+	if got, err := s.Get(b.ID); err != nil || len(got.Routes) != 3 || len(got.Workdir.Mounts) != 1 ||
+		got.Workdir.Mounts[0].HostPath != "/home/dev/code/app" || len(got.Workdir.Masks) != 1 {
+		t.Fatalf("refused updates changed the binding: %+v, %v", got, err)
 	}
 	callbackErr := errors.New("stop")
 	if _, err := s.Update(b.ID, func(*Spec) error { return callbackErr }); !errors.Is(err, callbackErr) {
