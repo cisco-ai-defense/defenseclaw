@@ -90,7 +90,7 @@ Disable OpenShell's anonymous usage telemetry? [Y/n]
     edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
   …
   ✓ gateway configured and restarted
-  Harnesses: [x] Claude Code [x] Codex [ ] Amp [ ] GitHub Copilot CLI [ ] Cursor Agent [ ] Devin CLI [ ] Kiro CLI [ ] OpenCode    Credentials: ANTHROPIC_API_KEY ✓  ~/.codex/auth.json ✓
+  Harnesses: [x] Claude Code [x] Codex [ ] Amp [ ] Antigravity [ ] GitHub Copilot CLI [ ] Cursor Agent [ ] Devin CLI [ ] Hermes Agent [ ] Kiro CLI [ ] OmniGent [ ] OpenCode [ ] OpenHands    Credentials: ANTHROPIC_API_KEY ✓  ~/.codex/auth.json ✓
   ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
 Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
   Building the Claude Code image (the first build downloads about 3 GB)…
@@ -203,6 +203,10 @@ there.
 | GitHub Copilot CLI | `copilot` | managed | Verified through Copilot's bring-your-own-provider mode. Copilot's own models through a GitHub token are unverified. |
 | OpenCode | `opencode` | user | Verified |
 | Kiro CLI | `kiro-cli-chat` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
+| Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
+| OpenHands | `openhands` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
+| OmniGent | `omnigent` | managed | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
+| Antigravity | `agy` | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
 | Cursor Agent | `cursor-agent` | managed | Unverified: the Cursor Agent CLI needs a Cursor account before its first turn, and no mock can stand in for it. |
 | Amp | `amp` | user | Unverified: every Amp run needs an Amp account API key (`AMP_API_KEY`). |
 | Devin CLI | `devin` | user | Unverified: the Devin CLI needs a Devin account login before its first turn. |
@@ -686,11 +690,18 @@ By default (`--llm auto`) a run shares the first model credential it finds:
 | Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared) |
 | OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY` |
 | GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key |
+| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY` |
+| Antigravity | `GEMINI_API_KEY`; without it, you sign in with Google inside the sandbox |
 
-`--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai` or
-`bedrock`), and `--llm none` shares nothing, so you log in inside the
+OmniGent also needs a model name after `--`, for example
+`defenseclaw sandbox run omnigent -- --model <model>`; `run` refuses to
+start without one. With `--llm bedrock` it defaults to `openai.gpt-oss-20b`.
+
+`--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`,
+`bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
 sandbox. `--llm bedrock` uses a short-term Amazon Bedrock key from
-`AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`).
+`AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
+then `$AWS_DEFAULT_REGION`, then `us-east-1`).
 A login you do inside a kept sandbox stays in it; the sandbox's files are
 readable by the agent, so prefer an API key where you can.
 
