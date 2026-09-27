@@ -163,8 +163,31 @@ The harness spec builds the environment passed to `openshell sandbox create
 - The connector's startup variables (see [overlay images](#overlay-images)).
 
 A client that ignores `HTTPS_PROXY` and connects directly is denied by
-OpenShell, which then files a draft policy proposal. Triaging those proposals
-is not built yet.
+OpenShell, which then files a draft policy proposal. `internal/openshell/triage`
+judges each proposal against the sandbox's own proxy decider, because
+approving one adds a direct OpenShell rule that bypasses the proxy:
+
+- What the proxy refuses and no unblock lifts is rejected: the
+  administrator's lists, the block list, the blocklist feed, this machine,
+  link-local and metadata addresses.
+- A public IP literal in the open mode is rejected until it is unblocked.
+- Doors into your machine or network ask: host ports, private addresses and
+  intranet names.
+- Everything else follows the pack's approvals mode.
+- Every destination name is resolved with the proxy's own dial-time rules
+  (`egress.LookupHost` and `Decider.CheckAddrs`). A name that resolves to
+  this machine, link-local, metadata or reserved addresses is rejected. A
+  name that resolves to a private network asks, or is rejected when
+  `openshell.admin.allow_unblock` is `false`. A name that does not resolve
+  is rejected.
+- The batcher repeats the whole check, with fresh DNS answers, right before
+  it applies an approval. Every reconcile, about every 5 minutes, removes
+  approved rules whose names now resolve to this machine.
+- OpenShell's own SSRF check still applies to approved rules without
+  `allowed_ips` (loopback, link-local and internal ranges). A name that
+  rebinds between two checks can reach this machine's own public addresses
+  until the next reconcile. The proxy has no such window, because it checks
+  every DNS answer at dial time.
 
 ## Hook ingress
 
@@ -298,6 +321,14 @@ attributes traffic to a sandbox and rate-limits it; it grants nothing the
 sandbox does not already have. A request without a credential gets a 407
 challenge; a wrong one also records an `auth_failed` event.
 
+The credential's principal also carries the sandbox's own `Decider`
+(`Principal.Decider`). The manager builds it from that sandbox's resolved
+pack and admin policy (`packs.Effective.EgressDecider`) and its unblocks. One
+sandbox's block list, ports, mode or unblocks therefore never decide another
+sandbox's traffic. The manager re-registers the credential whenever the
+policy is re-resolved. The proxy's own decider (`Options.Decider`,
+`SetDecider`) is only the fallback for a principal without one.
+
 ### Request handling
 
 - **CONNECT tunnels** carry HTTPS as opaque bytes. The proxy never terminates
@@ -320,28 +351,50 @@ category, a reason, whether it can be unblocked, and how to ask. Limits get a
 
 ### Decision order
 
-`Decider.Decide` applies these layers in order; the first that decides wins:
+This is the one egress semantics. The policy layer (`packs`), the proxy,
+triage, REST unblock and the activity feed all use it, because each asks the
+same decider. `Decider.Decide` applies these layers in order, and the first
+that decides wins:
 
-1. **Guard.** The destination must be a valid host and port. This machine and
-   what only it reaches (loopback, its own addresses, `localhost`,
-   `host.openshell.internal`, link-local and cloud metadata addresses,
-   reserved ranges) are never reachable (`host_internal`). Private networks
-   (RFC 1918, carrier-grade NAT, IPv6 unique local, the other hosts on this
-   machine's subnets, intranet names) are reachable only where an operator
-   allow rule names them (`private_network`). The port must be on the port
-   list (80 and 443 by default). Guard blocks cannot be unblocked.
-2. **Operator block list**, for example `openshell.egress.block` and the host
-   firewall's deny rules. It is checked before unblock decisions, so an
-   unblock cannot lift an operator block; only a configuration change can.
-3. **Unblock decisions**, for one sandbox or for every sandbox.
-4. **Operator allow list**, for example `openshell.egress.allow`.
-5. **Blocklist feed.** A feed block can be unblocked.
-6. **Mode default.** Open mode (the `open` profile) allows host names and
+1. **Guard.** The destination must be a valid host and port.
+   - This machine and what only it reaches are never reachable
+     (`host_internal`): loopback, its own addresses, `localhost`,
+     `host.openshell.internal`, link-local and cloud metadata addresses, and
+     reserved ranges.
+   - Private networks are reachable only where an allow entry names them
+     (`private_network`). These are RFC 1918, carrier-grade NAT and IPv6
+     unique local addresses, the other hosts on this machine's subnets, and
+     intranet names. The allow entry can come from `openshell.egress.allow`,
+     the pack's `egress.allow` or `openshell.admin.egress_allow_only`.
+   - The port must be on the port list (80 and 443 by default).
+   - Guard blocks can't be unblocked.
+2. **The administrator's lists.** `openshell.admin.egress_block` refuses
+   (`admin_block`). A non-empty `openshell.admin.egress_allow_only` refuses
+   everything outside it (`admin_allow_only`). Nothing but the administrator
+   lifts either. The block message says "blocked by your organization's
+   DefenseClaw policy".
+3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
+   (`operator_block`). It is checked before unblock decisions, so a host on
+   it is not one-click unblockable. Reaching it takes removing the entry.
+4. **Unblock decisions**, for one sandbox or for every sandbox ("always",
+   saved to `openshell.egress.unblocked`). They are ignored when
+   `openshell.admin.allow_unblock` is `false`.
+5. **The allow list**: the pack's entries (the curated allowlist included)
+   plus `openshell.egress.allow`. It exempts a host from the feed. When
+   `allow_unblock` is `false`, the feed is checked first, so nothing lifts a
+   feed entry.
+6. **Blocklist feed.** A feed block is unblockable, unless `allow_unblock` is
+   `false`.
+7. **Allow-only entries** allow.
+8. **Mode default.** Open mode (the `open` profile) allows host names. It
    blocks IP literals as `ip_literal`, because a literal would sidestep the
-   name-based feed; that block can be unblocked. Allowlist mode (the
-   `balanced` profile) allows only allowlist-feed matches and blocks the rest
-   as `not_allowlisted`, which can also be unblocked. The `strict` profile
-   runs without the proxy.
+   name-based feed, until the literal is unblocked. Allowlist mode (the
+   `balanced` profile) blocks the rest as `not_allowlisted`, which can also
+   be unblocked. Neither block is unblockable when `allow_unblock` is
+   `false`. The `strict` profile runs without the proxy.
+
+`Decision.Unblockable`, the 403 body's `unblockable` and `how_to_unblock`,
+blocked events and the feed's unblock action all follow steps 6 and 8.
 
 Host names are resolved on the proxy side as fully qualified names, never
 through the host's search domains. Every DNS answer passes the SSRF policy
@@ -358,9 +411,11 @@ exact host or `*.` for every subdomain (not the apex).
   from an unattended agent is moving data to a place anyone can read or past
   network controls. Categories: `paste_site`, `file_drop`, `webhook_catcher`,
   `tunnel`, `anonymizer`.
-- `allowlist.yaml` (`defenseclaw-allowlist`) is the allowlist-mode feed.
-  Categories: `package_registry`, `source_hosting`, `toolchain`,
-  `documentation`. CONNECT tunnels are opaque, so the proxy cannot tell a
+- `allowlist.yaml` (`defenseclaw-allowlist`) is the allowlist-mode feed of a
+  decider built without a policy. A sandbox's decider uses the balanced
+  pack's `egress.allow` instead, as part of the allow list. A test keeps the
+  two lists identical. Categories: `package_registry`, `source_hosting`,
+  `toolchain`, `documentation`. CONNECT tunnels are opaque, so the proxy cannot tell a
   download from an upload: every listed host with a write API (GitHub, GitLab,
   the registries' publish endpoints) can receive data too. The balanced
   profile narrows destinations; it is not an exfiltration barrier for those
@@ -399,20 +454,32 @@ and `log.egress.blocked` records (source `dc-egress-proxy`) and
 
 ### Relation to the pack posture
 
-`packs.Effective.DecideEgress` answers a similar question at policy level
-(admin block, admin allow-only list, ports, deny mode, block list, feeds,
-mode) for explaining decisions and checking runtime actions. The proxy's
-`Decider` enforces per connection. Building a `Decider` from an `Effective`
-posture is the manager's job.
+`packs.Effective` is the single source of the egress policy.
+`Effective.EgressOptions` is the only translation from the resolved posture
+to `egress.DeciderOptions`:
 
-The two disagree on one point today. `DecideEgress` reports a match on the
-block list (the pack's entries plus `openshell.egress.block`) as a block that
-can be unblocked (unless `openshell.admin.allow_unblock` is false), and
-`Allow(ActionUnblock)` permits that unblock. The proxy checks the operator block list before unblock
-decisions, and its block message says only a configuration change can allow
-the host. So an approved unblock of a host the user blocked would never take
-effect. The manager's mapping, or `DecideEgress`, has to settle which rule
-wins.
+- the network mode;
+- the ports;
+- the built-in feed when the policy has it;
+- the administrator's block and allow-only lists;
+- the block list;
+- the allow list, which already holds the curated allowlist when the
+  profile needs it, so the proxy's own allowlist feed is not used;
+- `NoUnblock` for `openshell.admin.allow_unblock: false`;
+- the sandbox's unblocks.
+
+The rest of the package asks the decider this builds:
+
+- `Effective.EgressDecider` builds each sandbox's proxy decider.
+- `Effective.DecideEgress` reports the decider's verdict before any unblock,
+  as a `packs` rule name.
+- `Allow(ActionUnblock)` accepts only what that verdict lets an unblock lift.
+- `Allow(ActionApprove)` checks the guard and the feed with it.
+
+No feed matcher is passed around: the policy uses the proxy's own feed.
+`internal/openshell/manager/egress_semantics_test.go` drives the policy
+layer, a live proxy, REST unblock and triage with the same inputs and pins
+that they agree.
 
 ## Provider credentials and LLM traffic
 
@@ -888,7 +955,7 @@ The built-in packs are embedded from `policies/sandbox/<name>/pack.yaml`:
 
 | Pack | Network | Approvals | Workspace | Skip-permissions | MCP import and host ports | Large upload |
 | --- | --- | --- | --- | --- | --- | --- |
-| `open` (default) | open web through the proxy, ports 80 and 443 | triage | mount | on | on | 25 MiB |
+| `open` (default) | open web through the proxy, ports 80 and 443 | auto | mount | on | on | 25 MiB |
 | `balanced` | curated allowlist, ports 80 and 443 | triage | mount | on | on | 10 MiB |
 | `strict` | no proxy; provider hosts only | manual | copy | off | off | 5 MiB |
 
@@ -934,12 +1001,21 @@ the user can edit the file.
 
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
-harness. The administrator's block list and allow-only list apply to every
-unblock and approval, and link-local, cloud metadata, multicast and reserved
-addresses are never approved. Only with `allow_unblock: false` is an
-approval also checked against the block list, the blocklist feed and private
-networks; the caller must then pass the proxy's feed matcher, and without one
-the approval fails closed.
+harness.
+
+- The administrator's block list and allow-only list apply to every unblock
+  and approval.
+- Neither lifts the block list (the pack's and `openshell.egress.block`).
+- This machine, link-local, cloud metadata, multicast and reserved
+  addresses are never unblocked or approved, and neither are the proxy
+  guard's host-internal names. Private networks are never unblocked; they
+  open only through an allow entry.
+- With `allow_unblock: false`, an approval is also refused for a blocklist
+  feed host and for a private network (an address or an intranet name).
+- The checks ask the policy's own egress decider, so they need no feed
+  matcher.
+- What a name resolves to is triage's check (see
+  [paths out of the workload](#paths-out-of-the-workload)).
 
 No policy, input or approval ever opens these host ports to a sandbox:
 DefenseClaw's API, sandbox ingress, egress proxy, guardrail proxy and model

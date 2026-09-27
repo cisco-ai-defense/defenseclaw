@@ -653,27 +653,37 @@ attributes each connection to a sandbox and applies per-sandbox limits.
   80 and 443 the proxy relays only web traffic; other protocols such as SSH
   pass only on ports you add.
 
-**What it decides.** Under the `open` profile, destination names are allowed
-unless they are on the built-in feed of exfiltration and abuse destinations
-(paste sites, file drops, webhook catchers, tunnels, anonymizers).
-`openshell.egress.feed: none` turns that feed off, unless
-`openshell.admin.allow_unblock` is `false` or `openshell.admin.required_pack`
-names a pack that uses it. Under
-`balanced`, only names on the curated allowlist are allowed. The `strict`
-profile runs without the proxy. Operator block rules always win; unblocks and
-operator allow rules are checked next, then the feed, then the profile's
-default. In every mode:
+**What it decides.** Each sandbox is decided by its own resolved policy
+(its pack, your `openshell` keys and the admin constraints); one sandbox's
+block list, ports or unblocks never apply to another. Under the `open`
+profile, destination names are allowed unless they are on the built-in feed
+of exfiltration and abuse destinations (paste sites, file drops, webhook
+catchers, tunnels, anonymizers). `openshell.egress.feed: none` turns that
+feed off, unless `openshell.admin.allow_unblock` is `false` or
+`openshell.admin.required_pack` names a pack that uses it. Under `balanced`,
+only names on the pack's allow list (the curated allowlist) are allowed. The
+`strict` profile runs without the proxy. The order, after the checks below:
+`openshell.admin.egress_block` and `egress_allow_only`, then the block list
+(the pack's and `openshell.egress.block`), then unblocks, then the allow
+list, then the feed, then the profile's default. In every mode:
 
 - This machine is never reachable: loopback, its own addresses, link-local
   and cloud metadata addresses.
-- Private networks are reachable only when an operator allow rule, such as
-  an `openshell.egress.allow` entry, names them. An unblock never opens them.
+- Private networks are reachable only when an allow entry names them: an
+  `openshell.egress.allow` entry, the pack's `egress.allow`, or
+  `openshell.admin.egress_allow_only`. An unblock never opens them.
 - Under `open`, a destination given as an IP address is blocked, because it
-  would sidestep the name-based feed. An unblock, or an operator allow rule
-  that names it, lifts the block.
+  would sidestep the name-based feed. An unblock, or an allow entry that
+  names it, lifts the block.
 - Names are resolved by the proxy, and each answer is checked just before the
   connection, so a DNS answer that changes between check and connect cannot
   redirect it.
+
+Only feed blocks and the profile defaults can be unblocked, and none when
+`openshell.admin.allow_unblock` is `false`. `POST /api/v1/sandbox/egress/unblock`
+refuses the rest: the administrator's lists answer `admin_violation` ("blocked
+by your organization's DefenseClaw policy"), and the block list, private
+networks and this machine answer `policy_violation`.
 
 A blocked request gets `403` with a JSON body: `error: "egress_blocked"`, the
 host, port and category, whether it can be unblocked, and a `how_to_unblock`

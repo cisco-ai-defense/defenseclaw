@@ -397,37 +397,52 @@ always ignored.
 
 ### How a destination is decided
 
-The effective policy checks each destination in this order, and the first
-match decides:
+The egress proxy, the policy checks for unblocks and approvals, and the
+triage of connection requests all use the same order. Each sandbox is
+decided by its own policy: another sandbox's pack, block list, ports, or
+unblocks never apply to it. The first match decides:
 
-1. `openshell.admin.egress_block`: always blocked. Nothing unblocks it.
-2. `openshell.admin.egress_allow_only`: when set, any host not on it is blocked.
+1. This machine, link-local and cloud metadata addresses, and reserved
+   addresses: always blocked. Nothing unblocks them.
+2. Private networks (such as `10.x`, `192.168.x`, and intranet names such as
+   `*.corp`): blocked, unless an allow entry names them. The entry can be in
+   `openshell.egress.allow`, the pack's `egress.allow`, or
+   `openshell.admin.egress_allow_only`. An unblock never opens them.
 3. The port must be on the proxy port list.
-4. With the `strict` profile, everything is blocked, because the proxy is off.
-5. The block list: blocked, but can be unblocked.
-6. The blocklist feed: blocked, unless the host is on the allow list. When
-   `allow_unblock` is `false`, the allow list does not exempt a host from the
-   feed.
-7. The allow list, then `egress_allow_only`: allowed.
-8. Everything else: allowed with the `open` profile, blocked with `balanced`.
+4. `openshell.admin.egress_block`: blocked by your organization's policy.
+   Nothing unblocks it.
+5. `openshell.admin.egress_allow_only`: when set, any host not on it is
+   blocked by your organization's policy.
+6. The block list (the pack's entries plus `openshell.egress.block`): blocked.
+   An unblock can't lift it; to reach the host, remove the entry.
+7. Your unblocks, for this sandbox or for every sandbox: allowed. They don't
+   count when `allow_unblock` is `false`.
+8. The allow list: allowed, and exempt from the blocklist feed. When
+   `allow_unblock` is `false`, the feed is checked first instead, so nothing
+   exempts a host from it.
+9. The blocklist feed: blocked. It can be unblocked, unless `allow_unblock`
+   is `false`.
+10. `egress_allow_only` entries: allowed.
+11. Everything else, with the `open` profile: a host name is allowed. A
+    destination given as an IP address is blocked until it's unblocked, because
+    an IP address would get around the name-based blocklist feed.
+12. Everything else, with the `balanced` profile: blocked, but can be unblocked.
 
-Before this order applies, the egress proxy refuses this machine itself,
-link-local and cloud metadata addresses, and private networks that no allow
-rule opens.
+With the `strict` profile the proxy is off, so the sandbox has no web egress
+and nothing can be unblocked. With `allow_unblock: false`, no block can be
+unblocked.
 
-<Callout type="warn" title="The egress proxy differs from this order today">
-The egress proxy is built but not yet connected to the policy. On its own, it
-differs from the order above in three ways:
+The proxy also checks every address a host name resolves to when it
+connects. A name that points at this machine, link-local or metadata
+addresses is blocked. So is a name that points at a private network no allow
+entry opens.
 
-- With the `open` profile, it blocks a destination given as an IP address
-  until that destination is unblocked. Step 8 would allow it.
-- An unblock can't lift a host on its block list. Step 5 says it can.
-- With the `balanced` profile, it also allows the hosts on its own allowlist
-  feed, `policies/sandbox/egress/allowlist.yaml`. That feed isn't the balanced
-  pack's list. It adds hosts such as `api.github.com`, `ghcr.io`, and
-  `bitbucket.org`, plus more package registries and toolchain downloads, and
-  it has no Docker Hub entries.
-</Callout>
+A connection request that the proxy would refuse isn't approved either. So
+triage resolves the names in a request with the same checks: a name that
+points at this machine is rejected, and one that points at your private
+network asks you. The check runs again right before an approval is applied,
+and on every reconcile, which removes approved rules whose names now point at
+this machine.
 
 ## Admin constraints
 
@@ -545,7 +560,7 @@ With `min_profile: balanced`, the `open` pack runs with the balanced allowlist.
 | `allow_yolo` | Skip-permissions mode is off for every harness, so the harness keeps its permission prompts. |
 | `allow_mount` | Every run uses copy mode, and no host folder is bind-mounted into a sandbox. This covers the project and extra read-only reference folders. |
 | `allow_host_ports` | No host port is opened to a sandbox, from config, from a run, or through an approval of a request to this machine. |
-| `allow_unblock` | Blocked destinations can't be unblocked, and approvals can't be kept for future sandboxes. A one-time approval can't reach a destination on the block list, on the blocklist feed, or at a private IP address such as `10.x` or `192.168.x`. Host names aren't resolved for this check, so an intranet name that points to a private address can still be approved once; use `egress_allow_only` to limit what approvals can open. Your own allow entries and those of a custom pack you chose are ignored. The blocklist feed can't be turned off, and allow entries no longer exempt a host from the feed. |
+| `allow_unblock` | Blocked destinations can't be unblocked, earlier unblocks stop counting, and approvals can't be kept for future sandboxes. A one-time approval can't reach a destination on the block list or the blocklist feed, or on a private network: a private IP address such as `10.x` or `192.168.x`, an intranet name such as `*.corp`, or a host name that resolves to a private address. Your own allow entries and those of a custom pack you chose are ignored. The blocklist feed can't be turned off, and allow entries no longer exempt a host from the feed. |
 | `allow_learn_mode` | Learn mode, which observes a run and suggests a policy, is refused. |
 
 ```yaml
@@ -575,10 +590,11 @@ first, and neither an unblock nor an approval can open them.
 
 `egress_allow_only` is the complete list of hosts any sandbox may reach.
 Hosts on it are reachable (unless a block list or the feed blocks them), and
-nothing else is, including entries on the pack's own allow list. It also
-raises the profile to at least `balanced`. With the `strict` profile the proxy
-is off, so it limits only what an approval can open. Unblocks and approvals
-outside the list are refused.
+nothing else is, including entries on the pack's own allow list. An entry
+that names a private host, such as `jira.corp` or `10.20.0.5`, opens it the
+way an allow entry does. It also raises the profile to at least `balanced`.
+With the `strict` profile the proxy is off, so it limits only what an
+approval can open. Unblocks and approvals outside the list are refused.
 
 ```yaml
 openshell:
@@ -671,8 +687,8 @@ sandbox runs:
 
 | Action | Refused by |
 | --- | --- |
-| Unblock a destination | `allow_unblock: false`, `egress_block`, a host outside `egress_allow_only`, or the `strict` profile (the proxy is off) |
-| Approve a connection request once | `egress_block`, a host outside `egress_allow_only`, and, with `allow_unblock: false`, a blocked or feed-listed destination or a private IP address (host names aren't resolved) |
+| Unblock a destination | `allow_unblock: false`, `egress_block`, a host outside `egress_allow_only`, the `strict` profile (the proxy is off), and, whatever the admin settings, the block list, private networks, and this machine |
+| Approve a connection request once | `egress_block`, a host outside `egress_allow_only`, a host name that resolves to this machine, and, with `allow_unblock: false`, a feed-listed destination or a private network (an address, an intranet name, or a host name that resolves to one) |
 | Approve a request for all future sandboxes | Everything above, plus `allow_unblock: false` on its own |
 | Open a host port | `allow_host_ports: false`, or a pack with `mcp.host_ports: false` |
 | Mount a host folder | `allow_mount: false`, or a folder covered by `require_copy_for` |
@@ -834,12 +850,13 @@ What developers get:
   kept, and no MCP servers. No run can choose another pack or a looser profile.
 - `allow_mount: false` also refuses extra read-only reference folders.
 - `allow_unblock: false` means approvals can't be kept for later sandboxes,
-  and a one-time approval can't reach a blocklisted or feed-listed destination
-  or a private IP address. A one-time approval of any other destination is
-  still possible, including an intranet host name that points to a private
-  address, because names aren't resolved for this check. To limit that too, list the
-  only hosts your organization permits in `egress_allow_only`; approvals of
-  any other host are refused.
+  and a one-time approval can't reach a blocklisted or feed-listed
+  destination or a private network. That covers private IP addresses,
+  intranet names, and host names that resolve to a private address when the
+  request is triaged or applied. A one-time approval of any other
+  destination is still possible. To limit that too, list the only hosts your
+  organization permits in `egress_allow_only`; approvals of any other host
+  are refused.
 - `locked: [workdir.unmask]` stops a run from revealing hidden secret files.
   The other lockable keys are already covered: the required pack sets the
   floors, `max_resources` caps CPU and memory, and the `allow_*` switches

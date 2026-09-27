@@ -563,8 +563,8 @@ openshell:
 | `workdir.max_upload_mb` | `0` | Copy-mode size limit in MiB, 0–1048576. `0` follows the pack. |
 | `workdir.git_depth` | `200` | History depth of the copy-mode clone, 0–1000000. `0` uses 200. |
 | `workdir.on_exit` | `ask` | What happens to the agent's changes when a session ends: `ask`, `keep`, or `undo`. |
-| `egress.block` | `[]` | Host globs added to the pack's block list. |
-| `egress.allow` | `[]` | Host globs added to the allow list. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |
+| `egress.block` | `[]` | Host globs added to the pack's block list. An unblock can't lift an entry; remove it to reach the host. |
+| `egress.allow` | `[]` | Host globs added to the allow list. An entry exempts the host from the blocklist feed, and one that names a private host (an exact name, an intranet wildcard such as `*.corp`, or an address) opens it. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |
 | `egress.unblocked` | `[]` | Hosts the daemon saves when you choose "always" for an unblock or an approval. Validated like `egress.allow`, and ignored when `admin.allow_unblock` is `false`. Unlike `egress.allow`, an entry here never opens a private address the name resolves to. |
 | `egress.ports` | `[]` | Destination ports for the egress proxy, 1–65535, unique, at most 64. A non-empty list replaces the pack's ports. |
 | `egress.large_upload_mb` | `0` | Alert when a host the sandbox hasn't contacted before receives more than this many MiB, 0–1048576. `0` follows the pack. |
@@ -613,7 +613,7 @@ unset key adds no limit, and the `allow_*` switches restrict only when set to
 | `allow_unblock` | `true`, `false`, `null` | `false` refuses unblocks, approve-always, user allow entries, and turning the blocklist feed off. |
 | `allow_learn_mode` | `true`, `false`, `null` | `false` refuses learn mode. |
 | `allowed_harnesses` | Harness names | Only these harnesses may run. |
-| `egress_block` | Host globs | Always blocked, for every sandbox. |
+| `egress_block` | Host globs | Always blocked, for every sandbox. Nothing unblocks or approves them. |
 | `egress_allow_only` | Host globs | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. |
 | `require_copy_for` | Host path globs, at most 1024 | Projects that must run in copy mode. |
 | `max_resources.cpu`, `max_resources.memory` | Same formats as `resources` | Ceilings for every sandbox. |
