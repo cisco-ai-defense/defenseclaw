@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 func TestValidateSourceRefusalMatrix(t *testing.T) {
@@ -261,12 +263,20 @@ func TestSecretNames(t *testing.T) {
 }
 
 func TestNamesAndLabels(t *testing.T) {
-	for _, bad := range []string{"", ".hidden", "-x", "a/b", "a..b", "x.lock", "x.", strings.Repeat("a", 64), "sp ace"} {
-		if ValidateName(bad) == nil {
+	for _, bad := range []string{
+		"", ".hidden", "-x", "x-", "a/b", "a..b", "x.lock", "x.", strings.Repeat("a", 64), "sp ace",
+		// OpenShell refuses these, so no host state may be written for them.
+		"A.b_c-1", "Upper", "under_score", "dot.ted",
+		// "git" is the shared shadow directory under <data>/snapshots.
+		"git",
+	} {
+		if err := ValidateName(bad); err == nil {
 			t.Errorf("ValidateName(%q) accepted", bad)
+		} else if !errors.Is(err, openshell.ErrInvalidName) {
+			t.Errorf("ValidateName(%q) = %v, want openshell.ErrInvalidName", bad, err)
 		}
 	}
-	for _, good := range []string{"dc-claude-myapp-7f3a", "fix-tests", "A.b_c-1"} {
+	for _, good := range []string{"dc-claude-myapp-7f3a", "fix-tests", "a", "0", "gitx", "my-git", strings.Repeat("a", 63)} {
 		if err := ValidateName(good); err != nil {
 			t.Errorf("ValidateName(%q): %v", good, err)
 		}
@@ -277,5 +287,21 @@ func TestNamesAndLabels(t *testing.T) {
 	}
 	if RepoName("/x/My App!") != "My-App" || RepoName("/x/...") != "project" {
 		t.Fatalf("RepoName sanitization: %q %q", RepoName("/x/My App!"), RepoName("/x/..."))
+	}
+}
+
+// TestValidateNameMatchesOpenShell keeps the workspace rule and the one
+// OpenShell calls use identical, apart from the reserved layout names:
+// a name one accepts and the other refuses would write host state for a
+// sandbox that can never be created or addressed.
+func TestValidateNameMatchesOpenShell(t *testing.T) {
+	names := []string{"", "a", "z9", "-a", "a-", "a--b", "ab.c", "a_b", "AB", "git", "gits", "a b", "a/b", "é",
+		strings.Repeat("x", 62), strings.Repeat("x", 63), strings.Repeat("x", 64), "0-0", "dc-copy-1"}
+	for _, n := range names {
+		_, reserved := reservedNames[n]
+		want := openshell.ValidSandboxName(n) && !reserved
+		if got := ValidateName(n) == nil; got != want {
+			t.Errorf("ValidateName(%q) accepted=%v, openshell.ValidSandboxName=%v reserved=%v", n, got, openshell.ValidSandboxName(n), reserved)
+		}
 	}
 }

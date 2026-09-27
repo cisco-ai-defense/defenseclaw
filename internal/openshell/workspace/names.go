@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 const (
@@ -38,16 +40,24 @@ const (
 	DefaultTargetRoot = "/work"
 )
 
-// nameRE accepts sandbox names that are also safe as a single git ref
-// component and as a file name: no leading dot or dash, no "..", no
-// ".lock" suffix, no path separators.
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+// reservedNames are sandbox names that would collide with a fixed entry of
+// the data-dir layout: <data>/snapshots/git holds every project's shadow
+// git directory, so a snapshot named "git" would share (and on removal
+// delete) all of them.
+var reservedNames = map[string]struct{}{"git": {}}
 
-// ValidateName checks a sandbox name before it is used in refs and paths.
+// ValidateName checks a sandbox name before it is used in refs, paths or
+// any gateway call. The rule is openshell.ValidSandboxName (a DNS label:
+// lowercase letters, digits and '-', at most 63 characters), the only
+// names OpenShell and the rest of DefenseClaw address, so no host state is
+// ever written for a sandbox that cannot exist. A DNS label is also a safe
+// git ref component and file name: no dots, slashes or leading dash.
 func ValidateName(name string) error {
-	if !nameRE.MatchString(name) || strings.Contains(name, "..") ||
-		strings.HasSuffix(name, ".lock") || strings.HasSuffix(name, ".") {
-		return fmt.Errorf("workspace: invalid sandbox name %q (use letters, digits, '.', '_' and '-', at most 63 characters)", name)
+	if !openshell.ValidSandboxName(name) {
+		return fmt.Errorf("%w: sandbox %q (use lowercase letters, digits and '-', at most 63 characters, starting and ending with a letter or digit)", openshell.ErrInvalidName, name)
+	}
+	if _, reserved := reservedNames[name]; reserved {
+		return fmt.Errorf("%w: sandbox name %q is reserved", openshell.ErrInvalidName, name)
 	}
 	return nil
 }
