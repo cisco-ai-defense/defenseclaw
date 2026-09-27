@@ -496,13 +496,53 @@ func configurationState(sb *Sandbox) (configState, string) {
 	return configAccepted, ""
 }
 
+// maxWaitBackoff caps the pause between polls that failed transiently.
+const maxWaitBackoff = 5 * time.Second
+
+// transientWaitError reports a poll failure a wait rides out: the gateway
+// is unreachable (restarting after a configuration change, doctor --fix
+// or systemd's Restart=on-failure) or one poll timed out, while the wait
+// itself still has time.
+func transientWaitError(ctx context.Context, err error) bool {
+	return ctx.Err() == nil && (IsUnavailable(err) || IsDeadlineExceeded(err))
+}
+
+// retryWait runs poll until it succeeds, fails for good, or ctx ends,
+// backing off after transient failures. Ending on ctx keeps the last
+// failure in the message.
+func (c *client) retryWait(ctx context.Context, poll func(context.Context) error) error {
+	delay := c.opts.PollInterval
+	for {
+		err := poll(ctx)
+		if err == nil || !transientWaitError(ctx, err) {
+			return err
+		}
+		if serr := c.sleep(ctx, delay); serr != nil {
+			return fmt.Errorf("%w (last poll: %v)", serr, err)
+		}
+		delay = min(delay*2, maxWaitBackoff)
+	}
+}
+
+// getForWait is one wait poll, bounded like a unary call so that a hung
+// call is retried instead of using up the wait.
+func (c *client) getForWait(ctx context.Context, name string) (*Sandbox, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.opts.RPCTimeout)
+	defer cancel()
+	return c.sdk.Sandboxes().Get(ctx, c.opts.Workspace, name)
+}
+
 func (c *client) WaitReady(ctx context.Context, name string) (*Sandbox, error) {
 	if err := checkSandboxName(name); err != nil {
 		return nil, err
 	}
 	ctx, cancel := c.wait(ctx)
 	defer cancel()
-	sb, err := c.sdk.Sandboxes().WaitReady(ctx, c.opts.Workspace, name, v1.WaitOptions{PollInterval: c.opts.PollInterval})
+	var sb *Sandbox
+	err := c.retryWait(ctx, func(ctx context.Context) (err error) {
+		sb, err = c.sdk.Sandboxes().WaitReady(ctx, c.opts.Workspace, name, v1.WaitOptions{PollInterval: c.opts.PollInterval})
+		return err
+	})
 	if err != nil {
 		return nil, wrap(fmt.Sprintf("wait for sandbox %q", name), err)
 	}
@@ -517,7 +557,10 @@ func (c *client) WaitReady(ctx context.Context, name string) (*Sandbox, error) {
 		if err := c.sleep(ctx, c.opts.PollInterval); err != nil {
 			return nil, wrap(fmt.Sprintf("wait for sandbox %q configuration", name), err)
 		}
-		sb, err = c.sdk.Sandboxes().Get(ctx, c.opts.Workspace, name)
+		err := c.retryWait(ctx, func(ctx context.Context) (err error) {
+			sb, err = c.getForWait(ctx, name)
+			return err
+		})
 		if err != nil {
 			return nil, wrap(fmt.Sprintf("wait for sandbox %q configuration", name), err)
 		}
@@ -534,7 +577,11 @@ func (c *client) WaitStopped(ctx context.Context, name string) (*Sandbox, error)
 	}
 	ctx, cancel := c.wait(ctx)
 	defer cancel()
-	sb, err := c.sdk.Sandboxes().WaitStopped(ctx, c.opts.Workspace, name, v1.WaitOptions{PollInterval: c.opts.PollInterval})
+	var sb *Sandbox
+	err := c.retryWait(ctx, func(ctx context.Context) (err error) {
+		sb, err = c.sdk.Sandboxes().WaitStopped(ctx, c.opts.Workspace, name, v1.WaitOptions{PollInterval: c.opts.PollInterval})
+		return err
+	})
 	return sb, wrap(fmt.Sprintf("wait for sandbox %q to stop", name), err)
 }
 
@@ -545,12 +592,20 @@ func (c *client) WaitDeleted(ctx context.Context, name string) error {
 	ctx, cancel := c.wait(ctx)
 	defer cancel()
 	for {
-		_, err := c.sdk.Sandboxes().Get(ctx, c.opts.Workspace, name)
-		if IsNotFound(err) {
-			return nil
-		}
+		gone := false
+		err := c.retryWait(ctx, func(ctx context.Context) error {
+			_, err := c.getForWait(ctx, name)
+			if IsNotFound(err) {
+				gone = true
+				return nil
+			}
+			return err
+		})
 		if err != nil {
 			return wrap(fmt.Sprintf("wait for sandbox %q deletion", name), err)
+		}
+		if gone {
+			return nil
 		}
 		if err := c.sleep(ctx, c.opts.PollInterval); err != nil {
 			return wrap(fmt.Sprintf("wait for sandbox %q deletion", name), err)

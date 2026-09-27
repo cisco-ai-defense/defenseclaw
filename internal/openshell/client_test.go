@@ -229,6 +229,111 @@ func TestWaitReadyFailsWhenSandboxErrorsDuringAdmission(t *testing.T) {
 	}
 }
 
+// TestWaitsRideOutGatewayRestarts covers a gateway that restarts during a
+// wait (a configuration change, doctor --fix, Restart=on-failure): polls
+// that find it unreachable, or time out, are retried until the wait's
+// deadline, while other failures still end the wait at once.
+func TestWaitsRideOutGatewayRestarts(t *testing.T) {
+	unavailable := func() error { return &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"} }
+	newFast := func(t *testing.T) (*openshelltest.Fake, openshell.Client) {
+		f := openshelltest.New()
+		c := f.Client(openshell.ClientOptions{PollInterval: time.Millisecond})
+		t.Cleanup(func() { _ = c.Close() })
+		return f, c
+	}
+	ctx := context.Background()
+
+	t.Run("ready", func(t *testing.T) {
+		f, c := newFast(t)
+		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		f.FailNext(openshelltest.MethodWaitReady, unavailable())
+		f.FailNext(openshelltest.MethodWaitReady, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "poll timed out"})
+		if sb, err := c.WaitReady(ctx, "box"); err != nil || sb.Status.Phase != openshell.PhaseReady {
+			t.Fatalf("WaitReady = %v, %v", sb, err)
+		}
+		if n := f.Calls(openshelltest.MethodWaitReady); n != 3 {
+			t.Fatalf("WaitReady polled %d times", n)
+		}
+	})
+	t.Run("configuration pending", func(t *testing.T) {
+		f, c := newFast(t)
+		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		f.SetAdmission(ws, "box", types.ConfigurationAdmissionPending, "")
+		calls := 0
+		f.Intercept(func(method string) error {
+			if method != openshelltest.MethodGetSandbox {
+				return nil
+			}
+			calls++
+			if calls == 1 {
+				return unavailable()
+			}
+			_ = f.SetPhase(ws, "box", openshell.PhaseError)
+			return nil
+		})
+		// The poll after the outage sees the sandbox fail.
+		if _, err := c.WaitReady(ctx, "box"); err == nil || !strings.Contains(err.Error(), "phase Error") {
+			t.Fatalf("WaitReady = %v", err)
+		}
+	})
+	t.Run("stopped", func(t *testing.T) {
+		f, c := newFast(t)
+		createReady(t, c, "box", nil)
+		if _, err := c.StopSandbox(ctx, "box"); err != nil {
+			t.Fatal(err)
+		}
+		f.FailNext(openshelltest.MethodWaitStopped, unavailable())
+		if _, err := c.WaitStopped(ctx, "box"); err != nil {
+			t.Fatalf("WaitStopped = %v", err)
+		}
+	})
+	t.Run("deleted", func(t *testing.T) {
+		f, c := newFast(t)
+		createReady(t, c, "box", nil)
+		if _, err := c.DeleteSandbox(ctx, "box"); err != nil {
+			t.Fatal(err)
+		}
+		f.FailNext(openshelltest.MethodGetSandbox, unavailable())
+		f.FailNext(openshelltest.MethodGetSandbox, unavailable())
+		if err := c.WaitDeleted(ctx, "box"); err != nil {
+			t.Fatalf("WaitDeleted = %v", err)
+		}
+		if n := f.Calls(openshelltest.MethodGetSandbox); n != 3 {
+			t.Fatalf("WaitDeleted polled %d times", n)
+		}
+	})
+	t.Run("other failures end the wait", func(t *testing.T) {
+		f, c := newFast(t)
+		createReady(t, c, "box", nil)
+		f.FailNext(openshelltest.MethodGetSandbox, &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "denied"})
+		if err := c.WaitDeleted(ctx, "box"); !openshell.IsPermissionDenied(err) || f.Calls(openshelltest.MethodGetSandbox) != 1 {
+			t.Fatalf("WaitDeleted = %v after %d polls", err, f.Calls(openshelltest.MethodGetSandbox))
+		}
+	})
+	t.Run("outage outlasts the wait", func(t *testing.T) {
+		f, c := newFast(t)
+		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		f.Intercept(func(method string) error {
+			if method == openshelltest.MethodWaitReady {
+				return unavailable()
+			}
+			return nil
+		})
+		wctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		_, err := c.WaitReady(wctx, "box")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "connection refused") {
+			t.Fatalf("WaitReady = %v", err)
+		}
+	})
+}
+
 func TestExec(t *testing.T) {
 	f, c := newClient(t)
 	createReady(t, c, "box", nil)
