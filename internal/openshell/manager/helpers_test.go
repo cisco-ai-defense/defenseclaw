@@ -559,6 +559,7 @@ type harnessEnv struct {
 	persist  *fakePersister
 	watch    *fakeWatch
 	dns      *fakeDNS
+	guard    *fakeGuard
 	forgot   []string
 	m        *Manager
 	cancel   context.CancelFunc
@@ -619,6 +620,7 @@ func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	e.persist = &fakePersister{}
 	e.watch = newFakeWatch()
 	e.dns = newFakeDNS()
+	e.guard = newFakeGuard()
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1"}
 	e.m = e.newManager()
 	return e
@@ -652,6 +654,7 @@ func (e *harnessEnv) newManager() *Manager {
 		Persist: e.persist, ForgetBinding: func(id string) { e.forgot = append(e.forgot, id) },
 		IngressPort: testIngressPort, EgressPort: testEgressPort, APIPort: 18970,
 		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
+		Guard: e.guard.run, GuardGitlinks: func(context.Context, string) ([]string, error) { return nil, nil },
 		DefenseClawVersion: "1.2.3", SettleDelay: -1, HookSilence: 10 * time.Minute,
 		Logf: func(format string, args ...any) { e.t.Logf("[manager] "+format, args...) },
 	})

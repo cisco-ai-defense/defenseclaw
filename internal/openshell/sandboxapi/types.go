@@ -195,6 +195,24 @@ type Sandbox struct {
 	// Orphaned marks an OpenShell sandbox with DefenseClaw labels but no
 	// DefenseClaw binding; its hooks cannot authenticate.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// NestedRepos are the git repositories the nested-repository guard
+	// found in a mounted project during the current session.
+	NestedRepos []NestedRepo `json:"nested_repos,omitempty"`
+}
+
+// NestedRepo is one repository that appeared inside a mounted project while
+// the sandbox ran: a .git entry (quarantined by renaming it) or a gitlink
+// added to the project's index (reported only).
+type NestedRepo struct {
+	// Kind is "repository" or "gitlink".
+	Kind string `json:"kind"`
+	// Path is the project-relative .git entry or gitlink.
+	Path string `json:"path"`
+	// Quarantined is the project-relative name the .git entry was renamed
+	// to; empty for gitlinks and failed quarantines.
+	Quarantined string    `json:"quarantined,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	At          time.Time `json:"at"`
 }
 
 // Launch carries the harness launch inputs (harness.LaunchOptions).
@@ -504,6 +522,10 @@ const (
 	// ActivityDropped tells a slow subscriber that events were skipped.
 	ActivityDropped = "dropped"
 )
+
+// ReasonNestedRepo is the Reason of the finding events the nested-repository
+// guard publishes.
+const ReasonNestedRepo = "nested_repo"
 
 // Activity sources for egress events.
 const (

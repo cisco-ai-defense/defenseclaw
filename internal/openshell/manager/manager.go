@@ -146,6 +146,12 @@ type Options struct {
 	// OnGateway is told about every gateway connection attempt: nil once
 	// connected, the error when the gateway is unavailable.
 	OnGateway func(err error)
+	// Guard runs the nested-repository guard of a mounted project while
+	// its sandbox is ready (default: package nestguard). GuardGitlinks
+	// lists a project's index gitlinks (default: the host git through
+	// gitsafe).
+	Guard         GuardFunc
+	GuardGitlinks func(ctx context.Context, root string) ([]string, error)
 }
 
 // Manager implements the gateway's SandboxController.
@@ -215,6 +221,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.Watch == nil {
 		opts.Watch = StreamWatch
+	}
+	if opts.Guard == nil {
+		opts.Guard = runNestGuard
 	}
 	if opts.SettleDelay == 0 {
 		opts.SettleDelay = DefaultSettleDelay

@@ -399,6 +399,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if res := templateResources(eff.Resources); res != nil {
 		tmpl.Resources = res
 	}
+	// The guard's baseline is what the project holds before the sandbox
+	// first runs.
+	m.takeGuardBaseline(ctx, &rec)
 	m.mu.Lock()
 	b.rec = rec
 	b.eff, b.decider = eff, egressDec

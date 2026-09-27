@@ -119,6 +119,10 @@ type record struct {
 	Workspace  *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
 	Violations []sandboxapi.Violation       `json:"violations,omitempty"`
 	Warnings   []string                     `json:"warnings,omitempty"`
+
+	// Guard is the nested-repository guard state of the current session
+	// (mount mode).
+	Guard *guardRecord `json:"guard,omitempty"`
 }
 
 type recordStore struct {

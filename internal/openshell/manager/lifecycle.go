@@ -282,6 +282,18 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.mu.Lock()
 	b.tamperStop = false
 	m.mu.Unlock()
+	if guarded(rec) {
+		// A new session: the guard starts over from what the project
+		// holds now, before the sandbox runs again.
+		m.takeGuardBaseline(ctx, &rec)
+		m.mu.Lock()
+		b.rec.Guard = rec.Guard
+		saved := b.rec
+		m.mu.Unlock()
+		if err := m.records.save(&saved); err != nil {
+			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
+		}
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)

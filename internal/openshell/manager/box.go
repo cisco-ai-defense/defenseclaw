@@ -58,6 +58,9 @@ type box struct {
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
+	// guardCancel stops the nested-repository guard (see guard.go).
+	guardCancel context.CancelFunc
+	guardDone   chan struct{}
 
 	hooks       hookStats
 	activeAt    time.Time
@@ -178,6 +181,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
 		Message: lifecycleMessage(rec.Name, phase),
 	})
+	m.syncGuard(b, phase)
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {
@@ -242,8 +246,8 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Workspace: r.Workspace, Violations: r.Violations, Warnings: r.Warnings,
-		Orphaned: b.orphaned,
-		Launch:   sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
+		Launch: sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
 	}
 	if spec, ok := harness.Get(r.Harness); ok {
 		v.HarnessName = spec.DisplayName
