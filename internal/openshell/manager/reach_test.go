@@ -143,6 +143,30 @@ func TestHookReachRefusedConnections(t *testing.T) {
 	}
 }
 
+// A connection OpenShell closes because the sandbox policy changed while it
+// was open (every reload does that, the first settings poll and a triaged
+// approval included) is no refusal: it raised a HIGH "hooks are not
+// reaching the daemon" alarm in a live Codex session whose OTLP export was
+// cut by a policy reload. It still counts as an attempt, so hooks that
+// never authenticate afterwards are flagged after the grace period.
+func TestHookReachIgnoresPolicyReloadCuts(t *testing.T) {
+	r := newReachEnv(t)
+	// The line OpenShell 0.1.1 printed in that session.
+	r.ocsf("NET:OPEN [MED] DENIED host.openshell.internal:" + strconv.Itoa(testIngressPort) +
+		" [reason:L7 tunnel closed before inspection because policy changed: policy generation is stale [captured_generation:2 current_generation:3]]")
+	if h := r.hooks(); h.Unreachable || h.IngressRefused != 0 {
+		t.Fatalf("a policy reload cut counted as a refusal: %+v", h)
+	}
+	if n := len(r.feed(sandboxapi.ReasonHooksUnreachable)); n != 0 {
+		t.Fatalf("warnings = %d", n)
+	}
+	r.advance(hookAttemptGrace + time.Second)
+	r.m.checkHookReach(context.Background())
+	if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "not one request authenticated") {
+		t.Fatalf("hooks that never authenticated after the cut = %+v", h)
+	}
+}
+
 // A hook connection OpenShell let through that never became an
 // authenticated request is flagged once the grace period ends.
 func TestHookReachUnansweredConnections(t *testing.T) {

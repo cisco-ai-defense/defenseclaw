@@ -269,11 +269,22 @@ const openshellHostAlias = "host.openshell.internal"
 func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
-		m.observeHookConnection(ctx, b, r.Denied(), at)
+		m.observeHookConnection(ctx, b, r.Denied() && !policyReloadCut(r), at)
 	case m.opts.EgressPort, 0:
 	default:
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
 	}
+}
+
+// policyReloadCut reports a connection OpenShell closed because the
+// sandbox policy changed while it was open ("L7 tunnel closed before
+// inspection because policy changed: policy generation is stale"): every
+// policy reload closes the open connections, those the policy still allows
+// included, so it is no refusal. The hooks retry once, and a session whose
+// requests then never authenticate is still flagged after hookAttemptGrace.
+func policyReloadCut(r ocsf.Record) bool {
+	reason := strings.ToLower(r.Reason)
+	return strings.Contains(reason, "policy changed") || strings.Contains(reason, "policy generation is stale")
 }
 
 // markWork records network activity of the sandbox's workload: it keeps
