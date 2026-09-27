@@ -142,9 +142,12 @@ These are the settings each pack controls. The
     link-local and metadata addresses, a public IP address under `open`
     (until it is unblocked), a port off the port list, and a name that
     resolves to this machine or doesn't resolve. A request for a host that an
-    allow entry or an unblock already covers is approved.
+    allow entry already covers is approved, and so is one an unblock covers,
+    except under `strict`.
   - Requests that reach into your machine (a localhost port) or your private
-    network always ask, and so do requests OpenShell's policy advisor flags.
+    network ask, and so do requests OpenShell's policy advisor flags. With
+    `openshell.admin.allow_unblock: false`, a private-network request is
+    rejected instead.
   - For the rest, `auto` approves. `triage` approves on an open network and
     asks otherwise. `manual` asks.
   - A stricter profile never runs looser approvals: `balanced` triages at

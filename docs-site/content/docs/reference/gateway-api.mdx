@@ -844,8 +844,9 @@ to the web. The harness launcher and the sandbox's shells set `HTTPS_PROXY`
 and `HTTP_PROXY` to `http://host.openshell.internal:<egress_port>`, with a
 per-sandbox username and password in the URL. `NO_PROXY` lists
 `host.openshell.internal` and the model provider hosts, so hook traffic and
-LLM traffic do not go through the proxy. A sandbox under the `strict` profile
-gets no proxy credential: it has no web egress.
+LLM traffic do not go through the proxy. The proxy refuses a sandbox whose
+profile is `strict`, even one raised to `strict` after it was created: such a
+sandbox has no web egress.
 
 **Authentication.** Clients send the credential as
 `Proxy-Authorization: Basic`. A request without it, or with a wrong one, gets
