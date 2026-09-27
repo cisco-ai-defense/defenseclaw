@@ -71,6 +71,26 @@ func newLocalAddrs(list func() ([]net.Addr, error)) *localAddrs {
 // hostAddrs is the process-wide view of this machine's addresses.
 var hostAddrs = newLocalAddrs(net.InterfaceAddrs)
 
+// OverrideInterfaceAddrsForTest replaces how this process reads its
+// interface addresses (net.InterfaceAddrs), which every decider's guard and
+// the proxy's dials consult, and returns a function that restores the
+// previous source. It exists for the tests of packages that build deciders
+// (packs, triage, the sandbox manager), whose verdicts on ranges and
+// literals would otherwise depend on the addresses of the machine they run
+// on. Production code must never call it.
+func OverrideInterfaceAddrsForTest(list func() ([]net.Addr, error)) (restore func()) {
+	swap := func(next func() ([]net.Addr, error)) func() ([]net.Addr, error) {
+		hostAddrs.mu.Lock()
+		defer hostAddrs.mu.Unlock()
+		prev := hostAddrs.list
+		hostAddrs.list, hostAddrs.loaded = next, time.Time{}
+		hostAddrs.addrs, hostAddrs.subnets = nil, nil
+		return prev
+	}
+	prev := swap(list)
+	return func() { swap(prev) }
+}
+
 // lookup reports whether addr is assigned to one of this machine's
 // interfaces (own), and otherwise the public on-link subnet of one of them
 // that contains it, if any. When the interface list cannot be read the
@@ -95,6 +115,45 @@ func (l *localAddrs) lookup(addr netip.Addr) (own bool, subnet netip.Prefix) {
 		own, subnet = l.findLocked(addr)
 	}
 	return own, subnet
+}
+
+// overlap is lookup for a range: whether prefix holds one of this
+// machine's own addresses (own), and otherwise the first public on-link
+// subnet of its interfaces that prefix overlaps, if any. The cached list is
+// refreshed as lookup refreshes it.
+func (l *localAddrs) overlap(prefix netip.Prefix) (own bool, subnet netip.Prefix) {
+	if l == nil || !prefix.IsValid() {
+		return false, netip.Prefix{}
+	}
+	prefix = prefix.Masked()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	age := now.Sub(l.loaded)
+	own, subnet = l.overlapLocked(prefix)
+	hit := own || subnet.IsValid()
+	if l.loaded.IsZero() || age >= localAddrsMaxAge || (!hit && age >= localAddrsMissRefresh) {
+		l.loaded = now
+		if list, err := l.list(); err == nil {
+			l.addrs, l.subnets = interfaceAddrSet(list)
+		}
+		own, subnet = l.overlapLocked(prefix)
+	}
+	return own, subnet
+}
+
+func (l *localAddrs) overlapLocked(prefix netip.Prefix) (bool, netip.Prefix) {
+	for addr := range l.addrs {
+		if prefix.Contains(addr) {
+			return true, netip.Prefix{}
+		}
+	}
+	for _, p := range l.subnets {
+		if p.Overlaps(prefix) {
+			return false, p
+		}
+	}
+	return false, netip.Prefix{}
 }
 
 func (l *localAddrs) findLocked(addr netip.Addr) (bool, netip.Prefix) {

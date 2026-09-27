@@ -251,6 +251,22 @@ func TestClassifyAllowedIPs(t *testing.T) {
 		{"10.0.0.0/8", noUnblock, Reject, ReasonAdmin},
 		{"93.184.216.0/24", open, Approve, ReasonAutoMode},
 		{"93.184.216.0/24", noUnblock, Approve, ReasonAutoMode},
+		// This machine's own addresses (see hostaddrs_test.go) are never
+		// opened, even in a public range; the rest of its public subnets
+		// is the user's network. With allowed_ips set OpenShell skips its
+		// own private-address check, so a name that rebinds to one of them
+		// later would reach the host.
+		{testOwnV4, open, Reject, ReasonResolvesToHost},
+		{"::ffff:" + testOwnV4, open, Reject, ReasonResolvesToHost},
+		{"185.199.0.0/16", open, Reject, ReasonResolvesToHost},
+		{"184.0.0.0/7", open, Reject, ReasonResolvesToHost},
+		{testOwnV6, open, Reject, ReasonResolvesToHost},
+		{"2a00:1450::/32", open, Reject, ReasonResolvesToHost},
+		{"185.199.9.200", open, Ask, ReasonPrivateNetwork},
+		{"185.199.9.128/25", open, Ask, ReasonPrivateNetwork},
+		{"2a00:1450:9::1", open, Ask, ReasonPrivateNetwork},
+		{"185.199.9.200", noUnblock, Reject, ReasonAdmin},
+		{"185.199.10.0/24", open, Approve, ReasonAutoMode},
 	} {
 		t.Run(tc.entry, func(t *testing.T) {
 			p := proposal("my-cdn.attacker.example", 443)

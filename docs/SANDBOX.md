@@ -183,11 +183,29 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
 - The batcher repeats the whole check, with fresh DNS answers, right before
   it applies an approval. Every reconcile, about every 5 minutes, removes
   approved rules whose names now resolve to this machine.
+- A proposal's `allowed_ips` are judged as whole ranges against the same
+  guard (`packs.Effective.AllowedIPReach`), because with `allowed_ips` set
+  OpenShell skips its own private-address check for the rule and the name
+  may later resolve to any address in them. A range that holds one of this
+  machine's own interface addresses is rejected, however public. A range on
+  a public subnet this machine sits on asks, like a private range.
 - OpenShell's own SSRF check still applies to approved rules without
-  `allowed_ips` (loopback, link-local and internal ranges). A name that
-  rebinds between two checks can reach this machine's own public addresses
-  until the next reconcile. The proxy has no such window, because it checks
-  every DNS answer at dial time.
+  `allowed_ips` (loopback, link-local and internal ranges), but it does not
+  know this machine's own public addresses. DefenseClaw checks the name at
+  triage, right before it applies the approval, and on every reconcile, one
+  lookup each time. A name whose DNS answers alternate between a public
+  address and one of this machine's public addresses can pass all of these
+  checks. The approved rule then reaches the services this machine serves on
+  that public address, for as long as the rule exists. The proxy has no such
+  gap, because it checks every DNS answer at dial time. This matters only on
+  a machine with a public address on an interface (a VPS or bare-metal host,
+  or a global IPv6 address). There, bind host services to loopback, or keep
+  agents from adding direct rules on their own: set
+  `openshell.approvals.agent_proposals: false`, or use the `balanced`
+  profile (it approves on its own only the curated allowlist) or `strict`
+  (it approves nothing on its own). Approved names are not pinned to the
+  addresses they resolved to, because OpenShell would then refuse a name as
+  soon as its CDN moved it.
 
 ## Hook ingress
 

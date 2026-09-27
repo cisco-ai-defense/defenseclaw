@@ -284,3 +284,58 @@ func TestSelfConnectedKernel(t *testing.T) {
 		t.Errorf("connection to own address %s has local end %s", target, conn.LocalAddr())
 	}
 }
+
+// TestLocalReach pins how a directly opened range (an OpenShell rule's
+// allowed_ips) relates to this machine: one that holds an own address
+// reaches it, one that overlaps a public on-link subnet reaches its local
+// network, and an IPv4-mapped range is judged as the IPv4 range.
+func TestLocalReach(t *testing.T) {
+	d := mustDecider(t, DeciderOptions{})
+	d.local = fixedLocalAddrs(ownV4, ownV6)
+	for _, tc := range []struct {
+		prefix string
+		own    bool
+		subnet string
+	}{
+		{ownV4 + "/32", true, ""},
+		{"9.0.0.0/8", true, ""},
+		{"::ffff:" + ownV4 + "/128", true, ""},
+		{ownV6 + "/128", true, ""},
+		{"2620::/16", true, ""},
+		{"9.9.200.0/24", false, "9.9.0.0/16"},
+		{"9.9.0.1/32", false, "9.9.0.0/16"},
+		{"2620:fe::1/128", false, "2620:fe::/64"},
+		{"2620:fe::1:0/112", false, "2620:fe::/64"},
+		{"9.10.0.0/16", false, ""},
+		{"2620:fe:0:1::/64", false, ""},
+		{"8.8.8.8/32", false, ""},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			own, subnet := d.LocalReach(netip.MustParsePrefix(tc.prefix))
+			got := ""
+			if subnet.IsValid() {
+				got = subnet.String()
+			}
+			if own != tc.own || got != tc.subnet {
+				t.Fatalf("LocalReach(%s) = %v %q, want %v %q", tc.prefix, own, got, tc.own, tc.subnet)
+			}
+		})
+	}
+	if own, subnet := d.LocalReach(netip.Prefix{}); own || subnet.IsValid() {
+		t.Fatal("an invalid prefix reached this machine")
+	}
+}
+
+// TestOverrideInterfaceAddrsForTest pins the test hook other packages use
+// to fix this machine's addresses, and that it restores the real source.
+func TestOverrideInterfaceAddrsForTest(t *testing.T) {
+	restore := OverrideInterfaceAddrsForTest(func() ([]net.Addr, error) { return []net.Addr{ipNet(ownV4)}, nil })
+	d := mustDecider(t, DeciderOptions{})
+	if own, _ := d.LocalReach(netip.MustParsePrefix(ownV4 + "/32")); !own {
+		t.Fatal("the overridden address is not this machine's")
+	}
+	restore()
+	if own, _ := d.LocalReach(netip.MustParsePrefix(ownV4 + "/32")); own {
+		t.Fatal("the override outlived its restore")
+	}
+}

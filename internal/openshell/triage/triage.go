@@ -419,7 +419,7 @@ func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 	}
 	var ipAsk *Decision
 	for _, entry := range p.AllowedIPs {
-		d := judgeAllowedIP(entry)
+		d := judgeAllowedIP(pol.Effective, entry)
 		switch d.Verdict {
 		case Reject:
 			d.Host, d.Port = firstEndpoint(p)
@@ -699,18 +699,24 @@ func resolvedWhat(chk egress.Decision) string {
 	return reason
 }
 
-// judgeAllowedIP classifies one allowed_ips entry. A non-empty allowed_ips
-// replaces OpenShell's own private-address check for the rule, so a range
-// that overlaps the user's network asks (Message is the entry) and one
-// that overlaps what DefenseClaw never opens rejects.
-func judgeAllowedIP(entry string) Decision {
+// judgeAllowedIP classifies one allowed_ips entry as the proxy's guard
+// would (packs.Effective.AllowedIPReach). A non-empty allowed_ips replaces
+// OpenShell's own private-address check for the rule, and its name may
+// resolve to any address in the range later, so a range that overlaps the
+// user's network (a private range, or a public subnet this machine is on)
+// asks (Message is the entry), and one that holds what DefenseClaw never
+// opens (this machine's own addresses among them) rejects.
+func judgeAllowedIP(eff *packs.Effective, entry string) Decision {
 	d := Decision{Kind: KindNetworkRule, Risky: true}
-	_, class, err := packs.ClassifyAllowedIP(entry)
+	_, class, err := eff.AllowedIPReach(entry)
 	switch {
 	case err != nil:
 		return reject(d, ReasonInvalid, "the proposal lists an invalid allowed IP "+strconv.Quote(truncate(strings.TrimSpace(entry), 64)))
 	case class == packs.AllowedIPNever:
 		return reject(d, ReasonPolicy, "the proposal would open "+strings.TrimSpace(entry)+", which DefenseClaw never opens to a sandbox")
+	case class == packs.AllowedIPHost:
+		return reject(d, ReasonResolvesToHost, "the proposal would open "+strings.TrimSpace(entry)+
+			", which holds an address of this machine; sandboxes reach services on this machine only through a host port")
 	case class == packs.AllowedIPPrivate:
 		return ask(d, ReasonPrivateNetwork, strings.TrimSpace(entry))
 	}

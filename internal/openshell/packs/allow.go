@@ -290,7 +290,7 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 	}
 	privateIPs := ""
 	for _, entry := range action.AllowedIPs {
-		_, class, err := ClassifyAllowedIP(entry)
+		_, class, err := e.AllowedIPReach(entry)
 		if err != nil {
 			return err
 		}
@@ -300,6 +300,12 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 				Key: key, Source: SourceUser, Attempted: entry, Constraint: "defenseclaw",
 				Message: "DefenseClaw never opens loopback, link-local, cloud metadata, multicast or reserved addresses to a sandbox",
 				Detail:  "allowed_ips entry " + entry + " includes some",
+			}
+		case AllowedIPHost:
+			return &Violation{
+				Key: key, Source: SourceUser, Attempted: entry, Constraint: "defenseclaw",
+				Message: "DefenseClaw never opens this machine's own addresses to a sandbox",
+				Detail:  "allowed_ips entry " + entry + " includes an address of this machine; list the exact addresses the sandbox needs",
 			}
 		case AllowedIPPrivate:
 			if privateIPs == "" {
@@ -384,7 +390,38 @@ const (
 	// directly: loopback, link-local, cloud metadata, multicast, reserved
 	// and IPv4-translation ranges.
 	AllowedIPNever
+	// AllowedIPHost ranges hold one of this machine's own interface
+	// addresses (Effective.AllowedIPReach): a sandbox never reaches the
+	// host's services through them.
+	AllowedIPHost
 )
+
+// AllowedIPReach classifies an allowed_ips entry as the egress proxy's
+// guard would: the fixed ranges first (ClassifyAllowedIP), then this
+// machine's own interface addresses, which a range must not hold
+// (AllowedIPHost), and the public subnets they sit on, whose other hosts are
+// this machine's local network (AllowedIPPrivate). A non-empty allowed_ips
+// replaces OpenShell's own connect-time private-address check for its rule,
+// and a name the rule allows may resolve to any address in it later, so the
+// range as a whole is judged, not the addresses the name resolves to now.
+func (e *Effective) AllowedIPReach(entry string) (netip.Prefix, AllowedIPClass, error) {
+	prefix, class, err := ClassifyAllowedIP(entry)
+	if err != nil || class == AllowedIPNever {
+		return prefix, class, err
+	}
+	d, err := e.policyDecider()
+	if err != nil {
+		return prefix, AllowedIPNever, err
+	}
+	own, subnet := d.LocalReach(prefix)
+	switch {
+	case own:
+		return prefix, AllowedIPHost, nil
+	case subnet.IsValid():
+		return prefix, AllowedIPPrivate, nil
+	}
+	return prefix, class, nil
+}
 
 // ClassifyAllowedIP parses an allowed_ips entry (an address or a CIDR
 // range) and classifies it by the widest reach it grants: a range that

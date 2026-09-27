@@ -328,6 +328,25 @@ func (d *Decider) Mode() Mode { return d.mode }
 // Ports returns the destination port allowlist.
 func (d *Decider) Ports() []int { return slices.Clone(d.ports) }
 
+// LocalReach reports what of this machine an address range reaches, as
+// the guard sees its interfaces: own when the range holds one of this
+// machine's own addresses (CategoryHostInternal for a single address), and
+// otherwise the public on-link subnet of one of its interfaces the range
+// overlaps (CategoryPrivateNetwork: other hosts there are its local
+// network). It is for ranges an OpenShell rule opens directly
+// (allowed_ips), which bypass the proxy's dial-time guard; the fixed
+// private, loopback and reserved ranges are the caller's to check. An
+// IPv4-mapped IPv6 range is judged as the IPv4 range it maps.
+func (d *Decider) LocalReach(prefix netip.Prefix) (own bool, subnet netip.Prefix) {
+	if !prefix.IsValid() {
+		return false, netip.Prefix{}
+	}
+	if a := prefix.Addr(); a.Is4In6() && prefix.Bits() >= 96 {
+		prefix = netip.PrefixFrom(a.Unmap(), prefix.Bits()-96)
+	}
+	return d.local.overlap(prefix)
+}
+
 // UnblocksAllowed reports whether unblock decisions can lift refusals
 // (DeciderOptions.NoUnblock unset).
 func (d *Decider) UnblocksAllowed() bool { return !d.noUnblock }

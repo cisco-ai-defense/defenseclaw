@@ -154,6 +154,20 @@ func TestAllowActions(t *testing.T) {
 			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"64.0.0.0/2"}}, outcome{constraint: "defenseclaw"}},
 		{"approve malformed allowed_ips", nil, Flags{},
 			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"10.0.0.0/33"}}, invalid},
+		// allowed_ips are held to the proxy guard's view of this machine
+		// (see hostaddrs_test.go): its own addresses are never opened, the
+		// rest of its public subnets are its local network.
+		{"approve allowed_ips of this machine", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{testOwnV4}}, outcome{constraint: "defenseclaw"}},
+		{"approve allowed_ips holding this machine", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"185.199.0.0/16"}}, outcome{constraint: "defenseclaw"}},
+		{"approve allowed_ips holding this machine's IPv6 address", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"2a00:1450::/32"}}, outcome{constraint: "defenseclaw"}},
+		{"approve allowed_ips on this machine's subnet", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"185.199.9.128/25"}}, allowed},
+		{"approve allowed_ips on this machine's subnet without unblock", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"2a00:1450:9::1"}},
+			outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve the metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "169.254.169.254", Port: 80}, outcome{constraint: "defenseclaw"}},
 		{"approve a mapped metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "[::ffff:169.254.169.254]", Port: 80}, outcome{constraint: "defenseclaw"}},
 		{"approve the IPv6 metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "fd00:ec2::254", Port: 80}, outcome{constraint: "defenseclaw"}},
