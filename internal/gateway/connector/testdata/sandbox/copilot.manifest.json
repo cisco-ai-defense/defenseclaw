@@ -124,7 +124,7 @@
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "sha256": "7de2f9d0276f081f8f0372f3dc74702d43be7d1265b2d703e73b2bd9b438daf8"
+      "sha256": "8a40f5f484c2aac9d7483fe99f4720443c67277d9b513635e66ec59d678ca163"
     }
   }
 }
