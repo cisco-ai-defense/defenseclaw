@@ -13,9 +13,9 @@ keywords:
 
 `defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
 agents in NVIDIA OpenShell 0.1 sandboxes on Linux and macOS. This page lists
-every `sandbox` command and flag. For the walkthrough, see the
-[Sandbox guide](/docs/setup/sandbox). Packs and organization limits are covered
-in [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
+every `sandbox` command and flag; see also [Sandbox](/docs/setup/sandbox).
+Packs and organization limits are covered in
+[Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
 the `openshell:` keys in
 [Configuration](/docs/reference/configuration#openshell-sandbox-settings).
 
@@ -29,10 +29,12 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   command line against the same commands and flags, then replaces itself with
   `defenseclaw-gateway sandbox …` and passes your arguments on exactly as
   typed. `legacy-cleanup` is the only command the Python CLI runs itself.
-- **Linux and macOS only.** On Windows every command stops with exit
-  status 3 before doing anything. `setup`, `run`, `image build`, and `enable`
-  also stop with status 3 under WSL2, in a `managed_enterprise` install, and
-  when run as root: sandboxes run as your own user.
+- **Linux and macOS only.** On Windows every command except `legacy-cleanup`
+  stops with exit status 3 before doing anything; `legacy-cleanup` stops with
+  status 1. `setup`, `run`, `image build`, and `enable` also stop with status
+  3 under WSL2, in a `managed_enterprise` install, and when run as root:
+  sandboxes run as your own user. `teardown` also stops with status 3 in a
+  `managed_enterprise` install.
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
@@ -48,14 +50,20 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   and Devin CLI are not verified end to end yet: their images build, but they
   never pass the hook check, so no sandbox runs them. The
   [capability matrix](/docs/capability-matrix) says why for each harness.
-- **Sandbox names.** A name is lowercase letters, digits, and `-`, up to 63
-  characters. Without `--name`, `run` picks `dc-<harness>-<folder>-<random>`,
-  for example `dc-claude-myapp-7f3a`. `sandbox list` shows the names.
+- **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
+  19 characters: OpenShell 0.1.1 refuses to create a sandbox with a longer
+  name. Without `--name`, `run` picks `<folder>-<random>`, the folder name cut
+  to fit, for example `myapp-7f3a`. The harness is a label on the sandbox, not
+  part of its name, and `sandbox list` shows both.
 - **Output.** Commands with `-o, --output` print `text` (the default) or
   `json`.
-- **Exit status.** `0` on success and `1` on an error. `run`, `connect`, and
-  `exec` return the exit status of the harness or command they ran. An
-  interrupted command returns `130`, and an unsupported platform returns `3`.
+- **Exit status.** `0` on success and `1` on an error. `run` and `connect`
+  return the exit status of the harness, and `exec` that of its command
+  (`connect --shell` exits `0` when the shell ends). When the harness exits
+  `0` but not one of the session's hooks reached DefenseClaw, so that every
+  tool call was blocked, `run` and `connect` exit `69`. `logs` does the same when it reports a finished detached run none of
+  whose hooks reached DefenseClaw. An interrupted command returns `130`, and
+  an unsupported platform or setup returns `3`.
 
 | Command | What it does |
 | --- | --- |
@@ -115,11 +123,14 @@ defenseclaw sandbox setup --non-interactive --skip-images
 
 Checks the platform, Landlock, Docker, the OpenShell service, CLI,
 registration and version, bind mounts, telemetry, ports, the DefenseClaw
-daemon, harness images, shell wrappers, and the organization policy. Each
-failed check names its fix. `--fix` applies the fixes it can make as your user,
-after asking. Doctor exits `1` when a check fails. With `--output json` it
-prints the result and exits `0`, so read the `ok` field instead.
-`defenseclaw doctor` shows the same checks in its Sandbox section.
+daemon, harness images, shell wrappers, and the organization policy. While the
+daemon serves sandboxes, it also checks that the hooks of running sandboxes
+reach DefenseClaw, and fails when a sandbox's hooks don't. Each failed check
+names its fix. `--fix` applies the fixes it can make as your user, after
+asking. Doctor exits `1` when a check fails. With `--output json` it prints the
+result and exits `0`, so read the `ok` field instead. When sandboxes are on
+(`openshell.enabled: true`), `defenseclaw doctor` shows the same checks in its
+Sandbox section; otherwise that section is one skipped row.
 
 ```bash
 defenseclaw sandbox doctor
@@ -209,7 +220,8 @@ defenseclaw sandbox image prune --dry-run
 
 Makes typing the harness command run it in a sandbox. It writes a marked block
 to your shell's rc file (`~/.bashrc`, `~/.zshrc` or `$ZDOTDIR/.zshrc`, or
-`~/.config/fish/config.fish`). The block defines a shell function named after
+`~/.config/fish/config.fish`, which is `$XDG_CONFIG_HOME/fish/config.fish`
+when `XDG_CONFIG_HOME` is set). The block defines a shell function named after
 the command that runs `sandbox run <harness>` with your arguments after `--`.
 The harness is also recorded in `openshell.wrappers`. New shells pick the
 block up. To skip the sandbox for one call, run the command with
@@ -247,10 +259,16 @@ defenseclaw sandbox disable claude
 
 ### `sandbox teardown`
 
-Deletes DefenseClaw's sandboxes, its OpenShell providers and provider
-profiles, and its harness images. It restores the OpenShell gateway config
-that setup changed, unless the file changed since. It also removes the shell
-wrappers and sets `openshell.enabled: false`. OpenShell itself stays
+Deletes DefenseClaw's sandboxes, its OpenShell providers, and its harness
+images. Provider profiles are shared by every DefenseClaw data directory on
+the OpenShell gateway, and teardown removes each DefenseClaw profile that no
+remaining provider uses: this data directory's ingress profiles, the legacy
+`defenseclaw-ingress` profile, and the shared model-credential and
+`--credential` profiles, including ones another DefenseClaw data directory
+imported. The daemons import them again when they need them. Another daemon's
+ingress profile is never removed. Teardown restores the OpenShell gateway
+config that setup changed, unless the file changed since. It also removes the
+shell wrappers and sets `openshell.enabled: false`. OpenShell itself stays
 installed. `defenseclaw uninstall` runs teardown for you. It works without a
 DefenseClaw config, so it can clean up a half-installed host.
 
@@ -283,9 +301,14 @@ When the harness exits, you get a summary line: tool calls and blocks, sites
 contacted and blocked, and files changed. Changes that can run code on your
 machine are called out. For a mounted folder you then keep the changes, undo
 them, or see the diff first (`openshell.workdir.on_exit` can decide for you).
+Otherwise, without a terminal or with `--yes`, a mounted folder keeps them.
 In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
-patch, or skip, which leaves them in the sandbox for `pull`. The sandbox is
-then stopped and kept for `connect`, unless you passed `--rm`.
+patch, or skip, which leaves them in the sandbox for `pull`. Without a
+terminal, or with `--yes`, copy mode skips: nothing is applied. The sandbox is
+then stopped and kept for `connect`, unless you passed `--rm`. In copy mode
+`--rm` is not honored while changes are left in the sandbox (you skipped,
+declined changes that can run code on your machine, or the pull or apply
+failed), so they aren't lost.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
@@ -360,13 +383,15 @@ A few rules the flags follow:
 ### `sandbox connect`
 
 Resumes a sandbox: it starts the sandbox if it is stopped, then attaches the
-harness to your terminal, or a shell with `--shell`. The session ends the
-same way as a `run` session. Needs a terminal.
+harness to your terminal, or a shell with `--shell`. A harness session ends
+the same way as a `run` session. A `--shell` session just returns when the
+shell exits, with status `0`: there is no end-of-session summary or review,
+the sandbox keeps running, and `--rm` doesn't apply. Needs a terminal.
 
 ```bash
-defenseclaw sandbox connect dc-claude-myapp-7f3a
+defenseclaw sandbox connect myapp-7f3a
 defenseclaw sandbox connect fix-tests --refresh -- --model sonnet
-defenseclaw sandbox connect dc-claude-myapp-7f3a --shell
+defenseclaw sandbox connect myapp-7f3a --shell
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags connect */}
@@ -386,7 +411,7 @@ proxy, as the harness. A terminal is allocated when yours is one. The command
 goes after `--`.
 
 ```bash
-defenseclaw sandbox exec dc-claude-myapp-7f3a -- npm test
+defenseclaw sandbox exec myapp-7f3a -- npm test
 defenseclaw sandbox exec fix-tests --no-tty -- git status --short
 ```
 
@@ -441,7 +466,7 @@ repositories, and warnings.
 
 ```bash
 defenseclaw sandbox status
-defenseclaw sandbox status dc-claude-myapp-7f3a --output json
+defenseclaw sandbox status myapp-7f3a --output json
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags status */}
@@ -455,7 +480,7 @@ defenseclaw sandbox status dc-claude-myapp-7f3a --output json
 Stops a sandbox. It is kept, so `start` or `connect` can resume it.
 
 ```bash
-defenseclaw sandbox stop dc-claude-myapp-7f3a
+defenseclaw sandbox stop myapp-7f3a
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags stop */}
@@ -468,7 +493,7 @@ Starts a stopped sandbox as a new session. A mounted project gets a fresh
 snapshot unless you pass `--no-snapshot`. Attach to it with `connect`.
 
 ```bash
-defenseclaw sandbox start dc-claude-myapp-7f3a
+defenseclaw sandbox start myapp-7f3a
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags start */}
@@ -484,7 +509,7 @@ and their undo snapshot unless you pass `--keep-snapshot`. Asks once per
 sandbox unless you pass `--yes`.
 
 ```bash
-defenseclaw sandbox delete dc-claude-myapp-7f3a
+defenseclaw sandbox delete myapp-7f3a
 defenseclaw sandbox delete fix-tests docs --yes
 ```
 
@@ -500,15 +525,17 @@ defenseclaw sandbox delete fix-tests docs --yes
 ### `sandbox activity`
 
 Shows the activity feed of every sandbox, or one: destinations reached (✓)
-and blocked (✗), large uploads, asks, blocked tool calls, and findings such
-as hooks that stopped reaching DefenseClaw. A blocked destination that can be
-unblocked shows the `unblock` command to run. `-f` keeps following the
-feed. The daemon keeps a bounded buffer of recent events. Each event has a
+and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
+calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
+changes (a sandbox being created, becoming ready, stopping, or being deleted),
+and workspace events such as an undo or a copy-mode upload. A blocked
+destination that can be unblocked shows the `unblock` command to run. `-f`
+keeps following the feed. The daemon keeps a bounded buffer of recent events. Each event has a
 sequence number, and `--since` starts after one.
 
 ```bash
 defenseclaw sandbox activity -f
-defenseclaw sandbox activity --sandbox dc-claude-myapp-7f3a --output json
+defenseclaw sandbox activity --sandbox myapp-7f3a --output json
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags activity */}
@@ -529,7 +556,7 @@ network addresses. `--watch` keeps the list current.
 
 ```bash
 defenseclaw sandbox approvals
-defenseclaw sandbox approvals --sandbox dc-claude-myapp-7f3a --watch
+defenseclaw sandbox approvals --sandbox myapp-7f3a --watch
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags approvals */}
@@ -546,10 +573,15 @@ Approves an ask. The approval opens a direct OpenShell rule for the
 destination. It is applied at the sandbox's next quiet moment, because every
 OpenShell policy change closes the sandbox's open connections. `--always`
 also saves the hosts to `openshell.egress.unblocked` for future sandboxes.
+It is refused, and nothing is approved, for the typical asks: a port on your
+machine, a private network address, or an ask with allowed IP addresses
+(`allowed_ips`). Those open for one sandbox only, so approve them without
+`--always`. For a port that future sandboxes need, pass `--host-port` to `run`
+or add it to `openshell.mcp.host_ports`.
 
 ```bash
-defenseclaw sandbox approve dc-claude-myapp-7f3a a1b2c3
-defenseclaw sandbox approve dc-claude-myapp-7f3a a1b2c3 --always --reason "team registry"
+defenseclaw sandbox approve myapp-7f3a a1b2c3
+defenseclaw sandbox approve myapp-7f3a a1b2c3 --always --reason "team registry"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags approve */}
@@ -564,7 +596,7 @@ defenseclaw sandbox approve dc-claude-myapp-7f3a a1b2c3 --always --reason "team 
 Rejects an ask. `--always` also adds the hosts to `openshell.egress.block`.
 
 ```bash
-defenseclaw sandbox reject dc-claude-myapp-7f3a a1b2c3 --reason "not needed"
+defenseclaw sandbox reject myapp-7f3a a1b2c3 --reason "not needed"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags reject */}
@@ -588,7 +620,7 @@ organization's lists can't be unblocked, and neither can anything under
 has the details.
 
 ```bash
-defenseclaw sandbox unblock webhook.site --sandbox dc-claude-myapp-7f3a
+defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 defenseclaw sandbox unblock docs.example.com --always
 ```
 
@@ -612,8 +644,8 @@ also flags secret-like files, and lists the review's findings and the nested
 repositories the session's guard found. `--diff` prints the unified diff too.
 
 ```bash
-defenseclaw sandbox review dc-claude-myapp-7f3a
-defenseclaw sandbox review dc-claude-myapp-7f3a --diff
+defenseclaw sandbox review myapp-7f3a
+defenseclaw sandbox review myapp-7f3a --diff
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags review */}
@@ -631,8 +663,8 @@ starts it again afterwards. Branches and tags the session moved are put back
 too, unless you pass `--keep-refs`.
 
 ```bash
-defenseclaw sandbox undo dc-claude-myapp-7f3a --preview
-defenseclaw sandbox undo dc-claude-myapp-7f3a --yes --restart
+defenseclaw sandbox undo myapp-7f3a --preview
+defenseclaw sandbox undo myapp-7f3a --yes --restart
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags undo */}
@@ -730,7 +762,7 @@ was asked for.
 
 ```bash
 defenseclaw sandbox policy explain
-defenseclaw sandbox policy explain --sandbox dc-claude-myapp-7f3a --output json
+defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy explain */}
@@ -755,7 +787,7 @@ the blocked ones listed apart. Use it before you move to the default-deny
 
 ```bash
 defenseclaw sandbox policy suggest
-defenseclaw sandbox policy suggest --sandbox dc-claude-myapp-7f3a --output json
+defenseclaw sandbox policy suggest --sandbox myapp-7f3a --output json
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy suggest */}
@@ -771,7 +803,9 @@ Adds host patterns to `openshell.egress.allow` in `config.yaml`, and refuses
 patterns that cover every host or a whole top-level domain. Allow entries
 matter under the `balanced` profile, which reaches only allowed hosts. Under
 `strict`, a direct connection to an allowed host is approved without asking.
-The daemon applies the change to running sandboxes within a few seconds.
+The daemon applies the change to running sandboxes within a few seconds. With
+`openshell.admin.allow_unblock: false` the entries are saved but ignored, and
+the command still succeeds.
 
 ```bash
 defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
@@ -870,8 +904,9 @@ removes a retired `openshell-sandbox` 0.0.x standalone install and restores
 the host's OpenClaw networking, ownership, and config. It prints every step
 with its exact commands and asks once, unless you pass `--yes`. Progress is
 recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
-does what is left. The [Sandbox guide](/docs/setup/sandbox) says when you need
-it.
+does what is left.
+[Detect a legacy install](/docs/setup/sandbox#detect-a-legacy-install) says
+when you need it.
 
 ```bash
 defenseclaw sandbox legacy-cleanup --dry-run

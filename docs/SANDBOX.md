@@ -994,8 +994,10 @@ phase `deleted`, `undo` and `review` still work on it, and `delete` drops the
 snapshot. Until then its name cannot be reused.
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
-digits and `-`, at most 63 characters, starting and ending with a letter or
-digit), and `git` is reserved.
+digits and `-`, starting and ending with a letter or digit), and `git` is
+reserved. OpenShell 0.1.1 creates sandboxes of at most 19 characters, so a
+new name is held to that; the default is `<folder>-<rand4>`, the folder name
+cut to fit, with the harness and DefenseClaw ownership carried as labels.
 
 ## Overlay images
 
