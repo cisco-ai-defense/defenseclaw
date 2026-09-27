@@ -57,7 +57,7 @@ func (a *APIServer) correlateHookOccurrence(
 		// unchanged external topology.
 		custody = audit.ConnectorCustodyExternal
 	}
-	instance, err := repo.ResolveConnectorInstance(ctx, req.ConnectorName, string(spec.ProfileVersion), custody)
+	instance, err := resolveConnectorInstanceForRequest(ctx, repo, req.ConnectorName, string(spec.ProfileVersion), custody)
 	if err != nil {
 		return ctx, req, err
 	}

@@ -18,9 +18,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -43,6 +48,12 @@ import (
 //     only through FSView.
 //   - Tool results never take the source-scope proofs that read the host
 //     tree (sandboxToolResultUntrusted).
+//   - Session state is per binding. Session IDs are chosen by the agent,
+//     and the host and each sandbox are separate trust domains, so a
+//     sandbox that names another domain's session must land in its own
+//     state: correlation resolves a connector instance per binding
+//     (resolveConnectorInstanceForRequest), and in-memory per-session maps
+//     key on sandboxSessionStateKey.
 //   - Nothing runs git or a subprocess scanner against the agent-writable
 //     tree on the host. The agent controls .git internals other than hooks
 //     and config (for example .git/commondir and nested repositories), so
@@ -97,6 +108,70 @@ func sandboxHookCWD(view *sandboxauth.FSView, cwd string) string {
 // source-scope downgrade; they are inspected like any other untrusted output.
 func sandboxToolResultUntrusted(ctx context.Context) bool {
 	return isSandboxHookRequest(ctx)
+}
+
+// sandboxSessionStateKey is the key under which in-memory per-session state
+// for sessionID is kept: the bare ID for host traffic, and the ID qualified
+// by the binding for a sandbox request.
+func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		return "sandbox\x00" + binding.ID + "\x00" + sessionID
+	}
+	return sessionID
+}
+
+// sandboxConnectorInstanceNamespace domain-separates derived sandbox
+// connector instance IDs.
+const sandboxConnectorInstanceNamespace = "defenseclaw/openshell/sandbox-connector-instance/v1"
+
+// sandboxConnectorInstanceID derives a binding's correlation connector
+// instance: a UUIDv7 whose timestamp is the binding's creation time and
+// whose remaining bits come from its ID and connector. It is stable for the
+// binding's life (rotation keeps the ID) and across daemon restarts, so
+// nothing needs to be stored to find it again.
+func sandboxConnectorInstanceID(binding sandboxauth.Binding) audit.ConnectorInstanceID {
+	sum := sha256.Sum256([]byte(sandboxConnectorInstanceNamespace + "\x00" + binding.ID + "\x00" + binding.Connector))
+	var id uuid.UUID
+	copy(id[:], sum[:16])
+	var ms uint64
+	if created := binding.CreatedAt.UnixMilli(); !binding.CreatedAt.IsZero() && created > 0 {
+		ms = uint64(created)
+	}
+	var stamp [8]byte
+	binary.BigEndian.PutUint64(stamp[:], ms<<16)
+	copy(id[:6], stamp[:6])
+	id[6] = 0x70 | id[6]&0x0f // version 7
+	id[8] = 0x80 | id[8]&0x3f // RFC 9562 variant
+	return audit.ConnectorInstanceID(id.String())
+}
+
+// resolveConnectorInstanceForRequest resolves the correlation connector
+// instance for a request's occurrences: the connector's default instance for
+// host traffic and the binding's own instance for a sandbox. Cursors,
+// pending operations, receipts, identifiers and tool-chain state are keyed
+// by the instance, so a sandbox can neither attach to nor reset host
+// correlation state, or another sandbox's, by naming its session or
+// replaying its identifiers.
+func resolveConnectorInstanceForRequest(
+	ctx context.Context,
+	repo *audit.CorrelationRepository,
+	connectorName string,
+	profileVersion string,
+	custody audit.ConnectorExportCustody,
+) (audit.ConnectorInstance, error) {
+	binding, sandboxed := sandboxauth.FromContext(ctx)
+	if !sandboxed {
+		return repo.ResolveConnectorInstance(ctx, connectorName, profileVersion, custody)
+	}
+	if sandboxauth.CanonicalConnector(connectorName) != binding.Connector {
+		return audit.ConnectorInstance{}, fmt.Errorf(
+			"correlation connector %q does not match the sandbox binding", connectorName)
+	}
+	return repo.ResolveScopedConnectorInstance(ctx, sandboxConnectorInstanceID(binding),
+		connectorName, profileVersion, custody)
 }
 
 // sandboxHookAuditExtra is the sandbox identity stamped onto hook audit

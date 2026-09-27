@@ -21,6 +21,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -612,4 +616,169 @@ func TestSandboxToolResultsSkipHostSourceProofs(t *testing.T) {
 func viewFor(ctx context.Context) *sandboxauth.FSView {
 	view, _ := sandboxauth.ViewFromContext(ctx)
 	return view
+}
+
+func sessionScopeBinding(id, connectorName string) sandboxauth.Binding {
+	b := sandboxauth.Binding{
+		ID:          id,
+		SandboxName: "dc-" + id[len(id)-4:],
+		Connector:   connectorName,
+		Routes:      []sandboxauth.Route{sandboxauth.RouteHook},
+		Workdir:     sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+		CreatedAt:   time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC),
+	}
+	switch connectorName {
+	case "claudecode":
+		b.AgentVersion, b.HookContractID = "2.1.156", "claudecode-hooks-v1"
+	case "codex":
+		b.AgentVersion, b.HookContractID = "0.128.0", "codex-hooks-v1"
+	}
+	return b
+}
+
+func TestSandboxConnectorInstanceID(t *testing.T) {
+	a := sessionScopeBinding("sb_0000000000000000000000000000000a", "claudecode")
+	b := sessionScopeBinding("sb_0000000000000000000000000000000b", "claudecode")
+	id := sandboxConnectorInstanceID(a)
+	parsed, err := uuid.Parse(string(id))
+	if err != nil || parsed.Version() != 7 || parsed.Variant() != uuid.RFC4122 || parsed.String() != string(id) {
+		t.Fatalf("instance id %q is not a canonical UUIDv7: %v", id, err)
+	}
+	if sec, nsec := parsed.Time().UnixTime(); time.Unix(sec, nsec).UTC().Truncate(time.Millisecond) != a.CreatedAt {
+		t.Fatalf("instance id time = %v, want the binding creation", time.Unix(sec, nsec).UTC())
+	}
+	rotated := a
+	rotated.Generation, rotated.TokenHash = 7, strings.Repeat("f", 64)
+	if sandboxConnectorInstanceID(rotated) != id {
+		t.Fatal("rotation changed the instance")
+	}
+	if sandboxConnectorInstanceID(b) == id {
+		t.Fatal("two bindings share an instance")
+	}
+	zero := a
+	zero.CreatedAt = time.Time{}
+	if parsed, err := uuid.Parse(string(sandboxConnectorInstanceID(zero))); err != nil || parsed.Version() != 7 {
+		t.Fatalf("zero creation time: %v", err)
+	}
+}
+
+// TestSandboxCorrelationStateIsPerBinding names the host's session ID from
+// two sandboxes and checks neither can reach the host's correlation cursor,
+// replay receipts or connector instance, nor each other's.
+func TestSandboxCorrelationStateIsPerBinding(t *testing.T) {
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	defer store.Close() //nolint:errcheck
+	promptBody := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"shared-session","prompt":"hello"}`)
+	toolBody := []byte(`{"hook_event_name":"PreToolUse","session_id":"shared-session","tool_name":"Read"}`)
+	correlate := func(ctx context.Context, body []byte) agentHookRequest {
+		t.Helper()
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		profile := server.hookProfileForRequest(ctx, "claudecode")
+		req := normalizeAgentHookRequestWithProfile("claudecode", payload, profile)
+		_, req, err := server.correlateHookOccurrence(ctx, profile, req, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+
+	host := correlate(t.Context(), promptBody)
+	a := sessionScopeBinding("sb_0000000000000000000000000000000a", "claudecode")
+	b := sessionScopeBinding("sb_0000000000000000000000000000000b", "claudecode")
+	ctxA, ctxB := sandboxCtx(a), sandboxCtx(b)
+
+	toolA := correlate(ctxA, toolBody)
+	if toolA.ConnectorInstanceID != string(sandboxConnectorInstanceID(a)) ||
+		toolA.ConnectorInstanceID == host.ConnectorInstanceID {
+		t.Fatalf("sandbox instance = %s, host = %s", toolA.ConnectorInstanceID, host.ConnectorInstanceID)
+	}
+	if toolA.AgentID == host.AgentID || toolA.TurnID == host.TurnID {
+		t.Fatalf("sandbox attached to the host session cursor: agent=%s turn=%s", toolA.AgentID, toolA.TurnID)
+	}
+	// Replaying the host's exact delivery is a new occurrence, not a replay
+	// that would suppress the host's telemetry.
+	replay := correlate(ctxA, promptBody)
+	if replay.SuppressCorrelationEmit || replay.SemanticEventID == host.SemanticEventID {
+		t.Fatalf("sandbox replay matched the host occurrence: %+v", replay)
+	}
+	// A second sandbox is isolated from the first.
+	toolB := correlate(ctxB, toolBody)
+	if toolB.ConnectorInstanceID == toolA.ConnectorInstanceID || toolB.AgentID == replay.AgentID && toolB.AgentID != "" {
+		t.Fatalf("sandboxes share correlation state: a=%+v b=%+v", replay, toolB)
+	}
+	// The host session keeps its own cursor.
+	hostTool := correlate(t.Context(), toolBody)
+	if hostTool.ConnectorInstanceID != host.ConnectorInstanceID ||
+		hostTool.AgentID != host.AgentID || hostTool.TurnID != host.TurnID {
+		t.Fatalf("host cursor disturbed: prompt=%+v tool=%+v", host, hostTool)
+	}
+	// A request for another connector cannot resolve any instance.
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConnectorInstanceForRequest(ctxA, repo, "codex", "codex-profile-v1",
+		audit.ConnectorCustodyExternal); err == nil {
+		t.Fatal("sandbox resolved another connector's instance")
+	}
+}
+
+func TestSandboxInMemorySessionStateIsPerBinding(t *testing.T) {
+	a := sessionScopeBinding("sb_0000000000000000000000000000000a", "codex")
+	b := sessionScopeBinding("sb_0000000000000000000000000000000b", "codex")
+	const session = "shared-session"
+	host := ContextWithSessionID(context.Background(), session)
+	ctxA := ContextWithSessionID(sandboxCtx(a), session)
+	ctxB := ContextWithSessionID(sandboxCtx(b), session)
+
+	if got := sandboxSessionStateKey(host, session); got != session {
+		t.Fatalf("host key = %q", got)
+	}
+	if keyA, keyB := sandboxSessionStateKey(ctxA, session), sandboxSessionStateKey(ctxB, session); keyA == session ||
+		keyB == session || keyA == keyB {
+		t.Fatalf("sandbox keys a=%q b=%q", keyA, keyB)
+	}
+	if sandboxSessionStateKey(ctxA, "") != "" {
+		t.Fatal("an empty session must stay empty")
+	}
+
+	reg := NewAgentRegistry("agent", "Agent")
+	hostID := reg.Resolve(host, session, "").AgentInstanceID
+	if peek := reg.ResolvePeek(ctxA, session, "").AgentInstanceID; peek != "" {
+		t.Fatalf("sandbox peeked the host session instance %q", peek)
+	}
+	idA := reg.Resolve(ctxA, session, "").AgentInstanceID
+	idB := reg.Resolve(ctxB, session, "").AgentInstanceID
+	if hostID == "" || idA == "" || idA == hostID || idB == idA || reg.Resolve(host, session, "").AgentInstanceID != hostID {
+		t.Fatalf("registry instances host=%q a=%q b=%q", hostID, idA, idB)
+	}
+
+	judge := &LLMJudge{}
+	judge.ObserveSessionPrompt(host, "HOST-INTENT-MARKER")
+	if sample := judge.toolJudgeContextSample(ctxA, "Bash", `{"command":"ls"}`); strings.Contains(sample, "HOST-INTENT-MARKER") {
+		t.Fatal("sandbox judge sample carries the host session's intent")
+	}
+	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctxA, session))
+	if sample := judge.toolJudgeContextSample(host, "Bash", `{"command":"ls"}`); !strings.Contains(sample, "HOST-INTENT-MARKER") {
+		t.Fatal("a sandbox reset cleared the host session's judge context")
+	}
+
+	api := &APIServer{}
+	api.rememberHookPromptID(host, "codex", session, "turn-1", "prompt-host")
+	if got := api.lastHookPromptID(ctxA, "codex", session); got != "" {
+		t.Fatalf("sandbox read the host prompt id %q", got)
+	}
+	api.rememberHookPromptID(ctxA, "codex", session, "turn-1", "prompt-a")
+	if got := api.lastHookPromptIDForTurn(host, "codex", session, "turn-1"); got != "prompt-host" {
+		t.Fatalf("host prompt id = %q after a sandbox wrote its own", got)
+	}
+
+	if api.stepIndexForTurn(sandboxSessionStateKey(ctxA, session), "t1", "UserPromptSubmit") != 1 ||
+		api.stepIndexForTurn(sandboxSessionStateKey(host, session), "t9", "UserPromptSubmit") != 1 {
+		t.Fatal("step index shared between the host and a sandbox")
+	}
 }
