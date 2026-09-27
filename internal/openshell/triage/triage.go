@@ -32,7 +32,9 @@
 //     and no unblock lifts (the block lists, the blocklist feed), public IP
 //     literals in the open mode until they are unblocked (they sidestep the
 //     name-based blocklist), names that resolve to this machine or do not
-//     exist, and ports the proxy does not carry;
+//     exist, ports the proxy does not carry, and requests the harness
+//     binary itself makes around the proxy for something it does without
+//     (Policy.HarnessFetches: Codex's startup tip download);
 //   - deferred: proposals with a name whose lookup timed out or failed
 //     temporarily stay pending and are decided again later;
 //   - asked: doors into the user's machine or network (host.openshell.internal
@@ -125,6 +127,9 @@ const (
 	// destination host. Approving a proposal opens all of it, but an ask
 	// shows the user one destination, so each host must be its own rule.
 	ReasonMultipleHosts Reason = "multiple_hosts"
+	// ReasonHarnessFetch: the sandbox's harness binary itself made the
+	// denied connection, for a request it does without (Policy.HarnessFetches).
+	ReasonHarnessFetch Reason = "harness_background_fetch"
 )
 
 // Flood limits the sandbox manager applies to triage decisions.
@@ -376,6 +381,51 @@ type Policy struct {
 	// AgentProposals is openshell.approvals.agent_proposals; false rejects
 	// every proposal.
 	AgentProposals bool
+	// HarnessFetches are requests the sandbox's harness binary makes around
+	// the proxy that it does without; their proposals are rejected.
+	HarnessFetches []HarnessFetch
+}
+
+// HarnessFetch is a destination the sandbox's pinned harness binary (a path
+// under BinaryRoot) reaches on its own around the egress proxy for
+// something it does without, with no setting that turns the request off
+// (harness.DirectFetch). A direct rule for it would bypass the proxy and
+// reload the sandbox policy, which closes its open connections, for
+// nothing.
+type HarnessFetch struct {
+	BinaryRoot string
+	Host       string
+	Port       int
+	// What says what the request is for.
+	What string
+}
+
+// harnessFetch returns the fetch p is: every binary the proposal names
+// lives under the fetch's BinaryRoot and every endpoint is its host and
+// port.
+func harnessFetch(p Proposal, fetches []HarnessFetch) (HarnessFetch, bool) {
+	binaries := append([]string{p.Binary}, p.Binaries...)
+	for _, f := range fetches {
+		root := strings.TrimSuffix(f.BinaryRoot, "/")
+		if root == "" || f.Host == "" || len(p.Endpoints) == 0 {
+			continue
+		}
+		match := true
+		for _, b := range binaries {
+			if !strings.HasPrefix(b, root+"/") || strings.Contains(b, "/../") {
+				match = false
+			}
+		}
+		for _, ep := range p.Endpoints {
+			if NormalizeHost(ep.Host) != NormalizeHost(f.Host) || ep.Port != f.Port {
+				match = false
+			}
+		}
+		if match {
+			return f, true
+		}
+	}
+	return HarnessFetch{}, false
 }
 
 // resolveTimeout bounds the DNS lookup of one proposed destination.
@@ -439,6 +489,11 @@ func Classify(ctx context.Context, p Proposal, pol Policy) Decision {
 	if d, bad := judgeRule(p); bad {
 		d.Host, d.Port = firstEndpoint(p)
 		return d
+	}
+	if f, ok := harnessFetch(p, pol.HarnessFetches); ok {
+		host, port := firstEndpoint(p)
+		return Decision{Verdict: Reject, Reason: ReasonHarnessFetch, Kind: KindNetworkRule, Host: host, Port: port,
+			Message: f.What + "; DefenseClaw opens no direct rule for it"}
 	}
 	if hosts := destinationHosts(p); len(hosts) > 1 {
 		host, port := firstEndpoint(p)

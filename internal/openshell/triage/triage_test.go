@@ -277,6 +277,57 @@ func TestClassifySecurityNotesAsk(t *testing.T) {
 	}
 }
 
+// TestClassifyRejectsHarnessFetches pins that a request the sandbox's
+// harness binary makes around the proxy for something it does without
+// (Codex's startup tip download, measured live: an open-network sandbox
+// approved a direct rule for it at every first start, and the reload cut
+// the session's open connections) is rejected, while the same destination
+// from another binary, or a proposal that adds another endpoint, is judged
+// as usual.
+func TestClassifyRejectsHarnessFetches(t *testing.T) {
+	open := effective(t, nil, packs.Flags{})
+	const root = "/opt/defenseclaw-harness/codex"
+	codex := root + "/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+	pol := testPolicy(open)
+	pol.HarnessFetches = []HarnessFetch{{BinaryRoot: root, Host: "raw.githubusercontent.com", Port: 443, What: "Codex's startup tip download"}}
+
+	chunk := liveChunk("raw.githubusercontent.com", 443)
+	chunk.Binary = codex
+	chunk.ProposedRule.Binaries = []v1.PolicyNetworkBinary{{Path: codex}}
+	p := FromChunk("fx-codex", chunk)
+	got := Classify(context.Background(), p, pol)
+	if got.Verdict != Reject || got.Reason != ReasonHarnessFetch || got.Host != "raw.githubusercontent.com" || got.Port != 443 ||
+		got.Message != "Codex's startup tip download; DefenseClaw opens no direct rule for it" {
+		t.Fatalf("harness fetch = %+v", got)
+	}
+	// Without the declaration the open network approves it.
+	if got := Classify(context.Background(), p, testPolicy(open)); got.Verdict != Approve {
+		t.Fatalf("undeclared = %+v, want the open network to approve it", got)
+	}
+	for name, edit := range map[string]func(*Proposal){
+		"another binary":      func(p *Proposal) { p.Binary, p.Binaries = "/usr/bin/curl", []string{"/usr/bin/curl"} },
+		"a rule binary too":   func(p *Proposal) { p.Binaries = append(p.Binaries, "/usr/bin/curl") },
+		"a path escape":       func(p *Proposal) { p.Binary = root + "/../../usr/bin/curl"; p.Binaries = []string{p.Binary} },
+		"no binary":           func(p *Proposal) { p.Binary, p.Binaries = "", nil },
+		"another port":        func(p *Proposal) { p.Endpoints[0].Port = 8443 },
+		"another endpoint":    func(p *Proposal) { p.Endpoints = append(p.Endpoints, Endpoint{Host: "ok.example.org", Port: 443}) },
+		"a lookalike host":    func(p *Proposal) { p.Endpoints[0].Host = "raw.githubusercontent.com.example.org" },
+		"the root's neighbor": func(p *Proposal) { p.Binary = root + "-evil/bin/codex"; p.Binaries = []string{p.Binary} },
+	} {
+		q := FromChunk("fx-codex", chunk)
+		edit(&q)
+		if got := Classify(context.Background(), q, pol); got.Reason == ReasonHarnessFetch {
+			t.Errorf("%s: rejected as a harness fetch: %+v", name, got)
+		}
+	}
+	// Host spelling does not matter.
+	q := FromChunk("fx-codex", chunk)
+	q.Endpoints[0].Host = "RAW.githubusercontent.com."
+	if got := Classify(context.Background(), q, pol); got.Reason != ReasonHarnessFetch {
+		t.Fatalf("spelling variant = %+v", got)
+	}
+}
+
 func TestClassifyAgentProposalsOff(t *testing.T) {
 	open := effective(t, nil, packs.Flags{})
 	got := Classify(context.Background(), proposal("ok.example.org", 443), Policy{Effective: open, Resolver: testResolver})

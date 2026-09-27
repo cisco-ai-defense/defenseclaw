@@ -280,6 +280,29 @@ type Spec struct {
 	// them never report a model.
 	modelArg  func(args []string) (flag, override string)
 	modelFlag string
+	// directFetches are requests the pinned harness makes around the
+	// egress proxy that it does without (DirectFetch).
+	directFetches []DirectFetch
+}
+
+// DirectFetch is a request the pinned harness binary makes on its own
+// around the egress proxy (its HTTP client ignores the proxy variables)
+// with no setting that turns it off, and that the harness does without
+// when it fails. OpenShell refuses it and drafts a proposal to open the
+// destination; triage rejects that proposal instead of adding a direct rule
+// (and the policy reload that closes the sandbox's open connections) the
+// harness does not need.
+type DirectFetch struct {
+	Host string
+	Port int
+	// What says what the request is for, for the activity feed.
+	What string
+}
+
+// DirectFetches lists the requests the pinned harness makes around the
+// egress proxy that triage rejects.
+func (s *Spec) DirectFetches() []DirectFetch {
+	return append([]DirectFetch(nil), s.directFetches...)
 }
 
 // InstallRoot is the harness's root-owned install prefix.

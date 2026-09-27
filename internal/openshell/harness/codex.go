@@ -127,6 +127,15 @@ var Codex = register(&Spec{
 	},
 	modelArg:  codexModelArg,
 	modelFlag: "-m",
+	// The TUI fetches its startup tip at every start with a client built
+	// with no_proxy() (Codex 0.146 tui/src/tooltips.rs), whatever
+	// tui.show_tooltips says, and keeps it in memory only, so neither
+	// managed config nor a pre-seeded file prevents the request. A 2-second
+	// timeout ends it and the TUI shows a built-in tip instead.
+	directFetches: []DirectFetch{{
+		Host: "raw.githubusercontent.com", Port: 443,
+		What: "Codex's startup tip download (openai/codex announcement_tip.toml), which ignores the proxy; Codex shows a built-in tip instead",
+	}},
 })
 
 // CodexMantleDefaultModel is the model Codex runs on Amazon Bedrock Mantle

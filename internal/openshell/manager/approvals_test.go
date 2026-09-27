@@ -29,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
@@ -128,6 +130,40 @@ func TestTriageDecidesProposals(t *testing.T) {
 			t.Fatalf("feed kinds = %v, missing %s", kinds, want)
 		}
 	}
+}
+
+// TestTriageRejectsHarnessFetches pins that a Codex sandbox's own startup
+// tip download, which Codex makes around the proxy, is rejected with the
+// reason on the feed instead of approved on the open network (the direct
+// rule and the policy reload that closes the session's connections), while
+// the same destination from the agent's curl is still approved.
+func TestTriageRejectsHarnessFetches(t *testing.T) {
+	e := newEnv(t, nil)
+	e.images.rec.HarnessVersion = "0.146.0"
+	e.images.rec.HookContract = connector.ResolveSandboxHookContract("codex", "0.146.0").Contract.ContractID
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "fetchbox", Harness: "codex"})
+	e.watch.waitStarted(t, sb.Name)
+	codex := harness.Codex.InstallRoot() + "/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+	tip := chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443)
+	tip.Binary = codex
+	tip.ProposedRule.Binaries = []types.PolicyNetworkBinary{{Path: codex}}
+	fetch := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, tip)
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
+	eventually(t, "the tip download's rejection", func() bool { return chunkStatus(e, sb.Name, fetch) == "rejected" })
+	var msg string
+	for _, ev := range e.m.ActivitySince(0, sb.Name) {
+		if ev.Kind == sandboxapi.ActivityEgressBlocked && ev.Reason == "harness_background_fetch" {
+			msg = ev.Message
+		}
+	}
+	if !strings.Contains(msg, "Codex's startup tip download") || !strings.Contains(msg, "opens no direct rule") {
+		t.Fatalf("feed message = %q", msg)
+	}
+
+	curl := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
+	eventually(t, "the agent's approval", func() bool { return chunkStatus(e, sb.Name, curl) == "approved" })
 }
 
 func TestApprovalRejectAlwaysPersists(t *testing.T) {

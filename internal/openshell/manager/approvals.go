@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
@@ -231,7 +232,22 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	return triage.Policy{
 		Effective: eff, Decider: d, Principal: m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff),
 		Resolver: m.opts.Resolver, AgentProposals: cfg.OpenShell.Approvals.AgentProposalsEnabled(),
+		HarnessFetches: harnessFetches(rec.Harness),
 	}
+}
+
+// harnessFetches are the requests the sandbox's harness makes around the
+// egress proxy that it does without (harness.Spec.DirectFetches).
+func harnessFetches(name string) []triage.HarnessFetch {
+	spec, ok := harness.Get(name)
+	if !ok {
+		return nil
+	}
+	var out []triage.HarnessFetch
+	for _, f := range spec.DirectFetches() {
+		out = append(out, triage.HarnessFetch{BinaryRoot: spec.InstallRoot(), Host: f.Host, Port: f.Port, What: f.What})
+	}
+	return out
 }
 
 // recheckApproval judges an approval again right before the batcher applies
