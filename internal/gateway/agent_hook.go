@@ -349,6 +349,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				elapsed := time.Since(t0)
 				resp := safeHookPanicResponse(connectorName, req.HookEventName, recovered)
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
+				// Sandbox hooks fail closed: apply the same transformation as
+				// the inline panic path (lines 457-467) so post-evaluation
+				// panics (e.g., in enrichAgentHookSpan, deferred EmitLLMEvent,
+				// finalizeAgentHook) also fail closed for sandbox hooks.
+				if sandboxHookForConnector(ctx, connectorName) {
+					resp.Action, resp.RawAction = "block", "block"
+					resp.WouldBlock = true
+					resp.Mode = "action"
+					resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
+				}
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
