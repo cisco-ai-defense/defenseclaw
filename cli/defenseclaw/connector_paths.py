@@ -372,6 +372,37 @@ def is_known(connector: str | None) -> bool:
     return normalize(connector) in KNOWN_CONNECTORS
 
 
+def declared_plugin_connectors(plugin_dir: str) -> set[str]:
+    """Return the connector names the plugin directories under *plugin_dir* declare.
+
+    Each subdirectory declares its own name and, when its ``plugin.yaml`` has
+    one, that ``name`` (both lowercased), mirroring the gateway's
+    ``pluginDirDeclares``. A missing *plugin_dir* declares nothing. Any other
+    read error raises :class:`OSError`: callers must then treat every name as
+    one a plugin might provide.
+    """
+    names: set[str] = set()
+    if not (plugin_dir or "").strip():
+        return names
+    try:
+        entries = list(os.scandir(plugin_dir))
+    except FileNotFoundError:
+        return names
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.strip().lower())
+        manifest = os.path.join(entry.path, "plugin.yaml")
+        try:
+            with open(manifest, encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh.read(64 * 1024))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
+            names.add(doc["name"].strip().lower())
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Path expansion helper — kept private to avoid divergence from the
 # Go-side ``expandPath`` (which only handles a leading ``~/`` prefix).

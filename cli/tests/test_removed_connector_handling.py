@@ -29,6 +29,7 @@ from defenseclaw.config import PerConnectorGuardrailConfig
 from tests.helpers import cleanup_app, make_app_context
 
 RETIRED_EXAMPLE = "retired-example"
+PLUGIN_EXAMPLE = "plugin-example"
 
 
 def _invoke(args, app):
@@ -101,6 +102,90 @@ class RemovedConnectorSetupTests(unittest.TestCase):
         self.assertIn("Refusing to remove the last connector", result.output)
         self.assertEqual(set(gc.connectors), {"codex"})
 
+    def _only_connector(self, name: str) -> None:
+        gc = self.app.cfg.guardrail
+        gc.connectors = {name: PerConnectorGuardrailConfig()}
+        gc.connector = name
+        self.app.cfg.claw.mode = name
+
+    def _assert_force_required(self, name: str) -> None:
+        result = CliRunner().invoke(setup_group, ["remove", name, "--yes", "--no-restart"], obj=self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Refusing to remove the last connector", result.output)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {name})
+
+    def test_setup_remove_last_plugin_connector_still_needs_force(self):
+        # A plugin that is installed but does not load is still a plugin: it
+        # keeps the --force gate whether its directory or its manifest names it.
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "plugins")
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, PLUGIN_EXAMPLE))
+        self._only_connector(PLUGIN_EXAMPLE)
+        self._assert_force_required(PLUGIN_EXAMPLE)
+
+        manifest_dir = os.path.join(self.app.cfg.plugin_dir, "vendor-bundle")
+        os.makedirs(manifest_dir)
+        with open(os.path.join(manifest_dir, "plugin.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("name: Manifest-Example\n")
+        self._only_connector("manifest-example")
+        self._assert_force_required("manifest-example")
+
+    def test_setup_remove_needs_force_when_plugin_dir_is_unreadable(self):
+        plugin_file = os.path.join(self.tmp_dir, "plugins-file")
+        with open(plugin_file, "w", encoding="utf-8") as fh:
+            fh.write("not a directory\n")
+        self.app.cfg.plugin_dir = plugin_file
+        self._only_connector(RETIRED_EXAMPLE)
+        self._assert_force_required(RETIRED_EXAMPLE)
+
+    def test_setup_remove_plugin_connector_keeps_the_teardown_path(self):
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "plugins")
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, PLUGIN_EXAMPLE))
+        gc = self.app.cfg.guardrail
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            PLUGIN_EXAMPLE: PerConnectorGuardrailConfig(),
+        }
+        gc.connector = "codex"
+        self.app.cfg.claw.mode = "codex"
+        runtime = cmd_setup._SetupAppliedRuntimeEvidence(
+            lifecycle="running",
+            generation="generation-before",
+            invariants=(),
+        )
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True),
+            patch("defenseclaw.commands.cmd_setup._capture_setup_applied_runtime", return_value=runtime),
+        ):
+            result = _invoke(["remove", PLUGIN_EXAMPLE, "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(set(gc.connectors), {"codex"})
+        self.assertNotIn("not a connector this DefenseClaw build ships", result.output)
+        self.assertIn("hooks are still installed", result.output)
+
+
+class DeclaredPluginConnectorTests(unittest.TestCase):
+    def test_directory_and_manifest_names_are_declared(self):
+        import tempfile
+
+        from defenseclaw.connector_paths import declared_plugin_connectors
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(declared_plugin_connectors(os.path.join(tmpdir, "missing")), set())
+            self.assertEqual(declared_plugin_connectors(""), set())
+            os.makedirs(os.path.join(tmpdir, "Alpha"))
+            os.makedirs(os.path.join(tmpdir, "bundle"))
+            with open(os.path.join(tmpdir, "bundle", "plugin.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("name: Beta\n")
+            os.makedirs(os.path.join(tmpdir, "broken"))
+            with open(os.path.join(tmpdir, "broken", "plugin.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("name: [unterminated\n")
+            with open(os.path.join(tmpdir, "loose-file"), "w", encoding="utf-8") as fh:
+                fh.write("x\n")
+            self.assertEqual(declared_plugin_connectors(tmpdir), {"alpha", "bundle", "beta", "broken"})
+            with self.assertRaises(OSError):
+                declared_plugin_connectors(os.path.join(tmpdir, "loose-file"))
+
 
 class RemovedConnectorUninstallTests(unittest.TestCase):
     def _plan(self) -> cmd_uninstall.UninstallPlan:
@@ -165,10 +250,6 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
             self.assertEqual(argv[1:5], ["connector", "verify", "--connector", RETIRED_EXAMPLE])
         with patch("shutil.which", return_value=None):
             self.assertFalse(cmd_uninstall._gateway_connector_is_unknown(RETIRED_EXAMPLE))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class UnshippedConnectorMigrationTests(unittest.TestCase):
@@ -246,3 +327,7 @@ class UnshippedConnectorMigrationTests(unittest.TestCase):
         text, changes = self._run(body)
         self.assertEqual(text, body)
         self.assertEqual(changes, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -10674,6 +10674,25 @@ def setup_claude_code(
     )
 
 
+def _connector_not_shipped(cfg, name: str) -> bool:
+    """Report whether neither a built-in connector nor a plugin provides *name*.
+
+    A name that a plugin directory under ``plugin_dir`` declares is a plugin
+    connector, even when the plugin currently fails to load, so it keeps the
+    normal teardown path and the last-connector ``--force`` gate. An unreadable
+    plugin directory counts every name as possibly provided by a plugin.
+    """
+    normalized = normalize_connector(name)
+    if normalized in _CONNECTOR_META:
+        return False
+    plugin_dir = (getattr(cfg, "plugin_dir", "") or "").strip() or os.path.join(cfg.data_dir, "plugins")
+    try:
+        declared = connector_paths.declared_plugin_connectors(plugin_dir)
+    except OSError:
+        return False
+    return normalized not in declared and name.strip().lower() not in declared
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -10733,7 +10752,7 @@ def _remove_connector(
     # A configured name this build does not ship (an older release registered
     # it) has no teardown owner: DefenseClaw drops it from config and its own
     # state, but never guesses at that agent's config files.
-    unshipped = normalize_connector(match) not in _CONNECTOR_META
+    unshipped = _connector_not_shipped(cfg, match)
 
     # WU8 D2=A — last-connector gate. An unshipped connector already enforces
     # nothing (the gateway refuses to start while config names it), so

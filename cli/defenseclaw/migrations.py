@@ -3344,31 +3344,16 @@ def _migrate_unshipped_connectors(ctx: MigrationContext) -> None:
 
 
 def _shipped_connector_names(raw: dict, data_dir: str) -> set[str]:
-    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, declared_plugin_connectors
 
-    shipped = set(KNOWN_CONNECTORS)
     plugin_dir = raw.get("plugin_dir") if isinstance(raw.get("plugin_dir"), str) else ""
     plugin_dir = (plugin_dir or "").strip() or os.path.join(data_dir, "plugins")
     try:
-        entries = list(os.scandir(plugin_dir))
-    except FileNotFoundError:
-        return shipped
+        declared = declared_plugin_connectors(plugin_dir)
     except OSError as exc:
         # Cannot tell which plugins exist: treat nothing as unshipped.
         raise RuntimeError(f"cannot read plugin directory {plugin_dir}: {exc}") from exc
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        shipped.add(entry.name.strip().lower())
-        manifest = os.path.join(entry.path, "plugin.yaml")
-        try:
-            with open(manifest, encoding="utf-8") as fh:
-                doc = yaml.safe_load(fh.read(64 * 1024))
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
-            shipped.add(doc["name"].strip().lower())
-    return shipped
+    return set(KNOWN_CONNECTORS) | declared
 
 
 def _drop_unshipped_connectors(ctx: MigrationContext) -> None:

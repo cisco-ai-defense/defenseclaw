@@ -1527,6 +1527,26 @@ func TestConnectorVerify_UnknownConnector_Exit2(t *testing.T) {
 	}
 }
 
+func TestConnectorVerify_PluginDeclaredConnectorIsNotUnknown(t *testing.T) {
+	// A plugin directory that declares the name means an installed plugin
+	// may simply have failed to load. Exit 2 would let uninstall skip its
+	// teardown, so verify must report it as not verifiable (exit 1).
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "")()
+	pluginDir := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "ghostclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.PluginDir = pluginDir
+	_, stderr, exitCode := runConnectorCmd(t, "verify", "--connector", "ghostclaw")
+	if exitCode != 1 {
+		t.Fatalf("expected exit 1 for a plugin-declared connector, got %d (stderr=%q)", exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "a plugin may provide it") || strings.Contains(stderr, "unknown connector") {
+		t.Fatalf("stderr = %q, want the not-loaded plugin message", stderr)
+	}
+}
+
 func TestConnectorVerify_CleanOpenClaw(t *testing.T) {
 	dir := t.TempDir()
 	defer withConnectorState(t, dir, "openclaw")()

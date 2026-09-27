@@ -907,6 +907,17 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		conn, ok = connector.RetiredConnector(name)
 	}
 	if !ok {
+		if !reg.NotShipped(name) {
+			// A plugin directory declares this name (or plugin discovery
+			// failed), so it may be an installed plugin that did not load.
+			// Exit 2 would let uninstall skip its teardown and strand the
+			// plugin's hooks; report it as not verifiable instead.
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"connector verify: connector %q is not loaded, but a plugin may provide it; fix the plugin under the configured plugin directory and retry\n",
+				name)
+			connectorExit(1)
+			return nil
+		}
 		// Map "unknown connector" to exit code 2 (config error), distinct
 		// from "connector dirty" (exit 1). Cobra surfaces RunE errors as
 		// exit 1 by default, so we need to bypass cobra and call os.Exit.
