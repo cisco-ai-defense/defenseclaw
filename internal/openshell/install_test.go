@@ -107,6 +107,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		Runner:     f.runner,
 		LookPath:   func(string) (string, error) { return "", errors.New("not on PATH") },
 		Candidates: []string{f.cliPath},
+		PackageCLI: f.cliPath,
 		Out:        &f.out,
 		Consent: func(p *openshell.InstallPlan) (bool, error) {
 			if !strings.Contains(f.out.String(), p.SHA256) {
@@ -140,6 +141,14 @@ func (f *installFixture) assertNoLeftovers() {
 }
 
 func TestInstallFresh(t *testing.T) {
+	// Inherited variables the pinned script reads: the release, the
+	// method, the CLI it registers the gateway with, a test switch that
+	// makes it a no-op.
+	inherited := []string{"OPENSHELL_VERSION", "OPENSHELL_ACK_BREAKING_UPGRADE", "OPENSHELL_INSTALL_METHOD", "OPENSHELL_REGISTER_BIN",
+		"OPENSHELL_INSTALL_SH_TEST", "OPENSHELL_TEST_LDD_OUTPUT", "OPENSHELL_SNAP_TLS_DIR"}
+	for _, v := range inherited {
+		t.Setenv(v, "inherited")
+	}
 	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
 	res, err := f.inst.Install(context.Background())
 	if err != nil {
@@ -160,16 +169,16 @@ func TestInstallFresh(t *testing.T) {
 			run = c
 		}
 	}
-	if !slices.Equal(run.Env, []string{"OPENSHELL_VERSION=v0.1.1"}) {
+	if !slices.Equal(run.Env, []string{"OPENSHELL_VERSION=v0.1.1", "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
 		t.Fatalf("installer env = %v", run.Env)
 	}
-	for _, v := range []string{"OPENSHELL_VERSION", "OPENSHELL_ACK_BREAKING_UPGRADE", "OPENSHELL_INSTALL_METHOD"} {
+	for _, v := range inherited {
 		if !slices.Contains(run.Unset, v) {
 			t.Errorf("inherited %s is not dropped: %v", v, run.Unset)
 		}
 	}
 	plan := f.out.String()
-	for _, want := range []string{"v0.1.1", f.inst.URL, sha(fakeScript), "OPENSHELL_VERSION=v0.1.1 /bin/sh "} {
+	for _, want := range []string{"v0.1.1", f.inst.URL, sha(fakeScript), "OPENSHELL_VERSION=v0.1.1 OPENSHELL_REGISTER_BIN=" + f.cliPath + " /bin/sh "} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("plan lacks %q:\n%s", want, plan)
 		}
@@ -328,6 +337,52 @@ func TestInstallBreakingUpgrade(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestInstallReplacesLegacyCLI covers a pre-0.0.37 CLI in ~/.local/bin,
+// which comes before the package's CLI on PATH and which the package does
+// not replace: the plan says to remove it, the script registers the
+// gateway with the package's CLI, and an install that leaves the old CLI
+// first on PATH is reported, not passed.
+func TestInstallReplacesLegacyCLI(t *testing.T) {
+	setup := func(t *testing.T) (*installFixture, string) {
+		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		legacy := filepath.Join(t.TempDir(), "openshell")
+		writeExecutable(t, legacy)
+		f.runner.On(legacy+" --version", "openshell 0.0.36\n", nil)
+		f.inst.LookPath = func(string) (string, error) {
+			if _, err := os.Stat(legacy); err != nil {
+				return "", err
+			}
+			return legacy, nil
+		}
+		f.inst.Candidates = []string{legacy, f.cliPath}
+		f.inst.ConfirmBreakingUpgrade = func(p *openshell.InstallPlan) (bool, error) { return true, nil }
+		return f, legacy
+	}
+	t.Run("left in place", func(t *testing.T) {
+		f, legacy := setup(t)
+		_, err := f.inst.Install(context.Background())
+		if !errors.Is(err, openshell.ErrStaleCLI) || !strings.Contains(err.Error(), "rm "+legacy) || !strings.Contains(err.Error(), "installed at "+f.cliPath) {
+			t.Fatalf("Install = %v", err)
+		}
+		if !strings.Contains(f.out.String(), "then remove the old CLI") || !strings.Contains(f.out.String(), "    rm "+legacy) {
+			t.Fatalf("plan does not say to remove the old CLI:\n%s", f.out.String())
+		}
+		for _, c := range f.runner.Calls() {
+			if c.Name == "/bin/sh" && !slices.Contains(c.Env, "OPENSHELL_REGISTER_BIN="+f.cliPath) {
+				t.Fatalf("installer registers the gateway with PATH's CLI: env %v", c.Env)
+			}
+		}
+	})
+	t.Run("removed as the plan says", func(t *testing.T) {
+		f, legacy := setup(t)
+		f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return true, os.Remove(legacy) }
+		res, err := f.inst.Install(context.Background())
+		if err != nil || res.CLIVersion.String() != "0.1.1" {
+			t.Fatalf("Install = %+v, %v", res, err)
+		}
+	})
 }
 
 func TestInstallVerifiesOutcome(t *testing.T) {

@@ -48,11 +48,29 @@ var (
 	// ErrBreakingUpgrade means a pre-0.0.37 OpenShell is present and the
 	// operator has not confirmed its runtime was cleaned up.
 	ErrBreakingUpgrade = errors.New("openshell: an incompatible OpenShell installation must be cleaned up first")
+	// ErrStaleCLI means the new CLI was installed but an old one comes
+	// first on PATH, so `openshell` still runs the old one.
+	ErrStaleCLI = errors.New("openshell: an old openshell CLI shadows the installed one")
 )
 
-// installerEnvUnset are inherited variables that would change what the
-// pinned installer does behind the plan's back.
-var installerEnvUnset = []string{"OPENSHELL_VERSION", "OPENSHELL_ACK_BREAKING_UPGRADE", "OPENSHELL_INSTALL_METHOD"}
+// linuxPackageCLI is where the deb and rpm packages install the CLI.
+const linuxPackageCLI = "/usr/bin/openshell"
+
+// installerEnvUnset lists the inherited OPENSHELL_* variables, which would
+// change what the pinned installer does behind the plan's back: it reads
+// the release, the install method, the CLI it registers the gateway with
+// and runs `status` through (OPENSHELL_REGISTER_BIN), snap paths, and a
+// test switch that turns the script into a no-op. Only the plan's Env is
+// passed.
+func installerEnvUnset(environ []string) []string {
+	var names []string
+	for _, kv := range environ {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "OPENSHELL_") {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // DigestMismatchError reports the digest actually downloaded.
 type DigestMismatchError struct {
@@ -153,6 +171,12 @@ type Installer struct {
 	// to the paths the upstream installer probes.
 	LookPath   func(string) (string, error)
 	Candidates []string
+	// PackageCLI is the CLI the installed package provides (default
+	// /usr/bin/openshell on Linux; empty on macOS, where the script finds
+	// Homebrew's itself). The script registers the gateway with it, not
+	// with whatever PATH resolves first, and it is checked first after
+	// the install.
+	PackageCLI string
 	// Out receives the plan (default os.Stdout).
 	Out io.Writer
 	// Consent must approve the printed plan. Required.
@@ -196,6 +220,9 @@ func (i *Installer) defaults() {
 	if i.Candidates == nil {
 		home, _ := os.UserHomeDir()
 		i.Candidates = []string{filepath.Join(home, ".local", "bin", "openshell"), "/usr/local/bin/openshell", "/usr/bin/openshell", "/opt/homebrew/bin/openshell"}
+	}
+	if i.PackageCLI == "" && runtime.GOOS == "linux" {
+		i.PackageCLI = linuxPackageCLI
 	}
 	if i.Out == nil {
 		i.Out = os.Stdout
@@ -257,6 +284,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 
 	plan.Command = []string{i.Shell, plan.ScriptPath}
 	plan.Env = []string{"OPENSHELL_VERSION=" + i.Release}
+	if i.PackageCLI != "" {
+		// Without it the script registers the gateway with, and checks its
+		// status through, whichever openshell comes first on PATH.
+		plan.Env = append(plan.Env, "OPENSHELL_REGISTER_BIN="+i.PackageCLI)
+	}
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
@@ -267,6 +299,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 			"before continuing, back up anything you need from existing sandboxes, then with the OLD CLI run:",
 			"    openshell sandbox delete --all && openshell gateway destroy",
 			"(the 0.1 CLI no longer has `gateway destroy`); continuing tells the installer this cleanup is done")
+		if rm := i.staleCLIRemoval(existing); rm != "" {
+			plan.Notes = append(plan.Notes,
+				"then remove the old CLI, which the package does not replace and which would shadow the new one on PATH:",
+				"    "+rm)
+		}
 	}
 	fmt.Fprint(i.Out, plan.String())
 
@@ -290,16 +327,13 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, ErrInstallDeclined
 	}
 
-	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset}); err != nil {
+	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
 
-	after := i.findExisting(ctx)
-	if after == nil {
-		return nil, errors.New("openshell: the installer finished but no openshell CLI was found")
-	}
-	if err := CheckSupported(after.Version); err != nil {
-		return nil, fmt.Errorf("openshell: after install the CLI at %s reports %q: %w", after.Path, after.RawVersion, err)
+	after, err := i.installedCLI(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if err := i.VerifyGateway(ctx); err != nil {
 		return nil, fmt.Errorf("openshell: %s installed but the gateway is not healthy: %w", after.Version, err)
@@ -360,23 +394,102 @@ func writeExclusive(path string, data []byte) error {
 // findExisting locates a native (non-snap) openshell CLI and asks it for
 // its version, the way the upstream installer does.
 func (i *Installer) findExisting(ctx context.Context) *ExistingInstall {
-	var candidates []string
-	if p, err := i.LookPath(DefaultBinary); err == nil && !strings.HasPrefix(p, "/snap/") {
-		candidates = append(candidates, p)
-	}
-	candidates = append(candidates, i.Candidates...)
-	for _, p := range candidates {
-		info, err := os.Stat(p)
-		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-			continue
+	for _, p := range append([]string{i.onPath()}, i.Candidates...) {
+		if e := i.probeCLI(ctx, p); e != nil {
+			return e
 		}
-		out, _ := i.Runner.Output(ctx, Command{Name: p, Args: []string{"--version"}, Timeout: 30 * time.Second})
-		first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-		e := &ExistingInstall{Path: p, RawVersion: strings.TrimSpace(first)}
-		e.Version, _ = VersionFromOutput(e.RawVersion)
-		return e
 	}
 	return nil
+}
+
+// installedCLI finds the supported CLI the install provided, the package's
+// first, and refuses one that PATH hides behind an older CLI.
+func (i *Installer) installedCLI(ctx context.Context) (*ExistingInstall, error) {
+	onPath := i.probeCLI(ctx, i.onPath())
+	var first, supported *ExistingInstall
+	for _, p := range append([]string{i.PackageCLI, i.onPath()}, i.Candidates...) {
+		e := i.probeCLI(ctx, p)
+		if e == nil {
+			continue
+		}
+		if first == nil {
+			first = e
+		}
+		if CheckSupported(e.Version) == nil {
+			supported = e
+			break
+		}
+	}
+	switch {
+	case first == nil:
+		return nil, errors.New("openshell: the installer finished but no openshell CLI was found")
+	case supported == nil:
+		return nil, fmt.Errorf("openshell: after install the CLI at %s reports %q: %w", first.Path, first.RawVersion, CheckSupported(first.Version))
+	case onPath != nil && !sameFile(onPath.Path, supported.Path) && CheckSupported(onPath.Version) != nil:
+		return nil, fmt.Errorf("%w: OpenShell %s is installed at %s, but %s comes first on PATH and reports %q; remove it (%s) so that openshell runs the new CLI",
+			ErrStaleCLI, supported.Version, supported.Path, onPath.Path, onPath.RawVersion, removeCommand(onPath.Path))
+	}
+	return supported, nil
+}
+
+// staleCLIRemoval is the command that removes an old CLI the install will
+// not replace, or "" when the package installs over it.
+func (i *Installer) staleCLIRemoval(e *ExistingInstall) string {
+	if e == nil || e.Path == "" {
+		return ""
+	}
+	if i.PackageCLI != "" {
+		if sameFile(e.Path, i.PackageCLI) {
+			return ""
+		}
+	} else if home, err := os.UserHomeDir(); err != nil || !strings.HasPrefix(e.Path, home+string(filepath.Separator)) {
+		// Homebrew replaces its own CLI; only a tarball install in the
+		// home directory is left behind.
+		return ""
+	}
+	return removeCommand(e.Path)
+}
+
+func removeCommand(path string) string {
+	cmd := "rm " + shellQuote(path)
+	if info, err := os.Lstat(path); err == nil && !ownedByCaller(info) {
+		cmd = "sudo " + cmd
+	}
+	return cmd
+}
+
+// onPath is the openshell PATH resolves, unless it is the snap's.
+func (i *Installer) onPath() string {
+	if p, err := i.LookPath(DefaultBinary); err == nil && !strings.HasPrefix(p, "/snap/") {
+		return p
+	}
+	return ""
+}
+
+// probeCLI asks the executable at p for its version; nil when there is
+// none.
+func (i *Installer) probeCLI(ctx context.Context, p string) *ExistingInstall {
+	if p == "" {
+		return nil
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return nil
+	}
+	out, _ := i.Runner.Output(ctx, Command{Name: p, Args: []string{"--version"}, Timeout: 30 * time.Second})
+	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	e := &ExistingInstall{Path: p, RawVersion: strings.TrimSpace(first)}
+	e.Version, _ = VersionFromOutput(e.RawVersion)
+	return e
+}
+
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 var semverToken = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.+~-]+)?$`)
