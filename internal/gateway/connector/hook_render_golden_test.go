@@ -122,6 +122,33 @@ func hostHookGoldenCases() []hostHookGoldenCase {
 			t.Fatal(err)
 		}
 	})
+
+	// The plugin bridges setupPluginArtifact renders into an agent's plugin
+	// directory. They share their templates with the OpenShell sandbox
+	// variants, so every host setup shape is pinned here too.
+	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
+		for _, v := range []struct {
+			managed  bool
+			failMode string
+		}{{false, "closed"}, {false, "open"}, {true, "closed"}} {
+			asset, v := asset, v
+			label := "plugin/" + asset + "/managed=" + boolLabel(v.managed) + "/fail=" + v.failMode
+			add(label, func(t *testing.T, dir string) {
+				body, err := renderHookTemplate(asset, templateData{
+					APIAddr:     apiAddr,
+					TokenFileJS: javaScriptStringContent("/home/golden/.defenseclaw/hooks/.hook-golden.token"),
+					FailMode:    v.failMode,
+					Managed:     v.managed,
+				})
+				if err != nil {
+					t.Fatalf("render %s: %v", label, err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, asset), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
 	return cases
 }
 
