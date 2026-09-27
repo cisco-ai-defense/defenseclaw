@@ -2049,6 +2049,9 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action is required"})
 		return
 	}
+	// Sandbox attribution comes only from an authenticated sandbox binding
+	// (audit.CorrelationEnvelope), never from a request body.
+	event.SandboxID, event.SandboxName = "", ""
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
