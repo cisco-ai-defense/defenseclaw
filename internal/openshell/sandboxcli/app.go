@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -424,17 +425,34 @@ func apiError(err error) error {
 	return e
 }
 
-// violationMessage renders a refused setting. Admin clamps read "blocked by
-// your organization's DefenseClaw policy: <key>".
+// violationMessage renders a refused setting with why and what to do.
+// Admin clamps read "blocked by your organization's DefenseClaw policy:
+// <key> — <why> (<openshell.admin constraint>); <next step>".
 func violationMessage(v *sandboxapi.Violation, message, detail string, admin bool) string {
 	if v != nil && (admin || v.Admin) {
 		msg := sandboxapi.AdminMessage + ": " + v.Key
 		if v.Message != "" && !strings.Contains(v.Message, sandboxapi.AdminMessage) {
 			msg += " (" + v.Message + ")"
 		}
+		why := firstNonEmpty(v.Detail, detail)
+		if why != "" && !strings.Contains(msg, why) {
+			msg += " — " + why
+		}
+		if c := v.Constraint; strings.HasPrefix(c, "openshell.admin.") {
+			msg += " (" + c + ")"
+		}
+		if e := v.Enforced; e != "" && e != "true" && e != "false" && !strings.Contains(why, "the run uses") {
+			msg += "; the run uses " + v.Key + " " + e
+		}
+		if next := adminNextStep(v, why); next != "" {
+			msg += "; " + next
+		}
 		return msg
 	}
 	if v != nil && v.Message != "" {
+		if d := firstNonEmpty(v.Detail, detail); d != "" && !strings.Contains(v.Message, d) {
+			return v.Message + " — " + d
+		}
 		return v.Message
 	}
 	if admin && !strings.HasPrefix(message, sandboxapi.AdminMessage) {
@@ -444,4 +462,35 @@ func violationMessage(v *sandboxapi.Violation, message, detail string, admin boo
 		return message + ": " + detail
 	}
 	return message
+}
+
+// wireViolation is a policy refusal the CLI found itself, in the daemon's
+// wire form (so it reads like the daemon's).
+func wireViolation(v packs.Violation) sandboxapi.Violation {
+	return sandboxapi.Violation{
+		Key: v.Key, Source: string(v.Source), Attempted: v.Attempted, Enforced: v.Enforced,
+		Constraint: v.Constraint, Fatal: v.Fatal, Admin: v.Admin(), Message: v.Message, Detail: v.Detail,
+	}
+}
+
+// adminNextStep is the way on after an organization's refusal, when why
+// does not say it already.
+func adminNextStep(v *sandboxapi.Violation, why string) string {
+	if v.Enforced != "" {
+		// A clamp: the run goes ahead with the organization's value.
+		return ""
+	}
+	switch strings.TrimPrefix(v.Constraint, "openshell.admin.") {
+	case "allow_mount", "require_copy_for":
+		return "run it with --copy (a sandbox that mounts the folder live must be deleted and run again with --copy)"
+	case "allow_host_ports":
+		return "run it without --host-port"
+	case "max_resources":
+		return "ask for less with --cpu or --memory"
+	case "allowed_harnesses", "egress_block", "egress_allow_only":
+		if !strings.Contains(why, "administrator") {
+			return "ask your administrator if you need it"
+		}
+	}
+	return ""
 }

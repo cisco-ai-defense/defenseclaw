@@ -670,7 +670,7 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	if out := ta.output(); !strings.Contains(out, "balanced (asked for open)") || !strings.Contains(out, "openshell.admin.min_profile") {
 		t.Fatalf("explain:\n%s", out)
 	}
-	if strings.Contains(ta.output(), "prints them in full") {
+	if strings.Contains(ta.output(), "-o json lists all") {
 		t.Fatalf("short values were reported as shortened:\n%s", ta.output())
 	}
 	ta.out.Reset()
@@ -689,8 +689,7 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 			t.Errorf("explain line is %d columns wide: %q", n, line)
 		}
 	}
-	if !strings.Contains(out, "**/secret-00.pem, **/secret-01.pem, … (+38 more)") ||
-		!strings.Contains(out, "defenseclaw sandbox policy explain -o json prints them in full") {
+	if !strings.Contains(out, "**/secret-00.pem, **/secret-01.pem (+38 more; -o json lists all)") {
 		t.Fatalf("explain did not shorten the long list:\n%s", out)
 	}
 	ta.out.Reset()

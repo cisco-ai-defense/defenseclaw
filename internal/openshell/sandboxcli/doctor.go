@@ -251,6 +251,10 @@ func (a *App) adminCheck() openshell.Check {
 	if s.Detail != "" {
 		c.Detail += ": " + s.Detail
 	}
+	if warnings := a.adminWarnings(); len(warnings) > 0 {
+		c.Status = openshell.StatusWarn
+		c.Detail += "; " + strings.Join(warnings, "; ")
+	}
 	return c
 }
 

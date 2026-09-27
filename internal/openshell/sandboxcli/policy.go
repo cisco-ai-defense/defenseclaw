@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -78,23 +79,158 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 	if o.Output == OutputJSON {
 		return writeJSON(a.IO.Out, ex)
 	}
-	row := func(k, v string) { a.line(fmt.Sprintf("%-14s%s", k, v)) }
-	row("Pack", ex.Pack+" ("+ex.PackSource+") "+ex.PackDigest)
-	row("Profile", ex.Profile)
-	row("Network", ex.NetworkMode)
-	row("Approvals", ex.Approvals)
-	row("Organization", adminText(ex.Admin))
+	rows := [][2]string{
+		{"Pack", ex.Pack + " (" + ex.PackSource + ") " + ex.PackDigest},
+		{"Profile", ex.Profile}, {"Network", ex.NetworkMode}, {"Approvals", ex.Approvals},
+		{"Organization", adminText(ex.Admin)},
+	}
 	for _, key := range []string{"yolo", "harness.allowed", "workdir.mode", "egress.feeds", "egress.block", "egress.admin_block",
 		"egress.allow", "egress.allow_only", "egress.ports", "mcp.import", "hooks.fail_mode"} {
 		if v := settingValue(ex.Settings, key); v != "" {
-			row(key, v)
+			shown, note := settingShown(ex, key, v)
+			rows = append(rows, [2]string{key, withNote(listSummary(shown, 8), note)})
 		}
+	}
+	// The key column fits the longest key: values never run into labels.
+	width := 0
+	for _, r := range rows {
+		width = max(width, len(r[0]))
+	}
+	for _, r := range rows {
+		a.line(fmt.Sprintf("%-*s  %s", width, r[0], r[1]))
 	}
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 	}
+	for _, w := range a.adminWarnings() {
+		a.warn(w)
+	}
 	a.note("where each value comes from: " + CommandName + " policy explain")
 	return nil
+}
+
+// settingShown is a setting's value as the policy applies it, and a note
+// on what it leaves out: allow entries outside the organization's
+// allow-only list reach nothing, so they are not listed as allowed.
+func settingShown(ex *sandboxapi.Explain, key, value string) (string, string) {
+	if key != "egress.allow" {
+		return value, ""
+	}
+	only := splitList(settingValue(ex.Settings, "egress.allow_only"))
+	if len(only) == 0 {
+		return value, ""
+	}
+	var inside, outside []string
+	for _, entry := range splitList(value) {
+		if coveredBy(only, entry) {
+			inside = append(inside, entry)
+		} else {
+			outside = append(outside, entry)
+		}
+	}
+	shown := "(none)"
+	if len(inside) > 0 {
+		shown = strings.Join(inside, ", ")
+	}
+	if len(outside) == 0 {
+		return shown, ""
+	}
+	return shown, plural(int64(len(outside)), "entry", "entries") + " outside the organization's allow-only list: not reachable"
+}
+
+func withNote(value, note string) string {
+	if note == "" {
+		return value
+	}
+	return value + " (" + note + ")"
+}
+
+// listFit fits a list value into width characters: the entries that fit,
+// then how many more there are.
+func listFit(v string, width int) string {
+	list := splitList(v)
+	if len(list) < 2 || utf8.RuneCountInString(v) <= width {
+		return truncate(v, width)
+	}
+	more := func(n int) string { return fmt.Sprintf(" (+%d more; -o json lists all)", n) }
+	best := ""
+	for i := range list {
+		s := strings.Join(list[:i+1], ", ")
+		if rest := len(list) - i - 1; rest > 0 {
+			s += more(rest)
+		}
+		if utf8.RuneCountInString(s) > width {
+			break
+		}
+		best = s
+	}
+	if best == "" {
+		suffix := more(len(list) - 1)
+		best = truncate(list[0], max(width-utf8.RuneCountInString(suffix), 8)) + suffix
+	}
+	return best
+}
+
+// splitList parses a setting's list value ("a, b", or "(none)").
+func splitList(v string) []string {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.HasPrefix(v, "(") {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// listSummary shortens a long list value to its first n entries.
+func listSummary(v string, n int) string {
+	list := splitList(v)
+	if len(list) <= n || strings.Contains(v, " (") {
+		return v
+	}
+	return strings.Join(list[:n], ", ") + fmt.Sprintf(" (+%d more; -o json lists all)", len(list)-n)
+}
+
+// coveredBy reports whether every destination the egress pattern entry
+// matches is matched by one of globs.
+func coveredBy(globs []string, entry string) bool {
+	inner, err := config.ParseOpenShellEgressPattern(entry)
+	if err != nil {
+		return false
+	}
+	for _, g := range globs {
+		if p, err := config.ParseOpenShellEgressPattern(g); err == nil && p.Covers(inner) {
+			return true
+		}
+	}
+	return false
+}
+
+// adminWarnings are the organization-policy entries that do less than
+// they look like: a bare domain on openshell.admin.egress_block blocks
+// that host only, not its subdomains.
+func (a *App) adminWarnings() []string {
+	if a.Cfg == nil {
+		return nil
+	}
+	block := a.Cfg.OpenShell.Admin.EgressBlock
+	var out []string
+	for _, entry := range block {
+		p, err := config.ParseOpenShellEgressPattern(entry)
+		if err != nil || p.Wildcard || p.Prefix.IsValid() || p.Host == "" || !strings.Contains(p.Host, ".") {
+			continue
+		}
+		if coveredBy(block, "*."+p.Host) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("openshell.admin.egress_block %s blocks %s itself, not its subdomains (www.%s stays reachable); "+
+			"add *.%s to block those too", entry, p.Host, p.Host, p.Host))
+	}
+	return out
 }
 
 func adminText(s sandboxapi.AdminStatus) string {
@@ -117,67 +253,113 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	if o.Output == OutputJSON {
 		return writeJSON(a.IO.Out, ex)
 	}
-	a.line(a.bold("pack "+ex.Pack) + " " + ex.PackDigest + " from " + ex.PackSource)
-	a.line("organization: " + adminText(ex.Admin))
-	rows := make([][]string, 0, len(ex.Settings))
-	shortened := false
+	head := "pack " + ex.Pack + " " + ex.PackDigest + " from "
+	a.line(a.bold("pack "+ex.Pack) + " " + ex.PackDigest + " from " +
+		truncate(ex.PackSource, max(explainWidth-2-utf8.RuneCountInString(head), 24)))
+	a.line(truncate("organization: "+adminText(ex.Admin), explainWidth-2))
+	// Every line fits explainWidth columns: the key, source and origin
+	// columns take what they need (the origin cut to explainOriginWidth),
+	// and long values (the masks, the blocklist) get the rest, cut to the
+	// entries that fit; -o json has them whole.
+	keyW, srcW, originW := len("SETTING"), len("SOURCE"), len("ORIGIN")
 	for _, s := range ex.Settings {
-		val, cut := shortList(s.Value, explainValueWidth)
-		shortened = shortened || cut
-		if s.Requested != "" {
-			req, cut := shortList(s.Requested, explainRequestedWidth)
-			shortened = shortened || cut
-			val += " (asked for " + req + ")"
+		keyW = max(keyW, utf8.RuneCountInString(s.Key))
+		srcW = max(srcW, utf8.RuneCountInString(s.Source))
+		originW = max(originW, min(utf8.RuneCountInString(s.Origin), explainOriginWidth))
+	}
+	valueW := min(max(explainWidth-keyW-srcW-originW-3*2, explainMinValueWidth), explainValueWidth)
+	rows := make([][]string, 0, len(ex.Settings))
+	var notes []string
+	for _, s := range ex.Settings {
+		shown, note := settingShown(ex, s.Key, s.Value)
+		if note != "" {
+			notes = append(notes, s.Key+": "+note)
 		}
-		rows = append(rows, []string{s.Key, val, s.Source, s.Origin})
+		asked := ""
+		if s.Requested != "" {
+			asked = " (asked for " + listFit(s.Requested, min(explainRequestedWidth, valueW/3)) + ")"
+		}
+		val := listFit(shown, valueW-utf8.RuneCountInString(asked)) + asked
+		if utf8.RuneCountInString(val) > valueW {
+			val = truncate(val, valueW)
+		}
+		rows = append(rows, []string{s.Key, val, s.Source, truncate(s.Origin, explainOriginWidth)})
 	}
 	a.table([]string{"SETTING", "VALUE", "SOURCE", "ORIGIN"}, rows)
-	if shortened {
-		a.note("long values are shortened; " + CommandName + " policy explain -o json prints them in full")
+	for _, n := range notes {
+		a.note(n)
+	}
+	if lines := a.adminConstraints(); len(lines) > 0 {
+		a.println()
+		a.line(a.bold("Organization constraints") + " (openshell.admin)")
+		for _, l := range lines {
+			a.line("  " + l)
+		}
 	}
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 	}
+	for _, w := range a.adminWarnings() {
+		a.warn(w)
+	}
 	return nil
 }
 
-// The VALUE column of `policy explain` is capped so the table fits a
-// terminal: the masks and egress lists would otherwise pad every row to
-// a thousand columns.
+// `policy explain` keeps every line within explainWidth columns, so its
+// table fits a terminal: the masks and egress lists would otherwise pad
+// every row to a thousand columns. The VALUE column gets what the other
+// columns leave, at most explainValueWidth.
 const (
-	explainValueWidth     = 48
+	explainWidth          = 120
+	explainValueWidth     = 72
+	explainMinValueWidth  = 32
+	explainOriginWidth    = 40
 	explainRequestedWidth = 24
+	// explainConstraintWidth fits a constraint's value after the
+	// indentation and the 22-column key of adminConstraints.
+	explainConstraintWidth = explainWidth - 4 - 23
 )
 
-// shortList fits v into width runes. A ", "-separated list keeps the
-// entries that fit and says how many it left out; any other value is cut.
-// It reports whether v was shortened.
-func shortList(v string, width int) (string, bool) {
-	if utf8.RuneCountInString(v) <= width {
-		return v, false
+// adminConstraints lists every openshell.admin key the configuration sets,
+// whatever the pack: a required pack does not hide the others.
+func (a *App) adminConstraints() []string {
+	if a.Cfg == nil {
+		return nil
 	}
-	items := strings.Split(v, ", ")
-	if len(items) < 2 {
-		return truncate(v, width), true
-	}
-	var kept []string
-	used := 0
-	for i, item := range items {
-		more := fmt.Sprintf(", … (+%d more)", len(items)-i-1)
-		n := utf8.RuneCountInString(item)
-		if len(kept) > 0 {
-			n += 2
+	ad := a.Cfg.OpenShell.Admin
+	var out []string
+	add := func(key, value string) {
+		if value != "" {
+			out = append(out, fmt.Sprintf("%-22s %s", key, value))
 		}
-		if len(kept) > 0 && used+n+utf8.RuneCountInString(more) > width {
-			break
+	}
+	boolean := func(key string, v *bool) {
+		if v != nil {
+			add(key, strconv.FormatBool(*v))
 		}
-		kept = append(kept, item)
-		used += n
 	}
-	if len(kept) == 1 && utf8.RuneCountInString(kept[0]) > width {
-		kept[0] = truncate(kept[0], width)
+	list := func(key string, v []string) {
+		if len(v) > 0 {
+			add(key, listFit(strings.Join(v, ", "), explainConstraintWidth))
+		}
 	}
-	return strings.Join(kept, ", ") + fmt.Sprintf(", … (+%d more)", len(items)-len(kept)), true
+	add("required_pack", ad.RequiredPack)
+	add("required_pack_digest", ad.RequiredPackDigest)
+	add("min_profile", ad.MinProfile)
+	boolean("allow_yolo", ad.AllowYolo)
+	boolean("allow_mount", ad.AllowMount)
+	boolean("allow_host_ports", ad.AllowHostPorts)
+	boolean("allow_unblock", ad.AllowUnblock)
+	boolean("allow_learn_mode", ad.AllowLearnMode)
+	list("allowed_harnesses", ad.AllowedHarnesses)
+	list("egress_block", ad.EgressBlock)
+	list("egress_allow_only", ad.EgressAllowOnly)
+	list("require_copy_for", ad.RequireCopyFor)
+	if r := ad.MaxResources; r.CPU != "" || r.Memory != "" {
+		add("max_resources", strings.TrimSpace(firstNonEmpty(r.CPU, "-")+" CPU, "+firstNonEmpty(r.Memory, "-")+" memory"))
+	}
+	list("locked", ad.Locked)
+	return out
 }
 
 // SuggestOptions are the `policy suggest` flags.
@@ -285,6 +467,11 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 		if list == "allow" && packs.IsBroadAllowGlob(h) {
 			return fmt.Errorf("%s allows too much; name hosts or a subdomain wildcard like *.example.com", h)
 		}
+		if list == "allow" {
+			if err := a.adminAllows(h); err != nil {
+				return err
+			}
+		}
 		dup := false
 		for _, have := range next {
 			if strings.EqualFold(have, h) {
@@ -308,6 +495,33 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 		a.note("allow entries matter in the balanced and strict profiles; open allows everything not blocked")
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
+	return nil
+}
+
+// adminAllows refuses an allow entry the organization's policy would make
+// dead: allow entries are ignored under allow_unblock: false, and nothing
+// on egress_block or outside egress_allow_only is reachable whatever the
+// entry says.
+func (a *App) adminAllows(entry string) error {
+	if a.Cfg == nil {
+		return nil
+	}
+	ad := a.Cfg.OpenShell.Admin
+	refuse := func(constraint, why string) error {
+		v := &sandboxapi.Violation{Key: "egress.allow", Attempted: entry, Constraint: constraint, Admin: true, Detail: why}
+		return errors.New(violationMessage(v, "", why, true))
+	}
+	if ad.AllowUnblock != nil && !*ad.AllowUnblock {
+		return refuse("openshell.admin.allow_unblock", "your own allow entries are ignored; ask your administrator to add destinations")
+	}
+	for _, b := range ad.EgressBlock {
+		if coveredBy([]string{b}, entry) {
+			return refuse("openshell.admin.egress_block", entry+" is on your organization's blocklist ("+b+")")
+		}
+	}
+	if len(ad.EgressAllowOnly) > 0 && !coveredBy(ad.EgressAllowOnly, entry) {
+		return refuse("openshell.admin.egress_allow_only", entry+" is not on your organization's list of allowed destinations")
+	}
 	return nil
 }
 
@@ -377,10 +591,13 @@ func (a *App) PackList(o PackOptions) error {
 		return writeJSON(a.IO.Out, map[string]any{"packs": out})
 	}
 	rows := make([][]string, 0, len(list))
+	var invalid []packs.Entry
 	for _, e := range list {
 		digest := e.Digest
 		if e.Err != nil {
-			digest = a.style("invalid: "+truncate(e.Err.Error(), 80), ansiRed)
+			// The reason goes below the table, whole.
+			digest = a.style("invalid (see below)", ansiRed)
+			invalid = append(invalid, e)
 		}
 		kind := "custom"
 		if e.Builtin {
@@ -389,6 +606,9 @@ func (a *App) PackList(o PackOptions) error {
 		rows = append(rows, []string{e.Name, kind, e.Profile, digest})
 	}
 	a.table([]string{"NAME", "KIND", "PROFILE", "DIGEST"}, rows)
+	for _, e := range invalid {
+		a.bad(e.Name + ": " + e.Err.Error())
+	}
 	return nil
 }
 
