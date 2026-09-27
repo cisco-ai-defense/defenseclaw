@@ -215,6 +215,24 @@ func (c *cliEnv) cliIn(dir string, timeout time.Duration, args ...string) (strin
 // home and data directory, the daemon token, and harmless mock model keys
 // in place of the user's.
 func (c *cliEnv) cliEnviron() []string {
+	if c.environ == nil {
+		real, _ := os.UserHomeDir()
+		xdg := os.Getenv("XDG_CONFIG_HOME")
+		if xdg == "" {
+			xdg = filepath.Join(real, ".config")
+		}
+		for _, kv := range os.Environ() {
+			k, _, _ := strings.Cut(kv, "=")
+			if strings.HasPrefix(k, "DEFENSECLAW_") || strings.HasPrefix(k, "OPENCLAW_") || k == "HOME" || k == "XDG_CONFIG_HOME" ||
+				k == "ANTHROPIC_API_KEY" || k == "OPENAI_API_KEY" || k == "CODEX_API_KEY" || k == "CLAUDE_CODE_OAUTH_TOKEN" {
+				continue
+			}
+			c.environ = append(c.environ, kv)
+		}
+		c.environ = append(c.environ, "HOME="+filepath.Join(c.work, "home"), "XDG_CONFIG_HOME="+xdg, "SHELL=/bin/bash",
+			"DEFENSECLAW_HOME="+filepath.Join(c.work, "dc"), "DEFENSECLAW_GATEWAY_TOKEN="+c.token, "NO_COLOR=1",
+			"OPENAI_API_KEY=dce2e-mock-key-not-a-secret", "ANTHROPIC_API_KEY=dce2e-mock-key-not-a-secret")
+	}
 	return c.environ
 }
 
@@ -273,7 +291,7 @@ func wantAll(t *testing.T, what, got string, want ...string) {
 }
 
 func (c *cliEnv) doctor() {
-	out, _, _ := c.cli(5*time.Minute, "doctor", "--output", "json")
+	out, errOut, code := c.cli(5*time.Minute, "doctor", "--output", "json")
 	var rep struct {
 		OK     bool `json:"ok"`
 		Checks []struct {
@@ -281,7 +299,7 @@ func (c *cliEnv) doctor() {
 		} `json:"checks"`
 	}
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
-		c.t.Fatalf("doctor json: %v\n%s", err, truncate(out, 2000))
+		c.t.Fatalf("doctor json (exit %d): %v\nstdout:\n%s\nstderr:\n%s", code, err, truncate(out, 2000), truncate(errOut, 2000))
 	}
 	for _, ch := range rep.Checks {
 		if ch.ID == "defenseclaw-daemon" && ch.Status != "pass" {
@@ -727,7 +745,7 @@ func (c *cliEnv) copyGitRefresh() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, "-q", "-e", "-f", "-c", inner, "/dev/null")
-	cmd.Dir, cmd.Env = dir, c.environ
+	cmd.Dir, cmd.Env = dir, c.cliEnviron()
 	raw, err := cmd.CombinedOutput()
 	out := string(raw)
 	t.Logf("connect --refresh:\n%s", truncate(out, 3000))
