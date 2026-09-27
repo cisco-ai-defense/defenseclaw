@@ -238,7 +238,7 @@ func (t *connTracker) setIdle(c *limitConn, idle bool) bool {
 // reclaim closes one connection to make room for a new one and reports
 // whether there was one to close: the oldest connection no request was
 // admitted on yet, else the one idle longest between keep-alive requests.
-// Connections carrying a request or tunnel are never closed.
+// Connections carrying an admitted request or tunnel are never closed.
 func (t *connTracker) reclaim() bool {
 	t.mu.Lock()
 	var victim *limitConn
