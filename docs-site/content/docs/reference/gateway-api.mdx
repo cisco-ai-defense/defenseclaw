@@ -1,12 +1,13 @@
 ---
 title: Gateway API
-description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, inspection verdict shape, and the OpenShell sandbox hook ingress and egress proxy. The handler code is authoritative.
+description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, inspection verdict shape, the /api/v1/sandbox REST API, and the OpenShell sandbox hook ingress and egress proxy. The handler code is authoritative.
 keywords:
   - DefenseClaw gateway API
   - defenseclaw-gateway endpoints
   - DefenseClaw inspect API
   - X-DefenseClaw-Token
   - X-DefenseClaw-Client
+  - DefenseClaw sandbox API
   - OpenShell sandbox hook ingress
   - DefenseClaw egress proxy
 ---
@@ -24,9 +25,10 @@ and the files referenced from its `mux.HandleFunc` registrations.
 <Callout type="info">
 This page covers the sidecar API on `gateway.api_port`. The separate guardrail
 proxy listener on `guardrail.port` has its own OpenAI-compatible and provider
-routes in `internal/gateway/proxy.go`. The two OpenShell sandbox listeners,
-the hook ingress and the egress proxy, are described under
-[Sandbox listeners](#sandbox-listeners).
+routes in `internal/gateway/proxy.go`. The routes that manage OpenShell
+sandboxes are under [Sandbox API](#sandbox-api). The two listeners that
+sandboxes themselves reach, the hook ingress and the egress proxy, are
+described under [Sandbox listeners](#sandbox-listeners).
 </Callout>
 
 ## Bind address
@@ -138,11 +140,24 @@ X-DefenseClaw-Client: cli
 | `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
+When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem
+for the OpenShell sandbox runtime:
+
+- `running`, with the hook ingress and egress proxy addresses in
+  `details.ingress` and `details.egress`;
+- `degraded`, with a `last_error` that names each failing part: `ingress`,
+  `egress`, `manager`, or `openshell` (the connection to the OpenShell
+  gateway). Sandbox hooks fail closed while a part is down;
+- `disabled`, with the reason, on a platform or in a deployment that can't
+  run sandboxes: any platform but Linux and macOS, or a `managed_enterprise`
+  install;
+- `stopped` while the API listener restarts.
+
 On a host that still carries the removed legacy standalone sandbox (see
 [Bind address](#bind-address)), `/health` includes a `sandbox` subsystem with
 state `degraded` and a `last_error` of "legacy standalone install detected",
-directing the operator to run `defenseclaw sandbox legacy-cleanup`. On every
-other host the `sandbox` subsystem is absent from `/health`.
+directing the operator to run `defenseclaw sandbox legacy-cleanup`. Otherwise
+the `sandbox` subsystem is absent from `/health`.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
@@ -447,6 +462,12 @@ rejections.
 
 See [`internal/gateway/otel_ingest.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/otel_ingest.go) for the parsing details and [Local observability](/docs/observability/local-observability) for the operator setup.
 
+### Sandbox management
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`, `POST`, `DELETE` | `/api/v1/sandbox/...` | Create, inspect, and control OpenShell sandboxes, answer their asks, lift egress blocks, explain their policy, and stream their activity. See [Sandbox API](#sandbox-api). |
+
 ## Verdict envelope
 
 All four `/api/v1/inspect/*` endpoints serialize the same
@@ -535,16 +556,185 @@ For `/api/v1/inspect/*`, evidence is redacted by default.
 handler records an `inspect-reveal` audit event; the request, response, and
 tool-response handlers currently reveal without that extra audit event.
 
-## Sandbox listeners
+## Sandbox API
 
-<Callout type="warn" title="Implemented, not started yet">
-The code for both listeners ships in this release, but `defenseclaw-gateway`
-does not start either of them yet, whatever `openshell.enabled` says, and
-nothing issues the per-sandbox credentials they check. They are part of the
-NVIDIA OpenShell sandbox integration, which is in development. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once they
-ship; today it covers legacy cleanup.
-</Callout>
+The routes under `/api/v1/sandbox/` manage NVIDIA OpenShell sandboxes. The
+`defenseclaw sandbox` CLI, the TUI Sandboxes panel, and the macOS app call
+them. The daemon is the only writer of sandbox bindings, OpenShell providers,
+sandboxes, approvals, and egress rules. The CLI keeps the terminal, the
+copy-mode workspace, the image builds, and the installer; see
+[Sandbox CLI](/docs/reference/sandbox-cli). The wire types are in
+[`internal/openshell/sandboxapi`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/openshell/sandboxapi/types.go),
+and the router is `internal/gateway/api_sandbox.go`.
+
+**Auth and CSRF.** The routes sit on the main API port behind the same
+middleware as every other route. They need the master gateway token (see
+[Auth](#auth)); a sandbox binding credential gets 401. Mutating requests carry
+`X-DefenseClaw-Client` (the CLI sends `defenseclaw-sandbox`) and
+`Content-Type: application/json` (see [CSRF protection](#csrf-protection)).
+Bodies are decoded strictly: an unknown field, trailing data, or malformed
+JSON gets 400 `invalid_request`, and a body over 256 KiB gets 413. Where the
+table marks a body optional, an empty body means the defaults.
+
+**When sandboxes are off.** Until the sandbox runtime runs, every route except
+`GET /api/v1/sandbox/status` answers 503: code `disabled` when
+`openshell.enabled` is `false`, and `unavailable` when it is `true` but the
+runtime isn't running (see the `/health` `sandbox` subsystem above).
+`GET /api/v1/sandbox/status` then still answers 200, with `enabled` and the
+`reason`.
+
+| Method | Path | Request | Response |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway`, `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, and `last_reconcile`. |
+| `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
+| `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
+| `DELETE` | `/api/v1/sandbox/sandboxes/{name}` | Optional `{"keep_snapshot": bool}` | `DeleteResponse`: `name`, `deleted`, the removed `providers`, `warnings` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/stop` | Optional `{}` | `Sandbox` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool}` | `Sandbox` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/undo` | Optional `{"preview", "keep_refs", "stop", "restart"}` (all bool) | `UndoResponse`: the workspace `result`, whether it `stopped` and `restarted` the sandbox, a `summary`, and a `review` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, and the `diff` when asked |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
+| `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
+| `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
+| `POST` | `/api/v1/sandbox/egress/unblock` | `UnblockRequest` | `UnblockResponse`: `host`, `sandbox`, `scope` (`sandbox` or `always`), `persisted`, `message` |
+| `GET` | `/api/v1/sandbox/policy/explain` | Query, see below | `Explain` |
+| `GET` | `/api/v1/sandbox/activity` | Query `sandbox`, `since`, `follow` | `{"events": [ActivityEvent]}`, or a server-sent event stream |
+
+Any other path under `/api/v1/sandbox/` gets 404 `not_found`.
+
+### Sandbox requests and responses
+
+`POST /api/v1/sandbox/sandboxes` creates and starts a sandbox. The CLI sends
+it for `sandbox run`.
+
+| Field | Meaning |
+| --- | --- |
+| `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
+| `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
+| `name` | Optional. Empty picks `dc-<harness>-<folder>-<random>`. |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed). |
+| `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
+| `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
+| `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
+| `credentials` | `--credential` bindings: `name`, `value`, `host`, and `port` (default 443). |
+| `env` | Non-secret environment variables. DefenseClaw, proxy, and loader variables, and variables the harness image pins, are refused. |
+
+Secret values in `llm.credentials` and `credentials` go to OpenShell as
+provider credentials. The daemon never stores them or returns them.
+
+A `Sandbox` carries its `name` and OpenShell `id`, the `harness`, its
+`phase` (lowercase OpenShell phase such as `ready` or `stopped`, or `missing`
+when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
+`profile`, `network_mode`, `approvals`, and `yolo`. It also carries
+`workdir_mode` (`mount` or `copy`), `project`, and `workdir`, the image and
+`tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
+plain reason, tamper counts, and whether hooks are `silent` or
+`unreachable`), `endpoints` (the last result of each credentialed endpoint),
+`egress` totals, `pending_approvals`, the
+`workspace` and `mcp` banner views, `snapshot`, `violations` (settings the
+policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
+nested-repository guard found in a mounted project). `launch` holds what the
+CLI needs to start the harness.
+
+### Approvals and unblocks
+
+An `Approval` is one of the rare asks: an OpenShell draft proposal that triage
+would not decide on its own. It has an `id`, `sandbox`, `kind`
+(`network_rule`, or `host_port` for a port on this machine), `host`, `port`,
+`endpoints`, the `binary` that connected, whether it is `risky`, the triage
+`reason`, and the OpenShell advisor's `rationale` and `security_notes`. Its
+`status` is `pending`, `queued`, `approved`, `rejected`, or `failed`.
+
+`POST /api/v1/sandbox/approvals/{id}` takes
+`{"decision": "approve"|"reject", "always": bool, "reason": text}`. An
+approval is usually answered `queued`: approvals are applied in batches when
+the sandbox's hooks are quiet, because every OpenShell policy change closes
+the sandbox's open connections. `always` keeps the decision for future
+sandboxes: an approval adds the hosts to `openshell.egress.unblocked`, a
+rejection to `openshell.egress.block`.
+
+`POST /api/v1/sandbox/egress/unblock` takes `{"host", "sandbox", "always"}`.
+`sandbox` scopes the unblock to one sandbox. Without it, `always` is
+required, and the host is saved to `openshell.egress.unblocked` for every
+sandbox. Only refusals the policy marks unblockable can be lifted; see
+[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+
+### Policy explain
+
+`GET /api/v1/sandbox/policy/explain` resolves the sandbox policy with its
+provenance. The query names either `sandbox` (the policy that sandbox runs
+with, against the current config) or the run options `harness`, `pack`,
+`profile`, `project`, `copy`, `safe`, `yolo`, and `unmask` (repeatable).
+The `Explain` response has the `pack`, `pack_source`, and `pack_digest`, the
+`profile`, `network_mode`, and `approvals`, the `admin` status, `settings`,
+and `violations`.
+
+Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
+or `default`), `origin` (such as `openshell.admin.min_profile`), and, for a
+clamped setting, the value `requested`. `admin` has `configured`,
+`authority` (`authoritative` in `managed_enterprise`, otherwise `advisory`),
+and `detail`.
+
+### Activity stream
+
+`GET /api/v1/sandbox/activity` returns the buffered activity feed as
+`{"events": [...]}`. With `follow=true`, or `Accept: text/event-stream`, it
+streams server-sent events instead. The stream first replays the buffered
+events after `since`, or after the `Last-Event-ID` header, which wins over
+`since`. Then it sends each new event as:
+
+```text
+id: 42
+event: activity
+data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"dc-claude-myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
+```
+
+A `: keepalive` comment follows the replay and repeats every 15 seconds.
+`sandbox` limits the feed to one sandbox. Too many open streams get 429.
+
+Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
+`sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
+(`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
+`bytes_up`, `bytes_down`, `approval_id`, `tool`, `event`, `phase`,
+`severity`, `reason`, and `message`.
+
+| `kind` | Meaning |
+| --- | --- |
+| `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. |
+| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before. |
+| `egress.unblocked` | An unblock was applied. |
+| `approval.requested`, `approval.resolved` | An ask was raised or answered. |
+| `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
+| `sandbox.lifecycle` | A sandbox changed phase. |
+| `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, or `nested_repo`. |
+| `workspace` | An undo, or a copy-mode upload or pull. |
+| `dropped` | A slow subscriber missed events. |
+
+### Sandbox API errors
+
+Every error answer is JSON:
+`{"code": "…", "error": "…", "detail": "…", "violation": {…}}`. `error` is
+the sentence for people, `detail` is optional, and `violation` names the
+refusing policy decision when there is one. A refusal by `openshell.admin`
+starts with "blocked by your organization's DefenseClaw policy".
+
+| Status | `code` | When |
+| --- | --- | --- |
+| 400 | `invalid_request`, `pack_invalid` | A malformed request, or a pack that fails to load. |
+| 403 | `admin_violation` | `openshell.admin` refused the request. |
+| 403 | `policy_violation` | The pack, the profile, or a DefenseClaw invariant refused it. |
+| 404 | `not_found` | No such sandbox, approval, or route. |
+| 409 | `conflict` | The sandbox exists already or is in the wrong phase. |
+| 409 | `image_unavailable` | No hook-checked harness image, and building one was refused or failed. |
+| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration. |
+| 429 | `unavailable` | Too many activity streams are open. |
+| 502 | `upstream_error` | An OpenShell call failed. |
+| 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available. |
+| 504 | `unavailable` | The request was cancelled or timed out. |
+| 500 | `internal` | Anything else. |
+
+## Sandbox listeners
 
 A sandboxed agent cannot connect out directly. The host-networked OpenShell
 supervisor carries the connections its policy allows, and it relays
@@ -556,17 +746,25 @@ sandbox. Inside the sandbox, both listeners are addressed as
 
 | Listener | Config key | Default port | Listens on |
 | --- | --- | --- | --- |
-| Hook ingress | `openshell.ingress_port` | `gateway.api_port` + 1 (`18971`) | A loopback IP address only, never the main API address |
-| Egress proxy | `openshell.egress_port` | `gateway.api_port` + 2 (`18972`) | Loopback addresses only |
+| Hook ingress | `openshell.ingress_port` | `gateway.api_port` + 1 (`18971`) | `127.0.0.1` only, never the main API address |
+| Egress proxy | `openshell.egress_port` | `gateway.api_port` + 2 (`18972`) | `127.0.0.1` only |
 
-The gateway starts both listeners with the API when `openshell.enabled` is
-`true`. It checks the `openshell:` block every time it loads the config and
-refuses a config that fails; the error starts with `config: openshell:`. An explicit port that is
-not between 1 and 65535, or both keys set to the same port, always fails. When
-`openshell.enabled` is `true`, the effective ports must also be at most
-65535 and differ from `gateway.api_port`, `guardrail.port` and each other.
-On a config reload, turning `openshell.enabled` on or off, or moving either
-port while it is on, restarts the main API listener.
+The gateway starts both listeners, and the sandbox manager behind the
+[Sandbox API](#sandbox-api), with the API when `openshell.enabled` is `true`
+on Linux or macOS. In a `managed_enterprise` install it starts neither, and
+`/health` reports the `sandbox` subsystem as `disabled`. A listener that
+cannot start marks the subsystem `degraded` (sandbox hooks then fail closed),
+but never stops the API.
+
+The gateway checks the `openshell:` block every time it loads the config and
+refuses a config that fails; the error starts with `config: openshell:`. An
+explicit port that is not between 1 and 65535, or both keys set to the same
+port, always fails. When `openshell.enabled` is `true`, the effective ports
+must also be at most 65535 and differ from `gateway.api_port`,
+`guardrail.port` and each other. On a config reload, turning
+`openshell.enabled` on or off, or moving either port while it is on, restarts
+the main API listener. A sandbox keeps the ingress port its image and policy
+were built for, so re-create existing sandboxes after moving it.
 
 ### Hook ingress
 
@@ -590,10 +788,23 @@ form, which would put a credential in the URL.
 
 **Authentication.** A request must send exactly one
 `Authorization: Bearer dcsb_…` header with the sandbox's binding credential.
-The integration is designed to deliver that credential as an OpenShell
-provider credential, so the harness sees only a placeholder that OpenShell
-swaps for the real value on the way to the ingress. The master gateway
-token, connector hook tokens and OTLP path tokens are never accepted here.
+The master gateway token, connector hook tokens and OTLP path tokens are
+never accepted here. The sandbox manager mints the credential when it creates
+the sandbox and revokes it when the sandbox is deleted.
+`openshell.token_delivery` says how the credential reaches the sandbox:
+
+- `provider` (the default): as an OpenShell provider credential in
+  `DEFENSECLAW_SANDBOX_TOKEN`. The sandbox sees only a placeholder, which
+  OpenShell swaps for the real value on the way to the ingress. Each ingress
+  listener has its own OpenShell provider profile,
+  `defenseclaw-ingress-<ingress_port>`, so DefenseClaw daemons on different
+  ports never re-point each other's sandboxes. The credential is rotated
+  every time the sandbox starts, so a credential from an earlier session
+  stops working.
+- `env`: as a plain `DEFENSECLAW_SANDBOX_TOKEN` variable. The agent can read
+  the real value, and it is kept for the sandbox's life, because OpenShell
+  can't change a sandbox's environment after it is created. The sandbox's
+  policy then gets its own rule to reach the ingress.
 
 | Response | When |
 | --- | --- |
@@ -622,16 +833,19 @@ are capped at 4 MiB, far below the main receiver's 64 MiB.
   with the same key and the same request within two minutes gets the original
   response, marked `X-DefenseClaw-Idempotent-Replay: true`, instead of a
   second evaluation. The same key on a different request gets 422.
+- A blocked tool call's verdict carries a plain reason for the agent: the rule
+  and what to do instead, never the matched content.
 - The [CSRF rules](#csrf-protection) are the same as on the main API.
 
 ### Egress proxy
 
 The egress proxy (`internal/openshell/egress`) is the sandbox's general path
-to the web. The sandbox's `HTTPS_PROXY` and `HTTP_PROXY` point at
-`http://host.openshell.internal:<egress_port>`, with a per-sandbox username
-and password in the URL. `NO_PROXY` lists `host.openshell.internal` and the
-model provider hosts, so hook traffic and LLM traffic do not go through the
-proxy.
+to the web. The harness launcher and the sandbox's shells set `HTTPS_PROXY`
+and `HTTP_PROXY` to `http://host.openshell.internal:<egress_port>`, with a
+per-sandbox username and password in the URL. `NO_PROXY` lists
+`host.openshell.internal` and the model provider hosts, so hook traffic and
+LLM traffic do not go through the proxy. A sandbox under the `strict` profile
+gets no proxy credential: it has no web egress.
 
 **Authentication.** Clients send the credential as
 `Proxy-Authorization: Basic`. A request without it, or with a wrong one, gets
@@ -639,7 +853,8 @@ proxy.
 `Proxy-Authenticate: Basic realm="DefenseClaw egress"`. The proxy keeps only
 SHA-256 digests of the passwords, and issuing a new credential for a sandbox
 revokes the old one. The credential does not grant extra reach: it
-attributes each connection to a sandbox and applies per-sandbox limits.
+attributes each connection to a sandbox and applies that sandbox's policy and
+limits.
 
 **What it forwards.**
 
@@ -648,49 +863,53 @@ attributes each connection to a sandbox and applies per-sandbox limits.
   handshake and closes a tunnel whose name it would block.
 - Absolute-form `http://` requests, with hop-by-hop headers and the proxy
   credential removed.
-- Only destination ports on the allowlist: 80 and 443 in the `open` and
-  `balanced` packs, replaced by `openshell.egress.ports` when you set it. On
-  80 and 443 the proxy relays only web traffic; other protocols such as SSH
-  pass only on ports you add.
+- Only destination ports on the sandbox's port list: 80 and 443 in the `open`
+  and `balanced` packs, replaced by `openshell.egress.ports` when you set it.
+  On 80 and 443 the proxy relays only web traffic; other protocols such as
+  SSH pass only on ports you add.
 
-**What it decides.** Each sandbox is decided by its own resolved policy
-(its pack, your `openshell` keys and the admin constraints); one sandbox's
-block list, ports or unblocks never apply to another. Under the `open`
-profile, destination names are allowed unless they are on the built-in feed
-of exfiltration and abuse destinations (paste sites, file drops, webhook
-catchers, tunnels, anonymizers). `openshell.egress.feed: none` turns that
-feed off, unless `openshell.admin.allow_unblock` is `false` or
-`openshell.admin.required_pack` names a pack that uses it. Under `balanced`,
-only names on the pack's allow list (the curated allowlist) are allowed. The
-`strict` profile runs without the proxy. The order, after the checks below:
-`openshell.admin.egress_block` and `egress_allow_only`, then the block list
-(the pack's and `openshell.egress.block`), then unblocks, then the allow
-list, then the feed, then the profile's default. In every mode:
+**What it decides.** Each sandbox is decided by its own resolved policy: its
+pack, your `openshell` keys, its run options, and the admin constraints.
+Another sandbox's pack, block list, ports, or unblocks never apply to it. The
+unblock and approval checks and the triage of OpenShell connection requests
+ask the same decider, so they never disagree with the proxy. In short:
 
-- This machine is never reachable: loopback, its own addresses, link-local
-  and cloud metadata addresses.
+- This machine is never reachable: loopback, its own addresses and names,
+  link-local, cloud metadata, and reserved addresses.
 - Private networks are reachable only when an allow entry names them: an
   `openshell.egress.allow` entry, the pack's `egress.allow`, or
   `openshell.admin.egress_allow_only`. An unblock never opens them. With
   `openshell.admin.allow_unblock: false`, your own entries and those of a
   custom pack you picked are ignored, so only `egress_allow_only` or a
   required pack's list can open one; the `how_to_unblock` hint says so.
-- Under `open`, a destination given as an IP address is blocked, because it
-  would sidestep the name-based feed. An unblock, or an allow entry that
-  names it, lifts the block.
+- `openshell.admin.egress_block`, a host outside
+  `openshell.admin.egress_allow_only`, and the block list (the pack's and
+  `openshell.egress.block`) are refused, and can't be unblocked.
+- Under `open`, host names are allowed unless the built-in feed of
+  exfiltration and abuse destinations lists them (paste sites, file drops,
+  webhook catchers, tunnels, anonymizers). A destination given as an IP
+  address is blocked, because it would get around the name-based feed. An
+  unblock, or an allow entry that names it, lifts the block.
+- Under `balanced`, only hosts on the allow list are reachable. The rest can
+  be unblocked.
 - Names are resolved by the proxy, and each answer is checked just before the
   connection, so a DNS answer that changes between check and connect cannot
   redirect it.
 
-Only feed blocks and the profile defaults can be unblocked, and none when
-`openshell.admin.allow_unblock` is `false`. `POST /api/v1/sandbox/egress/unblock`
-refuses the rest: the administrator's lists answer `admin_violation` ("blocked
-by your organization's DefenseClaw policy"), and the block list, private
-networks and this machine answer `policy_violation`.
+The full order, with what an allow entry, an unblock, and
+`openshell.admin.allow_unblock: false` change, is under
+[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+`POST /api/v1/sandbox/egress/unblock` refuses what can't be unblocked: the
+administrator's lists and `allow_unblock: false` answer `admin_violation`
+("blocked by your organization's DefenseClaw policy"). The block list,
+private networks, this machine, and the `strict` profile answer
+`policy_violation`.
 
-A blocked request gets `403` with a JSON body: `error: "egress_blocked"`, the
-host, port and category, whether it can be unblocked, and a `how_to_unblock`
-sentence written for the agent to pass on to you.
+A blocked request gets `403` with a JSON body: `error: "egress_blocked"`, a
+`message`, the `host`, `port`, `category` and `reason`, the matching `rule`
+or feed entry, whether it is `unblockable`, and a `how_to_unblock` sentence
+written for the agent to pass on to you, such as the
+`defenseclaw sandbox unblock` command to run.
 
 Policy changes reach open connections too. When a sandbox's policy changes
 (an administrator's constraint, for example), the proxy decides its open
@@ -699,12 +918,17 @@ a sandbox loses its proxy credential (its policy can no longer be resolved,
 or it moves to `strict`), all of its open tunnels close.
 
 The proxy also counts bytes per destination and reports an upload of more
-than 25 MiB (the default threshold) to a destination the sandbox had not
-contacted before.
+than the configured threshold to a destination the sandbox had not contacted
+before. The threshold is `openshell.egress.large_upload_mb`, or else the
+configured pack's `egress.large_upload_mb` (25 MiB in `open`, 10 MiB in
+`balanced`; `0` in a pack turns the report off). The report is an
+`egress.large_upload` activity event and a finding; the upload itself is not
+cut off.
 
 **Default per-sandbox limits.** 256 open connections, 256 concurrent tunnels
 or requests, and 50 new tunnels per second (burst 200), with 1024 connections
 across all sandboxes.
+
 
 ## Headers
 
@@ -717,3 +941,4 @@ across all sandboxes.
 | `X-DefenseClaw-Request-Id` | request *(optional)*, response | Caller-supplied correlation id. The gateway also accepts `X-Request-Id` and `X-Correlation-Id`; if none is supplied, it mints one. The chosen ID is always returned as `X-DefenseClaw-Request-Id`. The [hook ingress](#hook-ingress) ignores caller-supplied IDs and always mints one. See [`requestctx.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/requestctx.go). |
 | `X-DefenseClaw-Hook-Idempotency-Key` | request *(optional)* | [Hook ingress](#hook-ingress) only: a retry-stable key on a sandbox hook or notify post. |
 | `X-DefenseClaw-Idempotent-Replay` | response | [Hook ingress](#hook-ingress) only: `true` when the response replays an earlier one for the same key. |
+| `Last-Event-ID` | request *(optional)* | [Sandbox activity stream](#activity-stream) only: resume after this event sequence number. It wins over `?since`. |
