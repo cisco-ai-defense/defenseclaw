@@ -137,9 +137,10 @@ template="` + connector.DevinSandboxConfigTemplatePath + `"
 /bin/mkdir -p "${cfg%/*}" 2>/dev/null || refuse "${cfg%/*} cannot be created" "The DefenseClaw hooks live there."
 tmp="$(/usr/bin/mktemp "$cfg.XXXXXX" 2>/dev/null)" || refuse "$cfg cannot be updated" "The DefenseClaw hooks live there."
 # Keep the user's other settings; a config that is missing, unreadable or
-# not a JSON object is replaced by the template.
+# not exactly one JSON object (comments included) is replaced by the
+# template.
 if [ -f "$cfg" ] && [ ! -L "$cfg" ] &&
-  /usr/bin/jq --slurpfile t "$template" 'if type == "object" then .hooks = $t[0].hooks else error("not an object") end' "$cfg" >"$tmp" 2>/dev/null; then
+  /usr/bin/jq -s --slurpfile t "$template" 'if length == 1 and (.[0] | type) == "object" then .[0] | .hooks = $t[0].hooks else error("not one object") end' "$cfg" >"$tmp" 2>/dev/null; then
   :
 elif ! /bin/cp "$template" "$tmp" 2>/dev/null; then
   /bin/rm -f "$tmp"

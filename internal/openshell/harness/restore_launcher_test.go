@@ -198,6 +198,8 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 		"hooks-replaced": {existing: `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/bin/true"}]}]}}`, keepOther: true},
 		"not-json":       {existing: `{"model":`},
 		"not-an-object":  {existing: `["x"]`},
+		"two-documents":  {existing: `{"model":"opus"} {"hooks":{}}`},
+		"comments":       {existing: "{\n  // the user's note\n  \"model\": \"opus\"\n}"},
 		"missing":        {},
 	} {
 		t.Run(name, func(t *testing.T) {
