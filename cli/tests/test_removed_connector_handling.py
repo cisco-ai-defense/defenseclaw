@@ -169,3 +169,80 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnshippedConnectorMigrationTests(unittest.TestCase):
+    """The 0.8.11 upgrade step drops names this release does not ship."""
+
+    def _run(self, body: str, plugin_dirs: tuple[str, ...] = ()) -> tuple[str, list[str]]:
+        import tempfile
+
+        from defenseclaw import migrations
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in plugin_dirs:
+                os.makedirs(os.path.join(tmpdir, "plugins", name))
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            ctx = migrations.MigrationContext(openclaw_home=tmpdir, data_dir=tmpdir, config_path=path)
+            migrations._migrate_unshipped_connectors(ctx)
+            first = list(ctx.changes)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            migrations._migrate_unshipped_connectors(ctx)
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), text, "second run must not change the file")
+            return text, first
+
+    def test_drops_unshipped_name_and_repoints_primary(self):
+        import yaml
+
+        body = (
+            "# operator comment kept\n"
+            f"claw:\n  mode: {RETIRED_EXAMPLE}\n"
+            f"guardrail:\n  connector: {RETIRED_EXAMPLE}  # primary\n  connectors:\n"
+            "    codex:\n      mode: observe\n"
+            f"    {RETIRED_EXAMPLE}:\n      mode: action\n"
+            "    cursor: {}\n"
+            "gateway:\n  api_port: 18970\n"
+        )
+        text, changes = self._run(body)
+        self.assertIn("# operator comment kept", text)
+        self.assertIn("# primary", text)
+        self.assertNotIn(RETIRED_EXAMPLE, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"]["connectors"], {"codex": {"mode": "observe"}, "cursor": {}})
+        self.assertEqual(doc["guardrail"]["connector"], "codex")
+        self.assertEqual(doc["claw"]["mode"], "codex")
+        self.assertEqual(doc["gateway"], {"api_port": 18970})
+        self.assertEqual(len(changes), 1)
+        self.assertIn(repr(RETIRED_EXAMPLE), changes[0])
+
+    def test_keeps_a_shipped_primary(self):
+        import yaml
+
+        body = f"guardrail:\n  connector: codex\n  connectors:\n    codex: {{}}\n    {RETIRED_EXAMPLE}: {{}}\n"
+        text, changes = self._run(body)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"], {"connector": "codex", "connectors": {"codex": {}}})
+        self.assertEqual(len(changes), 1)
+
+    def test_only_connector_is_left_in_place_with_a_warning(self):
+        body = f"claw:\n  mode: {RETIRED_EXAMPLE}\nguardrail:\n  connector: {RETIRED_EXAMPLE}\n"
+        text, changes = self._run(body)
+        self.assertEqual(text, body)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("left unchanged", changes[0])
+
+    def test_plugin_connector_is_kept(self):
+        body = f"guardrail:\n  connector: codex\n  connectors:\n    codex: {{}}\n    {RETIRED_EXAMPLE}: {{}}\n"
+        text, changes = self._run(body, plugin_dirs=(RETIRED_EXAMPLE,))
+        self.assertEqual(text, body)
+        self.assertEqual(changes, [])
+
+    def test_shipped_aliases_and_unaffected_config_are_untouched(self):
+        body = "guardrail:\n  connector: claude-code\n  connectors:\n    codex: {}\n    claude-code: {}\n"
+        text, changes = self._run(body)
+        self.assertEqual(text, body)
+        self.assertEqual(changes, [])

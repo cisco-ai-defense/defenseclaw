@@ -191,7 +191,7 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(changes, [])
 
     def test_registered_migration_row_does_not_name_the_old_id(self):
-        rows = [row for row in migrations.MIGRATIONS if row[2] is migrations._migrate_retired_desktop_connector]
+        rows = [row for row in migrations.MIGRATIONS if row[2] is migrations._migrate_0_8_11_connectors]
         self.assertEqual(len(rows), 1)
         self.assertNotIn(RETIRED, rows[0][1].lower())
 
