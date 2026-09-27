@@ -76,6 +76,13 @@ func isSandboxHookRequest(ctx context.Context) bool {
 	return ok
 }
 
+// sandboxHookForConnector reports whether ctx is a sandbox request whose
+// binding was minted for connectorName.
+func sandboxHookForConnector(ctx context.Context, connectorName string) bool {
+	binding, ok := sandboxauth.FromContext(ctx)
+	return ok && sandboxauth.CanonicalConnector(connectorName) == binding.Connector
+}
+
 // hookCWDForContext resolves a payload working directory: unchanged host
 // behaviour for host requests, FSView translation for sandbox requests.
 func hookCWDForContext(ctx context.Context, cwd string) string {

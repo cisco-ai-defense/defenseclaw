@@ -105,6 +105,39 @@ func sandboxCtx(b sandboxauth.Binding) context.Context {
 	return withAuthenticatedHookConnector(ctx, b.Connector)
 }
 
+// TestSandboxHooksAreEvaluatedWithoutAHostConnector pins that a sandbox
+// hook is judged even when the host does not run that connector: the
+// sandboxed harness usually has its own permission prompts off.
+func TestSandboxHooksAreEvaluatedWithoutAHostConnector(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+	api := &APIServer{scannerCfg: cfg}
+	req := claudeCodeHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	if resp := api.evaluateClaudeCodeHook(context.Background(), req); resp.Action != "allow" {
+		t.Fatalf("host hook for an inactive connector = %q, want allow without a scan", resp.Action)
+	}
+	binding := sandboxauth.Binding{
+		ID: "sb_00000000000000000000000000000009", Connector: "claudecode", SandboxName: "dc-claude-app",
+		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+	}
+	if resp := api.evaluateClaudeCodeHook(sandboxCtx(binding), req); resp.Action != "block" {
+		t.Fatalf("sandbox hook = %q, want block", resp.Action)
+	}
+	codex := binding
+	codex.Connector = "codex"
+	if !sandboxHookForConnector(sandboxCtx(binding), "claude-code") || sandboxHookForConnector(sandboxCtx(codex), "claudecode") {
+		t.Fatal("sandboxHookForConnector must match only the binding's own connector")
+	}
+}
+
 func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
 	dataDir := t.TempDir()
 	// The host has its own, different Codex install recorded.

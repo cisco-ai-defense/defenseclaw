@@ -189,7 +189,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	profile connector.HookProfile,
 ) codexHookResponse {
 	mode := a.codexMode()
-	if a.scannerCfg != nil && !a.codexEnabled() {
+	// Sandbox hooks are always judged (see evaluateAgentHook).
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()

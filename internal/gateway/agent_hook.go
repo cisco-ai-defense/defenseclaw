@@ -1854,7 +1854,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		hookEvaluatorPanicHook()
 	}
 	mode := a.agentHookMode(req.ConnectorName)
-	if a.scannerCfg != nil && !a.agentHookEnabled(req.ConnectorName) {
+	// A hook authenticated through a sandbox binding is always evaluated:
+	// DefenseClaw launched that harness itself, usually with its own
+	// permission prompts off, and the host's connector selection says
+	// nothing about what runs inside a sandbox.
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
