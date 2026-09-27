@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 var (
@@ -105,18 +104,14 @@ type FSView struct {
 
 	mu             sync.Mutex
 	realRoots      map[string]realRoot
-	maskIdentities []maskIdentity // lazily resolved mask file identities
+	maskInfos      []fs.FileInfo // lazily resolved mask files
 	masksResolved  bool
+	maskFailClosed bool // a mask could not be located: treat everything as masked
 }
 
 type realRoot struct {
 	path string
 	err  error
-}
-
-type maskIdentity struct {
-	dev uint64
-	ino uint64
 }
 
 // NewFSView builds the view for b. A nil fsys uses OSFS. Construction never
@@ -382,9 +377,16 @@ func (v *FSView) maskedReal(real string) bool {
 	return false
 }
 
-// resolveMaskIdentities lazily resolves all mask file identities. On any
-// resolution error it fails closed (sets masksResolved with no identities),
-// treating the whole mount as potentially containing masked data.
+// resolveMaskIdentities lazily resolves the masks' files once per view.
+//
+// Inside the sandbox every mask is a read-only bind mount, so the workload
+// can neither delete nor rename the masked file or directory itself. A mask
+// that is missing while its parent directory still exists was therefore
+// deleted on the host and protects nothing, so it is skipped. A mask whose
+// parent is gone (a directory above it was renamed or removed) cannot be
+// located, and the secret may now live under another name, so the view
+// fails closed and treats every path as masked. Any other error fails closed
+// too.
 func (v *FSView) resolveMaskIdentities() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -392,35 +394,31 @@ func (v *FSView) resolveMaskIdentities() {
 		return
 	}
 	v.masksResolved = true
-	if len(v.hostMasks) == 0 {
-		return
-	}
 	for _, mask := range v.hostMasks {
-		resolved := mask
-		if real, err := v.fs.EvalSymlinks(mask); err == nil {
-			resolved = real
-		} else {
-			// Cannot resolve this mask; fail closed for all masks.
-			v.maskIdentities = nil
-			return
-		}
-		info, err := v.fs.Lstat(resolved)
+		real, err := v.fs.EvalSymlinks(mask)
 		if err != nil {
-			// Cannot stat this mask; fail closed for all masks.
-			v.maskIdentities = nil
+			if errors.Is(err, fs.ErrNotExist) && v.parentExists(mask) {
+				continue
+			}
+			v.maskFailClosed = true
 			return
 		}
-		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
-			v.maskIdentities = append(v.maskIdentities, maskIdentity{
-				dev: uint64(sys.Dev),
-				ino: sys.Ino,
-			})
-		} else {
-			// Platform does not provide dev/ino; fail closed.
-			v.maskIdentities = nil
+		info, err := v.fs.Lstat(real)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) && v.parentExists(mask) {
+				continue
+			}
+			v.maskFailClosed = true
 			return
 		}
+		v.maskInfos = append(v.maskInfos, info)
 	}
+}
+
+// parentExists reports whether the directory holding path still exists.
+func (v *FSView) parentExists(path string) bool {
+	info, err := v.fs.Lstat(filepath.Dir(path))
+	return err == nil && info.IsDir()
 }
 
 // openedOutsideMasks proves that the file opened for rel under m is neither
@@ -467,35 +465,24 @@ func (v *FSView) openedOutsideMasks(m Mount, rel string, opened fs.FileInfo) err
 // host it names the masked .env, and /work/app/CERTS/key.pem sits inside
 // a masked certs directory.
 //
-// This check uses cached mask file identities (dev/ino) resolved at first use,
-// making it robust against directory renames that would invalidate lexical
-// path checks.
+// The masks' files are resolved once per view (see resolveMaskIdentities),
+// so a directory renamed above a mask makes the view fail closed instead of
+// silently losing the mask.
 func (v *FSView) maskedIdentity(root, target string, info fs.FileInfo) bool {
 	if len(v.hostMasks) == 0 {
 		return false
 	}
-	// Ensure mask identities are resolved.
 	v.resolveMaskIdentities()
 	v.mu.Lock()
-	identities := v.maskIdentities
-	masksResolved := v.masksResolved
+	infos := v.maskInfos
+	failClosed := v.maskFailClosed
 	v.mu.Unlock()
-
-	// If masks could not be resolved, fail closed: treat everything as
-	// potentially masked.
-	if masksResolved && len(identities) == 0 && len(v.hostMasks) > 0 {
+	if failClosed {
 		return true
 	}
-
 	isMasked := func(candidate fs.FileInfo) bool {
-		sys, ok := candidate.Sys().(*syscall.Stat_t)
-		if !ok {
-			// Platform does not provide dev/ino; fail closed.
-			return len(v.hostMasks) > 0
-		}
-		candidateID := maskIdentity{dev: uint64(sys.Dev), ino: sys.Ino}
-		for _, maskID := range identities {
-			if candidateID == maskID {
+		for _, mask := range infos {
+			if os.SameFile(candidate, mask) {
 				return true
 			}
 		}

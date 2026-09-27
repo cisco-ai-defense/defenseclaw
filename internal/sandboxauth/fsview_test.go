@@ -496,3 +496,43 @@ func TestMaskBypassViaDirectoryRename(t *testing.T) {
 		t.Errorf("after rename, ReadFile should refuse mask: got %q %v", data, err)
 	}
 }
+
+// TestMaskResolutionPerRequestView covers views created after the host
+// changed, as the gateway does per request: a mask deleted on the host (its
+// directory still exists) protects nothing and must not disable the view,
+// while a mask whose parent directory disappeared (renamed or removed)
+// cannot be located, so the view fails closed.
+func TestMaskResolutionPerRequestView(t *testing.T) {
+	p := newProject(t)
+	if err := os.Remove(filepath.Join(p.root, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	b := Binding{Workdir: Workdir{
+		Mode:   WorkdirMount,
+		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
+		Masks:  []string{"/work/app/.env", "/work/app/certs"},
+	}}
+	view := NewFSView(b, nil)
+	if _, _, err := view.ReadFile("/work/app/src/main.go", 1024); err != nil {
+		t.Fatalf("deleted mask disabled the view: %v", err)
+	}
+	if _, _, err := view.ReadFile("/work/app/certs/dev.pem", 1024); !errors.Is(err, ErrMasked) {
+		t.Fatalf("remaining mask not enforced: %v", err)
+	}
+
+	if err := os.Rename(filepath.Join(p.root, "certs"), filepath.Join(p.root, "certs-moved")); err != nil {
+		t.Fatal(err)
+	}
+	renamedParent := Binding{Workdir: Workdir{
+		Mode:   WorkdirMount,
+		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
+		Masks:  []string{"/work/app/certs/dev.pem"},
+	}}
+	view = NewFSView(renamedParent, nil)
+	if _, _, err := view.ReadFile("/work/app/certs-moved/dev.pem", 1024); !errors.Is(err, ErrMasked) {
+		t.Fatalf("a mask whose directory moved must fail closed, got %v", err)
+	}
+	if _, _, err := view.ReadFile("/work/app/src/main.go", 1024); !errors.Is(err, ErrMasked) {
+		t.Fatalf("fail-closed view still read the project: %v", err)
+	}
+}
