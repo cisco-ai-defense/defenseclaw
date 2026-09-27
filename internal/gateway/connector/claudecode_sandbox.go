@@ -102,10 +102,23 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"CLAUDE_CODE_USE_VERTEX":   "",
 }
 
+// claudeCodeSandboxPinnedHelpers name programs Claude runs by itself, outside
+// any tool call and so unseen by PreToolUse, when a settings file sets them;
+// the drop-in pins each to "" (p2-render-4). In the 2.1.156 settings schema
+// each is an optional string, read from the merged settings, where the
+// managed tier outranks user and project values, and run only when non-empty:
+// apiKeyHelper prints the API key, awsCredentialExport and awsAuthRefresh run
+// for Bedrock and gcpAuthRefresh for Vertex, providers a settings file can
+// select through its env block. DefenseClaw passes credentials as OpenShell
+// placeholders and never uses them (apiKeyHelper would also add a second auth
+// header, which Bedrock Mantle rejects).
+var claudeCodeSandboxPinnedHelpers = []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"}
+
 // SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
 // the managed-settings.d drop-in (hooks, allowManagedHooksOnly, OTLP to the
-// ingress through otelHeadersHelper, pinned env), the helper itself and the
-// pre-seeded ~/.claude.json that skips first-run prompts.
+// ingress through otelHeadersHelper, pinned env and auth helpers), the
+// helper itself and the pre-seeded ~/.claude.json that skips first-run
+// prompts.
 func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArtifacts, error) {
 	rt, err := resolveSandboxTarget(c.Name(), target)
 	if err != nil {
@@ -157,6 +170,23 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 // project or user setting that enabled it, with sandbox.failIfUnavailable,
 // would stop the harness at startup. The hook-fire probe plants exactly
 // that in its hostile user and project settings.
+//
+// The auth helpers in claudeCodeSandboxPinnedHelpers are pinned to "". Two
+// other command-running settings are left out on purpose:
+//
+//   - statusLine (like fileSuggestion and subagentStatusLine) is an object,
+//     {"type": "command", "command": ...}, so a string there would drop this
+//     whole drop-in. It needs no pin: with allowManagedHooksOnly on, Claude
+//     reads all three from managed settings only.
+//   - enableAllProjectMcpServers false would not stop a trusted project's
+//     .mcp.json stdio servers: Claude approves every one of them when it runs
+//     non-interactively or when skipDangerousModePermissionPrompt is set in
+//     any tier (as here), and a project's own enabledMcpjsonServers list
+//     merges past any managed value. Those servers start without a
+//     PreToolUse, inside the sandbox, where the egress proxy and the file
+//     boundary still apply; closing them needs the managed MCP allowlist
+//     (allowManagedMcpServersOnly, allowedMcpServers), a policy decision of
+//     its own.
 func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 	hookCommand := path.Join(SandboxHookDir, "claude-code-hook.sh")
 	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, nil, rt.opts)
@@ -174,13 +204,9 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 		"hooks":                             hooks,
 		"env":                               env,
 		"sandbox":                           map[string]interface{}{"enabled": false},
-		// Neutralize command-running settings that project/user settings could
-		// otherwise use to bypass PreToolUse hooks (p2-render-4).
-		"apiKeyHelper":               "",
-		"enableAllProjectMcpServers": false,
-		"awsAuthRefresh":             "",
-		"awsCredentialExport":        "",
-		"statusLine":                 "",
+	}
+	for _, key := range claudeCodeSandboxPinnedHelpers {
+		policy[key] = ""
 	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
@@ -256,6 +282,11 @@ func verifyClaudeCodeSandboxDropIn(dropIn []byte, rt resolvedSandboxTarget) erro
 	sandbox, _ := source.settings["sandbox"].(map[string]interface{})
 	if enabled, ok := sandbox["enabled"].(bool); !ok || enabled {
 		return fmt.Errorf("verify Claude Code sandbox managed settings: Claude's own sandbox is not pinned off")
+	}
+	for _, key := range claudeCodeSandboxPinnedHelpers {
+		if got, ok := source.settings[key].(string); !ok || got != "" {
+			return fmt.Errorf("verify Claude Code sandbox managed settings: %s is not pinned to \"\"", key)
+		}
 	}
 	env, _ := source.settings["env"].(map[string]interface{})
 	pinned := make([]string, 0, len(claudeCodeSandboxPinnedEnv))

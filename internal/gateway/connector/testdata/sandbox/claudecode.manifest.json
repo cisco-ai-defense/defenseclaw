@@ -81,7 +81,7 @@
     "/etc/claude-code/managed-settings.d/50-defenseclaw.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "8280310b1f21553595f7693132318ef5712ec9f01cd5cf109cee09cdd98d24ef"
+      "sha256": "1cde910b3ab6e3b22a84c611896e6c17e7aa949b66e360356855556f6ba92d27"
     },
     "/sandbox/.claude.json": {
       "mode": "-rw-------",

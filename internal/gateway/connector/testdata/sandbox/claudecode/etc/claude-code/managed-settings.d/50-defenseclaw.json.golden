@@ -1,6 +1,13 @@
 {
   "allowManagedHooksOnly": true,
+  "apiKeyHelper": "",
+  "awsAuthRefresh": "",
+  "awsCredentialExport": "",
   "env": {
+    "ANTHROPIC_API_URL": "",
+    "ANTHROPIC_AUTH_TOKEN": "",
+    "ANTHROPIC_BASE_URL": "",
+    "ANTHROPIC_CUSTOM_HEADERS": "",
     "BASH_ENV": "",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
@@ -10,6 +17,8 @@
     "CLAUDE_CODE_SHELL_PREFIX": "",
     "CLAUDE_CODE_SIMPLE": "0",
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "",
+    "CLAUDE_CODE_USE_BEDROCK": "",
+    "CLAUDE_CODE_USE_VERTEX": "",
     "DISABLE_AUTOUPDATER": "1",
     "ENV": "",
     "LD_AUDIT": "",
@@ -35,6 +44,7 @@
     "OTEL_TRACES_EXPORTER": "none",
     "SHELL": "/bin/bash"
   },
+  "gcpAuthRefresh": "",
   "hooks": {
     "ConfigChange": [
       {

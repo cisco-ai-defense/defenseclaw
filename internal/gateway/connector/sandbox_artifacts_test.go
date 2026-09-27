@@ -242,10 +242,22 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 	if dropIn == nil {
 		t.Fatal("drop-in missing")
 	}
-	allowed := map[string]bool{"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true, "hooks": true, "env": true, "sandbox": true}
+	// Every key and value shape is reviewed against the Claude Code 2.1.156
+	// settings schema and proven live by the image's hook-fire probe.
+	allowed := map[string]bool{
+		"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true,
+		"hooks": true, "env": true, "sandbox": true,
+		"apiKeyHelper": true, "awsAuthRefresh": true, "awsCredentialExport": true, "gcpAuthRefresh": true,
+	}
 	for key := range dropIn {
 		if !allowed[key] {
 			t.Errorf("drop-in carries unreviewed key %q (Claude drops a whole drop-in with one invalid field)", key)
+		}
+	}
+	// The auth helpers are schema strings; "" makes Claude run none of them.
+	for _, key := range []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"} {
+		if got, ok := dropIn[key].(string); !ok || got != "" {
+			t.Errorf("drop-in %s = %#v, want \"\"", key, dropIn[key])
 		}
 	}
 	// Claude's own sandbox cannot nest inside OpenShell: pinned off, with
@@ -333,12 +345,15 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 		"shell-prefix-set": mutate(func(d map[string]interface{}) {
 			d["env"].(map[string]interface{})["CLAUDE_CODE_SHELL_PREFIX"] = "/sandbox/wrap.sh"
 		}),
-		"shell-unpinned":       mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
-		"simple-mode-on":       mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
-		"env-block-missing":    mutate(func(d map[string]interface{}) { delete(d, "env") }),
-		"own-sandbox-unpinned": mutate(func(d map[string]interface{}) { delete(d, "sandbox") }),
-		"own-sandbox-on":       mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": true} }),
-		"own-sandbox-string":   mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": "false"} }),
+		"shell-unpinned":          mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
+		"simple-mode-on":          mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
+		"env-block-missing":       mutate(func(d map[string]interface{}) { delete(d, "env") }),
+		"own-sandbox-unpinned":    mutate(func(d map[string]interface{}) { delete(d, "sandbox") }),
+		"own-sandbox-on":          mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": true} }),
+		"own-sandbox-string":      mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": "false"} }),
+		"api-key-helper-unpinned": mutate(func(d map[string]interface{}) { delete(d, "apiKeyHelper") }),
+		"aws-export-set":          mutate(func(d map[string]interface{}) { d["awsCredentialExport"] = "/sandbox/export.sh" }),
+		"gcp-refresh-not-string":  mutate(func(d map[string]interface{}) { d["gcpAuthRefresh"] = false }),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

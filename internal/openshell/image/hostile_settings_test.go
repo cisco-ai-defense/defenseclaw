@@ -76,9 +76,17 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 				t.Fatal(err)
 			}
 			var settings struct {
-				DisableAllHooks bool              `json:"disableAllHooks"`
-				Env             map[string]string `json:"env"`
-				Hooks           map[string][]struct {
+				DisableAllHooks     bool              `json:"disableAllHooks"`
+				Env                 map[string]string `json:"env"`
+				APIKeyHelper        string            `json:"apiKeyHelper"`
+				AWSAuthRefresh      string            `json:"awsAuthRefresh"`
+				AWSCredentialExport string            `json:"awsCredentialExport"`
+				GCPAuthRefresh      string            `json:"gcpAuthRefresh"`
+				StatusLine          struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				} `json:"statusLine"`
+				Hooks map[string][]struct {
 					Hooks []struct {
 						Type    string `json:"type"`
 						Command string `json:"command"`
@@ -113,11 +121,15 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 			}
 
 			// Claude runs the prefix with the command as one argument, the
-			// shell with -c, and settings hooks through /bin/sh.
+			// shell with -c, and settings hooks, auth helpers and the status
+			// line through /bin/sh.
 			bin := strings.SplitN(settings.Env["PATH"], ":", 2)[0]
 			hooks := settings.Hooks["PreToolUse"]
 			if len(hooks) != 1 || len(hooks[0].Hooks) != 1 || hooks[0].Hooks[0].Type != "command" {
 				t.Fatalf("planted PreToolUse hook = %+v", hooks)
+			}
+			if settings.StatusLine.Type != "command" {
+				t.Fatalf("planted statusLine = %+v, want the schema's command object", settings.StatusLine)
 			}
 			for label, argv := range map[string][]string{
 				"shell-prefix":  {settings.Env["CLAUDE_CODE_SHELL_PREFIX"], "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"},
@@ -126,6 +138,11 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 				"jq":            {filepath.Join(bin, "jq"), "-r"},
 				"settings-hook": {"/bin/sh", "-c", hooks[0].Hooks[0].Command},
 				"bash-env":      {bash, "-c", ". " + settings.Env["BASH_ENV"]},
+				"apikey-helper": {"/bin/sh", "-c", settings.APIKeyHelper},
+				"aws-refresh":   {"/bin/sh", "-c", settings.AWSAuthRefresh},
+				"aws-export":    {"/bin/sh", "-c", settings.AWSCredentialExport},
+				"gcp-refresh":   {"/bin/sh", "-c", settings.GCPAuthRefresh},
+				"status-line":   {"/bin/sh", "-c", settings.StatusLine.Command},
 			} {
 				if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
 					t.Fatalf("%s: %v\n%s", label, err, out)
