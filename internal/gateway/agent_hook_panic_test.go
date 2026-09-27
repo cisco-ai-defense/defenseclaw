@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -383,5 +384,44 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 	}
 	if connectorHookRows != 1 {
 		t.Fatalf("connector-hook audit row count = %d, want exactly 1 (post-finalize panic must not re-run finalizeAgentHook)", connectorHookRows)
+	}
+}
+
+// TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
+// a sandbox binding is blocked when the evaluator panics, instead of
+// taking the host's fail-open path.
+func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
+	prev := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic for sandbox test") }
+	defer func() { hookEvaluatorPanicHook = prev }()
+
+	api := &APIServer{}
+	handler := http.HandlerFunc(api.handleAgentHook("hermes"))
+	body, _ := json.Marshal(map[string]interface{}{
+		"hook_event_name": "pre_tool_call",
+		"session_id":      "session-sandbox-panic",
+		"agent_id":        "hermes-test",
+		"tool_name":       "shell",
+		"tool_input":      map[string]interface{}{"command": "echo marker"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	binding := sandboxauth.Binding{ID: "sb_panic", Connector: sandboxauth.CanonicalConnector("hermes")}
+	req = req.WithContext(sandboxauth.WithRequest(req.Context(), binding, nil))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("response body is not valid JSON after panic: %v body=%s", err, w.Body.String())
+	}
+	if got, _ := parsed["action"].(string); got != "block" {
+		t.Fatalf("sandbox panic action = %q, want block (sandbox hooks fail closed); body=%s", got, w.Body.String())
+	}
+	if reason, _ := parsed["reason"].(string); !strings.HasPrefix(reason, "Blocked by DefenseClaw") {
+		t.Errorf("sandbox panic reason = %q, want a plain block reason", reason)
 	}
 }

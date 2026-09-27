@@ -454,6 +454,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		resp, panicked := a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+		if panicked && sandboxHookForConnector(ctx, connectorName) {
+			// Sandbox hooks fail closed: the host's fail-open posture for
+			// a crashed evaluator keeps workflows running outside the
+			// sandbox, but inside it the hook is the only gate on the
+			// tool call, so an undecided call is blocked with a plain
+			// reason.
+			resp.Action, resp.RawAction = "block", "block"
+			resp.WouldBlock = true
+			resp.Mode = "action"
+			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
+		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked {
 			resp = a.safeApplyExperimentalArtifactPromotion(
