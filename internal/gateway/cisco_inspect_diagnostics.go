@@ -47,6 +47,9 @@ const (
 	ciscoInspectStageResponseDecode = "response_decode"
 
 	ciscoInspectClassResponseBodyTooLarge = "response_body_too_large"
+	// A 200 response the managed client cannot act on: neither is_safe
+	// nor action is present.
+	ciscoInspectClassResponseVerdictMissing = "response_verdict_missing"
 
 	ciscoInspectClassRequestInvalid                = "request_invalid"
 	ciscoInspectClassRequestInvalidJSON            = "request_invalid_json"

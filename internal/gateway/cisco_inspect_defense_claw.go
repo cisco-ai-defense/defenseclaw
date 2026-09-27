@@ -322,6 +322,10 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		endpoint: c.endpoint,
 		urlPath:  "/api/v1/inspect/defense_claw",
 		payload:  payload,
+		// A 200 without is_safe or action is no verdict: the request
+		// then follows cisco_ai_defense.unavailable_action and health
+		// reports it, instead of passing as an alert.
+		requireVerdict: true,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
@@ -341,8 +345,9 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	if verdict == nil {
 		// Any nil verdict from doInspectHTTP means the AID call did
 		// not produce an enforceable decision (marshal error, request
-		// build error, transport error, non-2xx, body read error, or
-		// JSON parse error — each of these already emit their own
+		// build error, transport error, non-2xx, body read error, JSON
+		// parse error, or a 200 with neither is_safe nor action — each
+		// of these already emit their own
 		// [cisco-ai-defense] line inside doInspectHTTP). A minted token
 		// does not make inspection available: /health and the Secure
 		// Client availability report the failed inspection until AI
