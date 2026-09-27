@@ -147,13 +147,16 @@ type SandboxHookDecision struct {
 	// Event is the harness hook event; Tool the tool it concerns.
 	Event string
 	Tool  string
-	// ToolUseID is the connector's per-call identifier (tool_use_id, toolUseID).
+	// ToolUseID is the harness's per-call ID (Claude Code and Codex
+	// tool_use_id): it pairs a call's PreToolUse with its PostToolUse.
 	ToolUseID string
 	// Action is the verdict (allow, block, alert, confirm).
 	Action     string
 	WouldBlock bool
 	Severity   string
-	Reason     string
+	// Reason is the plain reason the agent was given (see
+	// sandboxVerdictReason): rule metadata, never matched content.
+	Reason string
 }
 
 type sandboxIngressState struct {

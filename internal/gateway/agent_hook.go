@@ -471,6 +471,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp,
 				time.Since(t0),
 			)
+			// Last, once the verdict is final: a sandbox verdict carries
+			// a plain reason (rule, title, what to do instead) to the
+			// agent, the activity feed and last_blocked.
+			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
