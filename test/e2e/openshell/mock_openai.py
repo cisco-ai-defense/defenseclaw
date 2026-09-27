@@ -11,7 +11,9 @@
 
 """Dependency-free mock of the OpenAI Responses API for Codex E2E tests.
 
-  POST /v1/responses | /responses       streaming SSE (and non-streaming JSON)
+  POST /v1/responses | /responses       streaming SSE (and non-streaming JSON); a request
+                                         ending in a compaction_trigger item (Codex's
+                                         remote compaction) gets one compaction item
   GET  /v1/models | /models             static list ({"data": [...], "models": [...]})
   anything else                          logged, 404 JSON error
 
@@ -31,8 +33,15 @@ message text in the request "input":
 
 A {"shell": "<cmd>"} turn is rendered against whatever shell tool the request
 advertises: shell_command {"command": str}, exec_command {"cmd": str},
-shell {"command": ["bash","-lc",str]}, or the built-in local_shell tool.
-{"function_call": {"name": ..., "arguments": {...}}} emits a raw call.
+shell {"command": ["bash","-lc",str]}, or the built-in local_shell tool. Its
+optional "args" object is merged into a function tool's arguments (for example
+{"sandbox_permissions": "require_escalated", "justification": "..."}, which
+makes Codex ask for approval when approvals are on).
+{"function_call": {"name": ..., "arguments": {...}}} emits a raw call ("namespace"
+names the tool namespace of a namespaced tool, such as multi_agent_v1; "$AGENT_ID"
+in the arguments becomes the sub-agent the last spawn_agent call started).
+The logged summary carries last_tool_output, the last tool result the harness
+sent back: what the model was told a tool returned.
 Turn index = number of model-emitted items (function/custom/local-shell calls
 and assistant messages) after the last user message.
 """
@@ -59,7 +68,9 @@ DEFAULT_SCRIPT = {
     ]
 }
 
-MODEL_ITEMS = {"function_call", "custom_tool_call", "local_shell_call", "web_search_call"}
+# A compaction item stands for the turns it replaced, so a turn compacted
+# mid-scenario continues with its next step instead of starting over.
+MODEL_ITEMS = {"function_call", "custom_tool_call", "local_shell_call", "web_search_call", "compaction"}
 
 
 def load_script():
@@ -122,6 +133,10 @@ def position(items):
             txt = item_text(it)
             if "<environment_context>" in txt and len(items) > i + 1:
                 continue
+            # Codex reports a finished sub-agent as a user message; the
+            # scenario still follows the user's prompt.
+            if txt.lstrip().startswith("<subagent_notification>") and last_user >= 0:
+                continue
             last_user = i
     if last_user < 0:
         return "", 0
@@ -145,17 +160,46 @@ def tool_names(body):
     return names
 
 
-def render_shell(cmd, tools, seq):
+def last_tool_output(items):
+    """Return the text of the last tool output item (truncated), or ""."""
+    for it in reversed(items):
+        if not isinstance(it, dict) or not str(it.get("type", "")).endswith("_output"):
+            continue
+        out = it.get("output")
+        if isinstance(out, dict):
+            out = out.get("content") or out.get("output") or json.dumps(out)
+        if isinstance(out, list):
+            out = "\n".join(p.get("text", "") for p in out if isinstance(p, dict))
+        return str(out or "")[:2000]
+    return ""
+
+
+def last_agent_id(items):
+    """Return the agent_id of the last tool output that carries one, or ""."""
+    for it in reversed(items):
+        if not isinstance(it, dict) or it.get("type") != "function_call_output":
+            continue
+        try:
+            out = json.loads(it.get("output") or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(out, dict) and out.get("agent_id"):
+            return str(out["agent_id"])
+    return ""
+
+
+def render_shell(cmd, tools, seq, extra=None):
     call_id = "call_mock_%d_%s" % (seq, uuid.uuid4().hex[:6])
+    extra = extra or {}
     if "shell_command" in tools:
         return {"type": "function_call", "name": "shell_command", "call_id": call_id,
-                "arguments": json.dumps({"command": cmd, "timeout_ms": 30000})}
+                "arguments": json.dumps(dict({"command": cmd, "timeout_ms": 30000}, **extra))}
     if "exec_command" in tools:
         return {"type": "function_call", "name": "exec_command", "call_id": call_id,
-                "arguments": json.dumps({"cmd": cmd, "yield_time_ms": 10000})}
+                "arguments": json.dumps(dict({"cmd": cmd, "yield_time_ms": 10000}, **extra))}
     if "shell" in tools and tools["shell"] == "function":
         return {"type": "function_call", "name": "shell", "call_id": call_id,
-                "arguments": json.dumps({"command": ["bash", "-lc", cmd], "timeout_ms": 30000})}
+                "arguments": json.dumps(dict({"command": ["bash", "-lc", cmd], "timeout_ms": 30000}, **extra))}
     if "local_shell" in tools or tools.get("local_shell") == "local_shell":
         return {"type": "local_shell_call", "call_id": call_id, "status": "completed",
                 "action": {"type": "exec", "command": ["bash", "-lc", cmd], "timeout_ms": 30000}}
@@ -168,6 +212,11 @@ def plan(body, seq):
     if isinstance(items, str):
         items = [{"type": "message", "role": "user", "content": items}]
     tools = tool_names(body)
+    if items and isinstance(items[-1], dict) and items[-1].get("type") == "compaction_trigger":
+        # Codex's remote compaction (built-in OpenAI provider) wants exactly
+        # one opaque compaction item back.
+        return [{"type": "compaction", "id": "cmp_mock_%d" % seq,
+                 "encrypted_content": "dce2e-mock-compaction-%d" % seq}], {"scenario": "compaction", "turn": 0}
     prompt, idx = position(items)
     sc = None
     for cand in script.get("scenarios", []):
@@ -180,7 +229,7 @@ def plan(body, seq):
     turns = sc["turns"]
     turn = turns[idx] if idx < len(turns) else {"text": turns[-1].get("text") or "Done."}
     if "shell" in turn:
-        item = render_shell(turn["shell"], tools, seq)
+        item = render_shell(turn["shell"], tools, seq, turn.get("args"))
         if item is None:
             info["error"] = "no shell tool advertised"
             return [msg_item("mock: no shell tool among %s" % sorted(tools))], info
@@ -192,9 +241,15 @@ def plan(body, seq):
     if "function_call" in turn:
         fc = turn["function_call"]
         args = fc.get("arguments", {})
-        return [{"type": "function_call", "name": fc["name"],
-                 "call_id": "call_mock_%d_%s" % (seq, uuid.uuid4().hex[:6]),
-                 "arguments": args if isinstance(args, str) else json.dumps(args)}], info
+        args = args if isinstance(args, str) else json.dumps(args)
+        # "$AGENT_ID" names the sub-agent the last spawn_agent call started.
+        args = args.replace("$AGENT_ID", last_agent_id(items))
+        item = {"type": "function_call", "name": fc["name"],
+                "call_id": "call_mock_%d_%s" % (seq, uuid.uuid4().hex[:6]),
+                "arguments": args}
+        if fc.get("namespace"):
+            item["namespace"] = fc["namespace"]
+        return [item], info
     return [msg_item(turn.get("text", "Done."))], info
 
 
@@ -241,7 +296,8 @@ class Handler(BaseHTTPRequestHandler):
                               "n_input": len(items) if isinstance(items, list) else 1,
                               "input_types": [(i.get("type", "message") + ":" + str(i.get("role", "")))
                                               for i in items if isinstance(i, dict)][-12:],
-                              "previous_response_id": body.get("previous_response_id")}
+                              "previous_response_id": body.get("previous_response_id"),
+                              "last_tool_output": last_tool_output(items if isinstance(items, list) else [])}
         if ARGS.dump_dir and raw:
             os.makedirs(ARGS.dump_dir, exist_ok=True)
             with open(os.path.join(ARGS.dump_dir, "%05d.json" % seq), "wb") as fh:
