@@ -382,6 +382,9 @@ type Decision struct {
 	Port int
 	// Risky marks private, IP-literal or host-local reach.
 	Risky bool
+	// Unblockable reports a rejection an unblock of Host would lift: the
+	// proxy's own verdict (a blocklist feed entry, an open-mode IP literal).
+	Unblockable bool
 	// Violation is the refusing policy decision, when one refused it.
 	Violation *packs.Violation
 }
@@ -536,6 +539,7 @@ func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Po
 	// The proxy's verdict for this sandbox, before the port: approvals
 	// carry their own ports (checked below).
 	dec := decider.DecideHost(pol.Principal, host)
+	d.Unblockable = !dec.Allowed && dec.Unblockable
 	if !dec.Allowed {
 		switch {
 		case dec.Category == egress.CategoryPrivateNetwork:
@@ -628,7 +632,7 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 	if chk.Allowed {
 		return verdict
 	}
-	verdict.Risky = true
+	verdict.Risky, verdict.Unblockable = true, chk.Unblockable
 	switch {
 	case chk.Category == egress.CategoryHostInternal:
 		return reject(verdict, ReasonResolvesToHost, verdict.Host+" resolves to "+resolvedWhat(chk)+

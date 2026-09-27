@@ -457,7 +457,7 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
 			Category: string(d.Reason), Reason: string(d.Reason), Message: blockedMessage(d),
-			Unblockable: d.Violation == nil && d.Reason == triage.ReasonBlocklisted,
+			Unblockable: d.Violation == nil && d.Unblockable,
 		})
 	default:
 		a.status = sandboxapi.ApprovalPending

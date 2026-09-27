@@ -373,6 +373,34 @@ func TestClassifyUnblocked(t *testing.T) {
 	}
 }
 
+// TestClassifyUnblockable: a rejection says whether an unblock would lift
+// it exactly as the proxy does, so the feed offers unblocking only where
+// it works.
+func TestClassifyUnblockable(t *testing.T) {
+	ctx := context.Background()
+	open := effective(t, nil, packs.Flags{})
+	noUnblock := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, packs.Flags{})
+	blocked := effective(t, func(o *config.OpenShellConfig) { o.Egress.Block = []string{"drop.example.org"} }, packs.Flags{})
+	for _, tc := range []struct {
+		name        string
+		eff         *packs.Effective
+		host        string
+		unblockable bool
+	}{
+		{"feed", open, "webhook.site", true},
+		{"IP literal", open, "93.184.216.34", true},
+		{"block list", blocked, "drop.example.org", false},
+		{"feed without unblocking", noUnblock, "webhook.site", false},
+		{"IP literal without unblocking", noUnblock, "93.184.216.34", false},
+		{"metadata", open, "169.254.169.254", false},
+	} {
+		got := Classify(ctx, proposal(tc.host, 443), testPolicy(tc.eff))
+		if got.Verdict != Reject || got.Unblockable != tc.unblockable {
+			t.Errorf("%s: Classify(%s) = %+v, want a rejection with unblockable=%v", tc.name, tc.host, got, tc.unblockable)
+		}
+	}
+}
+
 // TestClassifyResolvesNames: a direct rule reaches whatever its name
 // resolves to without the proxy's guard, so triage resolves every name and
 // holds the answers to the proxy's dial-time rules.
