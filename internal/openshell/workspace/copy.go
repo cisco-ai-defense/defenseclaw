@@ -469,10 +469,6 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		}
 		candidates = append(candidates, p)
 	}
-	scanOpts.tracked = map[string]struct{}{}
-	for p := range trackedSet {
-		scanOpts.tracked[p] = struct{}{}
-	}
 	files, heldBack, warnings, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
 	if err != nil {
 		return err

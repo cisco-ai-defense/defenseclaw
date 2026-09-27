@@ -19,6 +19,9 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -74,19 +78,35 @@ type MaskedPath struct {
 const (
 	defaultMaxWalkEntries      = 250_000
 	defaultMaxContentScanFiles = 2_000
-	maxContentScanBytes        = 256 << 10
-	maxMasks                   = 256
+	// defaultMaxTrackedCompares bounds how many tracked files a scan reads
+	// to learn whether they still hold their committed bytes.
+	defaultMaxTrackedCompares = 20_000
+	maxContentScanBytes       = 256 << 10
+	// maxCompareBytes bounds the read of a tracked secret-named file; a
+	// larger one is treated as differing from its committed copy.
+	maxCompareBytes = 8 << 20
+	maxMasks        = 256
 )
 
 type secretScanOptions struct {
-	patterns     []string // operator mask globs; apply to tracked files too
-	unmask       []string // operator exceptions (paths or globs)
-	maskTracked  bool     // apply built-in name rules to tracked files too
-	tracked      map[string]struct{}
-	detector     SecretDetector
-	contentScan  bool
-	maxEntries   int
-	maxScanFiles int
+	patterns    []string // operator mask globs; apply to tracked files too
+	unmask      []string // operator exceptions (paths or globs)
+	maskTracked bool     // mask tracked secret names even when unchanged
+	// tracked is the project's index (live mounts of a git project).
+	tracked         map[string]trackedEntry
+	detector        SecretDetector
+	contentScan     bool
+	maxEntries      int
+	maxScanFiles    int
+	maxTrackedReads int
+}
+
+// trackedEntry is a path in the project's index.
+type trackedEntry struct {
+	mode, oid string
+	// watched: stage 0 and neither skip-worktree nor assume-unchanged, so
+	// git itself compares the working copy with the entry.
+	watched bool
 }
 
 type secretScan struct {
@@ -152,24 +172,25 @@ func isOpaqueDir(d fs.DirEntry) bool {
 }
 
 // detectSecrets walks root and returns the files and directories to mask.
+//
+// A tracked file is exempt only while its working copy holds exactly the
+// bytes of its index entry: the sandbox can read those from the mounted
+// .git anyway. A working copy of its own (different bytes, or an entry
+// marked skip-worktree or assume-unchanged, the usual way to keep local
+// credentials in a committed config file) is treated like an untracked
+// file: masked by name and scanned for content.
 func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 	res := &secretScan{}
 	scanBudget := opts.maxScanFiles
 	if scanBudget <= 0 {
 		scanBudget = defaultMaxContentScanFiles
 	}
-	unmasked := func(rel string) bool {
-		for _, u := range opts.unmask {
-			if matchGlob(u, rel) || strings.EqualFold(strings.Trim(u, "/"), rel) {
-				return true
-			}
-			prefix := strings.ToLower(strings.Trim(u, "/")) + "/"
-			if strings.HasPrefix(strings.ToLower(rel), prefix) {
-				return true
-			}
-		}
-		return false
+	trackedLimit := opts.maxTrackedReads
+	if trackedLimit <= 0 {
+		trackedLimit = defaultMaxTrackedCompares
 	}
+	trackedReads, uncompared := trackedLimit, 0
+	unmasked := func(rel string) bool { return unmaskedBy(opts.unmask, rel) }
 	add := func(m MaskedPath) {
 		if unmasked(m.Rel) {
 			res.unmasked = append(res.unmasked, m.Rel)
@@ -178,7 +199,7 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 		res.masks = append(res.masks, m)
 	}
 	truncated, err := walkProject(root, opts.maxEntries, func(rel string, d fs.DirEntry) error {
-		_, isTracked := opts.tracked[rel]
+		entry, isTracked := opts.tracked[rel]
 		if isOpaqueDir(d) || d.Name() == ".git" {
 			return nil
 		}
@@ -201,25 +222,45 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 			return nil
 		}
 		hardlinked := linkCount(info) > 1
+		abs := filepath.Join(root, filepath.FromSlash(rel))
 		if p, ok := matchAny(opts.patterns, rel); ok {
 			add(MaskedPath{Rel: rel, Reason: "pattern:" + p, Hardlinked: hardlinked})
 			return nil
 		}
-		if _, ok := isSecretName(rel); ok {
-			if isTracked && !opts.maskTracked {
-				res.trackedSecrets = append(res.trackedSecrets, rel)
-				return nil
+		if secretByName(nil, rel) {
+			if isTracked && !opts.maskTracked && entry.watched && info.Size() <= maxCompareBytes {
+				if content, err := readSmallRegular(abs, maxCompareBytes+1); err == nil && entry.holds(content) {
+					res.trackedSecrets = append(res.trackedSecrets, rel)
+					return nil
+				}
 			}
 			add(MaskedPath{Rel: rel, Reason: "name", Hardlinked: hardlinked})
 			return nil
 		}
-		if isTracked || !opts.contentScan || opts.detector == nil || scanBudget <= 0 ||
-			info.Size() == 0 || info.Size() > maxContentScanBytes {
+		if !opts.contentScan || opts.detector == nil || info.Size() == 0 || info.Size() > maxContentScanBytes {
+			return nil
+		}
+		var content []byte
+		if isTracked && entry.watched {
+			if trackedReads <= 0 {
+				uncompared++
+				return nil
+			}
+			trackedReads--
+			if content, err = readSmallRegular(abs, maxContentScanBytes); err != nil || entry.holds(content) {
+				return nil
+			}
+		}
+		if scanBudget <= 0 {
 			return nil
 		}
 		scanBudget--
-		content, err := readSmallRegular(filepath.Join(root, filepath.FromSlash(rel)), maxContentScanBytes)
-		if err != nil || looksBinary(content) {
+		if content == nil {
+			if content, err = readSmallRegular(abs, maxContentScanBytes); err != nil {
+				return nil
+			}
+		}
+		if looksBinary(content) {
 			return nil
 		}
 		if rule, ok := opts.detector.DetectSecret(rel, content); ok {
@@ -234,7 +275,10 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 		res.warnings = append(res.warnings, fmt.Sprintf("secret scan of %s stopped after %d entries; files beyond that are not masked", root, opts.maxEntries))
 	}
 	if opts.contentScan && scanBudget <= 0 {
-		res.warnings = append(res.warnings, "secret content scan reached its file budget; remaining untracked files were checked by name only")
+		res.warnings = append(res.warnings, "secret content scan reached its file budget; remaining files were checked by name only")
+	}
+	if uncompared > 0 {
+		res.warnings = append(res.warnings, fmt.Sprintf("%d tracked file(s) past the first %d were not compared with their committed copy and were checked by name only", uncompared, trackedLimit))
 	}
 	for _, m := range res.masks {
 		if m.Hardlinked {
@@ -243,7 +287,7 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 	}
 	if len(res.trackedSecrets) > 0 {
 		res.warnings = append(res.warnings, fmt.Sprintf(
-			"%d secret-like file(s) are tracked by git and stay visible (their contents are in the repository history anyway): %s",
+			"%d secret-like file(s) stay visible because they hold exactly their committed contents, which the sandbox can read from the repository anyway: %s",
 			len(res.trackedSecrets), strings.Join(firstN(res.trackedSecrets, 5), ", ")))
 	}
 	if pathExists(filepath.Join(root, "node_modules", ".pnpm")) {
@@ -257,7 +301,7 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 	return res, nil
 }
 
-func dirHasTracked(tracked map[string]struct{}, dir string) bool {
+func dirHasTracked(tracked map[string]trackedEntry, dir string) bool {
 	if len(tracked) == 0 {
 		return false
 	}
@@ -301,16 +345,53 @@ func firstN(s []string, n int) []string {
 	return append(out, fmt.Sprintf("+%d more", len(s)-n))
 }
 
-// trackedFiles lists the paths in the project's index (pre-session).
-func trackedFiles(ctx context.Context, project, gitDir string) (map[string]struct{}, error) {
-	out, err := gitCmd{dir: project, gitDir: gitDir, workTree: project}.output(ctx, "ls-files", "-z", "--cached")
+// trackedFiles reads the project's index (pre-session): each path's mode,
+// object name, and whether git watches its working copy. `ls-files -v`
+// tags skip-worktree entries "S" and assume-unchanged ones in lower case.
+func trackedFiles(ctx context.Context, project, gitDir string) (map[string]trackedEntry, error) {
+	out, err := gitCmd{dir: project, gitDir: gitDir, workTree: project}.output(ctx, "ls-files", "-z", "-v", "--stage")
 	if err != nil {
 		return nil, err
 	}
-	paths := splitNUL(out)
-	set := make(map[string]struct{}, len(paths))
-	for _, p := range paths {
-		set[p] = struct{}{}
+	set := map[string]trackedEntry{}
+	for _, rec := range splitNUL(out) {
+		meta, p, ok := strings.Cut(rec, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 4 {
+			continue
+		}
+		e := trackedEntry{mode: f[1], oid: f[2], watched: f[0] == "H" && f[3] == "0"}
+		if prev, seen := set[p]; seen {
+			// An unmerged path has several stages; none is its content.
+			prev.watched = false
+			e = prev
+		}
+		set[p] = e
 	}
 	return set, nil
+}
+
+// holds reports whether content is exactly the blob of a regular-file
+// entry: its git object name (SHA-1 or SHA-256, by length) matches.
+func (e trackedEntry) holds(content []byte) bool {
+	if e.mode != "100644" && e.mode != "100755" {
+		return false
+	}
+	header := "blob " + strconv.Itoa(len(content)) + "\x00"
+	var sum []byte
+	switch len(e.oid) {
+	case 40:
+		h := sha1.New()
+		h.Write([]byte(header))
+		h.Write(content)
+		sum = h.Sum(nil)
+	case 64:
+		h := sha256.New()
+		h.Write([]byte(header))
+		h.Write(content)
+		sum = h.Sum(nil)
+	default:
+		return false
+	}
+	return hex.EncodeToString(sum) == strings.ToLower(e.oid)
 }

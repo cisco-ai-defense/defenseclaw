@@ -75,7 +75,10 @@ type MountOptions struct {
 	// Unmask lists paths or globs (relative to the project, or absolute
 	// inside it) to keep visible even though they look like secrets.
 	Unmask []string
-	// MaskTracked applies the built-in secret names to tracked files too.
+	// MaskTracked masks tracked secret-named files even when they hold
+	// exactly their committed contents. (A tracked file whose working copy
+	// differs, or is marked skip-worktree or assume-unchanged, is always
+	// masked by name and scanned like an untracked one.)
 	MaskTracked bool
 	// Context lists extra folders to mount read-only next to the project.
 	Context []string
@@ -109,8 +112,10 @@ type MountPlan struct {
 	Mounts []Mount    `json:"mounts"`
 	// Masked lists hidden secrets in the project; context masks are on
 	// each ContextMount.
-	Masked         []MaskedPath   `json:"masked,omitempty"`
-	Unmasked       []string       `json:"unmasked,omitempty"`
+	Masked   []MaskedPath `json:"masked,omitempty"`
+	Unmasked []string     `json:"unmasked,omitempty"`
+	// TrackedSecrets are secret-named files left visible because they hold
+	// exactly their committed contents.
 	TrackedSecrets []string       `json:"tracked_secrets,omitempty"`
 	Protected      []string       `json:"protected,omitempty"`
 	Contexts       []ContextMount `json:"contexts,omitempty"`

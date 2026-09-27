@@ -143,6 +143,113 @@ func TestPlanMountDriverConfigIsStructpbCompatible(t *testing.T) {
 	}
 }
 
+// TestPlanMountMasksTrackedFilesWithTheirOwnWorkingCopy: being tracked
+// only exempts a file whose working copy is exactly its committed copy,
+// which the sandbox can read from .git anyway. Local edits, and entries
+// git was told to ignore (skip-worktree, assume-unchanged), are masked by
+// name and scanned by content like untracked files.
+func TestPlanMountMasksTrackedFilesWithTheirOwnWorkingCopy(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	fakeKey := "key AKIA" + strings.Repeat("Z", 16) + "\n"
+	for rel, content := range map[string]string{
+		"testdata/server.key": "fixture\n",
+		"config/local.env":    "TOKEN=placeholder\n",
+		"deploy/prod.env":     "TOKEN=placeholder\n",
+		"ops/ci.env":          "TOKEN=placeholder\n",
+		"settings.py":         "KEY = 'placeholder'\n",
+		"config/app.yaml":     "key: placeholder\n",
+		"docs/example.md":     fakeKey,
+	} {
+		writeFile(t, e.project, rel, content)
+	}
+	e.git(e.project, "add", "-A", "-f")
+	e.git(e.project, "commit", "-q", "-m", "tracked")
+	e.git(e.project, "update-index", "--skip-worktree", "deploy/prod.env", "config/app.yaml")
+	e.git(e.project, "update-index", "--assume-unchanged", "ops/ci.env")
+	for _, rel := range []string{"config/local.env", "deploy/prod.env", "ops/ci.env"} {
+		writeFile(t, e.project, rel, "TOKEN=marker-local\n")
+	}
+	writeFile(t, e.project, "settings.py", fakeKey)
+	writeFile(t, e.project, "config/app.yaml", fakeKey)
+
+	plan, err := PlanMount(bg, e.mountOpts("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, m := range plan.Masked {
+		reasons[m.Rel] = m.Reason
+	}
+	for rel, want := range map[string]string{
+		"config/local.env": "name", // edited
+		"deploy/prod.env":  "name", // skip-worktree
+		"ops/ci.env":       "name", // assume-unchanged
+		"settings.py":      "content:CS-SEC-AWS-KEY",
+		"config/app.yaml":  "content:CS-SEC-AWS-KEY", // skip-worktree, unchanged size
+	} {
+		if reasons[rel] != want {
+			t.Errorf("%s: mask reason %q, want %q (masked: %v)", rel, reasons[rel], want, reasons)
+		}
+	}
+	for _, rel := range []string{"testdata/server.key", "docs/example.md"} {
+		if _, ok := reasons[rel]; ok {
+			t.Errorf("%s holds its committed bytes but was masked", rel)
+		}
+	}
+	if strings.Join(plan.TrackedSecrets, ",") != "testdata/server.key" {
+		t.Fatalf("TrackedSecrets = %v", plan.TrackedSecrets)
+	}
+	if !strings.Contains(strings.Join(plan.Warnings, "\n"), "hold exactly their committed contents") {
+		t.Fatalf("warnings = %v", plan.Warnings)
+	}
+
+	opts := e.mountOpts("s2")
+	opts.MaskTracked = true
+	if plan, err = PlanMount(bg, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.TrackedSecrets) != 0 {
+		t.Fatalf("MaskTracked left %v visible", plan.TrackedSecrets)
+	}
+}
+
+func TestTrackedEntryHolds(t *testing.T) {
+	for _, tc := range []struct {
+		e    trackedEntry
+		data string
+		want bool
+	}{
+		{trackedEntry{mode: "100644", oid: "5abed26af8585d58b8923135234ca8d1d77128b4"}, "marker\n", true},
+		{trackedEntry{mode: "100755", oid: "5abed26af8585d58b8923135234ca8d1d77128b4"}, "marker\n", true},
+		{trackedEntry{mode: "100644", oid: "52c2fcd945b8573594a0976f8a75079d8c0a3e0b2c03f7f50eb46cf94067c8bb"}, "marker\n", true},
+		{trackedEntry{mode: "100644", oid: "5abed26af8585d58b8923135234ca8d1d77128b4"}, "marker!\n", false},
+		{trackedEntry{mode: "120000", oid: "5abed26af8585d58b8923135234ca8d1d77128b4"}, "marker\n", false},
+		{trackedEntry{mode: "100644", oid: "5abed26a"}, "marker\n", false},
+	} {
+		if got := tc.e.holds([]byte(tc.data)); got != tc.want {
+			t.Errorf("%+v holds %q = %v, want %v", tc.e, tc.data, got, tc.want)
+		}
+	}
+}
+
+func TestDetectSecretsBoundsTrackedComparisons(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "one\n")
+	writeFile(t, root, "b.txt", "two\n")
+	tracked := map[string]trackedEntry{
+		"a.txt": {mode: "100644", oid: strings.Repeat("0", 40), watched: true},
+		"b.txt": {mode: "100644", oid: strings.Repeat("0", 40), watched: true},
+	}
+	scan, err := detectSecrets(root, secretScanOptions{tracked: tracked, contentScan: true, detector: DefaultSecretDetector(), maxTrackedReads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(scan.warnings, "\n"), "1 tracked file(s) past the first 1") {
+		t.Fatalf("warnings = %v", scan.warnings)
+	}
+}
+
 func TestPlanMountUnmaskTrackedAndContentSecrets(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
