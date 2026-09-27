@@ -318,6 +318,23 @@ func TestMatchHost(t *testing.T) {
 		{"203.0.113.7", "203.0.113.7", true},
 		{"", "example.com", false},
 		{"example.com", "", false},
+		// Addresses match by value, whatever their spelling.
+		{"2001:db8::7", "2001:0DB8:0000:0000:0000:0000:0000:0007", true},
+		{"2001:db8::7", "[2001:db8:0::7]", true},
+		{"203.0.113.7", "::ffff:203.0.113.7", true},
+		{"::ffff:203.0.113.7", "203.0.113.7", true},
+		{"203.0.113.7", "[::ffff:cb00:7107]", true},
+		{"198.51.100.0/24", "198.51.100.77", true},
+		{"198.51.100.0/24", "::ffff:198.51.100.77", true},
+		{"198.51.100.0/24", "198.51.101.77", false},
+		{"2001:db8::/32", "2001:db8:ffff::1", true},
+		// Names and addresses never match each other.
+		{"198.51.100.0/24", "198.51.100.77.nip.example", false},
+		{"*.example.com", "203.0.113.7", false},
+		// "*" (no longer valid in lists) still matches everything; other
+		// malformed patterns match nothing.
+		{"*.203.0.113.7", "a.203.0.113.7", false},
+		{"a.*.example", "a.b.example", false},
 	} {
 		if got := MatchHost(tc.glob, tc.host); got != tc.want {
 			t.Errorf("MatchHost(%q, %q) = %v, want %v", tc.glob, tc.host, got, tc.want)

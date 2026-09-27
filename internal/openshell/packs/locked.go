@@ -286,16 +286,19 @@ func globsCovered(inner, outer []string) bool {
 }
 
 // hostGlobCovers reports whether every host inner matches (see MatchHost)
-// also matches outer.
+// also matches outer. A pattern that does not parse covers only its own
+// spelling.
 func hostGlobCovers(outer, inner string) bool {
-	outer = strings.Trim(config.NormalizeOpenShellHostGlob(outer), "[]")
-	inner = strings.Trim(config.NormalizeOpenShellHostGlob(inner), "[]")
 	switch {
-	case outer == "*" || outer == inner:
+	case strings.TrimSpace(outer) == "*":
 		return true
-	case inner == "*":
+	case strings.TrimSpace(inner) == "*":
 		return false
 	}
-	suffix, ok := strings.CutPrefix(outer, "*.")
-	return ok && strings.HasSuffix(inner, "."+suffix)
+	o, errOuter := config.ParseOpenShellEgressPattern(outer)
+	i, errInner := config.ParseOpenShellEgressPattern(inner)
+	if errOuter != nil || errInner != nil {
+		return config.NormalizeOpenShellEgressPattern(outer) == config.NormalizeOpenShellEgressPattern(inner)
+	}
+	return o.Covers(i)
 }

@@ -784,18 +784,18 @@
         "strict"
       ]
     },
-    "openShellHostGlob": {
-      "description": "\"*\", a host name, \"*.<host>\" (every subdomain), or an IP address; no scheme, port, path or inner wildcard.",
+    "openShellEgressPattern": {
+      "description": "An egress proxy host pattern: a host name, \"*.<host>\" (every subdomain), an IP address, or a CIDR prefix; no \"*\", scheme, port, path or inner wildcard.",
       "type": "string",
       "minLength": 1,
       "maxLength": 253,
-      "pattern": "^(\\*|(\\*\\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\\.?|\\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\\]?)$"
+      "pattern": "^((\\*\\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\\.?|\\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\\]?|[0-9A-Fa-f:.]+/[0-9]{1,3})$"
     },
-    "openShellHostGlobList": {
+    "openShellEgressPatternList": {
       "type": "array",
       "maxItems": 4096,
       "items": {
-        "$ref": "#/$defs/openShellHostGlob"
+        "$ref": "#/$defs/openShellEgressPattern"
       }
     },
     "openShellNameList": {
@@ -872,10 +872,10 @@
       "additionalProperties": false,
       "properties": {
         "block": {
-          "$ref": "#/$defs/openShellHostGlobList"
+          "$ref": "#/$defs/openShellEgressPatternList"
         },
         "allow": {
-          "$ref": "#/$defs/openShellHostGlobList"
+          "$ref": "#/$defs/openShellEgressPatternList"
         },
         "ports": {
           "$ref": "#/$defs/openShellPortList"
@@ -1012,10 +1012,10 @@
           "$ref": "#/$defs/openShellNameList"
         },
         "egress_block": {
-          "$ref": "#/$defs/openShellHostGlobList"
+          "$ref": "#/$defs/openShellEgressPatternList"
         },
         "egress_allow_only": {
-          "$ref": "#/$defs/openShellHostGlobList"
+          "$ref": "#/$defs/openShellEgressPatternList"
         },
         "require_copy_for": {
           "$ref": "#/$defs/openShellGlobList"

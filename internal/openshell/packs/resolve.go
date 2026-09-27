@@ -436,7 +436,7 @@ func validateWorkdirGlobs(o config.OpenShellConfig) error {
 // first label's mDNS name, lowercased.
 func ownHostNames() []string {
 	name, err := osHostname()
-	name = config.NormalizeOpenShellHostGlob(name)
+	name, _ = config.NormalizeOpenShellHost(name)
 	if err != nil || name == "" {
 		return nil
 	}
@@ -1175,7 +1175,7 @@ func mergeLists(lists ...[]string) []string {
 func normalizeGlobs(globs []string) []string {
 	out := []string{}
 	for _, glob := range globs {
-		if g := config.NormalizeOpenShellHostGlob(glob); g != "" {
+		if g := config.NormalizeOpenShellEgressPattern(glob); g != "" {
 			out = appendUnique(out, g)
 		}
 	}

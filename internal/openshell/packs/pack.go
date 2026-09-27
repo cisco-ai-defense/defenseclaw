@@ -127,7 +127,9 @@ type ApprovalsPolicy struct {
 type EgressPolicy struct {
 	// Feeds are blocklist feeds (FeedBuiltin).
 	Feeds []string `yaml:"feeds" json:"feeds"`
-	// Block and Allow are host globs ("example.com", "*.example.com", "*").
+	// Block and Allow are egress host patterns in canonical form
+	// (config.ParseOpenShellEgressPattern): "example.com",
+	// "*.example.com", "203.0.113.9" or "198.51.100.0/24".
 	Block []string `yaml:"block" json:"block"`
 	Allow []string `yaml:"allow" json:"allow"`
 	// Ports are the destination ports the proxy reaches.
@@ -492,11 +494,11 @@ func (v *validator) hostGlobs(field string, globs []string) []string {
 	}
 	out := make([]string, 0, len(globs))
 	for i, glob := range globs {
-		if err := config.ValidateOpenShellHostGlob(glob); err != nil {
+		if err := config.ValidateOpenShellEgressPattern(glob); err != nil {
 			v.fail(fmt.Sprintf("%s[%d]", field, i), "invalid_value", "%v", err)
 			continue
 		}
-		out = appendUnique(out, config.NormalizeOpenShellHostGlob(glob))
+		out = appendUnique(out, config.NormalizeOpenShellEgressPattern(glob))
 	}
 	return out
 }

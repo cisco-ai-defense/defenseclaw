@@ -45,7 +45,8 @@ from defenseclaw.openshell_validation import (
     MAX_PROJECT_GLOB_BYTES,
     openshell_error,
     valid_cpu,
-    valid_host_glob,
+    valid_copy_pattern,
+    valid_egress_pattern,
     valid_memory,
     valid_project_glob,
 )
@@ -220,13 +221,30 @@ class TestOpenShellValidation(unittest.TestCase):
                 disagreements.append(f"{case['name']}: expected valid={case['valid']}, accepted={accepted}")
         self.assertEqual(disagreements, [])
 
-    def test_host_globs(self):
-        for glob in ("*", "Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]", "::ffff:1.2.3.4", " a_b.example "):
-            self.assertTrue(valid_host_glob(glob), glob)
-        for glob in ("", ".", "paste.example:443", "a.*.example", "**.example", "https://x.example", "x.example/path",
-                     "example.com..", "a" * 64 + ".example", "-bad.example", ":::1", "fe80::1%eth0", "a b.example",
-                     ("a" * 60 + ".") * 5 + "example"):
-            self.assertFalse(valid_host_glob(glob), glob)
+    def test_egress_patterns(self):
+        # The same cases as TestParseOpenShellEgressPattern.
+        for pattern in ("Paste.Example.", " *.NGROK.io ", "_dmarc.example", "1.2.example", "203.0.113.9",
+                        "[2001:DB8::1]", "2001:0db8:0000::0001", "::ffff:203.0.113.9", "[::ffff:cb00:7109]",
+                        "10.1.2.3/8", "2001:db8:1::/48", "::ffff:192.0.2.0/120", "0.0.0.0/0", "2001:db8::1/128",
+                        "198.51.100.7/32", " a_b.example "):
+            self.assertTrue(valid_egress_pattern(pattern), pattern)
+        for pattern in ("", " ", ".", "*", "**.example", "a.*.example", "*.", "paste.example:443", "https://x.example",
+                        "x.example/path", "example.com..", "-bad.example", "a" * 64 + ".example", ":::1",
+                        "fe80::1%eth0", "a b.example", ("a" * 60 + ".") * 5 + "example", "01.2.3.4", "999.1.1.1",
+                        "127.1", "2130706433", "0x7f000001", "203.0.113.9.", "*.203.0.113.9", "*.[::1]",
+                        "10.0.0.0/33", "10.0.0.0/08", "10.0.0.0/", "10.0.0.0/-1", "::ffff:10.0.0.0/80",
+                        "[2001:db8::]/32", "fe80::%eth0/64", "example.com/24", "2001:db8::/129",
+                        "10.0.0.0/255.0.0.0"):
+            self.assertFalse(valid_egress_pattern(pattern), pattern)
+
+    def test_copy_patterns(self):
+        # The same cases as TestValidateOpenShellCopyPattern.
+        for pattern in ("/src/customer-*", " /src/customer-* ", "~", "~/clients/*", "**", "**/customer-*",
+                        "C:/src/*", "C:\\src\\*", "/src/[a-c]*", "/srv/\\*literal", "/src/[^x]y", "/src/[\\]a]x"):
+            self.assertTrue(valid_copy_pattern(pattern), pattern)
+        for pattern in ("", "  ", "customer-*", "*/customer-acme", "src/client-*", "./src", "~clients", "C:src", "*",
+                        "/src/customer-[ab", "/src/[]x]", "/src/[a-]", "/src/[-a]", "/src/customer\\", "/src/a\x00b"):
+            self.assertFalse(valid_copy_pattern(pattern), pattern)
 
     def test_project_globs(self):
         # The same cases as TestValidateOpenShellProjectGlob.

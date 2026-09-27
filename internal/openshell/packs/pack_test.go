@@ -151,8 +151,8 @@ description: "  Team pack  "
 network: {mode: allowlist}
 approvals: {mode: auto}
 egress:
-  block: [Paste.Example., "*.Ngrok.io", paste.example]
-  allow: ["[2001:db8::1]"]
+  block: [Paste.Example., "*.Ngrok.io", paste.example, 198.51.100.7/24, "2001:DB8:0::/32"]
+  allow: ["[2001:db8::1]", "::ffff:203.0.113.7", 203.0.113.7]
   ports: [443, 443, 8443]
 workspace:
   mode: copy
@@ -171,10 +171,10 @@ hooks: {fail_mode: closed}
 	if pack.Profile() != "balanced" || pack.Approvals.Mode != ApprovalsAuto {
 		t.Fatalf("profile %q approvals %q", pack.Profile(), pack.Approvals.Mode)
 	}
-	if !reflect.DeepEqual(pack.Egress.Block, []string{"paste.example", "*.ngrok.io"}) {
+	if !reflect.DeepEqual(pack.Egress.Block, []string{"paste.example", "*.ngrok.io", "198.51.100.0/24", "2001:db8::/32"}) {
 		t.Fatalf("block = %v", pack.Egress.Block)
 	}
-	if !reflect.DeepEqual(pack.Egress.Allow, []string{"[2001:db8::1]"}) {
+	if !reflect.DeepEqual(pack.Egress.Allow, []string{"2001:db8::1", "203.0.113.7"}) {
 		t.Fatalf("allow = %v", pack.Egress.Allow)
 	}
 	if !reflect.DeepEqual(pack.Egress.Ports, []int{443, 8443}) || pack.Egress.LargeUploadMB != 25 {
@@ -246,6 +246,9 @@ func TestParseRejects(t *testing.T) {
 		{"host glob with scheme", replace("network: {mode: open}", "network: {mode: open}\negress: {block: ['https://x.example']}"), "invalid_value", "egress.block[0]"},
 		{"inner wildcard", replace("network: {mode: open}", "network: {mode: open}\negress: {allow: ['a.*.example']}"), "invalid_value", "egress.allow[0]"},
 		{"allow every host", replace("network: {mode: open}", "network: {mode: allowlist}\negress: {allow: [pypi.org, '*']}"), "invalid_value", "egress.allow[1]"},
+		{"allow every address", replace("network: {mode: open}", "network: {mode: allowlist}\negress: {allow: ['::/0']}"), "invalid_value", "egress.allow[0]"},
+		{"block a shorthand address", replace("network: {mode: open}", "network: {mode: open}\negress: {block: ['127.1']}"), "invalid_value", "egress.block[0]"},
+		{"block a range with bad bits", replace("network: {mode: open}", "network: {mode: open}\negress: {block: [10.0.0.0/33]}"), "invalid_value", "egress.block[0]"},
 		{"allow a top-level domain", replace("network: {mode: open}", "network: {mode: open}\negress: {allow: ['*.COM']}"), "invalid_value", "egress.allow[0]"},
 		{"allow a public suffix", replace("network: {mode: open}", "network: {mode: allowlist}\negress: {allow: ['*.co.uk']}"), "invalid_value", "egress.allow[0]"},
 		{"port zero", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: [0]}"), "invalid_value", "egress.ports[0]"},
@@ -274,15 +277,24 @@ func TestIsBroadAllowGlob(t *testing.T) {
 		"*": true, " * ": true, "*.com": true, "*.CO.UK.": true, "*.io": true,
 		"*.example.com": false, "*.github.io": false, "*.corp": false, "*.internal": false,
 		"com": false, "example.com": false, "203.0.113.7": false, "[2001:db8::1]": false,
+		"0.0.0.0/0": true, "128.0.0.0/1": true, "10.0.0.0/7": true, "::/0": true, "2000::/3": true, "::ffff:0.0.0.0/96": true,
+		"10.0.0.0/8": false, "198.51.100.0/24": false, "2001:db8::/16": false, "2001:db8::/32": false,
 	} {
 		if got := IsBroadAllowGlob(glob); got != want {
 			t.Errorf("IsBroadAllowGlob(%q) = %v, want %v", glob, got, want)
 		}
 	}
-	// Block lists may still name every host.
-	pack := mustParse(t, strings.Replace(minimalPack, "network: {mode: open}", "network: {mode: open}\negress: {block: ['*', '*.com']}", 1))
-	if !reflect.DeepEqual(pack.Egress.Block, []string{"*", "*.com"}) {
+	// Block lists may name whole top-level domains and ranges, but not
+	// every host: that is network.mode deny.
+	pack := mustParse(t, strings.Replace(minimalPack, "network: {mode: open}",
+		"network: {mode: open}\negress: {block: ['*.com', 0.0.0.0/0]}", 1))
+	if !reflect.DeepEqual(pack.Egress.Block, []string{"*.com", "0.0.0.0/0"}) {
 		t.Fatalf("block = %v", pack.Egress.Block)
+	}
+	_, err := Parse([]byte(strings.Replace(minimalPack, "network: {mode: open}",
+		"network: {mode: open}\negress: {block: [paste.example, '*']}", 1)), "test")
+	if e := wantPackError(t, err, "invalid_value", "egress.block[1]"); !strings.Contains(e.Reason, "strict turns the web off") {
+		t.Fatalf("reason %q", e.Reason)
 	}
 }
 

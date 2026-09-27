@@ -12,9 +12,9 @@
 
 Mirrors ``OpenShellConfig.Validate`` and ``Config.ValidateOpenShell`` in
 internal/config/openshell.go for everything the v8 schema cannot express
-(host glob grammar, project-relative mask globs, positive quantities, listener
-collisions), so a Python writer never saves a section the Go gateway refuses to
-load. The shared corpus testdata/openshell/config_validation_cases.yaml pins the
+(egress pattern grammar, project-relative mask globs, copy-mode path globs,
+positive quantities, listener collisions), so a Python writer never saves a
+section the Go gateway refuses to load. The shared corpus testdata/openshell/config_validation_cases.yaml pins the
 parity; the input is a document that already passed the v8 schema.
 """
 
@@ -45,6 +45,8 @@ _MEMORY_MULTIPLIER = {
     "Ti": 1 << 40,
 }
 _PACK_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# Go: openShellPrefixBits, a CIDR prefix length without leading zeros.
+_PREFIX_BITS = re.compile(r"0|[1-9][0-9]{0,2}")
 _DRIVE_LETTER = re.compile(r"[A-Za-z]:")
 _MAX_INT64 = (1 << 63) - 1
 # Go: MaxOpenShellProjectGlobBytes.
@@ -55,30 +57,101 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _is_ip(value: str) -> bool:
-    # Go's net.ParseIP refuses scoped IPv6 literals.
+def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Go's netip.ParseAddr; a zoned address is returned as None (never valid here)."""
     if "%" in value:
-        return False
+        return None
     try:
-        ipaddress.ip_address(value)
+        return ipaddress.ip_address(value)
     except ValueError:
+        return None
+
+
+def _valid_egress_host_name(name: str) -> bool:
+    if name.endswith("."):
+        name = name[:-1]
+    if not name or len(name) > 253:
         return False
+    labels = name.split(".")
+    if not all(_HOST_LABEL.fullmatch(label) for label in labels):
+        return False
+    return "a" <= labels[-1][0] <= "z"
+
+
+def valid_egress_pattern(pattern: str) -> bool:
+    """``ValidateOpenShellEgressPattern``: a host name, "*.<host>", an IP address or a CIDR prefix."""
+    p = pattern.strip().lower()
+    if not p or p == "*":
+        return False
+    if p.startswith("*."):
+        return _valid_egress_host_name(p[2:])
+    if "*" in p:
+        return False
+    if "/" in p:
+        addr_part, _, bits = p.partition("/")
+        addr = _parse_ip(addr_part)
+        if addr is None or not _PREFIX_BITS.fullmatch(bits) or int(bits) > addr.max_prefixlen:
+            return False
+        # Go refuses an IPv4-mapped prefix shorter than /96.
+        return not (isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None and int(bits) < 96)
+    bare = p[1:-1] if len(p) >= 2 and p[0] == "[" and p[-1] == "]" else p
+    return _parse_ip(bare) is not None or _valid_egress_host_name(p)
+
+
+def _go_glob_well_formed(segment: str) -> bool:
+    """Go's path.Match syntax check: escapes and character classes must be complete."""
+    i, n = 0, len(segment)
+
+    def escaped(j: int) -> int:
+        # getEsc: a class character, optionally escaped; -1 when malformed.
+        if j >= n or segment[j] in "-]":
+            return -1
+        if segment[j] == "\\":
+            j += 1
+            if j >= n:
+                return -1
+        j += 1
+        return j if j < n else -1
+
+    while i < n:
+        c = segment[i]
+        if c == "\\":
+            if i + 1 >= n:
+                return False
+            i += 2
+        elif c == "[":
+            i += 1
+            if i < n and segment[i] == "^":
+                i += 1
+            ranges = 0
+            while True:
+                if i < n and segment[i] == "]" and ranges > 0:
+                    i += 1
+                    break
+                i = escaped(i)
+                if i < 0:
+                    return False
+                if segment[i] == "-":
+                    i = escaped(i + 1)
+                    if i < 0:
+                        return False
+                ranges += 1
+        else:
+            i += 1
     return True
 
 
-def valid_host_glob(glob: str) -> bool:
-    """``ValidateOpenShellHostGlob``: "*", a host name, "*.<host>" or an IP."""
-    g = glob.strip().lower()
-    if g.endswith("."):
-        g = g[:-1]
-    if not g:
+def valid_copy_pattern(pattern: str) -> bool:
+    """``ValidateOpenShellCopyPattern``: an absolute, "~/" or "**/" path glob of well-formed segments."""
+    p = pattern.strip()
+    if not p or "\x00" in p:
         return False
-    if g == "*" or _is_ip(g.strip("[]")):
-        return True
-    if len(g) > 253:
-        return False
-    name = g[2:] if g.startswith("*.") else g
-    return all(_HOST_LABEL.fullmatch(label) for label in name.split("."))
+    anchored = (
+        p.startswith(("/", "~/", "**/"))
+        or p in ("~", "**")
+        or (len(p) > 2 and _DRIVE_LETTER.match(p) is not None and p[2] in "/\\")
+    )
+    return anchored and all(_go_glob_well_formed(segment) for segment in p.split("/"))
 
 
 def valid_project_glob(glob: str) -> bool:
@@ -128,10 +201,10 @@ def _resources_error(path: str, raw: Any) -> tuple[str, str] | None:
 
 def _globs_error(path: str, raw: Any) -> tuple[str, str] | None:
     for index, glob in enumerate(raw if isinstance(raw, list) else []):
-        if not isinstance(glob, str) or not valid_host_glob(glob):
+        if not isinstance(glob, str) or not valid_egress_pattern(glob):
             return (
                 f"{path}[{index}]",
-                'use "*", a host name, "*.<host>" or an IP address without a scheme, port or path',
+                'use a host name, "*.<host>", an IP address or a CIDR prefix without a scheme, port or path',
             )
     return None
 
@@ -188,8 +261,11 @@ def openshell_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
         if error is not None:
             return error
     for index, glob in enumerate(admin.get("require_copy_for") or []):
-        if isinstance(glob, str) and not glob.strip():
-            return f"openshell.admin.require_copy_for[{index}]", "use a non-empty project path glob"
+        if isinstance(glob, str) and not valid_copy_pattern(glob):
+            return (
+                f"openshell.admin.require_copy_for[{index}]",
+                'use an absolute path glob or one starting with "~/", with well-formed wildcards',
+            )
     digest = admin.get("required_pack_digest")
     if isinstance(digest, str) and digest:
         if not _PACK_DIGEST.fullmatch(digest):

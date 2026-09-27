@@ -21,21 +21,134 @@ cases:
         pack: balanced
         profile: strict
         workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
-        egress: {block: ['*', Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2'], allow: ['*.npmjs.org', pypi.org], ports: [443]}
+        egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443]}
         resources: {cpu: '1.5', memory: 512Mi}
         admin:
           required_pack: strict
           required_pack_digest: sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
+          egress_block: [10.0.0.0/8, '::ffff:203.0.113.7']
           egress_allow_only: ['*.corp.example']
-          require_copy_for: [/src/customer-*]
+          require_copy_for: [/src/customer-*, '~/clients/*', '~', '**/customer-*', '**', 'C:/src/[a-c]*', '/srv/\*literal']
           max_resources: {cpu: 500m, memory: 8Gi}
 
-  - name: numeric-labels-are-host-names
+  - name: numeric-inner-labels-are-host-names
     valid: true
     source: |
       config_version: 8
       openshell:
-        egress: {block: [01.2.3.4, 999.1.1.1]}
+        egress: {block: [1.2.example, '*.0x7f.example', 0.example]}
+
+  - name: numeric-last-label-with-leading-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [01.2.3.4]}
+
+  - name: numeric-last-label-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [999.1.1.1]}
+
+  - name: numeric-last-label-shorthand
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['127.1']}
+
+  - name: hex-last-label
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: [0x7f000001]}
+
+  - name: ip-with-trailing-dot
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [203.0.113.9.]}
+
+  - name: wildcard-over-an-ip
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['*.203.0.113.9']}
+
+  - name: bare-star-block
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['*']}
+
+  - name: bare-star-allow
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {allow: ['*']}
+
+  - name: bare-star-admin-block
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['*']}
+
+  - name: bare-star-admin-allow-only
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_allow_only: ['*']}
+
+  - name: cidr-bits-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [10.0.0.0/33]}
+
+  - name: cidr-bits-with-leading-zero
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: [10.0.0.0/08]}
+
+  - name: cidr-mapped-prefix-too-short
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {egress_block: ['::ffff:10.0.0.0/80']}
+
+  - name: cidr-without-bits
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [10.0.0.0/]}
+
+  - name: cidr-over-a-name
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: [example.com/24]}
+
+  - name: cidr-ipv6-bits-out-of-range
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ['2001:db8::/129']}
 
   - name: host-glob-with-port
     valid: false
@@ -231,6 +344,62 @@ cases:
       config_version: 8
       openshell:
         admin: {require_copy_for: ['  ']}
+
+  - name: relative-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: [customer-*]}
+
+  - name: relative-require-copy-for-with-a-wildcard-parent
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['*/customer-acme']}
+
+  - name: home-without-a-slash-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['~clients']}
+
+  - name: drive-letter-without-a-separator-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['C:src']}
+
+  - name: unclosed-class-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/customer-[ab']}
+
+  - name: empty-class-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/[]x]']}
+
+  - name: open-range-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/[a-]']}
+
+  - name: trailing-escape-require-copy-for
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {require_copy_for: ['/src/customer\']}
 
   - name: pack-digest-format
     valid: false

@@ -806,6 +806,13 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		{"*.example.com", "*", false},
 		{"a.example.com", "*.a.example.com", false},
 		{"[2001:db8::1]", "2001:db8::1", true},
+		{"2001:db8::1", "2001:0db8:0:0::1", true},
+		{"203.0.113.7", "::ffff:203.0.113.7", true},
+		{"198.51.100.0/24", "198.51.100.7", true},
+		{"198.51.100.0/24", "198.51.100.128/25", true},
+		{"198.51.100.128/25", "198.51.100.0/24", false},
+		{"198.51.100.0/24", "*.example.com", false},
+		{"*.example.com", "198.51.100.7", false},
 	} {
 		if got := hostGlobCovers(tc.outer, tc.inner); got != tc.want {
 			t.Errorf("hostGlobCovers(%q, %q) = %v, want %v", tc.outer, tc.inner, got, tc.want)
@@ -1361,6 +1368,13 @@ func TestRequireCopyForMatching(t *testing.T) {
 		{"pattern in another case", "/Src/Customer-ACME", "/src/customer-acme/app", true},
 		{"project in another case", "/src/customer-*", "/SRC/CUSTOMER-X", true},
 		{"parent in another case", "/src/customer-acme", "/SRC", true},
+		// Config validation refuses relative and malformed patterns; a
+		// programmatic config that has one errs toward copy mode.
+		{"relative pattern matches at any depth", "customer-*", "/home/user/customer-acme/app", true},
+		{"relative pattern with a wildcard parent", "*/customer-acme", "/home/user/customer-acme", true},
+		{"relative pattern covers every mount", "customer-*", "/home/user/internal", true},
+		{"malformed segment", "/src/customer-[", "/src/customer-x", true},
+		{"malformed segment below the project", "/src/app/[", "/src/app", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff := &Effective{home: home, admin: config.OpenShellAdminConfig{RequireCopyFor: []string{tc.pattern}}}

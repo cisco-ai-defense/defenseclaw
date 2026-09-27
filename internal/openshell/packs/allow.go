@@ -351,10 +351,11 @@ type FeedMatcher func(feeds []string, host string) (entry string, blocked bool)
 // admin allow-only, ports, the deny network mode, block, feeds (unless the
 // host is on the allow list and openshell.admin.allow_unblock is not false),
 // then the open or allowlist network mode. SSRF protection (loopback, private
-// ranges, metadata, rebinding) is the proxy's job and runs before this.
+// ranges, metadata, rebinding) is the proxy's job and runs before this, and so
+// does matching IP entries against the addresses a name resolves to.
 func (e *Effective) DecideEgress(host string, port int, feed FeedMatcher) EgressDecision {
-	h := strings.Trim(config.NormalizeOpenShellHostGlob(host), "[]")
-	if e == nil || h == "" || strings.Contains(h, "*") {
+	h, _ := config.NormalizeOpenShellHost(host)
+	if e == nil || h == "" || strings.ContainsAny(h, "*/") {
 		return EgressDecision{Rule: RuleInvalid}
 	}
 	eg := e.Egress
@@ -423,33 +424,22 @@ func firstMatch(globs []string, host string) (string, bool) {
 	return "", false
 }
 
-// validHost normalizes a destination host (lowercase, no trailing dot or
-// brackets). It refuses globs, and names that end in a number but are not a
-// canonical IP address ("127.1", "2130706433", "0x7f000001"): resolvers read
-// those as IPv4 addresses, which would slip past every textual check.
+// validHost canonicalizes a destination host: a name lowercased without a
+// trailing dot, an IP address in canonical form without brackets and with an
+// IPv4-mapped IPv6 address unmapped, so every spelling of an address meets
+// the same checks. It refuses globs and CIDR prefixes, and names whose last
+// label does not start with a letter ("127.1", "2130706433", "0x7f000001"):
+// resolvers read those as IPv4 addresses, which would slip past every
+// textual check (config.ParseOpenShellEgressPattern).
 func validHost(host string) (string, error) {
-	h := config.NormalizeOpenShellHostGlob(host)
-	if h == "" || h == "*" || strings.HasPrefix(h, "*.") {
+	pattern, err := config.ParseOpenShellEgressPattern(host)
+	switch {
+	case err == nil && (pattern.Wildcard || strings.Contains(host, "/")):
 		return "", fmt.Errorf("sandbox policy: %q is not a destination host", host)
-	}
-	if err := config.ValidateOpenShellHostGlob(h); err != nil {
-		return "", fmt.Errorf("sandbox policy: %w", err)
-	}
-	h = strings.Trim(h, "[]")
-	if net.ParseIP(h) == nil && endsInNumber(h) {
+	case err != nil:
 		return "", fmt.Errorf("sandbox policy: %q is neither a host name nor a canonical IP address", host)
 	}
-	return h, nil
-}
-
-// endsInNumber reports a host whose last label is decimal or 0x-hex, which
-// URL parsers and inet_aton treat as an IPv4 address.
-func endsInNumber(host string) bool {
-	label := host[strings.LastIndex(host, ".")+1:]
-	if hex, ok := strings.CutPrefix(label, "0x"); ok {
-		return strings.Trim(hex, "0123456789abcdef") == ""
-	}
-	return label != "" && strings.Trim(label, "0123456789") == ""
+	return pattern.String(), nil
 }
 
 func validPort(port int) error {

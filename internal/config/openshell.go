@@ -20,7 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
+	"net/netip"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -474,33 +475,194 @@ func ParseOpenShellMemory(value string) (int64, error) {
 	return number * multiplier, nil
 }
 
-// NormalizeOpenShellHostGlob lowercases a host glob and strips a trailing dot.
-func NormalizeOpenShellHostGlob(glob string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(glob)), ".")
+// OpenShellEgressPattern is a parsed egress host pattern: an exact host name,
+// "*.<host>" (every subdomain at any depth, not the apex), an IP address or a
+// CIDR prefix. It is the grammar of the DefenseClaw egress proxy's block and
+// allow lists (internal/openshell/egress), so every list the configuration or
+// a sandbox policy pack hands the proxy parses there too.
+type OpenShellEgressPattern struct {
+	// Host is the DNS name of an exact or wildcard pattern: lower case,
+	// without a trailing dot.
+	Host string
+	// Wildcard reports a "*.<Host>" pattern.
+	Wildcard bool
+	// Prefix is set for an IP address (a single-address prefix) or a CIDR
+	// prefix: masked, with an IPv4-mapped IPv6 address or prefix unmapped to
+	// its IPv4 form, so every spelling of an address compares equal.
+	Prefix netip.Prefix
 }
 
-// ValidateOpenShellHostGlob accepts "*", an exact host name, "*.<host>"
-// (every subdomain, not the apex), or an IP literal. Schemes, ports, paths and
-// inner wildcards are rejected.
-func ValidateOpenShellHostGlob(glob string) error {
-	g := NormalizeOpenShellHostGlob(glob)
+// String returns the pattern's canonical spelling: "example.com",
+// "*.example.com", "192.0.2.1", "2001:db8::1" or "10.0.0.0/8".
+func (p OpenShellEgressPattern) String() string {
 	switch {
-	case g == "":
-		return errors.New("host glob is empty")
-	case g == "*":
-		return nil
-	case net.ParseIP(strings.Trim(g, "[]")) != nil:
-		return nil
-	case len(g) > 253:
-		return fmt.Errorf("host glob %q is longer than 253 characters", glob)
+	case p.Prefix.IsValid() && p.Prefix.IsSingleIP():
+		return p.Prefix.Addr().String()
+	case p.Prefix.IsValid():
+		return p.Prefix.String()
+	case p.Wildcard:
+		return "*." + p.Host
+	default:
+		return p.Host
 	}
-	name := strings.TrimPrefix(g, "*.")
-	for _, label := range strings.Split(name, ".") {
+}
+
+// Matches reports whether a destination matches the pattern: an IP pattern
+// matches the IP destinations it contains, a name pattern matches names only.
+// host and addr are what NormalizeOpenShellHost returns.
+func (p OpenShellEgressPattern) Matches(host string, addr netip.Addr) bool {
+	switch {
+	case p.Prefix.IsValid():
+		return addr.IsValid() && p.Prefix.Contains(addr.Unmap().WithZone(""))
+	case addr.IsValid() || p.Host == "":
+		return false
+	case p.Wildcard:
+		return strings.HasSuffix(host, "."+p.Host)
+	default:
+		return host == p.Host
+	}
+}
+
+// Covers reports whether every destination inner matches also matches p.
+func (p OpenShellEgressPattern) Covers(inner OpenShellEgressPattern) bool {
+	switch {
+	case p.Prefix.IsValid() || inner.Prefix.IsValid():
+		return p.Prefix.IsValid() && inner.Prefix.IsValid() &&
+			p.Prefix.Bits() <= inner.Prefix.Bits() && p.Prefix.Contains(inner.Prefix.Addr())
+	case p.Wildcard:
+		return inner.Wildcard && inner.Host == p.Host || strings.HasSuffix(inner.Host, "."+p.Host)
+	default:
+		return !inner.Wildcard && inner.Host == p.Host
+	}
+}
+
+// openShellPrefixBits is a CIDR prefix length without leading zeros.
+var openShellPrefixBits = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})$`)
+
+// ParseOpenShellEgressPattern parses an egress host pattern (see
+// OpenShellEgressPattern). Surrounding space and case are ignored, a host
+// name may end in one dot, and an IP address may be bracketed. Refused:
+//   - "*" and inner wildcards: allowing or blocking every host is a network
+//     mode, not a list entry (the open profile allows by default, strict
+//     turns the web off);
+//   - schemes, ports, paths, zoned IPv6 addresses and bracketed prefixes;
+//   - host names whose labels are not 1-63 letters, digits, "_" or inner
+//     "-", or that are longer than 253 characters;
+//   - names whose last label does not start with a letter ("127.1",
+//     "2130706433", "0x7f000001", "01.2.3.4"): resolvers read those as IPv4
+//     addresses, which would slip past every name comparison.
+func ParseOpenShellEgressPattern(pattern string) (OpenShellEgressPattern, error) {
+	p := strings.ToLower(strings.TrimSpace(pattern))
+	invalid := func() (OpenShellEgressPattern, error) {
+		return OpenShellEgressPattern{}, fmt.Errorf(
+			"egress pattern %q must be a host name, \"*.<host>\", an IP address or a CIDR prefix", pattern)
+	}
+	switch {
+	case p == "":
+		return OpenShellEgressPattern{}, errors.New("egress pattern is empty")
+	case p == "*":
+		return OpenShellEgressPattern{}, errors.New(`egress pattern "*" matches every host; choose the profile instead ` +
+			`(open allows by default, strict turns the web off)`)
+	case strings.HasPrefix(p, "*."):
+		host, ok := openShellEgressHostName(p[2:])
+		if !ok {
+			return invalid()
+		}
+		return OpenShellEgressPattern{Host: host, Wildcard: true}, nil
+	case strings.Contains(p, "*"):
+		return invalid()
+	case strings.Contains(p, "/"):
+		addrPart, bits, _ := strings.Cut(p, "/")
+		addr, err := netip.ParseAddr(addrPart)
+		if err != nil || addr.Zone() != "" || !openShellPrefixBits.MatchString(bits) {
+			return invalid()
+		}
+		n, _ := strconv.Atoi(bits)
+		if n > addr.BitLen() {
+			return invalid()
+		}
+		if addr.Is4In6() {
+			if n < 96 {
+				return OpenShellEgressPattern{}, fmt.Errorf("egress pattern %q: an IPv4-mapped prefix must be at least /96", pattern)
+			}
+			addr, n = addr.Unmap(), n-96
+		}
+		return OpenShellEgressPattern{Prefix: netip.PrefixFrom(addr, n).Masked()}, nil
+	}
+	if addr, ok := parseOpenShellAddr(p); ok {
+		if addr.Zone() != "" {
+			return OpenShellEgressPattern{}, fmt.Errorf("egress pattern %q: zoned IPv6 addresses are not destinations", pattern)
+		}
+		return OpenShellEgressPattern{Prefix: netip.PrefixFrom(addr, addr.BitLen())}, nil
+	}
+	host, ok := openShellEgressHostName(p)
+	if !ok {
+		return invalid()
+	}
+	return OpenShellEgressPattern{Host: host}, nil
+}
+
+// ValidateOpenShellEgressPattern checks one egress host pattern
+// (ParseOpenShellEgressPattern).
+func ValidateOpenShellEgressPattern(pattern string) error {
+	_, err := ParseOpenShellEgressPattern(pattern)
+	return err
+}
+
+// NormalizeOpenShellEgressPattern returns a pattern's canonical spelling
+// (OpenShellEgressPattern.String), or, for a pattern that does not parse, the
+// pattern lowercased and trimmed.
+func NormalizeOpenShellEgressPattern(pattern string) string {
+	if parsed, err := ParseOpenShellEgressPattern(pattern); err == nil {
+		return parsed.String()
+	}
+	return strings.ToLower(strings.TrimSpace(pattern))
+}
+
+// NormalizeOpenShellHost canonicalizes a destination host the way egress
+// patterns are: an IP address (optionally bracketed) in canonical form, an
+// IPv4-mapped IPv6 address unmapped and a zone dropped, and also returned as
+// addr; anything else lowercased and trimmed, without one trailing dot. It
+// does not validate the host.
+func NormalizeOpenShellHost(host string) (string, netip.Addr) {
+	h := strings.TrimSpace(host)
+	if addr, ok := parseOpenShellAddr(h); ok {
+		addr = addr.WithZone("")
+		return addr.String(), addr
+	}
+	return strings.TrimSuffix(strings.ToLower(h), "."), netip.Addr{}
+}
+
+// parseOpenShellAddr parses an IP address, optionally in brackets, and
+// unmaps an IPv4-mapped IPv6 address.
+func parseOpenShellAddr(s string) (netip.Addr, bool) {
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		s = s[1 : len(s)-1]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// openShellEgressHostName validates the lowercased DNS name of an egress
+// pattern and strips one trailing dot.
+func openShellEgressHostName(name string) (string, bool) {
+	name = strings.TrimSuffix(name, ".")
+	if name == "" || len(name) > 253 {
+		return "", false
+	}
+	labels := strings.Split(name, ".")
+	for _, label := range labels {
 		if !openShellHostLabel.MatchString(label) {
-			return fmt.Errorf("host glob %q must be a host name, \"*.<host>\", \"*\" or an IP address", glob)
+			return "", false
 		}
 	}
-	return nil
+	if last := labels[len(labels)-1]; last[0] < 'a' || last[0] > 'z' {
+		return "", false
+	}
+	return name, true
 }
 
 // MaxOpenShellProjectGlobBytes bounds one project-relative glob.
@@ -533,6 +695,33 @@ func ValidateOpenShellProjectGlob(glob string) error {
 
 func hasDriveLetter(p string) bool {
 	return len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))
+}
+
+// ValidateOpenShellCopyPattern accepts an openshell.admin.require_copy_for
+// entry: an absolute path glob ("/src/customer-*", or "C:/src/*" with a drive
+// letter), one under the home directory ("~" or "~/…"), or one that matches
+// at any depth ("**" or "**/customer-*"; since any folder may hold a match
+// below it, such a pattern covers every mount). A relative pattern such as
+// "customer-*" is refused: it would be matched from the filesystem root and
+// silently cover nothing. "*", "?" and "[…]" work within a path segment, and
+// every segment must be a well-formed glob (path.Match).
+func ValidateOpenShellCopyPattern(pattern string) error {
+	p := strings.TrimSpace(pattern)
+	switch {
+	case p == "":
+		return errors.New("pattern is empty")
+	case strings.ContainsRune(p, 0):
+		return errors.New("pattern contains a NUL byte")
+	case !strings.HasPrefix(p, "/") && p != "~" && !strings.HasPrefix(p, "~/") && p != "**" &&
+		!strings.HasPrefix(p, "**/") && !(hasDriveLetter(p) && len(p) > 2 && (p[2] == '/' || p[2] == '\\')):
+		return fmt.Errorf("%q must be an absolute path glob or start with \"~/\"; a relative pattern would never match", pattern)
+	}
+	for _, segment := range strings.Split(p, "/") {
+		if _, err := path.Match(segment, ""); err != nil {
+			return fmt.Errorf("%q has a malformed glob segment %q", pattern, segment)
+		}
+	}
+	return nil
 }
 
 // ValidateOpenShell checks the openshell section (OpenShellConfig.Validate)
@@ -623,8 +812,8 @@ func (o *OpenShellConfig) Validate() error {
 	}
 	check(ValidateOpenShellProjectGlobs("workdir.masks", o.Workdir.Masks))
 	check(ValidateOpenShellProjectGlobs("workdir.unmask", o.Workdir.Unmask))
-	check(validateOpenShellHostGlobs("egress.block", o.Egress.Block))
-	check(validateOpenShellHostGlobs("egress.allow", o.Egress.Allow))
+	check(validateOpenShellEgressPatterns("egress.block", o.Egress.Block))
+	check(validateOpenShellEgressPatterns("egress.allow", o.Egress.Allow))
 	check(validateOpenShellNames("harnesses", o.Harnesses))
 	check(validateOpenShellNames("wrappers", o.Wrappers))
 	for name := range o.Image.HarnessVersions {
@@ -655,11 +844,11 @@ func (a *OpenShellAdminConfig) validate() error {
 	check(validateOpenShellEnum("admin.min_profile", a.MinProfile, true,
 		OpenShellProfileOpen, OpenShellProfileBalanced, OpenShellProfileStrict))
 	check(validateOpenShellNames("admin.allowed_harnesses", a.AllowedHarnesses))
-	check(validateOpenShellHostGlobs("admin.egress_block", a.EgressBlock))
-	check(validateOpenShellHostGlobs("admin.egress_allow_only", a.EgressAllowOnly))
-	for i, glob := range a.RequireCopyFor {
-		if strings.TrimSpace(glob) == "" {
-			check(fmt.Errorf("admin.require_copy_for[%d] is empty", i))
+	check(validateOpenShellEgressPatterns("admin.egress_block", a.EgressBlock))
+	check(validateOpenShellEgressPatterns("admin.egress_allow_only", a.EgressAllowOnly))
+	for i, pattern := range a.RequireCopyFor {
+		if err := ValidateOpenShellCopyPattern(pattern); err != nil {
+			check(fmt.Errorf("admin.require_copy_for[%d]: %w", i, err))
 		}
 	}
 	check(validateOpenShellResources("admin.max_resources", a.MaxResources))
@@ -730,9 +919,9 @@ func ValidateOpenShellProjectGlobs(field string, globs []string) error {
 	return nil
 }
 
-func validateOpenShellHostGlobs(field string, globs []string) error {
-	for i, glob := range globs {
-		if err := ValidateOpenShellHostGlob(glob); err != nil {
+func validateOpenShellEgressPatterns(field string, patterns []string) error {
+	for i, pattern := range patterns {
+		if err := ValidateOpenShellEgressPattern(pattern); err != nil {
 			return fmt.Errorf("%s[%d]: %w", field, i, err)
 		}
 	}

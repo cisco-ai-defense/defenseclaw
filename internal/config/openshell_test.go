@@ -240,6 +240,11 @@ func TestOpenShellValidate(t *testing.T) {
 		{"admin locked", func(o *OpenShellConfig) { o.Admin.Locked = []string{"enabled"} }, "admin.locked[0]"},
 		{"admin max", func(o *OpenShellConfig) { o.Admin.MaxResources.CPU = "lots" }, "admin.max_resources.cpu"},
 		{"admin copy glob", func(o *OpenShellConfig) { o.Admin.RequireCopyFor = []string{" "} }, "admin.require_copy_for[0]"},
+		{"relative copy glob", func(o *OpenShellConfig) {
+			o.Admin.RequireCopyFor = []string{"/src/customer-*", "customer-*"}
+		}, "admin.require_copy_for[1]"},
+		{"every host blocked", func(o *OpenShellConfig) { o.Egress.Block = []string{"*"} }, "egress.block[0]"},
+		{"admin allow-only everything", func(o *OpenShellConfig) { o.Admin.EgressAllowOnly = []string{"*"} }, "admin.egress_allow_only[0]"},
 		{"admin block", func(o *OpenShellConfig) { o.Admin.EgressBlock = []string{"x.example/path"} }, "admin.egress_block[0]"},
 		{"pack digest format", func(o *OpenShellConfig) {
 			o.Admin.RequiredPack, o.Admin.RequiredPackDigest = "strict", "sha256:ABC"
@@ -261,7 +266,8 @@ func TestOpenShellValidate(t *testing.T) {
 	valid := DefaultConfig().OpenShell
 	valid.Workdir.Masks = []string{".env.*", "secrets/**", "**/*.pem"}
 	valid.Workdir.Unmask = []string{".env.example", "./certs/dev.pem"}
-	valid.Egress.Block = []string{"*", "Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]"}
+	valid.Egress.Block = []string{"Paste.Example.", "*.ngrok.io", "203.0.113.9", "[2001:db8::1]", "198.51.100.0/24"}
+	valid.Admin.RequireCopyFor = []string{"/src/customer-*", "~/clients/*", "**/customer-*"}
 	valid.Resources = OpenShellResourcesConfig{CPU: "1.5", Memory: "512Mi"}
 	valid.Admin.Locked = append([]string(nil), OpenShellLockableKeys...)
 	valid.Admin.RequiredPack, valid.Admin.RequiredPackDigest = "strict", "sha256:"+strings.Repeat("0f", 32)
@@ -357,6 +363,114 @@ func TestValidateOpenShellProjectGlob(t *testing.T) {
 	if err := ValidateOpenShellProjectGlobs("workdir.unmask", []string{".env.example", "/x"}); err == nil ||
 		!strings.HasPrefix(err.Error(), "workdir.unmask[1]: ") {
 		t.Fatalf("list error = %v", err)
+	}
+}
+
+func TestParseOpenShellEgressPattern(t *testing.T) {
+	for in, want := range map[string]string{
+		"Paste.Example.":       "paste.example",
+		" *.NGROK.io ":         "*.ngrok.io",
+		"_dmarc.example":       "_dmarc.example",
+		"1.2.example":          "1.2.example",
+		"203.0.113.9":          "203.0.113.9",
+		"[2001:DB8::1]":        "2001:db8::1",
+		"2001:0db8:0000::0001": "2001:db8::1",
+		"::ffff:203.0.113.9":   "203.0.113.9",
+		"[::ffff:cb00:7109]":   "203.0.113.9",
+		"10.1.2.3/8":           "10.0.0.0/8",
+		"2001:db8:1::/48":      "2001:db8:1::/48",
+		"::ffff:192.0.2.0/120": "192.0.2.0/24",
+		"0.0.0.0/0":            "0.0.0.0/0",
+		"2001:db8::1/128":      "2001:db8::1",
+		"198.51.100.7/32":      "198.51.100.7",
+	} {
+		got, err := ParseOpenShellEgressPattern(in)
+		if err != nil || got.String() != want || NormalizeOpenShellEgressPattern(in) != want {
+			t.Errorf("ParseOpenShellEgressPattern(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"", " ", "*", "**.example", "a.*.example", "*.", "paste.example:443", "https://x.example", "x.example/path",
+		"example.com..", "-bad.example", strings.Repeat("a", 64) + ".example", ":::1", "fe80::1%eth0",
+		"01.2.3.4", "999.1.1.1", "127.1", "2130706433", "0x7f000001", "203.0.113.9.", "*.203.0.113.9", "*.[::1]",
+		"10.0.0.0/33", "10.0.0.0/08", "10.0.0.0/", "10.0.0.0/-1", "::ffff:10.0.0.0/80", "[2001:db8::]/32",
+		"fe80::%eth0/64", "example.com/24", "2001:db8::/129", "10.0.0.0/255.0.0.0",
+	} {
+		if err := ValidateOpenShellEgressPattern(bad); err == nil {
+			t.Errorf("ValidateOpenShellEgressPattern(%q) accepted", bad)
+		}
+	}
+
+	parse := func(s string) OpenShellEgressPattern {
+		t.Helper()
+		p, err := ParseOpenShellEgressPattern(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		pattern, host string
+		want          bool
+	}{
+		{"example.com", "Example.COM.", true},
+		{"example.com", "a.example.com", false},
+		{"*.example.com", "a.b.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"203.0.113.9", "::ffff:203.0.113.9", true},
+		{"203.0.113.9", "[::ffff:cb00:7109]", true},
+		{"2001:db8::1", "2001:0DB8:0:0::1", true},
+		{"10.0.0.0/8", "10.200.3.4", true},
+		{"10.0.0.0/8", "::ffff:10.200.3.4", true},
+		{"10.0.0.0/8", "11.0.0.1", false},
+		{"2001:db8::/32", "[2001:db8:ffff::1]", true},
+		{"2001:db8::/32", "2001:db9::1", false},
+		// Names never match addresses, and addresses never match names.
+		{"10.0.0.0/8", "ten.example", false},
+		{"203.0.113.9", "203.0.113.9.nip.example", false},
+	} {
+		host, addr := NormalizeOpenShellHost(tc.host)
+		if got := parse(tc.pattern).Matches(host, addr); got != tc.want {
+			t.Errorf("%q matches %q = %v, want %v", tc.pattern, tc.host, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		outer, inner string
+		want         bool
+	}{
+		{"*.example.com", "*.example.com", true},
+		{"*.example.com", "*.a.example.com", true},
+		{"*.example.com", "a.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"a.example.com", "*.a.example.com", false},
+		{"10.0.0.0/8", "10.1.0.0/16", true},
+		{"10.0.0.0/8", "10.1.2.3", true},
+		{"10.1.0.0/16", "10.0.0.0/8", false},
+		{"10.0.0.0/8", "ten.example", false},
+		{"::ffff:10.0.0.0/104", "10.9.0.0/16", true},
+	} {
+		if got := parse(tc.outer).Covers(parse(tc.inner)); got != tc.want {
+			t.Errorf("%q covers %q = %v, want %v", tc.outer, tc.inner, got, tc.want)
+		}
+	}
+}
+
+func TestValidateOpenShellCopyPattern(t *testing.T) {
+	for _, pattern := range []string{
+		"/src/customer-*", " /src/customer-* ", "~", "~/clients/*", "**", "**/customer-*", "C:/src/*", `C:\src\*`,
+		"/src/[a-c]*", `/srv/\*literal`, "/src/[^x]y", `/src/[\]a]x`,
+	} {
+		if err := ValidateOpenShellCopyPattern(pattern); err != nil {
+			t.Errorf("ValidateOpenShellCopyPattern(%q) = %v", pattern, err)
+		}
+	}
+	for _, pattern := range []string{
+		"", "  ", "customer-*", "*/customer-acme", "src/client-*", "./src", "~clients", "C:src", "*",
+		"/src/customer-[ab", "/src/[]x]", "/src/[a-]", "/src/[-a]", `/src/customer\`, "/src/a\x00b",
+	} {
+		if err := ValidateOpenShellCopyPattern(pattern); err == nil {
+			t.Errorf("ValidateOpenShellCopyPattern(%q) accepted", pattern)
+		}
 	}
 }
 
