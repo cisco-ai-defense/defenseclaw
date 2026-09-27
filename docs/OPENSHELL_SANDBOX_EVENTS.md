@@ -51,6 +51,8 @@ sandbox) and `deleted` (after it is gone).
 | `RecordSandboxHealth` | `sandbox-health` | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Always (`durable_health_transition`) |
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | `security.finding` | No |
 
+`RecordSandboxPolicy` records name the changed host or egress pattern in `defenseclaw.admin.target_ref`: a wildcard such as `*.example.com` is recorded as `suffix:example.com`, and a leading `::` as `0::` (`::/0` becomes `0::/0`).
+
 A mandatory record is delivered whatever a route's collection settings say.
 
 ### Lifecycle

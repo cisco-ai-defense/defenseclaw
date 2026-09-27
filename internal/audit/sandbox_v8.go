@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"path"
 	"regexp"
 	"strconv"
@@ -319,7 +320,11 @@ type SandboxPolicyEvent struct {
 	Actor string
 	// Origin is api, cli, internal, or triage.
 	Origin string
-	// Target is a bounded reference to what changed, for example a host.
+	// Target is a bounded reference to what changed, for example a host or
+	// an egress rule's host pattern as the decider spells it. The recorder
+	// rewrites the two pattern forms the identifier shape cannot hold (see
+	// sandboxPolicyTarget) and rejects any other target that is not an
+	// identifier of at most 1024 bytes.
 	Target string
 	// Reason is a registered reason code (a stable token).
 	Reason      string
@@ -512,6 +517,7 @@ const (
 	maxSandboxFindingTargetBytes = 256
 	maxSandboxAuthorityBytes     = 1024
 	maxSandboxHostBytes          = 253
+	maxSandboxPolicyTargetBytes  = 1024
 )
 
 // sandboxInvalidHost is the target_ref of a destination that cannot be
@@ -844,6 +850,10 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 	if input.Reason != "" && !observability.IsStableToken(input.Reason) {
 		return fmt.Errorf("audit: sandbox policy reason must be a registered reason code")
 	}
+	target, err := sandboxPolicyTarget(input.Target)
+	if err != nil {
+		return err
+	}
 	fields := sandboxV8FieldsFor(identity)
 	event := recorder.newEvent(ctx, ActionSandboxPolicy, identity, identity.Name, "INFO", input.Timestamp)
 	if strings.TrimSpace(input.Actor) != "" {
@@ -872,7 +882,7 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 				DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 				DefenseClawAdminActorRef:        optionalControlPlaneV8Actor(event.Actor),
 				DefenseClawAdminOrigin:          optionalSandboxEnum(input.Origin),
-				DefenseClawAdminTargetRef:       optionalControlPlaneV8Target(input.Target),
+				DefenseClawAdminTargetRef:       target,
 				DefenseClawAdminAfterSummary:    afterSummary,
 				DefenseClawAdminReason:          optionalControlPlaneV8Reason(input.Reason),
 				DefenseClawAdminRevision:        revision,
@@ -1549,6 +1559,39 @@ func sandboxPolicyRevision(version uint32) observability.Optional[string] {
 		return observability.Absent[string]()
 	}
 	return observability.Present(fmt.Sprintf("v%d", version))
+}
+
+// sandboxPolicyTarget is the defenseclaw.admin.target_ref of a policy change.
+// The egress decider's host patterns include two forms that cannot start an
+// identifier. A leading wildcard (*.example.com) is recorded as
+// suffix:example.com. An IPv6 literal or prefix written with a leading "::"
+// (::/0, ::1) takes an explicit zero group (0::/0, 0::1), which names the
+// same addresses. Any other target that is not a bounded identifier is
+// rejected: this mandatory record must say what the change opened or closed,
+// so the target is never silently dropped.
+func sandboxPolicyTarget(value string) (observability.Optional[string], error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return observability.Absent[string](), nil
+	}
+	if suffix, wildcard := strings.CutPrefix(value, "*."); wildcard && suffix != "" {
+		value = "suffix:" + suffix
+	} else if strings.HasPrefix(value, "::") && sandboxIPOrPrefix(value) {
+		value = "0" + value
+	}
+	if !sandboxIdentifier(value, maxSandboxPolicyTargetBytes) {
+		return observability.Absent[string](), fmt.Errorf("audit: sandbox policy target is not a bounded reference")
+	}
+	return observability.Present(value), nil
+}
+
+// sandboxIPOrPrefix reports whether value is an IP literal or a CIDR prefix.
+func sandboxIPOrPrefix(value string) bool {
+	if _, err := netip.ParsePrefix(value); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddr(value)
+	return err == nil
 }
 
 type sandboxConditionV8 struct {

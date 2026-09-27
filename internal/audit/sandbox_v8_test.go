@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
@@ -1024,6 +1025,63 @@ func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
 	}
 }
 
+// TestSandboxPolicyTargetRecordsEgressPatterns pins the target_ref of egress
+// rule changes. The decider accepts host patterns that cannot start an
+// identifier, and a mandatory record that opens *.pastebin.com or ::/0 must
+// still say so: those two forms are rewritten, never dropped.
+func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
+	harness := newSandboxHarness(t)
+	for _, test := range []struct {
+		name      string
+		operation SandboxPolicyOperation
+		target    string
+		want      string
+	}{
+		{"exact host", SandboxEgressUnblock, "webhook.site", "webhook.site"},
+		{"wildcard host", SandboxEgressUnblock, "*.pastebin.com", "suffix:pastebin.com"},
+		{"padded wildcard host", SandboxEgressBlock, " *.example.com\t", "suffix:example.com"},
+		{"IPv6 default route", SandboxEgressUnblock, "::/0", "0::/0"},
+		{"IPv6 loopback", SandboxEgressBlock, "::1", "0::1"},
+		{"IPv6 prefix", SandboxEgressUnblock, "fe80::/10", "fe80::/10"},
+		{"IPv4 prefix", SandboxEgressUnblock, "10.0.0.0/8", "10.0.0.0/8"},
+		{"IPv4 default route", SandboxEgressUnblock, "0.0.0.0/0", "0.0.0.0/0"},
+		{"no target", SandboxPolicyApply, "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{
+				Sandbox: testSandboxIdentity(), Operation: test.operation, Actor: "cli:alice", Origin: "cli",
+				Target: test.target, ChangeCount: 1,
+			}); err != nil {
+				t.Fatalf("RecordSandboxPolicy: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeContract(t, record)
+			if !record.Mandatory() {
+				t.Fatal("a policy change must be mandatory")
+			}
+			got, present := sandboxBody(t, record)["defenseclaw.admin.target_ref"]
+			if present != (test.want != "") || (present && got != test.want) {
+				t.Fatalf("target_ref=%#v present=%v want %q", got, present, test.want)
+			}
+			if test.want == "" {
+				return
+			}
+			// A rewritten address still parses to the prefix it replaced.
+			if prefix, err := netip.ParsePrefix(test.target); err == nil {
+				if again, err := netip.ParsePrefix(test.want); err != nil || again != prefix {
+					t.Fatalf("target_ref %q does not name %v", test.want, prefix)
+				}
+			}
+			if addr, err := netip.ParseAddr(test.target); err == nil {
+				if again, err := netip.ParseAddr(test.want); err != nil || again != addr {
+					t.Fatalf("target_ref %q does not name %v", test.want, addr)
+				}
+			}
+		})
+	}
+}
+
 func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
 	harness := newSandboxHarness(t)
 	for _, test := range []struct {
@@ -1378,6 +1436,21 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		}},
 		{"policy free-text reason", func(r *SandboxRecorder) error {
 			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, Reason: "because I said so"})
+		}},
+		{"policy free-text target", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyRuleAdd, Target: "the pastebin rule"})
+		}},
+		{"policy bare wildcard target", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressUnblock, Target: "*."})
+		}},
+		{"policy nested wildcard target", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressUnblock, Target: "*.*.example.com"})
+		}},
+		{"policy colon target that is not an address", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: "::not-an-ip"})
+		}},
+		{"policy oversized target", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: strings.Repeat("t", maxSandboxPolicyTargetBytes+1)})
 		}},
 		{"health unknown state", func(r *SandboxRecorder) error {
 			return r.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: "sleepy"})
