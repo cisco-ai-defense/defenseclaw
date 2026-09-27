@@ -16,9 +16,10 @@
 //     or a terminal), publishes the outcome of every reconcile (`ready`
 //     only for a clean reconcile with no failed target and no
 //     state-publication error), and re-publishes a `ready` at least
-//     every RefreshInterval. When a `waiting_for_targets` write fails,
-//     it removes the file instead, so a failed retraction cannot leave
-//     a fresh `ready` behind.
+//     every RefreshInterval, also while a reconcile runs for as long as
+//     that reconcile keeps finishing targets. When a
+//     `waiting_for_targets` write fails, it removes the file instead, so
+//     a failed retraction cannot leave a fresh `ready` behind.
 //
 //   - Sidecar reads best-effort every ~5 s to update the health
 //     snapshot's `configuration.state` field through ReadCurrentState. A
@@ -83,16 +84,18 @@ const (
 const FileName = ".state"
 
 // RefreshInterval is the longest a running guardian waits before
-// re-publishing a `ready` state, independent of its --interval, so a
-// healthy guardian's file never ages past ReadyMaxAge.
+// re-publishing a `ready` state, independent of its --interval and of how
+// long a reconcile pass runs, so a healthy guardian's file never ages past
+// ReadyMaxAge.
 const RefreshInterval = time.Minute
 
 // ReadyMaxAge bounds how long a published `ready` is honored without the
-// guardian re-publishing it. It is several RefreshIntervals so a slow
-// reconcile does not flap the health surface, and short enough that a
+// guardian re-publishing it. It is several RefreshIntervals so a delayed
+// refresh does not flap the health surface, and short enough that a
 // guardian which stopped without retracting `ready` (crash, kill, or a
-// reinstall whose guardian has not started) falls back to
-// `waiting_for_targets` within minutes.
+// reinstall whose guardian has not started), or whose reconcile has
+// finished no target for ReadyMaxAge, falls back to `waiting_for_targets`
+// within minutes.
 const ReadyMaxAge = 5 * RefreshInterval
 
 // PathForDataDir returns the one state file path both the guardian

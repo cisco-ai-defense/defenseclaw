@@ -4,10 +4,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
@@ -134,4 +137,77 @@ func guardianReadinessAfterReconcile(run enterpriseHookReconcileRun, err error) 
 		return guardianstate.StateWaitingForTargets
 	}
 	return guardianstate.StateReady
+}
+
+// enterpriseHookReconcileProgress records when a running watch-loop
+// reconcile pass last finished a target.
+type enterpriseHookReconcileProgress struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+type enterpriseHookReconcileProgressKey struct{}
+
+func newEnterpriseHookReconcileProgress(now time.Time) *enterpriseHookReconcileProgress {
+	return &enterpriseHookReconcileProgress{last: now}
+}
+
+func (p *enterpriseHookReconcileProgress) note(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.last = now
+}
+
+func (p *enterpriseHookReconcileProgress) since(now time.Time) time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return now.Sub(p.last)
+}
+
+// withEnterpriseHookReconcileProgress returns ctx carrying progress for one
+// reconcile pass.
+func withEnterpriseHookReconcileProgress(ctx context.Context, progress *enterpriseHookReconcileProgress) context.Context {
+	return context.WithValue(ctx, enterpriseHookReconcileProgressKey{}, progress)
+}
+
+// noteEnterpriseHookReconcileProgress records that the pass running under ctx
+// finished a target. Outside a watch-loop pass it does nothing.
+func noteEnterpriseHookReconcileProgress(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if progress, _ := ctx.Value(enterpriseHookReconcileProgressKey{}).(*enterpriseHookReconcileProgress); progress != nil {
+		progress.note(time.Now())
+	}
+}
+
+// keepGuardianReadyDuringPass re-publishes ready every interval while one
+// reconcile pass runs, for a guardian whose last published readiness is
+// ready. It skips a refresh once the pass has finished no target for longer
+// than stall, so a pass stuck in one target still lets the ready age out of
+// guardianstate.ReadyMaxAge. The returned stop waits for the refresher to
+// exit, so the pass outcome published after it is never overwritten.
+func keepGuardianReadyDuringPass(w io.Writer, progress *enterpriseHookReconcileProgress, interval, stall time.Duration) (stop func()) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-ticker.C:
+				if progress.since(time.Now()) > stall {
+					continue
+				}
+				writeGuardianStateOrLog(w, guardianstate.StateReady)
+			}
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
 }

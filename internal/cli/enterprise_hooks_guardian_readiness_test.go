@@ -506,6 +506,112 @@ func TestGuardianWatchRefreshesReadyBetweenReconciles(t *testing.T) {
 	}
 }
 
+// countGuardianReadyWrites counts every ready the watch loop publishes, from
+// the ownership step of the protected readiness writer.
+func countGuardianReadyWrites(t *testing.T, statePath string) *atomic.Int32 {
+	t.Helper()
+	var readyWrites atomic.Int32
+	enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
+		if path == statePath {
+			if body, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(body)) == guardianstate.StateReady {
+				readyWrites.Add(1)
+			}
+		}
+		return nil
+	}
+	return &readyWrites
+}
+
+// TestGuardianWatchKeepsReadyFreshDuringLongReconcile is the regression for
+// a reconcile pass that outlasts guardianstate.ReadyMaxAge (a root guardian
+// gives every target user a worker budget per pass, so a pass over several
+// slow users can). The loop's between-pass refresh cannot run during a pass,
+// so a healthy guardian's ready expired mid-pass and the gateway reported
+// waiting_for_targets. The loop now keeps a ready it already published fresh
+// while the pass keeps finishing targets; it never publishes ready for a pass
+// that started while the guardian was not ready, and the pass outcome
+// published afterwards is not overwritten by a late refresh.
+func TestGuardianWatchKeepsReadyFreshDuringLongReconcile(t *testing.T) {
+	fixture := newGuardianWatchReadinessFixture(t)
+	enterpriseHookGuardianReadinessRefresh = 10 * time.Millisecond
+	readyWrites := countGuardianReadyWrites(t, fixture.statePath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	longPass := func(passCtx context.Context) int32 {
+		before := readyWrites.Load()
+		for deadline := time.Now().Add(300 * time.Millisecond); time.Now().Before(deadline); {
+			noteEnterpriseHookReconcileProgress(passCtx)
+			time.Sleep(5 * time.Millisecond)
+		}
+		return readyWrites.Load() - before
+	}
+	var whileWaiting, whileReady int32 = -1, -1
+	var afterFailedPass string
+	calls := 0
+	enterpriseHookWatchReconcileOnce = func(passCtx context.Context) (enterpriseHookReconcileRun, error) {
+		calls++
+		switch calls {
+		case 1: // startup: a target failed, so the guardian is not ready
+			return enterpriseHookReconcileRun{Failures: 1}, nil
+		case 2: // a long pass that started while not ready
+			whileWaiting = longPass(passCtx)
+			return enterpriseHookReconcileRun{}, nil
+		case 3: // a long pass that started while ready, and then fails
+			whileReady = longPass(passCtx)
+			return enterpriseHookReconcileRun{Failures: 1}, nil
+		case 4:
+			afterFailedPass = fixture.reader()
+			cancel()
+		}
+		// The loop may still start a pass after cancel before it sees
+		// the cancellation.
+		return enterpriseHookReconcileRun{}, nil
+	}
+	waitGuardianWatchForTest(t, runGuardianWatchForTest(t, ctx))
+	if whileWaiting != 0 {
+		t.Fatalf("ready was published %d times during a pass that started while waiting_for_targets", whileWaiting)
+	}
+	if whileReady < 3 {
+		t.Fatalf("ready was published %d times during a 300ms pass with a 10ms refresh, want it kept fresh", whileReady)
+	}
+	if afterFailedPass != guardianstate.StateWaitingForTargets {
+		t.Fatalf("readiness after a failed long pass = %q, want waiting_for_targets", afterFailedPass)
+	}
+}
+
+// TestGuardianWatchLetsReadyExpireForStalledReconcile pins the bound on the
+// in-pass refresh: a pass that stops finishing targets is not kept ready, so
+// a stuck guardian still ages out of guardianstate.ReadyMaxAge.
+func TestGuardianWatchLetsReadyExpireForStalledReconcile(t *testing.T) {
+	fixture := newGuardianWatchReadinessFixture(t)
+	enterpriseHookGuardianReadinessRefresh = 10 * time.Millisecond
+	previousStall := enterpriseHookGuardianReadinessPassStall
+	t.Cleanup(func() { enterpriseHookGuardianReadinessPassStall = previousStall })
+	enterpriseHookGuardianReadinessPassStall = 30 * time.Millisecond
+	readyWrites := countGuardianReadyWrites(t, fixture.statePath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var lateWrites int32 = -1
+	calls := 0
+	enterpriseHookWatchReconcileOnce = func(passCtx context.Context) (enterpriseHookReconcileRun, error) {
+		calls++
+		if calls != 2 {
+			return enterpriseHookReconcileRun{}, nil
+		}
+		// No progress: the pass is stuck in one target.
+		time.Sleep(250 * time.Millisecond)
+		before := readyWrites.Load()
+		time.Sleep(250 * time.Millisecond)
+		lateWrites = readyWrites.Load() - before
+		cancel()
+		return enterpriseHookReconcileRun{}, nil
+	}
+	waitGuardianWatchForTest(t, runGuardianWatchForTest(t, ctx))
+	if lateWrites != 0 {
+		t.Fatalf("ready was published %d times after the pass stopped finishing targets", lateWrites)
+	}
+}
+
 // TestGuardianReadinessReaderExpiresStaleReady pins the crash case: a
 // guardian killed without retracting ready (no deferred write ran) must not
 // leave the gateway reporting ready indefinitely.
