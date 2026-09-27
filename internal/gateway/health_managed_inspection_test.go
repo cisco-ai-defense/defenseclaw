@@ -390,3 +390,65 @@ func TestManagedHealthTickerRewiresAnUnwiredHookLane(t *testing.T) {
 		t.Fatalf("after the rewired lane got a verdict: %+v", got)
 	}
 }
+
+// A reload that leaves managed_enterprise clears the managed inspection
+// state after any publish that read the managed config before the reload.
+// Nothing publishes outside managed_enterprise, so a snapshot that publish
+// wrote after the clear would stay, and the Secure Client availability would
+// keep reporting DEGRADED.
+func TestRefreshManagedInspectionHealthClearsAfterAnInFlightPublish(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.setInspectionAvailability(errors.New("managed cloud token unavailable"))
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var first atomic.Bool
+	managedInspectionPublishTestHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(paused)
+			<-resume
+		}
+	}
+	t.Cleanup(func() { managedInspectionPublishTestHook = nil })
+
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		s.publishManagedInspectionHealth() // reads the managed config
+	}()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publisher did not reach its write")
+	}
+
+	// The reload publishes a config outside managed_enterprise, then clears.
+	s.cfgCurrent.Store(&config.Config{
+		DataDir:        s.cfg.DataDir,
+		DeploymentMode: string(config.DeploymentModeUnmanagedBYOD),
+		Guardrail:      config.GuardrailConfig{Enabled: true},
+	})
+	clearDone := make(chan struct{})
+	go func() {
+		defer close(clearDone)
+		s.refreshManagedInspectionHealth(false)
+	}()
+	// Without the publish lock the clear completes here, before the
+	// publisher writes.
+	select {
+	case <-clearDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(resume)
+	for _, ch := range []chan struct{}{staleDone, clearDone} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("publish or clear did not finish")
+		}
+	}
+
+	if got := s.health.Snapshot().ManagedInspection; got != nil {
+		t.Fatalf("managed inspection state left after leaving managed_enterprise: %+v", got)
+	}
+}

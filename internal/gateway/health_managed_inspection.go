@@ -165,7 +165,10 @@ func (s *Sidecar) publishManagedInspectionHealth() {
 }
 
 // refreshManagedInspectionHealth applies a reload: republish in
-// managed_enterprise, otherwise drop the managed inspection state.
+// managed_enterprise, otherwise drop the managed inspection state. The
+// clear takes the publish lock, so a publish that read the managed config
+// before the reload finishes first and cannot write its snapshot after the
+// clear; publishes that start later see the new config and do nothing.
 func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 	if s == nil {
 		return
@@ -174,6 +177,8 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 		s.publishManagedInspectionHealth()
 		return
 	}
+	s.managedInspectionPublishMu.Lock()
+	defer s.managedInspectionPublishMu.Unlock()
 	s.managedHookInspector.Store(0)
 	if s.health != nil {
 		s.health.ClearManagedInspection()
