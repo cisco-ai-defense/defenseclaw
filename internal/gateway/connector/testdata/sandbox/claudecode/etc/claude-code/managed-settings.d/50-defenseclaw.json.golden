@@ -5,7 +5,11 @@
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "",
+    "CLAUDE_CODE_SHELL": "",
+    "CLAUDE_CODE_SHELL_PREFIX": "",
     "CLAUDE_CODE_SIMPLE": "0",
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "",
     "DISABLE_AUTOUPDATER": "1",
     "ENV": "",
     "LD_AUDIT": "",
@@ -28,7 +32,8 @@
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode,service.name=claudecode",
     "OTEL_SERVICE_NAME": "claudecode",
-    "OTEL_TRACES_EXPORTER": "none"
+    "OTEL_TRACES_EXPORTER": "none",
+    "SHELL": "/bin/bash"
   },
   "hooks": {
     "ConfigChange": [

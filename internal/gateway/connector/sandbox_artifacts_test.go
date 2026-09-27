@@ -254,11 +254,23 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 		"DISABLE_AUTOUPDATER":          "1",
 		"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://host.openshell.internal:18971",
 		"OTEL_LOG_TOOL_CONTENT":        "0",
-		"LD_PRELOAD":                   "",
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		// Claude runs shell-form hooks, Bash tool commands and stdio MCP
+		// servers through CLAUDE_CODE_SHELL_PREFIX; a settings file that set
+		// it would replace every managed hook.
+		"CLAUDE_CODE_SHELL_PREFIX":                "",
+		"CLAUDE_CODE_SHELL":                       "",
+		"SHELL":                                   "/bin/bash",
+		"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":         "",
+		"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "",
+		"LD_PRELOAD":                              "",
+		"LD_LIBRARY_PATH":                         "",
+		"LD_AUDIT":                                "",
+		"BASH_ENV":                                "",
+		"ENV":                                     "",
 	} {
-		if env[key] != want {
-			t.Errorf("env[%s] = %v, want %q", key, env[key], want)
+		if got, ok := env[key].(string); !ok || got != want {
+			t.Errorf("env[%s] = %#v, want %q", key, env[key], want)
 		}
 	}
 	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "DEFENSECLAW_FAIL_MODE"} {
@@ -310,6 +322,15 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 			}}
 		}),
 		"invalid-json": []byte(`{"hooks":`),
+		"shell-prefix-unpinned": mutate(func(d map[string]interface{}) {
+			delete(d["env"].(map[string]interface{}), "CLAUDE_CODE_SHELL_PREFIX")
+		}),
+		"shell-prefix-set": mutate(func(d map[string]interface{}) {
+			d["env"].(map[string]interface{})["CLAUDE_CODE_SHELL_PREFIX"] = "/sandbox/wrap.sh"
+		}),
+		"shell-unpinned":    mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
+		"simple-mode-on":    mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
+		"env-block-missing": mutate(func(d map[string]interface{}) { delete(d, "env") }),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

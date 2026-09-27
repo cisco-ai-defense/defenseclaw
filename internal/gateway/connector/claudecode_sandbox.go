@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 )
 
 // In-image Claude Code system policy (Linux managed tier).
@@ -46,22 +47,51 @@ var claudeCodeSandboxStartupEnv = map[string]string{
 }
 
 // claudeCodeSandboxPinnedEnv are managed-env values that project or user
-// settings cannot override. CLAUDE_CODE_SIMPLE=0 keeps hooks active when the
-// agent requests Claude's simple/bare mode. The loader and shell-startup
-// variables act before the first line of a hook runs (when the dynamic
-// loader starts bash, or when Claude's spawning shell starts), so they are
-// pinned here; every other inherited variable, PATH and PYTHONPATH included,
-// is dropped by the hook itself (_sandbox.sh) before it starts a child
-// process. PATH and PYTHONPATH stay unpinned because the same env block
-// shapes the agent's own tool processes, where projects set them
-// legitimately.
+// settings cannot override. Claude Code (2.1.x) reads an empty value as
+// unset for every variable pinned to "".
+//
+//   - CLAUDE_CODE_SIMPLE=0 keeps hooks active when the agent requests
+//     Claude's simple/bare mode.
+//   - CLAUDE_CODE_SHELL_PREFIX names a program Claude runs every shell-form
+//     hook command, Bash tool command and stdio MCP server launch through,
+//     in place of the command itself. Set from a settings file (the
+//     workload-writable ~/.claude/settings.json, or a repository's committed
+//     .claude/settings.json under the pre-trusted /work) it would replace
+//     every DefenseClaw hook even with allowManagedHooksOnly on.
+//   - CLAUDE_CODE_SHELL, then SHELL when it names an executable bash or zsh,
+//     choose the shell that runs each Bash tool command after PreToolUse
+//     approved its text. Hooks are started through /bin/sh and never read
+//     them, but unpinned they would let a settings file hand every approved
+//     command to a program of its choosing.
+//   - CLAUDE_CODE_STOP_HOOK_BLOCK_CAP and
+//     CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS keep Claude's defaults (eight
+//     consecutive Stop blocks honoured; a SessionEnd budget taken from the
+//     managed hook timeouts), so settings cannot cut DefenseClaw's Stop
+//     verdicts or its SessionEnd audit short. DISABLE_BRIEF_MODE_STOP_HOOK
+//     only switches Claude's built-in brief-mode reminder and stays unpinned.
+//   - The loader and shell-startup variables act before the first line of a
+//     hook runs (when the dynamic loader starts bash, or when Claude's
+//     spawning shell starts).
+//
+// Every other inherited variable, PATH and PYTHONPATH included, is dropped
+// by the hook itself (_sandbox.sh) before it starts a child process. PATH
+// and PYTHONPATH stay unpinned because the same env block shapes the agent's
+// own tool processes, where projects set them legitimately. The image
+// build's hook-fire probe plants the mode, shell and shell-startup variables
+// above, and PATH, in user and project settings, and fails the image when a
+// hook no longer fires or a planted program runs.
 var claudeCodeSandboxPinnedEnv = map[string]string{
-	"CLAUDE_CODE_SIMPLE": "0",
-	"LD_PRELOAD":         "",
-	"LD_LIBRARY_PATH":    "",
-	"LD_AUDIT":           "",
-	"BASH_ENV":           "",
-	"ENV":                "",
+	"CLAUDE_CODE_SIMPLE":                      "0",
+	"CLAUDE_CODE_SHELL_PREFIX":                "",
+	"CLAUDE_CODE_SHELL":                       "",
+	"SHELL":                                   "/bin/bash",
+	"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":         "",
+	"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "",
+	"LD_PRELOAD":                              "",
+	"LD_LIBRARY_PATH":                         "",
+	"LD_AUDIT":                                "",
+	"BASH_ENV":                                "",
+	"ENV":                                     "",
 }
 
 // SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
@@ -200,6 +230,18 @@ func verifyClaudeCodeSandboxDropIn(dropIn []byte, rt resolvedSandboxTarget) erro
 	}
 	if only, _ := source.settings["allowManagedHooksOnly"].(bool); !only {
 		return fmt.Errorf("verify Claude Code sandbox managed settings: allowManagedHooksOnly is not true")
+	}
+	env, _ := source.settings["env"].(map[string]interface{})
+	pinned := make([]string, 0, len(claudeCodeSandboxPinnedEnv))
+	for key := range claudeCodeSandboxPinnedEnv {
+		pinned = append(pinned, key)
+	}
+	sort.Strings(pinned)
+	for _, key := range pinned {
+		want := claudeCodeSandboxPinnedEnv[key]
+		if got, ok := env[key].(string); !ok || got != want {
+			return fmt.Errorf("verify Claude Code sandbox managed settings: env %s is not pinned to %q", key, want)
+		}
 	}
 	ok, err := claudeCodeSourceHasHookContract(source, rt.opts, true)
 	if err != nil {
