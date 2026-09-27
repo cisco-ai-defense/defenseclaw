@@ -405,10 +405,19 @@ func (i *Installer) findExisting(ctx context.Context) *ExistingInstall {
 // installedCLI finds the supported CLI the install provided, the package's
 // first, and refuses one that PATH hides behind an older CLI.
 func (i *Installer) installedCLI(ctx context.Context) (*ExistingInstall, error) {
-	onPath := i.probeCLI(ctx, i.onPath())
+	probed := map[string]*ExistingInstall{}
+	probe := func(p string) *ExistingInstall {
+		if e, ok := probed[p]; ok {
+			return e
+		}
+		probed[p] = i.probeCLI(ctx, p)
+		return probed[p]
+	}
+	pathCLI := i.onPath()
+	onPath := probe(pathCLI)
 	var first, supported *ExistingInstall
-	for _, p := range append([]string{i.PackageCLI, i.onPath()}, i.Candidates...) {
-		e := i.probeCLI(ctx, p)
+	for _, p := range append([]string{i.PackageCLI, pathCLI}, i.Candidates...) {
+		e := probe(p)
 		if e == nil {
 			continue
 		}
