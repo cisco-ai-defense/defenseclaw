@@ -574,52 +574,242 @@ func TestResolvePackHarnessAllowlist(t *testing.T) {
 	}
 }
 
-func TestResolveLockedFlags(t *testing.T) {
-	cfg := testConfig(func(o *config.OpenShellConfig) {
-		o.Pack, o.Profile, o.Yolo = "balanced", "balanced", boolPtr(true)
-		o.Resources.CPU = "2"
-		o.MCP.HostPorts = []int{5432}
-		o.Admin.Locked = append([]string(nil), config.OpenShellLockableKeys...)
-	})
-	flags := Flags{
-		Pack: "strict", Profile: "strict", Safe: true, Copy: true, Unmask: []string{".env"}, NoMCP: true,
-		HostPorts: []int{6379}, CPU: "1", Memory: "1Gi", Harness: "codex", Learn: true,
-	}
-	eff, violations := mustResolve(t, cfg, flags)
+// lockedViolations maps each openshell.admin.locked violation's key to its
+// attempted flags, failing on any other violation.
+func lockedViolations(t *testing.T, violations []Violation) map[string]string {
+	t.Helper()
 	attempted := map[string]string{}
 	for _, v := range violations {
 		if v.Constraint != "openshell.admin.locked" || v.Source != SourceFlag ||
-			v.Message != "blocked by your organization's DefenseClaw policy: "+v.Key {
+			v.Message != "blocked by your organization's DefenseClaw policy: "+v.Key ||
+			!strings.HasSuffix(v.Detail, "the run uses the configured value") {
 			t.Fatalf("violation %+v", v)
 		}
 		attempted[v.Key] = v.Attempted
 	}
+	return attempted
+}
+
+func TestResolveLockedFlagsRefuseLoosening(t *testing.T) {
+	cfg := testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.Profile, o.Yolo = "balanced", "balanced", boolPtr(false)
+		o.Resources = config.OpenShellResourcesConfig{CPU: "2", Memory: "4Gi"}
+		o.MCP.HostPorts = []int{5432}
+		o.Admin.Locked = append([]string(nil), config.OpenShellLockableKeys...)
+	})
+	flags := Flags{
+		Pack: "open", Profile: "open", Yolo: true, Unmask: []string{".env", ".env.example"},
+		HostPorts: []int{5432, 6379}, CPU: "4", Memory: "4Gi", Harness: "codex", Learn: true,
+	}
+	eff, violations := mustResolve(t, cfg, flags)
 	want := map[string]string{
-		"pack": "--pack strict", "profile": "--profile strict", "yolo": "--safe", "workdir.mode": "--copy",
-		"workdir.unmask": "--unmask .env", "mcp.import": "--no-mcp", "mcp.host_ports": "--host-port 6379",
-		"resources": "--cpu 1 --memory 1Gi",
+		"pack": "--pack open", "profile": "--profile open", "yolo": "--yolo", "workdir.unmask": "--unmask .env",
+		"mcp.host_ports": "--host-port 6379", "resources": "--cpu 4",
 	}
-	if !reflect.DeepEqual(attempted, want) {
-		t.Fatalf("locked violations = %v, want %v", attempted, want)
+	if got := lockedViolations(t, violations); !reflect.DeepEqual(got, want) {
+		t.Fatalf("locked violations = %v, want %v", got, want)
 	}
-	if eff.Pack.Name != "balanced" || eff.Profile != "balanced" || !eff.Yolo || eff.Workspace.Mode != "mount" ||
-		containsString(eff.Workspace.Unmask, ".env") || !eff.MCP.Import || !reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) ||
-		eff.Resources != (Resources{CPU: "2"}) {
-		t.Fatalf("locked values were overridden: %+v", eff)
+	for _, v := range violations {
+		if v.Key == "pack" && !strings.Contains(v.Detail, "the open pack is looser than the configured balanced pack in network.mode") {
+			t.Fatalf("pack violation detail %q", v.Detail)
+		}
 	}
-	// Unlockable inputs still apply.
-	if eff.Harness != "codex" || !eff.Learn {
-		t.Fatalf("harness %q learn %v", eff.Harness, eff.Learn)
+	if eff.Pack.Name != "balanced" || eff.Profile != "balanced" || eff.Yolo || containsString(eff.Workspace.Unmask, ".env") ||
+		!reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) || eff.Resources != (Resources{CPU: "2", Memory: "4Gi"}) {
+		t.Fatalf("locked values were loosened: %+v", eff)
+	}
+	// Entries the configuration already has, and unlockable inputs, apply.
+	if !containsString(eff.Workspace.Unmask, ".env.example") || eff.Harness != "codex" || !eff.Learn {
+		t.Fatalf("unmask %v harness %q learn %v", eff.Workspace.Unmask, eff.Harness, eff.Learn)
 	}
 
-	// --yolo is reported as such; unlocked keys are untouched.
+	// Only locked keys are held; --yolo matching the configured value is
+	// no loosening.
 	cfg.OpenShell.Admin.Locked = []string{"yolo"}
-	eff, violations = mustResolve(t, cfg, Flags{Yolo: true, Copy: true})
-	if v := onlyViolation(t, violations); v.Attempted != "--yolo" {
+	cfg.OpenShell.Yolo = boolPtr(true)
+	eff, violations = mustResolve(t, cfg, Flags{Yolo: true, Pack: "open"})
+	if len(violations) != 0 || !eff.Yolo || eff.Pack.Name != "open" {
+		t.Fatalf("violations %+v yolo %v pack %s", violations, eff.Yolo, eff.Pack.Name)
+	}
+}
+
+func TestResolveLockedFlagsAcceptTightening(t *testing.T) {
+	cfg := testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.Yolo = "open", boolPtr(true)
+		o.Resources.CPU = "2"
+		o.Admin.Locked = append([]string(nil), config.OpenShellLockableKeys...)
+	})
+	for _, tc := range []struct {
+		name  string
+		flags Flags
+		check func(*Effective) bool
+	}{
+		{"--safe", Flags{Safe: true}, func(e *Effective) bool { return !e.Yolo }},
+		{"--safe with --yolo", Flags{Safe: true, Yolo: true}, func(e *Effective) bool { return !e.Yolo }},
+		{"--copy", Flags{Copy: true}, func(e *Effective) bool { return e.Workspace.Mode == "copy" }},
+		{"--no-mcp", Flags{NoMCP: true}, func(e *Effective) bool { return !e.MCP.Import }},
+		{"stricter --profile", Flags{Profile: "strict"}, func(e *Effective) bool { return e.Profile == "strict" }},
+		{"same --profile", Flags{Profile: "open"}, func(e *Effective) bool { return e.Profile == "open" }},
+		{"stricter built-in --pack", Flags{Pack: "balanced"}, func(e *Effective) bool { return e.Pack.Name == "balanced" }},
+		{"strictest built-in --pack", Flags{Pack: "strict"}, func(e *Effective) bool {
+			// openshell.yolo still applies over the chosen pack.
+			return e.Pack.Name == "strict" && e.Profile == "strict" && e.Yolo && e.Workspace.Mode == "copy"
+		}},
+		{"same --pack", Flags{Pack: "open"}, func(e *Effective) bool { return e.Pack.Name == "open" }},
+		{"--pack and --profile", Flags{Pack: "strict", Profile: "balanced"}, func(e *Effective) bool {
+			return e.Pack.Name == "strict" && e.Profile == "balanced"
+		}},
+		{"lower --cpu and a --memory limit", Flags{CPU: "500m", Memory: "1Gi"}, func(e *Effective) bool {
+			return e.Resources == (Resources{CPU: "500m", Memory: "1Gi"})
+		}},
+		{"configured --unmask", Flags{Unmask: []string{".env.example"}}, func(e *Effective) bool {
+			return containsString(e.Workspace.Unmask, ".env.example")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, violations := mustResolve(t, cfg, tc.flags)
+			if len(violations) != 0 || !tc.check(eff) {
+				t.Fatalf("violations %+v effective %+v", violations, eff)
+			}
+		})
+	}
+
+	// A stricter pack is measured against the configured one: balanced is
+	// looser than a configured strict.
+	cfg.OpenShell.Pack = "strict"
+	eff, violations := mustResolve(t, cfg, Flags{Pack: "balanced", Profile: "balanced"})
+	if got := lockedViolations(t, violations); len(got) != 2 || got["pack"] != "--pack balanced" || got["profile"] != "--profile balanced" ||
+		eff.Pack.Name != "strict" || eff.Profile != "strict" {
+		t.Fatalf("violations %+v effective %s/%s", violations, eff.Pack.Name, eff.Profile)
+	}
+	// A malformed request is an error, not a silently dropped flag.
+	if _, _, err := Resolve(cfg, Flags{CPU: "lots"}); err == nil || !strings.Contains(err.Error(), "--cpu") {
+		t.Fatalf("malformed locked --cpu: %v", err)
+	}
+}
+
+func TestResolveLockedCustomPacks(t *testing.T) {
+	root := t.TempDir()
+	base := strings.Replace(customPack("base"), "network: {mode: open}",
+		"network: {mode: allowlist}\negress: {allow: [git.corp.example, '*.pkg.corp.example'], block: [paste.example], large_upload_mb: 10}", 1)
+	writePack(t, root, "base", base)
+	variant := func(name, old, replacement string) {
+		t.Helper()
+		body := strings.Replace(strings.Replace(base, "name: base", "name: "+name, 1), old, replacement, 1)
+		if body == strings.Replace(base, "name: base", "name: "+name, 1) {
+			t.Fatalf("variant %s did not change the pack", name)
+		}
+		writePack(t, root, name, body)
+	}
+	variant("narrower", "allow: [git.corp.example, '*.pkg.corp.example']", "allow: [npm.pkg.corp.example, pypi.org]")
+	variant("wider-allow", "allow: [git.corp.example, '*.pkg.corp.example']", "allow: [git.corp.example, api.example.net]")
+	variant("fewer-blocks", "block: [paste.example]", "block: []")
+	variant("broader-blocks", "block: [paste.example]", "block: ['*.example']")
+	variant("no-upload-alert", "large_upload_mb: 10", "large_upload_mb: 0")
+	variant("yolo-off", "harness: {yolo: true}", "harness: {yolo: false}")
+	variant("host-ports", "mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: true}")
+	variant("deny-wider-allow", "mode: allowlist}\negress: {allow: [git.corp.example, '*.pkg.corp.example']",
+		"mode: deny}\negress: {allow: [git.corp.example, api.example.net]")
+
+	for _, tc := range []struct {
+		pack, profile string
+		looser        string // the key the refusal names, or "" when accepted
+	}{
+		{"narrower", "", ""},
+		{"broader-blocks", "", ""},
+		{"yolo-off", "", ""},
+		{"strict", "", ""},
+		{"wider-allow", "", "egress.allow"},
+		{"fewer-blocks", "", "egress.block"},
+		{"no-upload-alert", "", "egress.large_upload_mb"},
+		{"host-ports", "", "mcp.host_ports"},
+		{"open", "", "network.mode"},
+		// With the proxy off the egress lists do not apply, unless the
+		// user's profile turns the proxy back on.
+		{"deny-wider-allow", "", ""},
+		{"deny-wider-allow", "balanced", "egress.allow"},
+	} {
+		t.Run(tc.pack+"/"+tc.profile, func(t *testing.T) {
+			cfg := testConfig(func(o *config.OpenShellConfig) {
+				o.Pack, o.PackDir, o.Profile = "base", root, tc.profile
+				o.Admin.Locked = []string{"pack"}
+			})
+			eff, violations := mustResolve(t, cfg, Flags{Pack: tc.pack})
+			if tc.looser == "" {
+				if len(violations) != 0 || eff.Pack.Name != tc.pack {
+					t.Fatalf("violations %+v pack %s", violations, eff.Pack.Name)
+				}
+				return
+			}
+			v := onlyViolation(t, violations)
+			if v.Key != "pack" || v.Constraint != "openshell.admin.locked" || !strings.Contains(v.Detail, "in "+tc.looser+";") ||
+				eff.Pack.Name != "base" {
+				t.Fatalf("violation %+v pack %s", v, eff.Pack.Name)
+			}
+		})
+	}
+
+	// A pack that shares files the configured pack masks is looser.
+	writePack(t, root, "masked", strings.Replace(customPack("masked"), "workspace: {mode: mount}",
+		"workspace: {mode: mount, masks: [.env, .env.*]}", 1))
+	cfg := testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.PackDir, o.Admin.Locked = "masked", root, []string{"pack"}
+	})
+	_, violations := mustResolve(t, cfg, Flags{Pack: "strict"})
+	if v := onlyViolation(t, violations); !strings.Contains(v.Detail, "in workspace.unmask;") {
 		t.Fatalf("violation %+v", v)
 	}
-	if eff.Workspace.Mode != "copy" {
-		t.Fatalf("unlocked --copy was dropped")
+
+	// A pack that does not load is refused, and the configured pack runs.
+	cfg = testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.PackDir, o.Admin.Locked = "base", root, []string{"pack"}
+	})
+	eff, violations := mustResolve(t, cfg, Flags{Pack: "missing-pack"})
+	if v := onlyViolation(t, violations); v.Key != "pack" || !strings.Contains(v.Detail, "could not be loaded") || eff.Pack.Name != "base" {
+		t.Fatalf("violation %+v pack %s", v, eff.Pack.Name)
+	}
+}
+
+func TestLooserPackKeyBuiltins(t *testing.T) {
+	load := func(name string) *Pack {
+		pack, err := Builtin(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pack
+	}
+	open, balanced, strict := load("open"), load("balanced"), load("strict")
+	for _, tc := range []struct {
+		candidate, baseline *Pack
+		want                string
+	}{
+		{balanced, open, ""},
+		{strict, open, ""},
+		{strict, balanced, ""},
+		{open, open, ""},
+		{open, balanced, "network.mode"},
+		{balanced, strict, "network.mode"},
+	} {
+		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
+			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		outer, inner string
+		want         bool
+	}{
+		{"*", "*.example.com", true},
+		{"*.example.com", "a.example.com", true},
+		{"*.example.com", "*.a.example.com", true},
+		{"*.Example.com.", "A.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"*.example.com", "*", false},
+		{"a.example.com", "*.a.example.com", false},
+		{"[2001:db8::1]", "2001:db8::1", true},
+	} {
+		if got := hostGlobCovers(tc.outer, tc.inner); got != tc.want {
+			t.Errorf("hostGlobCovers(%q, %q) = %v, want %v", tc.outer, tc.inner, got, tc.want)
+		}
 	}
 }
 

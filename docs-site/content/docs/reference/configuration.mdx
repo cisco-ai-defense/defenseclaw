@@ -412,7 +412,7 @@ openshell:
     egress_allow_only: []    # forces an allowlist profile
     require_copy_for: []     # project path globs that must run in copy mode (parents too)
     max_resources: {cpu: "", memory: ""}
-    locked: []               # keys run flags may not override: pack, profile, yolo,
+    locked: []               # keys run flags may not loosen: pack, profile, yolo,
                              # workdir.mode, workdir.unmask, mcp.import, mcp.host_ports, resources
 ```
 
@@ -451,6 +451,13 @@ custom required pack must be a file that root owns and no other user can
 modify, together with every directory above it (for example an absolute path
 under an administrator-owned directory; the default `pack_dir` in the data
 directory usually does not qualify).
+
+`locked` keeps the configured value of each listed key against run flags that
+would loosen it, while flags that only tighten it still apply: `--safe`,
+`--copy`, `--no-mcp`, a `--profile` at least as strict as the configured one, a
+`--pack` at least as strict as the configured pack in every setting, a smaller
+`--cpu` or `--memory`, and `--unmask` or `--host-port` entries the
+configuration already lists.
 
 `require_copy_for` also covers mounting a folder above a listed project, a
 missing project folder, and differently cased spellings of the path. With

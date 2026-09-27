@@ -368,7 +368,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 			reservedPorts: reservedPorts(cfg, flags.OpenShellGatewayPort),
 		},
 	}
-	flags = r.dropLockedFlags(flags)
+	flags = r.dropLockedFlags(o, flags)
 
 	pack, err := r.selectPack(o, flags)
 	if err != nil {
@@ -571,58 +571,6 @@ func (r *resolver) clamp(key, requested, enforced string, from layer, constraint
 			Constraint: constraint, Detail: detail,
 		})
 	}
-}
-
-// dropLockedFlags discards run flags for keys the administrator locked; the
-// run then uses the configured value.
-func (r *resolver) dropLockedFlags(flags Flags) Flags {
-	drop := func(key string, given bool, attempted string) bool {
-		if !given || !r.admin.IsLocked(key) {
-			return false
-		}
-		r.violate(Violation{
-			Key: key, Source: SourceFlag, Attempted: attempted,
-			Constraint: "openshell.admin.locked",
-			Detail:     "your organization locked " + key + "; the run uses the configured value",
-		})
-		return true
-	}
-	if drop("pack", flags.Pack != "", "--pack "+flags.Pack) {
-		flags.Pack = ""
-	}
-	if drop("profile", flags.Profile != "", "--profile "+flags.Profile) {
-		flags.Profile = ""
-	}
-	yoloFlag := "--yolo"
-	if flags.Safe {
-		yoloFlag = "--safe"
-	}
-	if drop("yolo", flags.Safe || flags.Yolo, yoloFlag) {
-		flags.Safe, flags.Yolo = false, false
-	}
-	if drop("workdir.mode", flags.Copy, "--copy") {
-		flags.Copy = false
-	}
-	if drop("workdir.unmask", len(flags.Unmask) > 0, "--unmask "+strings.Join(flags.Unmask, ", ")) {
-		flags.Unmask = nil
-	}
-	if drop("mcp.import", flags.NoMCP, "--no-mcp") {
-		flags.NoMCP = false
-	}
-	if drop("mcp.host_ports", len(flags.HostPorts) > 0, "--host-port "+joinInts(flags.HostPorts)) {
-		flags.HostPorts = nil
-	}
-	var resources []string
-	if flags.CPU != "" {
-		resources = append(resources, "--cpu "+flags.CPU)
-	}
-	if flags.Memory != "" {
-		resources = append(resources, "--memory "+flags.Memory)
-	}
-	if drop("resources", len(resources) > 0, strings.Join(resources, " ")) {
-		flags.CPU, flags.Memory = "", ""
-	}
-	return flags
 }
 
 func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, error) {

@@ -85,7 +85,7 @@ const (
 )
 
 // OpenShellLockableKeys are the openshell keys an administrator can list in
-// openshell.admin.locked so `sandbox run` flags cannot override them.
+// openshell.admin.locked so `sandbox run` flags cannot loosen them.
 var OpenShellLockableKeys = []string{
 	"mcp.host_ports",
 	"mcp.import",
@@ -274,7 +274,9 @@ type OpenShellAdminConfig struct {
 	RequireCopyFor []string                 `mapstructure:"require_copy_for" yaml:"require_copy_for,omitempty"`
 	MaxResources   OpenShellResourcesConfig `mapstructure:"max_resources"    yaml:"max_resources,omitempty"`
 	// Locked lists openshell keys (OpenShellLockableKeys) that `sandbox run`
-	// flags may not override.
+	// flags may not loosen. Flags that only tighten a locked key (--safe,
+	// --copy, --no-mcp, a stricter --pack or --profile, a smaller resource
+	// request) still apply.
 	Locked []string `mapstructure:"locked" yaml:"locked,omitempty"`
 }
 
