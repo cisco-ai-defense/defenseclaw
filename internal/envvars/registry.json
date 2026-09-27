@@ -3713,39 +3713,20 @@
       "since": "0.9.0"
     },
     {
-      "name": "DEFENSECLAW_E2E_ANTHROPIC_URL",
+      "name": "DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK",
       "category": "test_fixture",
-      "purpose": "Base URL of the mock Anthropic Messages server the live hook-fire probe points Claude Code at.",
+      "purpose": "Host address the live overlay build test binds the hook-fire sink and built-in mock LLM on to re-verify each image in relay mode (the Docker Desktop default), for example the Linux docker0 gateway.",
       "default": "unset",
       "accepted_values": [
-        "http URL",
-        "unset (hook-fire skipped)"
+        "loopback or private IP address",
+        "unset (relay mode skipped)"
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
           "location": "internal/openshell/image/integration_test.go",
-          "description": "Live Claude Code hook-fire probe"
-        }
-      ],
-      "since": "0.9.0"
-    },
-    {
-      "name": "DEFENSECLAW_E2E_OPENAI_URL",
-      "category": "test_fixture",
-      "purpose": "Base URL of the mock OpenAI Responses server the live hook-fire probe points Codex at.",
-      "default": "unset",
-      "accepted_values": [
-        "http URL",
-        "unset (hook-fire skipped)"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "internal/openshell/image/integration_test.go",
-          "description": "Live Codex hook-fire probe"
+          "description": "Live relay-mode hook-fire probe"
         }
       ],
       "since": "0.9.0"

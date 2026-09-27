@@ -60,9 +60,10 @@ type Record struct {
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
 	NetworkBinaries []Binary `json:"network_binaries"`
-	// HookFireVerified is set only by Builder.VerifyHooks, once the
-	// hook-fire probe proved that the managed hooks of ImageID fire. Build
-	// always records a fresh, unverified record, so a rebuild clears it.
+	// HookFireVerified is set only by Builder.VerifyHooks (which Build runs
+	// for every fresh image), once the hook-fire probe proved that the
+	// managed hooks of ImageID fire. Build records every new image
+	// unverified first, so a rebuild clears an earlier verdict.
 	HookFireVerified bool `json:"hook_fire_verified,omitempty"`
 	// HookFireVerifiedAt is when that probe passed.
 	HookFireVerifiedAt time.Time `json:"hook_fire_verified_at,omitzero"`

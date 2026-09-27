@@ -130,7 +130,7 @@ func TestBuildRecordsVerifiedImage(t *testing.T) {
 	fixed := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	b := &Builder{Docker: docker, Store: store, Now: func() time.Time { return fixed }}
 
-	rec, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{})
+	rec, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{SkipHookFire: true})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -147,13 +147,13 @@ func TestBuildRecordsVerifiedImage(t *testing.T) {
 	}
 
 	// A second build of the same inputs reuses the verified image.
-	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{}); err != nil {
+	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{SkipHookFire: true}); err != nil {
 		t.Fatal(err)
 	}
 	if docker.count("build") != 1 {
 		t.Fatalf("cached build ran docker build %d times", docker.count("build"))
 	}
-	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{Force: true}); err != nil {
+	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{Force: true, SkipHookFire: true}); err != nil {
 		t.Fatal(err)
 	}
 	if docker.count("build") != 2 {
@@ -431,7 +431,7 @@ func TestPruneLeavesOtherDataDirsAlone(t *testing.T) {
 		}
 		daemon.expect(c)
 		clock = clock.Add(time.Minute)
-		rec, err := builder.Build(ctx, spec, BuildOptions{})
+		rec, err := builder.Build(ctx, spec, BuildOptions{SkipHookFire: true})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}

@@ -23,16 +23,14 @@ package image
 //
 //	DEFENSECLAW_E2E_DATA_DIR=<dir> \
 //	DEFENSECLAW_E2E_IMAGE_REPO=e-defenseclaw-sandbox \
-//	DEFENSECLAW_E2E_ANTHROPIC_URL=http://127.0.0.1:<mock> \
-//	DEFENSECLAW_E2E_OPENAI_URL=http://127.0.0.1:<mock> \
 //	go test -tags openshell_integration ./internal/openshell/image/ -run TestLiveOverlay -v -timeout 60m
 //
-// The mock URLs are the harness-spike servers (mock_anthropic.py with
-// scripts-claude.json, mock_openai.py with scripts-codex.json): "write the
-// marker" answers with one allowed shell tool call and "BLOCKME" with one the
-// stand-in ingress denies; for Claude Code the probe repeats "write the
-// marker" with hostile user and project settings planted. Without them the
-// hook-fire probe is skipped.
+// Build runs the hook-fire probe itself against the built-in mock LLM
+// (allow, BLOCKME and, for Claude Code, hostile user and project settings)
+// on the platform's default network, so no model or mock server is needed.
+// DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK=<address> (for example the Linux
+// docker0 gateway 172.17.0.1) additionally re-verifies each image in relay
+// mode, the Docker Desktop default, with the sink bound on that address.
 
 import (
 	"context"
@@ -64,75 +62,43 @@ func TestLiveOverlay(t *testing.T) {
 	b := &Builder{Docker: CLI{}, Store: NewStore(dataDir), Log: testLogWriter{t}}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
+	relaySink := os.Getenv("DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK")
 
-	type scenario struct {
-		spec  *harness.Spec
-		env   map[string]string
-		args  []string
-		ready bool
-	}
-	anthropic := os.Getenv("DEFENSECLAW_E2E_ANTHROPIC_URL")
-	openai := os.Getenv("DEFENSECLAW_E2E_OPENAI_URL")
-	scenarios := []scenario{
-		{
-			spec:  harness.ClaudeCode,
-			env:   map[string]string{"ANTHROPIC_BASE_URL": anthropic, "ANTHROPIC_API_KEY": "sk-ant-mock-0123456789abcdefghij"},
-			args:  []string{"--output-format", "json"},
-			ready: anthropic != "",
-		},
-		{
-			spec: harness.Codex,
-			env:  map[string]string{"OPENAI_API_KEY": "sk-mock-0123456789"},
-			args: []string{
-				"-c", `model_provider="mock"`, "-c", `model_providers.mock.name="mock"`,
-				"-c", `model_providers.mock.base_url="` + openai + `/v1"`,
-				"-c", `model_providers.mock.env_key="OPENAI_API_KEY"`, "-c", `model_providers.mock.wire_api="responses"`,
-				// Codex sends its default model's tools in a "responses lite"
-				// input item the mock does not read; an unknown model gets the
-				// classic tools field.
-				"-m", "mock-model",
-			},
-			ready: openai != "",
-		},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.spec.Name, func(t *testing.T) {
+	for _, h := range []*harness.Spec{harness.ClaudeCode, harness.Codex} {
+		t.Run(h.Name, func(t *testing.T) {
 			spec := BuildSpec{
-				Harness:            sc.spec,
+				Harness:            h,
 				UID:                os.Getuid(),
 				GID:                os.Getgid(),
 				IngressPort:        ingress,
 				DefenseClawVersion: "0.0.0-e2e",
 				Repository:         repo,
 			}
-			rec, err := b.Build(ctx, spec, BuildOptions{})
+			rec, err := b.Build(ctx, spec, BuildOptions{HookFire: HookFireOptions{ContainerPrefix: "e-hookfire"}})
+			pretty, _ := json.MarshalIndent(rec, "", "  ")
+			t.Logf("build record:\n%s", pretty)
 			if err != nil {
 				t.Fatalf("build: %v", err)
 			}
-			pretty, _ := json.MarshalIndent(rec, "", "  ")
-			t.Logf("built and verified:\n%s", pretty)
-			if !sc.ready {
-				t.Skip("mock LLM URL not set; hook-fire probe skipped")
+			if !rec.HookFireVerified {
+				t.Fatal("Build returned an image whose hooks were not verified")
+			}
+			current, ok, err := b.Current(spec)
+			if err != nil || !ok || current.Tag != rec.Tag {
+				t.Fatalf("current = %+v %t %v after a verified build", current, ok, err)
+			}
+			if relaySink == "" {
+				return
 			}
 			c, err := b.Context(spec)
 			if err != nil {
 				t.Fatal(err)
 			}
-			verified, res, err := b.VerifyHooks(ctx, c, HookFireOptions{
-				Env:             sc.env,
-				Args:            sc.args,
-				Prompt:          "write the marker",
-				Block:           &BlockScenario{Prompt: "BLOCKME", Marker: "BLOCKME", SideEffect: "/tmp/blocked.txt"},
-				ContainerPrefix: "e-hookfire",
-			})
+			verified, res, err := b.VerifyHooks(ctx, c, HookFireOptions{Network: HookFireNetworkRelay, SinkHost: relaySink, ContainerPrefix: "e-hookfire"})
 			report, _ := json.MarshalIndent(res, "", "  ")
-			t.Logf("hook-fire result:\n%s", report)
-			if err != nil {
-				t.Fatal(err)
-			}
-			current, ok, err := b.Store.Current(c)
-			if err != nil || !ok || current.Tag != rec.Tag || !verified.HookFireVerified {
-				t.Fatalf("current = %+v %t %v after a passing hook-fire probe", current, ok, err)
+			t.Logf("relay-mode hook-fire result:\n%s", report)
+			if err != nil || !verified.HookFireVerified {
+				t.Fatalf("relay-mode VerifyHooks: %v", err)
 			}
 		})
 	}
@@ -140,7 +106,7 @@ func TestLiveOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	t.Logf("prune: removed=%v kept=%v stale=%v", report.Removed, report.Kept, report.ForgottenStale)
+	t.Logf("prune: removed=%v kept=%v stale=%v unrecorded=%v foreign=%v", report.Removed, report.Kept, report.ForgottenStale, report.Unrecorded, report.Foreign)
 }
 
 type testLogWriter struct{ t *testing.T }

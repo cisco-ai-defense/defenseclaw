@@ -21,8 +21,10 @@
 // digest-pinned community base, tagged by a content hash over every build
 // input. A post-build probe (--network none) verifies the in-image bytes,
 // modes and owners and records the harness realpaths, versions and digests
-// in <data_dir>/sandboxes/images.json; a hook-fire probe runs the harness
-// against mock servers and proves the managed hooks actually fire.
+// in <data_dir>/sandboxes/images.json; a hook-fire probe, which Build runs
+// before it returns an image, drives the harness against a built-in mock LLM
+// and a stand-in hook ingress and proves the managed hooks actually fire,
+// deny a blocked tool call and let an allowed one run.
 package image
 
 import (

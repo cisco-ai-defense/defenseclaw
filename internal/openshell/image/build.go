@@ -41,14 +41,24 @@ type BuildOptions struct {
 	// Force rebuilds even when a verified image with the same content hash
 	// is already recorded and present.
 	Force bool
+	// HookFire configures the hook-fire probe Build runs before it returns
+	// an image; the zero value uses the built-in mock LLM and scenarios.
+	HookFire HookFireOptions
+	// SkipHookFire records the image without the hook-fire probe. The
+	// record stays unverified, so Store.Current does not select it until
+	// VerifyHooks passes.
+	SkipHookFire bool
 }
 
 // Build renders the context, streams it to `docker build -t <tag> -`,
-// probes the result with --network none, verifies it and records it. An
-// image that fails verification is removed. A new build is recorded with
-// HookFireVerified unset (a rebuild clears an earlier verdict), and a cached
-// image keeps its recorded verdict; Store.Current selects the image only
-// after VerifyHooks proves its hooks fire.
+// probes the result with --network none, verifies it and records it, then
+// runs VerifyHooks, so a fresh image is proven to enforce before anything
+// selects it. An image that fails the static verification is removed; one
+// whose hooks are proven not to fire stays recorded as unverified (for
+// diagnosis) and Build returns the ErrHooksNotFired error. A new build is
+// recorded with HookFireVerified unset (a rebuild clears an earlier
+// verdict); a cached image keeps its verdict and is probed again only when
+// it is not verified yet.
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
 	c, err := b.Context(spec)
 	if err != nil {
@@ -59,7 +69,10 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 			return Record{}, err
 		} else if ok && recordMatches(rec, c) {
 			if id, err := b.imageID(ctx, c.Tag); err == nil && id == rec.ImageID {
-				return rec, nil
+				if rec.HookFireVerified || opts.SkipHookFire {
+					return rec, nil
+				}
+				return b.verifyBuilt(ctx, c, rec, opts)
 			}
 		}
 	}
@@ -128,7 +141,23 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 	if err := b.Store.Put(rec); err != nil {
 		return Record{}, err
 	}
-	return rec, nil
+	if opts.SkipHookFire {
+		return rec, nil
+	}
+	return b.verifyBuilt(ctx, c, rec, opts)
+}
+
+// verifyBuilt runs VerifyHooks for a just-built or cached image and returns
+// the verified record, or the unverified one and the probe error.
+func (b *Builder) verifyBuilt(ctx context.Context, c *Context, rec Record, opts BuildOptions) (Record, error) {
+	verified, _, err := b.VerifyHooks(ctx, c, opts.HookFire)
+	if err != nil {
+		if verified.Tag == "" {
+			verified = rec
+		}
+		return verified, fmt.Errorf("openshell image: %s built but not verified: %w", c.Tag, err)
+	}
+	return verified, nil
 }
 
 // Context renders spec's build context for this builder's store: an empty

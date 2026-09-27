@@ -25,6 +25,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,16 +36,26 @@ import (
 )
 
 // containerSim plays the harness inside the image: it posts hook events to
-// the ingress the docker argv points at, the way the rendered hooks do.
+// the ingress the docker argv points at, the way the rendered hooks do. With
+// llm set it first asks the model endpoint the argv configures (the
+// built-in mock) for its tool call and reports the tool's side effect only
+// when the hook allowed it.
 type containerSim struct {
 	t *testing.T
 	// events per scenario, in order; the tool input of PreToolUse carries
-	// the scenario prompt so the block marker can match.
+	// the scenario prompt (or, with llm, the mock's tool command) so the
+	// block marker can match.
 	events        []string
 	port          int
 	badToken      bool
 	noKey         bool
 	ignoreVerdict bool
+	// llm drives the tool call from the configured model endpoint.
+	llm bool
+	// toolNeverRuns suppresses the allowed tool's side effect.
+	toolNeverRuns bool
+	// relay expects the relay-mode argv instead of the host network.
+	relay bool
 	// hostileEvents replaces events in the hostile-settings run (nil keeps
 	// events), and plantedRan is what that run reports as planted programs
 	// that ran.
@@ -52,27 +63,51 @@ type containerSim struct {
 	plantedRan    string
 }
 
+var (
+	simRelayPortRE = regexp.MustCompile(`host\.docker\.internal ([0-9]+) >/tmp/dc-hookfire-relay\.log`)
+	simBaseURLRE   = regexp.MustCompile(`model_providers\.dcprobe\.base_url="([^"]+)"`)
+)
+
 func (s containerSim) handle(args []string) (string, int) {
 	host, token, script, user := "", "", "", ""
+	env := map[string]string{}
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--user":
 			user = args[i+1]
 		case "--add-host":
-			host = strings.TrimPrefix(args[i+1], connector.SandboxIngressHost+":")
+			if v, ok := strings.CutPrefix(args[i+1], connector.SandboxIngressHost+":"); ok {
+				host = v
+			}
 		case "-e":
-			if v, ok := strings.CutPrefix(args[i+1], connector.SandboxTokenEnv+"="); ok {
+			k, v, _ := strings.Cut(args[i+1], "=")
+			env[k] = v
+			if k == connector.SandboxTokenEnv {
 				token = v
 			}
 		}
 	}
 	script = args[len(args)-1]
-	if host == "" || token == "" || !strings.Contains(script, harness.ClaudeCodeLauncherPath) {
+	if host == "" || token == "" || !(strings.Contains(script, harness.ClaudeCodeLauncherPath) || strings.Contains(script, harness.CodexLauncherPath)) {
 		s.t.Errorf("hook-fire argv lacks the sink host, token or launcher: %v", args)
 		return "", 1
 	}
-	if !containsSeq(args, "--network", "host") || !containsSeq(args, "-e", "HOME="+connector.SandboxHomeDir) {
+	if !containsSeq(args, "-e", "HOME="+connector.SandboxHomeDir) {
 		s.t.Errorf("hook-fire argv = %v", args)
+	}
+	target := net.JoinHostPort(host, strconv.Itoa(s.port))
+	if s.relay {
+		m := simRelayPortRE.FindStringSubmatch(script)
+		if containsSeq(args, "--network", "host") || host != "127.0.0.1" || !containsSeq(args, "--add-host", "host.docker.internal:host-gateway") || m == nil ||
+			!strings.Contains(script, "until (exec 3<>/dev/tcp/127.0.0.1/"+strconv.Itoa(s.port)+")") {
+			s.t.Errorf("relay-mode argv = %v\n%s", args, script)
+			return "", 1
+		}
+		// The in-container relay forwards the baked port to the sink.
+		target = "127.0.0.1:" + m[1]
+	} else if !containsSeq(args, "--network", "host") || strings.Contains(script, "host.docker.internal") {
+		s.t.Errorf("host-mode argv = %v", args)
+		return "", 1
 	}
 	if s.badToken {
 		token = "forged"
@@ -85,17 +120,23 @@ func (s containerSim) handle(args []string) (string, int) {
 	if hostile && !strings.Contains(script, "cd '/work/dc-hookfire-project' || exit 97") {
 		s.t.Errorf("hostile-settings run does not start in the planted project: %s", script)
 	}
+	toolInput := map[string]string{"command": script}
+	if s.llm {
+		command, err := s.askModel(env, script)
+		if err != nil {
+			s.t.Errorf("mock LLM: %v", err)
+			return "", 1
+		}
+		toolInput = map[string]string{"command": command}
+	}
 	events := s.events
 	if hostile && s.hostileEvents != nil {
 		events = s.hostileEvents
 	}
 	blocked := false
 	for _, event := range events {
-		payload, _ := json.Marshal(map[string]interface{}{
-			"hook_event_name": event,
-			"tool_input":      map[string]string{"command": script},
-		})
-		req, _ := http.NewRequest(http.MethodPost, "http://"+net.JoinHostPort(host, strconv.Itoa(s.port))+"/api/v1/claude-code/hook", bytes.NewReader(payload))
+		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": event, "tool_input": toolInput})
+		req, _ := http.NewRequest(http.MethodPost, "http://"+target+"/api/v1/claude-code/hook", bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+token)
 		if !s.noKey {
 			req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k-"+event)
@@ -113,7 +154,7 @@ func (s containerSim) handle(args []string) (string, int) {
 	}
 	out := "::rc=0\n"
 	if strings.Contains(script, "::side-effect=") {
-		if blocked {
+		if blocked || s.toolNeverRuns {
 			out += "::side-effect=absent\n"
 		} else {
 			out += "::side-effect=present\n"
@@ -123,6 +164,56 @@ func (s containerSim) handle(args []string) (string, int) {
 		out += "::planted-ran=" + s.plantedRan + "\n"
 	}
 	return out + "::output-begin\nok\n::output-end\n", 0
+}
+
+// askModel asks the model endpoint the argv configures for the prompt's
+// tool call, as Claude Code (Messages) or Codex (Responses) would.
+func (s containerSim) askModel(env map[string]string, script string) (string, error) {
+	prompt := builtinAllowPrompt
+	if strings.Contains(script, builtinBlockPrompt) {
+		prompt = builtinBlockPrompt
+	} else if !strings.Contains(script, builtinAllowPrompt) {
+		return "", fmt.Errorf("the script runs neither built-in prompt")
+	}
+	container := func(url string) string { return strings.Replace(url, "host.docker.internal", "127.0.0.1", 1) }
+	post := func(url, body string) (map[string]interface{}, error) {
+		resp, err := http.Post(url, "application/json", strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		var out map[string]interface{}
+		return out, json.NewDecoder(resp.Body).Decode(&out)
+	}
+	if base, ok := env["ANTHROPIC_BASE_URL"]; ok {
+		msg, _ := json.Marshal(prompt)
+		out, err := post(container(base)+"/v1/messages", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":`+string(msg)+`}],"tools":[{"name":"Bash"}]}`)
+		if err != nil {
+			return "", err
+		}
+		block := out["content"].([]interface{})[0].(map[string]interface{})
+		if block["type"] != "tool_use" {
+			return "", fmt.Errorf("messages answered %v", out)
+		}
+		return block["input"].(map[string]interface{})["command"].(string), nil
+	}
+	m := simBaseURLRE.FindStringSubmatch(script)
+	if m == nil || env["OPENAI_API_KEY"] == "" {
+		return "", fmt.Errorf("argv configures no mock model endpoint")
+	}
+	msg, _ := json.Marshal(prompt)
+	out, err := post(container(m[1])+"/responses", `{"model":"mock-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":`+string(msg)+`}]}],"tools":[{"type":"function","name":"shell_command"}]}`)
+	if err != nil {
+		return "", err
+	}
+	item := out["output"].([]interface{})[0].(map[string]interface{})
+	var call struct {
+		Command string `json:"command"`
+	}
+	if item["type"] != "function_call" || json.Unmarshal([]byte(item["arguments"].(string)), &call) != nil {
+		return "", fmt.Errorf("responses answered %v", out)
+	}
+	return call.Command, nil
 }
 
 func freePort(t *testing.T) int {
@@ -135,11 +226,26 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func hookFireContext(t *testing.T) *Context {
+func hookFireContextFor(t *testing.T, h *harness.Spec) *Context {
 	t.Helper()
-	spec := testSpec(harness.ClaudeCode)
+	spec := testSpec(h)
 	spec.IngressPort = freePort(t)
 	return mustContext(t, spec)
+}
+
+func hookFireContext(t *testing.T) *Context {
+	t.Helper()
+	return hookFireContextFor(t, harness.ClaudeCode)
+}
+
+// hostOpts are caller-mock options on the host network with the sink on
+// 127.0.0.1 (the test binds the context's free ingress port there).
+func hostOpts(block bool) HookFireOptions {
+	opts := HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Env: map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, Prompt: "write the marker"}
+	if block {
+		opts.Block = &BlockScenario{Prompt: "BLOCKME", Marker: "BLOCKME", SideEffect: "/tmp/blocked.txt"}
+	}
+	return opts
 }
 
 var fullClaudeRun = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"}
@@ -148,17 +254,12 @@ func TestHookFireProbePassesWhenHooksFire(t *testing.T) {
 	c := hookFireContext(t)
 	sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
 	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
-	res, err := b.HookFireProbe(context.Background(), c, HookFireOptions{
-		SinkHost: "127.0.0.1",
-		Env:      map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
-		Prompt:   "write the marker",
-		Block:    &BlockScenario{Prompt: "BLOCKME", Marker: "BLOCKME", SideEffect: "/tmp/blocked.txt"},
-	})
+	res, err := b.HookFireProbe(context.Background(), c, hostOpts(true))
 	if err != nil {
 		t.Fatalf("HookFireProbe: %v", err)
 	}
-	if len(res.Runs) != 3 || len(res.Runs[0].Events) != len(fullClaudeRun) {
-		t.Fatalf("runs = %+v", res.Runs)
+	if res.Network != HookFireNetworkHost || len(res.Runs) != 3 || len(res.Runs[0].Events) != len(fullClaudeRun) {
+		t.Fatalf("result = %+v", res)
 	}
 	for i, want := range []string{ScenarioAllow, ScenarioBlock, ScenarioHostileSettings} {
 		if res.Runs[i].Scenario != want {
@@ -174,6 +275,43 @@ func TestHookFireProbePassesWhenHooksFire(t *testing.T) {
 	}
 	if hostile := res.Runs[2]; len(hostile.Events) != len(fullClaudeRun) || len(hostile.PlantedRan) != 0 {
 		t.Fatalf("hostile-settings run = %+v", hostile)
+	}
+}
+
+// TestHookFireBuiltinMockDrivesEveryHarness runs the zero-value options:
+// the probe serves the built-in mock LLM itself, points each harness at it,
+// and requires the allowed tool's side effect and the blocked tool's
+// absence, on both network modes.
+func TestHookFireBuiltinMockDrivesEveryHarness(t *testing.T) {
+	for _, h := range []*harness.Spec{harness.ClaudeCode, harness.Codex} {
+		for _, mode := range []HookFireNetwork{HookFireNetworkHost, HookFireNetworkRelay} {
+			t.Run(h.Name+"/"+string(mode), func(t *testing.T) {
+				c := hookFireContextFor(t, h)
+				sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, relay: mode == HookFireNetworkRelay}
+				b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
+				opts := HookFireOptions{Network: mode}
+				if mode == HookFireNetworkHost {
+					// The test cannot rely on 127.0.0.2 existing (macOS).
+					opts.SinkHost = "127.0.0.1"
+				}
+				res, err := b.HookFireProbe(context.Background(), c, opts)
+				if err != nil {
+					t.Fatalf("HookFireProbe: %v", err)
+				}
+				wantRuns := 2
+				if h == harness.ClaudeCode {
+					wantRuns = 3
+				}
+				if len(res.Runs) != wantRuns || res.Network != mode {
+					t.Fatalf("result = %+v", res)
+				}
+				for _, run := range res.Runs {
+					if run.SideEffectPresent == nil || *run.SideEffectPresent != (run.Scenario != ScenarioBlock) {
+						t.Fatalf("%s run side effect = %v", run.Scenario, run.SideEffectPresent)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -209,11 +347,7 @@ func TestHookFireProbeFailures(t *testing.T) {
 			sim := tc.sim
 			sim.t, sim.port = t, c.Spec.IngressPort
 			b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
-			opts := HookFireOptions{SinkHost: "127.0.0.1", Prompt: "write the marker"}
-			if tc.block {
-				opts.Block = &BlockScenario{Prompt: "BLOCKME", Marker: "BLOCKME", SideEffect: "/tmp/blocked.txt"}
-			}
-			_, err := b.HookFireProbe(context.Background(), c, opts)
+			_, err := b.HookFireProbe(context.Background(), c, hostOpts(tc.block))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -224,21 +358,62 @@ func TestHookFireProbeFailures(t *testing.T) {
 	}
 }
 
+// TestHookFireBuiltinRequiresTheAllowedToolToRun fails an image whose hooks
+// all fire but whose allowed tool call never runs (for example a planted
+// shell that swallows it).
+func TestHookFireBuiltinRequiresTheAllowedToolToRun(t *testing.T) {
+	c := hookFireContextFor(t, harness.Codex)
+	sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, toolNeverRuns: true}
+	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
+	_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
+	if !errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), "the allowed tool call never ran ("+builtinAllowSideEffect+" is missing)") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestHookFireProbeRejectsBadOptions(t *testing.T) {
 	c := hookFireContext(t)
 	b := &Builder{Docker: &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}}
 	for name, opts := range map[string]HookFireOptions{
-		"no-prompt":        {SinkHost: "127.0.0.1"},
-		"public-sink":      {SinkHost: "10.0.0.5", Prompt: "p"},
-		"hostname-sink":    {SinkHost: "localhost", Prompt: "p"},
-		"bad-side-effect":  {SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b", Marker: "m", SideEffect: "/tmp/$(x)"}},
-		"incomplete-block": {SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b"}},
+		"custom-mock-no-prompt": {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Env: map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}},
+		"public-sink":           {Network: HookFireNetworkHost, SinkHost: "10.0.0.5", Prompt: "p"},
+		"hostname-sink":         {Network: HookFireNetworkHost, SinkHost: "localhost", Prompt: "p"},
+		"relay-public-sink":     {Network: HookFireNetworkRelay, SinkHost: "8.8.8.8", Prompt: "p"},
+		"unknown-network":       {Network: "bridge", Prompt: "p"},
+		"bad-side-effect":       {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b", Marker: "m", SideEffect: "/tmp/$(x)"}},
+		"bad-allow-side-effect": {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", AllowSideEffect: "relative/file"},
+		"incomplete-block":      {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := b.HookFireProbe(context.Background(), c, opts); err == nil {
 				t.Fatal("bad options accepted")
 			}
 		})
+	}
+}
+
+func TestDefaultHookFireNetworkMatchesPlatform(t *testing.T) {
+	n, err := resolveHookFireNet(HookFireOptions{}, 18971)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch n.mode {
+	case HookFireNetworkHost:
+		if n.bindHost != DefaultHookFireSinkHost || n.sinkPort != 18971 || n.containerHost != DefaultHookFireSinkHost {
+			t.Fatalf("host mode = %+v", n)
+		}
+	case HookFireNetworkRelay:
+		// Docker Desktop forwards host.docker.internal to host loopback;
+		// the sink takes a free port, never the ingress port a running
+		// DefenseClaw holds.
+		if n.bindHost != "127.0.0.1" || n.sinkPort != 0 || n.containerHost != "host.docker.internal" {
+			t.Fatalf("relay mode = %+v", n)
+		}
+	default:
+		t.Fatalf("mode = %q", n.mode)
+	}
+	if n.mode != DefaultHookFireNetwork() {
+		t.Fatalf("resolved %q, default %q", n.mode, DefaultHookFireNetwork())
 	}
 }
 
@@ -286,7 +461,7 @@ func verifyDocker(t *testing.T, c *Context, sim *containerSim, onHookFire func(a
 	inner := docker.handler
 	docker.handler = func(args []string, stdin []byte) (string, int) {
 		switch {
-		case args[0] == "run" && containsSeq(args, "--network", "host"):
+		case args[0] == "run" && !containsSeq(args, "--network", "none"):
 			if onHookFire != nil {
 				if exit := onHookFire(args); exit != 0 {
 					return "", exit
@@ -323,7 +498,7 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	clock := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	b := &Builder{Docker: docker, Store: store, Now: func() time.Time { return clock }}
 	ctx := context.Background()
-	opts := HookFireOptions{SinkHost: "127.0.0.1", Prompt: "write the marker"}
+	opts := hostOpts(true)
 	current := func() (Record, bool) {
 		t.Helper()
 		rec, ok, err := store.Current(c)
@@ -333,12 +508,12 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 		return rec, ok
 	}
 
-	built, err := b.Build(ctx, c.Spec, BuildOptions{})
+	built, err := b.Build(ctx, c.Spec, BuildOptions{SkipHookFire: true})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if built.HookFireVerified {
-		t.Fatal("a fresh build is recorded as hook-verified")
+	if built.HookFireVerified || len(images) != 0 {
+		t.Fatal("a build that skipped the hook-fire probe is recorded as hook-verified")
 	}
 	if _, ok := current(); ok {
 		t.Fatal("Current selected an image whose hooks were never proven to fire")
@@ -349,17 +524,17 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyHooks: %v", err)
 	}
-	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 2 {
+	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 3 {
 		t.Fatalf("verified record = %+v runs=%d", rec, len(res.Runs))
 	}
-	if len(images) != 2 || images[0] != built.ImageID || images[1] != built.ImageID {
+	if len(images) != 3 || images[0] != built.ImageID || images[2] != built.ImageID {
 		t.Fatalf("hook-fire ran %v, want the recorded image ID %s", images, built.ImageID)
 	}
 	if got, ok := current(); !ok || got.Tag != c.Tag || !got.HookFireVerified {
 		t.Fatalf("Current = %+v %t after a passing probe", got, ok)
 	}
-	if cached, err := b.Build(ctx, c.Spec, BuildOptions{}); err != nil || !cached.HookFireVerified || docker.count("build") != 1 {
-		t.Fatalf("cached build = %+v %v (docker builds %d)", cached, err, docker.count("build"))
+	if cached, err := b.Build(ctx, c.Spec, BuildOptions{HookFire: opts}); err != nil || !cached.HookFireVerified || docker.count("build") != 1 || len(images) != 3 {
+		t.Fatalf("cached build = %+v %v (docker builds %d, probes %d)", cached, err, docker.count("build"), len(images))
 	}
 
 	// A probe that proves the hooks no longer fire clears the verdict.
@@ -372,27 +547,62 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 		t.Fatal("Current still selects an image whose hooks did not fire")
 	}
 
-	// A rebuild records a fresh, unverified image.
+	// A cached but unverified image is probed again by Build.
 	sim.events = fullClaudeRun
-	if _, _, err := b.VerifyHooks(ctx, c, opts); err != nil {
-		t.Fatal(err)
+	if again, err := b.Build(ctx, c.Spec, BuildOptions{HookFire: opts}); err != nil || !again.HookFireVerified || docker.count("build") != 1 {
+		t.Fatalf("re-verified cached build = %+v %v (docker builds %d)", again, err, docker.count("build"))
 	}
-	rebuilt, err := b.Build(ctx, c.Spec, BuildOptions{Force: true})
-	if err != nil {
-		t.Fatal(err)
+
+	// A rebuild records a fresh image and verifies it before returning.
+	probes := len(images)
+	rebuilt, err := b.Build(ctx, c.Spec, BuildOptions{Force: true, HookFire: opts})
+	if err != nil || !rebuilt.HookFireVerified || docker.count("build") != 2 || len(images) != probes+3 {
+		t.Fatalf("forced rebuild = %+v %v", rebuilt, err)
 	}
-	if rebuilt.HookFireVerified || docker.count("build") != 2 {
-		t.Fatalf("forced rebuild = %+v", rebuilt)
+	// A rebuild whose hooks do not fire stays recorded, unverified.
+	sim.events = []string{"SessionStart"}
+	failed, err := b.Build(ctx, c.Spec, BuildOptions{Force: true, HookFire: opts})
+	if !errors.Is(err, ErrHooksNotFired) || failed.HookFireVerified || failed.Tag != c.Tag {
+		t.Fatalf("rebuild with silent hooks = %+v %v", failed, err)
 	}
 	if _, ok := current(); ok {
-		t.Fatal("Current selects a rebuilt image before its hooks were probed")
+		t.Fatal("Current selects a rebuilt image whose hooks did not fire")
+	}
+	if _, ok, _ := store.Get(c.Tag); !ok {
+		t.Fatal("an image whose hooks did not fire was forgotten")
+	}
+}
+
+func TestBuildVerifiesWithTheBuiltinMock(t *testing.T) {
+	c := hookFireContextFor(t, harness.Codex)
+	sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true}
+	docker := verifyDocker(t, c, sim, nil)
+	b := &Builder{Docker: docker, Store: testStore(t)}
+	rec, err := b.Build(context.Background(), c.Spec, BuildOptions{HookFire: HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"}})
+	if err != nil || !rec.HookFireVerified {
+		t.Fatalf("Build = %+v %v", rec, err)
+	}
+	if cur, ok, err := b.Current(c.Spec); err != nil || !ok || cur.Tag != c.Tag {
+		t.Fatalf("Current = %+v %t %v", cur, ok, err)
+	}
+}
+
+func TestVerifyHooksRequiresABlockScenario(t *testing.T) {
+	c := hookFireContext(t)
+	docker := &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 1 }}
+	b := &Builder{Docker: docker, Store: testStore(t)}
+	if _, _, err := b.VerifyHooks(context.Background(), c, hostOpts(false)); err == nil || !strings.Contains(err.Error(), "block scenario") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(docker.calls) != 0 {
+		t.Fatalf("docker ran: %v", docker.calls)
 	}
 }
 
 func TestVerifyHooksRefusesUnrecordedOrReplacedImages(t *testing.T) {
 	c := hookFireContext(t)
 	sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
-	opts := HookFireOptions{SinkHost: "127.0.0.1", Prompt: "write the marker"}
+	opts := hostOpts(true)
 	for name, stored := range map[string]*Record{
 		"not-built":        nil,
 		"other-content":    {Tag: c.Tag, ContentHash: "sha256:other", ImageID: "sha256:" + strings.Repeat("1", 64)},
@@ -456,8 +666,10 @@ func TestVerifyHooksKeepsVerdictWhenProbeCannotRun(t *testing.T) {
 	}}
 	b := &Builder{Docker: docker, Store: store}
 	for name, opts := range map[string]HookFireOptions{
-		"docker-failure": {SinkHost: "127.0.0.1", Prompt: "write the marker"},
-		"bad-options":    {SinkHost: "127.0.0.1"},
+		"docker-failure":         hostOpts(true),
+		"builtin-docker-failure": {Network: HookFireNetworkRelay},
+		"bad-options":            {Network: HookFireNetworkHost, SinkHost: "10.0.0.5"},
+		"no-block-scenario":      hostOpts(false),
 	} {
 		_, _, err := b.VerifyHooks(context.Background(), c, opts)
 		if err == nil || errors.Is(err, ErrHooksNotFired) {
@@ -482,10 +694,10 @@ func TestVerifyHooksIgnoresProbeOfReplacedImage(t *testing.T) {
 		return 0
 	})
 	b := &Builder{Docker: docker, Store: store}
-	if _, err := b.Build(context.Background(), c.Spec, BuildOptions{}); err != nil {
+	if _, err := b.Build(context.Background(), c.Spec, BuildOptions{SkipHookFire: true}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := b.VerifyHooks(context.Background(), c, HookFireOptions{SinkHost: "127.0.0.1", Prompt: "write the marker"})
+	_, _, err := b.VerifyHooks(context.Background(), c, hostOpts(true))
 	if err == nil || !strings.Contains(err.Error(), "rebuilt while") {
 		t.Fatalf("error = %v", err)
 	}
