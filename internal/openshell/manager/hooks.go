@@ -150,7 +150,11 @@ func (m *Manager) handleHookTamper(bindingID, sandboxName, tool, event, tamperRe
 		m.mu.Unlock()
 		return
 	}
-	onTamper := b.effectivePack.HookOnTamper
+	onTamper := ""
+	if b.eff != nil {
+		onTamper = b.eff.HookOnTamper
+	}
+	identity := b.identity()
 	// Reset hook silence: tamper detection counts as hook traffic.
 	b.silentSince, b.silenceSent = time.Time{}, false
 	m.mu.Unlock()
@@ -170,10 +174,7 @@ func (m *Manager) handleHookTamper(bindingID, sandboxName, tool, event, tamperRe
 	}
 
 	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
-		Sandbox: audit.SandboxIdentity{
-			Name:      sandboxName,
-			BindingID: bindingID,
-		},
+		Sandbox:     identity,
 		Kind:        audit.SandboxFindingHookTamper,
 		Severity:    "HIGH",
 		Title:       title,
@@ -202,7 +203,7 @@ func (m *Manager) handleHookTamper(bindingID, sandboxName, tool, event, tamperRe
 		go func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := m.Stop(stopCtx, sandboxName, false); err != nil {
+			if _, err := m.Stop(stopCtx, sandboxName); err != nil {
 				m.logf("hook tamper: failed to stop %s: %v", sandboxName, err)
 			} else {
 				m.logf("hook tamper: stopped %s", sandboxName)
