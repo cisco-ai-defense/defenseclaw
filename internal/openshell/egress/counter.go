@@ -43,7 +43,8 @@ type CounterOptions struct {
 	// A binding's uploads to first-seen hosts are also totalled per
 	// registrable domain (the name under its ICANN public suffix, so every
 	// customer zone of a hosting provider such as workers.dev or github.io
-	// counts together) and per resolved address, and each of those totals
+	// counts together) and per resolved address (per /64 for IPv6, all of
+	// which one server can answer on), and each of those totals
 	// has the same threshold: rotating subdomains, domains pointing at one
 	// server, or a provider's free subdomains does not reset it. Uploads to
 	// unblocked or operator-allowed destinations count only toward their
@@ -375,8 +376,13 @@ func (c *Counter) aggregatesFor(p Principal, host string, remote netip.Addr) []*
 	if _, err := netip.ParseAddr(host); err != nil {
 		keys = append(keys, siteKey(p, host))
 	}
-	if remote.IsValid() {
-		keys = append(keys, aggKey{binding: p.BindingID, kind: aggAddr, key: remote.Unmap().WithZone("").String()})
+	if remote = remote.Unmap().WithZone(""); remote.IsValid() {
+		key := remote.String()
+		if remote.Is6() {
+			// One server can answer on every address of its /64.
+			key = netip.PrefixFrom(remote, 64).Masked().String()
+		}
+		keys = append(keys, aggKey{binding: p.BindingID, kind: aggAddr, key: key})
 	}
 	now := c.now().UnixNano()
 	c.mu.Lock()

@@ -447,6 +447,11 @@ func TestCounterAggregatesUploads(t *testing.T) {
 	if v := send("two.example", sink, 600, false); !v.signal || !strings.Contains(v.scope, "at 203.0.113.9") {
 		t.Errorf("one address behind two domains = %+v", v)
 	}
+	// An IPv6 server can answer on every address of its /64.
+	send("six-a.example", netip.MustParseAddr("2001:470:1:2::a"), 600, false)
+	if v := send("six-b.example", netip.MustParseAddr("2001:470:1:2::b"), 600, false); !v.signal || !strings.Contains(v.scope, "at 2001:470:1:2::/64") {
+		t.Errorf("one IPv6 /64 behind two domains = %+v", v)
+	}
 	if n := c.Forget("b-1"); n == 0 || len(c.aggs) != 0 {
 		t.Errorf("Forget left %d aggregates", len(c.aggs))
 	}
