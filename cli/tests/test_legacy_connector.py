@@ -48,6 +48,20 @@ class MigrateRawConfigTests(unittest.TestCase):
         self.assertEqual(raw["guardrail"]["connectors"], {DEVIN: {"mode": "observe"}})
         self.assertIn(repr(RETIRED), notices[0])
 
+    def test_other_per_connector_maps_are_renamed(self):
+        raw = {
+            "guardrail": {"connector": DEVIN},
+            "asset_policy": {"connectors": {RETIRED: {"mode": "action"}}},
+            "application_protection": {"connectors": {RETIRED: {"min_confidence": 0.7}}},
+            "observability": {"connectors": {DEVIN: {"webhooks": []}, RETIRED: {"webhooks": []}}},
+        }
+        notices = legacy_connector.migrate_raw_config(raw)
+        self.assertEqual(raw["asset_policy"]["connectors"], {DEVIN: {"mode": "action"}})
+        self.assertEqual(raw["application_protection"]["connectors"], {DEVIN: {"min_confidence": 0.7}})
+        self.assertEqual(raw["observability"]["connectors"], {DEVIN: {"webhooks": []}})
+        self.assertEqual(len(notices), 1)
+        self.assertIn(repr(f"observability.connectors.{RETIRED}"), notices[0])
+
     def test_unaffected_config_is_untouched(self):
         raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
         before = yaml.safe_dump(raw)
@@ -152,6 +166,23 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         doc = yaml.safe_load(text)
         self.assertEqual(doc["guardrail"]["connectors"], {DEVIN: {"mode": "observe"}, "codex": {}})
+
+    def test_migration_renames_other_per_connector_maps_in_place(self):
+        body = (
+            "guardrail:\n  connector: devin\n  connectors:\n    devin: {}\n"
+            "asset_policy:\n  # asset comment kept\n  connectors:\n"
+            f"    {RETIRED}:\n      mode: action\n"
+            "observability:\n  destinations:\n    - name: local\n      select:\n        connectors:\n          - codex\n"
+            f"  connectors:\n    {RETIRED}:\n      webhooks: []\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("# asset comment kept", text)
+        self.assertNotIn(RETIRED, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["asset_policy"]["connectors"], {DEVIN: {"mode": "action"}})
+        self.assertEqual(doc["observability"]["connectors"], {DEVIN: {"webhooks": []}})
+        self.assertEqual(doc["observability"]["destinations"][0]["select"]["connectors"], ["codex"])
 
     def test_migration_leaves_unaffected_config_alone(self):
         body = "guardrail:\n  connector: cursor\n"

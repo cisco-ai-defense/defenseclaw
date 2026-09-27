@@ -45,6 +45,15 @@ BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
 # Pre-rename per-user vendor directories the vendor still reads.
 INVENTORY_DOT_DIRS: tuple[str, ...] = (".windsurf", ".codeium")
 
+# Top-level blocks whose ``connectors`` map is keyed by connector ID. The Go
+# loader (internal/config.migrateLegacyConnectorIDs) renames the same maps.
+CONNECTOR_MAP_BLOCKS: tuple[str, ...] = (
+    "guardrail",
+    "asset_policy",
+    "application_protection",
+    "observability",
+)
+
 
 def _fold(name: Any) -> str:
     return "".join(str(name or "").split()).lower()
@@ -90,34 +99,52 @@ def notice(config_path: str = "", dropped: list[str] | None = None) -> str:
     return msg
 
 
+def _migrate_connector_map(block: dict[Any, Any]) -> tuple[bool, list[str]]:
+    """Apply the rename to ``block["connectors"]`` keys, in place."""
+    connectors = block.get("connectors")
+    if not isinstance(connectors, dict):
+        return False, []
+    _, rename, dropped = migrate_connector_keys("", [str(k) for k in connectors])
+    if not rename and not dropped:
+        return False, []
+    rebuilt: dict[Any, Any] = {}
+    for key, value in connectors.items():
+        if str(key) in dropped:
+            continue
+        rebuilt[rename.get(str(key), key)] = value
+    block["connectors"] = rebuilt
+    return True, dropped
+
+
 def migrate_raw_config(raw: Any, config_path: str = "") -> list[str]:
     """Rename the retired ID in a raw ``config.yaml`` mapping, in place.
 
-    Touches ``guardrail.connector``, ``guardrail.connectors`` and
-    ``claw.mode``. Must run before connector keys are normalized or checked
-    for duplicates. Returns the notices (empty when nothing changed).
+    Touches ``guardrail.connector``, ``claw.mode`` and the keys of every
+    per-connector map in :data:`CONNECTOR_MAP_BLOCKS`. Must run before
+    connector keys are normalized or checked for duplicates. Returns the
+    notices (empty when nothing changed).
     """
     if not isinstance(raw, dict):
         return []
     changed = False
     dropped: list[str] = []
     guardrail = raw.get("guardrail")
-    if isinstance(guardrail, dict):
-        connectors = guardrail.get("connectors")
-        keys = [str(k) for k in connectors] if isinstance(connectors, dict) else []
+    if isinstance(guardrail, dict) and "connector" in guardrail:
         primary = guardrail.get("connector", "")
-        new_primary, rename, dropped = migrate_connector_keys(primary, keys)
-        if "connector" in guardrail and new_primary != primary:
+        new_primary, _ = canonical(primary)
+        if new_primary != primary:
             guardrail["connector"] = new_primary
             changed = True
-        if isinstance(connectors, dict) and (rename or dropped):
-            rebuilt: dict[Any, Any] = {}
-            for key, value in connectors.items():
-                if key in dropped:
-                    continue
-                rebuilt[rename.get(key, key)] = value
-            guardrail["connectors"] = rebuilt
-            changed = True
+    for block_key in CONNECTOR_MAP_BLOCKS:
+        block = raw.get(block_key)
+        if not isinstance(block, dict):
+            continue
+        moved, dropped_keys = _migrate_connector_map(block)
+        changed = changed or moved
+        if block_key == "guardrail":
+            dropped.extend(dropped_keys)
+        else:
+            dropped.extend(f"{block_key}.connectors.{key}" for key in dropped_keys)
     claw = raw.get("claw")
     if isinstance(claw, dict) and "mode" in claw:
         mode, migrated = canonical(claw.get("mode"))

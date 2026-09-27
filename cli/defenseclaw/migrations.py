@@ -3196,7 +3196,8 @@ def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
 
 def _rewrite_retired_desktop_connector_text(text: str) -> str:
     """Rename the retired ID in ``claw.mode``, ``guardrail.connector`` and the
-    ``guardrail.connectors`` map key, keeping every other byte."""
+    per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS``),
+    keeping every other byte."""
     retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
     replacement = legacy_connector.REPLACEMENT
 
@@ -3218,7 +3219,18 @@ def _rewrite_retired_desktop_connector_text(text: str) -> str:
         )
         text = text[: block.start("body")] + body + text[block.end("body") :]
 
-    block = _find_top_level_block(text, "guardrail")
+    for block_key in legacy_connector.CONNECTOR_MAP_BLOCKS:
+        text = _rewrite_retired_connector_map_keys(text, block_key)
+    return text
+
+
+def _rewrite_retired_connector_map_keys(text: str, block_key: str) -> str:
+    """Rename (or drop, when an explicit replacement key exists) the retired
+    ID among the keys of ``<block_key>.connectors``, keeping every other
+    byte. Only a ``connectors:`` mapping that is a direct child of the block
+    is touched; nested selector lists of the same name are left alone."""
+    replacement = legacy_connector.REPLACEMENT
+    block = _find_top_level_block(text, block_key)
     if not block:
         return text
     lines = block.group("body").splitlines(keepends=True)
@@ -3229,7 +3241,19 @@ def _rewrite_retired_desktop_connector_text(text: str) -> str:
     def is_blank(line: str) -> bool:
         return not line.strip() or line.lstrip().startswith("#")
 
-    header = next((i for i, line in enumerate(lines) if re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)), None)
+    first = next((i for i, line in enumerate(lines) if not is_blank(line)), None)
+    if first is None:
+        return text
+    block_child = indent_of(lines[first])
+    header = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if indent_of(line) == block_child
+            and re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)
+        ),
+        None,
+    )
     if header is None:
         return text
     parent = indent_of(lines[header])

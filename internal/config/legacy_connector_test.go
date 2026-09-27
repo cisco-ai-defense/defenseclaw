@@ -83,6 +83,32 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 		}
 	})
 
+	t.Run("other per-connector maps", func(t *testing.T) {
+		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+			"asset_policy:\n  connectors:\n    "+retired+":\n      mode: action\n"+
+			"application_protection:\n  connectors:\n    "+retired+":\n      min_confidence: 0.7\n"+
+			"observability:\n  connectors:\n    "+replacement+":\n      webhooks: []\n    "+retired+":\n      webhooks: []\n")
+		if _, ok := cfg.AssetPolicy.Connectors[retired]; ok {
+			t.Fatalf("asset_policy kept the retired key: %v", cfg.AssetPolicy.Connectors)
+		}
+		if got := cfg.AssetPolicy.Connectors[replacement].Mode; got != "action" {
+			t.Fatalf("asset_policy.%s.mode = %q, want the retired block's action", replacement, got)
+		}
+		block, ok := cfg.ApplicationProtection.Connectors[replacement]
+		if !ok || block.MinConfidence == nil || *block.MinConfidence != 0.7 {
+			t.Fatalf("application_protection.%s = %+v, %v; want the retired block's settings", replacement, block, ok)
+		}
+		if _, ok := cfg.ApplicationProtection.Connectors[retired]; ok {
+			t.Fatalf("application_protection kept the retired key")
+		}
+		if len(cfg.Observability.Connectors) != 1 {
+			t.Fatalf("observability.connectors = %v, want only the explicit %s block", cfg.Observability.Connectors, replacement)
+		}
+		if len(cfg.LegacyConnectorNotices) != 1 || !strings.Contains(cfg.LegacyConnectorNotices[0], "observability.connectors."+retired) {
+			t.Fatalf("notices = %v, want one naming the dropped observability key", cfg.LegacyConnectorNotices)
+		}
+	})
+
 	t.Run("unaffected config has no notice", func(t *testing.T) {
 		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: cursor\n")
 		if cfg.Guardrail.Connector != "cursor" || len(cfg.LegacyConnectorNotices) != 0 {

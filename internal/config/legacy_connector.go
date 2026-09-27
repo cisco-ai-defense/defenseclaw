@@ -23,11 +23,14 @@ import (
 )
 
 // migrateLegacyConnectorIDs moves retired connector IDs in guardrail.connector,
-// guardrail.connectors and claw.mode to their replacement. It must run right
-// after decoding and before normalizeConnectorKey or the duplicate-key check,
-// so a config holding both the retired and the replacement key loads with the
-// replacement's settings instead of failing. The Python loader applies the
-// same rule (defenseclaw.legacy_connector.migrate_raw_config).
+// claw.mode and the keys of every per-connector settings map
+// (guardrail.connectors, asset_policy.connectors,
+// application_protection.connectors and observability.connectors) to their
+// replacement. It must run right after decoding and before normalizeConnectorKey
+// or the duplicate-key check, so a config holding both the retired and the
+// replacement key loads with the replacement's settings instead of failing.
+// The Python loader applies the same rule
+// (defenseclaw.legacy_connector.migrate_raw_config).
 func migrateLegacyConnectorIDs(cfg *Config) {
 	if cfg == nil {
 		return
@@ -51,7 +54,46 @@ func migrateLegacyConnectorIDs(cfg *Config) {
 		cfg.Claw.Mode = ClawMode(mode)
 		changed = true
 	}
+	for _, other := range []struct {
+		path    string
+		migrate func() (bool, []string)
+	}{
+		{"asset_policy.connectors", func() (bool, []string) { return migrateLegacyConnectorMap(cfg.AssetPolicy.Connectors) }},
+		{"application_protection.connectors", func() (bool, []string) {
+			return migrateLegacyConnectorMap(cfg.ApplicationProtection.Connectors)
+		}},
+		{"observability.connectors", func() (bool, []string) { return migrateLegacyConnectorMap(cfg.Observability.Connectors) }},
+	} {
+		moved, droppedKeys := other.migrate()
+		changed = changed || moved
+		for _, key := range droppedKeys {
+			dropped = append(dropped, other.path+"."+key)
+		}
+	}
 	if changed {
 		cfg.LegacyConnectorNotices = append(cfg.LegacyConnectorNotices, legacyconnector.Notice(cfg.ConfigFilePath, dropped))
 	}
+}
+
+// migrateLegacyConnectorMap applies the rename rule to the keys of one
+// per-connector settings map in place and reports whether it changed and
+// which retired keys it dropped.
+func migrateLegacyConnectorMap[T any](settings map[string]T) (bool, []string) {
+	if len(settings) == 0 {
+		return false, nil
+	}
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	_, rename, dropped := legacyconnector.MigrateConnectorKeys("", keys)
+	for old, replacement := range rename {
+		settings[replacement] = settings[old]
+		delete(settings, old)
+	}
+	for _, old := range dropped {
+		delete(settings, old)
+	}
+	return len(rename) > 0 || len(dropped) > 0, dropped
 }
