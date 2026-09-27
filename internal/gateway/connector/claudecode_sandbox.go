@@ -176,11 +176,11 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 		"sandbox":                           map[string]interface{}{"enabled": false},
 		// Neutralize command-running settings that project/user settings could
 		// otherwise use to bypass PreToolUse hooks (p2-render-4).
-		"apiKeyHelper":                "",
-		"enableAllProjectMcpServers":  false,
-		"awsAuthRefresh":              "",
-		"awsCredentialExport":         "",
-		"statusLine":                  "",
+		"apiKeyHelper":               "",
+		"enableAllProjectMcpServers": false,
+		"awsAuthRefresh":             "",
+		"awsCredentialExport":        "",
+		"statusLine":                 "",
 	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
