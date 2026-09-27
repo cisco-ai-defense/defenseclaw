@@ -119,6 +119,8 @@ type App struct {
 	GOOS       string
 	// WSL reports a Linux kernel running under Windows (WSL2).
 	WSL func() bool
+	// Geteuid is the effective uid (sandboxes refuse root).
+	Geteuid func() int
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 
@@ -214,6 +216,9 @@ func (a *App) defaults() {
 		if a.WSL == nil {
 			a.WSL = IsWSL
 		}
+		if a.Geteuid == nil {
+			a.Geteuid = os.Geteuid
+		}
 		if a.ConfigPath == "" && a.Cfg != nil {
 			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)
 		}
@@ -302,7 +307,7 @@ func (a *App) CheckSupported() error {
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
 		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments yet", ErrUnsupported)
 	}
-	if os.Geteuid() == 0 {
+	if a.Geteuid() == 0 {
 		return fmt.Errorf("%w: run sandboxes as your own user, not root (they run as your uid)", ErrUnsupported)
 	}
 	return nil
