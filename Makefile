@@ -985,6 +985,8 @@ py-connector-matrix-test: pycli
 		cli/tests/test_connector_mcp_writers.py \
 		cli/tests/test_connector_paths.py \
 		cli/tests/test_install_smoke.py \
+		cli/tests/test_legacy_connector.py \
+		cli/tests/test_retired_connector_names.py \
 		cli/tests/test_scan_ux_connector_matrix.py
 
 ts-test:
