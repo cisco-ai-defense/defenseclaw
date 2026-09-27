@@ -340,20 +340,42 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
-	m.stopWatch(b)
+	// The watcher keeps running until the sandbox is gone: a delete that
+	// fails leaves it running, still watched and triaged.
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
 	if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
+		m.deleteFailed(ctx, gw, b)
 		return nil, upstream("delete sandbox "+name, err)
 	}
 	if err := gw.Client.WaitDeleted(ctx, name); err != nil {
+		m.deleteFailed(ctx, gw, b)
 		return nil, upstream("wait for sandbox "+name+" deletion", err)
 	}
+	m.stopWatch(b)
 	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true}
 	resp.Providers, resp.Warnings = m.cleanup(ctx, gw, b, req.KeepSnapshot)
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleted, audit.SandboxTriggerDelete, false, nil, nil)
 	m.forget(b)
 	return resp, nil
+}
+
+// deleteFailed puts a sandbox whose delete failed back into the phase
+// OpenShell reports and makes sure it is watched.
+func (m *Manager) deleteFailed(ctx context.Context, gw *Gateway, b *box) {
+	ctx = context.WithoutCancel(ctx)
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	if sb, err := gw.Client.GetSandbox(ctx, name); err == nil {
+		m.mu.Lock()
+		b.sb = sb
+		m.mu.Unlock()
+		if phase := auditPhase(sb.Status.Phase); phase != audit.SandboxPhaseDeleting {
+			m.lifecycle(ctx, b, phase, audit.SandboxTriggerDelete, false, nil, sb.Status.ExitCode)
+		}
+	}
+	m.startWatch(b)
 }
 
 // cleanup releases everything a gone sandbox held. It is shared by Delete

@@ -724,3 +724,74 @@ func TestStartTokenDeliveryEnvKeepsTheToken(t *testing.T) {
 		t.Fatalf("the sandbox's token no longer authenticates after a restart: %v", err)
 	}
 }
+
+// staleList serves a ListSandboxes snapshot taken earlier, as a slow
+// reconcile pass sees it.
+type staleList struct {
+	openshell.Client
+	list []*openshell.Sandbox
+}
+
+func (s staleList) ListSandboxes(context.Context, map[string]string) ([]*openshell.Sandbox, error) {
+	return s.list, nil
+}
+
+// TestReconcileKeepsSandboxesCreatedDuringThePass pins that a sandbox whose
+// create finished after the pass listed OpenShell is not garbage-collected
+// (binding revoked, providers deleted, record removed).
+func TestReconcileKeepsSandboxesCreatedDuringThePass(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "early"})
+	snapshot, err := e.client.ListSandboxes(context.Background(), e.m.managedSelector())
+	if err != nil || len(snapshot) != 1 {
+		t.Fatalf("list = %v, %v", snapshot, err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "late"})
+	ingress, _ := e.client.GetProvider(context.Background(), "late-ingress")
+	token := ingress.Spec.Credentials[openshell.EnvSandboxToken]
+	e.gw.Client = staleList{Client: e.client, list: snapshot}
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Match(token); err != nil {
+		t.Fatalf("the new sandbox's binding was revoked: %v", err)
+	}
+	if !slices.Contains(e.providers(), "late-ingress") {
+		t.Fatalf("the new sandbox's providers were deleted: %v", e.providers())
+	}
+	if _, err := e.m.Get(context.Background(), "late"); err != nil {
+		t.Fatalf("the new sandbox was forgotten: %v", err)
+	}
+	if slices.Contains(e.ws.released, "late") {
+		t.Fatal("the new sandbox's mount was released")
+	}
+}
+
+// TestDeleteFailureKeepsWatching pins that a delete OpenShell refuses
+// leaves the sandbox watched, in the phase OpenShell reports.
+func TestDeleteFailureKeepsWatching(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "stubborn"})
+	e.watch.waitStarted(t, sb.Name)
+	e.fake.FailNext(openshelltest.MethodDeleteSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "driver busy"})
+	if _, err := e.m.Delete(context.Background(), sb.Name, sandboxapi.DeleteRequest{}); err == nil {
+		t.Fatal("delete succeeded")
+	}
+	e.m.mu.Lock()
+	b := e.m.boxes[sb.Name]
+	watching, phase := b.watchCancel != nil, b.phase
+	e.m.mu.Unlock()
+	if !watching {
+		t.Fatal("the watcher stopped although the sandbox still runs")
+	}
+	if phase != audit.SandboxPhaseReady {
+		t.Fatalf("phase = %s, want ready again", phase)
+	}
+	// The watcher still delivers events.
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindStatus, Status: &stream.Status{Phase: openshell.PhaseStopped}})
+	eventually(t, "status after the failed delete", func() bool {
+		phases := e.tel.phases(sb.Name)
+		return phases[len(phases)-1] == audit.SandboxPhaseStopped
+	})
+}

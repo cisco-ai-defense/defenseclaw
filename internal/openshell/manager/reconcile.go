@@ -104,9 +104,10 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		if !b.op.TryLock() {
 			continue // an operation is running; the next pass decides
 		}
-		// A delete may have finished (and a create of the same name
-		// started) while this pass was listing.
-		if m.current(b) {
+		// The list is a snapshot: a create may have finished, or a delete
+		// and a create of the same name, while this pass was listing. Only
+		// a sandbox OpenShell says is gone now is released.
+		if m.current(b) && m.goneNow(ctx, gw, b) {
 			m.gc(ctx, gw, b)
 		}
 		b.op.Unlock()
@@ -143,11 +144,16 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 			if _, ok := live[p.Labels[LabelSandbox]]; ok {
 				continue
 			}
+			// A sandbox DefenseClaw still holds (created after the list,
+			// or kept by the pass above) owns its providers.
 			m.mu.Lock()
 			b := m.boxes[p.Labels[LabelSandbox]]
-			creating := b != nil && b.creating
+			held := b != nil && !b.deleted
 			m.mu.Unlock()
-			if creating {
+			if held {
+				continue
+			}
+			if _, err := gw.Client.GetSandbox(ctx, p.Labels[LabelSandbox]); !openshell.IsNotFound(err) {
 				continue
 			}
 			if _, err := gw.Client.DeleteProvider(ctx, p.Name); err != nil && !openshell.IsNotFound(err) {
@@ -162,6 +168,23 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.refreshEgress()
 	m.enforceAll(ctx)
 	return nil
+}
+
+// goneNow asks OpenShell whether b's sandbox is gone (NotFound, or a
+// different sandbox under the same name).
+func (m *Manager) goneNow(ctx context.Context, gw *Gateway, b *box) bool {
+	m.mu.Lock()
+	name, id := b.rec.Name, b.rec.ID
+	m.mu.Unlock()
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	switch {
+	case openshell.IsNotFound(err):
+		return true
+	case err != nil:
+		return false
+	default:
+		return id != "" && sb.ID != "" && sb.ID != id
+	}
 }
 
 // adopt returns the box for a live OpenShell sandbox, creating one from
@@ -248,9 +271,6 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 	if err != nil {
 		return
 	}
-	if _, err := gw.Client.GetSandbox(ctx, name); !openshell.IsNotFound(err) {
-		return
-	}
 	m.mu.Lock()
 	b := m.boxes[name]
 	m.mu.Unlock()
@@ -258,7 +278,7 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 		return
 	}
 	defer b.op.Unlock()
-	if m.current(b) {
+	if m.current(b) && m.goneNow(ctx, gw, b) {
 		m.gc(ctx, gw, b)
 	}
 }
