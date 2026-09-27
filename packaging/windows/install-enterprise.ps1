@@ -3013,6 +3013,32 @@ function Resolve-DefenseClawConnectorMetadataVersion {
 # (cli/defenseclaw/inventory/hook_contracts.json; a contract test pins them).
 $script:DefenseClawClaudeHookContractMinimums = @('2.1.154', '2.1.219')
 
+function ConvertTo-DefenseClawClaudeContractVersionKey {
+    param([AllowNull()][string]$Value)
+    # Ordinal-sortable key of the leading major.minor.patch of a version the
+    # manifest accepts. The gateway picks the Claude hook contract from that
+    # part alone (NormalizeAgentVersion reads 64-bit components and ignores a
+    # pre-release or build suffix), so 2.1.250-beta.1 sorts as 2.1.250.
+    # Returns '' for a version the manifest refuses or Go cannot normalize.
+    $version = ConvertTo-DefenseClawConnectorMetadataVersion -Value $Value
+    if ($version -cnotmatch '^([0-9]+)\.([0-9]+)\.([0-9]+)') {
+        return ''
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($component in @($Matches[1], $Matches[2], $Matches[3])) {
+        $number = [long]0
+        if (-not [long]::TryParse(
+                $component,
+                [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$number)) {
+            return ''
+        }
+        $parts.Add($number.ToString('D19', [Globalization.CultureInfo]::InvariantCulture))
+    }
+    return ($parts -join '.')
+}
+
 function Get-DefenseClawClaudeBootstrapPlaceholder {
     param(
         [AllowNull()][AllowEmptyCollection()][string[]]$DetectedVersions,
@@ -3023,26 +3049,27 @@ function Get-DefenseClawClaudeBootstrapPlaceholder {
     # the Claude effective-policy evidence (#895). Rows on different contracts
     # rewrite it in turn. A user with no client yet therefore takes the
     # minimum of the newest contract a detected client on this host resolves
-    # to, so the rows written here share one contract. Only exact release
-    # versions are considered; without one, the bootstrap default applies.
-    $best = $null
+    # to, so the rows written here share one contract. A detected version
+    # counts by its leading major.minor.patch, as the gateway resolves it;
+    # without a detected version, the bootstrap default applies.
+    $bestKey = ''
     $bestText = ''
     foreach ($detected in @($DetectedVersions)) {
-        $text = [string]$detected
-        $parsed = $null
-        if ($text -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
-            -not [Version]::TryParse($text, [ref]$parsed)) {
+        $key = ConvertTo-DefenseClawClaudeContractVersionKey -Value ([string]$detected)
+        if ($key.Length -eq 0) {
             continue
         }
         foreach ($minimum in $script:DefenseClawClaudeHookContractMinimums) {
-            $floor = [Version]::Parse($minimum)
-            if ($parsed -ge $floor -and ($null -eq $best -or $floor -gt $best)) {
-                $best = $floor
+            $floorKey = ConvertTo-DefenseClawClaudeContractVersionKey -Value $minimum
+            if ([string]::CompareOrdinal($key, $floorKey) -ge 0 -and
+                ($bestKey.Length -eq 0 -or
+                    [string]::CompareOrdinal($floorKey, $bestKey) -gt 0)) {
+                $bestKey = $floorKey
                 $bestText = $minimum
             }
         }
     }
-    if ($null -eq $best) {
+    if ($bestKey.Length -eq 0) {
         return $Default
     }
     return $bestText

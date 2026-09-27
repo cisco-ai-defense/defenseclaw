@@ -108,13 +108,15 @@ try {
     Assert-Versions 'newest detected contract wins' `
         (Get-RenderedVersions -Profiles @($carol, $alice, $bob) -Connectors @('claudecode')) `
         @{ 'carol/claudecode' = '2.1.200'; 'alice/claudecode' = '2.1.219'; 'bob/claudecode' = '2.1.250' }
-    # No detected client, or only a pre-release build: the bootstrap default.
+    # No detected client: the bootstrap default.
     Assert-Versions 'no detected client' `
         (Get-RenderedVersions -Profiles @($alice) -Connectors @('claudecode', 'codex')) `
         @{ 'alice/claudecode' = '2.1.154'; 'alice/codex' = '0.131.0' }
+    # A pre-release build counts by its release numbers, as the gateway
+    # resolves its contract (2.1.250-beta.1 is claudecode-hooks-v2).
     Assert-Versions 'pre-release client only' `
         (Get-RenderedVersions -Profiles @($dave, $alice) -Connectors @('claudecode')) `
-        @{ 'dave/claudecode' = '2.1.250-beta.1'; 'alice/claudecode' = '2.1.154' }
+        @{ 'dave/claudecode' = '2.1.250-beta.1'; 'alice/claudecode' = '2.1.219' }
     # Other connectors keep their fixed placeholders.
     Assert-Versions 'codex placeholder unchanged' `
         (Get-RenderedVersions -Profiles @($bob, $alice) -Connectors @('codex', 'claudecode')) `
@@ -126,7 +128,15 @@ try {
         @(@('2.1.218'), '2.1.154'),
         @(@('2.1.219'), '2.1.219'),
         @(@('2.1.200', '3.0.0'), '2.1.219'),
-        @(@('not-a-version', '2.1.300+build.5'), '2.1.154')
+        @(@('not-a-version', '2.1.300+build.5'), '2.1.219'),
+        @(@('2.1.219-rc.1'), '2.1.219'),
+        @(@('2.1.218+build.9'), '2.1.154'),
+        @(@('2.1.100-beta.1'), '2.1.154'),
+        @(@('02.01.0250'), '2.1.219'),
+        @(@('2.1'), '2.1.154'),
+        @(@('2.1.250-'), '2.1.154'),
+        @(@('9223372036854775808.0.0'), '2.1.154'),
+        @(@('3000000000.0.0'), '2.1.219')
     )) {
         $got = Get-DefenseClawClaudeBootstrapPlaceholder `
             -DetectedVersions ([string[]]$case[0]) `

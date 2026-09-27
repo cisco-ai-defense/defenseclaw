@@ -639,7 +639,8 @@ for it, or the row is disabled. The DefenseClaw Claude policy is one
 machine-wide file rendered from the Claude hook contract of each enrolled row,
 so the `-Mode`/`-Connector` renderer records a user who has no Claude client
 yet at the minimum of the newest contract a detected client on the endpoint
-uses: 2.1.219 beside a client at 2.1.219 or newer, otherwise 2.1.154. Rows on
+uses: 2.1.219 beside a client at 2.1.219 or newer (a pre-release or build
+suffix is ignored, as it is for contract selection), otherwise 2.1.154. Rows on
 different contracts, such as clients at 2.1.200 and 2.1.250 on one endpoint,
 still render different policies and leave the Claude effective-policy
 evidence stale after each enrollment, so keep an endpoint's Claude clients in
