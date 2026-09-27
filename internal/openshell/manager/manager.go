@@ -136,6 +136,9 @@ type Options struct {
 	Now func() time.Time
 	// Logf receives operational messages; nil writes to stderr.
 	Logf func(format string, args ...any)
+	// OnGateway is told about every gateway connection attempt: nil once
+	// connected, the error when the gateway is unavailable.
+	OnGateway func(err error)
 }
 
 // Manager implements the gateway's SandboxController.
@@ -389,6 +392,9 @@ func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 			m.health(ctx, audit.SandboxHealthDegraded, "OPENSHELL_UNAVAILABLE", err.Error())
 		}
 		m.gwErr, m.gwErrAt = err, m.now()
+		if m.opts.OnGateway != nil {
+			m.opts.OnGateway(err)
+		}
 		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", err)
 	}
 	if m.gwErr != nil {
@@ -397,6 +403,9 @@ func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 		m.health(ctx, audit.SandboxHealthReady, "", "")
 	}
 	m.gw, m.gwErr = gw, nil
+	if m.opts.OnGateway != nil {
+		m.opts.OnGateway(nil)
+	}
 	m.gwPort.Store(int64(gw.Port))
 	return gw, nil
 }

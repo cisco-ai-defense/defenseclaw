@@ -177,7 +177,10 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 	if w.Code != 200 || !st.Enabled || st.Available || st.Reason == "" {
 		t.Fatalf("status = %d %+v", w.Code, st)
 	}
-	if snap := sc.health.Snapshot(); snap.Sandbox == nil || snap.Sandbox.State != StateRunning {
-		t.Fatalf("sandbox health = %+v", snap.Sandbox)
-	}
+	// The listeners run; the missing OpenShell gateway degrades the
+	// subsystem and says why.
+	eventuallyTrue(t, func() bool {
+		snap := sc.health.Snapshot()
+		return snap.Sandbox != nil && snap.Sandbox.State == StateDegraded && strings.Contains(snap.Sandbox.LastError, "openshell:")
+	})
 }

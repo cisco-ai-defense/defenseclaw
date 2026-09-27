@@ -59,6 +59,22 @@ type sandboxRuntime struct {
 	proxy      *egress.Proxy
 	egressAddr string
 	health     *SidecarHealth
+
+	// report marks one part of the subsystem healthy (nil) or not; run
+	// installs it.
+	reportMu sync.Mutex
+	report   func(part string, err error)
+}
+
+// gatewayState reports the OpenShell gateway connection as the "openshell"
+// part of the sandbox subsystem health.
+func (rt *sandboxRuntime) gatewayState(err error) {
+	rt.reportMu.Lock()
+	report := rt.report
+	rt.reportMu.Unlock()
+	if report != nil {
+		report("openshell", err)
+	}
 }
 
 // sandboxRecorder returns the process's single sandbox telemetry recorder
@@ -100,6 +116,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	ingressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(ingressPort))
 	egressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(egressPort))
 	inflight := sandboxauth.NewInFlight(nil)
+	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: s.health}
 
 	mgr, err := manager.New(manager.Options{
 		DataDir: dataDir,
@@ -124,6 +141,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		IngressAddr:        ingressAddr,
 		EgressAddr:         egressAddr,
 		DefenseClawVersion: manager.ImageVersion(),
+		OnGateway:          rt.gatewayState,
 	})
 	if err != nil {
 		return nil, err
@@ -153,7 +171,8 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	}
 	mgr.AttachProxy(proxy)
 	api.SetSandboxController(mgr)
-	return &sandboxRuntime{api: api, manager: mgr, proxy: proxy, egressAddr: egressAddr, health: s.health}, nil
+	rt.manager, rt.proxy = mgr, proxy
+	return rt, nil
 }
 
 // run serves the API together with the sandbox listeners and manager until
@@ -187,6 +206,14 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 		rt.health.SetSandbox(StateDegraded, strings.Join(parts, "; "), nil)
 	}
 	report("", nil)
+	rt.reportMu.Lock()
+	rt.report = report
+	rt.reportMu.Unlock()
+	defer func() {
+		rt.reportMu.Lock()
+		rt.report = nil
+		rt.reportMu.Unlock()
+	}()
 
 	wg.Add(3)
 	go func() {
