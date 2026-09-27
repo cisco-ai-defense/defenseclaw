@@ -104,6 +104,10 @@ func TestCreateMountMode(t *testing.T) {
 	if env["MY_FLAG"] != "1" || env["NODE_USE_ENV_PROXY"] != "1" {
 		t.Fatalf("env = %v", env)
 	}
+	// OpenShell drops *_PROXY variables; the launchers export these.
+	if env[openshell.EnvEgressURL] != env["HTTPS_PROXY"] || env[openshell.EnvEgressBypass] != env["NO_PROXY"] {
+		t.Fatalf("egress aliases = %q %q", env[openshell.EnvEgressURL], env[openshell.EnvEgressBypass])
+	}
 	if _, secret := env["ANTHROPIC_API_KEY"]; secret {
 		t.Fatal("the LLM key is in the plain environment")
 	}

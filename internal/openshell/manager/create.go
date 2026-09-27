@@ -342,8 +342,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		noProxy = append(noProxy, c.binding.Host)
 	}
 	if len(noProxy) > 0 {
-		joined := joinNoProxy(envOut["NO_PROXY"], noProxy)
-		envOut["NO_PROXY"], envOut["no_proxy"] = joined, joined
+		harness.SetNoProxy(envOut, joinNoProxy(envOut["NO_PROXY"], noProxy))
 	}
 	for k, v := range in.req.Env {
 		envOut[k] = v

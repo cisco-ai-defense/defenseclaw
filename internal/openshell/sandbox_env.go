@@ -31,4 +31,11 @@ const (
 	EnvSandboxID = "DEFENSECLAW_SANDBOX_ID"
 	// EnvSandboxName is the DefenseClaw sandbox name.
 	EnvSandboxName = "DEFENSECLAW_SANDBOX_NAME"
+	// EnvEgressURL and EnvEgressBypass carry the DefenseClaw egress proxy
+	// URL and its bypass list. The OpenShell 0.1.1 supervisor drops every
+	// *_PROXY variable (and NODE_USE_ENV_PROXY) from the sandbox
+	// environment, so the in-image harness launchers export HTTPS_PROXY,
+	// HTTP_PROXY, NO_PROXY and NODE_USE_ENV_PROXY from these.
+	EnvEgressURL    = "DEFENSECLAW_EGRESS_URL"
+	EnvEgressBypass = "DEFENSECLAW_EGRESS_BYPASS"
 )

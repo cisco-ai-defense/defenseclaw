@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -283,13 +284,41 @@ func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 			env[key] = opts.EgressProxyURL
 		}
 		env["NODE_USE_ENV_PROXY"] = "1"
+		env[openshell.EnvEgressURL] = opts.EgressProxyURL
 	}
 	sort.Strings(noProxy)
-	joined := strings.Join(dedupe(noProxy), ",")
-	env["NO_PROXY"] = joined
-	env["no_proxy"] = joined
+	SetNoProxy(env, strings.Join(dedupe(noProxy), ","))
 	return env, nil
 }
+
+// SetNoProxy sets the proxy bypass list in every spelling a sandbox needs:
+// NO_PROXY and no_proxy for runtimes that read them, and
+// openshell.EnvEgressBypass, which survives OpenShell's environment filter
+// for the launchers.
+func SetNoProxy(env map[string]string, list string) {
+	env["NO_PROXY"] = list
+	env["no_proxy"] = list
+	env[openshell.EnvEgressBypass] = list
+}
+
+// egressLauncherSnippet exports the DefenseClaw egress proxy for the harness
+// and every tool it runs. OpenShell strips *_PROXY variables from the sandbox
+// environment, so the proxy arrives under names the filter keeps. The proxy
+// is a convenience path, not the boundary: OpenShell refuses direct egress
+// the policy does not allow either way.
+const egressLauncherSnippet = `if [ -n "${DEFENSECLAW_EGRESS_URL:-}" ] && [ -z "${HTTPS_PROXY:-}" ]; then
+  case "$DEFENSECLAW_EGRESS_URL" in
+    http://*[!A-Za-z0-9:@._/-]*) ;;
+    http://*)
+      HTTPS_PROXY="$DEFENSECLAW_EGRESS_URL"; HTTP_PROXY="$DEFENSECLAW_EGRESS_URL"
+      https_proxy="$DEFENSECLAW_EGRESS_URL"; http_proxy="$DEFENSECLAW_EGRESS_URL"
+      NODE_USE_ENV_PROXY=1
+      NO_PROXY="${DEFENSECLAW_EGRESS_BYPASS:-host.openshell.internal}"; no_proxy="$NO_PROXY"
+      export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy
+      ;;
+  esac
+fi
+`
 
 var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 

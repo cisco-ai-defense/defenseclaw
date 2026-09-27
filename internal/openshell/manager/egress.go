@@ -297,7 +297,7 @@ func recoverCredential(sb *openshell.Sandbox, username string) (egress.Credentia
 	if sb == nil {
 		return egress.Credential{}, false
 	}
-	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
+	for _, key := range []string{openshell.EnvEgressURL, "HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
 		raw := sb.Spec.Environment[key]
 		if raw == "" {
 			continue

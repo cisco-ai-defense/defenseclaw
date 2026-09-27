@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -189,6 +190,8 @@ func TestEnv(t *testing.T) {
 		"ANTHROPIC_BASE_URL":                     "https://bedrock-mantle.us-east-1.api.aws/anthropic",
 		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
 		"NO_PROXY":                               "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
+		"DEFENSECLAW_EGRESS_URL":                 "http://b1:secret@host.openshell.internal:18972",
+		"DEFENSECLAW_EGRESS_BYPASS":              "bedrock-mantle.us-east-1.api.aws,host.openshell.internal",
 	}
 	for key, value := range want {
 		if env[key] != value {
@@ -340,6 +343,57 @@ func TestCodexLauncherAddsRuntimeSettings(t *testing.T) {
 		// Trust entries are written only under /work or /sandbox.
 		if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); err == nil {
 			t.Fatal("trusted a directory outside /work and /sandbox")
+		}
+	}
+}
+
+// TestLaunchersExportEgressProxy pins that the launchers restore the proxy
+// variables OpenShell strips from the sandbox environment, and only from a
+// well-formed http:// URL.
+func TestLaunchersExportEgressProxy(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	const proxy = "http://dcx-0123456789abcdef:0123abcd@host.openshell.internal:18972"
+	for _, tc := range []struct {
+		spec   *Spec
+		binary string
+	}{{ClaudeCode, "/usr/local/bin/claude"}, {Codex, "/usr/local/bin/codex"}} {
+		dir := t.TempDir()
+		record := filepath.Join(dir, "record")
+		stub := filepath.Join(dir, "stub")
+		body := "#!/bin/bash\nprintf '%s|%s|%s|%s|%s\\n' \"${HTTPS_PROXY:-}\" \"${http_proxy:-}\" \"${NO_PROXY:-}\" \"${no_proxy:-}\" \"${NODE_USE_ENV_PROXY:-}\" >>" + record + "\n"
+		if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		launcher := filepath.Join(dir, "launch")
+		if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(tc.spec.Launcher().Data), tc.binary, stub)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run := func(env ...string) string {
+			t.Helper()
+			_ = os.Remove(record)
+			cmd := exec.Command(launcher, "exec", "hi")
+			cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + dir}, env...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s launcher: %v\n%s", tc.spec.Name, err, out)
+			}
+			got, _ := os.ReadFile(record)
+			return strings.TrimSpace(string(got))
+		}
+		bypass := "api.anthropic.com,host.openshell.internal"
+		if got, want := run(openshell.EnvEgressURL+"="+proxy, openshell.EnvEgressBypass+"="+bypass),
+			proxy+"|"+proxy+"|"+bypass+"|"+bypass+"|1"; got != want {
+			t.Fatalf("%s exported %q, want %q", tc.spec.Name, got, want)
+		}
+		if got := run(openshell.EnvEgressURL + "=http://x y@host:1"); got != "||||" {
+			t.Fatalf("%s exported a malformed proxy: %q", tc.spec.Name, got)
+		}
+		if got := run("HTTPS_PROXY=http://already:set@h:1", openshell.EnvEgressURL+"="+proxy); !strings.HasPrefix(got, "http://already:set@h:1|") {
+			t.Fatalf("%s overrode an existing proxy: %q", tc.spec.Name, got)
+		}
+		if got := run(); got != "||||" {
+			t.Fatalf("%s exported a proxy without one: %q", tc.spec.Name, got)
 		}
 	}
 }

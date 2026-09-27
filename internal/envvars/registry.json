@@ -3580,6 +3580,52 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_EGRESS_URL",
+      "category": "hook_internal",
+      "purpose": "DefenseClaw egress proxy URL (http://<per-sandbox credential>@host.openshell.internal:<egress_port>) set inside every open or balanced sandbox. OpenShell 0.1.1 drops *_PROXY variables from the sandbox environment, so the in-image harness launchers export HTTPS_PROXY, HTTP_PROXY and NODE_USE_ENV_PROXY from it.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "http:// proxy URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env sets it; the harness launchers export the proxy variables from it"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_EGRESS_BYPASS",
+      "category": "hook_internal",
+      "purpose": "Comma-separated hosts that bypass the DefenseClaw egress proxy inside a sandbox (the hook ingress and credentialed provider hosts, where OpenShell injects credentials). The harness launchers export NO_PROXY from it.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "comma-separated host list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "SetNoProxy sets it with NO_PROXY; the harness launchers export NO_PROXY from it"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_SANDBOX_TOKEN",
       "category": "credential",
       "purpose": "Per-sandbox binding token the sandbox hooks present to the DefenseClaw hook ingress. Delivered as an OpenShell provider credential by default (openshell.token_delivery: provider), so the agent only ever sees a revision-scoped placeholder that the supervisor substitutes at the ingress endpoint. Authorizes only that sandbox's own hook routes; revoked on delete and rotated on start.",

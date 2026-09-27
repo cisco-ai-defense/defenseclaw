@@ -108,11 +108,12 @@ var Codex = register(&Spec{
 const CodexLauncherPath = LauncherDir + "/codex-launch"
 
 const codexLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v1
+# defenseclaw-sandbox-launcher v2
 # DefenseClaw Codex launcher (OpenShell sandbox images, root-owned). Adds the
 # runtime-only settings that cannot live in static configuration, then execs
 # the pinned Codex binary with the caller's arguments.
 set -u
+` + egressLauncherSnippet + `
 if [ -z "${CODEX_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
   CODEX_API_KEY="$OPENAI_API_KEY"
   export CODEX_API_KEY
