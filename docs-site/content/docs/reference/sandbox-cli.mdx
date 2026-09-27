@@ -312,7 +312,9 @@ failed), so they aren't lost.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
-another one instead. Inside a sandbox, `sandbox run <harness>` runs the
+another one instead. Only one sandbox can mount a folder live, so while
+any sandbox that mounts the folder exists (even stopped), a new live run
+there is refused: use `--copy`, or delete the other sandbox first. Inside a sandbox, `sandbox run <harness>` runs the
 harness directly.
 
 ```bash
@@ -490,7 +492,13 @@ This command has no flags.
 ### `sandbox start`
 
 Starts a stopped sandbox as a new session. A mounted project gets a fresh
-snapshot unless you pass `--no-snapshot`. Attach to it with `connect`.
+snapshot only when nothing would be lost: there is no snapshot yet, the last
+one was undone, or the folder hasn't changed since it. If an earlier
+session's changes are still in the folder, the old snapshot is kept, so
+`undo` can still revert them, and the activity feed says so.
+`--new-snapshot` accepts those changes and takes a fresh snapshot;
+`--no-snapshot` always keeps the old one. A sandbox that is already running
+is refused. Attach to it with `connect`.
 
 ```bash
 defenseclaw sandbox start myapp-7f3a
@@ -499,6 +507,7 @@ defenseclaw sandbox start myapp-7f3a
 {/* AUTOGEN-BEGIN: sandbox-flags start */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--new-snapshot` | switch |  | Take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them). |
 | `--no-snapshot` | switch |  | Keep the previous session's snapshot instead of taking a new one. |
 {/* AUTOGEN-END: sandbox-flags */}
 

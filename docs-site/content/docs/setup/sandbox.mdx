@@ -284,7 +284,10 @@ defenseclaw sandbox run codex --prompt "fix the failing tests"
 
 If a sandbox already holds this folder for the same harness, an
 interactive `run` without `--name` asks whether to resume it. `--new`
-always starts a new sandbox.
+starts a new sandbox instead, but a second sandbox can't mount the folder
+live while the first one exists, even stopped: add `--copy`, or delete the
+old sandbox first. The same applies to a run of another harness in a folder
+a kept sandbox mounts.
 
 ## During the session
 
@@ -606,13 +609,18 @@ without git has no branches, so use `--apply` or `--patch-out` there.
 copy-mode sandbox again.
 
 Copy mode is also where a project that cannot be mounted safely ends up.
-`run` refuses to mount a folder whose git state cannot be protected in place
-(for example a linked worktree, `.git` as a symbolic link, or a git
-directory outside the folder) and tells you to use `--copy`.
+When a folder's git state cannot be protected in place (for example a
+linked worktree, `.git` as a symbolic link, or a git directory outside the
+folder), `run` says why and starts the sandbox in copy mode, as if you had
+passed `--copy`.
 
 ### Run agents in parallel
 
-Give each run its own name and its own copy:
+Only one sandbox at a time can mount a folder live, because `undo`,
+`review` and the end-of-session diff cover the whole folder. While a
+sandbox exists that mounts the folder (running or kept), a second live run
+on the same folder, or on one inside or around it, is refused with a hint
+to use `--copy` or delete the other sandbox. Give each parallel run its own name and its own copy:
 
 ```bash
 defenseclaw sandbox run claude --copy --name fix-tests
@@ -859,10 +867,10 @@ dc-claude-myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 
 
 | Command | What it does |
 | --- | --- |
-| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot), attach the harness, and end the session as `run` does. `--shell` opens a shell instead. |
+| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
 | `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. |
-| `defenseclaw sandbox start <name>` | Start a stopped sandbox with a fresh snapshot (`--no-snapshot` keeps the previous one). |
+| `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder, in which case the old snapshot is kept so `undo` still reverts them; `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
 | `defenseclaw sandbox delete <name>` | Delete sandboxes with their credentials and, unless `--keep-snapshot`, their undo snapshot. |
 | `defenseclaw sandbox status` | The sandbox subsystem: OpenShell, the gateway, the listeners, the policy, and how many sandboxes run. With a name, one sandbox in detail. |
 

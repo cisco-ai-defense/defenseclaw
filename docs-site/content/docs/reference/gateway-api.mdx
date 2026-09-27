@@ -600,7 +600,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
 | `DELETE` | `/api/v1/sandbox/sandboxes/{name}` | Optional `{"keep_snapshot": bool}` | `DeleteResponse`: `name`, `deleted`, the removed `providers`, `warnings` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/stop` | Optional `{}` | `Sandbox` |
-| `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool}` | `Sandbox` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool, "new_snapshot": bool}`; `409 conflict` when the sandbox is already running | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/undo` | Optional `{"preview", "keep_refs", "stop", "restart"}` (all bool) | `UndoResponse`: the workspace `result`, whether it `stopped` and `restarted` the sandbox, a `summary`, and a `review` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, and the `diff` when asked |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
@@ -734,7 +734,8 @@ starts with "blocked by your organization's DefenseClaw policy".
 | 403 | `admin_violation` | `openshell.admin` refused the request. |
 | 403 | `policy_violation` | The pack, the profile, or a DefenseClaw invariant refused it. |
 | 404 | `not_found` | No such sandbox, approval, or route. |
-| 409 | `conflict` | The sandbox exists already or is in the wrong phase. |
+| 409 | `conflict` | The sandbox exists already or is in the wrong phase, another sandbox already mounts the folder (or one inside or around it) live, or an undo would revert a folder another running sandbox mounts. |
+| 409 | `needs_copy` | The project cannot be mounted live (a linked worktree, `.git` as a symbolic link, or a git directory outside the folder); `detail` says why. `sandbox run` then creates the sandbox in copy mode. |
 | 409 | `image_unavailable` | No hook-checked harness image, and building one was refused or failed. |
 | 422 | `policy_rejected` | OpenShell rejected the sandbox configuration. |
 | 429 | `unavailable` | Too many activity streams are open. |
