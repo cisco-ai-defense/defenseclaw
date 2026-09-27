@@ -247,6 +247,22 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 	}
 }
 
+// ReadUserMCPServersForConnector returns a sandbox harness's user-scope MCP
+// servers only: neither the workspace-local registry nor a project's
+// (.mcp.json, .codex/config.toml). A sandbox brings the user's own servers
+// along; a repository's servers are governed by the sandbox pack's
+// mcp.project_servers. Only claudecode and codex run in sandboxes.
+func ReadUserMCPServersForConnector(connector string) ([]MCPServerEntry, error) {
+	switch normalizeConnectorKey(connector) {
+	case "claudecode":
+		return readMCPServersClaudeCode("")
+	case "codex":
+		return readMCPServersCodex("")
+	default:
+		return nil, fmt.Errorf("no user-scope MCP inventory for connector %q", connector)
+	}
+}
+
 func readMCPServersOpenClaw(configFile string) ([]MCPServerEntry, error) {
 	entries, err := readMCPServersViaCLI()
 	if err == nil {

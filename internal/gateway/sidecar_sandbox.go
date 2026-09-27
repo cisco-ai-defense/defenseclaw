@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -117,6 +118,10 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	egressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(egressPort))
 	inflight := sandboxauth.NewInFlight(nil)
 	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: s.health}
+	mcp := &sandboxMCPInventory{config: s.currentConfig}
+	if api.store != nil {
+		mcp.policy = enforce.NewPolicyEngine(api.store)
+	}
 
 	mgr, err := manager.New(manager.Options{
 		DataDir: dataDir,
@@ -131,6 +136,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 			Docker: image.CLI{}, Store: images, Log: io.Discard,
 		}},
 		Profiles:           manager.CLIProfileImporter{Binary: cfg.OpenShell.EffectiveBinary()},
+		MCP:                mcp,
 		Telemetry:          s.sandboxTelemetry(),
 		Persist:            sandboxConfigPersister{api: api},
 		Quiesce:            inflight,
