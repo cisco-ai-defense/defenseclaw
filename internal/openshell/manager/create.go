@@ -480,9 +480,8 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	b.rec.ID = sb.ID
 	b.sb = sb
 	b.creating = false
-	rec = b.rec
 	m.mu.Unlock()
-	if err := m.records.save(&rec); err != nil {
+	if err := m.saveRecord(b); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 	}
 	m.recordMountTelemetry(ctx, b, plan, !in.req.NoSnapshot)
@@ -695,7 +694,7 @@ func (m *Manager) release(name string, b *box) {
 		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
-	_ = m.records.remove(name)
+	_ = m.removeRecord(b)
 }
 
 func realProject(p string) (string, error) {

@@ -242,12 +242,12 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		}
 		m.mu.Lock()
 		if !slices.Contains(b.rec.Unblocks, host) {
-			b.rec.Unblocks = append(b.rec.Unblocks, host)
+			b.rec.Unblocks = append(slices.Clip(b.rec.Unblocks), host)
 		}
-		rec := b.rec
+		name := b.rec.Name
 		m.mu.Unlock()
-		if err := m.records.save(&rec); err != nil {
-			m.logf("save unblock of %s: %v", rec.Name, err)
+		if err := m.saveRecord(b); err != nil {
+			m.logf("save unblock of %s: %v", name, err)
 		} else {
 			resp.Persisted = true
 		}

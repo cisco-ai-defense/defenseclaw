@@ -127,9 +127,8 @@ func (m *Manager) saveCursor(b *box, cursor string) error {
 		return nil
 	}
 	b.rec.Cursor = cursor
-	rec := b.rec
 	m.mu.Unlock()
-	return m.records.save(&rec)
+	return m.saveRecord(b)
 }
 
 // handleEvent maps one WatchSandbox event onto telemetry, the feed and

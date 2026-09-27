@@ -129,6 +129,8 @@ type record struct {
 
 type recordStore struct {
 	dir string
+	// beforeWrite, when set (tests), runs before each record is written.
+	beforeWrite func(name string)
 }
 
 func newRecordStore(dataDir string) recordStore {
@@ -151,6 +153,9 @@ func (s recordStore) save(r *record) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
+	}
+	if s.beforeWrite != nil {
+		s.beforeWrite(r.Name)
 	}
 	return safefile.WritePrivate(p, append(data, '\n'))
 }

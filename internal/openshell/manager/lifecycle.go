@@ -338,9 +338,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		m.takeGuardBaseline(ctx, &rec)
 		m.mu.Lock()
 		b.rec.Guard = rec.Guard
-		saved := b.rec
 		m.mu.Unlock()
-		if err := m.records.save(&saved); err != nil {
+		if err := m.saveRecord(b); err != nil {
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
@@ -494,7 +493,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 		warn(err)
 	}
 	warn(m.removeRunConfig(rec.Name))
-	warn(m.records.remove(rec.Name))
+	warn(m.removeRecord(b))
 	return providers, warnings
 }
 

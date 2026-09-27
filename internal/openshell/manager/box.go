@@ -88,6 +88,43 @@ type box struct {
 	// triageMu serializes draft polls of this sandbox. It is taken before
 	// Manager.mu, never under it.
 	triageMu sync.Mutex
+
+	// saveMu serializes writes of rec to disk (saveRecord, removeRecord),
+	// so a slower writer never replaces a newer record with an older copy.
+	// It is taken before Manager.mu, never under it. dropped, guarded by
+	// saveMu, is set once the record file is removed: nothing writes it
+	// again.
+	saveMu  sync.Mutex
+	dropped bool
+}
+
+// saveRecord writes the box's record as it is now. Writers change b.rec
+// under Manager.mu and then call it; the copy is taken under the box's save
+// lock, so concurrent writers leave the newest record on disk. Callers must
+// not hold Manager.mu.
+func (m *Manager) saveRecord(b *box) error {
+	b.saveMu.Lock()
+	defer b.saveMu.Unlock()
+	if b.dropped {
+		return nil
+	}
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	return m.records.save(&rec)
+}
+
+// removeRecord deletes the box's record file for good: later saves of the
+// box are dropped, so a writer that raced the removal cannot bring the
+// record of a deleted sandbox back. Callers must not hold Manager.mu.
+func (m *Manager) removeRecord(b *box) error {
+	b.saveMu.Lock()
+	defer b.saveMu.Unlock()
+	b.dropped = true
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	return m.records.remove(name)
 }
 
 type hookStats struct {
@@ -183,7 +220,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.logf("lifecycle telemetry for %s: %v", rec.Name, err)
 	}
 	if phase != audit.SandboxPhaseDeleted {
-		_ = m.records.save(&rec)
+		_ = m.saveRecord(b)
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{
 		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),

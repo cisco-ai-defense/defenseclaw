@@ -139,9 +139,8 @@ func (m *Manager) guardLoop(ctx context.Context, b *box) {
 			m.takeGuardBaseline(ctx, &rec)
 			m.mu.Lock()
 			b.rec.Guard = rec.Guard
-			saved := b.rec
 			m.mu.Unlock()
-			_ = m.records.save(&saved)
+			_ = m.saveRecord(b)
 		}
 		err := m.opts.Guard(ctx, nestguard.Options{
 			Root: rec.Project, Baseline: rec.Guard.Baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
@@ -189,7 +188,7 @@ func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection)
 	rec := b.rec
 	id := b.identity()
 	m.mu.Unlock()
-	if err := m.records.save(&rec); err != nil {
+	if err := m.saveRecord(b); err != nil {
 		m.logf("sandbox %s: save the nested-repository detection: %v", rec.Name, err)
 	}
 	ctx = context.WithoutCancel(ctx)
