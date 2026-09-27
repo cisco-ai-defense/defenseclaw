@@ -85,11 +85,6 @@ authenticated hook route only. OmniGent's separately documented optional
 native source currently authenticates loopback `/v1/{signal}` requests with
 the master gateway token.
 
-A request that carries an OpenShell sandbox binding credential (a `dcsb_`
-value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
-token) gets 401 on every authenticated route of this API, before any other
-check. Those credentials are valid only on the [hook ingress](#hook-ingress).
-
 The token is resolved from one of, in priority order:
 
 1. The env var named by `gateway.token_env` (custom name — operator intent wins)
@@ -104,6 +99,11 @@ already supplies a token. Rotate a locally managed token with
 `defenseclaw setup rotate-token --yes`; that transaction restarts the gateway
 and refreshes active connector credentials. An externally managed custom
 `gateway.token_env` must be rotated by its owning secret system.
+
+A request that carries an OpenShell sandbox binding credential (a `dcsb_`
+value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
+token) gets 401 on every authenticated route of this API, before any other
+check. Those credentials are valid only on the [hook ingress](#hook-ingress).
 
 ### CSRF protection
 

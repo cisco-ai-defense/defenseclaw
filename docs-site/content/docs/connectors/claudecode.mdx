@@ -223,11 +223,11 @@ image:
   `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
   `allowManagedHooksOnly` set. User and project settings cannot add hooks or
   switch DefenseClaw's off.
-- **Checked at build.** Every image build runs Claude Code against a mock
-  model and keeps the image only when every required hook fired and a blocked
-  tool call did not run. It repeats the run with hostile user and project
-  settings planted, including `disableAllHooks`, and rejects the image if any
-  hook stops firing.
+- **Checked before use.** An image counts as verified only after Claude Code
+  ran in it against a mock model, every required hook fired, and a blocked
+  tool call did not run. A second run with hostile user and project settings
+  planted, including `disableAllHooks`, must show the same result. Only
+  verified images are selected for use.
 - **Fail closed.** The hook scripts live in root-owned
   `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
   gateway through the [hook ingress](/docs/reference/gateway-api#hook-ingress)

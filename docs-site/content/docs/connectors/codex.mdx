@@ -250,9 +250,9 @@ image. Nothing on your host changes; the files exist only in the image:
   `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
   gateway through the [hook ingress](/docs/reference/gateway-api#hook-ingress)
   with a per-sandbox token, never the host gateway token.
-- **Checked at build.** Every image build runs Codex against a mock model and
-  keeps the image only when every required hook fired and a blocked tool call
-  did not run.
+- **Checked before use.** An image counts as verified only after Codex ran
+  in it against a mock model, every required hook fired, and a blocked tool
+  call did not run. Only verified images are selected for use.
 - **Launch flags.** Codex's own sandbox cannot run inside OpenShell. In
   skip-permissions mode Codex starts with
   `--dangerously-bypass-approvals-and-sandbox`; otherwise it keeps its
