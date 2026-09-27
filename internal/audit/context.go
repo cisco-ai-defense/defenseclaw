@@ -50,10 +50,14 @@ type CorrelationEnvelope struct {
 	// onto Event.Connector via applyEnvelope so every audit surface
 	// (SQLite, sinks, Splunk HEC, OTel logs) can filter by connector.
 	Connector string
-	// SandboxID and SandboxName identify the OpenShell sandbox a hook
-	// request came from. They are stamped only from the authenticated
-	// sandbox binding, never from request headers or payloads, and are empty
-	// for host traffic.
+	// SandboxID and SandboxName identify the OpenShell sandbox whose
+	// binding authenticated the request (the OpenShell sandbox ID and the
+	// DefenseClaw dc-<harness>-<repo>-<rand4> name). They are stamped only
+	// from the authenticated sandbox binding, never from request headers or
+	// payloads, and are empty for host traffic. Sandbox-aware v8 families
+	// such as the hook decision project them onto their correlation.sandbox
+	// attributes. They are never metric labels, and audit rows do not carry
+	// them as columns.
 	SandboxID   string
 	SandboxName string
 }

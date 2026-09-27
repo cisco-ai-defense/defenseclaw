@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,4 +411,108 @@ func assertHookV8MetricPoint(
 		}
 	}
 	t.Errorf("metric point attributes=%v value=%v not found in %+v", wantAttributes, wantValue, points)
+}
+
+func TestHookDecisionV8CarriesSandboxBindingCorrelation(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		SessionID: "session-sandbox-1", SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33",
+		SandboxName: "dc-claudecode-myapp-7f3a",
+	})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-sandbox-1",
+		ToolName: "Bash",
+	}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, requests := capture.snapshot()
+		if len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 && hookModelV8MetricPointCount(
+			requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations,
+		) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	if len(logs) != 1 {
+		t.Fatalf("generated hook decision logs=%d want=1", len(logs))
+	}
+	var logWire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &logWire); err != nil {
+		t.Fatalf("decode generated hook decision body: %v", err)
+	}
+	for key, want := range map[string]string{
+		"defenseclaw.sandbox.id":   "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33",
+		"defenseclaw.sandbox.name": "dc-claudecode-myapp-7f3a",
+	} {
+		if got, _ := logWire.Body[key].(string); got != want {
+			t.Errorf("generated hook decision %s=%q want=%q body=%v", key, got, want, logWire.Body)
+		}
+	}
+
+	// Sandbox identities are high-cardinality log attributes only; no hook
+	// decision metric may carry them as a label.
+	_, requests := capture.snapshot()
+	if hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) < 1 {
+		t.Fatal("hook decision metrics were not exported")
+	}
+	for _, instrument := range []string{
+		observability.TelemetryInstrumentDefenseClawConnectorHookInvocations,
+		observability.TelemetryInstrumentDefenseClawConnectorHookOutcome,
+		observability.TelemetryInstrumentDefenseClawInspectEvaluations,
+	} {
+		for _, point := range hookModelV8MetricPoints(requests, instrument) {
+			for key := range point.attributes {
+				if strings.HasPrefix(key, "defenseclaw.sandbox.") {
+					t.Errorf("metric %s carries sandbox label %s", instrument, key)
+				}
+			}
+		}
+	}
+}
+
+func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
+	cases := []struct {
+		name                 string
+		envelope             audit.CorrelationEnvelope
+		wantID, wantName     string
+		wantIDOK, wantNameOK bool
+	}{
+		{name: "unbound"},
+		{
+			name:     "bound",
+			envelope: audit.CorrelationEnvelope{SandboxID: " sbx-1 ", SandboxName: "dc-codex-app-0a1b"},
+			wantID:   "sbx-1", wantIDOK: true, wantName: "dc-codex-app-0a1b", wantNameOK: true,
+		},
+		{
+			name:     "name without id before the gateway accepted the sandbox",
+			envelope: audit.CorrelationEnvelope{SandboxName: "dc-codex-app-0a1b"},
+			wantName: "dc-codex-app-0a1b", wantNameOK: true,
+		},
+		{
+			name:     "free text is dropped",
+			envelope: audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"},
+		},
+		{
+			name:     "name over the registered bound is dropped",
+			envelope: audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)},
+			wantID:   "sbx-2", wantIDOK: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, name := hookDecisionV8Sandbox(tc.envelope)
+			if got, ok := id.Get(); ok != tc.wantIDOK || got != tc.wantID {
+				t.Errorf("sandbox id=(%q,%v) want (%q,%v)", got, ok, tc.wantID, tc.wantIDOK)
+			}
+			if got, ok := name.Get(); ok != tc.wantNameOK || got != tc.wantName {
+				t.Errorf("sandbox name=(%q,%v) want (%q,%v)", got, ok, tc.wantName, tc.wantNameOK)
+			}
+		})
+	}
 }

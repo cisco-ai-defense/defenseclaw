@@ -44,7 +44,10 @@ plus `creating` (before the gateway accepts the sandbox) and `deleted`.
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | Category `sandbox.<kind>`: OCSF finding, binary drift, tamper attempt, hook silence, large upload |
 
 Hook decisions (`log.compat.hook_decision`) accept the same correlation group
-so a sandboxed hook verdict can be joined to its sandbox.
+so a sandboxed hook verdict can be joined to its sandbox. The gateway fills
+`defenseclaw.sandbox.id` and `defenseclaw.sandbox.name` from the sandbox
+binding that authenticated the hook (`audit.CorrelationEnvelope.SandboxID` and
+`SandboxName`); the hook metrics never carry them.
 
 ## Metrics
 
