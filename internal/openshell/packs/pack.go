@@ -361,7 +361,7 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 		p.Egress.Feeds = v.feeds("egress.feeds", *egress.Feeds)
 	}
 	p.Egress.Block = v.hostGlobs("egress.block", egress.Block)
-	p.Egress.Allow = v.hostGlobs("egress.allow", egress.Allow)
+	p.Egress.Allow = v.allowGlobs("egress.allow", egress.Allow)
 	if egress.Ports == nil {
 		p.Egress.Ports = append([]int(nil), defaultPorts...)
 	} else {
@@ -492,6 +492,19 @@ func (v *validator) hostGlobs(field string, globs []string) []string {
 			continue
 		}
 		out = appendUnique(out, config.NormalizeOpenShellHostGlob(glob))
+	}
+	return out
+}
+
+// allowGlobs is hostGlobs for an allow list, which may not cover every host
+// or a whole public suffix (IsBroadAllowGlob).
+func (v *validator) allowGlobs(field string, globs []string) []string {
+	out := v.hostGlobs(field, globs)
+	for i, glob := range globs {
+		if IsBroadAllowGlob(glob) {
+			v.fail(fmt.Sprintf("%s[%d]", field, i), "invalid_value",
+				"%q covers every host or a whole top-level domain; list the destinations to allow", glob)
+		}
 	}
 	return out
 }

@@ -20,11 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // OpenShellHostAlias is the name a sandbox uses to reach the host.
@@ -38,7 +40,9 @@ const (
 	// destination host (Action.Host), for one sandbox or always.
 	ActionUnblock ActionKind = "unblock"
 	// ActionApprove approves one OpenShell draft proposal for
-	// Action.Host (and Action.Port) once.
+	// Action.Host (and Action.Port) once. Pass Action.Feed: when
+	// openshell.admin.allow_unblock is false, an approval is checked
+	// against the blocklist feeds and refused without a matcher.
 	ActionApprove ActionKind = "approve"
 	// ActionApproveAlways approves a proposal and keeps the rule for
 	// future sandboxes.
@@ -69,6 +73,9 @@ type Action struct {
 	Path string
 	// Harness is the harness to run.
 	Harness string
+	// Feed is the egress proxy's blocklist feed matcher, read by approvals
+	// (see ActionApprove).
+	Feed FeedMatcher
 }
 
 // Allow checks a runtime action against the effective policy. It returns nil
@@ -83,9 +90,9 @@ func (e *Effective) Allow(action Action) error {
 	case ActionUnblock:
 		return e.allowUnblock(action.Host)
 	case ActionApprove:
-		return e.allowApproval("approvals.approve", action.Host, action.Port, false)
+		return e.allowApproval("approvals.approve", action, false)
 	case ActionApproveAlways:
-		return e.allowApproval("approvals.always", action.Host, action.Port, true)
+		return e.allowApproval("approvals.always", action, true)
 	case ActionHostPort:
 		if err := validPort(action.Port); err != nil {
 			return err
@@ -142,30 +149,68 @@ func (e *Effective) allowUnblock(host string) error {
 	return nil
 }
 
-// allowApproval gates an OpenShell draft proposal. Proposals for the host
-// itself (host.openshell.internal, loopback) are host-port requests.
-func (e *Effective) allowApproval(key, host string, port int, always bool) error {
-	host, err := validHost(host)
+// allowApproval gates an OpenShell draft proposal. An approval opens a
+// direct OpenShell rule that bypasses the DefenseClaw egress proxy and its
+// SSRF guard, so it is checked against what the proxy would enforce:
+//   - the administrator's blocklist and allow-only list always apply;
+//   - the host itself (host.openshell.internal, loopback addresses and
+//     names, this machine's name) is a host-port request;
+//   - link-local, cloud metadata, multicast and reserved addresses are
+//     never approved;
+//   - when openshell.admin.allow_unblock is false, a destination on the
+//     block list or a blocklist feed, or a private network address, is
+//     refused too: approving it would lift the proxy's refusal.
+func (e *Effective) allowApproval(key string, action Action, always bool) error {
+	host, err := validHost(action.Host)
 	if err != nil {
 		return err
 	}
+	port := action.Port
 	if port != 0 {
 		if err := validPort(port); err != nil {
 			return err
 		}
 	}
-	if always && isFalse(e.admin.AllowUnblock) {
+	unblockForbidden := isFalse(e.admin.AllowUnblock)
+	if always && unblockForbidden {
 		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
 			"approvals cannot be kept for future sandboxes; approve once instead")
 	}
 	if v := e.Egress.adminVerdict(key, host); v != nil {
 		return v
 	}
-	if isHostLocal(host) {
+	if e.isHostLocal(host) {
 		if port == 0 {
 			return fmt.Errorf("sandbox policy: approving %s needs a port", host)
 		}
 		return e.hostPortAllowed(port)
+	}
+	if neverApproved(host) {
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
+			Message: "DefenseClaw never opens link-local, cloud metadata, multicast or reserved addresses to a sandbox",
+			Detail:  host + " is one of them",
+		}
+	}
+	if !unblockForbidden {
+		return nil
+	}
+	if glob, ok := firstMatch(e.Egress.Block, host); ok {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			host+" matches "+glob+" on the blocklist, and blocked destinations cannot be approved")
+	}
+	if len(e.Egress.Feeds) > 0 {
+		if action.Feed == nil {
+			return fmt.Errorf("sandbox policy: approving %s needs the blocklist feed to check it against", host)
+		}
+		if entry, blocked := action.Feed(e.Egress.Feeds, host); blocked {
+			return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+				host+" is on the blocklist feed ("+entry+"), and blocked destinations cannot be approved")
+		}
+	}
+	if isPrivateAddress(host) {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			host+" is a private network address, which the egress proxy refuses")
 	}
 	return nil
 }
@@ -244,9 +289,11 @@ func (e *Effective) hostPortAllowed(port int) error {
 }
 
 // requiresCopy returns the openshell.admin.require_copy_for pattern that
-// covers path, or "". The path is matched lexically and after resolving
-// symbolic links, and each pattern's literal prefix is matched both as
-// written and resolved, so a symlinked spelling of a covered project still
+// covers a mount of path (path, an ancestor, or a folder below it; see
+// matchProjectPath), or "". An empty path matches nothing: Resolve treats a
+// missing project as covered. The path is matched lexically and after
+// resolving symbolic links, and each pattern's literal prefix is matched both
+// as written and resolved, so a symlinked spelling of a covered project still
 // matches.
 func (e *Effective) requiresCopy(path string) string {
 	if path == "" || len(e.admin.RequireCopyFor) == 0 {
@@ -302,9 +349,9 @@ type FeedMatcher func(feeds []string, host string) (entry string, blocked bool)
 // DecideEgress applies the effective egress posture to a destination host
 // and port (0 skips the port check) in the documented order: admin block,
 // admin allow-only, ports, the deny network mode, block, feeds (unless the
-// host is on the allow list), then the open or allowlist network mode. SSRF
-// protection (loopback, private ranges, metadata, rebinding) is the proxy's
-// job and runs before this.
+// host is on the allow list and openshell.admin.allow_unblock is not false),
+// then the open or allowlist network mode. SSRF protection (loopback, private
+// ranges, metadata, rebinding) is the proxy's job and runs before this.
 func (e *Effective) DecideEgress(host string, port int, feed FeedMatcher) EgressDecision {
 	h := strings.Trim(config.NormalizeOpenShellHostGlob(host), "[]")
 	if e == nil || h == "" || strings.Contains(h, "*") {
@@ -329,7 +376,8 @@ func (e *Effective) DecideEgress(host string, port int, feed FeedMatcher) Egress
 		return EgressDecision{Rule: RuleBlock, Match: glob, Unblockable: unblockable}
 	}
 	allowGlob, allowed := firstMatch(eg.Allow, h)
-	if !allowed && feed != nil && len(eg.Feeds) > 0 {
+	// With unblocking forbidden, nothing lifts a feed entry.
+	if (!allowed || !unblockable) && feed != nil && len(eg.Feeds) > 0 {
 		if entry, blocked := feed(eg.Feeds, h); blocked {
 			return EgressDecision{Rule: RuleFeed, Match: entry, Unblockable: unblockable}
 		}
@@ -375,6 +423,10 @@ func firstMatch(globs []string, host string) (string, bool) {
 	return "", false
 }
 
+// validHost normalizes a destination host (lowercase, no trailing dot or
+// brackets). It refuses globs, and names that end in a number but are not a
+// canonical IP address ("127.1", "2130706433", "0x7f000001"): resolvers read
+// those as IPv4 addresses, which would slip past every textual check.
 func validHost(host string) (string, error) {
 	h := config.NormalizeOpenShellHostGlob(host)
 	if h == "" || h == "*" || strings.HasPrefix(h, "*.") {
@@ -383,7 +435,21 @@ func validHost(host string) (string, error) {
 	if err := config.ValidateOpenShellHostGlob(h); err != nil {
 		return "", fmt.Errorf("sandbox policy: %w", err)
 	}
-	return strings.Trim(h, "[]"), nil
+	h = strings.Trim(h, "[]")
+	if net.ParseIP(h) == nil && endsInNumber(h) {
+		return "", fmt.Errorf("sandbox policy: %q is neither a host name nor a canonical IP address", host)
+	}
+	return h, nil
+}
+
+// endsInNumber reports a host whose last label is decimal or 0x-hex, which
+// URL parsers and inet_aton treat as an IPv4 address.
+func endsInNumber(host string) bool {
+	label := host[strings.LastIndex(host, ".")+1:]
+	if hex, ok := strings.CutPrefix(label, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return label != "" && strings.Trim(label, "0123456789") == ""
 }
 
 func validPort(port int) error {
@@ -393,13 +459,66 @@ func validPort(port int) error {
 	return nil
 }
 
-// isHostLocal reports a destination that is the host itself.
-func isHostLocal(host string) bool {
-	if host == OpenShellHostAlias || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+// hostLocalNames reach the host itself: the OpenShell and Docker host
+// aliases and the loopback names distributions put in /etc/hosts.
+var hostLocalNames = map[string]bool{
+	OpenShellHostAlias:        true,
+	"host.docker.internal":    true,
+	"gateway.docker.internal": true,
+	"localhost":               true,
+	"localhost.localdomain":   true,
+	"localhost4":              true,
+	"localhost4.localdomain4": true,
+	"localhost6":              true,
+	"localhost6.localdomain6": true,
+	"ip6-localhost":           true,
+	"ip6-loopback":            true,
+}
+
+// metadataNames are cloud instance-metadata host names.
+var metadataNames = map[string]bool{
+	"metadata":                   true,
+	"metadata.google.internal":   true,
+	"metadata.goog":              true,
+	"instance-data":              true,
+	"instance-data.ec2.internal": true,
+}
+
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// isHostLocal reports a destination that is the host itself. host is
+// normalized (validHost).
+func (e *Effective) isHostLocal(host string) bool {
+	if hostLocalNames[host] || strings.HasSuffix(host, ".localhost") || containsString(e.hostNames, host) {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// neverApproved reports metadata host names and addresses no sandbox may
+// reach directly even when private networks are allowed: link-local, cloud
+// metadata and task-credential endpoints, multicast and reserved ranges.
+func neverApproved(host string) bool {
+	if metadataNames[host] {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return netguard.V8NetworkSafetyPolicy{AllowPrivateNetworks: true, AllowCGNAT: true}.ValidateIP(ip) != nil
+}
+
+// isPrivateAddress reports an RFC 1918, IPv6 ULA or RFC 6598 (CGNAT)
+// address literal.
+func isPrivateAddress(host string) bool {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsPrivate() || cgnatPrefix.Contains(addr)
 }
 
 func containsNormalized(names []string, harness string) bool {

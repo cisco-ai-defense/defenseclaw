@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	sandboxpolicies "github.com/defenseclaw/defenseclaw/policies/sandbox"
 )
@@ -33,8 +34,11 @@ import (
 // maxCustomPacks bounds how many entries of a pack directory List inspects.
 const maxCustomPacks = 256
 
-// userHomeDir is swapped in tests.
-var userHomeDir = os.UserHomeDir
+// userHomeDir and validateTrustedFile are swapped in tests.
+var (
+	userHomeDir         = os.UserHomeDir
+	validateTrustedFile = managed.ValidateTrustedFilePath
+)
 
 // BuiltinNames lists the built-in packs from loosest to strictest.
 func BuiltinNames() []string {
@@ -93,6 +97,68 @@ func Load(ref, packDir string) (*Pack, error) {
 		return loadNamed(ref, packDir)
 	}
 	return LoadFile(ref)
+}
+
+// LoadTrusted is Load for a pack an administrator relies on (a
+// managed_enterprise openshell.admin.required_pack): before a custom pack is
+// read, its file and every directory above it must be administrator-owned and
+// not writable by other users (managed.ValidateTrustedFilePath), so a user
+// cannot swap the pack the administrator-owned config.yaml names. Built-in
+// packs are embedded and always trusted.
+func LoadTrusted(ref, packDir string) (*Pack, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || IsBuiltin(ref) {
+		return Load(ref, packDir)
+	}
+	file, err := packFilePath(ref, packDir)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(file); errors.Is(err, fs.ErrNotExist) {
+		return nil, packErr(file, "", "not_found", "no such pack file")
+	}
+	if err := validateTrustedFile(file, "sandbox policy pack"); err != nil {
+		return nil, packErr(file, "", "untrusted",
+			"must be an administrator-owned file that other users cannot modify (%v)", err)
+	}
+	pack, err := Load(ref, packDir)
+	if err != nil {
+		return nil, err
+	}
+	if pack.Source != file {
+		return nil, packErr(file, "", "untrusted", "loaded %s instead of the checked file", pack.Source)
+	}
+	return pack, nil
+}
+
+// packFilePath returns the pack.yaml a custom pack reference names, without
+// reading it (see Load).
+func packFilePath(ref, packDir string) (string, error) {
+	var target string
+	if packNamePattern.MatchString(ref) {
+		packDir = strings.TrimSpace(packDir)
+		if packDir == "" {
+			return "", packErr(ref, "", "not_found", "no built-in pack named %q and openshell.pack_dir is not set", ref)
+		}
+		dir, err := expandHome(packDir)
+		if err != nil {
+			return "", packErr(ref, "", "not_found", "openshell.pack_dir %q: %v", packDir, err)
+		}
+		target = filepath.Join(dir, ref)
+	} else {
+		expanded, err := expandHome(ref)
+		if err != nil {
+			return "", packErr(ref, "", "not_found", "%v", err)
+		}
+		if !filepath.IsAbs(expanded) {
+			return "", packErr(ref, "", "relative_path", "pack paths must be absolute (or start with ~/)")
+		}
+		target = filepath.Clean(expanded)
+	}
+	if info, err := os.Lstat(target); err == nil && info.IsDir() {
+		target = filepath.Join(target, PackFileName)
+	}
+	return target, nil
 }
 
 func loadNamed(name, packDir string) (*Pack, error) {

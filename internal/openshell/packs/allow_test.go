@@ -24,7 +24,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// testFeed stands in for the egress proxy's builtin exfiltration feed.
+func testFeed(feeds []string, host string) (string, bool) {
+	if containsString(feeds, FeedBuiltin) && (host == "webhook.site" || host == "raw.githubusercontent.com" ||
+		strings.HasSuffix(host, ".pastebin.com")) {
+		return "exfil:" + host, true
+	}
+	return "", false
+}
+
+func withHostname(t *testing.T, name string) {
+	t.Helper()
+	previous := osHostname
+	osHostname = func() (string, error) { return name, nil }
+	t.Cleanup(func() { osHostname = previous })
+}
+
 func TestAllowActions(t *testing.T) {
+	withHostname(t, "DevBox.corp.example")
 	type outcome struct {
 		constraint string // "" allows; "error" is a plain (non-Violation) refusal
 		fatal      bool
@@ -56,7 +73,49 @@ func TestAllowActions(t *testing.T) {
 		{"unblock a URL", nil, Flags{}, Action{Kind: ActionUnblock, Host: "https://x.example"}, invalid},
 
 		{"approve once", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443, Feed: testFeed}, allowed},
+		{"approve once without a feed matcher", nil, Flags{},
 			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, allowed},
+		{"approve once without a feed matcher when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, invalid},
+		{"approve a blocklisted host", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"paste.example"} }, Flags{},
+			Action{Kind: ActionApprove, Host: "paste.example", Port: 443, Feed: testFeed}, allowed},
+		{"approve a blocklisted host when unblock is off", func(o *config.OpenShellConfig) {
+			o.Egress.Block, o.Admin.AllowUnblock = []string{"paste.example"}, boolPtr(false)
+		}, Flags{}, Action{Kind: ActionApprove, Host: "Paste.Example.", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve a feed host", nil, Flags{}, Action{Kind: ActionApprove, Host: "webhook.site", Port: 443, Feed: testFeed}, allowed},
+		{"approve a feed host when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "webhook.site", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve a feed host with the feed off", func(o *config.OpenShellConfig) { o.Egress.Feed = "none" }, Flags{},
+			Action{Kind: ActionApprove, Host: "webhook.site", Port: 443}, allowed},
+		{"approve a private address", nil, Flags{}, Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432}, allowed},
+		{"approve a private address when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve a CGNAT address when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "100.64.1.2", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve the metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "169.254.169.254", Port: 80}, outcome{constraint: "defenseclaw"}},
+		{"approve a mapped metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "[::ffff:169.254.169.254]", Port: 80}, outcome{constraint: "defenseclaw"}},
+		{"approve the IPv6 metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "fd00:ec2::254", Port: 80}, outcome{constraint: "defenseclaw"}},
+		{"approve the Alibaba metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "100.100.100.200", Port: 80}, outcome{constraint: "defenseclaw"}},
+		{"approve a metadata name", nil, Flags{}, Action{Kind: ActionApprove, Host: "Metadata.Google.Internal", Port: 80}, outcome{constraint: "defenseclaw"}},
+		{"approve a link-local address", nil, Flags{}, Action{Kind: ActionApprove, Host: "fe80::1", Port: 22}, outcome{constraint: "defenseclaw"}},
+		{"approve multicast", nil, Flags{}, Action{Kind: ActionApprove, Host: "224.0.0.251", Port: 5353}, outcome{constraint: "defenseclaw"}},
+		{"approve a short IPv4 spelling", nil, Flags{}, Action{Kind: ActionApprove, Host: "127.1", Port: 18970}, invalid},
+		{"approve a decimal IPv4 spelling", nil, Flags{}, Action{Kind: ActionApprove, Host: "2130706433", Port: 18970}, invalid},
+		{"approve a hex IPv4 spelling", nil, Flags{}, Action{Kind: ActionApprove, Host: "0x7f000001", Port: 18970}, invalid},
+		{"approve an octal IPv4 spelling", nil, Flags{}, Action{Kind: ActionApprove, Host: "0177.0.0.1", Port: 18970}, invalid},
+		{"unblock a short IPv4 spelling", nil, Flags{}, Action{Kind: ActionUnblock, Host: "10.1"}, invalid},
+		{"approve ip6-localhost", nil, Flags{}, Action{Kind: ActionApprove, Host: "ip6-localhost", Port: 18970}, outcome{constraint: "defenseclaw"}},
+		{"approve localhost.localdomain", nil, Flags{}, Action{Kind: ActionApprove, Host: "localhost.localdomain", Port: 18970}, outcome{constraint: "defenseclaw"}},
+		{"approve the Docker host alias", nil, Flags{}, Action{Kind: ActionApprove, Host: "host.docker.internal", Port: OpenShellGatewayPort}, outcome{constraint: "defenseclaw"}},
+		{"approve this machine by name", nil, Flags{}, Action{Kind: ActionApprove, Host: "devbox", Port: 18971}, outcome{constraint: "defenseclaw"}},
+		{"approve this machine by mDNS name", nil, Flags{}, Action{Kind: ActionApprove, Host: "devbox.local", Port: 18972}, outcome{constraint: "defenseclaw"}},
+		{"approve this machine by full name", nil, Flags{}, Action{Kind: ActionApprove, Host: "devbox.corp.example.", Port: 18972}, outcome{constraint: "defenseclaw"}},
+		{"approve a mapped loopback address", nil, Flags{}, Action{Kind: ActionApprove, Host: "::ffff:127.0.0.1", Port: 18970}, outcome{constraint: "defenseclaw"}},
+		{"approve another loopback address with host ports off", func(o *config.OpenShellConfig) { o.Admin.AllowHostPorts = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "127.0.0.2", Port: 5432}, outcome{constraint: "openshell.admin.allow_host_ports"}},
+		{"approve ip6-loopback with host ports off", func(o *config.OpenShellConfig) { o.Admin.AllowHostPorts = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "ip6-loopback", Port: 5432}, outcome{constraint: "openshell.admin.allow_host_ports"}},
 		{"approve an admin-blocked host", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"api.example.com"} }, Flags{},
 			Action{Kind: ActionApprove, Host: "api.example.com", Port: 443}, outcome{constraint: "openshell.admin.egress_block"}},
 		{"approve always", nil, Flags{}, Action{Kind: ActionApproveAlways, Host: "api.example.com", Port: 443}, allowed},
@@ -84,6 +143,12 @@ func TestAllowActions(t *testing.T) {
 			Action{Kind: ActionMount, Path: "/src/app"}, outcome{constraint: "openshell.admin.allow_mount"}},
 		{"mount a copy-only project", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-*"} }, Flags{},
 			Action{Kind: ActionMount, Path: "/src/customer-a/lib"}, outcome{constraint: "openshell.admin.require_copy_for"}},
+		{"mount a parent of a copy-only project", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-acme"} }, Flags{Copy: true},
+			Action{Kind: ActionMount, Path: "/src"}, outcome{constraint: "openshell.admin.require_copy_for"}},
+		{"mount a copy-only project spelled in another case", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-acme"} }, Flags{Copy: true},
+			Action{Kind: ActionMount, Path: "/SRC/Customer-ACME/app"}, outcome{constraint: "openshell.admin.require_copy_for"}},
+		{"mount a sibling of a copy-only project", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-acme"} }, Flags{Copy: true},
+			Action{Kind: ActionMount, Path: "/src/internal"}, allowed},
 		{"mount relative", nil, Flags{}, Action{Kind: ActionMount, Path: "lib"}, invalid},
 
 		{"yolo", nil, Flags{}, Action{Kind: ActionYolo}, allowed},
@@ -155,12 +220,7 @@ func TestAllowMessages(t *testing.T) {
 }
 
 func TestDecideEgress(t *testing.T) {
-	feed := func(feeds []string, host string) (string, bool) {
-		if containsString(feeds, FeedBuiltin) && (host == "webhook.site" || strings.HasSuffix(host, ".pastebin.com")) {
-			return "exfil:" + host, true
-		}
-		return "", false
-	}
+	feed := testFeed
 	for _, tc := range []struct {
 		name        string
 		edit        func(*config.OpenShellConfig)
@@ -201,6 +261,21 @@ func TestDecideEgress(t *testing.T) {
 			"x.pastebin.com", 443, false, RuleFeed, "exfil:x.pastebin.com", true},
 		{"unblock disabled", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
 			"webhook.site", 443, false, RuleFeed, "exfil:webhook.site", false},
+		{"curated allow entry exempts from the feed", nil, Flags{Pack: "balanced"},
+			"raw.githubusercontent.com", 443, true, RuleAllow, "raw.githubusercontent.com", false},
+		{"nothing exempts from the feed when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{Pack: "balanced"},
+			"raw.githubusercontent.com", 443, false, RuleFeed, "exfil:raw.githubusercontent.com", false},
+		{"raised profile uses the curated allowlist", nil, Flags{Profile: "balanced"},
+			"registry.npmjs.org", 443, true, RuleAllow, "registry.npmjs.org", false},
+		{"admin floor uses the curated allowlist", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{},
+			"pypi.org", 443, true, RuleAllow, "pypi.org", false},
+		{"user allow-everything is ignored", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"*", "*.com"} }, Flags{Profile: "balanced"},
+			"example.com", 443, false, RuleNetworkAllowlist, "", true},
+		// The reported bypass: an admin balanced floor, no unblocking, and a
+		// user allow-everything entry.
+		{"floor with a user allow-everything entry", func(o *config.OpenShellConfig) {
+			o.Egress.Allow, o.Admin.MinProfile, o.Admin.AllowUnblock = []string{"*"}, "balanced", boolPtr(false)
+		}, Flags{}, "webhook.site", 443, false, RuleFeed, "exfil:webhook.site", false},
 		{"ip literal", func(o *config.OpenShellConfig) { o.Egress.Block = []string{"2001:db8::1"} }, Flags{},
 			"[2001:db8::1]", 443, false, RuleBlock, "2001:db8::1", true},
 		{"empty host", nil, Flags{}, "", 443, false, RuleInvalid, "", false},

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"golang.org/x/net/publicsuffix"
 )
 
 // MatchHost reports whether host matches a host glob: "*" matches every
@@ -53,14 +54,34 @@ func MatchAnyHost(globs []string, host string) bool {
 	return false
 }
 
+// IsBroadAllowGlob reports an allow-list host glob that covers every host
+// ("*") or a whole public suffix ("*.com", "*.co.uk"). Such an entry turns an
+// allowlist into an open network and exempts whole top-level domains from the
+// blocklist feeds, so packs refuse it and Resolve ignores it.
+func IsBroadAllowGlob(glob string) bool {
+	g := strings.Trim(config.NormalizeOpenShellHostGlob(glob), "[]")
+	if g == "*" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(g, "*.")
+	if !ok || suffix == "" {
+		return false
+	}
+	ps, icann := publicsuffix.PublicSuffix(suffix)
+	return icann && ps == suffix
+}
+
 // matchProjectPath reports whether an admin require_copy_for pattern covers
-// project: the pattern matches the project directory or one of its
-// ancestors. "~/" expands to home, "*" and "?" match within one path
-// segment, and "**" matches any number of segments. A pattern without
-// wildcards therefore covers that directory and everything below it.
-func matchProjectPath(pattern, project, home string) bool {
+// a mount of dir: the pattern matches dir, one of its ancestors, or a path
+// below it (mounting a parent folder exposes the covered one). "~/" expands
+// to home, "*" and "?" match within one path segment, and "**" matches any
+// number of segments, so a pattern without wildcards covers that directory
+// and everything below it. Matching ignores case: a differently cased
+// spelling reaches the same folder on case-insensitive file systems (macOS,
+// Windows), and on case-sensitive ones the error is toward copy mode.
+func matchProjectPath(pattern, dir, home string) bool {
 	pattern = strings.TrimSpace(pattern)
-	if pattern == "" || project == "" {
+	if pattern == "" || dir == "" {
 		return false
 	}
 	if pattern == "~" || strings.HasPrefix(pattern, "~/") {
@@ -69,14 +90,32 @@ func matchProjectPath(pattern, project, home string) bool {
 		}
 		pattern = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(pattern, "~"), "/"))
 	}
-	pat := splitPath(filepath.ToSlash(filepath.Clean(pattern)))
-	proj := splitPath(filepath.ToSlash(filepath.Clean(project)))
-	for n := len(proj); n >= 0; n-- {
-		if matchSegments(pat, proj[:n]) {
+	pat := splitPath(strings.ToLower(filepath.ToSlash(filepath.Clean(pattern))))
+	segments := splitPath(strings.ToLower(filepath.ToSlash(filepath.Clean(dir))))
+	for n := len(segments); n >= 0; n-- {
+		if matchSegments(pat, segments[:n]) {
 			return true
 		}
 	}
-	return false
+	return matchesBelow(pat, segments)
+}
+
+// matchesBelow reports whether pattern can match a path strictly below
+// segments: segments match a prefix of the pattern and pattern segments
+// remain. It errs toward a match, because the caller then requires copy mode.
+func matchesBelow(pattern, segments []string) bool {
+	for i, segment := range segments {
+		if i >= len(pattern) {
+			return false
+		}
+		if pattern[i] == "**" {
+			return true
+		}
+		if ok, err := path.Match(pattern[i], segment); err != nil || !ok {
+			return false
+		}
+	}
+	return len(pattern) > len(segments)
 }
 
 // patternSpellings returns a require_copy_for pattern with "~/" expanded and,

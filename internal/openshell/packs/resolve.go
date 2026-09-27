@@ -19,6 +19,7 @@ package packs
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -56,7 +57,8 @@ type Flags struct {
 	// Harness is the harness to run (claudecode, codex, ...).
 	Harness string
 	// Project is the absolute host path of the launch folder; it is
-	// matched against openshell.admin.require_copy_for.
+	// matched against openshell.admin.require_copy_for. When that list is
+	// set and Project is empty, the workspace falls back to copy mode.
 	Project string
 	// Profile is --profile open|balanced|strict.
 	Profile string
@@ -194,8 +196,9 @@ type Workspace struct {
 // Egress is the effective egress-proxy posture. Effective.DecideEgress
 // applies it to a destination; the decision order is: AdminBlock (never
 // unblockable) → AllowOnly (when set, nothing outside it) → Ports → Block →
-// Feeds (Allow exempts a host from the feeds only) → the network mode (open
-// allows; allowlist needs Allow or AllowOnly; deny refuses).
+// Feeds (Allow exempts a host from the feeds, unless
+// openshell.admin.allow_unblock is false) → the network mode (open allows;
+// allowlist needs Allow or AllowOnly; deny refuses).
 type Egress struct {
 	Feeds         []string `json:"feeds"`
 	Block         []string `json:"block"`
@@ -250,7 +253,9 @@ type Effective struct {
 	admin         config.OpenShellAdminConfig
 	reservedPorts map[int]string
 	home          string
-	settings      map[string]Setting
+	// hostNames are this machine's own names, which reach the host.
+	hostNames []string
+	settings  map[string]Setting
 }
 
 // explainOrder is the order Explain reports settings in.
@@ -297,12 +302,23 @@ type layer struct {
 var layerDefault = layer{SourceDefault, "defenseclaw default"}
 
 type resolver struct {
-	eff        *Effective
-	admin      config.OpenShellAdminConfig
-	packLayer  layer
-	userPack   bool // the pack was selected by the user or a flag
+	eff       *Effective
+	admin     config.OpenShellAdminConfig
+	packLayer layer
+	userPack  bool // the pack was selected by the user or a flag
+	// required: the pack is openshell.admin.required_pack, whose posture
+	// is a floor for user keys and flags.
+	required bool
+	// managed: managed_enterprise, where a custom required pack must be an
+	// administrator-owned file.
+	managed    bool
 	violations []Violation
 }
+
+const requiredPackConstraint = "openshell.admin.required_pack"
+
+// osHostname is swapped in tests.
+var osHostname = os.Hostname
 
 // Resolve computes the effective sandbox posture: the selected pack, then the
 // user's openshell keys, then the run flags, clamped by openshell.admin.
@@ -320,11 +336,13 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	o := cfg.OpenShell
 	home, _ := userHomeDir()
 	r := &resolver{
-		admin: o.Admin,
+		admin:   o.Admin,
+		managed: managed.IsManagedEnterprise(cfg.DeploymentMode),
 		eff: &Effective{
 			Admin:         AdminStatusFor(cfg),
 			admin:         o.Admin,
 			home:          home,
+			hostNames:     ownHostNames(),
 			settings:      make(map[string]Setting),
 			reservedPorts: reservedPorts(cfg),
 		},
@@ -340,7 +358,9 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.resolveYolo(o, flags)
 	r.resolveHarness(flags)
 	r.resolveWorkspace(o, flags)
-	r.resolveEgress(o)
+	if err := r.resolveEgress(o); err != nil {
+		return nil, nil, err
+	}
 	r.resolveMCP(o, flags)
 	if err := r.resolveResources(o, flags); err != nil {
 		return nil, nil, err
@@ -368,6 +388,22 @@ func validateFlags(flags Flags) error {
 		}
 	}
 	return nil
+}
+
+// ownHostNames returns this machine's host name, its first label and the
+// first label's mDNS name, lowercased.
+func ownHostNames() []string {
+	name, err := osHostname()
+	name = config.NormalizeOpenShellHostGlob(name)
+	if err != nil || name == "" {
+		return nil
+	}
+	short, _, _ := strings.Cut(name, ".")
+	names := []string{name}
+	for _, alias := range []string{short, short + ".local"} {
+		names = appendUnique(names, alias)
+	}
+	return names
 }
 
 // reservedPorts are DefenseClaw's own host listeners and the OpenShell
@@ -508,10 +544,21 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 		ref, from = strings.TrimSpace(o.Pack), layer{SourceUser, "openshell.pack"}
 	}
 	if required := strings.TrimSpace(r.admin.RequiredPack); required != "" {
-		pack, err := Load(required, o.PackDir)
+		load := Load
+		if r.managed {
+			// config.yaml is administrator-owned here; a pack file the
+			// user can write must not stand in for it.
+			load = LoadTrusted
+		}
+		pack, err := load(required, o.PackDir)
 		if err != nil {
 			return nil, fmt.Errorf("sandbox policy: openshell.admin.required_pack: %w", err)
 		}
+		if digest := strings.TrimSpace(r.admin.RequiredPackDigest); digest != "" && pack.Digest != digest {
+			return nil, fmt.Errorf("sandbox policy: openshell.admin.required_pack %s has digest %s, not the pinned openshell.admin.required_pack_digest %s",
+				pack.Name, pack.Digest, digest)
+		}
+		r.required = true
 		r.packLayer = layer{SourcePack, "pack " + pack.Name}
 		if ref != "" && ref != required {
 			// Another reference to the same content (a path to the
@@ -520,12 +567,12 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 			if err != nil || chosen.Digest != pack.Digest {
 				r.violate(Violation{
 					Key: "pack", Source: from.source, Attempted: ref, Enforced: pack.Name,
-					Constraint: "openshell.admin.required_pack",
+					Constraint: requiredPackConstraint,
 					Detail:     "your organization requires the " + pack.Name + " sandbox pack",
 				})
 			}
 		}
-		r.setClamped("pack", pack.Name, ref, "openshell.admin.required_pack")
+		r.setClamped("pack", pack.Name, ref, requiredPackConstraint)
 		return pack, nil
 	}
 	pack, err := Load(ref, o.PackDir)
@@ -552,13 +599,22 @@ func (r *resolver) resolveProfile(o config.OpenShellConfig, flags Flags) {
 		profile = config.OpenShellProfileStrict
 	}
 	floor, constraint, detail := -1, "", ""
-	if rank := config.OpenShellProfileRank(r.admin.MinProfile); rank >= 0 {
-		floor, constraint = rank, "openshell.admin.min_profile"
-		detail = "your organization requires at least the " + r.admin.MinProfile + " profile"
+	raise := func(rank int, byConstraint, because string) {
+		if rank > floor {
+			floor, constraint, detail = rank, byConstraint, because
+		}
 	}
-	if balanced := config.OpenShellProfileRank(config.OpenShellProfileBalanced); len(r.admin.EgressAllowOnly) > 0 && balanced > floor {
-		floor, constraint = balanced, "openshell.admin.egress_allow_only"
-		detail = "your organization only allows listed destinations, which needs an allowlist profile"
+	if rank := config.OpenShellProfileRank(r.admin.MinProfile); rank >= 0 {
+		raise(rank, "openshell.admin.min_profile",
+			"your organization requires at least the "+r.admin.MinProfile+" profile")
+	}
+	if len(r.admin.EgressAllowOnly) > 0 {
+		raise(config.OpenShellProfileRank(config.OpenShellProfileBalanced), "openshell.admin.egress_allow_only",
+			"your organization only allows listed destinations, which needs an allowlist profile")
+	}
+	if r.required {
+		raise(config.OpenShellProfileRank(r.eff.Pack.Profile()), requiredPackConstraint,
+			"your organization requires the "+r.eff.Pack.Name+" sandbox pack, whose profile is "+r.eff.Pack.Profile())
 	}
 	if floor >= 0 && config.OpenShellProfileRank(profile) < floor {
 		enforced := profileByRank[floor]
@@ -613,11 +669,16 @@ func (r *resolver) resolveYolo(o config.OpenShellConfig, flags Flags) {
 	case flags.Yolo:
 		yolo, from = true, layer{SourceFlag, "--yolo"}
 	}
-	if yolo && isFalse(r.admin.AllowYolo) {
+	switch {
+	case yolo && isFalse(r.admin.AllowYolo):
 		r.clamp("yolo", "true", "false", from, "openshell.admin.allow_yolo",
 			"skip-permissions mode is disabled; the harness keeps its permission prompts")
 		yolo = false
-	} else {
+	case yolo && r.required && !r.eff.Pack.Harness.Yolo:
+		r.clamp("yolo", "true", "false", from, requiredPackConstraint,
+			"the required "+r.eff.Pack.Name+" sandbox pack keeps the harness permission prompts")
+		yolo = false
+	default:
 		r.set("yolo", strconv.FormatBool(yolo), from)
 	}
 	r.eff.Yolo = yolo
@@ -679,16 +740,30 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	if flags.Copy {
 		mode, from = config.OpenShellWorkdirCopy, layer{SourceFlag, "--copy"}
 	}
-	copyPattern := r.eff.requiresCopy(flags.Project)
+	mount := mode == config.OpenShellWorkdirMount
 	switch {
-	case mode == config.OpenShellWorkdirMount && isFalse(r.admin.AllowMount):
+	case mount && isFalse(r.admin.AllowMount):
 		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.allow_mount",
 			"live project mounts are disabled; the agent works on a copy")
 		mode = config.OpenShellWorkdirCopy
-	case mode == config.OpenShellWorkdirMount && copyPattern != "":
-		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.require_copy_for",
-			"your organization requires copy mode for projects matching "+copyPattern)
+	case mount && r.required && pack.Workspace.Mode == config.OpenShellWorkdirCopy:
+		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, requiredPackConstraint,
+			"the required "+pack.Name+" sandbox pack works on a copy of the project")
 		mode = config.OpenShellWorkdirCopy
+	case mount && len(r.admin.RequireCopyFor) > 0 && flags.Project == "":
+		// Without the project path the require_copy_for check cannot
+		// pass, so fail toward copy mode.
+		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.require_copy_for",
+			"no project folder was given to check against the folders your organization requires copy mode for")
+		mode = config.OpenShellWorkdirCopy
+	case mount:
+		if pattern := r.eff.requiresCopy(flags.Project); pattern != "" {
+			r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.require_copy_for",
+				"your organization requires copy mode for projects matching "+pattern)
+			mode = config.OpenShellWorkdirCopy
+			break
+		}
+		r.set("workdir.mode", mode, from)
 	default:
 		r.set("workdir.mode", mode, from)
 	}
@@ -729,7 +804,7 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	r.set("workdir.on_exit", ws.OnExit, from)
 }
 
-func (r *resolver) resolveEgress(o config.OpenShellConfig) {
+func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	pack := r.eff.Pack
 	eg := &r.eff.Egress
 	unblockForbidden := isFalse(r.admin.AllowUnblock)
@@ -741,11 +816,16 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) {
 	case config.OpenShellFeedNone:
 		feeds, from = []string{}, layer{SourceUser, "openshell.egress.feed"}
 	}
-	if !containsString(feeds, FeedBuiltin) && unblockForbidden {
+	switch {
+	case !containsString(feeds, FeedBuiltin) && unblockForbidden:
 		r.clamp("egress.feeds", listValue(feeds), FeedBuiltin, from, "openshell.admin.allow_unblock",
 			"the exfiltration blocklist feed cannot be turned off")
 		feeds = appendUnique(feeds, FeedBuiltin)
-	} else {
+	case !containsString(feeds, FeedBuiltin) && r.required && containsString(pack.Egress.Feeds, FeedBuiltin):
+		r.clamp("egress.feeds", listValue(feeds), FeedBuiltin, from, requiredPackConstraint,
+			"the required "+pack.Name+" sandbox pack keeps the exfiltration blocklist feed")
+		feeds = appendUnique(feeds, FeedBuiltin)
+	default:
 		r.set("egress.feeds", listValue(feeds), from)
 	}
 	eg.Feeds = feeds
@@ -756,33 +836,126 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) {
 	eg.AdminBlock = normalizeGlobs(r.admin.EgressBlock)
 	r.set("egress.admin_block", listValue(eg.AdminBlock), layer{SourceAdmin, "openshell.admin.egress_block"})
 
-	userAllow := normalizeGlobs(o.Egress.Allow)
-	if len(userAllow) > 0 && unblockForbidden {
-		r.violate(Violation{
-			Key: "egress.allow", Source: SourceUser, Attempted: listValue(userAllow),
-			Enforced: listValue(pack.Egress.Allow), Constraint: "openshell.admin.allow_unblock",
-			Detail: "your own allow entries are ignored; ask your administrator to add destinations",
-		})
-		eg.Allow = append([]string{}, pack.Egress.Allow...)
-		r.setClamped("egress.allow", listValue(eg.Allow), listValue(mergeLists(pack.Egress.Allow, userAllow)),
-			"openshell.admin.allow_unblock")
-	} else {
-		eg.Allow = mergeLists(pack.Egress.Allow, userAllow)
-		r.set("egress.allow", listValue(eg.Allow), mergedLayer(r.packLayer, len(userAllow) > 0, "openshell.egress.allow"))
+	if err := r.resolveAllow(o, unblockForbidden); err != nil {
+		return err
 	}
 	eg.AllowOnly = normalizeGlobs(r.admin.EgressAllowOnly)
 	r.set("egress.allow_only", listValue(eg.AllowOnly), layer{SourceAdmin, "openshell.admin.egress_allow_only"})
 
-	eg.Ports, from = append([]int{}, pack.Egress.Ports...), r.packLayer
-	if len(o.Egress.Ports) > 0 {
-		eg.Ports, from = uniqueInts(o.Egress.Ports), layer{SourceUser, "openshell.egress.ports"}
-	}
-	r.set("egress.ports", joinInts(eg.Ports), from)
+	r.resolvePorts(o)
 	eg.LargeUploadMB, from = pack.Egress.LargeUploadMB, r.packLayer
 	if o.Egress.LargeUploadMB > 0 {
 		eg.LargeUploadMB, from = o.Egress.LargeUploadMB, layer{SourceUser, "openshell.egress.large_upload_mb"}
 	}
 	r.set("egress.large_upload_mb", strconv.Itoa(eg.LargeUploadMB), from)
+	return nil
+}
+
+// resolveAllow builds the egress allow list. DefenseClaw's curated entries
+// (a built-in pack's, and the balanced pack's when the profile asks for an
+// allowlist the pack does not have) and a required pack's entries always
+// apply. Entries of a custom pack the user picked and the user's own entries
+// are lifted refusals, so openshell.admin.allow_unblock: false drops them.
+// Entries that cover every host or a whole public suffix are never used.
+func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool) error {
+	pack := r.eff.Pack
+	eg := &r.eff.Egress
+	const key = "egress.allow"
+
+	eg.Allow = []string{}
+	from := r.packLayer
+	var refused []string
+	if pack.Builtin || r.required {
+		eg.Allow = mergeLists(pack.Egress.Allow)
+	}
+	if r.eff.NetworkMode == NetworkAllowlist && pack.Network.Mode != NetworkAllowlist {
+		curated, err := Builtin(config.OpenShellProfileBalanced)
+		if err != nil {
+			return fmt.Errorf("sandbox policy: curated allowlist: %w", err)
+		}
+		eg.Allow = mergeLists(eg.Allow, curated.Egress.Allow)
+		from = layer{from.source, from.origin + " + the curated allowlist of pack balanced"}
+	}
+	if !pack.Builtin && !r.required && len(pack.Egress.Allow) > 0 {
+		if unblockForbidden {
+			refused = append(refused, pack.Egress.Allow...)
+			r.violate(Violation{
+				Key: key, Source: SourcePack, Attempted: listValue(pack.Egress.Allow), Enforced: listValue(eg.Allow),
+				Constraint: "openshell.admin.allow_unblock",
+				Detail:     "allow entries of a pack you chose are ignored; ask your administrator to add destinations",
+			})
+		} else {
+			eg.Allow = mergeLists(pack.Egress.Allow, eg.Allow)
+		}
+	}
+
+	var userAllow, broad []string
+	for _, glob := range normalizeGlobs(o.Egress.Allow) {
+		if IsBroadAllowGlob(glob) {
+			broad = append(broad, glob)
+			continue
+		}
+		userAllow = append(userAllow, glob)
+	}
+	if len(broad) > 0 {
+		r.violate(Violation{
+			Key: key, Source: SourceUser, Attempted: listValue(broad), Constraint: "defenseclaw",
+			Message: "DefenseClaw ignores allow entries that cover every host or a whole top-level domain: " + key,
+			Detail:  "list the destinations to allow instead",
+		})
+	}
+	switch {
+	case len(userAllow) > 0 && unblockForbidden:
+		refused = append(refused, userAllow...)
+		r.violate(Violation{
+			Key: key, Source: SourceUser, Attempted: listValue(userAllow), Enforced: listValue(eg.Allow),
+			Constraint: "openshell.admin.allow_unblock",
+			Detail:     "your own allow entries are ignored; ask your administrator to add destinations",
+		})
+	case len(userAllow) > 0:
+		eg.Allow = mergeLists(eg.Allow, userAllow)
+		from = mergedLayer(from, true, "openshell.egress.allow")
+	}
+	if len(refused) > 0 {
+		r.setClamped(key, listValue(eg.Allow), listValue(mergeLists(eg.Allow, refused)), "openshell.admin.allow_unblock")
+	} else {
+		r.set(key, listValue(eg.Allow), from)
+	}
+	return nil
+}
+
+// resolvePorts applies openshell.egress.ports, which replaces the pack's
+// list. Over a required pack only the pack's own ports can be kept.
+func (r *resolver) resolvePorts(o config.OpenShellConfig) {
+	pack := r.eff.Pack
+	eg := &r.eff.Egress
+	eg.Ports = append([]int{}, pack.Egress.Ports...)
+	if len(o.Egress.Ports) == 0 {
+		r.set("egress.ports", joinInts(eg.Ports), r.packLayer)
+		return
+	}
+	requested := uniqueInts(o.Egress.Ports)
+	if !r.required {
+		eg.Ports = requested
+		r.set("egress.ports", joinInts(eg.Ports), layer{SourceUser, "openshell.egress.ports"})
+		return
+	}
+	kept := []int{}
+	for _, port := range requested {
+		if containsInt(pack.Egress.Ports, port) {
+			kept = append(kept, port)
+		}
+	}
+	if len(kept) == len(requested) {
+		eg.Ports = kept
+		r.set("egress.ports", joinInts(eg.Ports), layer{SourceUser, "openshell.egress.ports"})
+		return
+	}
+	if len(kept) > 0 {
+		eg.Ports = kept
+	}
+	r.clamp("egress.ports", joinInts(requested), joinInts(eg.Ports), layer{SourceUser, "openshell.egress.ports"},
+		requiredPackConstraint, "the required "+pack.Name+" sandbox pack reaches only ports "+joinInts(pack.Egress.Ports))
 }
 
 func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
@@ -796,8 +969,14 @@ func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
 	if flags.NoMCP {
 		imp, from = false, layer{SourceFlag, "--no-mcp"}
 	}
+	if imp && r.required && !pack.MCP.Import {
+		r.clamp("mcp.import", "true", "false", from, requiredPackConstraint,
+			"the required "+pack.Name+" sandbox pack does not bring MCP servers into the sandbox")
+		imp = false
+	} else {
+		r.set("mcp.import", strconv.FormatBool(imp), from)
+	}
 	m.Import = imp
-	r.set("mcp.import", strconv.FormatBool(imp), from)
 
 	switch {
 	case pack.MCP.HostPorts && isFalse(r.admin.AllowHostPorts):

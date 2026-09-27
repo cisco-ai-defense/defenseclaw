@@ -220,6 +220,9 @@ func TestParseRejects(t *testing.T) {
 		{"unknown feed", replace("network: {mode: open}", "network: {mode: open}\negress: {feeds: [custom]}"), "invalid_value", "egress.feeds[0]"},
 		{"host glob with scheme", replace("network: {mode: open}", "network: {mode: open}\negress: {block: ['https://x.example']}"), "invalid_value", "egress.block[0]"},
 		{"inner wildcard", replace("network: {mode: open}", "network: {mode: open}\negress: {allow: ['a.*.example']}"), "invalid_value", "egress.allow[0]"},
+		{"allow every host", replace("network: {mode: open}", "network: {mode: allowlist}\negress: {allow: [pypi.org, '*']}"), "invalid_value", "egress.allow[1]"},
+		{"allow a top-level domain", replace("network: {mode: open}", "network: {mode: open}\negress: {allow: ['*.COM']}"), "invalid_value", "egress.allow[0]"},
+		{"allow a public suffix", replace("network: {mode: open}", "network: {mode: allowlist}\negress: {allow: ['*.co.uk']}"), "invalid_value", "egress.allow[0]"},
 		{"port zero", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: [0]}"), "invalid_value", "egress.ports[0]"},
 		{"no ports while open", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: []}"), "invalid_value", "egress.ports"},
 		{"negative large upload", replace("network: {mode: open}", "network: {mode: open}\negress: {large_upload_mb: -1}"), "invalid_value", "egress.large_upload_mb"},
@@ -236,6 +239,23 @@ func TestParseRejects(t *testing.T) {
 			_, err := Parse([]byte(tc.doc), "test")
 			wantPackError(t, err, tc.code, tc.field)
 		})
+	}
+}
+
+func TestIsBroadAllowGlob(t *testing.T) {
+	for glob, want := range map[string]bool{
+		"*": true, " * ": true, "*.com": true, "*.CO.UK.": true, "*.io": true,
+		"*.example.com": false, "*.github.io": false, "*.corp": false, "*.internal": false,
+		"com": false, "example.com": false, "203.0.113.7": false, "[2001:db8::1]": false,
+	} {
+		if got := IsBroadAllowGlob(glob); got != want {
+			t.Errorf("IsBroadAllowGlob(%q) = %v, want %v", glob, got, want)
+		}
+	}
+	// Block lists may still name every host.
+	pack := mustParse(t, strings.Replace(minimalPack, "network: {mode: open}", "network: {mode: open}\negress: {block: ['*', '*.com']}", 1))
+	if !reflect.DeepEqual(pack.Egress.Block, []string{"*", "*.com"}) {
+		t.Fatalf("block = %v", pack.Egress.Block)
 	}
 }
 

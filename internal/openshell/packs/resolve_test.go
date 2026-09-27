@@ -593,12 +593,13 @@ func TestResolveRequiredPack(t *testing.T) {
 		t.Fatalf("choosing the required pack: %+v", violations)
 	}
 
-	// required_pack replaces only the pack layer: run flags still apply on
-	// top until min_profile or locked stops them.
+	// The required pack's profile is a floor for flags.
 	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
-	if len(violations) != 0 || eff.Pack.Name != "strict" || eff.Profile != "open" {
-		t.Fatalf("unconstrained --profile over a required pack: violations %+v effective %+v", violations, eff)
+	if v := onlyViolation(t, violations); v.Key != "profile" || v.Source != SourceFlag || v.Constraint != "openshell.admin.required_pack" ||
+		v.Enforced != "strict" || eff.Profile != "strict" || !strings.Contains(v.Detail, "requires the strict sandbox pack") {
+		t.Fatalf("--profile over a required pack: violation %+v effective profile %q", v, eff.Profile)
 	}
+	wantSetting(t, eff, "profile", "strict", SourceAdmin, "openshell.admin.required_pack")
 	cfg.OpenShell.Admin.Locked = []string{"profile"}
 	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
 	if v := onlyViolation(t, violations); v.Key != "profile" || v.Constraint != "openshell.admin.locked" || eff.Profile != "strict" {
@@ -630,6 +631,252 @@ func TestResolveRequiredPack(t *testing.T) {
 	cfg.OpenShell.Admin.RequiredPack = "no-such-pack"
 	if _, _, err := Resolve(cfg, Flags{}); err == nil || !strings.Contains(err.Error(), "openshell.admin.required_pack") {
 		t.Fatalf("missing required pack: %v", err)
+	}
+}
+
+// A required pack's posture is a floor: user keys and flags may tighten it
+// but every loosening is clamped and reported.
+func TestResolveRequiredPackFloors(t *testing.T) {
+	loosen := func(o *config.OpenShellConfig) {
+		o.Admin.RequiredPack = "strict"
+		o.Profile, o.Yolo, o.Workdir.Mode = "open", boolPtr(true), "mount"
+		o.MCP.Import = boolPtr(true)
+		o.Egress.Feed, o.Egress.Ports = "none", []int{22, 443}
+	}
+	eff, violations := mustResolve(t, testConfig(loosen), Flags{})
+	got := map[string]Violation{}
+	for _, v := range violations {
+		if v.Constraint != "openshell.admin.required_pack" || v.Source != SourceUser || !v.Admin() ||
+			v.Message != "blocked by your organization's DefenseClaw policy: "+v.Key {
+			t.Fatalf("violation %+v", v)
+		}
+		got[v.Key] = v
+	}
+	for key, enforced := range map[string]string{
+		"profile": "strict", "yolo": "false", "workdir.mode": "copy", "mcp.import": "false",
+		"egress.feeds": FeedBuiltin, "egress.ports": "443",
+	} {
+		if v, ok := got[key]; !ok || v.Enforced != enforced {
+			t.Fatalf("violation for %s = %+v (all: %+v), want enforced %q", key, v, violations, enforced)
+		}
+	}
+	if len(violations) != 6 {
+		t.Fatalf("violations = %+v", violations)
+	}
+	if eff.Profile != "strict" || eff.NetworkMode != NetworkDeny || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
+		!reflect.DeepEqual(eff.Egress.Feeds, []string{FeedBuiltin}) || !reflect.DeepEqual(eff.Egress.Ports, []int{443}) {
+		t.Fatalf("effective = %+v", eff)
+	}
+	wantSetting(t, eff, "egress.ports", "443", SourceAdmin, "openshell.admin.required_pack")
+
+	// Flags are clamped the same way.
+	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "strict" }),
+		Flags{Profile: "balanced", Yolo: true})
+	if len(violations) != 2 || violations[0].Source != SourceFlag || violations[1].Source != SourceFlag || eff.Profile != "strict" || eff.Yolo {
+		t.Fatalf("violations %+v effective %s yolo %v", violations, eff.Profile, eff.Yolo)
+	}
+
+	// Only ports outside the pack are dropped; with none left the pack's
+	// ports apply.
+	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+		o.Admin.RequiredPack, o.Egress.Ports = "balanced", []int{8443}
+	}), Flags{})
+	if v := onlyViolation(t, violations); v.Key != "egress.ports" || v.Attempted != "8443" || !reflect.DeepEqual(eff.Egress.Ports, []int{80, 443}) {
+		t.Fatalf("violation %+v ports %v", v, eff.Egress.Ports)
+	}
+
+	// Tightening a required pack is not a violation.
+	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+		o.Admin.RequiredPack, o.Egress.Ports, o.Egress.Feed = "balanced", []int{443}, "builtin"
+	}), Flags{Profile: "strict", Safe: true, Copy: true, NoMCP: true})
+	if len(violations) != 0 || eff.Profile != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
+		!reflect.DeepEqual(eff.Egress.Ports, []int{443}) {
+		t.Fatalf("violations %+v effective %+v", violations, eff)
+	}
+	// Without required_pack the same choices over the pack are the user's.
+	if _, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+		loosen(o)
+		o.Admin.RequiredPack, o.Pack = "", "strict"
+	}), Flags{}); len(violations) != 0 {
+		t.Fatalf("violations without required_pack: %+v", violations)
+	}
+}
+
+func TestResolveRequiredPackTrust(t *testing.T) {
+	root := t.TempDir()
+	corpDir := writePack(t, root, "corp", strings.Replace(customPack("corp"), "network: {mode: open}",
+		"network: {mode: open}\negress: {feeds: []}", 1))
+	corpFile := filepath.Join(corpDir, PackFileName)
+	corp, err := LoadFile(corpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedCfg := func(required string) *config.Config {
+		cfg := testConfig(func(o *config.OpenShellConfig) { o.PackDir, o.Admin.RequiredPack = root, required })
+		cfg.DeploymentMode = "managed_enterprise"
+		return cfg
+	}
+
+	// A pack file the user owns cannot stand in for the administrator's.
+	for _, ref := range []string{"corp", corpDir, corpFile} {
+		if _, _, err := Resolve(managedCfg(ref), Flags{}); err == nil ||
+			!strings.Contains(err.Error(), "openshell.admin.required_pack") || !strings.Contains(err.Error(), "administrator-owned") {
+			t.Fatalf("user-owned required pack %q: %v", ref, err)
+		}
+	}
+
+	if _, _, err := Resolve(managedCfg("missing-pack"), Flags{}); err == nil || !strings.Contains(err.Error(), "no such pack file") {
+		t.Fatalf("missing managed required pack: %v", err)
+	}
+
+	var checked []string
+	previous := validateTrustedFile
+	validateTrustedFile = func(path, _ string) error {
+		checked = append(checked, path)
+		return nil
+	}
+	t.Cleanup(func() { validateTrustedFile = previous })
+	eff, _ := mustResolve(t, managedCfg("corp"), Flags{})
+	if eff.Pack.Name != "corp" || !reflect.DeepEqual(checked, []string{corpFile}) {
+		t.Fatalf("pack %s checked %v", eff.Pack.Name, checked)
+	}
+	checked = nil
+	if _, _ = mustResolve(t, managedCfg("strict"), Flags{}); len(checked) != 0 {
+		t.Fatalf("a built-in pack was checked: %v", checked)
+	}
+	// Outside managed_enterprise the user owns config.yaml anyway.
+	cfg := managedCfg("corp")
+	cfg.DeploymentMode = ""
+	if _, _ = mustResolve(t, cfg, Flags{}); len(checked) != 0 {
+		t.Fatalf("advisory mode checked %v", checked)
+	}
+
+	// required_pack_digest pins the content in every mode.
+	for _, mode := range []string{"", "managed_enterprise"} {
+		cfg := managedCfg("corp")
+		cfg.DeploymentMode = mode
+		cfg.OpenShell.Admin.RequiredPackDigest = corp.Digest
+		if eff, _ := mustResolve(t, cfg, Flags{}); eff.Pack.Digest != corp.Digest {
+			t.Fatalf("digest %s", eff.Pack.Digest)
+		}
+		cfg.OpenShell.Admin.RequiredPackDigest = "sha256:" + strings.Repeat("0", 64)
+		if _, _, err := Resolve(cfg, Flags{}); err == nil || !strings.Contains(err.Error(), "required_pack_digest") ||
+			!strings.Contains(err.Error(), corp.Digest) {
+			t.Fatalf("mode %q digest mismatch: %v", mode, err)
+		}
+	}
+}
+
+func TestResolveAllowList(t *testing.T) {
+	root := t.TempDir()
+	writePack(t, root, "team", strings.Replace(customPack("team"), "network: {mode: open}",
+		"network: {mode: allowlist}\negress: {allow: [git.corp.example]}", 1))
+	curated, err := Builtin("balanced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		edit      func(*config.OpenShellConfig)
+		flags     Flags
+		has       []string
+		lacks     []string
+		curated   bool
+		violation string // constraint of the only violation, or ""
+		origin    string
+	}{
+		{"open pack", nil, Flags{}, nil, []string{"pypi.org"}, false, "", "pack open"},
+		{"raised by a flag", nil, Flags{Profile: "balanced"}, nil, nil, true, "", "pack open + the curated allowlist of pack balanced"},
+		{"raised by the admin", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{}, nil, nil, true, "", ""},
+		{"lowered from strict", func(o *config.OpenShellConfig) { o.Pack = "strict" }, Flags{Profile: "balanced"}, nil, nil, true, "", ""},
+		{"raised to strict", nil, Flags{Profile: "strict"}, nil, []string{"pypi.org"}, false, "", ""},
+		{"custom allowlist pack keeps its own list", func(o *config.OpenShellConfig) { o.Pack, o.PackDir = "team", root }, Flags{},
+			[]string{"git.corp.example"}, []string{"pypi.org"}, false, "", "pack team"},
+		{"user entries merge", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"API.Example.com"} }, Flags{Profile: "balanced"},
+			[]string{"api.example.com"}, nil, true, "", "pack open + the curated allowlist of pack balanced + openshell.egress.allow"},
+		{"broad user entries are ignored", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"*", "*.com", "api.example.com"} }, Flags{},
+			[]string{"api.example.com"}, []string{"*", "*.com"}, false, "defenseclaw", ""},
+		{"unblock off drops a chosen custom pack's entries", func(o *config.OpenShellConfig) {
+			o.Pack, o.PackDir, o.Admin.AllowUnblock = "team", root, boolPtr(false)
+		}, Flags{}, nil, []string{"git.corp.example"}, false, "openshell.admin.allow_unblock", ""},
+		{"unblock off keeps a required pack's entries", func(o *config.OpenShellConfig) {
+			o.PackDir, o.Admin.RequiredPack, o.Admin.AllowUnblock = root, "team", boolPtr(false)
+		}, Flags{}, []string{"git.corp.example"}, []string{"pypi.org"}, false, "", "pack team"},
+		{"unblock off keeps the curated entries", func(o *config.OpenShellConfig) {
+			o.Pack, o.Admin.AllowUnblock = "balanced", boolPtr(false)
+		}, Flags{}, nil, nil, true, "", "pack balanced"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, violations := mustResolve(t, testConfig(tc.edit), tc.flags)
+			switch {
+			case tc.violation == "" && len(violations) != 0:
+				t.Fatalf("violations = %+v", violations)
+			case tc.violation != "":
+				if v := onlyViolation(t, violations); v.Constraint != tc.violation || v.Key != "egress.allow" {
+					t.Fatalf("violation = %+v", v)
+				}
+			}
+			for _, host := range tc.has {
+				if !containsString(eff.Egress.Allow, host) {
+					t.Fatalf("allow %v lacks %s", eff.Egress.Allow, host)
+				}
+			}
+			for _, host := range tc.lacks {
+				if containsString(eff.Egress.Allow, host) {
+					t.Fatalf("allow %v has %s", eff.Egress.Allow, host)
+				}
+			}
+			for _, host := range curated.Egress.Allow {
+				if containsString(eff.Egress.Allow, host) != tc.curated {
+					t.Fatalf("curated %s present = %v, want %v (allow %v)", host, !tc.curated, tc.curated, eff.Egress.Allow)
+				}
+			}
+			if tc.origin != "" {
+				if got, _ := eff.Setting("egress.allow"); got.Origin != tc.origin {
+					t.Fatalf("egress.allow provenance = %+v, want origin %q", got, tc.origin)
+				}
+			}
+		})
+	}
+
+	// The reported bypass: a custom allowlist pack that allows every host
+	// no longer loads.
+	writePack(t, root, "wide", strings.Replace(customPack("wide"), "network: {mode: open}",
+		"network: {mode: allowlist}\negress: {allow: ['*'], feeds: []}", 1))
+	_, _, err = Resolve(testConfig(func(o *config.OpenShellConfig) {
+		o.Pack, o.PackDir, o.Admin.MinProfile, o.Admin.AllowUnblock = "wide", root, "balanced", boolPtr(false)
+	}), Flags{})
+	if err == nil || !strings.Contains(err.Error(), "egress.allow[0]") {
+		t.Fatalf("allow-everything pack: %v", err)
+	}
+}
+
+func TestResolveRequireCopyWithoutProject(t *testing.T) {
+	cfg := testConfig(func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-acme"} })
+	eff, violations := mustResolve(t, cfg, Flags{})
+	if len(violations) != 0 || eff.Workspace.Mode != "copy" {
+		t.Fatalf("violations %+v mode %s", violations, eff.Workspace.Mode)
+	}
+	wantSetting(t, eff, "workdir.mode", "copy", SourceAdmin, "openshell.admin.require_copy_for")
+
+	cfg.OpenShell.Workdir.Mode = "mount"
+	eff, violations = mustResolve(t, cfg, Flags{})
+	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.require_copy_for" || v.Source != SourceUser ||
+		!strings.Contains(v.Detail, "no project folder") || eff.Workspace.Mode != "copy" {
+		t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
+	}
+	// The reported bypass: mounting the parent of a covered repository.
+	eff, violations = mustResolve(t, cfg, Flags{Project: "/src"})
+	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.require_copy_for" || eff.Workspace.Mode != "copy" {
+		t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
+	}
+	if err := eff.Allow(Action{Kind: ActionMount, Path: "/src"}); err == nil {
+		t.Fatal("mounting the parent of a copy-only project was allowed")
+	}
+	// Without require_copy_for a missing project changes nothing.
+	eff, violations = mustResolve(t, testConfig(nil), Flags{})
+	if len(violations) != 0 || eff.Workspace.Mode != "mount" {
+		t.Fatalf("violations %+v mode %s", violations, eff.Workspace.Mode)
 	}
 }
 
@@ -803,6 +1050,17 @@ func TestRequireCopyForMatching(t *testing.T) {
 		{"symlinked pattern prefix", filepath.Join(link, "customer-*"), filepath.Join(real, "app"), true},
 		{"unrelated", "/src/acme", "/home/user/acme", false},
 		{"empty pattern", " ", "/src/acme", false},
+		{"parent of a covered dir", "/src/customer-acme", "/src", true},
+		{"root covers everything", "/src/customer-acme", "/", true},
+		{"home above a tilde pattern", "~/work/acme", home, true},
+		{"parent of a wildcard match", "/src/customer-*", "/src", true},
+		{"parent of a double star match", "/src/**/secret", "/src/a", true},
+		{"parent of a double star match at the root", "/**/secret", "/", true},
+		{"sibling of a covered dir", "/src/a/b", "/src/c", false},
+		{"parent of a sibling", "/src/customer-*", "/home", false},
+		{"pattern in another case", "/Src/Customer-ACME", "/src/customer-acme/app", true},
+		{"project in another case", "/src/customer-*", "/SRC/CUSTOMER-X", true},
+		{"parent in another case", "/src/customer-acme", "/SRC", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff := &Effective{home: home, admin: config.OpenShellAdminConfig{RequireCopyFor: []string{tc.pattern}}}
@@ -816,6 +1074,6 @@ func TestRequireCopyForMatching(t *testing.T) {
 		t.Fatal("a tilde pattern without a home directory must not match")
 	}
 	if eff.requiresCopy("") != "" {
-		t.Fatal("an empty project must not match")
+		t.Fatal("an empty path must not match (Resolve handles a missing project)")
 	}
 }
