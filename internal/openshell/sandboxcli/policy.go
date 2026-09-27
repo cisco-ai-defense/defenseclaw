@@ -23,6 +23,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -119,18 +120,64 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	a.line(a.bold("pack "+ex.Pack) + " " + ex.PackDigest + " from " + ex.PackSource)
 	a.line("organization: " + adminText(ex.Admin))
 	rows := make([][]string, 0, len(ex.Settings))
+	shortened := false
 	for _, s := range ex.Settings {
-		val := s.Value
+		val, cut := shortList(s.Value, explainValueWidth)
+		shortened = shortened || cut
 		if s.Requested != "" {
-			val += " (asked for " + s.Requested + ")"
+			req, cut := shortList(s.Requested, explainRequestedWidth)
+			shortened = shortened || cut
+			val += " (asked for " + req + ")"
 		}
 		rows = append(rows, []string{s.Key, val, s.Source, s.Origin})
 	}
 	a.table([]string{"SETTING", "VALUE", "SOURCE", "ORIGIN"}, rows)
+	if shortened {
+		a.note("long values are shortened; " + CommandName + " policy explain -o json prints them in full")
+	}
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 	}
 	return nil
+}
+
+// The VALUE column of `policy explain` is capped so the table fits a
+// terminal: the masks and egress lists would otherwise pad every row to
+// a thousand columns.
+const (
+	explainValueWidth     = 48
+	explainRequestedWidth = 24
+)
+
+// shortList fits v into width runes. A ", "-separated list keeps the
+// entries that fit and says how many it left out; any other value is cut.
+// It reports whether v was shortened.
+func shortList(v string, width int) (string, bool) {
+	if utf8.RuneCountInString(v) <= width {
+		return v, false
+	}
+	items := strings.Split(v, ", ")
+	if len(items) < 2 {
+		return truncate(v, width), true
+	}
+	var kept []string
+	used := 0
+	for i, item := range items {
+		more := fmt.Sprintf(", … (+%d more)", len(items)-i-1)
+		n := utf8.RuneCountInString(item)
+		if len(kept) > 0 {
+			n += 2
+		}
+		if len(kept) > 0 && used+n+utf8.RuneCountInString(more) > width {
+			break
+		}
+		kept = append(kept, item)
+		used += n
+	}
+	if len(kept) == 1 && utf8.RuneCountInString(kept[0]) > width {
+		kept[0] = truncate(kept[0], width)
+	}
+	return strings.Join(kept, ", ") + fmt.Sprintf(", … (+%d more)", len(items)-len(kept)), true
 }
 
 // SuggestOptions are the `policy suggest` flags.

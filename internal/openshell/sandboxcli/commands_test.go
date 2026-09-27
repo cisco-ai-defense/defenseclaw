@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -245,14 +246,20 @@ func TestReviewAndDelete(t *testing.T) {
 	ta.daemon.review = sandboxapi.ReviewResponse{Summary: "8 files changed (+212 −37)",
 		RiskLine: "⚠ Changed files that can run code on your machine: package.json#scripts.postinstall  → review before running",
 		Report: &workspace.ReviewReport{FilesChanged: 8, Flags: []workspace.Flag{{Path: "package.json", Label: "package.json#scripts.postinstall",
-			Severity: workspace.SeverityHigh, Detail: "runs on npm install"}}}}
+			Severity: workspace.SeverityHigh, Detail: "runs on npm install"}},
+			Findings: []workspace.ScanFinding{{Path: "config/dev.env", Scanner: "clawshield-secrets", RuleID: "aws-key",
+				Severity: "critical", Title: "AWS access key", Location: "config/dev.env:3"}}}}
 	if err := ta.Review(context.Background(), ReviewOptions{Name: "box", Diff: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"box: 8 files changed (+212 −37)", "package.json#scripts.postinstall — runs on npm install", "+changed"} {
+	for _, want := range []string{"box: 8 files changed (+212 −37)", "package.json#scripts.postinstall — runs on npm install", "+changed",
+		"  CRITICAL config/dev.env:3 — clawshield-secrets: AWS access key"} {
 		if !strings.Contains(ta.output(), want) {
 			t.Errorf("review lacks %q:\n%s", want, ta.output())
 		}
+	}
+	if strings.Contains(ta.output(), "{Path:") {
+		t.Errorf("review dumps a Go struct:\n%s", ta.output())
 	}
 	if err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"box"}, Yes: true, KeepSnapshot: true}); err != nil {
 		t.Fatal(err)
@@ -520,6 +527,29 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	if out := ta.output(); !strings.Contains(out, "balanced (asked for open)") || !strings.Contains(out, "openshell.admin.min_profile") {
 		t.Fatalf("explain:\n%s", out)
 	}
+	if strings.Contains(ta.output(), "prints them in full") {
+		t.Fatalf("short values were reported as shortened:\n%s", ta.output())
+	}
+	ta.out.Reset()
+	var masks []string
+	for i := range 40 {
+		masks = append(masks, fmt.Sprintf("**/secret-%02d.pem", i))
+	}
+	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "workdir.masks",
+		Value: strings.Join(masks, ", "), Source: "pack", Origin: "pack open"})
+	if err := ta.PolicyExplain(context.Background(), PolicyOptions{Sandbox: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	out := ta.output()
+	for _, line := range strings.Split(out, "\n") {
+		if n := utf8.RuneCountInString(line); n > 120 {
+			t.Errorf("explain line is %d columns wide: %q", n, line)
+		}
+	}
+	if !strings.Contains(out, "**/secret-00.pem, **/secret-01.pem, … (+38 more)") ||
+		!strings.Contains(out, "defenseclaw sandbox policy explain -o json prints them in full") {
+		t.Fatalf("explain did not shorten the long list:\n%s", out)
+	}
 	ta.out.Reset()
 	ta.daemon.events = []sandboxapi.ActivityEvent{
 		{Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"}, {Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"},
@@ -528,7 +558,7 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	if err := ta.PolicySuggest(context.Background(), SuggestOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	out := ta.output()
+	out = ta.output()
 	if !strings.Contains(out, "      - docs.python.org  # 1\n      - registry.npmjs.org  # 2") || !strings.Contains(out, "Blocked (not suggested): webhook.site") {
 		t.Fatalf("suggest:\n%s", out)
 	}

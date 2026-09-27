@@ -329,7 +329,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 }
 
 // summaryLine is "Session ended · 57 tool calls (1 blocked: …) · 23 sites
-// contacted (1 blocked) · 8 files changed (+212 −37)".
+// contacted (1 request blocked) · 8 files changed (+212 −37)". Sites count
+// distinct destinations and blocks count refused requests, so the blocked
+// number is labelled as requests.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
@@ -348,10 +350,10 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	parts = append(parts, tools)
 	sites := after.Egress.Destinations - before.Egress.Destinations
-	sitesBlocked := after.Egress.Blocked - before.Egress.Blocked
+	requestsBlocked := after.Egress.Blocked - before.Egress.Blocked
 	siteText := plural(int64(max(sites, 0)), "site contacted", "sites contacted")
-	if sitesBlocked > 0 {
-		siteText += fmt.Sprintf(" (%d blocked)", sitesBlocked)
+	if requestsBlocked > 0 {
+		siteText += " (" + plural(int64(requestsBlocked), "request blocked", "requests blocked") + ")"
 	}
 	parts = append(parts, siteText)
 	switch {

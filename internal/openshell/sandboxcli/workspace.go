@@ -212,7 +212,7 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 			a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.Severity)), f.Label, f.Detail))
 		}
 		for _, f := range r.Findings {
-			a.line(fmt.Sprintf("  %-8s %s", "FINDING", truncate(fmt.Sprintf("%+v", f), 160)))
+			a.line(findingLine(f))
 		}
 		for _, w := range r.Warnings {
 			a.warn(w)
@@ -434,4 +434,16 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		a.warn(w)
 	}
 	return applied, nil
+}
+
+// findingLine renders a scanner finding like the flag lines above it:
+// "  CRITICAL config/dev.env:3 — clawshield-secrets: AWS access key".
+func findingLine(f workspace.ScanFinding) string {
+	where := firstNonEmpty(f.Location, f.Path)
+	sev := strings.ToUpper(firstNonEmpty(f.Severity, "finding"))
+	text := where + " — " + f.Scanner
+	if title := firstNonEmpty(f.Title, f.RuleID); title != "" {
+		text += ": " + title
+	}
+	return fmt.Sprintf("  %-8s %s", sev, truncate(text, 160))
 }

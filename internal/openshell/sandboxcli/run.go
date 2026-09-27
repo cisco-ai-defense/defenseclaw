@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -493,12 +495,12 @@ func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
 	for _, c := range sbCredentials(o) {
 		row("Secret", c)
 	}
-	if len(o.HostPorts) > 0 {
-		var ports []string
-		for _, p := range o.HostPorts {
-			ports = append(ports, fmt.Sprintf("localhost:%d", p))
+	if ports := bannerHostPorts(sb, o); len(ports) > 0 {
+		var hosts []string
+		for _, p := range ports {
+			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
 		}
-		row("Host", strings.Join(ports, " ")+" reachable from the sandbox")
+		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
 	}
 	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
 		// Servers left behind and a repository's blocked servers arrive as
@@ -517,6 +519,25 @@ func (a *App) banner(sb *sandboxapi.Sandbox, llm llmChoice, o RunOptions) {
 	a.println()
 }
 
+// bannerHostPorts are the --host-port flags the policy accepted: the ones
+// no violation refused (the pack, the organization, or a DefenseClaw port).
+// None is open yet: the sandbox's first connection to one is an ask.
+func bannerHostPorts(sb *sandboxapi.Sandbox, o RunOptions) []int {
+	refused := map[string]bool{}
+	for _, v := range sb.Violations {
+		if v.Key == "mcp.host_ports" {
+			refused[v.Attempted] = true
+		}
+	}
+	var out []int
+	for _, p := range o.HostPorts {
+		if !refused[strconv.Itoa(p)] && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func sbCredentials(o RunOptions) []string {
 	var out []string
 	for _, c := range o.Credentials {
@@ -525,7 +546,7 @@ func sbCredentials(o RunOptions) []string {
 		}
 	}
 	if o.GitHubWrite {
-		out = append(out, "GH_TOKEN/GITHUB_TOKEN → api.github.com only (gh can push and open pull requests)")
+		out = append(out, "GH_TOKEN/GITHUB_TOKEN → api.github.com only (gh can call the GitHub API, for example to open pull requests)")
 	}
 	return out
 }

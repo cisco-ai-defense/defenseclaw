@@ -84,7 +84,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 sites contacted (1 blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 sites contacted (1 request blocked) · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b",
 	} {
@@ -535,5 +535,42 @@ func TestRunCredentialBindingWinsOverLLM(t *testing.T) {
 	req := createRequest(t, ta.daemon)
 	if req.LLM != nil || len(req.Credentials) != 1 || req.Credentials[0].Port != 28921 {
 		t.Fatalf("create request = %+v", req)
+	}
+}
+
+func TestSummaryLineCountsBlockedRequests(t *testing.T) {
+	s := &session{before: &sandboxapi.Sandbox{Egress: sandboxapi.EgressStats{Destinations: 1, Blocked: 1}}}
+	for _, tc := range []struct {
+		egress sandboxapi.EgressStats
+		want   string
+	}{
+		{sandboxapi.EgressStats{Destinations: 1, Blocked: 1}, "Session ended · 0 tool calls · 0 sites contacted"},
+		{sandboxapi.EgressStats{Destinations: 2, Blocked: 2}, "Session ended · 0 tool calls · 1 site contacted (1 request blocked)"},
+		{sandboxapi.EgressStats{Destinations: 3, Blocked: 3}, "Session ended · 0 tool calls · 2 sites contacted (2 requests blocked)"},
+	} {
+		if got := s.summaryLine(&sandboxapi.Sandbox{Egress: tc.egress}, nil); got != tc.want {
+			t.Errorf("summaryLine(%+v) = %q, want %q", tc.egress, got, tc.want)
+		}
+	}
+}
+
+func TestBannerHostLineListsAcceptedPortsOnly(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("box")
+	sb.Violations = []sandboxapi.Violation{{Key: "mcp.host_ports", Attempted: "18970", Constraint: "defenseclaw",
+		Message: "DefenseClaw never opens DefenseClaw's API (port 18970) to a sandbox"}}
+	ta.banner(&sb, llmChoice{}, RunOptions{HostPorts: []int{5432, 18970, 5432}})
+	out := ta.output()
+	if !strings.Contains(out, "Host      localhost:5432 (opens when you approve the sandbox's first connection)") {
+		t.Fatalf("banner host line:\n%s", out)
+	}
+	if strings.Contains(out, "localhost:18970") {
+		t.Fatalf("banner lists a refused port as reachable:\n%s", out)
+	}
+	ta.out.Reset()
+	sb.Violations = []sandboxapi.Violation{{Key: "mcp.host_ports", Attempted: "5432", Constraint: "pack strict"}}
+	ta.banner(&sb, llmChoice{}, RunOptions{HostPorts: []int{5432}})
+	if strings.Contains(ta.output(), "Host ") {
+		t.Fatalf("banner shows a Host line although every port was refused:\n%s", ta.output())
 	}
 }
