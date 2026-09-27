@@ -5768,20 +5768,7 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		entry := map[string]interface{}{
-			"type":       "command",
-			"timeoutSec": 30,
-		}
-		eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
-		if goos == "windows" {
-			// Copilot selects this field itself and evaluates it with PowerShell.
-			// eventCommand is therefore the complete vendor-specific program:
-			// do not prepend a call operator or another PowerShell process.
-			entry["powershell"] = eventCommand
-		} else {
-			entry["bash"] = eventCommand
-		}
-		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, entry)
+		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, copilotHookRegistration(goos, event, hookScript))
 	}
 	// A version downgrade must remove only the now-out-of-contract managed
 	// handler (currently userPromptTransformed), while retaining operator hooks
@@ -5799,6 +5786,29 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 	}
 	return writeJSONObject(path, cfg)
 }
+
+// copilotHookRegistration is the one Copilot hook entry DefenseClaw registers
+// for event: user and workspace hook files on the host, and the root-owned
+// policy.d document in OpenShell sandbox images.
+func copilotHookRegistration(goos, event, hookScript string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"type":       "command",
+		"timeoutSec": copilotHookTimeoutSeconds,
+	}
+	eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
+	if goos == "windows" {
+		// Copilot selects this field itself and evaluates it with PowerShell.
+		// eventCommand is therefore the complete vendor-specific program:
+		// do not prepend a call operator or another PowerShell process.
+		entry["powershell"] = eventCommand
+	} else {
+		entry["bash"] = eventCommand
+	}
+	return entry
+}
+
+// copilotHookTimeoutSeconds is Copilot's command-hook envelope.
+const copilotHookTimeoutSeconds = 30
 
 func copilotHookInvocationCommandForEvent(goos, event, hookScript string) string {
 	if goos == "windows" {

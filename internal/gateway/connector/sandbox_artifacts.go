@@ -184,6 +184,7 @@ func SandboxIngressAddr(port int) (string, error) {
 var sandboxHookScriptsByConnector = map[string][]string{
 	"claudecode": {"claude-code-hook.sh"},
 	"codex":      {"codex-hook.sh"},
+	"copilot":    {"copilot-hook.sh"},
 }
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox
@@ -408,4 +409,6 @@ func sandboxHookRuntimeBinaries() []SandboxBinary {
 var (
 	_ SandboxArtifactProvider = (*ClaudeCodeConnector)(nil)
 	_ SandboxArtifactProvider = (*CodexConnector)(nil)
+	_ SandboxArtifactProvider = (*hookOnlyConnector)(nil)
+	_ SandboxArtifactProvider = (*AMPConnector)(nil)
 )

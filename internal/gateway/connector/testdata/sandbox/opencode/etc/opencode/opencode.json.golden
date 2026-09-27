@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "plugin": [
+    "file:///usr/local/lib/defenseclaw/opencode/defenseclaw.js"
+  ],
+  "share": "disabled"
+}

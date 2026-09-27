@@ -1,0 +1,26 @@
+{
+  "connector": "opencode",
+  "hook_contract": "opencode-hooks-v1",
+  "tamper_tier": "managed",
+  "env": {
+    "OPENCODE_DISABLE_AUTOUPDATE": "1"
+  },
+  "binaries": [
+    {
+      "Name": "opencode",
+      "Role": "harness"
+    }
+  ],
+  "files": {
+    "/etc/opencode/opencode.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "cd7c1a2412b8f2bfe3604fcca4dcd66bab69d1d151566de7c1ce6cab3eeefc14"
+    },
+    "/usr/local/lib/defenseclaw/opencode/defenseclaw.js": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "fc8925a9c2fa0c013a65fe29da2755f93e710afd3be464f62edb8e629b69fe32"
+    }
+  }
+}

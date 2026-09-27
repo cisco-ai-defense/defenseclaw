@@ -611,10 +611,6 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	if err != nil {
 		t.Skip("node is required for the executable OpenCode plugin contract")
 	}
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := testenv.PrivateTempDir(t)
 	tokenPath := filepath.Join(dir, ".hook-opencode.token")
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
@@ -622,15 +618,18 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 	render := func(failMode string) []byte {
 		t.Helper()
-		text := strings.NewReplacer(
-			"{{.APIAddr}}", "127.0.0.1:18970",
-			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
-			"{{.FailMode}}", failMode,
-		).Replace(string(body))
-		if strings.Contains(text, "{{.") {
-			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)
+		text, err := renderHookTemplate("opencode-plugin.js", templateData{
+			APIAddr:     "127.0.0.1:18970",
+			TokenFileJS: javaScriptStringContent(tokenPath),
+			FailMode:    failMode,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		return []byte(text)
+		if strings.Contains(string(text), "{{") {
+			t.Fatalf("rendered %s plugin retains a template action", failMode)
+		}
+		return text
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")
 	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")

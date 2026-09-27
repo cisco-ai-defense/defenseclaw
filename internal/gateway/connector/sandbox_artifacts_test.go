@@ -40,6 +40,9 @@ var sandboxGoldenTargets = []struct {
 }{
 	{"claudecode", &ClaudeCodeConnector{}, "2.1.156"},
 	{"codex", &CodexConnector{}, "0.146.0"},
+	{"amp", NewAMPConnector(), "0.0.1785334225-g9abe75"},
+	{"copilot", NewCopilotConnector(), "1.0.88"},
+	{"opencode", NewOpenCodeConnector(), "1.18.31"},
 }
 
 type sandboxGoldenManifest struct {

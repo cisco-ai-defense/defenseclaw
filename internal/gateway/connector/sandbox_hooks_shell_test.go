@@ -216,10 +216,13 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 var sandboxIdempotencyKeyRE = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$`)
 
 const (
-	claudePreToolUse = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
-	codexPreToolUse  = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
-	allowResponse    = `200|{"action":"allow"}`
+	claudePreToolUse  = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
+	codexPreToolUse   = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
+	copilotPreToolUse = `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/proj","toolName":"bash","toolArgs":{"command":"ls","description":"list"}}`
+	allowResponse     = `200|{"action":"allow"}`
 )
+
+var copilotPreToolUseArgs = []string{"--event", "preToolUse"}
 
 func TestSandboxClaudeHookRetriesOnceWithIdempotencyKey(t *testing.T) {
 	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
@@ -359,6 +362,7 @@ func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
 	}{
 		{"claudecode", "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, true},
 		{"codex", "0.146.0", "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, true},
+		{"copilot", "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, true},
 		{"claudecode", "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, false},
 		{"claudecode", "2.1.156", "inspect-tool-response.sh", nil, `{"output":"ok"}`, false},
 		{"codex", "0.146.0", "inspect-request.sh", nil, `{"content":"hi"}`, false},
@@ -534,6 +538,7 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 		{"claude-code-hook", &ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "/api/v1/claude-code/hook", true},
 		{"codex-hook", &CodexConnector{}, "0.146.0", "codex-hook.sh",
 			[]string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, "/api/v1/codex/hook", true},
+		{"copilot-hook", NewCopilotConnector(), "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, "/api/v1/copilot/hook", true},
 		{"inspect-tool", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool", false},
 	}
 	vectors := map[string]func(t *testing.T, a *sandboxEnvAttack) map[string]string{
@@ -704,6 +709,77 @@ func TestSandboxCodexHookBindsEventAndContract(t *testing.T) {
 	if run.exitCode != 2 {
 		t.Fatalf("ingress down exit %d, want 2", run.exitCode)
 	}
+}
+
+// TestSandboxCopilotHook pins the Copilot sandbox hook: the event travels in
+// its header over the retrying transport, an event-native verdict is printed
+// for Copilot, and every failure, a block without a verdict included, exits 2
+// (Copilot's only hook deny besides the verdict).
+func TestSandboxCopilotHook(t *testing.T) {
+	h := newSandboxHookHarness(t, NewCopilotConnector(), "1.0.88")
+	hook := SandboxHookDir + "/copilot-hook.sh"
+	token := "openshell:resolve:env:v3_DEFENSECLAW_SANDBOX_TOKEN"
+	env := map[string]string{SandboxTokenEnv: token, "DEFENSECLAW_FAIL_MODE": "open", "DEFENSECLAW_GATEWAY_TOKEN": "host"}
+	if err := os.WriteFile(filepath.Join(h.path(SandboxHookDir), ".hook-copilot.token"), []byte("host\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("retry-keeps-key-and-event", func(t *testing.T) {
+		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{"exit:52", allowResponse})
+		if run.exitCode != 0 || len(run.calls) != 2 || run.stdout != "" {
+			t.Fatalf("exit %d calls %d stdout %q; stderr=%s", run.exitCode, len(run.calls), run.stdout, run.stderr)
+		}
+		key := run.calls[0].headers["x-defenseclaw-hook-idempotency-key"]
+		if !sandboxIdempotencyKeyRE.MatchString(key) {
+			t.Fatalf("idempotency key %q", key)
+		}
+		for i, call := range run.calls {
+			if call.url() != "http://host.openshell.internal:18971/api/v1/copilot/hook" ||
+				call.headers["x-defenseclaw-copilot-event"] != "preToolUse" ||
+				call.headers["x-defenseclaw-hook-idempotency-key"] != key ||
+				call.headers["authorization"] != "Bearer "+token ||
+				call.body != copilotPreToolUse {
+				t.Fatalf("call %d: %v body %q", i, call.argv, call.body)
+			}
+		}
+	})
+	t.Run("verdict-is-printed", func(t *testing.T) {
+		verdict := `{"permissionDecision":"deny","permissionDecisionReason":"nope"}`
+		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{`200|{"action":"block","reason":"nope","hook_output":` + verdict + `}`})
+		if run.exitCode != 0 || strings.TrimSpace(run.stdout) != verdict {
+			t.Fatalf("exit %d stdout %q; stderr=%s", run.exitCode, run.stdout, run.stderr)
+		}
+	})
+	t.Run("block-without-verdict-exits-2", func(t *testing.T) {
+		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{`200|{"action":"block","reason":"nope"}`})
+		if run.exitCode != 2 || !strings.Contains(run.stderr, "nope") {
+			t.Fatalf("exit %d stderr %q", run.exitCode, run.stderr)
+		}
+	})
+	for name, args := range map[string][]string{
+		"no-args":       nil,
+		"unknown-event": {"--event", "futureEvent"},
+		"extra-args":    {"--event", "preToolUse", "--x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := h.run(t, hook, args, copilotPreToolUse, env, []string{allowResponse})
+			if run.exitCode != 2 || len(run.calls) != 0 {
+				t.Fatalf("exit %d calls %d, want 2 and no request", run.exitCode, len(run.calls))
+			}
+		})
+	}
+	t.Run("missing-token-ignores-host-token", func(t *testing.T) {
+		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "host"}, []string{allowResponse})
+		if run.exitCode != 2 || len(run.calls) != 0 || !strings.Contains(run.stderr, SandboxTokenEnv) {
+			t.Fatalf("exit %d calls %d stderr %q", run.exitCode, len(run.calls), run.stderr)
+		}
+	})
+	t.Run("unknown-action-fails-closed", func(t *testing.T) {
+		run := h.run(t, hook, []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, env, []string{`200|{"action":"maybe"}`})
+		if run.exitCode != 2 {
+			t.Fatalf("exit %d, want 2", run.exitCode)
+		}
+	})
 }
 
 func TestSandboxInspectHookBakesConnector(t *testing.T) {
@@ -882,6 +958,17 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 			{"codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, token, nil},
 			{codexSandboxNotifyScript, []string{`{"type":"agent-turn-complete"}`}, "", token, []string{`200|{}`}},
 		}, append(inspect("inspect-request.sh", `{"content":"hi"}`), inspect("inspect-response.sh", `{"content":"hi"}`)...)...)},
+		{"copilot", NewCopilotConnector(), "1.0.88", []scenario{
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{allowResponse}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{blockOut}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{`200|{"action":"block","hook_output":{"permissionDecision":"deny"}}`}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{"exit:52", allowResponse}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{`401|{}`}},
+			{"copilot-hook.sh", copilotPreToolUseArgs, oversized, token, nil},
+			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, nil, nil},
+			{"copilot-hook.sh", []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, token, []string{allowResponse}},
+		}},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			artifacts, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})

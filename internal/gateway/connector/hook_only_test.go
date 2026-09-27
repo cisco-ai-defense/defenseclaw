@@ -3922,11 +3922,21 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 }
 
 func TestCopilotShellBootstrapFailuresAlwaysOpen(t *testing.T) {
-	script, err := hookFS.ReadFile("hooks/copilot-hook.sh")
-	if err != nil {
-		t.Fatal(err)
+	// The host render; the OpenShell sandbox variant of the same template
+	// fails closed instead (TestCopilotSandboxPolicyShape).
+	for _, managed := range []bool{false, true} {
+		script, err := renderHookTemplate("copilot-hook.sh", templateData{
+			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: managed, TokenFile: ".hook-copilot.token", ScopedToken: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCopilotShellBootstrapFailsOpen(t, string(script))
 	}
-	body := string(script)
+}
+
+func assertCopilotShellBootstrapFailsOpen(t *testing.T, body string) {
+	t.Helper()
 	if strings.Contains(body, "exit 2") {
 		t.Fatalf("Copilot shell bootstrap contains a fail-closed exit: %s", body)
 	}
