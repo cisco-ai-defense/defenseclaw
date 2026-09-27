@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // resolve resolves the effective sandbox policy for flags against the
@@ -65,6 +66,9 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 	m.mu.Unlock()
 	cfg := m.config()
 	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	if err == nil {
+		err = m.checkPolicySources(rec.WorkdirMode, rec.Project, eff)
+	}
 	var d *egress.Decider
 	if err == nil {
 		d, err = m.egressDecider(cfg, eff)
@@ -82,6 +86,31 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		m.policyRestored(b, eff)
 	}
 	return eff, violations, nil
+}
+
+// checkPolicySources refuses a policy the sandbox could rewrite. In mount
+// mode the agent writes the project as the host user, and a custom pack is
+// trusted because that user owns it (packs.LoadFile), so a pack file or
+// pack directory inside the project (or holding it) would let the agent
+// change its own policy on the next resolution: add allow entries that
+// lift the blocklist feed or open private networks, drop block entries,
+// relax the network mode. Create refuses such a mount (PlanMount with the
+// policy sources protected); every later resolution checks again, because
+// the configuration (openshell.pack_dir, openshell.pack) can move the
+// policy under a running sandbox, which then fails closed.
+func (m *Manager) checkPolicySources(mode, project string, eff *packs.Effective) error {
+	if mode != config.OpenShellWorkdirMount || project == "" {
+		return nil
+	}
+	for _, src := range eff.PolicySources() {
+		if workspace.Overlaps(project, src) {
+			m.logf("%s: the sandbox policy source %s overlaps the mounted project %s", gatewaylog.ErrCodeOpenShellPackInvalid, src, project)
+			return &sandboxapi.Error{Code: sandboxapi.CodePackInvalid,
+				Message: "the sandbox policy pack is inside the project folder the sandbox writes, so the agent could change its own policy",
+				Detail:  src + " overlaps " + project + "; keep custom packs outside the project (for example in openshell.pack_dir), or run with --copy"}
+		}
+	}
+	return nil
 }
 
 // policyUnresolved fails a sandbox closed while its policy cannot be

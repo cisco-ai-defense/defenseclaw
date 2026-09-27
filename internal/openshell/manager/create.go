@@ -129,6 +129,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 			return nil, m.violationError(ctx, err, req.Name)
 		}
 	}
+	if err := m.checkPolicySources(mode, project, eff); err != nil {
+		return nil, err
+	}
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
@@ -261,6 +264,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		plan, err = m.ws.PlanMount(ctx, workspace.MountOptions{
 			Project: in.project, Name: name, DataDir: m.opts.DataDir,
 			Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Context: in.req.Context,
+			// The agent writes the mount as the host user, who also owns
+			// the custom packs: a folder holding one is never shared.
+			Protected: eff.PolicySources(),
 		})
 		if err != nil {
 			return nil, workspaceError(err)
@@ -286,6 +292,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		if !in.req.NoSnapshot {
 			snap, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: in.project, Name: name, DataDir: m.opts.DataDir, Skip: plan.MaskedRels(), Replace: true,
+				Protected: eff.PolicySources(),
 			})
 			if err != nil {
 				return nil, workspaceError(err)

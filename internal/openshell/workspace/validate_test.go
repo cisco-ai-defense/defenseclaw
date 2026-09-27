@@ -369,3 +369,40 @@ func TestValidateSourceRefusesXDGAndLinkedConfigDirs(t *testing.T) {
 		t.Errorf("relative XDG_CONFIG_HOME: %v", err)
 	}
 }
+
+// TestOverlaps pins the relation ValidateSource refuses for protected
+// paths, as the sandbox manager re-checks it: a path inside the share, the
+// share itself, or a folder that holds it, also through a symbolic link.
+func TestOverlaps(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	packs := filepath.Join(root, "packs")
+	for _, dir := range []string{filepath.Join(project, ".defenseclaw"), packs} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(project, ".defenseclaw"), link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, protected string
+		want            bool
+	}{
+		{"a pack file inside the project", filepath.Join(project, ".defenseclaw", "pack.yaml"), true},
+		{"a pack file not created yet", filepath.Join(project, "later", "pack.yaml"), true},
+		{"the project itself", project, true},
+		{"a folder holding the project", root, true},
+		{"a pack reached through a symbolic link into the project", filepath.Join(link, "pack.yaml"), true},
+		{"a sibling folder", filepath.Join(packs, "team", "pack.yaml"), false},
+		{"a name that only shares a prefix", project + "-other", false},
+		{"no path", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Overlaps(project, tc.protected); got != tc.want {
+				t.Fatalf("Overlaps(%s, %s) = %v, want %v", project, tc.protected, got, tc.want)
+			}
+		})
+	}
+}

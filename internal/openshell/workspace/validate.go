@@ -281,6 +281,22 @@ func resolveHome(home string) (string, error) {
 	return resolveExisting(abs), nil
 }
 
+// Overlaps reports whether a shared folder and a protected path overlap:
+// the path is the folder, lies inside it or holds it. Symbolic links are
+// resolved and, where both exist, file identity is compared (so a
+// case-insensitive filesystem or a bind mount cannot hide the overlap).
+// This is the relation ValidateSource refuses for SourceOptions.Protected;
+// a caller that must keep re-checking a share it already validated (the
+// sandbox manager, for the policy files a sandbox could rewrite) uses it
+// directly.
+func Overlaps(share, protected string) bool {
+	if share == "" || protected == "" {
+		return false
+	}
+	rs, rp := resolveExisting(share), resolveExisting(protected)
+	return within(rs, rp) || within(rp, rs)
+}
+
 // resolveExisting resolves symlinks in the longest existing prefix of p so
 // a not-yet-created protected path still compares correctly.
 func resolveExisting(p string) string {

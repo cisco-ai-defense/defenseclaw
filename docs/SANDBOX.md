@@ -986,6 +986,17 @@ Custom packs are `<pack_dir>/<name>/pack.yaml` (default
 rules as guardrail rule packs. A pack's digest is `sha256:` over the file's
 bytes.
 
+A custom pack is trusted because you own it, and in mount mode the agent
+writes the project as you. So the policy is never read from inside a
+live-mounted project. The manager refuses to create a mount-mode sandbox
+whose pack file or `pack_dir` is inside the project or holds it
+(`pack_invalid`); the workspace also refuses to share such a folder. Every
+later resolution checks again, because a configuration change can move the
+pack. A running sandbox whose pack moved into its project fails closed (see
+[Authentication](#authentication) under the egress proxy). Keep packs
+outside the project, or run with `--copy`: a copy is not shared back while
+the agent runs.
+
 `packs.Resolve` layers the pack, then the user's `openshell` keys, then the
 run inputs (`packs.Flags`, which the future run command will fill), and clamps
 the result by `openshell.admin`. Along the way:

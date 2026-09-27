@@ -270,7 +270,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
 		if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 			Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
-			Skip: maskedRels(binding, rec.Workdir),
+			Skip: maskedRels(binding, rec.Workdir), Protected: eff.PolicySources(),
 		}); err != nil {
 			return workspaceError(err)
 		}

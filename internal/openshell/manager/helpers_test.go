@@ -87,6 +87,7 @@ type fakeWorkspace struct {
 	reviewed     []string
 	masked       []workspace.MaskedPath
 	lastSnapshot workspace.SnapshotOptions
+	lastMount    workspace.MountOptions
 }
 
 func newFakeWorkspace() *fakeWorkspace {
@@ -100,6 +101,7 @@ func (f *fakeWorkspace) PlanMount(_ context.Context, opts workspace.MountOptions
 		return nil, f.planErr
 	}
 	f.planned = append(f.planned, opts.Name)
+	f.lastMount = opts
 	repo := workspace.RepoName(opts.Project)
 	target := path.Join("/work", repo)
 	plan := &workspace.MountPlan{
