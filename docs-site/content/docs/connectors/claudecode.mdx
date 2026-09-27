@@ -211,30 +211,37 @@ block, ask, or decision authority.
 
 <Callout type="info" title="In development">
 No command launches Claude Code in an OpenShell sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
+they ship; today it covers legacy cleanup.
 </Callout>
 
-DefenseClaw already renders the files it adds to a Claude Code OpenShell
-overlay image. Nothing on your host changes; the files exist only in the
-image:
+DefenseClaw can already render the files it will add to a Claude Code
+OpenShell overlay image; no image is built yet. When one is, the files exist
+only in the image and nothing on your host changes:
 
 - **Hooks in the managed tier.** The hooks are registered in the root-owned
   managed policy drop-in
   `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
   `allowManagedHooksOnly` set. User and project settings cannot add hooks or
   switch DefenseClaw's off.
+- **Settings pinned for the sandbox.** The same drop-in switches off Claude
+  Code's own sandbox (it cannot run inside OpenShell), disables the
+  auto-updater and non-essential traffic, and sends Claude Code's native OTel
+  to the [hook ingress](/docs/reference/gateway-api#hook-ingress).
+- **Fail closed.** The hook scripts live in root-owned
+  `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
+  gateway through the hook ingress with a per-sandbox token, never the host
+  gateway token.
 - **Checked before use.** An image counts as verified only after Claude Code
   ran in it against a mock model, every required hook fired, and a blocked
   tool call did not run. A second run with hostile user and project settings
   planted, including `disableAllHooks`, must show the same result. Only
   verified images are selected for use.
-- **Fail closed.** The hook scripts live in root-owned
-  `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
-  gateway through the [hook ingress](/docs/reference/gateway-api#hook-ingress)
-  with a per-sandbox token, never the host gateway token.
-- **Settings pinned for the sandbox.** Claude Code's own sandbox is switched
-  off (it cannot run inside OpenShell), and the auto-updater and non-essential
-  traffic are disabled.
+- **Launch flags.** In skip-permissions mode
+  ([`openshell.yolo`](/docs/reference/configuration#openshell-sandbox-settings),
+  on in the `open` and `balanced` packs) Claude Code starts with
+  `--dangerously-skip-permissions`; otherwise it keeps its permission prompts.
+  DefenseClaw hooks gate every tool call in both modes.
 - **Image pin.** The image installs Claude Code 2.1.156 by default. The build
   refuses a Claude Code version that has no reviewed Linux hook contract.
 

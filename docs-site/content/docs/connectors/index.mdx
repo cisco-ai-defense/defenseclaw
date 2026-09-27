@@ -93,13 +93,15 @@ ranges and script generations.
 ## OpenShell sandbox
 
 Running an agent inside an NVIDIA OpenShell sandbox is in development, and no
-command launches one yet; the [sandbox guide](/docs/setup/sandbox) documents
-the sandbox commands. DefenseClaw already renders sandbox image files for
+command launches one yet. The [sandbox guide](/docs/setup/sandbox) will cover
+the sandbox commands once they ship; today it covers legacy cleanup.
+DefenseClaw can already render the sandbox image files for
 [Claude Code](/docs/connectors/claudecode#openshell-sandbox) and
-[Codex](/docs/connectors/codex#openshell-sandbox). Both register their hooks
-in the harness's root-owned managed policy tier, so user and project settings
-cannot switch them off. Every other connector is pending; the
-[capability matrix](/docs/capability-matrix) shows the status per connector.
+[Codex](/docs/connectors/codex#openshell-sandbox), but no image is built yet.
+Both register their hooks in the harness's root-owned managed policy tier, so
+user and project settings cannot switch them off. Every other connector is
+pending; the [capability matrix](/docs/capability-matrix) shows the status per
+connector.
 
 ## How a connector is structured
 

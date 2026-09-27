@@ -233,28 +233,36 @@ the presence of a file.
 
 <Callout type="info" title="In development">
 No command launches Codex in an OpenShell sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
+they ship; today it covers legacy cleanup.
 </Callout>
 
-DefenseClaw already renders the files it adds to a Codex OpenShell overlay
-image. Nothing on your host changes; the files exist only in the image:
+DefenseClaw can already render the files it will add to a Codex OpenShell
+overlay image; no image is built yet. When one is, the files exist only in
+the image and nothing on your host changes:
 
 - **Hooks in the managed tier.** The hooks are registered in root-owned
   `/etc/codex/requirements.toml`, which pins `allow_managed_hooks_only` and
   `features.hooks` on, so user and project config cannot add hooks or switch
-  DefenseClaw's off. Root-owned `/etc/codex/managed_config.toml` turns off
-  the update check, analytics, and the plugin, app and update features that
-  reach remote services. It also wires the notify bridge and sends native
-  OTel to the hook ingress.
+  DefenseClaw's off.
+- **Settings pinned for the sandbox.** Root-owned
+  `/etc/codex/managed_config.toml` turns off the update check, analytics, and
+  the plugin, app and update features that reach remote services. It also
+  wires the notify bridge and sends Codex's native OTel to the
+  [hook ingress](/docs/reference/gateway-api#hook-ingress).
 - **Fail closed.** The hook scripts live in root-owned
   `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
-  gateway through the [hook ingress](/docs/reference/gateway-api#hook-ingress)
-  with a per-sandbox token, never the host gateway token.
+  gateway through the hook ingress with a per-sandbox token, never the host
+  gateway token. The notify bridge in the same directory only sends
+  telemetry, so it is best-effort: on any failure, such as an unreachable
+  ingress, it exits quietly and never blocks Codex.
 - **Checked before use.** An image counts as verified only after Codex ran
   in it against a mock model, every required hook fired, and a blocked tool
   call did not run. Only verified images are selected for use.
 - **Launch flags.** Codex's own sandbox cannot run inside OpenShell. In
-  skip-permissions mode Codex starts with
+  skip-permissions mode
+  ([`openshell.yolo`](/docs/reference/configuration#openshell-sandbox-settings),
+  on in the `open` and `balanced` packs) Codex starts with
   `--dangerously-bypass-approvals-and-sandbox`; otherwise it keeps its
   approval prompts with `sandbox_mode="danger-full-access"`. DefenseClaw hooks
   gate every tool call in both modes.
