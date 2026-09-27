@@ -687,7 +687,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 }
 
 // emitAgentHookLLMEvent is the LLM-event emitter for the six
-// hook-only connectors (hermes, cursor, geminicli,
+// hook-only connectors (hermes, cursor,
 // copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
@@ -2006,7 +2006,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "devin", "geminicli", "openhands":
+	case "antigravity", "devin", "openhands":
 		return true
 	default:
 		return false

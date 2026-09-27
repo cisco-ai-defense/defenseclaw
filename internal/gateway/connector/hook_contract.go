@@ -714,42 +714,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
 		},
 	}},
-	"geminicli": {{
-		Connector:               "geminicli",
-		ContractID:              "geminicli-hooks-v1",
-		MinAgentVersion:         "0.26.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.gemini/settings.json"},
-		ResponseFieldName:       "hook_output",
-		Events: []string{
-			"SessionStart",
-			"BeforeAgent",
-			"BeforeModel",
-			"BeforeToolSelection",
-			"BeforeTool",
-			"AfterTool",
-			"AfterModel",
-			"AfterAgent",
-			"PreCompress",
-			"Notification",
-			"SessionEnd",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
-		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       false,
-			BlockEvents:        append([]string(nil), geminiCLIBlockEvents...),
-			SupportsFailClosed: true,
-			Scope:              "user",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          true,
-		ToolCallLifecycle:   geminiCLIToolCallLifecycle(),
-		Notes: []string{
-			"Gemini CLI 0.26.0 enabled hooks by default.",
-		},
-	}},
 	"copilot": {
 		{
 			Connector:               "copilot",
@@ -853,7 +817,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
 			"Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
 			"PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
-			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json. Gemini CLI shares the global config namespace, but its connector registration, lifecycle schema, gateway route, token, and teardown ownership remain separate.",
+			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json.",
 		},
 	}},
 	"openhands": {{
@@ -1285,8 +1249,6 @@ func normalizeConnectorName(name string) string {
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini", "gemini-cli", "gemini_cli":
-		return "geminicli"
 	case "open-hands", "open_hands":
 		return "openhands"
 	default:

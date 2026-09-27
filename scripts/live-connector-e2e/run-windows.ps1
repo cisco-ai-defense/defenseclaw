@@ -4756,9 +4756,9 @@ function Get-RegisteredHookEvent([string]$EventName, [string]$PayloadPath) {
 }
 
 function Get-NativeHookArguments([string]$RegisteredEvent) {
-    if ($Connector -in @('devin', 'geminicli')) {
-        # Devin and retired Gemini CLI registrations infer the lifecycle event
-        # from stdin; exercise their exact three-argument launcher shape.
+    if ($Connector -eq 'devin') {
+        # Devin registrations infer the lifecycle event from stdin; exercise
+        # the exact three-argument launcher shape.
         return @('hook', '--connector', $Connector)
     }
     $arguments = @('hook', '--connector', $Connector, '--event', $RegisteredEvent)
@@ -4787,57 +4787,23 @@ function Invoke-RegisteredNativeHook(
     [int]$TimeoutSeconds = $CommandTimeoutSeconds,
     [string]$LogLabel = 'hook'
 ) {
-    if ($Connector -notin @('devin', 'geminicli')) {
+    if ($Connector -ne 'devin') {
         return Invoke-Tool -Name (Resolve-ContractHookTool) `
             -Arguments (Get-NativeHookArguments $RegisteredEvent) `
             -Allowed $AllowedExitCodes -InputPath $InputPath -Timeout $TimeoutSeconds
     }
 
-    if ($Connector -eq 'devin') {
-        $configPath = Get-EffectiveConnectorConfigPath 'devin'
-        $config = [IO.File]::ReadAllText($configPath)
-        $document = $config | ConvertFrom-Json -ErrorAction Stop
-        $command = [string]@($document.hooks.PreToolUse)[0].hooks[0].command
-        $parsed = Get-DevinWindowsHookCommand $command 'Devin PreToolUse'
-        $safeLabel = $LogLabel -replace '[^A-Za-z0-9.-]', '_'
-        $logPath = Join-Path $script:LogRoot (
-            '{0:D3}-devin-registered-{1}.log' -f (++$script:CommandIndex), $safeLabel
-        )
-        return Invoke-NativeProcess -FilePath $parsed.Target -ArgumentList @(
-            'hook', '--connector', 'devin'
-        ) -InputPath $InputPath -TimeoutSeconds $TimeoutSeconds `
-            -AllowedExitCodes $AllowedExitCodes -LogPath $logPath
-    }
-
-    $settingsPath = Get-EffectiveConnectorConfigPath 'geminicli'
-    $settings = [IO.File]::ReadAllText($settingsPath) |
-        ConvertFrom-Json -ErrorAction Stop
-    $registeredHandlers = @(
-        foreach ($group in @($settings.hooks.BeforeTool)) {
-            foreach ($handler in @($group.hooks)) {
-                if ([string]$handler.name -ceq 'defenseclaw') { $handler }
-            }
-        }
-    )
-    $expectedCommand = Get-GeminiCLIExpectedWindowsHookCommand
-    if ($registeredHandlers.Count -ne 1 -or
-        [string]$registeredHandlers[0].command -cne $expectedCommand) {
-        throw 'Gemini CLI registered launcher invocation does not match the exact awaited native command'
-    }
-    $systemPowerShell = Join-Path (
-        [Environment]::SystemDirectory
-    ) 'WindowsPowerShell\v1.0\powershell.exe'
-    $commandPrefix = "$systemPowerShell -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-    if (-not $expectedCommand.StartsWith($commandPrefix, [StringComparison]::Ordinal)) {
-        throw 'Gemini CLI registered launcher does not use exact system PowerShell'
-    }
-    $encodedCommand = $expectedCommand.Substring($commandPrefix.Length)
+    $configPath = Get-EffectiveConnectorConfigPath 'devin'
+    $config = [IO.File]::ReadAllText($configPath)
+    $document = $config | ConvertFrom-Json -ErrorAction Stop
+    $command = [string]@($document.hooks.PreToolUse)[0].hooks[0].command
+    $parsed = Get-DevinWindowsHookCommand $command 'Devin PreToolUse'
     $safeLabel = $LogLabel -replace '[^A-Za-z0-9.-]', '_'
     $logPath = Join-Path $script:LogRoot (
-        '{0:D3}-geminicli-registered-{1}.log' -f (++$script:CommandIndex), $safeLabel
+        '{0:D3}-devin-registered-{1}.log' -f (++$script:CommandIndex), $safeLabel
     )
-    return Invoke-NativeProcess -FilePath $systemPowerShell -ArgumentList @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
+    return Invoke-NativeProcess -FilePath $parsed.Target -ArgumentList @(
+        'hook', '--connector', 'devin'
     ) -InputPath $InputPath -TimeoutSeconds $TimeoutSeconds `
         -AllowedExitCodes $AllowedExitCodes -LogPath $logPath
 }
@@ -5001,7 +4967,6 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
         $toolEvent = switch ($Connector) {
             'copilot' { 'preToolUse' }
             'cursor' { 'preToolUse' }
-            'geminicli' { 'BeforeTool' }
             default { 'PreToolUse' }
         }
         $toolPayload = [ordered]@{
@@ -5029,7 +4994,7 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
             } else {
                 $toolPath
             }
-            $toolResult = if ($Connector -in @('devin', 'geminicli')) {
+            $toolResult = if ($Connector -eq 'devin') {
                 Invoke-RegisteredNativeHook $toolEvent $toolInputPath @(0, 2) `
                     $probeTimeout "gateway-readiness-$attempt-tool"
             } else {
@@ -5251,7 +5216,6 @@ function Invoke-Setup([string]$Mode) {
         'devin' { 'devin' }
         'hermes' { 'hermes' }
         'antigravity' { 'antigravity' }
-        'geminicli' { 'geminicli' }
         'opencode' { 'opencode' }
     }
     $setupRuntimeProbe = if ($Connector -ceq 'opencode') {
@@ -5289,7 +5253,6 @@ function Get-ConnectorHookLabel {
         'devin' { 'Devin hooks' }
         'hermes' { 'Hermes hooks (fail-open)' }
         'antigravity' { 'Antigravity hooks' }
-        'geminicli' { 'Gemini CLI hooks' }
         'opencode' { 'OpenCode hooks' }
     }
 }
@@ -5304,7 +5267,6 @@ function Get-ConnectorRepairSubcommand {
         'devin' { 'devin' }
         'hermes' { 'hermes' }
         'antigravity' { 'antigravity' }
-        'geminicli' { 'geminicli' }
     }
 }
 
@@ -5315,7 +5277,6 @@ function Get-ConnectorToolName {
         'cursor' { 'run_terminal_cmd' }
         'devin' { 'exec' }
         'hermes' { 'execute_command' }
-        'geminicli' { 'RunShellCommand' }
         default { 'shell' }
     }
 }
@@ -5586,215 +5547,6 @@ function Get-DevinWindowsHookCommand([string]$Command, [string]$Context) {
     }
 }
 
-function Get-GeminiCLIExpectedHookEvents {
-    return @(
-        'SessionStart', 'SessionEnd', 'BeforeAgent', 'AfterAgent',
-        'BeforeModel', 'AfterModel', 'BeforeToolSelection', 'BeforeTool',
-        'AfterTool', 'PreCompress', 'Notification'
-    )
-}
-
-function Get-GeminiCLIExpectedWindowsHookCommand {
-    $hookExecutable = Get-StableHookRuntimeExecutable
-    $systemPowerShell = Join-Path (
-        [Environment]::SystemDirectory
-    ) 'WindowsPowerShell\v1.0\powershell.exe'
-    $quotedHookExecutable = "'$($hookExecutable.Replace("'", "''"))'"
-    $hookScriptBody = (
-        "`$ErrorActionPreference='Stop'; " +
-        "`$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-        "`$hookProcess=Microsoft.PowerShell.Management\Start-Process " +
-        "-FilePath $quotedHookExecutable " +
-        "-ArgumentList @('hook','--connector','geminicli') " +
-        "-NoNewWindow -Wait -PassThru; exit `$hookProcess.ExitCode"
-    )
-    $encoded = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes($hookScriptBody)
-    )
-    return "$systemPowerShell -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded"
-}
-
-function Assert-GeminiCLISynchronousWindowsHookConfig(
-    [string]$Config,
-    [string]$Context
-) {
-    try { $document = $Config | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "$Context is not valid Gemini CLI settings JSON: $($_.Exception.Message)" }
-    if ($null -eq $document.hooks) {
-        throw "$Context has no Gemini CLI hooks object"
-    }
-
-    $expectedEvents = @(Get-GeminiCLIExpectedHookEvents)
-    $registeredEvents = @($document.hooks.PSObject.Properties.Name | Sort-Object)
-    if (($registeredEvents -join "`0") -cne (($expectedEvents | Sort-Object) -join "`0")) {
-        throw "$Context does not contain the exact 11-event Gemini CLI hook set"
-    }
-
-    $expectedCommand = Get-GeminiCLIExpectedWindowsHookCommand
-    $hookExecutable = Get-StableHookRuntimeExecutable
-    $hookItem = Get-Item -LiteralPath $hookExecutable -Force -ErrorAction Stop
-    if ($hookItem.PSIsContainer -or
-        ($hookItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-        [IO.Path]::GetFileName($hookItem.FullName) -cne 'defenseclaw-hook.exe') {
-        throw "$Context does not target the regular stable native hook executable"
-    }
-    if ($expectedCommand -match '(?i)(?:\bbash\b|\bwsl(?:\.exe)?\b|git-bash|\.sh\b|\.ps1\b|\$LASTEXITCODE)') {
-        throw "$Context expected command contains a compatibility-shell or non-awaited fallback"
-    }
-
-    $ownedHandlerCount = 0
-    foreach ($event in $expectedEvents) {
-        $eventProperty = $document.hooks.PSObject.Properties[$event]
-        if ($null -eq $eventProperty) { throw "$Context is missing Gemini CLI event $event" }
-        $managedGroups = [Collections.Generic.List[object]]::new()
-        foreach ($group in @($eventProperty.Value)) {
-            $handlers = @($group.hooks)
-            $managed = @($handlers | Where-Object {
-                [string]$_.name -ceq 'defenseclaw'
-            })
-            if ($managed.Count -gt 0) {
-                $managedGroups.Add([pscustomobject]@{
-                    Group = $group
-                    Handlers = $handlers
-                    Managed = $managed
-                })
-            }
-            foreach ($handler in $handlers) {
-                $visibleCommand = [string]$handler.command
-                if ($visibleCommand -match '(?i)(?:\bbash\b|\bwsl(?:\.exe)?\b|git-bash|\.sh\b|\.ps1\b)') {
-                    throw "$Context event $event contains a compatibility-shell handler"
-                }
-            }
-        }
-        if ($managedGroups.Count -ne 1 -or $managedGroups[0].Managed.Count -ne 1) {
-            throw "$Context event $event has an invalid number of DefenseClaw Gemini CLI handlers"
-        }
-        $managedGroup = $managedGroups[0]
-        $handler = $managedGroup.Managed[0]
-        if ([string]$managedGroup.Group.matcher -cne '*' -or
-            $managedGroup.Handlers.Count -ne 1 -or
-            [string]$handler.type -cne 'command' -or
-            [string]$handler.command -cne $expectedCommand -or
-            [int]$handler.timeout -ne 30000 -or
-            [string]$handler.description -cne 'DefenseClaw hook inspection') {
-            throw "$Context event $event does not use the exact awaited encoded system-PowerShell handler"
-        }
-        $ownedHandlerCount++
-    }
-    if ($ownedHandlerCount -ne 11) {
-        throw "$Context has $ownedHandlerCount awaited Gemini CLI handlers, expected 11"
-    }
-}
-
-function Assert-GeminiCLIForeignHookFixture(
-    [ValidateSet('seeded', 'configured', 'teardown')][string]$Phase
-) {
-    if ($Connector -ne 'geminicli') { return }
-    $settingsPath = Get-EffectiveConnectorConfigPath 'geminicli'
-    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-        throw "Gemini CLI $Phase fixture settings are missing: $settingsPath"
-    }
-    $document = [IO.File]::ReadAllText($settingsPath) |
-        ConvertFrom-Json -ErrorAction Stop
-    if ([string]$document.operatorSetting -cne 'keep') {
-        throw "Gemini CLI $Phase changed the unrelated top-level operator setting"
-    }
-
-    $matches = [Collections.Generic.List[object]]::new()
-    foreach ($group in @($document.hooks.BeforeTool)) {
-        foreach ($handler in @($group.hooks)) {
-            if ([string]$handler.name -ceq 'operator' -and
-                [string]$handler.type -ceq 'command' -and
-                [string]$handler.command -ceq 'C:\Operator\audit-hook.exe --gemini' -and
-                [int]$handler.timeout -eq 17000 -and
-                [string]$handler.description -ceq 'Operator Gemini audit hook') {
-                $matches.Add([pscustomobject]@{ Group = $group; Handler = $handler })
-            }
-        }
-    }
-    if ($matches.Count -ne 1) {
-        throw "Gemini CLI $Phase did not preserve exactly one foreign hook in the mixed group"
-    }
-    $foreignGroup = $matches[0].Group
-    $groupProperties = @($foreignGroup.PSObject.Properties.Name | Sort-Object)
-    $handlerProperties = @($matches[0].Handler.PSObject.Properties.Name | Sort-Object)
-    if (($groupProperties -join ',') -cne 'hooks,matcher,operatorField,sequential' -or
-        ($handlerProperties -join ',') -cne 'command,description,name,timeout,type' -or
-        [string]$foreignGroup.matcher -cne '*' -or
-        $foreignGroup.sequential -ne $true -or
-        [string]$foreignGroup.operatorField -cne 'keep') {
-        throw "Gemini CLI $Phase rewrote foreign mixed-group fields"
-    }
-
-    $foreignGroupHandlers = @($foreignGroup.hooks)
-    if ($Phase -ceq 'seeded') {
-        if ($foreignGroupHandlers.Count -ne 2 -or
-            @($foreignGroupHandlers | Where-Object { [string]$_.name -ceq 'defenseclaw' }).Count -ne 1) {
-            throw 'Gemini CLI seed fixture is not an exact mixed owned/foreign group'
-        }
-    } elseif ($foreignGroupHandlers.Count -ne 1) {
-        throw "Gemini CLI $Phase retained or introduced another handler in the foreign group"
-    }
-
-    if ($Phase -ceq 'teardown') {
-        $topProperties = @($document.PSObject.Properties.Name | Sort-Object)
-        $hookEvents = @($document.hooks.PSObject.Properties.Name | Sort-Object)
-        if (($topProperties -join ',') -cne 'hooks,operatorSetting' -or
-            ($hookEvents -join ',') -cne 'BeforeTool' -or
-            @($document.hooks.BeforeTool).Count -ne 1) {
-            throw 'Gemini CLI teardown did not restore the exact foreign-only settings document'
-        }
-    }
-}
-
-function Initialize-GeminiCLIForeignHookFixture {
-    if ($Connector -ne 'geminicli') { return }
-    if ([string]::IsNullOrWhiteSpace($NativeDataRoot)) {
-        throw 'Gemini CLI deterministic Windows coverage requires the packaged native contract'
-    }
-    $settingsPath = Get-EffectiveConnectorConfigPath 'geminicli'
-    if (Test-Path -LiteralPath $settingsPath) {
-        throw "Gemini CLI contract refuses pre-existing settings: $settingsPath"
-    }
-    [IO.Directory]::CreateDirectory((Split-Path -Parent $settingsPath)) | Out-Null
-    $hookExecutable = Get-StableHookRuntimeExecutable
-    $legacyManagedCommand = "& '$($hookExecutable.Replace("'", "''"))' hook --connector geminicli"
-    $fixture = [ordered]@{
-        operatorSetting = 'keep'
-        hooks = [ordered]@{
-            BeforeTool = @(
-                [ordered]@{
-                    matcher = '*'
-                    sequential = $true
-                    operatorField = 'keep'
-                    hooks = @(
-                        [ordered]@{
-                            name = 'defenseclaw'
-                            type = 'command'
-                            command = $legacyManagedCommand
-                            timeout = 30000
-                            description = 'DefenseClaw hook inspection'
-                        },
-                        [ordered]@{
-                            name = 'operator'
-                            type = 'command'
-                            command = 'C:\Operator\audit-hook.exe --gemini'
-                            timeout = 17000
-                            description = 'Operator Gemini audit hook'
-                        }
-                    )
-                }
-            )
-        }
-    }
-    [IO.File]::WriteAllText(
-        $settingsPath,
-        ($fixture | ConvertTo-Json -Depth 10),
-        [Text.UTF8Encoding]::new($false)
-    )
-    Assert-GeminiCLIForeignHookFixture seeded
-}
-
 function Assert-HermesWindowsHookConfig([string]$ConfigPath, [string]$Context) {
     $code = @'
 import json
@@ -5952,8 +5704,6 @@ function Assert-DoctorHookRegistration {
     } else {
         $expectedHookExecutable = if ($Connector -eq 'amp') {
             $config
-        } elseif ($Connector -eq 'geminicli') {
-            $config
         } elseif ($Connector -eq 'cursor') {
             Join-Path $env:DEFENSECLAW_HOME 'hooks\cursor-hook.ps1'
         } else {
@@ -6015,10 +5765,6 @@ function Assert-DoctorHookRegistration {
         Assert-HermesWindowsHookConfig $config 'setup-created Hermes registration'
     } elseif ($Connector -eq 'antigravity') {
         Assert-AntigravityWindowsHookCommands $registration
-    } elseif ($Connector -eq 'geminicli') {
-        Assert-GeminiCLISynchronousWindowsHookConfig `
-            $registration 'setup-created Gemini CLI registration'
-        Assert-GeminiCLIForeignHookFixture configured
     } elseif ($Connector -eq 'opencode') {
         foreach ($marker in @('tool.execute.before', 'await defenseclawPost', 'throw new Error', 'tool.execute.after')) {
             if ($registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
@@ -6107,7 +5853,6 @@ function Initialize-DefenseClawEnv {
         (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\devin'),
         (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\hermes'),
         (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\antigravity'),
-        (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\geminicli'),
         (Join-Path $env:DEFENSECLAW_HOME 'connector_backups\opencode'),
         (Join-Path $env:DEFENSECLAW_HOME 'hooks')
     )
@@ -6135,11 +5880,6 @@ function Invoke-Teardown {
     Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
     $teardownArguments = @('connector', 'teardown', '--connector', $Connector)
     $verifyArguments = @('connector', 'verify', '--connector', $Connector)
-    if ($Connector -eq 'geminicli') {
-        $geminiConfigHome = Resolve-EffectiveConnectorHome 'geminicli'
-        $teardownArguments += @('--config-home', $geminiConfigHome)
-        $verifyArguments += @('--config-home', $geminiConfigHome)
-    }
     Invoke-Tool 'defenseclaw-gateway' $teardownArguments @(0, 1) | Out-Null
     Invoke-Tool 'defenseclaw-gateway' $verifyArguments | Out-Null
     $config = Get-EffectiveConnectorConfigPath $Connector
@@ -6156,9 +5896,6 @@ function Invoke-Teardown {
                 throw "teardown left the managed Cursor runtime artifact in place: $artifact"
             }
         }
-    }
-    if ($Connector -eq 'geminicli') {
-        Assert-GeminiCLIForeignHookFixture teardown
     }
 }
 
@@ -6367,7 +6104,6 @@ function New-DangerousCommandPayload(
         'copilot' { 'preToolUse' }
         'cursor' { 'preToolUse' }
         'hermes' { 'pre_tool_call' }
-        'geminicli' { 'BeforeTool' }
         'opencode' { 'tool.execute.before' }
         default { 'PreToolUse' }
     }
@@ -6834,10 +6570,6 @@ function Assert-DoctorWindowsHookRegistration {
         $cursorAdapter = Assert-CursorSynchronousWindowsHookCommand $config ($script:LastSetupMode -eq 'action') 'Cursor setup'
     } elseif ($Connector -eq 'antigravity') {
         Assert-AntigravityWindowsHookCommands $config
-    } elseif ($Connector -eq 'geminicli') {
-        Assert-GeminiCLISynchronousWindowsHookConfig `
-            $config 'Gemini CLI setup'
-        Assert-GeminiCLIForeignHookFixture configured
     } elseif ($Connector -eq 'hermes') {
         Assert-HermesWindowsHookConfig $configPath 'Hermes setup'
     } elseif ($Connector -eq 'codex') {
@@ -6876,7 +6608,6 @@ function Assert-DoctorWindowsHookRegistration {
         'copilot' { 'healthy Windows-native Copilot PowerShell byte-stream registration' }
         'cursor' { 'configured runtime=' }
         'hermes' { 'on-disk Windows-native executable registration is valid' }
-        'geminicli' { 'reachable at' }
         default { 'healthy Windows-native executable registration' }
     }
     $expectedDoctorStatus = if ($Connector -eq 'hermes') { 'fail' } else { 'pass' }
@@ -9400,7 +9131,6 @@ function Invoke-ContractRun {
         'init', '--skip-install', '--non-interactive', '--yes', '--connector', $Connector,
         '--profile', 'observe', '--no-start-gateway', '--no-verify'
     )
-    Initialize-GeminiCLIForeignHookFixture
     if ($Connector -eq 'copilot') { $script:CopilotConfiguredMode = 'observe' }
     Invoke-Tool 'defenseclaw' $initArgs | Out-Null
     Set-IsolatedGatewayPort
@@ -9419,14 +9149,7 @@ function Invoke-ContractRun {
     } finally {
         Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     }
-    if ($Connector -eq 'geminicli') {
-        # Gemini currently uses Doctor's lock-backed reachability row; the
-        # exact 11-handler/native-launcher validator above is the authoritative
-        # deterministic registration check for this Preview connector.
-        Assert-DoctorHookRegistration
-    } else {
-        Assert-DoctorWindowsHookRegistration
-    }
+    Assert-DoctorWindowsHookRegistration
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }
     if (Test-Path -LiteralPath $session) { Invoke-Hook $sessionEvent $session allow }
@@ -10857,9 +10580,6 @@ if ($HeldStateFixture) {
 if (-not $NoRun) {
     if (-not $IsWindows) { throw 'run-windows.ps1 requires native Windows PowerShell' }
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'only native Windows x64 is certifying' }
-    if ($Layer -eq 'live' -and $Connector -eq 'geminicli') {
-        throw 'Gemini CLI remains Preview on native Windows; this harness provides deterministic packaged contract coverage only, not authenticated official-client live evidence'
-    }
     if ($ProtectedAntigravityLocal) {
         $AuthenticatedAntigravityRunner = $true
     }
@@ -11094,9 +10814,6 @@ if (-not $NoRun) {
         $env:DEFENSECLAW_DEVIN_CONFIG_HOME = Join-Path $env:USERPROFILE 'AppData\Roaming\devin'
         $env:HERMES_HOME = Join-Path $env:USERPROFILE 'AppData\Local\hermes'
         $env:OPENCODE_CONFIG_DIR = Join-Path $env:USERPROFILE '.config\opencode'
-        $env:GEMINI_CLI_HOME = $env:USERPROFILE
-        $env:DEFENSECLAW_GEMINI_CONFIG_HOME = Join-Path $env:GEMINI_CLI_HOME '.gemini'
-        Remove-Item Env:GEMINI_CONFIG_DIR -ErrorAction SilentlyContinue
     } else {
         Assert-PackagedConnectorHomes $StateRoot $HomeRoot
     }

@@ -38,8 +38,6 @@ type State struct {
 	DevinConfigDir       string `json:"devin_config_dir,omitempty"`
 	DevinExecutable      string `json:"devin_executable,omitempty"`
 	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
-	GeminiCLIHome        string `json:"gemini_cli_home,omitempty"`
-	GeminiConfigDir      string `json:"gemini_config_dir,omitempty"`
 	OpenCodeConfigDir    string `json:"opencode_config_dir,omitempty"`
 	OmnigentConfigHome   string `json:"omnigent_config_home,omitempty"`
 	HermesHome           string `json:"hermes_home,omitempty"`
@@ -47,10 +45,7 @@ type State struct {
 
 // Environment removes ambient profile selectors and restores the documented
 // installer-owned values. AntigravityConfigDir remains custody state used only
-// by isolated Setup maintenance. GeminiCLIHome is the vendor-documented home
-// root, while GeminiConfigDir is its derived <root>/.gemini directory and is
-// also rehydrated through a DefenseClaw-private binding. The obsolete
-// GEMINI_CONFIG_DIR selector is never set.
+// by isolated Setup maintenance.
 func (state State) Environment(base []string) []string {
 	owned := map[string]bool{
 		"DEFENSECLAW_INSTALL_ROOT":            true,
@@ -65,10 +60,7 @@ func (state State) Environment(base []string) []string {
 		"OMNIGENT_CONFIG_HOME":                true,
 		"HERMES_HOME":                         true,
 		"ANTIGRAVITY_CONFIG_DIR":              true,
-		"GEMINI_CLI_HOME":                     true,
-		"GEMINI_CONFIG_DIR":                   true,
 		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME": true,
-		"DEFENSECLAW_GEMINI_CONFIG_HOME":      true,
 	}
 	result := make([]string, 0, len(base)+12)
 	for _, entry := range base {
@@ -108,16 +100,6 @@ func (state State) Environment(base []string) []string {
 	}
 	if state.HermesHome != "" {
 		result = append(result, "HERMES_HOME="+state.HermesHome)
-	}
-	geminiCLIHome := state.GeminiCLIHome
-	if geminiCLIHome == "" {
-		geminiCLIHome = geminiHomeForConfigDir(state.GeminiConfigDir)
-	}
-	if geminiBindingConsistent(geminiCLIHome, state.GeminiConfigDir) {
-		result = append(result, "GEMINI_CLI_HOME="+geminiCLIHome)
-	}
-	if state.GeminiConfigDir != "" {
-		result = append(result, "DEFENSECLAW_GEMINI_CONFIG_HOME="+state.GeminiConfigDir)
 	}
 	return result
 }
@@ -204,8 +186,6 @@ func loadAt(executable, installRoot string) (State, error) {
 		state.DevinConfigDir,
 		state.DevinExecutable,
 		state.AntigravityConfigDir,
-		state.GeminiCLIHome,
-		state.GeminiConfigDir,
 		state.OpenCodeConfigDir,
 		state.OmnigentConfigHome,
 		state.HermesHome,
@@ -217,42 +197,7 @@ func loadAt(executable, installRoot string) (State, error) {
 	if state.DataRoot == "" {
 		return State{}, errors.New("native install state has no data root")
 	}
-	if state.GeminiCLIHome != "" && !geminiBindingConsistent(state.GeminiCLIHome, state.GeminiConfigDir) {
-		return State{}, errors.New("native install state has an inconsistent Gemini CLI home binding")
-	}
-	for _, path := range []string{state.GeminiCLIHome, state.GeminiConfigDir} {
-		if path != "" && (strings.TrimSpace(path) != path || containsPathControl(path)) {
-			return State{}, errors.New("native install state has an invalid Gemini CLI home binding")
-		}
-	}
 	return state, nil
-}
-
-func geminiHomeForConfigDir(configDir string) string {
-	if configDir == "" || !strings.EqualFold(filepath.Base(configDir), ".gemini") {
-		return ""
-	}
-	root := filepath.Dir(configDir)
-	if root == configDir || root == "." {
-		return ""
-	}
-	return root
-}
-
-func geminiBindingConsistent(home, configDir string) bool {
-	return home != "" && configDir != "" && strings.EqualFold(
-		filepath.Join(home, ".gemini"),
-		configDir,
-	)
-}
-
-func containsPathControl(path string) bool {
-	for _, char := range path {
-		if char < 0x20 || char == 0x7f {
-			return true
-		}
-	}
-	return false
 }
 
 func absoluteCleanPath(path string) bool {

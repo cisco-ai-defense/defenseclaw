@@ -6149,7 +6149,7 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6165,14 +6165,14 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 	api, called := tokenAuthTestServer(t, "secret-token-123")
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeGeminiCLI: "scoped-token-abc",
+		connector.OTLPScopeOmnigent: "scoped-token-abc",
 	})
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6183,7 +6183,7 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 		t.Fatal("next handler called for master token despite scoped token existing")
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Authorization", "Bearer secret-token-123")
 	rr = httptest.NewRecorder()
@@ -6195,7 +6195,7 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 		t.Fatal("next handler called for master bearer despite scoped token existing")
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6386,7 +6386,7 @@ func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+			req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 			req.RemoteAddr = "127.0.0.1:54321"
 			if tc.ct != "" {
 				req.Header.Set("Content-Type", tc.ct)
@@ -6411,7 +6411,7 @@ func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example.com")

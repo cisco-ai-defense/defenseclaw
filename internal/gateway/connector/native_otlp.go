@@ -32,8 +32,6 @@ import (
 //     (claudecode's settings.json `env`).
 //   - NativeOTLPTOMLBlock — a TOML table inserted into the agent's
 //     config file (codex's `[otel.exporter.otlp-http]` block).
-//   - NativeOTLPJSONBlock — a JSON object inserted into the agent's
-//     settings file (geminicli's `telemetry` block).
 //   - NativeOTLPFileSink — the agent writes OTLP to a local JSONL file
 //     instead of (or in addition to) the network endpoint.
 type NativeOTLPKind string
@@ -41,7 +39,6 @@ type NativeOTLPKind string
 const (
 	NativeOTLPEnvBlock  NativeOTLPKind = "env_block"
 	NativeOTLPTOMLBlock NativeOTLPKind = "toml_block"
-	NativeOTLPJSONBlock NativeOTLPKind = "json_block"
 	NativeOTLPFileSink  NativeOTLPKind = "file_sink"
 )
 
@@ -64,16 +61,16 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 
 // NativeOTLPSpec describes how DefenseClaw should configure a connector's
 // native OTLP exporter. The spec is intentionally generic enough to
-// accommodate the three connectors that DefenseClaw currently integrates
-// with native OTLP (codex, claudecode, geminicli) AND the next wave the survey
+// accommodate the connectors that DefenseClaw currently integrates
+// with native OTLP (codex, claudecode, omnigent, openhands) AND the next wave the survey
 // surfaced (OpenCode, Cline, Goose, HolmesGPT, Kilo Code) without
 // per-connector code in the gateway.
 //
 // Field rules:
 //
 //   - Endpoint: the OTLP-HTTP endpoint URL. For path-token connectors
-//     (geminicli) PathToken is set instead and Endpoint is constructed
-//     by the installer.
+//     PathToken is set instead and Endpoint is constructed by the
+//     installer.
 //   - Protocol: "http/json" or "http/protobuf". Default "http/json".
 //   - Headers: HTTP headers the exporter should set on every outbound
 //     OTLP request. Used for tenant-aware tokens. Keys are canonicalized
@@ -95,7 +92,7 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //   - PathToken: optional. When non-empty the installer wires a
 //     /otlp/<scope>/<token>/v1/<signal> URL pattern instead of carrying
 //     the token in a header. Required for connectors whose exporter
-//     can't set arbitrary HTTP headers (geminicli).
+//     can't set arbitrary HTTP headers.
 //   - PathScope: paired with PathToken. The connector-scoped namespace
 //     used in /otlp/<scope>/<token>/v1/<signal>. Validated against the
 //     closed allow-list in OTLPPathTokenScopes().
@@ -138,7 +135,7 @@ func (s NativeOTLPSpec) Validate() error {
 		return fmt.Errorf("NativeOTLPSpec: Kind is required")
 	}
 	switch s.Kind {
-	case NativeOTLPEnvBlock, NativeOTLPTOMLBlock, NativeOTLPJSONBlock, NativeOTLPFileSink:
+	case NativeOTLPEnvBlock, NativeOTLPTOMLBlock, NativeOTLPFileSink:
 	default:
 		return fmt.Errorf("NativeOTLPSpec: unknown Kind %q", s.Kind)
 	}
@@ -221,8 +218,8 @@ func isScopedOTLPBaseEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope
 
 // pathTokenBaseEndpoint returns the path-token endpoint WITHOUT a
 // signal suffix. Vendor exporters that auto-append /v1/<signal> to
-// their configured base (Gemini CLI's settings.json otlpEndpoint
-// field) consume this; signalEndpoint() is for vendors that expect a
+// their configured base (OTEL_EXPORTER_OTLP_ENDPOINT) consume this;
+// signalEndpoint() is for vendors that expect a
 // fully-qualified per-signal URL (Codex's [otel.*_exporter.otlp-http]).
 func (s NativeOTLPSpec) pathTokenBaseEndpoint() string {
 	if strings.TrimSpace(s.PathToken) == "" {
@@ -348,38 +345,6 @@ func (s NativeOTLPSpec) TOMLBlock() (map[string]interface{}, error) {
 		"trace_exporter":   exporterFor(NativeOTLPSignalTraces),
 		"metrics_exporter": exporterFor(NativeOTLPSignalMetrics),
 	}, nil
-}
-
-// JSONBlock renders a JSON-block spec into a map suitable for embedding
-// into Gemini CLI's settings.json `telemetry` block. The shape matches
-// the Gemini schema described in patchGeminiTelemetry (hook_only.go).
-//
-// The endpoint emitted is the path-token BASE (no /v1/<signal> suffix)
-// because Gemini's OTel exporter auto-appends the signal path. Adding
-// it here would produce /otlp/<scope>/<token>/v1/traces/v1/traces at
-// request time which the gateway's tokenAuth middleware rejects.
-func (s NativeOTLPSpec) JSONBlock() (map[string]interface{}, error) {
-	if s.Kind != NativeOTLPJSONBlock {
-		return nil, fmt.Errorf("NativeOTLPSpec.JSONBlock: kind %q is not json_block", s.Kind)
-	}
-	if err := s.Validate(); err != nil {
-		return nil, err
-	}
-	out := map[string]interface{}{
-		"enabled":      true,
-		"traces":       true,
-		"target":       "local",
-		"useCollector": true,
-		"useCliAuth":   false,
-		"otlpProtocol": "http",
-		"outfile":      "",
-		"logPrompts":   s.LogUserPrompts,
-	}
-	endpoint := s.pathTokenBaseEndpoint()
-	if endpoint != "" {
-		out["otlpEndpoint"] = endpoint
-	}
-	return out, nil
 }
 
 // FileSinkPath returns the configured local sink path for a FileSink

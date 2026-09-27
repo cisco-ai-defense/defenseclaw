@@ -48,7 +48,7 @@ var hookTraceV6Propagator propagation.TextMapPropagator = propagation.TraceConte
 //     refused trace splice even though the OTel middleware sees it
 //     before the mux 404.
 //  2. Loopback — every shipped hook script (cursor, codex,
-//     claude-code, hermes, geminicli, copilot) POSTs to
+//     claude-code, hermes, copilot) POSTs to
 //     127.0.0.1:<api-port>; the codex notify-bridge ships a
 //     127.0.0.1 URL too. A non-loopback caller has no legitimate
 //     reason to splice into the hook trace tree, so we drop the

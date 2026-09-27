@@ -487,8 +487,8 @@ func TestHookLifecycleV8InferredDelegationMarksProvenance(t *testing.T) {
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"},{"id":"child-2","name":"reviewer"}]}`)
 	api.emitAgentHookLLMEvent(t.Context(), agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "gemini-session",
-		TurnID: "gemini-turn", AgentID: "gemini-root", AgentName: "gemini", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "gemini-session",
+		TurnID: "gemini-turn", AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
 		ToolName: "spawn_agent", ToolArgs: args,
 		Payload: map[string]any{"root_agent_id": "gemini-root", "tool_call_id": "spawn-call-1"},
 	}, args)
@@ -512,8 +512,8 @@ func TestHookLifecycleV8InferredDelegationMarksProvenance(t *testing.T) {
 func TestHookLifecycleV8DistinctStartsKeepExecutionScopedDedupeAndOperation(t *testing.T) {
 	api := &APIServer{}
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "SessionStart", SessionID: "resume-session",
-		AgentID: "resume-agent", AgentName: "resume", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "SessionStart", SessionID: "resume-session",
+		AgentID: "resume-agent", AgentName: "resume", AgentType: "openhands",
 		Payload: map[string]any{
 			"root_agent_id": "resume-agent", "agent_depth": 0, "source": "resume",
 		},
@@ -546,8 +546,8 @@ func TestHookLifecycleV8FinalizesGenericOperationAfterTraceIdentity(t *testing.T
 	api := &APIServer{}
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "Notification", SessionID: "event-session",
-		AgentID: "event-agent", AgentName: "event-agent", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "Notification", SessionID: "event-session",
+		AgentID: "event-agent", AgentName: "event-agent", AgentType: "openhands",
 		Payload: map[string]any{"root_agent_id": "event-agent", "agent_depth": 0},
 	}
 
@@ -572,8 +572,8 @@ func TestHookLifecycleV8ExactTopLevelReplayReusesCanonicalCursor(t *testing.T) {
 	api := &APIServer{}
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "replay-session",
-		TurnID: "replay-turn", AgentID: "replay-agent", AgentName: "replay", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "replay-session",
+		TurnID: "replay-turn", AgentID: "replay-agent", AgentName: "replay", AgentType: "openhands",
 		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
 		Payload: map[string]any{
 			"root_agent_id": "replay-agent", "tool_call_id": "replay-call",
@@ -624,8 +624,8 @@ func TestHookLifecycleV8ExactTopLevelReplayReusesCanonicalCursor(t *testing.T) {
 func TestHookLifecycleV8LateTopLevelReplayKeepsNewestRetainedCursor(t *testing.T) {
 	api := &APIServer{}
 	start := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "late-replay-session",
-		TurnID: "late-replay-turn", AgentID: "late-replay-agent", AgentName: "replay", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "late-replay-session",
+		TurnID: "late-replay-turn", AgentID: "late-replay-agent", AgentName: "replay", AgentType: "openhands",
 		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
 		Payload: map[string]any{
 			"root_agent_id": "late-replay-agent", "tool_call_id": "late-replay-call",
@@ -647,17 +647,17 @@ func TestHookLifecycleV8LateTopLevelReplayKeepsNewestRetainedCursor(t *testing.T
 
 func TestHookLifecycleV8LaterSubagentStopRepairsToolFirstLineage(t *testing.T) {
 	api := &APIServer{}
-	rootAgentID := stableLLMEventID("agent", "geminicli", "shared-session", "root")
+	rootAgentID := stableLLMEventID("agent", "openhands", "shared-session", "root")
 	parent := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "shared-session",
-		TurnID: "parent-turn", AgentID: rootAgentID, AgentName: "root", AgentType: "geminicli",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "shared-session",
+		TurnID: "parent-turn", AgentID: rootAgentID, AgentName: "root", AgentType: "openhands",
 		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf parent"}`),
 		Payload: map[string]any{
 			"root_agent_id": rootAgentID, "agent_depth": 0, "tool_call_id": "parent-call",
 		},
 	}
 	childTool := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "shared-session",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "shared-session",
 		TurnID: "child-turn", AgentID: "agent-child", AgentName: "child", AgentType: "subagent",
 		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf child"}`),
 		Payload: map[string]any{"tool_call_id": "child-call"},
@@ -690,8 +690,8 @@ func TestHookLifecycleV8InferredReplayReusesCanonicalCursorAndRetainsTerminal(t 
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
 	parent := llmEventMeta{
-		Source: "geminicli", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "geminicli",
+		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
+		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
 		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
 		ToolName: "spawn_agent", ToolID: "spawn-call-1",
@@ -748,8 +748,8 @@ func TestHookLifecycleV8InferredReplayAfterTerminalKeepsTerminalSnapshot(t *test
 	api := &APIServer{}
 	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
 	parent := llmEventMeta{
-		Source: "geminicli", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "geminicli",
+		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
+		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
 		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
 		ToolName: "spawn_agent", ToolID: "spawn-call-1",
@@ -772,8 +772,8 @@ func TestHookLifecycleV8InferredDelegationSeparatesParentExecutions(t *testing.T
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
 	parentA := llmEventMeta{
-		Source: "geminicli", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "geminicli",
+		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
+		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
 		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution-a",
 		ToolName: "spawn_agent", ToolID: "spawn-call-1",
@@ -826,8 +826,8 @@ func TestHookLifecycleV8InferredDelegationRetainsExecutionAndSequence(t *testing
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"}]}`)
 	base := agentHookRequest{
-		ConnectorName: "geminicli", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "geminicli",
+		ConnectorName: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
+		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
 		ToolName: "spawn_agent", ToolArgs: args,
 		Payload: map[string]any{
 			"root_agent_id": "gemini-root", "tool_call_id": "spawn-call-1",

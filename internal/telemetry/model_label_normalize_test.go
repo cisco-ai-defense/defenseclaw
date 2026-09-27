@@ -98,7 +98,7 @@ func TestNormalizeGenAILabels_BoundCardinality(t *testing.T) {
 		"":                                  "unknown",
 		"Anthropic":                         "anthropic",
 		"codex":                             "openai",
-		"gemini-cli":                        "google",
+		"gemini-2.5-pro":                    "google",
 		"openai-with-random-suffix":         "openai",
 		strings.Repeat("provider-", 20):     "other",
 		"attacker-provider-2026-05-18-uuid": "other",

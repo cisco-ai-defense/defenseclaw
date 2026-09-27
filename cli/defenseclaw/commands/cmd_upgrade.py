@@ -169,7 +169,6 @@ _NATIVE_WINDOWS_INSTALLER_CONNECTORS = frozenset(
         "copilot",
         "cursor",
         "devin",
-        "geminicli",
         "hermes",
         "kiro",
         "omnigent",

@@ -705,56 +705,6 @@ def test_prepare_accepts_current_native_connector_identities(
     assert _prepare_from_tree(local_app_data, profile) is not None
 
 
-def test_prepare_accepts_gemini_connector_home_custody(tmp_path: Path) -> None:
-    local_app_data, profile = _native_tree(tmp_path)
-    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
-    state = _install_state(local_app_data, profile)
-    state["connector"] = "geminicli"
-    gemini_cli_home = profile / "gemini-cli-home"
-    state["gemini_cli_home"] = str(gemini_cli_home)
-    state["gemini_config_dir"] = str(gemini_cli_home / ".gemini")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    assert _prepare_from_tree(local_app_data, profile) is not None
-
-
-def test_prepare_accepts_predecessor_gemini_config_without_vendor_home(tmp_path: Path) -> None:
-    local_app_data, profile = _native_tree(tmp_path)
-    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
-    state = _install_state(local_app_data, profile)
-    state["connector"] = "geminicli"
-    state["gemini_config_dir"] = str(profile / ".gemini")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    assert _prepare_from_tree(local_app_data, profile) is not None
-
-
-def test_prepare_refuses_inconsistent_gemini_cli_home_binding(tmp_path: Path) -> None:
-    local_app_data, profile = _native_tree(tmp_path)
-    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
-    state = _install_state(local_app_data, profile)
-    state["connector"] = "geminicli"
-    state["gemini_cli_home"] = str(profile / "gemini-cli-home")
-    state["gemini_config_dir"] = str(profile / "other" / ".gemini")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    with pytest.raises(native.NativeWindowsUninstallRefusal, match="inconsistent Gemini CLI"):
-        _prepare_from_tree(local_app_data, profile)
-
-
-@pytest.mark.parametrize("hostile_value", [None, "relative", "C:\\gemini-home ", "C:\\gemini\thome"])
-def test_prepare_refuses_invalid_gemini_cli_home_binding(tmp_path: Path, hostile_value: object) -> None:
-    local_app_data, profile = _native_tree(tmp_path)
-    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
-    state = _install_state(local_app_data, profile)
-    state["gemini_cli_home"] = hostile_value
-    state["gemini_config_dir"] = str(profile / ".gemini")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    with pytest.raises(native.NativeWindowsUninstallRefusal, match="invalid gemini cli home"):
-        _prepare_from_tree(local_app_data, profile)
-
-
 @pytest.mark.parametrize(
     ("acl_problem", "message"),
     [

@@ -92,7 +92,6 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         os.path.join("connector_backups", "cursor", "config.json"),
         os.path.join("connector_backups", "cursor", "hooks.json.json"),
     ),
-    "geminicli": (os.path.join("connector_backups", "geminicli", "config.json"),),
     "hermes": (
         os.path.join("connector_backups", "hermes", "config.yaml.json"),
         os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),

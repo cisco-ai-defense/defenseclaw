@@ -345,10 +345,6 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		// variable. The hidden maintenance flag already flows through
 		// SetupOpts.ConfigHome, so do not invent or export a vendor override.
 		return func() {}, nil
-	case "geminicli":
-		// Retired Gemini CLI cleanup uses only SetupOpts.ConfigHome from the
-		// authenticated maintenance handoff; never publish a new vendor override.
-		return func() {}, nil
 	case "opencode":
 		variable = "OPENCODE_CONFIG_DIR"
 	case "omnigent":
@@ -524,9 +520,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
 	if name != "amp" && name != "antigravity" && name != "claudecode" && name != "codex" &&
-		name != "copilot" && name != "cursor" && name != "geminicli" && name != "hermes" && name != "omnigent" &&
+		name != "copilot" && name != "cursor" && name != "hermes" && name != "omnigent" &&
 		name != "opencode" && name != "devin" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, geminicli, hermes, omnigent, and opencode")
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, hermes, omnigent, and opencode")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)

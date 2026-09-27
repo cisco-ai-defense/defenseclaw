@@ -61,9 +61,7 @@ from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context
 
-# Active scan-capable connector names. Retired Gemini CLI remains known only
-# so authenticated lifecycle cleanup can resolve its old state; it must not
-# participate in new scan-command matrices.
+# Active scan-capable connector names.
 ACTIVE_SCAN_CONNECTORS = (
     "openclaw",
     "codex",

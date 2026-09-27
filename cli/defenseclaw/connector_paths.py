@@ -86,7 +86,6 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     reject_reparse_path,
 )
-from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 from defenseclaw.safety import is_symlink
 
 _MCP_CONFIG_MAX_BYTES = 2 * 1024 * 1024
@@ -104,7 +103,6 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "hermes",
     "cursor",
     "devin",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",
@@ -156,7 +154,6 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "hermes",
         "cursor",
         "devin",
-        "geminicli",
         "copilot",
         "openhands",
         "antigravity",
@@ -366,8 +363,6 @@ def normalize(connector: str | None) -> str:
         return "openhands"
     if name in {"claude-code", "claude_code"}:
         return "claudecode"
-    if name in {"gemini-cli", "gemini_cli", "gemini"}:
-        return "geminicli"
     return name or "openclaw"
 
 
@@ -375,30 +370,6 @@ def is_known(connector: str | None) -> bool:
     """Return True iff *connector* (after :func:`normalize`) is in
     :data:`KNOWN_CONNECTORS`."""
     return normalize(connector) in KNOWN_CONNECTORS
-
-
-def is_cleanup_only(connector: str | None) -> bool:
-    """Return whether *connector* is retained only for managed cleanup.
-
-    Cleanup-only connectors stay in :data:`KNOWN_CONNECTORS` so historical
-    receipts, aliases, and exact teardown paths remain resolvable. They must
-    not participate in new asset discovery or mutation surfaces.
-    """
-
-    return normalize(connector) in DEPRECATED_CONNECTORS
-
-
-def cleanup_only_guidance(connector: str | None) -> str:
-    """Operator guidance for a retired connector's blocked active surface."""
-
-    name = normalize(connector)
-    if name == "geminicli":
-        return (
-            "Gemini CLI is retired and cleanup-only; use the Antigravity "
-            "connector. Remove existing DefenseClaw-managed Gemini CLI state "
-            "with `defenseclaw setup remove geminicli --yes`."
-        )
-    return f"Connector {name!r} is retired and cleanup-only."
 
 
 # ---------------------------------------------------------------------------
@@ -1104,46 +1075,6 @@ def devin_hook_config_path(workspace_dir: str | None = None) -> str:
     return _workspace_path(workspace_dir, ".devin", "hooks.v1.json")
 
 
-def gemini_config_home() -> str:
-    """Return Gemini CLI's DefenseClaw-bound user configuration root.
-
-    Native DefenseClaw launchers rehydrate the authenticated derived ``.gemini``
-    directory through a private binding. Source installs without that binding
-    follow Gemini CLI's official ``GEMINI_CLI_HOME`` contract: the variable is
-    a parent home root, so Gemini creates/loads ``.gemini`` underneath it.
-    """
-
-    configured = os.environ.get("DEFENSECLAW_GEMINI_CONFIG_HOME")
-    if configured is not None:
-        if (
-            not configured
-            or configured.strip() != configured
-            or "\x00" in configured
-            or "\r" in configured
-            or "\n" in configured
-            or not os.path.isabs(configured)
-            or os.path.normpath(configured) != configured
-        ):
-            raise ValueError(
-                "DEFENSECLAW_GEMINI_CONFIG_HOME is not an absolute normalized path"
-            )
-        return configured
-
-    vendor_home = os.environ.get("GEMINI_CLI_HOME")
-    if vendor_home:
-        if (
-            vendor_home.strip() != vendor_home
-            or "\x00" in vendor_home
-            or "\r" in vendor_home
-            or "\n" in vendor_home
-            or not os.path.isabs(vendor_home)
-            or os.path.normpath(vendor_home) != vendor_home
-        ):
-            raise ValueError("GEMINI_CLI_HOME is not an absolute normalized path")
-        return os.path.join(vendor_home, ".gemini")
-    return os.path.join(os.path.abspath(str(Path.home())), ".gemini")
-
-
 def amp_config_home() -> str:
     """Return Amp's documented system configuration directory."""
 
@@ -1488,8 +1419,6 @@ def connector_home(
         return amp_config_home()
     if name == "zeptoclaw":
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
-    if name == "geminicli":
-        return gemini_config_home()
     if name == "copilot":
         return copilot_home()
     if name == "openhands":
@@ -1576,11 +1505,6 @@ def connector_config_files(
         paths = [
             os.path.join(zepto_home, "config.json"),
             _workspace_path(workspace_dir, ".mcp.json"),
-        ]
-    elif name == "geminicli":
-        paths = [
-            os.path.join(gemini_config_home(), "settings.json"),
-            _workspace_path(workspace_dir, ".gemini", "settings.json"),
         ]
     elif name == "copilot":
         copilot_root = copilot_home()
@@ -1805,8 +1729,6 @@ def skill_dirs(
     ``~/.openclaw/openclaw.json``).
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_skill_dirs(workspace_dir)
     if name == "codex":
@@ -1855,8 +1777,6 @@ def skill_write_dirs(
     install behavior.
     """
 
-    if is_cleanup_only(connector):
-        return []
     if normalize(connector) == "amp":
         workspace = _workspace_dir(workspace_dir)
         if workspace:
@@ -1898,8 +1818,6 @@ def plugin_dirs(
     * OpenClaw:    ``<home_dir>/extensions``
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_plugin_dirs(workspace_dir)
     if name == "codex":
@@ -1969,8 +1887,6 @@ def agent_dirs(
     owned by their existing inventory adapters.
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "codex":
         return _dedup(
             [
@@ -2020,8 +1936,6 @@ def rule_dirs(
     omitted on native Windows.
     """
     name = normalize(connector)
-    if is_cleanup_only(name):
-        return []
     if name == "copilot":
         return copilot_instruction_paths(workspace_dir)
     if name == "cursor":
@@ -2091,8 +2005,6 @@ def mcp_servers(
     """
     name = normalize(connector)
     infer = infer_workspace_from_cwd
-    if is_cleanup_only(name):
-        return []
     if name == "claudecode":
         return _claudecode_mcp_servers(
             workspace_dir,
@@ -2200,8 +2112,6 @@ def mcp_source_locations(
     name = normalize(connector)
     infer = infer_workspace_from_cwd
     home = str(Path.home())
-    if is_cleanup_only(name):
-        return []
 
     def ws(*parts: str) -> str:
         return _discovery_path(workspace_dir, *parts, infer_from_cwd=infer)
@@ -3156,16 +3066,6 @@ def _antigravity_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     )
 
 
-def _gemini_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    return _dedup(
-        [
-            os.path.join(gemini_config_home(), "skills"),
-            _workspace_path(workspace_dir, ".gemini", "skills"),
-            _workspace_path(workspace_dir, ".agents", "skills"),
-        ]
-    )
-
-
 def _copilot_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     workspace = _workspace_dir(workspace_dir)
     ancestors = _copilot_workspace_ancestors(workspace)
@@ -3504,12 +3404,6 @@ def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
             if os.path.isdir(component_dir):
                 out.append(component_dir)
     return _dedup(out)
-
-
-def _gemini_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
-    # Gemini CLI extensions are installed into the user configuration root.
-    # The CLI does not document a project-local .gemini/extensions layer.
-    return [os.path.join(gemini_config_home(), "extensions")]
 
 
 def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
@@ -3963,37 +3857,6 @@ def _devin_mcp_servers(
     entries: list[MCPServerEntry] = []
     for path in _devin_mcp_read_paths(workspace or None):
         entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
-    return _dedup_mcp_entries(entries)
-
-
-def _gemini_mcp_servers(
-    workspace_dir: str | None = None,
-    *,
-    infer_from_cwd: bool = False,
-    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
-) -> list[MCPServerEntry]:
-    entries: list[MCPServerEntry] = []
-    # Gemini's project settings override user settings. Only consult the
-    # project layer when a workspace is pinned or the caller opts into cwd
-    # inference; never infer it from a daemon's current working directory.
-    project_settings = _discovery_path(
-        workspace_dir, ".gemini", "settings.json", infer_from_cwd=infer_from_cwd,
-    )
-    if project_settings:
-        entries.extend(
-            _read_mcp_settings_block(
-                project_settings,
-                keys=("mcpServers",),
-                diagnostic_sink=diagnostic_sink,
-            )
-        )
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(gemini_config_home(), "settings.json"),
-            keys=("mcpServers",),
-            diagnostic_sink=diagnostic_sink,
-        )
-    )
     return _dedup_mcp_entries(entries)
 
 
@@ -4931,8 +4794,6 @@ def set_mcp_server(
                      (for example OpenHands writes ``~/.openhands/mcp.json``).
     """
     name_n = normalize(connector)
-    if is_cleanup_only(name_n):
-        raise MCPWriteUnsupportedError(cleanup_only_guidance(name_n))
     if name_n == "openclaw":
         if openclaw_config_setter is None:
             raise RuntimeError(
@@ -5036,8 +4897,6 @@ def unset_mcp_server(
     :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
-    if is_cleanup_only(name_n):
-        raise MCPWriteUnsupportedError(cleanup_only_guidance(name_n))
     if name_n == "openclaw":
         if openclaw_config_unsetter is None:
             raise RuntimeError(

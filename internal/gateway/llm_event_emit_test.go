@@ -199,7 +199,7 @@ func TestHookDecisionMetaReusesLifecycleExecutionAcrossStartTurnResumeAndChild(t
 
 func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 	root := llmEventMeta{
-		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
 		RootAgentID: "retained-root", RootSessionID: "parent-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
 	}
@@ -209,7 +209,7 @@ func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 		hookSessionStateOrder: []string{rootKey},
 	}
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
 		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
 		ToolName: "Bash",
 		Payload: map[string]any{
@@ -233,7 +233,7 @@ func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 
 func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *testing.T) {
 	root := llmEventMeta{
-		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
 		RootAgentID: "retained-root", RootSessionID: "parent-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
 	}
@@ -243,7 +243,7 @@ func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *te
 		hookSessionStateOrder: []string{rootKey},
 	}
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
 		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
 		ToolName: "Bash",
 		Payload: map[string]any{
@@ -620,7 +620,6 @@ func TestAllHookConnectorsNormalizeStableLifecycle(t *testing.T) {
 		{"claudecode", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"hermes", "on_session_start", "on_session_end", "session_start", "session_end"},
 		{"cursor", "sessionStart", "sessionEnd", "session_start", "session_end"},
-		{"geminicli", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"copilot", "sessionStart", "sessionEnd", "session_start", "session_end"},
 		{"antigravity", "PreInvocation", "Stop", "turn_start", "turn_end"},
 		{"openhands", "session_start", "session_end", "session_start", "session_end"},
@@ -1019,7 +1018,7 @@ func TestBoundedHookLLMSpanContent(t *testing.T) {
 func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 	}
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
@@ -1039,7 +1038,7 @@ func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 
 func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDeduped(t *testing.T) {
 	executionA := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution-a",
 	}
 	executionB := executionA
@@ -1077,7 +1076,7 @@ func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDedupe
 func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	arguments := `{"command":"printf ok"}`
@@ -1098,7 +1097,7 @@ func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(
 func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"printf old"}`)
@@ -1123,7 +1122,7 @@ func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T)
 	t.Run("native ID", func(t *testing.T) {
 		api := &APIServer{}
 		meta := llmEventMeta{
-			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 			ExecutionID: "execution", ToolID: "tool-call",
 		}
 		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output":"first"}`); !ok {
@@ -1141,7 +1140,7 @@ func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T)
 	t.Run("no ID repeated calls", func(t *testing.T) {
 		api := &APIServer{}
 		meta := llmEventMeta{
-			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 			ExecutionID: "execution",
 		}
 		api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)

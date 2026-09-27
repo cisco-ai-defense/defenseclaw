@@ -94,7 +94,6 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 		"openhands":   {{"openhands-hooks-v1", "1.12.0", "", true, "v6", 6}},
 		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
-		"geminicli":   {{"geminicli-hooks-v1", "0.26.0", "", true, "v6", 11}},
 	}
 
 	for _, goos := range []string{"darwin", "linux", "windows"} {
@@ -449,7 +448,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -942,18 +941,6 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 			want:    ToolLifecycleOutcomeDenied,
 		},
 		{
-			name:      "gemini_error",
-			connector: "geminicli", event: "AfterTool",
-			payload: map[string]interface{}{"tool_response": map[string]interface{}{"error": "command failed"}},
-			want:    ToolLifecycleOutcomeFailure,
-		},
-		{
-			name:      "gemini_missing_response_is_unknown",
-			connector: "geminicli", event: "AfterTool",
-			payload: map[string]interface{}{},
-			want:    ToolLifecycleOutcomeUnknown,
-		},
-		{
 			name:      "openhands_explicit_success",
 			connector: "openhands", event: "post_tool_use",
 			payload: map[string]interface{}{"tool_response": map[string]interface{}{"is_error": false}},
@@ -1188,7 +1175,7 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 		})
 	}
 
-	for _, connectorName := range []string{"geminicli", "copilot", "openhands", "omnigent"} {
+	for _, connectorName := range []string{"copilot", "openhands", "omnigent"} {
 		contract := ResolveHookContract(connectorName, "").Contract.ToolCallLifecycle
 		if contract.SupportsExactInvocationJoin() {
 			t.Fatalf("%s must not claim exact invocation joins", connectorName)

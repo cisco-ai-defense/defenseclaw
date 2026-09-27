@@ -57,7 +57,7 @@ t_install_warns_unsupported_connector() {
   # past the root-check on a clean install. We rely on the fact that
   # the warning is emitted BEFORE the root check.
   local out rc=0
-  out="$("${INSTALL_SH}" --connector "geminicli" 2>&1)" || rc=$?
+  out="$("${INSTALL_SH}" --connector "retired-example" 2>&1)" || rc=$?
   assert_contains "${out}" "is not in the auto-wire list" "warns about unsupported"
 }
 

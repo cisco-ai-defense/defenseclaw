@@ -1289,7 +1289,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "intentionally does not implement or claim that surface",
             r=r,
         )
-    elif connector in {"hermes", "devin", "geminicli", "openhands"}:
+    elif connector in {"hermes", "devin", "openhands"}:
         _emit(
             "warn",
             "Human approval",
@@ -3847,7 +3847,6 @@ _HOOK_HEALTH_LABELS = {
     "hermes": "Hermes hooks (fail-open)",
     "cursor": "Cursor hooks",
     "devin": "Devin hooks",
-    "geminicli": "Gemini CLI hooks (deprecated)",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
     "omnigent": "OmniGent policy",
@@ -5313,15 +5312,7 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
     connector (multi-connector installs) instead of probing only the
     primary. Unknown connectors are skipped silently (no new failure row).
     """
-    if connector == "geminicli":
-        r.record(
-            "warn",
-            "Gemini CLI (deprecated)",
-            "New setup is retired; remove existing managed state and use Antigravity",
-            reason_code="connector_deprecated",
-            remediation="defenseclaw setup remove geminicli --yes",
-        )
-    elif connector == "openclaw":
+    if connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif connector == "claudecode":
         _check_claudecode_hooks(cfg, r)
@@ -5922,9 +5913,6 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "copilot",
         "openhands",
         "antigravity",
-        # Retained only so Doctor handles an already-configured, deprecated
-        # Gemini CLI install as hook-driven while the operator removes it.
-        "geminicli",
         "opencode",
         "amp",
         "omnigent",
@@ -9197,7 +9185,6 @@ _CONNECTOR_LABELS = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
@@ -9808,9 +9795,6 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
         os.path.join("connector_backups", "cursor", "config.json"),
         # Older native-Windows builds named the receipt after hooks.json.
         os.path.join("connector_backups", "cursor", "hooks.json.json"),
-    ),
-    "geminicli": (
-        os.path.join("connector_backups", "geminicli", "config.json"),
     ),
     "hermes": (
         os.path.join("connector_backups", "hermes", "config.yaml.json"),

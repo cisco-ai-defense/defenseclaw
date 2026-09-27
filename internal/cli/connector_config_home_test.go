@@ -109,7 +109,6 @@ func TestBindAntigravityLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *tes
 	ambient := filepath.Join(root, "ambient")
 	bound := filepath.Join(root, ".gemini", "config")
 	t.Setenv("ANTIGRAVITY_CONFIG_DIR", ambient)
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(root, "gemini-ambient"))
 	connectorFlagConfigHome = bound
 	t.Cleanup(func() { connectorFlagConfigHome = "" })
 
@@ -127,27 +126,6 @@ func TestBindAntigravityLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *tes
 	restore()
 	if got := os.Getenv("ANTIGRAVITY_CONFIG_DIR"); got != ambient {
 		t.Fatalf("restored ANTIGRAVITY_CONFIG_DIR = %q, want %q", got, ambient)
-	}
-}
-
-func TestBindGeminiLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *testing.T) {
-	root := t.TempDir()
-	ambient := filepath.Join(root, "ambient-gemini")
-	bound := filepath.Join(root, ".gemini")
-	t.Setenv("GEMINI_CONFIG_DIR", ambient)
-	connectorFlagConfigHome = bound
-	t.Cleanup(func() { connectorFlagConfigHome = "" })
-
-	restore, err := bindConnectorLifecycleConfigHome("geminicli")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restore()
-	if got := os.Getenv("GEMINI_CONFIG_DIR"); got != ambient {
-		t.Fatalf("GEMINI_CONFIG_DIR was mutated to %q, want ambient %q", got, ambient)
-	}
-	if got := resolveConnectorOpts("").ConfigHome; got != bound {
-		t.Fatalf("hidden Gemini config home resolved to %q, want %q", got, bound)
 	}
 }
 

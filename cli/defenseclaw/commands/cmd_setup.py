@@ -209,7 +209,6 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "CLAUDE_CONFIG_DIR",
     "COPILOT_HOME",
     "DEFENSECLAW_CURSOR_CONFIG_HOME",
-    "DEFENSECLAW_GEMINI_CONFIG_HOME",
     "OPENCODE_CONFIG_DIR",
     "OMNIGENT_CONFIG",
     "OMNIGENT_CONFIG_HOME",
@@ -4275,14 +4274,6 @@ class _PlatformConnectorChoice(click.Choice):
     ) -> Any:
         if isinstance(value, str):
             connector = normalize_connector(value)
-            if connector in platform_support.DEPRECATED_CONNECTORS:
-                support = platform_support.connector_platform_support(connector)
-                self.fail(
-                    f"connector {connector!r} is {support.status} on "
-                    f"{platform_support.host_os()}: {support.reason}",
-                    param,
-                    ctx,
-                )
             if connector in _CONNECTOR_NAMES_FALLBACK:
                 support = platform_support.connector_platform_support(connector)
                 if not support.available:
@@ -4335,12 +4326,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "devin": {
         "label": "Devin",
         "description": "project hooks + documented local MCP, skill, rule, and agent discovery",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
-    "geminicli": {
-        "label": "Gemini CLI (deprecated; use Antigravity)",
-        "description": "retired integration retained only for safe teardown and uninstall",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -4468,11 +4453,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "Canonical user/project mcp_config.json plus read-only legacy config*.json MCP compatibility",
         "User and project .devin/.agents skills, rules, and file agents are discovered locally",
         "Plugins are closed beta and are not claimed; native OTLP is not claimed",
-    ),
-    "geminicli": (
-        "New setup is disabled on every platform; use the Antigravity connector",
-        "Existing managed settings.json hooks and native OTLP state remain removable",
-        "Legacy receipts and backups are retained only for exact restore or surgical cleanup",
     ),
     "copilot": (
         "~/.copilot/hooks/defenseclaw.json hooks by default",
@@ -11125,24 +11105,6 @@ for _observability_connector in (
     "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
-
-
-def _deprecated_gemini_setup() -> None:
-    raise click.ClickException(
-        "Gemini CLI integration is deprecated; use `defenseclaw setup antigravity`. "
-        "Existing managed Gemini CLI hooks remain removable with "
-        "`defenseclaw setup remove geminicli`."
-    )
-
-
-for _deprecated_gemini_alias in ("geminicli", "gemini-cli", "gemini"):
-    setup.add_command(
-        click.Command(
-            _deprecated_gemini_alias,
-            callback=_deprecated_gemini_setup,
-            hidden=True,
-        )
-    )
 
 
 # Two orthogonal facts about a connector — split deliberately so the

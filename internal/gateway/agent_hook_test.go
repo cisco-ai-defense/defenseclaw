@@ -298,7 +298,7 @@ func TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope(t *testing.T) {
 //
 //   - which key the script reads ("permission" for cursor,
 //     "permissionDecision" for copilot's PreToolUse, "decision"
-//     for hermes/geminicli, etc.)
+//     for hermes, etc.)
 //   - the value for each (connector, action) cell so a regression
 //     that, say, swaps "deny" -> "block" on the cursor permission
 //     field is caught in CI before it ships.
@@ -330,9 +330,6 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 		{connector: "cursor", event: "preToolUse", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
-
-		// geminicli -- decision="deny" + reason on block.
-		{connector: "geminicli", event: "BeforeTool", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
 
 		// openhands -- decision="deny" + exit 2 in the shell hook on block.
 		{connector: "openhands", event: "pre_tool_use", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
@@ -510,8 +507,6 @@ func capsForConnector(name string) connector.HookCapability {
 		return connector.NewHermesConnector().HookCapabilities(connector.SetupOpts{})
 	case "cursor":
 		return connector.NewCursorConnector().HookCapabilities(connector.SetupOpts{})
-	case "geminicli":
-		return connector.NewGeminiCLIConnector().HookCapabilities(connector.SetupOpts{})
 	case "copilot":
 		return connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
 	case "openhands":
@@ -558,7 +553,7 @@ func TestConnectorReason_DefaultStrings(t *testing.T) {
 		},
 		{
 			name:      "alert_with_tool",
-			connector: "geminicli",
+			connector: "openhands",
 			action:    "alert",
 			tool:      "Read",
 			want:      "DefenseClaw flagged Read with a warning.",
@@ -619,7 +614,7 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api.SetNotifier(d)
 
 	api.dispatchAgentHookNotification(
-		agentHookRequest{ConnectorName: "geminicli", HookEventName: "BeforeTool", ToolName: "Read"},
+		agentHookRequest{ConnectorName: "openhands", HookEventName: "pre_tool_use", ToolName: "Read"},
 		"allow", "block", "MEDIUM", "observe-mode", true,
 		hookEvaluationContext{},
 	)
@@ -1039,7 +1034,7 @@ func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 		"preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
 		// Snake-case pre-execution events
 		"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use",
-		// Gemini CLI
+		// BeforeTool-style events
 		"BeforeTool",
 		// Copilot
 		"permissionRequest",
@@ -1065,7 +1060,7 @@ func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
 	intentEvents := []string{
 		// Codex, Claude Code, Devin, and OmniGent.
 		"UserPromptSubmit",
-		// Cursor, Copilot, OpenHands, Gemini CLI, Hermes, and Amp.
+		// Cursor, Copilot, OpenHands, Hermes, and Amp.
 		"beforeSubmitPrompt", "pre_user_prompt", "userPromptSubmitted",
 		"user_prompt_submit", "BeforeAgent", "pre_llm_call", "agent.start",
 	}

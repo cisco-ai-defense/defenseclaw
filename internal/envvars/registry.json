@@ -1444,38 +1444,6 @@
       "since": "0.7.0"
     },
     {
-      "name": "DEFENSECLAW_GEMINI_CONFIG_HOME",
-      "category": "upgrade_internal",
-      "purpose": "Carries the exact Gemini configuration directory derived from the authenticated GEMINI_CLI_HOME root through native Windows Setup, launcher, gateway recovery, and connector lifecycle children. Ambient copies are scrubbed; Gemini CLI itself never reads this private DefenseClaw binding.",
-      "default": "unset",
-      "accepted_values": [
-        "absolute normalized GEMINI_CLI_HOME/.gemini path authenticated by native install state",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Scrubs ambient copies and passes only the transaction-bound Gemini configuration directory to connector lifecycle children"
-        },
-        {
-          "location": "internal/nativeinstallstate/state.go",
-          "description": "Rehydrates the authenticated Gemini configuration directory for direct gateway and launcher recovery"
-        },
-        {
-          "location": "internal/config/claw.go",
-          "description": "Requires an absolute normalized private binding before resolving Gemini settings"
-        },
-        {
-          "location": "cli/defenseclaw/connector_paths.py",
-          "description": "Uses the authenticated private binding for native lifecycle path parity while rejecting malformed values"
-        }
-      ],
-      "since": "0.8.10",
-      "security_note": "Private authenticated lifecycle binding only. This is not a Gemini vendor environment variable, must never override GEMINI_CLI_HOME during ordinary discovery, and has no authority unless it came from the protected native install state or Setup transaction."
-    },
-    {
       "name": "DEFENSECLAW_GUARDIAN_AGENT_VERSION",
       "category": "runtime_path",
       "purpose": "Systemd template override supplying the local agent version used for enterprise hook-contract validation.",

@@ -2417,11 +2417,6 @@ class TestCoverage:
             elif name in {"zeptoclaw", "amp", "omnigent", "kiro"}:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name == "geminicli":
-                with pytest.MonkeyPatch.context() as m:
-                    m.setenv("HOME", str(tmp_path / "isolated-home"))
-                    with pytest.raises(MCPWriteUnsupportedError):
-                        set_mcp_server(name, "x", {"command": "y"})
             elif name == "antigravity":
                 # Antigravity now has a documented native MCP write path:
                 # ~/.gemini/config/mcp_config.json.

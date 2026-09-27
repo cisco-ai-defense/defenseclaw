@@ -1974,9 +1974,6 @@ while [[ $# -gt 0 ]]; do
         --connector)
             [[ $# -lt 2 ]] && die "--connector requires a value (${CONNECTOR_CHOICES[*]})"
             CONNECTOR="$2"
-            if [[ "${CONNECTOR}" == "geminicli" || "${CONNECTOR}" == "gemini-cli" || "${CONNECTOR}" == "gemini" ]]; then
-                die "Gemini CLI integration is deprecated; use --connector antigravity"
-            fi
             is_valid_connector "${CONNECTOR}" \
                 || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES[*]}"
             shift 2

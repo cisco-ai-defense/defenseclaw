@@ -688,18 +688,6 @@ func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndGemini(t *testing.T
 	); err != nil {
 		t.Fatalf("Antigravity deferred-cleanup custody rejected: %v", err)
 	}
-
-	fixture.record.VerifiedConnectors = []string{"antigravity", "geminicli"}
-	if err := validateDeferredUninstallCleanupRecord(
-		fixture.record,
-		paths,
-		fixture.record.InstallerStateRoot,
-		fixture.record.MaintenancePath,
-		fixture.record.RunValueName,
-		fixture.record.RunCommand,
-	); err != nil {
-		t.Fatalf("Gemini native-Windows deferred-cleanup custody rejected: %v", err)
-	}
 }
 
 func writeDeferredCleanupHookState(t *testing.T, path string, state hookruntime.State) {

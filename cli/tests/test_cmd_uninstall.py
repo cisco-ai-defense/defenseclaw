@@ -932,7 +932,6 @@ class RenderPlanConnectorTests(unittest.TestCase):
             "codex",
             "copilot",
             "cursor",
-            "geminicli",
             "hermes",
             "omnigent",
             "opencode",

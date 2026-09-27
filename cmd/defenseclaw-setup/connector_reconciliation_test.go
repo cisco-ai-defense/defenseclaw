@@ -27,31 +27,6 @@ func TestAntigravityDefaultCleanupHomeIsNarrowGeminiConfigDirectory(t *testing.T
 	}
 }
 
-func TestGeminiAndAntigravityCleanupHomesRemainDisjoint(t *testing.T) {
-	profile := t.TempDir()
-	geminiHome := filepath.Join(profile, ".gemini")
-	antigravityHome := filepath.Join(geminiHome, "config")
-	transaction := setupTransaction{
-		DataRoot:                     filepath.Join(profile, ".defenseclaw"),
-		PreviousGeminiConfigDir:      geminiHome,
-		GeminiConfigDir:              geminiHome,
-		PreviousAntigravityConfigDir: antigravityHome,
-		AntigravityConfigDir:         antigravityHome,
-	}
-
-	geminiHomes := connectorCleanupHomes(transaction, "geminicli")
-	if !reflect.DeepEqual(geminiHomes, []string{geminiHome}) {
-		t.Fatalf("Gemini cleanup homes = %v, want only %q", geminiHomes, geminiHome)
-	}
-	antigravityHomes := connectorCleanupHomes(transaction, "antigravity")
-	if !reflect.DeepEqual(antigravityHomes, []string{antigravityHome}) {
-		t.Fatalf("Antigravity cleanup homes = %v, want only %q", antigravityHomes, antigravityHome)
-	}
-	if samePath(geminiHomes[0], antigravityHomes[0]) {
-		t.Fatal("Gemini and Antigravity cleanup custody collapsed to one home")
-	}
-}
-
 func TestConnectorReconciliationRecordsAndClearsPerConfigHome(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -446,7 +421,6 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 		"amp":        filepath.Join(root, ".config", "amp"),
 		"copilot":    filepath.Join(root, ".copilot"),
 		"cursor":     filepath.Join(root, ".cursor"),
-		"geminicli":  filepath.Join(root, ".gemini"),
 	} {
 		if got := connectorDefaultHomeBesideDataRoot(dataRoot, connectorName); !samePath(got, want) {
 			t.Fatalf("%s default home = %q, want %q", connectorName, got, want)
@@ -648,8 +622,7 @@ func TestReconcilePreservedAntigravityMigratesCustomCustodyToOfficialHome(t *tes
 		currentEnv,
 		func(_, _, connector, action string, env []string) error {
 			home := envValue(env, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME")
-			if envValue(env, "ANTIGRAVITY_CONFIG_DIR") != "" ||
-				envValue(env, "GEMINI_CONFIG_DIR") != "" {
+			if envValue(env, "ANTIGRAVITY_CONFIG_DIR") != "" {
 				t.Fatalf("invented Antigravity vendor environment survived: %v", env)
 			}
 			calls = append(calls, connector+":"+action+":"+home)

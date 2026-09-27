@@ -487,44 +487,6 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 	}
 }
 
-// TestNativeOTLPShape_GeminiCLI pins the Gemini CLI telemetry
-// sub-object to the schema the vendor's settings.json loader
-// requires: enabled/target/useCollector/useCliAuth/otlpEndpoint/
-// otlpProtocol/outfile/logPrompts, with the path-scoped endpoint that the gateway's
-// tokenAuth middleware accepts for the gemini scope.
-func TestNativeOTLPShape_GeminiCLI(t *testing.T) {
-	t.Parallel()
-	opts := fixedSetupOpts(t)
-	const fixedToken = "test-gemini-token"
-
-	spec := geminiCLINativeOTLPSpec(opts)
-	if spec == nil {
-		t.Fatal("geminiCLINativeOTLPSpec returned nil")
-	}
-	spec.PathToken = fixedToken
-	got, err := spec.JSONBlock()
-	if err != nil {
-		t.Fatalf("spec.JSONBlock: %v", err)
-	}
-
-	want := map[string]interface{}{
-		"enabled":      true,
-		"traces":       true,
-		"target":       "local",
-		"useCollector": true,
-		"useCliAuth":   false,
-		"otlpEndpoint": "http://127.0.0.1:18970/otlp/geminicli/" + fixedToken,
-		"otlpProtocol": "http",
-		"outfile":      "",
-		"logPrompts":   spec.LogUserPrompts,
-	}
-
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("geminicli telemetry block mismatch:\n  want=%s\n   got=%s",
-			mustJSON(want), mustJSON(got))
-	}
-}
-
 func TestNativeOTLPShape_OpenHandsDarwinExporterOnly(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
@@ -661,12 +623,4 @@ func splitOTelHeader(v string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func mustJSON(v interface{}) string {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return "<encode error: " + err.Error() + ">"
-	}
-	return string(b)
 }

@@ -106,7 +106,7 @@ func retryPendingConnectorReconciliation(
 		}
 		seen[identity] = true
 		connectorName := strings.ToLower(failure.Connector)
-		codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome := "", "", "", "", "", "", "", "", "", "", "", ""
+		codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, openCodeHome, omnigentHome, hermesHome := "", "", "", "", "", "", "", "", "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
 		} else if connectorName == "claudecode" {
@@ -120,9 +120,6 @@ func retryPendingConnectorReconciliation(
 			devinExecutable = transaction.PreviousDevinExecutable
 		} else if connectorName == "antigravity" {
 			antigravityHome = failure.ConfigHome
-		} else if connectorName == "geminicli" {
-			geminiHome = failure.ConfigHome
-			geminiCLIHome = geminiCLIHomeForConfigDir(failure.ConfigHome)
 		} else if connectorName == "opencode" {
 			openCodeHome = failure.ConfigHome
 		} else if connectorName == "omnigent" {
@@ -131,7 +128,7 @@ func retryPendingConnectorReconciliation(
 			hermesHome = failure.ConfigHome
 		}
 		env := transactionChildEnvForConnectorHomes(
-			transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
+			transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, openCodeHome, omnigentHome, hermesHome,
 		)
 		verify := func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
@@ -324,8 +321,6 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.DevinConfigDir)
 		case "antigravity":
 			candidates = append(candidates, transaction.PreviousState.AntigravityConfigDir)
-		case "geminicli":
-			candidates = append(candidates, transaction.PreviousState.GeminiConfigDir)
 		case "opencode":
 			candidates = append(candidates, transaction.PreviousState.OpenCodeConfigDir)
 		case "omnigent":
@@ -389,8 +384,6 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 		logicalName = "config"
 	case "antigravity":
 		logicalName = "hooks.json"
-	case "geminicli":
-		logicalName = "config"
 	case "opencode":
 		logicalName = "config"
 	case "hermes":
@@ -425,8 +418,6 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		directory = ".cursor"
 	case "antigravity":
 		return filepath.Join(filepath.Dir(cleanDataRoot), ".gemini", "config")
-	case "geminicli":
-		return filepath.Join(filepath.Dir(cleanDataRoot), ".gemini")
 	case "opencode":
 		directory = filepath.Join(".config", "opencode")
 	case "omnigent":
@@ -450,8 +441,6 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 	devinHome := transaction.PreviousDevinConfigDir
 	devinExecutable := transaction.PreviousDevinExecutable
 	antigravityHome := transaction.PreviousAntigravityConfigDir
-	geminiCLIHome := transaction.PreviousGeminiCLIHome
-	geminiHome := transaction.PreviousGeminiConfigDir
 	openCodeHome := transaction.PreviousOpenCodeConfigDir
 	omnigentHome := transaction.PreviousOmnigentConfigHome
 	hermesHome := transaction.PreviousHermesHome
@@ -467,9 +456,6 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 		devinHome = configHome
 	} else if connectorName == "antigravity" {
 		antigravityHome = configHome
-	} else if connectorName == "geminicli" {
-		geminiHome = configHome
-		geminiCLIHome = geminiCLIHomeForConfigDir(configHome)
 	} else if connectorName == "opencode" {
 		openCodeHome = configHome
 	} else if connectorName == "omnigent" {
@@ -478,7 +464,7 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 		hermesHome = configHome
 	}
 	return transactionChildEnvForConnectorHomes(
-		transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, geminiCLIHome, geminiHome, openCodeHome, omnigentHome, hermesHome,
+		transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, openCodeHome, omnigentHome, hermesHome,
 	)
 }
 
@@ -785,11 +771,6 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousAntigravityConfigDir
 		}
 		return transaction.AntigravityConfigDir
-	case "geminicli":
-		if previous {
-			return transaction.PreviousGeminiConfigDir
-		}
-		return transaction.GeminiConfigDir
 	case "opencode":
 		if previous {
 			return transaction.PreviousOpenCodeConfigDir

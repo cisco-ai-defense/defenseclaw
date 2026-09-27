@@ -247,15 +247,6 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 		return classifyCodexResult(payload)
 	case "hermes":
 		return classifyStatusValue(nestedValue(payload, "extra", "status"))
-	case "geminicli":
-		response, ok := nestedMap(payload, "tool_response", "toolResponse")
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		if errorValue, exists := firstPresent(response, "error"); exists && hasErrorValue(errorValue) {
-			return classifyCancellationOrFailure(errorValue)
-		}
-		return ToolLifecycleOutcomeSuccess
 	case "antigravity":
 		if _, ok := firstPresent(payload, "stepIdx", "step_idx"); !ok {
 			return ToolLifecycleOutcomeUnknown
@@ -893,40 +884,6 @@ func devinToolCallLifecycle() ToolCallLifecycleContract {
 		Limitations: []string{
 			"Devin publishes session_id and per-turn prompt_id but no stable per-tool invocation identifier, so PreToolUse/PostToolUse state remains detection-only.",
 			"PostToolUse success/failure is authoritative only through tool_response.success; hook errors other than exit code 2 fail open upstream.",
-		},
-	}
-}
-
-func geminiCLIToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"BeforeTool"},
-		AuthoritativeSuccessEvents:        []string{"AfterTool"},
-		AuthoritativeFailureEvents:        []string{"AfterTool"},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"AfterAgent"},
-		AuthoritativeTerminalEvents:       []string{"SessionEnd"},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeResultPayload,
-		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"BeforeTool"},
-			ResultContentEvents:    []string{"AfterTool"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"SessionStart", "AfterAgent", "SessionEnd"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
-			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
-			ToolSurfaceSkills,
-		},
-		OfficialSourceURLs: []string{
-			"https://geminicli.com/docs/hooks/reference/",
-			"https://geminicli.com/docs/reference/tools/",
-		},
-		Limitations: []string{
-			"Hook payloads provide a session identifier but no stable tool invocation identifier, so AfterTool cannot authorize a paired state transition.",
-			"AfterTool is shared by success and failure; consumers must inspect tool_response.error instead of treating the event name as success.",
 		},
 	}
 }

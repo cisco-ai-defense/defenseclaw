@@ -5396,7 +5396,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / geminicli / copilot / openhands
+//	hermes / cursor / copilot / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw

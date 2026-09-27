@@ -1826,21 +1826,6 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "Devin project hooks not found; pin a workspace and run setup",
             "defenseclaw setup devin --workspace <project>",
         )
-    if connector == "geminicli":
-        path = connector_config_files("geminicli")[0]
-        if os.path.isfile(path):
-            return StepResult(
-                "Connector",
-                "warn",
-                "Gemini CLI integration is deprecated; remove managed state and use Antigravity",
-                "defenseclaw setup remove geminicli --yes",
-            )
-        return StepResult(
-            "Connector",
-            "warn",
-            "Gemini CLI integration is deprecated; use Antigravity",
-            "defenseclaw setup antigravity",
-        )
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()

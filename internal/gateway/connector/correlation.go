@@ -43,7 +43,6 @@ const (
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
 	CorrelationProfileDevinV1       CorrelationProfileVersion = "devin-correlation-v1"
-	CorrelationProfileGeminiCLIV1   CorrelationProfileVersion = "geminicli-correlation-v1"
 	CorrelationProfileCopilotV1     CorrelationProfileVersion = "copilot-correlation-v1"
 	CorrelationProfileOpenHandsV1   CorrelationProfileVersion = "openhands-correlation-v1"
 	CorrelationProfileAntigravityV1 CorrelationProfileVersion = "antigravity-correlation-v1"
@@ -515,8 +514,6 @@ func nativeTelemetryForConnector(name string) NativeTelemetrySpec {
 		// Official monitoring documentation states that native tool_use_id and
 		// gen_ai.tool.call.id carry the same value passed to hooks.
 		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryMetrics, NativeTelemetryTraces}, Stability: NativeTelemetryBeta, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
-	case "geminicli":
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true}
 	case "openhands":
 		if runtime.GOOS == "darwin" {
 			return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryTraces}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsExporterOnly, AcceptsW3C: true, PropagatesW3C: true}
@@ -730,22 +727,6 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id", "promptId"),
 		)
 		return makeSpec(CorrelationProfileDevinV1, "devin-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "Devin publishes session and per-prompt IDs but no stable per-tool invocation or native OTLP identity"))
-	case "geminicli":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "session", "sessionId", "conversation_id", "conversationId"),
-			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id", "promptId"),
-			reported(CorrelationTargetAgent, ns, "agent", "agentId"),
-			reported(CorrelationTargetModelRequest, ns, "model_request", "request_id", "requestId"),
-			reported(CorrelationTargetModelResponse, ns, "model_response", "response_id", "responseId"),
-		)
-		native := appendBindings(nativeStandard(ns),
-			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id"),
-			// Gemini CLI uses the underscore spelling in its native telemetry
-			// contract. Keep the standard dotted spelling as separate accepted
-			// evidence through nativeStandard for compatible SDK emitters.
-			reported(CorrelationTargetTool, ns, "tool_invocation", "gen_ai.tool.call_id"),
-		)
-		return makeSpec(CorrelationProfileGeminiCLIV1, "geminicli-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceModelBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "hook tool payloads may omit prompt and tool-call IDs; native tool IDs require trace or pending-operation correlation"))
 	case "copilot":
 		correlationContractID := hookContractID
 		switch correlationContractID {

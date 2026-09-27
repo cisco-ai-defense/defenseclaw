@@ -185,7 +185,7 @@ func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest, o
 // schema.
 //
 // Post PR #284 this helper handles the 5 hookOnly connectors
-// (hermes/cursor/geminicli/copilot); codex and claudecode
+// (hermes/cursor/copilot); codex and claudecode
 // have their own dedupers (rememberCodexRawHookEvents /
 // rememberClaudeCodeRawHookEvents) that probe connector-specific
 // fields like ToolUseID / PermissionRequestID. The unified

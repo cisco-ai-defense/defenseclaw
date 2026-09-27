@@ -188,7 +188,6 @@ func newBuiltinConnectors() []Connector {
 		NewHermesConnector(),
 		NewCursorConnector(),
 		NewDevinConnector(),
-		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
 		NewOpenHandsConnector(),
 		NewAntigravityConnector(),

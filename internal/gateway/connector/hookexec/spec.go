@@ -37,7 +37,7 @@ const (
 	styleCodex
 	// styleHookEcho: echo hook_output and exit 0 — the gateway already
 	// encoded the decision in the agent-native hook_output. (cursor / copilot
-	// / geminicli / hermes)
+	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
 	// `decision` is deny/block. (openhands-hook.sh)
@@ -130,14 +130,6 @@ var specs = map[string]spec{
 		connector: "copilot", hookName: "copilot-hook", errLabel: "copilot",
 		subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
-	},
-	"geminicli": {
-		connector: "geminicli", hookName: "geminicli-hook", errLabel: "geminicli",
-		subject: "geminicli tool", endpoint: "/api/v1/geminicli/hook",
-		outputField: "hook_output", style: styleHookEcho,
-		oversizedClosed:   failResult{exit: blockExit},
-		unreachableStrict: failResult{exit: blockExit},
-		responseClosed:    failResult{exit: blockExit},
 	},
 	// Antigravity consumes per-event JSON on stdout. PreToolUse decision=deny is
 	// the only documented hard block; hookexec converts generic failure results

@@ -61,14 +61,6 @@ class CodeGuardAssetStatus:
 def codeguard_status(cfg, connector: str | None = None, target: str = "skill") -> CodeGuardAssetStatus:
     connector = _resolve_connector(cfg, connector)
     target = _normalize_target(target)
-    if connector_paths.is_cleanup_only(connector):
-        return CodeGuardAssetStatus(
-            connector,
-            target,
-            "",
-            "unsupported",
-            connector_paths.cleanup_only_guidance(connector),
-        )
     path = _target_path(cfg, connector, target)
     if not path:
         return CodeGuardAssetStatus(connector, target, "", "unsupported", f"{connector} has no {target} install target")

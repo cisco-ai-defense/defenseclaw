@@ -212,20 +212,19 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 
 // TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
 // contract for the hook-only connectors (hermes, cursor,
-// geminicli, copilot, openhands). Two contracts differ from the
+// copilot, openhands). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
-//     inventory, Cursor exposes its documented local plugin cache, and Gemini
-//     CLI exposes its bound-user extensions directory, so all three contribute
-//     plugin watcher paths. Copilot owns its command-backed plugin inventory
+//     inventory and Cursor exposes its documented local plugin cache, so both
+//     contribute plugin watcher paths. Copilot owns its command-backed plugin inventory
 //     without exposing filesystem directories. The remaining hook-only
 //     connectors advertise no plugin inventory and must fall back to
 //     cfg.PluginDirs(). This keeps watcher ownership aligned with each vendor
 //     surface rather than applying one connector's plugin semantics to all
 //     hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/geminicli/copilot/openhands
+//  2. Skills support varies: hermes/cursor/copilot/openhands
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
 //     framework-owned subpath. This split is what justifies a dedicated
@@ -262,14 +261,6 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			expectSkillFrag:  filepath.Join(".cursor", "skills"),
 			expectPluginSrc:  watcherDirsFromConnector,
 			expectPluginFrag: filepath.Join(".cursor", "plugins", "local"),
-		},
-		{
-			name:             "geminicli",
-			ctor:             func() connector.Connector { return connector.NewGeminiCLIConnector() },
-			expectSkillSrc:   watcherDirsFromConnector,
-			expectSkillFrag:  filepath.Join(".gemini", "skills"),
-			expectPluginSrc:  watcherDirsFromConnector,
-			expectPluginFrag: filepath.Join(".gemini", "extensions"),
 		},
 		{
 			// With no workspace pinned in cfg the connector

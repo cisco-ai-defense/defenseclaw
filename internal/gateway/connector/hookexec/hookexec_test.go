@@ -539,19 +539,6 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
-			name:      "geminicli allow with no hook_output exit 0",
-			connector: "geminicli",
-			respBody:  `{"action":"allow"}`,
-			wantCode:  0,
-		},
-		{
-			name:       "geminicli echoes hook_output deny exit 0",
-			connector:  "geminicli",
-			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
-			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
-			wantCode:   0,
-		},
-		{
 			name:       "openhands deny in hook_output exits 2",
 			connector:  "openhands",
 			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
@@ -643,7 +630,6 @@ func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 		"copilot",
 		"cursor",
 		"devin",
-		"geminicli",
 		"openhands",
 	} {
 		t.Run(connector, func(t *testing.T) {
@@ -839,7 +825,6 @@ func TestOversizedPayload(t *testing.T) {
 		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"cursor":     {stdout: cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook payload too large") + "\n", code: 2},
 		"copilot":    {stdout: "", code: 0},
-		"geminicli":  {stdout: "", code: 2},
 		"hermes":     {stdout: "", code: 0},
 	}
 	for connector, want := range cases {
@@ -1266,7 +1251,6 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 		"codex":       "/api/v1/codex/hook",
 		"claudecode":  "/api/v1/claude-code/hook",
 		"cursor":      "/api/v1/cursor/hook",
-		"geminicli":   "/api/v1/geminicli/hook",
 		"copilot":     "/api/v1/copilot/hook",
 		"antigravity": "/api/v1/antigravity/hook",
 		"hermes":      "/api/v1/hermes/hook",
@@ -2007,7 +1991,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "geminicli", "hermes", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

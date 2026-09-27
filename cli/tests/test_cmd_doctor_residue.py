@@ -194,7 +194,7 @@ class FixConnectorResidueTests(unittest.TestCase):
     def test_calls_gateway_teardown_for_every_native_connector_receipt(self):
         native_connectors = {
             "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-            "geminicli", "hermes", "omnigent", "opencode",
+            "hermes", "omnigent", "opencode",
             legacy_connector.RETIRED_DESKTOP_ID,
         }
         with tempfile.TemporaryDirectory() as data_dir:
@@ -346,7 +346,7 @@ class ResidueArtifactsContractTests(unittest.TestCase):
     def test_built_in_connectors_present(self):
         expected = {
             "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-            "devin", "geminicli", "hermes", "omnigent", "opencode", "openhands",
+            "devin", "hermes", "omnigent", "opencode", "openhands",
             legacy_connector.RETIRED_DESKTOP_ID, "zeptoclaw",
         }
         self.assertEqual(set(_CONNECTOR_RESIDUE_ARTIFACTS), expected)

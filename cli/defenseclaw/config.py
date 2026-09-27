@@ -2465,8 +2465,6 @@ def _normalize_connector_key(name: str | None) -> str:
         return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
-    if n in {"gemini-cli", "gemini_cli", "gemini"}:
-        return "geminicli"
     return n
 
 

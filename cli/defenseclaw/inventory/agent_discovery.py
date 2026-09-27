@@ -65,7 +65,6 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     reject_reparse_path,
 )
-from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -786,12 +785,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "kiro",
 )
 
-# Keep deprecated names in connector_paths.KNOWN_CONNECTORS so exact legacy
-# teardown can still resolve them, but never scan, cache, or render them as
-# install candidates.
-DISCOVERABLE_CONNECTORS: tuple[str, ...] = tuple(
-    name for name in KNOWN_CONNECTORS if name not in DEPRECATED_CONNECTORS
-)
+DISCOVERABLE_CONNECTORS: tuple[str, ...] = tuple(KNOWN_CONNECTORS)
 
 
 @dataclass
@@ -1753,12 +1747,6 @@ def _version_for_binary(
         timeout = 10.0
     if binary_name == "openhands":
         env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
-    elif binary_name == "gemini":
-        # DEFENSECLAW_GEMINI_CONFIG_HOME is DefenseClaw's private derived
-        # config-directory authority and must not reach the vendor. Preserve
-        # Gemini's official GEMINI_CLI_HOME parent-root contract.
-        env = dict(os.environ)
-        env.pop("DEFENSECLAW_GEMINI_CONFIG_HOME", None)
 
     try:
         result = subprocess.run(

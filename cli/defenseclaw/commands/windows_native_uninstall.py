@@ -92,8 +92,6 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "devin_config_dir",
         "devin_executable",
         "antigravity_config_dir",
-        "gemini_cli_home",
-        "gemini_config_dir",
         "opencode_config_dir",
         "omnigent_config_home",
         "hermes_home",
@@ -479,7 +477,6 @@ def _validate_install_state(
             "copilot",
             "cursor",
             "devin",
-            "geminicli",
             "hermes",
             "kiro",
             "omnigent",
@@ -499,28 +496,6 @@ def _validate_install_state(
             os.path.abspath(expected)
         ):
             raise NativeWindowsUninstallRefusal(f"Native installer state has an unexpected {field.replace('_', ' ')}.")
-    gemini_cli_home = state.get("gemini_cli_home")
-    gemini_config_dir = state.get("gemini_config_dir")
-    for field, value in (
-        ("gemini_cli_home", gemini_cli_home),
-        ("gemini_config_dir", gemini_config_dir),
-    ):
-        if field in state and (
-            not isinstance(value, str)
-            or value.strip() != value
-            or not os.path.isabs(value)
-            or os.path.normpath(value) != value
-            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
-        ):
-            raise NativeWindowsUninstallRefusal(f"Native installer state has an invalid {field.replace('_', ' ')}.")
-    # Pre-GEMINI_CLI_HOME states can carry only gemini_config_dir. Once the
-    # vendor root exists, however, the pair is closed and must describe exactly
-    # <GEMINI_CLI_HOME>/.gemini.
-    if "gemini_cli_home" in state and (
-        "gemini_config_dir" not in state
-        or os.path.normcase(os.path.join(gemini_cli_home, ".gemini")) != os.path.normcase(gemini_config_dir)
-    ):
-        raise NativeWindowsUninstallRefusal("Native installer state has an inconsistent Gemini CLI home binding.")
     return version, source_commit
 
 

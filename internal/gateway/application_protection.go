@@ -597,8 +597,6 @@ func normalizeAppProtectionConnector(name string) string {
 		return "openhands"
 	case "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini-cli", "gemini_cli", "gemini":
-		return "geminicli"
 	default:
 		return n
 	}

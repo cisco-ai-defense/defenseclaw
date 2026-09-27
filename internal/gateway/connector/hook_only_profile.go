@@ -109,13 +109,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = CursorHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "devin":
 		output = devinHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
-	case "geminicli":
-		output = geminiCLIHookOutputForProfile(
-			in.Req.HookEventName,
-			in.Action,
-			reason,
-			in.AdditionalContext,
-		)
 	case "copilot":
 		output = copilotHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
 	case "openhands":
@@ -155,32 +148,13 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		// hook_output body is required by OmniGent's policy API.
 		return HookRespondOutput{}
 	}
-	if output == nil && in.Req.ConnectorName != "hermes" && in.Req.ConnectorName != "geminicli" &&
+	if output == nil && in.Req.ConnectorName != "hermes" &&
 		in.Req.ConnectorName != "openhands" &&
 		in.Req.ConnectorName != "devin" &&
 		in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
-}
-
-// geminiCLIHookOutputForProfile emits only fields the selected Gemini hook
-// event accepts. In particular, BeforeToolSelection rejects decision,
-// continue, and systemMessage; a generic confirm-to-alert response there would
-// otherwise be an invalid hook result. The block list is repeated as a
-// responder-side boundary so a caller cannot manufacture control authority by
-// bypassing MapVerdict.
-func geminiCLIHookOutputForProfile(event, action, reason, additional string) map[string]interface{} {
-	if action == "block" && eventInProfile(event, geminiCLIBlockEvents) {
-		return map[string]interface{}{"decision": "deny", "reason": reason}
-	}
-	if canonicalHookEvent(event) == "beforetoolselection" {
-		return nil
-	}
-	if action == "alert" && additional != "" {
-		return map[string]interface{}{"systemMessage": additional}
-	}
-	return nil
 }
 
 // CursorHookOutput renders the exact event-native stdout object documented by

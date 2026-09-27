@@ -1036,58 +1036,6 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 }
 
-func TestGeminiWindowsNativeHookCommandIsSynchronousAndExactlyOwned(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	const unixHook = `/home/u/.defenseclaw/hooks/geminicli-hook.sh`
-	setHookBinaryOverride(t, hookBinary)
-
-	command := hookInvocationCommandFor("windows", "geminicli", unixHook)
-	want := windowsNativePowerShellHookCommandForBinary("geminicli", hookBinary)
-	if command != want {
-		t.Fatalf("Gemini Windows command = %q, want %q", command, want)
-	}
-	if strings.Contains(command, ".sh") || strings.Contains(command, "bash") || strings.HasPrefix(command, "& ") {
-		t.Fatalf("Gemini command regressed to a script or non-waiting call operator: %q", command)
-	}
-	decoded := decodePowerShellEncodedCommandForTest(t, command)
-	for _, marker := range []string{
-		windowsNativePowerShellStartForTest(hookBinary, "geminicli"),
-		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"exit $hookProcess.ExitCode",
-	} {
-		if !strings.Contains(decoded, marker) {
-			t.Errorf("decoded Gemini command missing %q:\n%s", marker, decoded)
-		}
-	}
-	if !isNativeHookCommand(command) {
-		t.Fatal("current Gemini encoded command is not recognized as owned")
-	}
-	if got := shellWord(command); got != command {
-		t.Fatalf("Gemini native command was shell-quoted into an inert string: %q", got)
-	}
-
-	for name, legacy := range map[string]string{
-		"unqualified Start-Process": legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("geminicli", hookBinary),
-		"non-waiting encoded":       legacyWindowsNativePowerShellHookCommandForBinary("geminicli", hookBinary),
-		"call operator":             legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary),
-	} {
-		if !isNativeHookCommand(legacy) {
-			t.Errorf("exact Gemini %s command is not owned for migration: %q", name, legacy)
-		}
-	}
-
-	foreign := windowsNativePowerShellHookCommandForBinary(
-		"geminicli",
-		`C:\Foreign Product\defenseclaw-hook.exe`,
-	)
-	if isNativeHookCommand(foreign) {
-		t.Fatal("foreign encoded Gemini command was treated as DefenseClaw-owned")
-	}
-	if isNativeHookCommand(command + " extra") {
-		t.Fatal("tampered Gemini encoded command was treated as DefenseClaw-owned")
-	}
-}
-
 func TestWindowsHermesDirectHookCommandQuotesAndRejectsUnsafePaths(t *testing.T) {
 	valid := `C:\Users\Kevin O'Brien\Defense Claw $Preview\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, valid)
@@ -1427,8 +1375,6 @@ func main() {
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
-		{connector: "geminicli", exitCode: 0},
-		{connector: "geminicli", exitCode: 2},
 		{connector: "copilot", exitCode: 0},
 		{connector: "copilot", exitCode: 2},
 	}

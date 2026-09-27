@@ -34,7 +34,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
-from defenseclaw import __version__, connector_paths
+from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
@@ -6587,7 +6587,7 @@ class DefenseClawTUI(App[None]):
         return [
             connector
             for connector, _mode in modes
-            if connector and not connector_paths.is_cleanup_only(connector)
+            if connector
         ]
 
     def _connector_filter(self) -> str:
@@ -10671,10 +10671,6 @@ class DefenseClawTUI(App[None]):
         # ultimately "" under the merged "All" view, so the form writes
         # ``--connector`` instead of silently defaulting to the primary.
         connector = model.action_connector(selected)
-        effective_connector = connector or str(getattr(model, "connector", "") or "")
-        if connector_paths.is_cleanup_only(effective_connector):
-            self._set_status(connector_paths.cleanup_only_guidance(effective_connector))
-            return
         result = await self.push_screen_wait(
             MCPSetFormScreen(initial_name=initial_name, connector=connector)
         )
@@ -11451,14 +11447,6 @@ class DefenseClawTUI(App[None]):
         model = self.catalog_models[panel]
         names = self._active_connector_names()
         asset_panel = panel in {"skills", "mcps", "plugins"}
-        current_connector = str(getattr(model, "connector", "") or "")
-        if asset_panel and not names and connector_paths.is_cleanup_only(current_connector):
-            guidance = connector_paths.cleanup_only_guidance(current_connector)
-            model.apply_loaded([])
-            model.message = guidance
-            self._set_status(guidance)
-            self._render_chrome()
-            return
         # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
         # into one table with a CONNECTOR column. Tools is a process-global
         # enforcement view, so it never merges. Single-connector installs keep
@@ -13201,34 +13189,8 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
-    cleanup_only_actives = [
-        connector
-        for connector in actives
-        if isinstance(connector, str) and connector_paths.is_cleanup_only(connector)
-    ]
-    actives = [
-        connector
-        for connector in actives
-        if not (
-            isinstance(connector, str)
-            and connector_paths.is_cleanup_only(connector)
-        )
-    ]
-    if cleanup_only_actives and not actives and not roster_error:
-        roster_error = connector_paths.cleanup_only_guidance(cleanup_only_actives[0])
-
-    raw_claw_mode = str(getattr(claw, "mode", "") or "")
-    display_claw_mode = (
-        (actives[0] if actives else "")
-        if connector_paths.is_cleanup_only(raw_claw_mode)
-        else raw_claw_mode
-    )
-    raw_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
-    display_guardrail_connector = (
-        (actives[0] if actives else "")
-        if connector_paths.is_cleanup_only(raw_guardrail_connector)
-        else raw_guardrail_connector
-    )
+    display_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.
     # Project its effective values into the legacy singular Overview fields;
