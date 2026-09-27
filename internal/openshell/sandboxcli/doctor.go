@@ -37,6 +37,7 @@ const (
 	CheckIDImages   = "overlay-images"
 	CheckIDWrappers = "shell-wrappers"
 	CheckIDAdmin    = "admin-policy"
+	CheckIDHooks    = "sandbox-hooks"
 )
 
 // DoctorOptions are the `sandbox doctor` flags.
@@ -82,6 +83,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	rep := a.HostDoctor(ctx, d)
 	if st != nil {
 		rep.Checks = append(rep.Checks, st.check)
+		if st.available {
+			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
+		}
 		rep.Checks = append(rep.Checks, a.imagesCheck(), a.wrappersCheck(), a.adminCheck())
 	}
 	return rep
@@ -89,7 +93,48 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 
 type statusProbe struct {
 	listening bool
+	// available is set when the daemon serves sandboxes; ingress is its
+	// hook ingress address.
+	available bool
+	ingress   string
 	check     openshell.Check
+}
+
+// hooksCheck reports the sandboxes whose current session's hooks do not
+// reach DefenseClaw, with the daemon's reason for each.
+func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
+	c := openshell.Check{ID: CheckIDHooks, Title: "Sandbox hooks", Status: openshell.StatusPass}
+	api, err := a.api()
+	if err != nil {
+		c.Status, c.Detail = openshell.StatusSkip, err.Error()
+		return c
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
+		return c
+	}
+	var bad []string
+	running := 0
+	for _, sb := range list {
+		if sb.Phase == "ready" {
+			running++
+		}
+		if sb.Hooks.Unreachable {
+			bad = append(bad, sb.Name+": "+firstNonEmpty(sb.Hooks.UnreachableReason, "no hook request reaches DefenseClaw"))
+		}
+	}
+	switch {
+	case len(bad) > 0:
+		c.Status = openshell.StatusFail
+		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
+		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
+	case running == 0:
+		c.Detail = "no sandbox is running"
+	default:
+		c.Detail = fmt.Sprintf("the hooks of %s reach DefenseClaw (ingress %s)", plural(int64(running), "running sandbox", "running sandboxes"), firstNonEmpty(ingress, "(unknown)"))
+	}
+	return c
 }
 
 func (a *App) probeDaemon(ctx context.Context) *statusProbe {
@@ -109,7 +154,7 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 			p.listening = st.IngressAddr != ""
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+firstNonEmpty(st.Reason, "not connected to OpenShell")
 		default:
-			p.listening = true
+			p.listening, p.available, p.ingress = true, true, st.IngressAddr
 			c.Status = openshell.StatusPass
 			c.Detail = fmt.Sprintf("connected to %s; ingress %s, egress proxy %s", gatewayText(st.Gateway), st.IngressAddr, st.EgressAddr)
 		}

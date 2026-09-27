@@ -123,6 +123,10 @@ type App struct {
 	Geteuid func() int
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
+	// HookWindow is how long a harness session may run before its first
+	// authenticated hook is overdue and the run warns that the hooks do
+	// not reach DefenseClaw (DefaultHookWindow).
+	HookWindow time.Duration
 
 	// Host integrations, replaceable in tests. HostDoctor runs the host
 	// checks of d (default d.Run).
@@ -159,6 +163,12 @@ func (e *ExitError) Unwrap() error { return e.Err }
 
 // ExitCode is the status to exit with.
 func (e *ExitError) ExitCode() int { return e.Code }
+
+// ExitHooksUnreachable is the exit status of a session that ended without
+// one of its hooks reaching DefenseClaw (sysexits EX_UNAVAILABLE): the
+// hooks failed closed, so whatever the harness reported, it could do
+// nothing. A harness's own non-zero status takes precedence.
+const ExitHooksUnreachable = 69
 
 // Silent marks an error whose message was already printed.
 type Silent struct{ Err error }

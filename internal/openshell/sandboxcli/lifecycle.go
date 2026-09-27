@@ -86,6 +86,8 @@ func profileText(sb sandboxapi.Sandbox) string {
 
 func hooksText(sb sandboxapi.Sandbox) string {
 	switch {
+	case sb.Hooks.Unreachable:
+		return "unreachable!"
 	case sb.Hooks.Silent:
 		return "silent!"
 	case sb.Hooks.LastHookAt.IsZero():
@@ -189,8 +191,14 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if !sb.Hooks.LastHookAt.IsZero() {
 		cov += ", last " + sb.Hooks.LastHookAt.Local().Format("15:04:05")
 	}
+	if sb.Hooks.IngressRefused > 0 {
+		cov += fmt.Sprintf(", %d refused by OpenShell", sb.Hooks.IngressRefused)
+	}
 	if sb.Hooks.Silent {
 		cov += a.style(" — SILENT since "+sb.Hooks.SilentSince.Local().Format("15:04:05"), ansiRed)
+	}
+	if sb.Hooks.Unreachable {
+		cov += a.style(" — NOT REACHING DefenseClaw since "+sb.Hooks.UnreachableSince.Local().Format("15:04:05"), ansiRed)
 	}
 	row("Hook traffic", cov)
 	if sb.Hooks.LastBlocked != "" {
@@ -217,6 +225,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
+	}
+	if sb.Hooks.Unreachable {
+		a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 	}
 	if sb.Orphaned {
 		a.warn("DefenseClaw holds no binding for this sandbox; its hooks cannot authenticate. Delete it.")
@@ -302,10 +313,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 	if err := s.end(ctx); err != nil {
 		return err
 	}
-	if code != 0 {
-		return &ExitError{Code: code}
-	}
-	return nil
+	return s.exit(code)
 }
 
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
@@ -496,16 +504,32 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	if code != 0 && !o.Follow {
 		return fmt.Errorf("%s has no detached run output (start one with `%s run --detach`)", sb.Name, CommandName)
 	}
-	if !o.Follow {
-		statusInv, err := cli.Exec(sb.Name, []string{"cat", RunDir + "/latest.exit"}, openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: 30 * time.Second})
-		if err == nil {
-			var out bytes.Buffer
-			if code, err := a.Streamer.Stream(ctx, statusInv, &out, &bytes.Buffer{}); err == nil && code == 0 {
-				a.note("the run exited with status " + strings.TrimSpace(out.String()))
-			} else {
-				a.note("the run is still going (follow it with -f)")
-			}
+	if o.Follow {
+		return nil
+	}
+	// The exit status, then (for runs this version started) the start.
+	script := `cat "$1/latest.exit" || exit 1; cat "$1/latest.started" 2>/dev/null || true`
+	statusInv, err := cli.Exec(sb.Name, []string{"sh", "-c", script, "sh", RunDir}, openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: 30 * time.Second})
+	if err != nil {
+		return nil
+	}
+	var out bytes.Buffer
+	if code, err := a.Streamer.Stream(ctx, statusInv, &out, &bytes.Buffer{}); err != nil || code != 0 {
+		a.note("the run is still going (follow it with -f)")
+		if sb.Hooks.Unreachable {
+			a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 		}
+		return nil
+	}
+	st := parseRunStatus(out.String())
+	a.note("the run exited with status " + st.exit)
+	// The hooks of a finished run: read after it ended.
+	if now, err := api.Get(ctx, o.Name); err == nil {
+		sb = now
+	}
+	if !runReachedHooks(sb, st.started) {
+		a.warn(hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason, "not one hook request of this run reached DefenseClaw")))
+		return errNoHooks()
 	}
 	return nil
 }

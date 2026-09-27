@@ -65,6 +65,9 @@ type box struct {
 	hooks       hookStats
 	activeAt    time.Time
 	silentSince time.Time
+	// reach is whether the current session's hooks reach the ingress
+	// (reach.go); it starts over whenever the sandbox becomes ready.
+	reach hookReach
 	// tamperStop is set once a hook tamper scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
@@ -98,6 +101,10 @@ type hookStats struct {
 	// tampered counts tool calls that ran without a DefenseClaw verdict.
 	tampered   int64
 	lastTamper time.Time
+	// ingressRefused counts the ingress connections and requests OpenShell
+	// refused.
+	ingressRefused     int64
+	lastIngressRefused time.Time
 }
 
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -160,6 +167,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	b.phase = phase
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
+		b.reach = hookReach{}
 	}
 	b.rec.Phase = string(phase)
 	id := b.identity()
@@ -280,6 +288,8 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
+		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
+		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,
 	}
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {

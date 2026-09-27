@@ -243,6 +243,17 @@ type HookCoverage struct {
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`
+	// IngressRefused counts the hook connections and requests to the
+	// DefenseClaw ingress that OpenShell refused (the sandbox's network
+	// policy does not allow its port or path).
+	IngressRefused       int64     `json:"ingress_refused,omitempty"`
+	LastIngressRefusedAt time.Time `json:"last_ingress_refused_at,omitzero"`
+	// Unreachable is set while the current session's hooks do not reach
+	// DefenseClaw: they fail closed, so the harness can do nothing.
+	// UnreachableReason says why DefenseClaw concluded that.
+	Unreachable       bool      `json:"unreachable,omitempty"`
+	UnreachableSince  time.Time `json:"unreachable_since,omitzero"`
+	UnreachableReason string    `json:"unreachable_reason,omitempty"`
 }
 
 // Endpoint is an OpenShell EndpointStatus: the last network result of a
@@ -548,6 +559,21 @@ const (
 // ReasonNestedRepo is the Reason of the finding events the nested-repository
 // guard publishes.
 const ReasonNestedRepo = "nested_repo"
+
+// ReasonHooksUnreachable is the Reason of the finding event a session gets
+// when its hooks do not reach DefenseClaw; ReasonHooksRestored follows once
+// an authenticated hook arrives after all.
+const (
+	ReasonHooksUnreachable = "hooks_unreachable"
+	ReasonHooksRestored    = "hooks_restored"
+)
+
+// HooksUnreachableWarning opens every warning about hooks that do not
+// reach DefenseClaw; HooksDoctorHint closes it.
+const (
+	HooksUnreachableWarning = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
+	HooksDoctorHint         = "Run: defenseclaw sandbox doctor"
+)
 
 // Activity sources for egress events.
 const (

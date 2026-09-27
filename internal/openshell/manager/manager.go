@@ -138,6 +138,10 @@ type Options struct {
 	// HookSilence is how long a harness may be active without hook
 	// traffic before a hook_silence finding (DefaultHookSilence).
 	HookSilence time.Duration
+	// HookReachWindow is how long a session's harness may work before its
+	// first authenticated hook is overdue and the session is flagged as
+	// not reaching DefenseClaw (DefaultHookReachWindow; see reach.go).
+	HookReachWindow time.Duration
 	// ConnectRetry paces gateway reconnects.
 	ConnectRetry time.Duration
 	// TriageInterval paces the draft poll of ready sandboxes
@@ -240,6 +244,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.HookSilence <= 0 {
 		opts.HookSilence = DefaultHookSilence
+	}
+	if opts.HookReachWindow <= 0 {
+		opts.HookReachWindow = DefaultHookReachWindow
 	}
 	if opts.ConnectRetry <= 0 {
 		opts.ConnectRetry = defaultConnectRetry
@@ -363,6 +370,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer reconcile.Stop()
 	silence := time.NewTicker(minDuration(m.opts.HookSilence/4, time.Minute))
 	defer silence.Stop()
+	reach := time.NewTicker(hookReachInterval)
+	defer reach.Stop()
 	drafts := time.NewTicker(m.opts.TriageInterval)
 	defer drafts.Stop()
 	for {
@@ -372,6 +381,8 @@ func (m *Manager) Run(ctx context.Context) error {
 		case <-silence.C:
 			m.checkHookSilence(ctx)
 			m.pruneToolCalls()
+		case <-reach.C:
+			m.checkHookReach(ctx)
 		case <-drafts.C:
 			if m.gatewayUp() {
 				m.triageSweep(ctx)

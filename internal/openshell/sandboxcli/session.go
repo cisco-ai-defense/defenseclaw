@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -46,6 +47,13 @@ type session struct {
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
 	before *sandboxapi.Sandbox
+
+	// hooksWarned is set once the live warning that the session's hooks do
+	// not reach DefenseClaw went out (hooks.go); noHooks once the session
+	// ended without one of them getting through.
+	hooksMu     sync.Mutex
+	hooksWarned bool
+	noHooks     bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -106,8 +114,10 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	return s.app.Terminal.Run(ctx, inv)
 }
 
-// watchNotices follows the sandbox's activity during the session and
-// prints what must not wait until the end: a quarantined nested repository.
+// watchNotices follows the sandbox during the session and prints what must
+// not wait until the end: a quarantined nested repository, and hooks that
+// do not reach DefenseClaw (the daemon's verdict, or no hook by the end of
+// the hook window).
 func (s *session) watchNotices(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var since uint64
@@ -115,19 +125,28 @@ func (s *session) watchNotices(ctx context.Context) func() {
 		since = max(since, ev.Seq)
 		return nil
 	})
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		defer close(done)
+		defer wg.Done()
 		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
-			if ev.Kind == sandboxapi.ActivityFinding && ev.Reason == sandboxapi.ReasonNestedRepo {
-				// The harness owns the terminal: one line on stderr, in
-				// column 0, is all that is safe.
-				fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", strings.TrimPrefix(ev.Message, "⚠ "))
+			if ev.Kind != sandboxapi.ActivityFinding {
+				return nil
+			}
+			switch ev.Reason {
+			case sandboxapi.ReasonNestedRepo:
+				s.notice(strings.TrimPrefix(ev.Message, "⚠ "))
+			case sandboxapi.ReasonHooksUnreachable:
+				s.warnHooksOnce(ev.Message)
 			}
 			return nil
 		})
 	}()
-	return func() { cancel(); <-done }
+	go func() {
+		defer wg.Done()
+		s.checkHooksAfter(ctx, s.app.hookWindow())
+	}()
+	return func() { cancel(); wg.Wait() }
 }
 
 // detach starts the harness in the background inside the sandbox; its
@@ -143,6 +162,7 @@ mkdir -p "$d"
 log="$d/$(date -u +%Y%m%dT%H%M%SZ).log"
 ln -sfn "$log" "$d/latest.log"
 rm -f "$d/latest.exit"
+date +%s > "$d/latest.started"
 runner='rc=0; "$@" || rc=$?; printf "%s\n" "$rc" > ` + RunDir + `/latest.exit'
 if command -v setsid >/dev/null 2>&1; then
   setsid nohup sh -c "$runner" sh "$@" >"$log" 2>&1 </dev/null &
@@ -235,6 +255,7 @@ func (s *session) end(ctx context.Context) error {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
 	}
 	a.println(s.summaryLine(after, rev))
+	s.printHookReach(after)
 	changed := rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0)
 	if rev != nil && rev.RiskLine != "" {
 		a.println(a.style(rev.RiskLine, ansiYellow))
@@ -363,6 +384,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	pull, err := a.pull(ctx, s.api, s.cli, after)
 	if err != nil {
 		a.println(s.summaryLine(after, nil))
+		s.printHookReach(after)
 		a.warn("could not pull the sandbox's changes: " + err.Error())
 		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
 		s.rm = false
@@ -370,6 +392,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	}
 	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: pull.Review.RiskLine()}
 	a.println(s.summaryLine(after, rev))
+	s.printHookReach(after)
 	if rev.RiskLine != "" {
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}

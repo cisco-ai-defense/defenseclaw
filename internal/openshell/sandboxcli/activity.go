@@ -114,7 +114,14 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(": " + truncate(ev.Reason, 120))
 		}
 	case sandboxapi.ActivityFinding:
-		b.WriteString(a.style("⚠", ansiYellow) + " " + firstNonEmpty(ev.Message, ev.Reason))
+		switch msg := firstNonEmpty(ev.Message, ev.Reason); ev.Reason {
+		case sandboxapi.ReasonHooksRestored:
+			b.WriteString(a.style("✓", ansiGreen) + " " + msg)
+		case sandboxapi.ReasonHooksUnreachable:
+			b.WriteString(a.style("✗", ansiRed) + " " + strings.TrimPrefix(msg, "⚠ "))
+		default:
+			b.WriteString(a.style("⚠", ansiYellow) + " " + strings.TrimPrefix(msg, "⚠ "))
+		}
 	case sandboxapi.ActivityDropped:
 		b.WriteString(a.dim("… " + firstNonEmpty(ev.Message, "some events were skipped")))
 	default:

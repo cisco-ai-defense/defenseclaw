@@ -341,6 +341,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
 		ident = b.identity()
 		if e.Kind == egress.EventAllowed || e.Kind == egress.EventClosed {
 			b.activeAt = m.now()
+			m.noteWorkLocked(b)
 		}
 	}
 	m.mu.Unlock()

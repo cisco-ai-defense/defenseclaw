@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,6 +103,9 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 3, Time: at, Kind: sandboxapi.ActivityToolBlocked, Sandbox: "box", Tool: "Bash", Reason: "E2E marker"},
 		{Seq: 4, Time: at, Kind: sandboxapi.ActivityApprovalRequested, Sandbox: "box", ApprovalID: "ap-1", Host: "10.0.0.5", Port: 5432},
 		{Seq: 5, Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: "box", Reason: sandboxapi.ReasonNestedRepo, Message: "⚠ quarantined a new git repository at x/.git"},
+		{Seq: 6, Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: "box", Reason: sandboxapi.ReasonHooksUnreachable,
+			Message: "⚠ " + hooksWarningText("OpenShell refused the hooks' connections")},
+		{Seq: 7, Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: "box", Reason: sandboxapi.ReasonHooksRestored, Message: "DefenseClaw hooks reach the daemon again"},
 	}
 	if err := ta.Activity(context.Background(), ActivityOptions{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
@@ -112,7 +116,9 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ✗ webhook.site (exfil destination)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox box",
 		"12:01:02 ✗ tool Bash blocked: E2E marker",
 		"12:01:02 ? ask ap-1: 10.0.0.5:5432  → defenseclaw sandbox approve box ap-1",
-		"12:01:02 ⚠ ⚠ quarantined a new git repository at x/.git",
+		"12:01:02 ⚠ quarantined a new git repository at x/.git",
+		"12:01:02 ✗ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (OpenShell refused the hooks' connections). Run: defenseclaw sandbox doctor",
+		"12:01:02 ✓ DefenseClaw hooks reach the daemon again",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -122,14 +128,14 @@ func TestActivityRendering(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct{ Events []sandboxapi.ActivityEvent }
-	if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || len(got.Events) != 5 {
+	if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || len(got.Events) != 7 {
 		t.Fatalf("activity json: %v %s", err, ta.output())
 	}
 	ta.out.Reset()
 	if err := ta.Activity(context.Background(), ActivityOptions{Follow: true, Sandbox: "box"}); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(ta.output(), "\n"); n != 5 {
+	if n := strings.Count(ta.output(), "\n"); n != 7 {
 		t.Fatalf("followed %d events:\n%s", n, ta.output())
 	}
 }
@@ -257,8 +263,9 @@ func TestExecAndLogs(t *testing.T) {
 		switch {
 		case cmd[0] == "tail":
 			return 0, "log line\n"
-		case cmd[0] == "cat":
-			return 0, "0\n"
+		case isRunStatus(cmd):
+			// The run started a minute ago; the sandbox's last hook is now.
+			return 0, fmt.Sprintf("0\n%d\n", time.Now().Add(-time.Minute).Unix())
 		case cmd[0] == "false":
 			return 7, ""
 		}
@@ -275,10 +282,12 @@ func TestExecAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmds := ta.stream.commands()
-	if !slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "tail -n 50 "+RunDir+"/latest.log") || !slices.Contains(cmds, "cat "+RunDir+"/latest.exit") {
+	if !slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "tail -n 50 "+RunDir+"/latest.log") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+		return isRunStatus(sandboxCommand(argv))
+	}) {
 		t.Fatalf("commands = %q", cmds)
 	}
-	if out := ta.output(); !strings.Contains(out, "log line") || !strings.Contains(out, "exited with status 0") {
+	if out := ta.output(); !strings.Contains(out, "log line") || !strings.Contains(out, "exited with status 0") || strings.Contains(out, "not reaching") {
 		t.Fatalf("logs output:\n%s", out)
 	}
 	if err := ta.Logs(context.Background(), LogsOptions{Name: "box", Follow: true}); err != nil {

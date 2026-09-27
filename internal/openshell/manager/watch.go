@@ -201,12 +201,14 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	switch r.Class {
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
 		host := triage.NormalizeHost(r.Host)
-		// Relays to DefenseClaw's own listeners (hooks, the egress proxy)
-		// are reported by those listeners.
-		if host == "" || host == openshellHostAlias {
+		if host == openshellHostAlias {
+			m.hostAliasEvent(ctx, b, r, at)
 			return
 		}
-		m.markActive(b, at)
+		if host == "" {
+			return
+		}
+		m.markWork(b, at)
 		if !r.Denied() && !r.Allowed() {
 			return
 		}
@@ -254,6 +256,33 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 }
 
 const openshellHostAlias = "host.openshell.internal"
+
+// hostAliasEvent handles OpenShell's record of a connection to the host.
+// Relays to DefenseClaw's own listeners are reported by those listeners,
+// except what only OpenShell sees of the hooks: a connection or request to
+// the ingress it refused, or one that never became an authenticated
+// request. Any other host port (a local model endpoint, a --host-port
+// service) is harness work.
+func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	switch r.Port {
+	case m.opts.IngressPort:
+		m.observeHookConnection(ctx, b, r.Denied(), at)
+	case m.opts.EgressPort, 0:
+	default:
+		m.markWork(b, at)
+	}
+}
+
+// markWork records network activity of the sandbox's workload: it keeps
+// the hooks' silence check and the session's reachability check going.
+func (m *Manager) markWork(b *box, at time.Time) {
+	m.markActive(b, at)
+	m.mu.Lock()
+	if !at.Before(b.started) {
+		m.noteWorkLocked(b)
+	}
+	m.mu.Unlock()
+}
 
 func (m *Manager) markActive(b *box, at time.Time) {
 	m.mu.Lock()

@@ -52,21 +52,29 @@ type HookDecision struct {
 func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route) {
 	now := m.now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	box := m.boxes[b.SandboxName]
 	if box == nil || box.rec.BindingID != b.ID {
+		m.mu.Unlock()
 		return
 	}
+	restored := false
 	switch route {
 	case sandboxauth.RouteHook:
 		box.hooks.lastHook = now
 		box.hooks.requests++
 		box.silentSince, box.silenceSent = time.Time{}, false
+		restored = box.hookReachedLocked()
 	case sandboxauth.RouteNotify:
 		box.hooks.lastNotify = now
 	case sandboxauth.RouteOTLP:
 		box.hooks.lastOTLP = now
 		box.activeAt = now
+		m.noteWorkLocked(box)
+	}
+	name := box.rec.Name
+	m.mu.Unlock()
+	if restored {
+		m.publishHooksRestored(name)
 	}
 }
 

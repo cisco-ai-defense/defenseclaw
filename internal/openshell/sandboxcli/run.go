@@ -227,10 +227,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if err := s.end(ctx); err != nil {
 		return err
 	}
-	if code != 0 {
-		return &ExitError{Code: code}
-	}
-	return nil
+	return s.exit(code)
 }
 
 func printMode(spec *harness.Spec, args []string) bool {

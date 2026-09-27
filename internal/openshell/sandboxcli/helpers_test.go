@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +71,9 @@ type fakeDaemon struct {
 	// createMCP and createWarnings are what create reports.
 	createMCP      *sandboxapi.MCPSummary
 	createWarnings []string
+	// live are events only a followed activity stream delivers (they
+	// happen during the session).
+	live []sandboxapi.ActivityEvent
 	// timeline records the order of the steps of a run, shared with the
 	// other fakes of a testApp.
 	timeline *timeline
@@ -94,6 +98,28 @@ func (tl *timeline) list() []string {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	return append([]string(nil), tl.steps...)
+}
+
+// hookTraffic is the hook traffic of a harness the fakes ran: an
+// authenticated hook request for the sandbox the argv names.
+func (d *fakeDaemon) hookTraffic(argv []string) {
+	name := ""
+	for i, a := range argv {
+		if a == "--name" && i+1 < len(argv) {
+			name = argv[i+1]
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if sb, ok := d.sandboxes[name]; ok {
+		sb.Hooks.HookRequests++
+		sb.Hooks.LastHookAt = time.Now()
+	}
+}
+
+// runsHarness reports whether argv starts a harness through its launcher.
+func runsHarness(argv []string) bool {
+	return slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, harness.LauncherDir+"/") })
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -204,7 +230,11 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope})
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
-		for _, ev := range d.events {
+		events := d.events
+		if r.URL.Query().Get("follow") == "true" {
+			events = append(append([]sandboxapi.ActivityEvent(nil), events...), d.live...)
+		}
+		for _, ev := range events {
 			if s := r.URL.Query().Get("sandbox"); s == "" || ev.Sandbox == s {
 				out = append(out, ev)
 			}
@@ -326,15 +356,18 @@ type fakeTerminal struct {
 	code int
 	// startErr fails the start of the harness (nothing runs).
 	startErr error
-	// during runs while the harness "owns" the terminal.
+	// during runs while the harness "owns" the terminal; hooks then stands
+	// for the harness's hook traffic (nil: its hooks never reach the
+	// daemon).
 	during   func()
+	hooks    func(argv []string)
 	timeline *timeline
 }
 
 func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, inv.Argv)
-	during, startErr := f.during, f.startErr
+	during, startErr, hooks := f.during, f.startErr, f.hooks
 	f.mu.Unlock()
 	if !inv.Interactive {
 		return -1, io.ErrUnexpectedEOF
@@ -346,6 +379,9 @@ func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, er
 	if during != nil {
 		during()
 	}
+	if hooks != nil {
+		hooks(inv.Argv)
+	}
 	return f.code, nil
 }
 
@@ -354,19 +390,25 @@ type fakeStreamer struct {
 	mu   sync.Mutex
 	runs [][]string
 	// answer returns the exit status and output for an argv.
-	answer   func(argv []string) (int, string)
+	answer func(argv []string) (int, string)
+	// hooks stands for the hook traffic of a harness it runs (nil: none
+	// reaches the daemon).
+	hooks    func(argv []string)
 	timeline *timeline
 }
 
 func (f *fakeStreamer) Stream(_ context.Context, inv openshell.Invocation, stdout, _ io.Writer) (int, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, inv.Argv)
-	answer := f.answer
+	answer, hooks := f.answer, f.hooks
 	f.mu.Unlock()
 	if inv.Interactive {
 		return -1, io.ErrUnexpectedEOF
 	}
 	f.timeline.add(execStep(inv.Argv))
+	if hooks != nil && runsHarness(inv.Argv) {
+		hooks(inv.Argv)
+	}
 	if answer == nil {
 		return 0, nil
 	}
@@ -574,9 +616,11 @@ func newTestApp(t *testing.T, input string) *testApp {
 			t.Fatal(err)
 		}
 	}
-	// One timeline for the order of a run's steps.
+	// One timeline for the order of a run's steps; every harness the fakes
+	// run reaches the daemon with its hooks unless a test turns that off.
 	tl := &timeline{}
 	ta.daemon.timeline, ta.term.timeline, ta.stream.timeline, ta.copy.timeline = tl, tl, tl, tl
+	ta.term.hooks, ta.stream.hooks = ta.daemon.hookTraffic, ta.daemon.hookTraffic
 	// A test that drops Cfg (or its DataDir) falls back to
 	// config.DefaultDataPath: keep that in the fixture too, never the
 	// developer's ~/.defenseclaw.
