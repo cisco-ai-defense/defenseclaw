@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -228,6 +229,119 @@ func TestSandboxIngressRejectsEveryOtherCredential(t *testing.T) {
 	f.handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("duplicate Authorization: %d", rec.Code)
+	}
+}
+
+// TestSandboxIngressRefusesCredentialOutsideAuthorization covers a
+// workload that puts its credential placeholder in some other header or in
+// the query string, where OpenShell also substitutes it. Nothing that
+// carries the real credential may reach a handler that echoes or persists
+// request metadata.
+func TestSandboxIngressRefusesCredentialOutsideAuthorization(t *testing.T) {
+	f := newSandboxIngressFixture(t)
+	st := f.api.sandboxIngressState()
+	next := &recordingHandler{}
+	h := f.api.sandboxIngressAuthenticate(st, sandboxRequestIDMiddleware(next))
+	tok := f.claudeTok
+	basic := base64.StdEncoding.EncodeToString([]byte("x:" + tok))
+	escaped := strings.Replace(tok, "_", "%5F", 1)
+
+	for _, tc := range []struct {
+		name    string
+		target  string
+		headers []string
+	}{
+		{name: "request id header", target: "/api/v1/claude-code/hook", headers: []string{"X-Request-Id", tok}},
+		{name: "canonical request id", target: "/api/v1/claude-code/hook", headers: []string{RequestIDHeader, "id-" + tok}},
+		{name: "correlation id", target: "/v1/logs", headers: []string{"X-Correlation-Id", tok}},
+		{name: "session id", target: "/api/v1/claude-code/hook", headers: []string{"X-DefenseClaw-Session-Id", tok}},
+		{name: "idempotency key", target: "/api/v1/claude-code/hook", headers: []string{SandboxHookIdempotencyHeader, tok}},
+		{name: "traceparent", target: "/api/v1/claude-code/hook", headers: []string{"Traceparent", tok}},
+		{name: "header name", target: "/api/v1/claude-code/hook", headers: []string{"X-" + tok, "1"}},
+		{name: "basic encoded", target: "/api/v1/claude-code/hook", headers: []string{"Proxy-Authorization", "Basic " + basic}},
+		{name: "query", target: "/api/v1/claude-code/hook?session=" + tok},
+		{name: "percent-encoded query", target: "/v1/logs?x=" + escaped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(next.reqs)
+			req := httptest.NewRequest(http.MethodPost, tc.target, strings.NewReader(`{}`))
+			req.RemoteAddr = "127.0.0.1:43210"
+			req.Header.Set("Authorization", "Bearer "+tok)
+			for i := 0; i+1 < len(tc.headers); i += 2 {
+				req.Header.Set(tc.headers[i], tc.headers[i+1])
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400", rec.Code)
+			}
+			if len(next.reqs) != before {
+				t.Fatal("request reached the handler chain")
+			}
+			for name, values := range rec.Header() {
+				for _, value := range values {
+					if strings.Contains(value, tok) {
+						t.Fatalf("response header %s echoes the credential", name)
+					}
+				}
+			}
+			if strings.Contains(rec.Body.String(), tok) {
+				t.Fatal("response body echoes the credential")
+			}
+		})
+	}
+
+	// The full chain refuses it too, before any middleware echoes anything.
+	rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", tok, `{}`, "X-Request-Id", tok)
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Header().Get(RequestIDHeader), tok) {
+		t.Fatalf("full chain: status %d, request id %q", rec.Code, rec.Header().Get(RequestIDHeader))
+	}
+	// An ordinary request still passes.
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", tok, `{}`); rec.Code == http.StatusBadRequest &&
+		strings.Contains(rec.Body.String(), "Authorization header") {
+		t.Fatal("a request with only an Authorization credential was refused")
+	}
+}
+
+// TestSandboxIngressAlwaysMintsRequestIDs pins that a sandbox cannot choose
+// the request ID that is echoed to it and stamped on every audit row.
+func TestSandboxIngressAlwaysMintsRequestIDs(t *testing.T) {
+	f := newSandboxIngressFixture(t)
+	st := f.api.sandboxIngressState()
+	var seen string
+	var seenHeaders []string
+	h := f.api.sandboxIngressAuthenticate(st, sandboxRequestIDMiddleware(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			seen = RequestIDFromContext(r.Context())
+			for _, name := range clientRequestIDHeaders {
+				if v := r.Header.Get(name); v != "" {
+					seenHeaders = append(seenHeaders, name)
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+f.claudeTok)
+	req.Header.Set(RequestIDHeader, "client-chosen-1")
+	req.Header.Set("X-Request-Id", "client-chosen-2")
+	req.Header.Set("X-Correlation-Id", "client-chosen-3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	echoed := rec.Header().Get(RequestIDHeader)
+	if echoed == "" || strings.HasPrefix(echoed, "client-chosen") || echoed != seen {
+		t.Fatalf("request id echoed=%q context=%q, want one minted id", echoed, seen)
+	}
+	if len(seenHeaders) != 0 {
+		t.Fatalf("client request-id headers reached the handler: %v", seenHeaders)
+	}
+	// Host traffic keeps honouring a client request ID.
+	host := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	req.Header.Set("X-Request-Id", "client-chosen-2")
+	rec = httptest.NewRecorder()
+	host.ServeHTTP(rec, req)
+	if got := rec.Header().Get(RequestIDHeader); got != "client-chosen-2" {
+		t.Fatalf("host request id = %q", got)
 	}
 }
 

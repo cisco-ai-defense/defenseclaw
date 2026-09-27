@@ -18,10 +18,12 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -51,8 +53,11 @@ import (
 //
 // Middleware, outermost first:
 //
-//	authenticate  credential -> binding (401); binding + FSView into ctx
-//	trace, request ID, correlation (identity from the binding's host user)
+//	authenticate  credential -> binding (401); a credential anywhere but
+//	              the Authorization header is refused (400); binding +
+//	              FSView into ctx
+//	trace, request ID (always minted), correlation (identity from the
+//	              binding's host user)
 //	authorize     route allowlist and connector match (404/403),
 //	              per-binding limiter (429), in-flight tracking
 //	metrics, CSRF, body limit
@@ -344,7 +349,7 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = a.metricsMiddleware(h)
 	h = a.sandboxIngressAuthorize(st, exact, h)
 	h = CorrelationMiddleware(reg)(h)
-	h = requestIDMiddleware(h)
+	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
 	h = a.sandboxIngressAuthenticate(st, h)
 	return h
@@ -425,9 +430,81 @@ func (a *APIServer) sandboxIngressAuthenticate(st *sandboxIngressState, next htt
 			writeSandboxIngressError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if sandboxCredentialOutsideAuthorization(r) {
+			// OpenShell substitutes the real credential for its placeholder in
+			// every header and in the query string. A header or query value
+			// that carries it would be echoed back (request IDs) or persisted
+			// to audit sinks, handing the workload the credential it must only
+			// ever see as a placeholder.
+			a.sandboxIngressAuthFailure(st, r, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
+			writeSandboxIngressError(w, http.StatusBadRequest,
+				"sandbox credentials are accepted only in the Authorization header")
+			return
+		}
 		view := sandboxauth.NewFSView(binding, st.fs)
 		ctx := sandboxauth.WithRequest(r.Context(), binding, view)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// sandboxCredentialOutsideAuthorization reports whether anything the
+// request carries besides its single Authorization header holds sandbox
+// credential material: another header's name or value, the host, the path
+// or the query. Percent-encoded and Basic-encoded forms count too.
+func sandboxCredentialOutsideAuthorization(r *http.Request) bool {
+	for name, values := range r.Header {
+		if name == "Authorization" {
+			continue
+		}
+		// Header names arrive canonicalised, which changes letter case.
+		if containsSandboxCredential(strings.ToLower(name)) {
+			return true
+		}
+		for _, value := range values {
+			if containsSandboxCredential(value) {
+				return true
+			}
+		}
+	}
+	return containsSandboxCredential(r.Host) ||
+		containsSandboxCredential(r.RequestURI) ||
+		containsSandboxCredential(r.URL.Path) ||
+		containsSandboxCredential(r.URL.RawPath) ||
+		containsSandboxCredential(r.URL.RawQuery)
+}
+
+func containsSandboxCredential(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, sandboxauth.TokenPrefix) {
+		return true
+	}
+	if strings.Contains(s, "%") {
+		if decoded, err := url.PathUnescape(s); err == nil && strings.Contains(decoded, sandboxauth.TokenPrefix) {
+			return true
+		}
+	}
+	if scheme, rest, ok := strings.Cut(strings.TrimSpace(s), " "); ok && strings.EqualFold(scheme, "Basic") {
+		if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rest)); err == nil &&
+			strings.Contains(string(decoded), sandboxauth.TokenPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxRequestIDMiddleware is requestIDMiddleware with every
+// client-supplied request ID dropped, so the ID is always minted. The
+// request ID is echoed in a response header and persisted to every audit
+// sink; a sandbox must not choose what either carries.
+func sandboxRequestIDMiddleware(next http.Handler) http.Handler {
+	inner := requestIDMiddleware(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range clientRequestIDHeaders {
+			r.Header.Del(name)
+		}
+		inner.ServeHTTP(w, r)
 	})
 }
 
