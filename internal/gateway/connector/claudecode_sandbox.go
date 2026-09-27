@@ -47,8 +47,14 @@ var claudeCodeSandboxStartupEnv = map[string]string{
 
 // claudeCodeSandboxPinnedEnv are managed-env values that project or user
 // settings cannot override. CLAUDE_CODE_SIMPLE=0 keeps hooks active when the
-// agent requests Claude's simple/bare mode; the loader and shell-startup
-// pins stop a settings env block from injecting code into hook processes.
+// agent requests Claude's simple/bare mode. The loader and shell-startup
+// variables act before the first line of a hook runs (when the dynamic
+// loader starts bash, or when Claude's spawning shell starts), so they are
+// pinned here; every other inherited variable, PATH and PYTHONPATH included,
+// is dropped by the hook itself (_sandbox.sh) before it starts a child
+// process. PATH and PYTHONPATH stay unpinned because the same env block
+// shapes the agent's own tool processes, where projects set them
+// legitimately.
 var claudeCodeSandboxPinnedEnv = map[string]string{
 	"CLAUDE_CODE_SIMPLE": "0",
 	"LD_PRELOAD":         "",

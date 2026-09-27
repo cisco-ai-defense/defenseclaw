@@ -53,6 +53,10 @@ export DEFENSECLAW_HOME
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
 . "${HOOK_DIR}/_hardening.sh"
+# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
@@ -60,7 +64,6 @@ defenseclaw_harden_env
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
 # OpenShell sandbox images bake the fail mode; no environment override.
-. "${HOOK_DIR}/_sandbox.sh"
 FAIL_MODE="closed"
 readonly FAIL_MODE
 

@@ -32,7 +32,8 @@ import (
 )
 
 // sandboxCurlStub stands in for curl on the baked hook PATH. It records the
-// argv and stdin of every call and replays one scripted response per call:
+// argv, environment and stdin of every call and replays one scripted
+// response per call:
 // "exit:<code>" makes curl fail, "<status>|<body>" prints body and status the
 // way `curl -w '\n%{http_code}'` does.
 const sandboxCurlStub = `#!/bin/bash
@@ -40,6 +41,7 @@ dir="$(cd "$(dirname "$0")" && pwd)"
 n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$dir/count"
 printf '%s\n' "$@" > "$dir/args.$n"
+/usr/bin/env > "$dir/env.$n"
 cat > "$dir/body.$n"
 line="$(sed -n "${n}p" "$dir/responses")"
 case "$line" in
@@ -52,6 +54,7 @@ esac
 type sandboxCurlCall struct {
 	argv    []string
 	headers map[string]string
+	env     map[string]string
 	body    string
 }
 
@@ -76,6 +79,8 @@ func (c sandboxCurlCall) flagValue(flag string) string {
 type sandboxHookHarness struct {
 	root    string
 	stubDir string
+	// bakedPATH replaces SandboxHookPATH in the rendered helpers.
+	bakedPATH string
 }
 
 // newSandboxHookHarness materializes a rendered artifact set under a scratch
@@ -95,6 +100,7 @@ func newSandboxHookHarness(t *testing.T, provider SandboxArtifactProvider, versi
 	}
 	h := &sandboxHookHarness{root: t.TempDir(), stubDir: t.TempDir()}
 	stubPath := h.stubDir + ":/usr/bin:/bin:/usr/sbin:/sbin"
+	h.bakedPATH = stubPath
 	for _, file := range artifacts.Files {
 		data := file.Data
 		switch filepath.Base(file.Path) {
@@ -134,10 +140,11 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 	for _, name := range []string{"count", "responses"} {
 		_ = os.Remove(filepath.Join(h.stubDir, name))
 	}
-	matches, _ := filepath.Glob(filepath.Join(h.stubDir, "args.*"))
-	bodies, _ := filepath.Glob(filepath.Join(h.stubDir, "body.*"))
-	for _, stale := range append(matches, bodies...) {
-		_ = os.Remove(stale)
+	for _, pattern := range []string{"args.*", "body.*", "env.*"} {
+		stale, _ := filepath.Glob(filepath.Join(h.stubDir, pattern))
+		for _, file := range stale {
+			_ = os.Remove(file)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(h.stubDir, "responses"), []byte(strings.Join(responses, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -168,7 +175,18 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 			t.Fatal(err)
 		}
 		body, _ := os.ReadFile(filepath.Join(h.stubDir, "body."+strconv.Itoa(i)))
-		call := sandboxCurlCall{argv: strings.Split(strings.TrimSuffix(string(rawArgs), "\n"), "\n"), headers: map[string]string{}, body: string(body)}
+		call := sandboxCurlCall{
+			argv:    strings.Split(strings.TrimSuffix(string(rawArgs), "\n"), "\n"),
+			headers: map[string]string{},
+			env:     map[string]string{},
+			body:    string(body),
+		}
+		rawEnv, _ := os.ReadFile(filepath.Join(h.stubDir, "env."+strconv.Itoa(i)))
+		for _, line := range strings.Split(strings.TrimSuffix(string(rawEnv), "\n"), "\n") {
+			if name, value, ok := strings.Cut(line, "="); ok {
+				call.env[name] = value
+			}
+		}
 		for j, arg := range call.argv {
 			if arg == "-H" && j+1 < len(call.argv) {
 				name, value, _ := strings.Cut(call.argv[j+1], ": ")
@@ -325,6 +343,215 @@ func TestSandboxHooksIgnoreShellInjectionThroughEnvironment(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("environment-injected shell code ran inside the sandbox hook")
+	}
+}
+
+// writeMarkerTool writes an executable that only records that it ran.
+func writeMarkerTool(t *testing.T, dir, name, markerDir string) {
+	t.Helper()
+	script := "#!/bin/sh\n: > '" + filepath.Join(markerDir, name) + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sandboxHookChildEnv is every variable a sandbox hook may hand to its child
+// processes: the inputs it reads, what the hook and _hardening.sh set, and
+// what the recording stub's own bash adds (PWD, SHLVL, OLDPWD, _).
+var sandboxHookChildEnv = map[string]bool{
+	"PATH": true, "HOME": true, "PWD": true, "OLDPWD": true, "SHLVL": true, "_": true,
+	"LC_ALL": true, "LANG": true, "GIT_CONFIG_NOSYSTEM": true, "GIT_CONFIG_GLOBAL": true,
+	"DEFENSECLAW_HOME": true, "DEFENSECLAW_MANAGED_HOOK": true,
+	"DEFENSECLAW_HOOK_CONNECTOR": true, "DEFENSECLAW_HOOK_NAME": true,
+	SandboxTokenEnv: true, "DEFENSECLAW_TRACEPARENT": true, "CLAUDE_TOOL_NAME": true,
+}
+
+// sandboxEnvAttack is the scratch state of one polluted-environment run.
+type sandboxEnvAttack struct {
+	h *sandboxHookHarness
+	// markers collects one file per planted program that ran.
+	markers string
+	// planted holds marker versions of the tools the hooks run.
+	planted string
+	// pyDir holds a sitecustomize.py that leaves a marker.
+	pyDir string
+	// victim stands for a workload directory the hook must never adopt as
+	// its HOME (and so never remove); keep is a file inside it.
+	victim, keep string
+	// tmpdir is an inherited TMPDIR the hook must ignore.
+	tmpdir string
+}
+
+func newSandboxEnvAttack(t *testing.T, h *sandboxHookHarness) *sandboxEnvAttack {
+	t.Helper()
+	a := &sandboxEnvAttack{h: h, markers: t.TempDir(), planted: t.TempDir(), pyDir: t.TempDir(), victim: t.TempDir(), tmpdir: t.TempDir()}
+	for _, tool := range []string{"mktemp", "curl", "jq", "head", "sed", "tr", "od", "id", "uname", "cat", "python3"} {
+		writeMarkerTool(t, a.planted, tool, a.markers)
+	}
+	site := "open(" + strconv.Quote(filepath.Join(a.markers, "sitecustomize")) + ", 'w').close()\n"
+	if err := os.WriteFile(filepath.Join(a.pyDir, "sitecustomize.py"), []byte(site), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.keep = filepath.Join(a.victim, "keep")
+	if err := os.WriteFile(a.keep, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestSandboxHooksScrubInheritedEnvironment runs every sandbox hook with an
+// environment the workload controls (Claude Code applies settings env blocks
+// to hook processes): a PATH entry ahead of the baked one, a PYTHONPATH
+// sitecustomize, bash knobs that would abort or reroute the hook, the hook's
+// own variable names, and assorted interpreter inputs. Each hook must still
+// forward the untouched payload to the baked ingress, run none of the
+// planted code, and hand its children only the variables it reads.
+func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
+	const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	hooks := []struct {
+		name     string
+		provider SandboxArtifactProvider
+		version  string
+		script   string
+		args     []string
+		stdin    string
+		route    string
+		traced   bool
+	}{
+		{"claude-code-hook", &ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "/api/v1/claude-code/hook", true},
+		{"codex-hook", &CodexConnector{}, "0.146.0", "codex-hook.sh",
+			[]string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, "/api/v1/codex/hook", true},
+		{"inspect-tool", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool", false},
+	}
+	vectors := map[string]func(t *testing.T, a *sandboxEnvAttack) map[string]string{
+		"planted-path": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			return map[string]string{"PATH": a.planted + ":/usr/bin:/bin"}
+		},
+		"pythonpath-sitecustomize": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			if _, err := exec.LookPath("python3"); err != nil {
+				t.Skip("python3 is required")
+			}
+			return map[string]string{"PYTHONPATH": a.pyDir, "PYTHONSTARTUP": filepath.Join(a.pyDir, "sitecustomize.py")}
+		},
+		"python3-never-started": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			// python3 on the baked PATH itself.
+			writeMarkerTool(t, a.h.stubDir, "python3", a.markers)
+			return nil
+		},
+		"bash-knobs": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			return map[string]string{"FUNCNEST": "1", "TMOUT": "1", "POSIXLY_CORRECT": "1", "EXECIGNORE": "*/jq", "BASH_COMPAT": "31"}
+		},
+		"hook-variables": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			return map[string]string{
+				"HOOK_DIR":                    "/nonexistent",
+				"DEFENSECLAW_BAKED_HOOK_PATH": a.planted,
+				"DEFENSECLAW_HOOK_HOME":       a.victim,
+				"DEFENSECLAW_HOOK_MAX_BODY":   "4",
+				"DEFENSECLAW_FAIL_MODE":       "open",
+				"DC_SANDBOX_INGRESS":          "attacker.invalid:1",
+				"FAIL_MODE":                   "open",
+				"TMPDIR":                      a.tmpdir,
+			}
+		},
+		"interpreter-inputs": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+			return map[string]string{"PERL5LIB": a.pyDir, "RUBYOPT": "-W0", "NODE_OPTIONS": "--no-warnings", "GCONV_PATH": a.pyDir, "DC_TEST_CANARY": "1"}
+		},
+	}
+	vectors["all-at-once"] = func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+		env := map[string]string{}
+		for name, vector := range vectors {
+			if name == "all-at-once" || name == "pythonpath-sitecustomize" {
+				continue
+			}
+			for key, value := range vector(t, a) {
+				env[key] = value
+			}
+		}
+		env["PYTHONPATH"] = a.pyDir
+		return env
+	}
+
+	for _, hook := range hooks {
+		for name, vector := range vectors {
+			t.Run(hook.name+"/"+name, func(t *testing.T) {
+				h := newSandboxHookHarness(t, hook.provider, hook.version)
+				a := newSandboxEnvAttack(t, h)
+				env := map[string]string{
+					SandboxTokenEnv:           "tok",
+					"DEFENSECLAW_TRACEPARENT": traceparent,
+					"CLAUDE_TOOL_NAME":        "Bash",
+				}
+				for key, value := range vector(t, a) {
+					env[key] = value
+				}
+
+				run := h.run(t, SandboxHookDir+"/"+hook.script, hook.args, hook.stdin, env, []string{allowResponse})
+				if run.exitCode != 0 || len(run.calls) != 1 {
+					t.Fatalf("exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+				}
+				call := run.calls[0]
+				if want := "http://host.openshell.internal:18971" + hook.route; call.url() != want {
+					t.Fatalf("url = %q, want %q", call.url(), want)
+				}
+				forwarded := call.body
+				if hook.script == "inspect-tool.sh" {
+					var body map[string]string
+					if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+						t.Fatalf("inspect body %q: %v", call.body, err)
+					}
+					forwarded = body["args"]
+				}
+				if forwarded != hook.stdin {
+					t.Fatalf("forwarded payload = %q, want the hook input %q", forwarded, hook.stdin)
+				}
+				if hook.traced && call.headers["traceparent"] != traceparent {
+					t.Fatalf("allowlisted trace context lost: headers %v", call.headers)
+				}
+				if ran, _ := os.ReadDir(a.markers); len(ran) != 0 {
+					var names []string
+					for _, entry := range ran {
+						names = append(names, entry.Name())
+					}
+					t.Fatalf("planted code ran inside the sandbox hook: %v", names)
+				}
+				if _, err := os.Stat(a.keep); err != nil {
+					t.Fatalf("an inherited DEFENSECLAW_HOOK_HOME was adopted and removed: %v", err)
+				}
+				if call.env["PATH"] != h.bakedPATH {
+					t.Fatalf("child PATH = %q, want the baked %q", call.env["PATH"], h.bakedPATH)
+				}
+				if home := call.env["HOME"]; home == "" || strings.HasPrefix(home, a.victim) || strings.HasPrefix(home, a.tmpdir) {
+					t.Fatalf("child HOME = %q must be a fresh mktemp directory outside the inherited TMPDIR", home)
+				}
+				for key, value := range call.env {
+					if !sandboxHookChildEnv[key] {
+						t.Errorf("child process inherited %s=%q", key, value)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxHookPayloadCapWithoutPython checks that the head(1) tier the
+// sandbox hooks use in place of python3 still refuses an oversized payload,
+// and that an inherited cap is ignored in both directions.
+func TestSandboxHookPayloadCapWithoutPython(t *testing.T) {
+	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
+	markers := t.TempDir()
+	writeMarkerTool(t, h.stubDir, "python3", markers)
+	hook := SandboxHookDir + "/claude-code-hook.sh"
+	oversized := `{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("a", 1<<20) + `"}}`
+	run := h.run(t, hook, nil, oversized, map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "99999999"}, []string{allowResponse})
+	if run.exitCode != 2 || len(run.calls) != 0 {
+		t.Fatalf("oversized payload: exit %d calls %d, want 2 and no request; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+	}
+	run = h.run(t, hook, nil, claudePreToolUse, map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "4"}, []string{allowResponse})
+	if run.exitCode != 0 || len(run.calls) != 1 || run.calls[0].body != claudePreToolUse {
+		t.Fatalf("normal payload: exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+	}
+	if ran, _ := os.ReadDir(markers); len(ran) != 0 {
+		t.Fatal("a sandbox hook started python3")
 	}
 }
 

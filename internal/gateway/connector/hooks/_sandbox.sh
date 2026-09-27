@@ -4,8 +4,8 @@
 #
 # Rendered only into DefenseClaw's OpenShell overlay images, where it is
 # root-owned and read-only to the workload, and sourced by the sandbox
-# variants of the hooks right after _hardening.sh. Host hook directories never
-# contain this file.
+# variants of the hooks right after _hardening.sh and before
+# defenseclaw_harden_env. Host hook directories never contain this file.
 #
 # Everything a hook needs to reach DefenseClaw is baked here at image build:
 # the ingress address (host.openshell.internal, relayed by the OpenShell
@@ -14,14 +14,58 @@
 # delivers as a provider placeholder in DEFENSECLAW_SANDBOX_TOKEN and swaps
 # for the real credential only on the ingress endpoint.
 
-# The workload can shape the environment every hook inherits (project
-# settings env blocks, exported variables). Remove the loader, shell-startup,
-# curl-configuration and proxy inputs before any child process starts; the
-# ingress requests below also pass -q and --noproxy '*'. The payload cap is
-# reset to the helper default for the same reason.
-unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CURL_HOME \
-      http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy \
-      NO_PROXY no_proxy DEFENSECLAW_HOOK_MAX_BODY
+# The workload shapes the environment every hook inherits: Claude Code
+# applies the env block of user and project settings to hook processes, and
+# whatever the agent exports reaches them as well. bash -p has already
+# ignored BASH_ENV, ENV, SHELLOPTS, BASHOPTS, CDPATH, GLOBIGNORE and exported
+# functions at startup, and _hardening.sh, sourced just before this file,
+# only defines helpers. So before the first child process or helper call:
+#
+#   - every inherited variable the sandbox hooks do not read is dropped:
+#     search paths (PATH, PYTHONPATH, PERL5LIB, ...), interpreter, loader,
+#     curl, mktemp and locale inputs, bash knobs such as FUNCNEST, TMOUT,
+#     POSIXLY_CORRECT or EXECIGNORE, and every DEFENSECLAW_* host override
+#     (fail mode, token, payload cap, hook HOME). Values the hook assigned
+#     before this point (HOOK_DIR, the baked PATH) only lose the export bit
+#     an inherited variable of the same name gave them;
+#   - PATH is pinned to the value baked into the sandbox _hardening.sh.
+#
+# Environment entries whose names are not shell identifiers cannot be named
+# here, and none of the tools the hooks run read such names. The ingress
+# requests below still pass -q and --noproxy '*'.
+unset -v _dc_sandbox_var _dc_sandbox_vars
+case "${DEFENSECLAW_BAKED_HOOK_PATH:-}" in
+  /*) ;;
+  *)
+    echo "defenseclaw: sandbox hook helpers carry no baked PATH, blocking (sandbox hooks fail closed)" >&2
+    exit 2
+    ;;
+esac
+if ! _dc_sandbox_vars="$(compgen -e)"; then
+  echo "defenseclaw: cannot enumerate the hook environment, blocking (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+for _dc_sandbox_var in $_dc_sandbox_vars; do
+  case "$_dc_sandbox_var" in
+    DEFENSECLAW_SANDBOX_TOKEN|CLAUDE_TOOL_NAME|TOOL_NAME) ;;
+    DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
+    HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
+    HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    *) unset -v "$_dc_sandbox_var" 2>/dev/null || export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
+  esac
+done
+unset -v _dc_sandbox_var _dc_sandbox_vars
+set +o posix
+PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
+export PATH
+
+# The python3 tiers of defenseclaw_read_stdin_capped and _dc_jq exist for
+# hosts without a byte-exact head(1) or without jq. The overlay image ships
+# both, so sandbox hooks never start an interpreter whose startup reads
+# workload-controlled files (site-packages .pth files, sitecustomize).
+_dc_python3_usable() {
+  return 1
+}
 
 readonly DC_SANDBOX_INGRESS="{{.APIAddr}}"
 readonly DC_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}

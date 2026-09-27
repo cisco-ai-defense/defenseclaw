@@ -48,7 +48,11 @@ fi
 # touching any agent-supplied data so resource caps + env sanitization
 # apply to every subprocess this hook spawns.
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
@@ -56,7 +60,6 @@ DEFENSECLAW_HOOK_NAME="inspect-tool"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if .Sandbox}}# OpenShell sandbox images run exactly one harness: the connector identity
 # and fail mode are baked at image build, never read from the environment.
-. "${HOOK_DIR}/_sandbox.sh"
 RUNTIME_CONNECTOR="{{.ConnectorName}}"
 FAIL_MODE="{{.FailMode}}"
 readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
