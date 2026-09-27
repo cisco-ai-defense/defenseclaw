@@ -19,6 +19,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -103,10 +104,13 @@ func withholdHistory(ctx context.Context, sg gitCmd, stage, stageRoot string, wi
 	if err != nil {
 		return 0, err
 	}
+	// Lines are "<oid>[ <path>]"; the path only guides delta search. A
+	// path with a line break splits its line, and the fragment, which does
+	// not start with an object name, is skipped.
 	var keep bytes.Buffer
 	for _, line := range strings.Split(string(objects), "\n") {
 		oid, _, _ := strings.Cut(line, " ")
-		if oid == "" {
+		if !isOID(oid) {
 			continue
 		}
 		if _, dropped := drop[oid]; !dropped {
@@ -184,7 +188,9 @@ func restoreWithheldObjects(ctx context.Context, stageRoot, base string) error {
 	}
 	g := gitCmd{dir: filepath.Dir(base), gitDir: base}
 	for _, key := range []string{"extensions.partialClone", "pack.window"} {
-		if err := g.run(ctx, "config", "--unset", key); err != nil {
+		// Exit status 5: the key was not set.
+		var ge *GitError
+		if err := g.run(ctx, "config", "--unset", key); err != nil && !(errors.As(err, &ge) && ge.ExitCode == 5) {
 			return err
 		}
 	}
