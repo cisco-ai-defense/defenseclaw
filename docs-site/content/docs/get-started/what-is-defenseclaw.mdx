@@ -51,14 +51,16 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 ## Sandboxed agents
 
-DefenseClaw judges what an agent does; it does not isolate the agent. On the
-host, the agent keeps your user's access to files and the network. Support
-for running Claude Code and Codex inside an NVIDIA OpenShell sandbox is in
-development. In that design, OpenShell supplies the isolation boundary, and
-DefenseClaw keeps checking every tool call through its hook ingress and
-filters web traffic through its egress proxy. No command launches a sandbox
-yet. The [sandbox guide](/docs/setup/sandbox) will cover the sandbox commands
-once they ship; today it covers legacy cleanup.
+DefenseClaw judges what an agent does; on its own it does not isolate the
+agent. On the host, the agent keeps your user's access to files and the
+network. To isolate it, run it in an NVIDIA OpenShell 0.1 sandbox with
+`defenseclaw sandbox run <command>`, for example `defenseclaw sandbox run
+claude`: OpenShell supplies the isolation boundary, and DefenseClaw keeps
+checking every tool call through its hook ingress and filters web traffic
+through its egress proxy. Claude Code, Codex, GitHub Copilot CLI, OpenCode
+and Kiro CLI run today on Linux, and as a preview on macOS; Cursor Agent, Amp
+and Devin CLI are unverified and cannot run yet. The
+[sandbox guide](/docs/setup/sandbox) covers setup, runs, undo and review.
 
 ## What DefenseClaw is not
 
