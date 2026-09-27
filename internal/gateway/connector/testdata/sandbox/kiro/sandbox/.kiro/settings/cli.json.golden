@@ -1,5 +1,7 @@
 {
   "app.disableAutoupdates": true,
   "chat.defaultAgent": "defenseclaw",
+  "chat.disableTrustAllConfirmation": true,
+  "chat.greeting.enabled": false,
   "telemetry.enabled": false
 }

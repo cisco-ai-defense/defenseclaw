@@ -82,7 +82,7 @@
     "/sandbox/.kiro/settings/cli.json": {
       "mode": "-rw-r--r--",
       "owner": "user",
-      "sha256": "409b8ea41bcd3a9386491637a2ca165b507d8c1ca34da730e4fbf100b67c1ccb"
+      "sha256": "c3b40824bb81339647a06c49846b18a5c52c6dc5a9f0315087a96bfdb3a2d296"
     },
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",

@@ -119,14 +119,17 @@ func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArt
 	})
 }
 
-// kiroSandboxSettings select the DefenseClaw agent by default and switch
-// Kiro's telemetry and auto-update off (both keys measured valid on 2.24.1;
-// the hooks fire with them set).
+// kiroSandboxSettings select the DefenseClaw agent by default, switch Kiro's
+// telemetry and auto-update off, and skip the first-run greeting and the
+// startup confirmation of --trust-all-tools (every key measured valid on
+// 2.24.1; the hooks fire with them set).
 func kiroSandboxSettings() map[string]interface{} {
 	return map[string]interface{}{
-		kiroDefaultAgentSettingKey: kiroManagedAgentName,
-		"telemetry.enabled":        false,
-		"app.disableAutoupdates":   true,
+		kiroDefaultAgentSettingKey:         kiroManagedAgentName,
+		"telemetry.enabled":                false,
+		"app.disableAutoupdates":           true,
+		"chat.disableTrustAllConfirmation": true,
+		"chat.greeting.enabled":            false,
 	}
 }
 

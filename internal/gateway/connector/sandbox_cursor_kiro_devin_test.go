@@ -105,7 +105,8 @@ func TestKiroSandboxArtifactsShape(t *testing.T) {
 	if err := json.Unmarshal(sandboxFile(t, a, KiroSandboxSettingsPath).Data, &settings); err != nil {
 		t.Fatal(err)
 	}
-	if settings["chat.defaultAgent"] != KiroSandboxAgentName || settings["telemetry.enabled"] != false || settings["app.disableAutoupdates"] != true {
+	if settings["chat.defaultAgent"] != KiroSandboxAgentName || settings["telemetry.enabled"] != false || settings["app.disableAutoupdates"] != true ||
+		settings["chat.disableTrustAllConfirmation"] != true || settings["chat.greeting.enabled"] != false {
 		t.Fatalf("settings = %v", settings)
 	}
 }
