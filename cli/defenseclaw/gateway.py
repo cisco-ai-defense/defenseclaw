@@ -29,11 +29,12 @@ This module hosts two cohesive but independent responsibilities:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
@@ -116,6 +117,164 @@ def _refuse_gateway_redirect(response: requests.Response, **_kwargs: Any) -> req
             response=response,
         )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Sandbox API (/api/v1/sandbox/...)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the typed Go client in internal/openshell/sandboxapi. Every non-2xx
+# answer carries {"code", "error", "detail", "violation"}; the codes are stable
+# machine tokens and "error" is the sentence to show a person.
+
+SANDBOX_API_PREFIX = "/api/v1/sandbox"
+SANDBOX_ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# Lifecycle calls can wait for OpenShell (start, stop, undo, review, delete).
+SANDBOX_LIFECYCLE_TIMEOUT = 180
+# Activity streams carry a keepalive every 15 seconds.
+SANDBOX_STREAM_READ_TIMEOUT = 45
+
+_SANDBOX_STATUS_CODES = {
+    400: "invalid_request",
+    401: "policy_violation",
+    403: "policy_violation",
+    404: "not_found",
+    409: "conflict",
+    502: "upstream_error",
+    503: "unavailable",
+}
+
+
+class SandboxAPIError(Exception):
+    """A refused or failed sandbox API call, with a message fit for people."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        detail: str = "",
+        status: int = 0,
+        violation: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message if not detail else f"{message}: {detail}")
+        self.code = code
+        self.message = message
+        self.detail = detail
+        self.status = status
+        self.violation = dict(violation) if isinstance(violation, Mapping) else None
+
+    @property
+    def admin(self) -> bool:
+        """Whether an openshell.admin constraint refused the request."""
+        return self.code == "admin_violation" or bool(self.violation and self.violation.get("admin"))
+
+    @property
+    def unavailable(self) -> bool:
+        return self.code in {"unavailable", "disabled"}
+
+    def plain(self) -> str:
+        """One line for a status bar or toast; never a stack trace."""
+        if self.admin and SANDBOX_ADMIN_MESSAGE not in self.message:
+            return f"{SANDBOX_ADMIN_MESSAGE}: {self.message}"
+        return self.message
+
+
+def _sandbox_error(resp: requests.Response) -> SandboxAPIError:
+    body: Any = None
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    code = ""
+    message = ""
+    detail = ""
+    violation = None
+    if isinstance(body, Mapping):
+        code = str(body.get("code") or "")
+        message = str(body.get("error") or "")
+        detail = str(body.get("detail") or "")
+        raw_violation = body.get("violation")
+        violation = raw_violation if isinstance(raw_violation, Mapping) else None
+    if not message:
+        text = (resp.text or "").strip()
+        message = text[:300] if text and not text.startswith("{") else (resp.reason or f"HTTP {resp.status_code}")
+    if not code:
+        code = _SANDBOX_STATUS_CODES.get(resp.status_code, "internal")
+    return SandboxAPIError(code, message, detail=detail, status=resp.status_code, violation=violation)
+
+
+def parse_sse_events(lines: Iterable[str | bytes]) -> Iterator[dict[str, Any]]:
+    """Decode a text/event-stream of sandbox activity events.
+
+    Mirrors ``sandboxapi.ReadEvents``: ``data:`` lines accumulate until a blank
+    line dispatches them and comment lines (the keepalive) are skipped. A
+    malformed event is skipped rather than ending the stream.
+    """
+    data: list[str] = []
+
+    def dispatch() -> dict[str, Any] | None:
+        if not data:
+            return None
+        raw = "\n".join(data)
+        data.clear()
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            return None
+        return event if isinstance(event, dict) else None
+
+    for line in lines:
+        if isinstance(line, bytes):
+            line = line.decode("utf-8", errors="replace")
+        line = line.rstrip("\r\n")
+        if line == "":
+            event = dispatch()
+            if event is not None:
+                yield event
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            value = line[len("data:") :]
+            data.append(value[1:] if value.startswith(" ") else value)
+    event = dispatch()
+    if event is not None:
+        yield event
+
+
+class SandboxActivityStream:
+    """An open ``GET /api/v1/sandbox/activity?follow=true`` stream.
+
+    Iterate for events; :meth:`close` (from any thread) ends the iteration.
+    """
+
+    def __init__(self, response: requests.Response) -> None:
+        self._response = response
+        self._closed = False
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        try:
+            yield from parse_sse_events(self._response.iter_lines(decode_unicode=False))
+        except (requests.RequestException, AttributeError, ValueError, OSError) as exc:
+            if self._closed:
+                return
+            raise SandboxAPIError(
+                "unavailable", "the activity stream from the DefenseClaw daemon broke off", detail=str(exc)
+            ) from exc
+        finally:
+            self.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            self._response.close()
+        except Exception:  # noqa: BLE001 - closing a dead socket is best effort
+            pass
 
 
 class OrchestratorClient:
@@ -503,6 +662,224 @@ class OrchestratorClient:
             return {"valid": False, "error": "policy file exceeds size limit"}
         resp.raise_for_status()
         return resp.json()
+
+    # ------------------------------------------------------------------
+    # Sandbox API
+    # ------------------------------------------------------------------
+
+    def _sandbox_call(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | Sequence[tuple[str, str]] | None = None,
+        body: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{SANDBOX_API_PREFIX}{path}"
+        payload: Any = None
+        if method != "GET":
+            payload = dict(body or {})
+        try:
+            resp = self._session.request(
+                method,
+                url,
+                params=params,
+                json=payload,
+                timeout=timeout or self.timeout,
+                allow_redirects=False,
+            )
+        except requests.HTTPError as exc:
+            # The session hook refuses redirects before a body is parsed.
+            raise SandboxAPIError(
+                "internal", "the DefenseClaw daemon answered with a redirect", detail=str(exc)
+            ) from exc
+        except requests.Timeout as exc:
+            raise SandboxAPIError(
+                "unavailable", "the DefenseClaw daemon did not answer in time", detail=str(exc)
+            ) from exc
+        except requests.RequestException as exc:
+            raise SandboxAPIError("unavailable", "the DefenseClaw daemon is not reachable", detail=str(exc)) from exc
+        if not 200 <= resp.status_code < 300:
+            raise _sandbox_error(resp)
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise SandboxAPIError("internal", "the DefenseClaw daemon returned a malformed response") from exc
+
+    @staticmethod
+    def _sandbox_path(name: str, verb: str = "") -> str:
+        path = "/sandboxes/" + quote(name, safe="")
+        return f"{path}/{verb}" if verb else path
+
+    @staticmethod
+    def _sandbox_object(value: Any, what: str) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise SandboxAPIError("internal", f"the DefenseClaw daemon returned a malformed {what}")
+        return value
+
+    def _sandbox_list(self, value: Any, key: str, what: str) -> list[dict[str, Any]]:
+        rows = self._sandbox_object(value, what).get(key)
+        if not isinstance(rows, list):
+            raise SandboxAPIError("internal", f"the DefenseClaw daemon returned a malformed {what}")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def sandbox_status(self) -> dict[str, Any]:
+        """``GET /api/v1/sandbox/status``: the sandbox subsystem as a whole."""
+        return self._sandbox_object(self._sandbox_call("GET", "/status"), "sandbox status")
+
+    def list_sandboxes(self) -> list[dict[str, Any]]:
+        """``GET /api/v1/sandbox/sandboxes``: every DefenseClaw sandbox."""
+        return self._sandbox_list(self._sandbox_call("GET", "/sandboxes"), "sandboxes", "sandbox list")
+
+    def get_sandbox(self, name: str) -> dict[str, Any]:
+        return self._sandbox_object(self._sandbox_call("GET", self._sandbox_path(name)), "sandbox")
+
+    def stop_sandbox(self, name: str) -> dict[str, Any]:
+        """Stop a sandbox; it is kept for a later start or connect."""
+        result = self._sandbox_call("POST", self._sandbox_path(name, "stop"), timeout=SANDBOX_LIFECYCLE_TIMEOUT)
+        return self._sandbox_object(result, "sandbox")
+
+    def start_sandbox(self, name: str, *, no_snapshot: bool = False) -> dict[str, Any]:
+        """Start a stopped sandbox (a new session, with a fresh snapshot unless ``no_snapshot``)."""
+        body = {"no_snapshot": True} if no_snapshot else {}
+        result = self._sandbox_call(
+            "POST", self._sandbox_path(name, "start"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
+        )
+        return self._sandbox_object(result, "sandbox")
+
+    def delete_sandbox(self, name: str, *, keep_snapshot: bool = False) -> dict[str, Any]:
+        """Delete a sandbox with its providers, binding and (unless kept) snapshot."""
+        body = {"keep_snapshot": True} if keep_snapshot else {}
+        result = self._sandbox_call("DELETE", self._sandbox_path(name), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT)
+        return self._sandbox_object(result, "delete result")
+
+    def undo_sandbox(
+        self,
+        name: str,
+        *,
+        preview: bool = False,
+        keep_refs: bool = False,
+        stop: bool = False,
+        restart: bool = False,
+    ) -> dict[str, Any]:
+        """Restore the project to its pre-session snapshot.
+
+        Undo needs the sandbox stopped: ``stop`` stops a running one first and
+        ``restart`` starts it again afterwards. ``preview`` changes nothing.
+        """
+        flags = (("preview", preview), ("keep_refs", keep_refs), ("stop", stop), ("restart", restart))
+        body = {key: True for key, value in flags if value}
+        result = self._sandbox_call(
+            "POST", self._sandbox_path(name, "undo"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
+        )
+        return self._sandbox_object(result, "undo result")
+
+    def review_sandbox(self, name: str, *, diff: bool = False) -> dict[str, Any]:
+        """The end-of-session review of a mounted project."""
+        body = {"diff": True} if diff else {}
+        result = self._sandbox_call(
+            "POST", self._sandbox_path(name, "review"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
+        )
+        return self._sandbox_object(result, "review")
+
+    def sandbox_approvals(self, sandbox: str = "") -> list[dict[str, Any]]:
+        """Pending asks, optionally for one sandbox."""
+        params = {"sandbox": sandbox} if sandbox else None
+        return self._sandbox_list(self._sandbox_call("GET", "/approvals", params=params), "approvals", "approval list")
+
+    def decide_sandbox_approval(
+        self,
+        approval_id: str,
+        *,
+        approve: bool,
+        always: bool = False,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Approve or reject one ask; ``always`` keeps the decision for future sandboxes."""
+        body: dict[str, Any] = {"decision": "approve" if approve else "reject"}
+        if always:
+            body["always"] = True
+        if reason:
+            body["reason"] = reason
+        result = self._sandbox_call("POST", "/approvals/" + quote(approval_id, safe=""), body=body, timeout=30)
+        return self._sandbox_object(result, "approval result")
+
+    def unblock_sandbox_egress(self, host: str, *, sandbox: str = "", always: bool = False) -> dict[str, Any]:
+        """Lift an egress block for one sandbox, or with ``always`` for every sandbox."""
+        body: dict[str, Any] = {"host": host}
+        if sandbox:
+            body["sandbox"] = sandbox
+        if always:
+            body["always"] = True
+        result = self._sandbox_call("POST", "/egress/unblock", body=body, timeout=30)
+        return self._sandbox_object(result, "unblock result")
+
+    def sandbox_policy_explain(
+        self,
+        *,
+        sandbox: str = "",
+        harness: str = "",
+        pack: str = "",
+        profile: str = "",
+        project: str = "",
+        copy: bool = False,
+        safe: bool = False,
+        yolo: bool = False,
+        unmask: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """The resolved sandbox posture with provenance (``sandbox policy explain``)."""
+        texts = (("sandbox", sandbox), ("harness", harness), ("pack", pack), ("profile", profile), ("project", project))
+        params: list[tuple[str, str]] = [(key, value) for key, value in texts if value]
+        params += [(key, "true") for key, value in (("copy", copy), ("safe", safe), ("yolo", yolo)) if value]
+        params += [("unmask", glob) for glob in unmask]
+        result = self._sandbox_call("GET", "/policy/explain", params=params or None)
+        return self._sandbox_object(result, "policy explanation")
+
+    def sandbox_activity(self, *, since: int = 0, sandbox: str = "") -> list[dict[str, Any]]:
+        """Buffered activity events after sequence number ``since``."""
+        params: dict[str, str] = {}
+        if since > 0:
+            params["since"] = str(since)
+        if sandbox:
+            params["sandbox"] = sandbox
+        result = self._sandbox_call("GET", "/activity", params=params or None)
+        return self._sandbox_list(result, "events", "activity feed")
+
+    def open_sandbox_activity_stream(
+        self,
+        *,
+        since: int = 0,
+        sandbox: str = "",
+        read_timeout: float = SANDBOX_STREAM_READ_TIMEOUT,
+    ) -> SandboxActivityStream:
+        """Open the live activity feed (server-sent events), replaying after ``since``."""
+        params: dict[str, str] = {"follow": "true"}
+        if since > 0:
+            params["since"] = str(since)
+        if sandbox:
+            params["sandbox"] = sandbox
+        try:
+            resp = self._session.get(
+                f"{self.base_url}{SANDBOX_API_PREFIX}/activity",
+                params=params,
+                headers={"Accept": "text/event-stream"},
+                stream=True,
+                timeout=(self.timeout, read_timeout),
+                allow_redirects=False,
+            )
+        except requests.HTTPError as exc:
+            raise SandboxAPIError(
+                "internal", "the DefenseClaw daemon answered with a redirect", detail=str(exc)
+            ) from exc
+        except requests.RequestException as exc:
+            raise SandboxAPIError("unavailable", "the DefenseClaw daemon is not reachable", detail=str(exc)) from exc
+        if resp.status_code != 200:
+            try:
+                raise _sandbox_error(resp)
+            finally:
+                resp.close()
+        return SandboxActivityStream(resp)
 
     def is_running(self) -> bool:
         try:
