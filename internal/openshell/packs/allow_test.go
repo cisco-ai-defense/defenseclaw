@@ -130,6 +130,19 @@ func TestAllowActions(t *testing.T) {
 			Action{Kind: ActionApprove, Host: "10.0.0.5", Port: 5432, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
 		{"approve a CGNAT address when unblock is off", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
 			Action{Kind: ActionApprove, Host: "100.64.1.2", Port: 443, Feed: testFeed}, outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve public allowed_ips", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"93.184.216.0/24"}}, allowed},
+		{"approve private allowed_ips", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"10.0.0.0/8"}}, allowed},
+		{"approve private allowed_ips without unblock", func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, Feed: testFeed, AllowedIPs: []string{"8.0.0.0/5"}},
+			outcome{constraint: "openshell.admin.allow_unblock"}},
+		{"approve metadata allowed_ips", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"169.254.0.0/16"}}, outcome{constraint: "defenseclaw"}},
+		{"approve loopback-holding allowed_ips", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"64.0.0.0/2"}}, outcome{constraint: "defenseclaw"}},
+		{"approve malformed allowed_ips", nil, Flags{},
+			Action{Kind: ActionApprove, Host: "cdn.example.com", Port: 443, AllowedIPs: []string{"10.0.0.0/33"}}, invalid},
 		{"approve the metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "169.254.169.254", Port: 80}, outcome{constraint: "defenseclaw"}},
 		{"approve a mapped metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "[::ffff:169.254.169.254]", Port: 80}, outcome{constraint: "defenseclaw"}},
 		{"approve the IPv6 metadata address", nil, Flags{}, Action{Kind: ActionApprove, Host: "fd00:ec2::254", Port: 80}, outcome{constraint: "defenseclaw"}},
@@ -504,5 +517,41 @@ func TestBlockListIsNotUnblockable(t *testing.T) {
 	}
 	if err := eff.Allow(Action{Kind: ActionUnblock, Host: "webhook.site"}); err != nil {
 		t.Fatalf("unblocking a feed entry: %v", err)
+	}
+}
+
+func TestClassifyAllowedIP(t *testing.T) {
+	for entry, want := range map[string]AllowedIPClass{
+		"93.184.216.34":          AllowedIPPublic,
+		"93.184.216.0/24":        AllowedIPPublic,
+		"2606:2800:220:1::/64":   AllowedIPPublic,
+		"10.0.5.20":              AllowedIPPrivate,
+		"172.20.0.0/16":          AllowedIPPrivate,
+		"8.0.0.0/5":              AllowedIPPrivate,
+		"100.64.0.0/12":          AllowedIPPrivate,
+		"fd12:3456::/32":         AllowedIPPrivate,
+		"::ffff:10.1.0.0/112":    AllowedIPPrivate,
+		"127.0.0.1":              AllowedIPNever,
+		"169.254.169.254/32":     AllowedIPNever,
+		"100.64.0.0/10":          AllowedIPNever,
+		"0.0.0.0/0":              AllowedIPNever,
+		"128.0.0.0/1":            AllowedIPNever,
+		"::/0":                   AllowedIPNever,
+		"::1":                    AllowedIPNever,
+		"fe80::/10":              AllowedIPNever,
+		"64:ff9b::a00:1":         AllowedIPNever,
+		"2002::/16":              AllowedIPNever,
+		"::ffff:0:0/95":          AllowedIPNever,
+		"::ffff:169.254.0.0/112": AllowedIPNever,
+	} {
+		_, got, err := ClassifyAllowedIP(entry)
+		if err != nil || got != want {
+			t.Errorf("ClassifyAllowedIP(%q) = %v, %v; want %v", entry, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "example.com", "10.0.0.0/33", "fe80::1%eth0"} {
+		if _, _, err := ClassifyAllowedIP(bad); err == nil {
+			t.Errorf("ClassifyAllowedIP(%q) accepted", bad)
+		}
 	}
 }

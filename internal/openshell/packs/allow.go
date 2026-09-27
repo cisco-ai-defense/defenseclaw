@@ -76,6 +76,11 @@ type Action struct {
 	// Feed is the egress proxy's blocklist feed matcher, read by approvals
 	// (see ActionApprove).
 	Feed FeedMatcher
+	// AllowedIPs are an approval's allowed_ips entries: the addresses the
+	// destination may resolve to. Set, they replace OpenShell's own
+	// private-address check, so ranges DefenseClaw never opens are refused
+	// and private ranges need openshell.admin.allow_unblock.
+	AllowedIPs []string
 }
 
 // Allow checks a runtime action against the effective policy. It returns nil
@@ -216,6 +221,25 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 	if v := e.Egress.adminVerdict(key, host); v != nil {
 		return v
 	}
+	privateIPs := ""
+	for _, entry := range action.AllowedIPs {
+		_, class, err := ClassifyAllowedIP(entry)
+		if err != nil {
+			return err
+		}
+		switch class {
+		case AllowedIPNever:
+			return &Violation{
+				Key: key, Source: SourceUser, Attempted: entry, Constraint: "defenseclaw",
+				Message: "DefenseClaw never opens loopback, link-local, cloud metadata, multicast or reserved addresses to a sandbox",
+				Detail:  "allowed_ips entry " + entry + " includes some",
+			}
+		case AllowedIPPrivate:
+			if privateIPs == "" {
+				privateIPs = entry
+			}
+		}
+	}
 	if e.isHostLocal(host) {
 		if port == 0 {
 			return fmt.Errorf("sandbox policy: approving %s needs a port", host)
@@ -248,8 +272,103 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
 			host+" is a private network address, which the egress proxy refuses")
 	}
+	if privateIPs != "" {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			"allowed_ips entry "+privateIPs+" includes private network addresses, which the egress proxy refuses")
+	}
 	return nil
 }
+
+// AllowedIPClass is how an allowed_ips range relates to the networks
+// DefenseClaw guards.
+type AllowedIPClass int
+
+const (
+	// AllowedIPPublic ranges hold only public addresses.
+	AllowedIPPublic AllowedIPClass = iota
+	// AllowedIPPrivate ranges overlap RFC 1918, CGNAT or IPv6 ULA space:
+	// the user's own network.
+	AllowedIPPrivate
+	// AllowedIPNever ranges overlap addresses no sandbox may reach
+	// directly: loopback, link-local, cloud metadata, multicast, reserved
+	// and IPv4-translation ranges.
+	AllowedIPNever
+)
+
+// ClassifyAllowedIP parses an allowed_ips entry (an address or a CIDR
+// range) and classifies it by the widest reach it grants: a range that
+// only partly overlaps a guarded network (8.0.0.0/5 holds 10.0.0.0/8)
+// counts as that network.
+func ClassifyAllowedIP(entry string) (netip.Prefix, AllowedIPClass, error) {
+	entry = strings.TrimSpace(entry)
+	prefix, err := netip.ParsePrefix(entry)
+	if err != nil {
+		addr, aerr := netip.ParseAddr(entry)
+		if aerr != nil || addr.Zone() != "" {
+			return netip.Prefix{}, AllowedIPNever, fmt.Errorf("sandbox policy: allowed_ips entry %q is not an address or CIDR range", entry)
+		}
+		prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	prefix = prefix.Masked()
+	if prefix.Addr().Is6() && mappedPrefix.Overlaps(prefix) {
+		if prefix.Bits() < mappedPrefix.Bits() {
+			// Wider than the IPv4-mapped block: it holds every IPv4 address.
+			return prefix, AllowedIPNever, nil
+		}
+		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-mappedPrefix.Bits())
+	}
+	for _, never := range neverOpenPrefixes {
+		if never.Overlaps(prefix) {
+			return prefix, AllowedIPNever, nil
+		}
+	}
+	for _, private := range privatePrefixes {
+		if private.Overlaps(prefix) {
+			return prefix, AllowedIPPrivate, nil
+		}
+	}
+	return prefix, AllowedIPPublic, nil
+}
+
+var (
+	mappedPrefix = netip.MustParsePrefix("::ffff:0:0/96")
+	// neverOpenPrefixes mirror netguard's v8 address policy with private
+	// networks allowed: what stays prohibited is never approved.
+	neverOpenPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("100.100.100.200/32"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("192.88.99.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("::/96"),
+		netip.MustParsePrefix("64:ff9b::/96"),
+		netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("100::/64"),
+		netip.MustParsePrefix("2001::/23"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("2002::/16"),
+		netip.MustParsePrefix("3fff::/20"),
+		netip.MustParsePrefix("5f00::/16"),
+		netip.MustParsePrefix("fd00:ec2::254/128"),
+		netip.MustParsePrefix("fe80::/10"),
+		netip.MustParsePrefix("fec0::/10"),
+		netip.MustParsePrefix("ff00::/8"),
+	}
+	privatePrefixes = []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		cgnatPrefix,
+		netip.MustParsePrefix("fc00::/7"),
+	}
+)
 
 func (e *Effective) profileViolation(key, attempted, detail string) *Violation {
 	constraint := "profile " + e.Profile
