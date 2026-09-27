@@ -3536,7 +3536,7 @@
     {
       "name": "DEFENSECLAW_SANDBOX_ID",
       "category": "hook_internal",
-      "purpose": "OpenShell sandbox id that the planned sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It is meant to tell a nested DefenseClaw launch that it already runs sandboxed; the planned sandbox command and shell wrapper do not exist yet. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",
+      "purpose": "OpenShell sandbox id that the sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It tells a nested DefenseClaw launch that it already runs sandboxed: a nested `sandbox run` runs the harness natively and needs no configuration, and the shell wrapper steps aside. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "opaque OpenShell sandbox id",
@@ -3552,6 +3552,10 @@
         {
           "location": "internal/openshell/harness/harness.go",
           "description": "Spec.Env passes it to the sandbox so nested DefenseClaw invocations can detect the sandbox"
+        },
+        {
+          "location": "cli/defenseclaw/main.py",
+          "description": "Lets a nested `defenseclaw sandbox run` reach the gateway stub without a config, as in Go"
         }
       ],
       "since": "0.9.0"

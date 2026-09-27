@@ -333,12 +333,19 @@ hard-cut version or rerun a fresh installer over an old installation.
 
 | Command | Use it for |
 | --- | --- |
+| `defenseclaw sandbox setup [--install-openshell] [--no-mounts] [--wrappers] [--non-interactive] [--yes]` | Linux and macOS. One-time setup for NVIDIA OpenShell 0.1 sandboxes: checks the machine, installs OpenShell when you agree, enables project-folder mounts, records the harnesses and builds their images. |
+| `defenseclaw sandbox run <harness> [--copy] [--safe] [--profile open\|balanced\|strict] [-- args]` | Run Claude Code (`claude`) or Codex (`codex`) in a sandbox on the current folder. |
+| `defenseclaw sandbox doctor [--json] [--fix]` | Check that this machine can run sandboxes. `defenseclaw doctor` shows the same checks in its Sandbox section. |
 | `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. It prints every step with its exact commands and asks once unless you pass `--yes`. |
 
-`legacy-cleanup` is the only `sandbox` command today. Running agents in an
-NVIDIA OpenShell 0.1 sandbox is in development. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once they
-ship; today it covers legacy cleanup.
+The `sandbox` commands are implemented by `defenseclaw-gateway sandbox`;
+`defenseclaw sandbox` accepts the same commands and flags and hands them
+over unchanged (`legacy-cleanup` is the one Python-only command). Run
+`defenseclaw sandbox --help` for the full list: lifecycle (`list`, `status`,
+`connect`, `stop`, `start`, `delete`, `logs`), the activity feed and asks
+(`activity`, `approvals`, `approve`, `reject`, `unblock`), the workspace
+(`undo`, `review`, `pull`), `policy`, `pack`, `image`, the shell wrappers
+(`enable`, `disable`) and `teardown`.
 
 ## Discoverability
 

@@ -16,17 +16,20 @@ namespace joined to the host by a veth pair (`10.200.0.1` host,
 and launcher scripts, and changed ownership and ACLs on the OpenClaw home. The
 per-connector sandbox policy it generated was never enforced.
 
-The old `sandbox init` and `sandbox setup` commands and the gateway's
-`sandbox` subcommands were removed. `defenseclaw sandbox legacy-cleanup` is
-now the only `sandbox` subcommand. OpenClaw and ZeptoClaw use the `shims`
-subprocess policy on every platform; see the
-[capability matrix](/docs/capability-matrix).
+The old `sandbox init` command and the legacy options of `sandbox setup`
+(sandbox and host IPs, auto-pairing, host networking) were removed with it.
+OpenClaw and ZeptoClaw use the `shims` subprocess policy on every platform;
+see the [capability matrix](/docs/capability-matrix).
 
 <Callout title="NVIDIA OpenShell 0.1">
-Support for NVIDIA OpenShell 0.1 is being rebuilt and is coming in a future
-release. `config.yaml` already accepts the `openshell` keys and the
-[sandbox policy packs and admin limits](/docs/setup/sandbox-policy), which
-take effect once that support ships.
+The `sandbox` commands now run Claude Code and Codex in NVIDIA OpenShell 0.1
+sandboxes on Linux and macOS: start with `defenseclaw sandbox setup`, then
+`defenseclaw sandbox run claude` in a project folder, and see
+`defenseclaw sandbox --help`. The TUI (Setup slot 13 and the Sandboxes panel,
+key 7) and the macOS app offer the same setup and a live activity feed. The
+`openshell` keys and the
+[sandbox policy packs and admin limits](/docs/setup/sandbox-policy) apply to
+these sandboxes.
 </Callout>
 
 ## Nested repositories in a mounted project

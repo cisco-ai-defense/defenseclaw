@@ -121,13 +121,15 @@ which ones are interactive and which ones are designed for scripts.
 
 ### OpenShell sandbox
 
-The `sandbox` group has one command today: `defenseclaw sandbox legacy-cleanup`
-removes the retired `openshell-sandbox` 0.0.x install from Linux hosts.
-Running Claude Code and Codex inside an NVIDIA OpenShell 0.1 sandbox is in
-development. The `openshell:` config block is already validated, but no
-command launches a sandbox yet. The [sandbox guide](/docs/setup/sandbox)
-will cover the sandbox commands once they ship; today it covers legacy
-cleanup.
+`defenseclaw sandbox setup` prepares a Linux or macOS machine to run Claude
+Code and Codex inside NVIDIA OpenShell 0.1 sandboxes, and
+`defenseclaw sandbox run claude` starts one on the current project folder.
+The same setup is the Sandbox wizard in the TUI (Setup, slot 13) and the
+macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
+`defenseclaw sandbox --help` for every command.
+`defenseclaw sandbox legacy-cleanup` removes the retired `openshell-sandbox`
+0.0.x install from Linux hosts; the [sandbox guide](/docs/setup/sandbox)
+covers it.
 
 ## Deployment and policy references
 

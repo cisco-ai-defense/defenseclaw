@@ -20,12 +20,14 @@ The integration is being built in layers. The packages in the
 manager, hook ingress and egress proxy when `openshell.enabled` is on, and
 the `defenseclaw-gateway sandbox` command tree (setup, doctor, run and the
 lifecycle, approval, workspace, policy, pack, image, wrapper and teardown
-commands) drives it through the REST API under `/api/v1/sandbox/`. Still to
-come:
+commands) drives it through the REST API under `/api/v1/sandbox/`. The
+surfaces are in place: the Python `defenseclaw sandbox` Click stubs mirror
+the Go tree (pinned in `internal/cli/testdata/sandbox_commands.json`) and
+exec `defenseclaw-gateway sandbox`, `defenseclaw doctor` has a Sandbox
+section, the TUI has a Sandboxes panel (key 7) and the sandbox setup wizard
+in Setup slot 13, and the macOS app shows sandboxes in the menu bar,
+Overview and a Sandboxes panel. Still to come:
 
-- **Surfaces.** The Python `defenseclaw sandbox` stubs that hand off to the
-  Go commands (today the Python group has only `legacy-cleanup`), the TUI
-  Sandboxes panel and the macOS menu-bar item.
 - **MCP import and per-run configuration for the other harnesses.** Only
   Claude Code and Codex bring the user's MCP servers along and get per-run
   managed configuration (see
@@ -1745,7 +1747,10 @@ These were not measured, so the design does not rely on a result for them:
 | `sandbox` commands (setup, run, lifecycle, pull, policy, images, teardown) | [`../internal/openshell/sandboxcli/`](../internal/openshell/sandboxcli/), [`../internal/cli/sandbox.go`](../internal/cli/sandbox.go) |
 | Shell wrappers (`sandbox enable`/`disable`) | [`../internal/openshell/wrapper/`](../internal/openshell/wrapper/) |
 | Nested-repository guard | [`../internal/openshell/nestguard/`](../internal/openshell/nestguard/), [`../internal/openshell/manager/guard.go`](../internal/openshell/manager/guard.go) |
-| Python `sandbox` group and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Python `sandbox` stubs and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Python sandbox API client (REST and the activity stream) | [`../cli/defenseclaw/gateway.py`](../cli/defenseclaw/gateway.py) |
+| TUI Sandboxes panel, launch dialog and setup wizard | [`../cli/defenseclaw/tui/sandbox_panel.py`](../cli/defenseclaw/tui/sandbox_panel.py), [`../cli/defenseclaw/tui/services/sandbox_state.py`](../cli/defenseclaw/tui/services/sandbox_state.py), [`../cli/defenseclaw/tui/panels/setup.py`](../cli/defenseclaw/tui/panels/setup.py) |
+| macOS app sandboxes (menu bar, Overview, panel) | [`../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift`](../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift), [`../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift`](../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift) |
 | Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
 
 ## Testing
