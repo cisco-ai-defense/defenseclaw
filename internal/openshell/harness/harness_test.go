@@ -33,7 +33,7 @@ import (
 )
 
 func TestRegistry(t *testing.T) {
-	if got := Names(); !reflect.DeepEqual(got, []string{"amp", "claudecode", "codex", "copilot", "opencode"}) {
+	if got := Names(); !reflect.DeepEqual(got, []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"}) {
 		t.Fatalf("Names() = %v", got)
 	}
 	for _, name := range Names() {
@@ -77,12 +77,36 @@ func TestRegistry(t *testing.T) {
 		if strings.TrimSpace(spec.Verification.Reason) == "" {
 			t.Fatalf("%s verification carries no evidence or reason", name)
 		}
-		if len(spec.CredentialProfiles("")) == 0 {
-			t.Fatalf("%s has no credential profile", name)
+		login, hasLogin := spec.Login()
+		if len(spec.CredentialProfiles("")) == 0 && !hasLogin {
+			t.Fatalf("%s has neither a credential profile nor an in-sandbox login", name)
+		}
+		if hasLogin && (len(login.Argv) == 0 || !strings.HasPrefix(login.Argv[0], "/usr/local/bin/") || strings.TrimSpace(login.Note) == "") {
+			t.Fatalf("%s login %#v", name, login)
 		}
 	}
-	if _, ok := Get("cursor"); ok {
-		t.Fatal("cursor has no sandbox harness")
+	for _, name := range []string{"hermes", "openhands", "antigravity", "omnigent", "openclaw"} {
+		if _, ok := Get(name); ok {
+			t.Fatalf("%s has no sandbox harness", name)
+		}
+	}
+}
+
+// TestLoginReturnsACopy keeps a caller from editing a registered login.
+func TestLoginReturnsACopy(t *testing.T) {
+	login, ok := Kiro.Login()
+	if !ok || login.Unverified == "" {
+		t.Fatalf("kiro login = %#v, %t", login, ok)
+	}
+	login.Argv[0] = "/tmp/evil"
+	if again, _ := Kiro.Login(); again.Argv[0] != "/usr/local/bin/kiro-cli" {
+		t.Fatalf("Login aliases the registered argv: %v", again.Argv)
+	}
+	if _, ok := ClaudeCode.Login(); ok {
+		t.Fatal("Claude Code runs with provider profiles only")
+	}
+	if len(Devin.CredentialProfiles("")) != 0 {
+		t.Fatal("Devin authenticates only with an in-sandbox login")
 	}
 }
 
@@ -99,6 +123,11 @@ func TestTamperTiersAndVerification(t *testing.T) {
 		{OpenCode, connector.SandboxTamperTierUser, Verified},
 		{Copilot, connector.SandboxTamperTierManaged, Verified},
 		{Amp, connector.SandboxTamperTierUser, Unverified},
+		// Enterprise hooks.json: root-owned, and its deny wins over user
+		// and project hooks.
+		{Cursor, connector.SandboxTamperTierManaged, Unverified},
+		{Devin, connector.SandboxTamperTierUser, Unverified},
+		{Kiro, connector.SandboxTamperTierUser, Verified},
 	} {
 		if tc.spec.TamperTier != tc.tier || tc.spec.Verification.Status != tc.status {
 			t.Errorf("%s: tier %s status %s, want %s %s", tc.spec.Name, tc.spec.TamperTier, tc.spec.Verification.Status, tc.tier, tc.status)
@@ -106,6 +135,15 @@ func TestTamperTiersAndVerification(t *testing.T) {
 	}
 	if !strings.Contains(Amp.Verification.Reason, "AMP_API_KEY") {
 		t.Fatalf("Amp must say what is missing: %s", Amp.Verification.Reason)
+	}
+	if !strings.Contains(Cursor.Verification.Reason, "CURSOR_API_KEY") || !strings.Contains(Cursor.Verification.Reason, "agent-cli-local") {
+		t.Fatalf("Cursor must say what is missing and what was measured where: %s", Cursor.Verification.Reason)
+	}
+	if !strings.Contains(Devin.Verification.Reason, "devin auth login") {
+		t.Fatalf("Devin must say what is missing: %s", Devin.Verification.Reason)
+	}
+	if !strings.Contains(Kiro.Verification.Reason, "KIRO_MOCK_CHAT_RESPONSE") || !strings.Contains(Kiro.Verification.Reason, "unverified") {
+		t.Fatalf("Kiro must say what the probe used and what stays unverified: %s", Kiro.Verification.Reason)
 	}
 }
 
@@ -136,6 +174,14 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"amp-below-floor", Amp, "0.0.1785301270-g4f08a3", "", ErrUnknownContract},
 		{"amp-no-build-suffix", Amp, "0.0.1785334225", "", nil},
 		{"amp-latest", Amp, "latest", "", nil},
+		{"cursor-pin", Cursor, "", "'https://downloads.cursor.com/lab/2026.07.23-e383d2b/linux/arm64/agent-cli-package.tar.gz'", nil},
+		{"cursor-newer-build", Cursor, "2026.09.26-dd393fe", "", ErrUnknownContract},
+		{"cursor-desktop-version", Cursor, "3.13.0", "", nil},
+		{"kiro-pin", Kiro, "", "'https://prod.download.cli.kiro.dev/stable/2.24.1/kirocli-x86_64-linux.tar.gz'", nil},
+		{"kiro-older", Kiro, "2.22.0", "", ErrUnknownContract},
+		{"kiro-latest", Kiro, "latest", "", nil},
+		{"devin-pin", Devin, "", "'https://static.devin.ai/cli/3000.4.25/devin-3000.4.25-aarch64-unknown-linux.tar.gz'", nil},
+		{"devin-newer", Devin, "3000.11.3", "", ErrUnknownContract},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,6 +269,78 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 	}
 }
 
+// TestTarballPinnedInstallChecksDigests pins the checks every archive-installed
+// harness runs: an https-only download of the architecture's archive, its
+// sha256 before anything is unpacked, a root-owned prefix, and the pinned
+// version reported by the installed binary.
+func TestTarballPinnedInstallChecksDigests(t *testing.T) {
+	for _, tc := range []struct {
+		spec    *Spec
+		pin     tarballPin
+		version string
+	}{
+		{Cursor, cursorPin, `[ "$got" = '2026.07.23-e383d2b' ]`},
+		{Kiro, kiroPin, `[ "$got" = 'kiro-cli-chat 2.24.1' ]`},
+		{Devin, devinPin, `[ "$got" = '3000.4.25' ]`},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			steps, err := tc.spec.InstallSteps("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := steps[0].Run
+			wants := []string{
+				"curl -fsSL --proto '=https' --tlsv1.2",
+				`got="$(sha256sum "$tmp/release.tar.gz" | cut -d' ' -f1)"`,
+				`[ "$got" = "$want" ] || {`,
+				`tar -xzf "$tmp/release.tar.gz" -C "$root" --no-same-owner --no-same-permissions`,
+				`chown -R root:root "$root"`,
+				"root=" + shellQuote(tc.spec.InstallRoot()),
+				tc.version,
+			}
+			for _, arch := range []string{"aarch64", "x86_64"} {
+				archive := tc.pin.Archives[arch]
+				wants = append(wants, arch+") url="+shellQuote(archive.URL)+"; want="+shellQuote(archive.SHA256))
+			}
+			for _, want := range wants {
+				if !strings.Contains(run, want) {
+					t.Errorf("install step lacks %q:\n%s", want, run)
+				}
+			}
+			// The digest check comes before the archive is unpacked.
+			if strings.Index(run, `[ "$got" = "$want" ]`) > strings.Index(run, "tar -xzf") {
+				t.Error("the archive is unpacked before its digest is checked")
+			}
+			if _, err := os.Stat("/bin/sh"); err == nil {
+				cmd := exec.Command("/bin/sh", "-n")
+				cmd.Stdin = strings.NewReader(run)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("install step does not parse: %v\n%s", err, out)
+				}
+			}
+		})
+	}
+	good := tarballArchive{URL: "https://example.com/tool-1.2.3.tar.gz", SHA256: strings.Repeat("a", 64)}
+	for name, pin := range map[string]tarballPin{
+		"plain-http":      {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": {URL: "http://example.com/tool-1.2.3.tar.gz", SHA256: good.SHA256}}, DigestSource: "x"},
+		"short-digest":    {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": {URL: good.URL, SHA256: "abc"}}, DigestSource: "x"},
+		"other-release":   {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": {URL: "https://example.com/tool-9.9.9.tar.gz", SHA256: good.SHA256}}, DigestSource: "x"},
+		"no-digest-note":  {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": good}},
+		"no-archives":     {Version: "1.2.3", DigestSource: "x"},
+		"quote-in-url":    {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": {URL: "https://example.com/tool-1.2.3'$(x).tar.gz", SHA256: good.SHA256}}, DigestSource: "x"},
+		"bad-arch":        {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64;id": good}, DigestSource: "x"},
+		"too-deep-strip":  {Version: "1.2.3", Archives: map[string]tarballArchive{"x86_64": good}, Strip: 9, DigestSource: "x"},
+		"version-garbage": {Version: "1.2.3;rm", Archives: map[string]tarballArchive{"x86_64": good}, DigestSource: "x"},
+	} {
+		if err := pin.validate(); err == nil {
+			t.Errorf("%s: invalid archive pin accepted", name)
+		}
+	}
+	if _, err := kiroPin.installRun("/opt/x", "2.23.0"); err == nil {
+		t.Fatal("a release without pinned archives rendered")
+	}
+}
+
 func TestCopilotInstallPreExtractsTheRootOwnedPackage(t *testing.T) {
 	steps, err := Copilot.InstallSteps("")
 	if err != nil {
@@ -283,6 +401,24 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{AmpLauncherPath, "--dangerously-allow-all", "-m", "high", "--plugin-ready-timeout", "30", "-x", "fix it"}},
 		{"amp-headless-safe", Amp, LaunchOptions{Mode: Headless, Prompt: "fix it"},
 			[]string{AmpLauncherPath, "--plugin-ready-timeout", "30", "-x", "fix it"}},
+		{"cursor-interactive-yolo", Cursor, LaunchOptions{Mode: Interactive, Yolo: true},
+			[]string{CursorLauncherPath, "--trust", "--sandbox", "disabled", "--force"}},
+		{"cursor-headless-yolo", Cursor, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", Args: []string{"--model", "sonnet-4"}},
+			[]string{CursorLauncherPath, "--trust", "--sandbox", "disabled", "--force", "-p", "--output-format", "text", "--model", "sonnet-4", "fix it"}},
+		{"cursor-headless-safe", Cursor, LaunchOptions{Mode: Headless, Prompt: "fix it", CredentialProfile: profiles.CursorID},
+			[]string{CursorLauncherPath, "--trust", "--sandbox", "disabled", "-p", "--output-format", "text", "fix it"}},
+		{"kiro-interactive-yolo", Kiro, LaunchOptions{Mode: Interactive, Yolo: true},
+			[]string{KiroLauncherPath, "--trust-all-tools"}},
+		{"kiro-headless-yolo", Kiro, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", Args: []string{"--model", "claude-sonnet-4"}},
+			[]string{KiroLauncherPath, "--no-interactive", "--trust-all-tools", "--model", "claude-sonnet-4", "fix it"}},
+		{"kiro-headless-safe", Kiro, LaunchOptions{Mode: Headless, Prompt: "fix it", CredentialProfile: profiles.KiroID},
+			[]string{KiroLauncherPath, "--no-interactive", "fix it"}},
+		{"devin-interactive-yolo", Devin, LaunchOptions{Mode: Interactive, Yolo: true},
+			[]string{DevinLauncherPath, "--permission-mode", "dangerous"}},
+		{"devin-headless-yolo", Devin, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", Args: []string{"--model", "opus"}},
+			[]string{DevinLauncherPath, "--permission-mode", "dangerous", "--model", "opus", "-p", "fix it"}},
+		{"devin-headless-safe", Devin, LaunchOptions{Mode: Headless, Prompt: "fix it"},
+			[]string{DevinLauncherPath, "-p", "fix it"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,6 +538,9 @@ func TestHookOnlyHarnessEnv(t *testing.T) {
 		{Copilot, profiles.CopilotGitHubID, map[string]string{"COPILOT_AUTO_UPDATE": "false"},
 			"api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,host.openshell.internal"},
 		{Amp, profiles.AmpID, map[string]string{"AMP_SKIP_UPDATE_CHECK": "1"}, "ampcode.com,host.openshell.internal"},
+		{Cursor, profiles.CursorID, map[string]string{}, "api2.cursor.sh,api3.cursor.sh,host.openshell.internal,repo42.cursor.sh"},
+		{Kiro, profiles.KiroID, map[string]string{},
+			"host.openshell.internal,management.us-east-1.kiro.dev,prod.us-east-1.auth.desktop.kiro.dev,q.us-east-1.amazonaws.com,runtime.us-east-1.kiro.dev"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.spec.Name+"/"+tc.profile, func(t *testing.T) {
@@ -437,10 +576,11 @@ func TestHookOnlyHarnessEnv(t *testing.T) {
 	if !strings.Contains(openCodeMantleConfig, `"apiKey":"{env:BEDROCK_MANTLE_API_KEY}"`) {
 		t.Fatal("OpenCode Mantle config must read the key placeholder at runtime")
 	}
-	for _, name := range []string{"opencode", "copilot", "amp"} {
+	unverified := map[string]bool{profiles.CopilotGitHubID: true, profiles.AmpID: true, profiles.CursorID: true, profiles.KiroID: true}
+	for _, name := range []string{"opencode", "copilot", "amp", "cursor", "kiro"} {
 		spec, _ := Get(name)
 		for _, cp := range spec.CredentialProfiles("") {
-			if (cp.ProfileID == profiles.CopilotGitHubID || cp.ProfileID == profiles.AmpID) != (cp.Unverified != "") {
+			if unverified[cp.ProfileID] != (cp.Unverified != "") {
 				t.Errorf("%s: unverified = %q", cp.ProfileID, cp.Unverified)
 			}
 		}
@@ -751,6 +891,9 @@ func TestProbeVersionPatterns(t *testing.T) {
 		// The probe keeps only [A-Za-z0-9 ._()+-] of the first line.
 		{Copilot, "GitHub Copilot CLI 1.0.88.", "1.0.88"},
 		{Amp, "0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},
+		{Cursor, "2026.07.23-e383d2b", "2026.07.23-e383d2b"},
+		{Kiro, "kiro-cli-chat 2.24.1", "2.24.1"},
+		{Devin, "devin 3000.4.25 (7e8e528a)", "3000.4.25"},
 	} {
 		m := tc.spec.Probe().VersionRE.FindStringSubmatch(tc.out)
 		if len(m) != 2 || m[1] != tc.want {

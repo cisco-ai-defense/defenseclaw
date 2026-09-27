@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
@@ -31,23 +32,20 @@ import (
 // returns the exit code, the record and the launcher's output.
 func launcherEnv(t *testing.T, spec *Spec, env []string) (int, string, string) {
 	t.Helper()
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
-	dir := t.TempDir()
-	record := filepath.Join(dir, "record")
-	stub := filepath.Join(dir, "stub")
-	if err := os.WriteFile(stub, []byte("#!/bin/bash\n/usr/bin/env >"+record+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	launcher := filepath.Join(dir, "launch")
-	script := strings.ReplaceAll(string(spec.Launcher().Data), "/usr/local/bin/"+spec.Command, stub)
-	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(launcher)
-	cmd.Dir = dir
-	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + dir}, env...)
+	launcher, dir := launcherFixture(t, spec, `/usr/bin/env >"${0%/*}/record"`+"\n")
+	code, out := startLauncher(t, launcher, dir, dir, env)
+	got, _ := os.ReadFile(filepath.Join(dir, "record"))
+	return code, "\n" + string(got), out
+}
+
+// startLauncher starts launcher in cwd with args and env (PATH and HOME
+// default to the system directories and home) and returns its exit code and
+// output.
+func startLauncher(t *testing.T, launcher, home, cwd string, env []string, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(launcher, args...)
+	cmd.Dir = cwd
+	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + home}, env...)
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if exitErr, ok := err.(*exec.ExitError); ok {
@@ -55,8 +53,46 @@ func launcherEnv(t *testing.T, spec *Spec, env []string) (int, string, string) {
 	} else if err != nil {
 		t.Fatalf("launcher: %v\n%s", err, out)
 	}
-	got, _ := os.ReadFile(record)
-	return code, "\n" + string(got), string(out)
+	return code, string(out)
+}
+
+// launcherFixture renders spec's launcher into a fresh directory, which also
+// stands in for the image HOME, with the pinned binary replaced by a stub
+// script (stubBody after the shebang) and the root-owned templates the
+// launcher restores from laid out below the directory. It returns the
+// launcher and the directory.
+func launcherFixture(t *testing.T, spec *Spec, stubBody string) (string, string) {
+	t.Helper()
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "stub")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\n"+stubBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(dir, "launch")
+	script := strings.ReplaceAll(string(spec.Launcher().Data), "/usr/local/bin/"+spec.Command+" ", stub+" ")
+	// Launchers that pin the image HOME use the test directory instead, and
+	// the root-owned templates they restore from are laid out below it.
+	script = strings.ReplaceAll(script, "HOME="+connector.SandboxHomeDir+"\n", "HOME="+dir+"\n")
+	script = strings.ReplaceAll(script, `"`+connector.SandboxLibDir+"/", `"`+dir+connector.SandboxLibDir+"/")
+	for _, file := range artifactsFor(t, spec).Files {
+		if file.Owner != connector.SandboxOwnerRoot || !strings.HasPrefix(file.Path, connector.SandboxLibDir+"/") {
+			continue
+		}
+		dest := filepath.Join(dir, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dest, file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return launcher, dir
 }
 
 // TestLaunchersScrubShellStartupEnv starts every launcher with the shell

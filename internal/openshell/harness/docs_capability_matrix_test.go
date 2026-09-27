@@ -28,9 +28,9 @@ import (
 
 // TestDocsCapabilityMatrixSandboxColumn keeps the docs capability matrix's
 // OpenShell sandbox column a checked projection of the harness registry: a
-// harness row shows its artifacts' tamper tier, a root-owned hook config file
-// the artifacts really contain, and the default image pin; every other row is
-// pending. internal/gateway/connector checks the status against the
+// harness row shows its artifacts' tamper tier, a hook config file the
+// artifacts really contain (root-owned for the managed tier), and the default
+// image pin; every other row is pending. internal/gateway/connector checks the status against the
 // SandboxArtifactProvider implementations.
 func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -81,15 +81,17 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 		if sb.HarnessPin != spec.DefaultVersion {
 			t.Errorf("%s sandbox.harnessPin=%q want %q", row.ID, sb.HarnessPin, spec.DefaultVersion)
 		}
+		// A managed registration is a root-owned file; a user-tier one is
+		// the file in the image HOME the harness reads.
 		found := false
 		for _, file := range artifacts.Files {
-			if file.Path == sb.HookConfig && file.Owner == connector.SandboxOwnerRoot {
+			if file.Path == sb.HookConfig && (file.Owner == connector.SandboxOwnerRoot || artifacts.TamperTier == connector.SandboxTamperTierUser) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("%s sandbox.hookConfig=%q is not a root-owned file in its sandbox artifacts", row.ID, sb.HookConfig)
+			t.Errorf("%s sandbox.hookConfig=%q is not a hook config file of its %s-tier sandbox artifacts", row.ID, sb.HookConfig, artifacts.TamperTier)
 		}
 	}
 	for _, name := range Names() {

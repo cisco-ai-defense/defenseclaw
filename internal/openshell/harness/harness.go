@@ -186,6 +186,18 @@ type CredentialProfile struct {
 	Unverified string
 }
 
+// LoginOption is a vendor login run inside the sandbox instead of (or next
+// to) a provider profile. The credential it stores lives in the sandbox HOME,
+// where the workload can read it (unlike a provider placeholder), and a kept
+// sandbox reuses it; its traffic goes through the egress proxy.
+type LoginOption struct {
+	// Argv runs the login inside the sandbox (via the launcher).
+	Argv []string
+	Note string
+	// Unverified, when set, says why the login was not performed.
+	Unverified string
+}
+
 // VerificationStatus says how far a harness was proven inside OpenShell.
 type VerificationStatus string
 
@@ -247,10 +259,11 @@ type Spec struct {
 	launchArgv         func(LaunchOptions, CredentialProfile) ([]string, error)
 	bypassFlags        []bypassFlag
 	credentialProfiles []CredentialProfile
+	login              *LoginOption
 	customization      []CustomizationPath
 	preseedRefresh     []string
 	// versionPattern overrides the exact-release pattern for harnesses
-	// whose releases carry a build suffix (Amp).
+	// whose releases carry a build suffix (Amp, Cursor Agent).
 	versionPattern *regexp.Regexp
 	// env is harness-level sandbox env that depends on the install layout
 	// (the connector artifacts cannot know it).
@@ -296,6 +309,16 @@ func (s *Spec) CredentialProfiles(region string) []CredentialProfile {
 		out = append(out, resolveCredentialProfile(cp, region))
 	}
 	return out
+}
+
+// Login returns the harness's in-sandbox vendor login, if it has one.
+func (s *Spec) Login() (LoginOption, bool) {
+	if s.login == nil {
+		return LoginOption{}, false
+	}
+	out := *s.login
+	out.Argv = append([]string(nil), s.login.Argv...)
+	return out, true
 }
 
 // CredentialProfile returns one supported profile resolved for region.
