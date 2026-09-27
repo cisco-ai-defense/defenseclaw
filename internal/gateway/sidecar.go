@@ -183,14 +183,21 @@ type Sidecar struct {
 	judgeBodiesReadyPending bool
 	judgeBodiesReadyDetails string
 
-	// cmidProviderMu guards cmidProviderInst AND cmidBuildLastLog.
-	// The provider is lazily constructed on first request via
-	// ensureCMIDProvider and reused for the sidecar's lifetime.
-	// Managed-mode wiring only.
-	cmidProviderMu    sync.Mutex
-	cmidProviderInst  cloudreg.Provider
-	cmidBuildLastLog  time.Time
-	cmidBuildLastKind string
+	// cmidProviderMu guards cmidProviderInst, the cmidBuild* log state
+	// and managedInspectorFailure. The provider is lazily constructed on
+	// first request via ensureCMIDProvider and reused for the sidecar's
+	// lifetime. Managed-mode wiring only.
+	cmidProviderMu      sync.Mutex
+	cmidProviderInst    cloudreg.Provider
+	cmidBuildLastLog    time.Time
+	cmidBuildLastKind   string
+	cmidBuildLastDetail string
+	// cmidBuildQuiet is set while ensureCMIDProviderQuietly runs a quiet
+	// provider build.
+	cmidBuildQuiet bool
+	// managedInspectorFailure is the cause of the last failed managed
+	// inspector build, "" after a success (buildManagedInspector).
+	managedInspectorFailure string
 
 	// Last outcome of building the managed cloud auth provider, so
 	// /health can report whether inspection is reachable.
@@ -2370,9 +2377,18 @@ func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 // Both call sites always read a fresh cfg snapshot, so this helper does
 // too.
 func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Inspector {
+	return s.buildManagedInspector(ctx, siteLabel, false)
+}
+
+// buildManagedInspector is newManagedInspector. A quiet build (the hook-lane
+// retry on the guardrail health ticker) logs a build failure and records it
+// as a failed inspection only when its cause differs from the last managed
+// inspector build failure, so a build that keeps failing is reported once
+// rather than on every retry, with no request behind it.
+func (s *Sidecar) buildManagedInspector(ctx context.Context, siteLabel string, quiet bool) Inspector {
 	cfg := s.currentConfig()
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
-	prov, err := s.ensureCMIDProvider(ctx)
+	prov, err := s.ensureCMIDProviderQuietly(ctx, quiet)
 	// Hard-failure gate: only bail when we truly have no provider to
 	// hand to the inspector. A non-nil provider with err != nil means
 	// the underlying library is currently unloadable (e.g. AVC hasn't
@@ -2386,9 +2402,11 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		if err != nil {
 			detail = err.Error()
 		}
-		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
-			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
-		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
+		if s.noteManagedInspectorFailure(detail) || !quiet {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
+				"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
+			recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
+		}
 		return nil
 	}
 	if err != nil {
@@ -2405,11 +2423,14 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
-		EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
-			"managed_enterprise inspector unavailable — "+siteLabel)
-		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		if s.noteManagedInspectorFailure("managed_enterprise inspector unavailable") || !quiet {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
+				"managed_enterprise inspector unavailable — "+siteLabel)
+			recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		}
 		return nil
 	}
+	s.noteManagedInspectorFailure("")
 	m.bindObservabilityV8(metricRuntime)
 	// Wire per-request availability into /health so a dropped CMID
 	// auth after inspector construction is visible without a reload.
@@ -2418,6 +2439,17 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	// publish nil so a self-healing lane clears the fail flag.
 	m.bindAvailabilityObserver(s.setInspectionAvailability)
 	return m
+}
+
+// noteManagedInspectorFailure records the cause of a managed inspector
+// build failure ("" after a successful build) and reports whether it
+// differs from the previous one.
+func (s *Sidecar) noteManagedInspectorFailure(cause string) bool {
+	s.cmidProviderMu.Lock()
+	defer s.cmidProviderMu.Unlock()
+	changed := cause != s.managedInspectorFailure
+	s.managedInspectorFailure = cause
+	return changed
 }
 
 // cmidBuildLogCooldown throttles the "CMID provider build failed"
@@ -2454,19 +2486,25 @@ const cmidProviderTokenCacheTTL = 60 * time.Second
 // apart from a live provider whose Refresh started failing after
 // working for a while.
 //
-// Caller must hold s.cmidProviderMu. cmidBuildLastLog and
-// cmidBuildLastKind live inside that lock's scope, so no additional
-// synchronisation is needed.
+// Caller must hold s.cmidProviderMu. The cmidBuild* fields live inside
+// that lock's scope, so no additional synchronisation is needed.
 func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 	if err == nil {
 		return
 	}
 	now := time.Now()
-	if stage == s.cmidBuildLastKind && now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown {
-		return
+	detail := err.Error()
+	if stage == s.cmidBuildLastKind {
+		// A quiet build (the hook-lane retry, see ensureCMIDProviderQuietly)
+		// does not repeat a failure already logged, whatever its age.
+		if now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown ||
+			(s.cmidBuildQuiet && detail == s.cmidBuildLastDetail) {
+			return
+		}
 	}
 	s.cmidBuildLastLog = now
 	s.cmidBuildLastKind = stage
+	s.cmidBuildLastDetail = detail
 	fmt.Fprintf(os.Stderr,
 		"[managed-cloud] CMID provider build failed at %s: %v\n",
 		stage, err)
@@ -2521,11 +2559,21 @@ func (s *Sidecar) logCMIDBuildLane(lane string) {
 // hook, managedaid per batch) reuse the last-issued bearer token
 // until either the TTL expires or a 401 → Invalidate() clears it.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	return s.ensureCMIDProviderQuietly(ctx, false)
+}
+
+// ensureCMIDProviderQuietly is ensureCMIDProvider. With quiet set, a build
+// failure identical to the last one logged is not logged again (see
+// logCMIDBuildError); retryManagedHookInspector rebuilds a failing provider
+// on the guardrail health ticker and would otherwise repeat it every retry.
+func (s *Sidecar) ensureCMIDProviderQuietly(ctx context.Context, quiet bool) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
 	}
+	s.cmidBuildQuiet = quiet
+	defer func() { s.cmidBuildQuiet = false }()
 	prov, buildErr := s.buildCMIDProvider(ctx)
 	s.setInspectionAvailability(buildErr)
 	// buildCMIDProvider returns (nil, err) only on hard failures

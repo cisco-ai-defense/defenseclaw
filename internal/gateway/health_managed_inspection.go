@@ -193,7 +193,9 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 // unavailable_action=block every tool call that needs inspection is
 // blocked. Runs on the guardrail health ticker, at most once per
 // managedInspectionProbeInterval; an empty endpoint is left to the reload
-// that sets one.
+// that sets one. The build is quiet: a failure with the same cause as the
+// last one is not logged or recorded as a failed inspection again, since
+// no request is behind it.
 func (s *Sidecar) retryManagedHookInspector(ctx context.Context) {
 	if s == nil || s.managedHookInspector.Load() != managedHookInspectorUnwired {
 		return
@@ -218,7 +220,7 @@ func (s *Sidecar) retryManagedHookInspector(ctx context.Context) {
 	if api == nil {
 		return
 	}
-	inspector := s.newManagedInspector(ctx, "hook remote inspection still disabled")
+	inspector := s.buildManagedInspector(ctx, "hook remote inspection still disabled", true)
 	if inspector == nil {
 		return
 	}

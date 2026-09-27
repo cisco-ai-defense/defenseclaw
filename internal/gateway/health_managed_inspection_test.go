@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -450,5 +451,63 @@ func TestRefreshManagedInspectionHealthClearsAfterAnInFlightPublish(t *testing.T
 
 	if got := s.health.Snapshot().ManagedInspection; got != nil {
 		t.Fatalf("managed inspection state left after leaving managed_enterprise: %+v", got)
+	}
+}
+
+// The hook-lane retry rebuilds a failing provider every
+// managedInspectionProbeInterval. A build that keeps failing the same way
+// is logged and recorded as a failed inspection once, not on every retry
+// with no request behind it; a new cause is reported again.
+func TestManagedHookInspectorRetryReportsARepeatedBuildFailureOnce(t *testing.T) {
+	var cause atomic.Value
+	cause.Store("managed cloud auth library not trusted yet")
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		return nil, errors.New(cause.Load().(string))
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = "https://aid.example.invalid"
+	s.apiServer = managedBlockingHookServer(nil)
+	retry := func() {
+		// Run as if the retry interval and the build log cooldown
+		// had both elapsed.
+		s.hookInspectorMu.Lock()
+		s.hookInspectorLastRetry = time.Time{}
+		s.hookInspectorMu.Unlock()
+		s.cmidProviderMu.Lock()
+		s.cmidBuildLastLog = time.Time{}
+		s.cmidProviderMu.Unlock()
+		s.retryManagedHookInspector(context.Background())
+	}
+	lines := func(out string) (build, inspect int) {
+		return strings.Count(out, "CMID provider build failed"), strings.Count(out, "[gateway] error ")
+	}
+
+	var wired Inspector
+	out := captureStderr(t, func() {
+		// runAPI's wiring reports the failure.
+		wired = s.pickInspector(context.Background())
+		s.setManagedHookInspectorWired(wired != nil)
+		retry()
+		retry()
+	})
+	if wired != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", wired)
+	}
+	if build, inspect := lines(out); build != 1 || inspect != 1 {
+		t.Fatalf("startup and two retries with one cause: %d build and %d error lines, want 1 and 1:\n%s", build, inspect, out)
+	}
+
+	cause.Store("managed cloud auth library missing")
+	out = captureStderr(t, func() {
+		retry()
+		retry()
+	})
+	if build, inspect := lines(out); build != 1 || inspect != 1 {
+		t.Fatalf("two retries with a new cause: %d build and %d error lines, want 1 and 1:\n%s", build, inspect, out)
+	}
+	if s.managedHookInspector.Load() != managedHookInspectorUnwired {
+		t.Fatal("a failed retry marked the hook lane wired")
 	}
 }
