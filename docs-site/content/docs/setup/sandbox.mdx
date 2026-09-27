@@ -29,6 +29,25 @@ release. `config.yaml` already accepts the `openshell` keys and the
 take effect once that support ships.
 </Callout>
 
+## Nested repositories in a mounted project
+
+When an OpenShell sandbox works on your project folder directly (the default
+mount mode), the agent could create a new git repository, a `.git` directory
+or file, somewhere inside the folder. Its configuration could run a program
+the next time git runs in that subfolder on your machine: you, your editor, or
+a git-aware shell prompt.
+
+While the sandbox runs, DefenseClaw watches the folder and renames every new
+`.git` entry to `.git.defenseclaw-quarantine-<time>` the moment it appears, so
+the git commands you run in the project on the host stay safe. New submodule
+(gitlink) entries in the project's index are reported. Each one appears in the
+sandbox activity feed and in the end-of-session summary, and undo removes it.
+A repository you create in the folder yourself during a session is quarantined
+too; rename it back when the session ends.
+
+For untrusted repositories or tasks, run the sandbox with `--copy`: the agent
+works on a copy, and its changes reach your folder only when you apply them.
+
 ## Detect a legacy install
 
 On a host whose DefenseClaw config still says `openshell.mode: standalone`,

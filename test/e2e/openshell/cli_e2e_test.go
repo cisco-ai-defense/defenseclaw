@@ -123,12 +123,21 @@ func (c *cliEnv) setupCLI() {
 		}
 		return err
 	})
+	// The daemon stops before this cleanup runs (it was started later), so
+	// leftovers go through the gateway; e.sweep then deletes the providers
+	// named after the prefix.
 	c.root.Cleanup(func() {
-		for _, name := range []string{c.claude, c.codex} {
-			if c.api != nil {
-				if _, err := c.api.Get(context.Background(), name); err == nil {
-					_, _ = c.api.Delete(context.Background(), name, sandboxapi.DeleteRequest{})
-				}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		for _, name := range []string{c.claude, c.codex, c.prefix + "-bc", c.prefix + "-bx"} {
+			if _, err := c.gw.GetSandbox(ctx, name); err != nil {
+				continue
+			}
+			c.root.Logf("cleanup: deleting leftover sandbox %s", name)
+			if _, err := c.gw.DeleteSandbox(ctx, name); err != nil {
+				c.root.Logf("cleanup: delete sandbox %s: %v", name, err)
+			} else if err := c.gw.WaitDeleted(ctx, name); err != nil {
+				c.root.Logf("cleanup: wait for %s: %v", name, err)
 			}
 		}
 	})
@@ -361,29 +370,43 @@ func (c *cliEnv) liveEdit() {
 	}
 }
 
+// nestedRepo plants a .git directory and a .git file (a gitdir pointer, the
+// form undo can see once it is quarantined) in the mounted project.
 func (c *cliEnv) nestedRepo() {
 	t := c.t
 	if _, code := c.execOut(c.claude, "mkdir", "-p", "sub/nested/.git/objects"); code != 0 {
 		t.Fatal("could not create the nested repository")
 	}
-	var quarantined string
-	waitFor(t, time.Minute, "the nested repository to be quarantined", func() error {
-		if _, err := os.Lstat(filepath.Join(c.project, "sub", "nested", ".git")); err == nil {
-			return fmt.Errorf("sub/nested/.git is still there")
-		}
-		sb := c.status(c.claude)
-		for _, n := range sb.NestedRepos {
-			if n.Path == "sub/nested/.git" && n.Quarantined != "" {
-				quarantined = n.Quarantined
-				return nil
-			}
-		}
-		return fmt.Errorf("nested repos %+v", sb.NestedRepos)
-	})
-	if _, err := os.Lstat(filepath.Join(c.project, filepath.FromSlash(quarantined))); err != nil {
-		t.Fatalf("the quarantined entry %s is missing: %v", quarantined, err)
+	if _, code := c.execOut(c.claude, "sh", "-c", "mkdir -p sub/pointer && printf 'gitdir: /tmp/dce2e-gitdir\\n' > sub/pointer/.git"); code != 0 {
+		t.Fatal("could not create the .git file")
 	}
-	t.Logf("quarantined as %s", quarantined)
+	for _, rel := range []string{"sub/nested", "sub/pointer"} {
+		var quarantined string
+		waitFor(t, time.Minute, rel+"/.git to be quarantined", func() error {
+			if _, err := os.Lstat(filepath.Join(c.project, filepath.FromSlash(rel), ".git")); err == nil {
+				return fmt.Errorf("%s/.git is still there", rel)
+			}
+			sb := c.status(c.claude)
+			for _, n := range sb.NestedRepos {
+				if n.Path == rel+"/.git" && n.Quarantined != "" {
+					quarantined = n.Quarantined
+					return nil
+				}
+			}
+			return fmt.Errorf("nested repos %+v", sb.NestedRepos)
+		})
+		if _, err := os.Lstat(filepath.Join(c.project, filepath.FromSlash(quarantined))); err != nil {
+			t.Fatalf("the quarantined entry %s is missing: %v", quarantined, err)
+		}
+		t.Logf("%s/.git quarantined as %s", rel, quarantined)
+	}
+	var feed struct{ Events []sandboxapi.ActivityEvent }
+	if err := json.Unmarshal([]byte(c.ok(time.Minute, "activity", "--sandbox", c.claude, "--output", "json")), &feed); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(feed.Events, func(ev sandboxapi.ActivityEvent) bool { return ev.Reason == sandboxapi.ReasonNestedRepo }) {
+		t.Fatal("no nested-repository finding on the activity feed")
+	}
 }
 
 func (c *cliEnv) reviewUndo() {
@@ -399,8 +422,17 @@ func (c *cliEnv) reviewUndo() {
 	if err != nil || string(restored) != c.readme {
 		t.Fatalf("README after undo = %q, %v", restored, err)
 	}
-	if _, err := os.Stat(filepath.Join(c.project, "sub")); err == nil {
-		t.Fatal("undo left the nested repository's folder")
+	// Undo removes the quarantined .git file (content git tracks); the
+	// quarantined directory held only an empty folder, which git cannot see.
+	var left []string
+	_ = filepath.WalkDir(filepath.Join(c.project, "sub"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			left = append(left, p)
+		}
+		return nil
+	})
+	if len(left) > 0 {
+		t.Fatalf("undo left files of the planted repositories: %v", left)
 	}
 	if sb := c.status(c.claude); sb.Phase != "stopped" {
 		t.Fatalf("phase after undo = %s", sb.Phase)

@@ -127,6 +127,12 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 			{LLMBedrock, profiles.CodexBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
 		}
 	}
+	// A --credential binding of the model's own variable wins.
+	for _, c := range cands {
+		if reserved[c.envName] && (choice == LLMAuto || choice == LLMNone || c.llm == choice) {
+			return llmChoice{Note: c.envName + " comes from --credential"}, nil
+		}
+	}
 	if choice == LLMNone {
 		return llmChoice{Note: "no model credential is shared (--llm none); log in inside the sandbox"}, nil
 	}

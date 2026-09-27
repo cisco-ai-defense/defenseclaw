@@ -16,23 +16,18 @@ removal of the legacy 0.0.x sandbox. Telemetry details are in
 ## Build status
 
 The integration is being built in layers. The packages in the
-[code map](#code-map) exist with unit tests. What ties them together does not
-exist yet:
+[code map](#code-map) exist with unit tests, the daemon runs the sandbox
+manager, hook ingress and egress proxy when `openshell.enabled` is on, and
+the `defenseclaw-gateway sandbox` command tree (setup, doctor, run and the
+lifecycle, approval, workspace, policy, pack, image, wrapper and teardown
+commands) drives it through the REST API under `/api/v1/sandbox/`. Still to
+come:
 
-- **The sandbox manager.** Nothing creates, starts, stops or deletes a
-  sandbox yet. That work will mint and revoke bindings, build the egress
-  proxy's decider from the resolved pack, take snapshots, and emit telemetry.
-  Sentences below that say "the manager must" are obligations for it.
-- **Daemon wiring.** The sidecar does not start the hook ingress or the egress
-  proxy. Today `openshell.enabled: true` only makes config validation check
-  the two sandbox ports, and switching it (or moving a port while it is on)
-  restarts the API server.
-- **Approvals and surfaces.** Triage of OpenShell draft proposals, MCP
-  import, the REST API under `/api/v1/sandbox/`, the TUI and macOS surfaces,
-  and the shell wrapper.
-- **Commands.** `defenseclaw sandbox legacy-cleanup` is the only `sandbox`
-  command. The egress proxy's block messages already name two planned
-  commands, `sandbox unblock` and `sandbox run --host-port PORT`.
+- **Surfaces.** The Python `defenseclaw sandbox` stubs that hand off to the
+  Go commands (today the Python group has only `legacy-cleanup`), the TUI
+  Sandboxes panel and the macOS menu-bar item.
+- **MCP import.** The harness's MCP servers are not brought into the sandbox
+  yet (`--no-mcp` is accepted and recorded).
 - **Harnesses.** Only `claudecode` and `codex` have harness specs and sandbox
   artifacts.
 
@@ -735,7 +730,7 @@ Host-executable files that git ignores are found by re-walking the folder.
 The ClawShield secret rules and CodeGuard also scan the changed files (files
 up to 1 MiB, at most 2,000 of them).
 
-### Known limit: planted nested repositories
+### Planted nested repositories and the live guard
 
 Mount mode cannot stop the agent from creating a new git repository inside
 the project folder. Git reads a repository's own configuration whenever it
@@ -745,19 +740,38 @@ behind a nested repository that runs a program on your machine the next time
 something on the host runs git inside that subfolder: you, your editor, or a
 git-aware shell prompt.
 
-What limits the damage:
+The daemon therefore runs a nested-repository guard
+(`internal/openshell/nestguard`) for every mounted sandbox while it is ready:
 
-- The project's own `.git/config` and hooks are read-only in the sandbox, so
-  the planted configuration only applies inside the nested folder.
-- DefenseClaw's own post-session git work uses the shadow git directory and
-  never reads it.
-- Review flags the nested repository as critical, and undo removes it.
+- Before the sandbox runs (at create and at every start), the manager records
+  the `.git` entries the folder already holds. Those are never touched.
+- While the sandbox runs, the guard watches the folder with inotify (on
+  macOS, and when the watch limit is reached, it falls back to a bounded
+  periodic scan). The moment a new `.git` entry appears at any depth,
+  directory, file or symbolic link, including the top level of a folder that
+  had no git, the guard renames it to `.git.defenseclaw-quarantine-<time>`.
+  The rename walks the path with `O_NOFOLLOW` directory handles and never
+  replaces an existing name, so a symbolic link the agent swaps in cannot
+  redirect it. No git on the host ever reads the planted configuration.
+- It also reports new gitlink (submodule) entries in the project's index;
+  those are not changed.
+- Each detection is kept on the sandbox record (`nested_repos` in the REST
+  API), emitted as a `quarantine` `log.sandbox.workspace` record and a
+  `sandbox.nested_repo` finding, and published on the activity feed, where
+  the run UI, `sandbox activity` and the TUI show it. The end-of-session
+  summary lists it again.
 
-None of this stops the planted program if something runs git in that folder
-before the review. For untrusted repositories or tasks, use copy mode. There
-the agent's work comes back as git objects in a verified bundle, which cannot
-carry another repository's configuration, and nothing reaches the host folder
-until the operator applies it. There is no guardrail rule for this case.
+So running git in the project on the host is safe while the guard runs: a
+repository the agent plants is quarantined before a host git command can use
+it. The guard runs only while the sandbox is ready. It also quarantines a
+repository you create in the folder yourself during a session (rename it
+back when you are done). Review still flags the quarantined entry, and undo
+removes it.
+
+For untrusted repositories or tasks, use copy mode. There the agent's work
+comes back as git objects in a verified bundle, which cannot carry another
+repository's configuration, and nothing reaches the host folder until the
+operator applies it.
 
 ### Copy mode
 
@@ -1212,7 +1226,10 @@ These were not measured, so the design does not rely on a result for them:
 | Hook ingress | [`../internal/gateway/api_sandbox_ingress.go`](../internal/gateway/api_sandbox_ingress.go), [`../internal/gateway/sandbox_hook_scope.go`](../internal/gateway/sandbox_hook_scope.go) |
 | `openshell:` configuration | [`../internal/config/openshell.go`](../internal/config/openshell.go), [`../schemas/config/v8/defenseclaw-config.schema.json`](../schemas/config/v8/defenseclaw-config.schema.json) |
 | Telemetry producers | [`../internal/audit/sandbox_v8.go`](../internal/audit/sandbox_v8.go) |
-| `sandbox` command group and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| `sandbox` commands (setup, run, lifecycle, pull, policy, images, teardown) | [`../internal/openshell/sandboxcli/`](../internal/openshell/sandboxcli/), [`../internal/cli/sandbox.go`](../internal/cli/sandbox.go) |
+| Shell wrappers (`sandbox enable`/`disable`) | [`../internal/openshell/wrapper/`](../internal/openshell/wrapper/) |
+| Nested-repository guard | [`../internal/openshell/nestguard/`](../internal/openshell/nestguard/), [`../internal/openshell/manager/guard.go`](../internal/openshell/manager/guard.go) |
+| Python `sandbox` group and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
 | Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
 
 ## Testing
