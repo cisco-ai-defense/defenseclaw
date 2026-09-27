@@ -56,6 +56,9 @@ var (
 	// ErrUnpulledChanges: a refresh would discard work the agent has not
 	// handed back yet.
 	ErrUnpulledChanges = errors.New("workspace: the sandbox has changes that were not pulled")
+	// ErrUnappliedPull: a refresh would discard a pulled result that was
+	// never applied.
+	ErrUnappliedPull = errors.New("workspace: the last pull was not applied")
 	// ErrNotGitProject: the operation needs a git repository on the host.
 	ErrNotGitProject = errors.New("workspace: the project is not a git repository")
 	// ErrNoChanges: the sandbox result equals the baseline.

@@ -781,6 +781,73 @@ func TestFindResumableAndRefresh(t *testing.T) {
 	}
 }
 
+// TestRefreshAfterPull: a sandbox still in the state its last pull took
+// holds no unpulled work, so once that pull is applied (or had nothing to
+// apply) a refresh needs no Force; before that, the refresh refuses rather
+// than discard the pull, and a forced one says it did.
+func TestRefreshAfterPull(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "config/server.key", "marker-key\n")
+	e.git(e.project, "add", "-f", "config/server.key")
+	e.git(e.project, "commit", "-q", "-m", "key")
+	_, fs := launchCopy(t, e, "c1", nil)
+	opts := RefreshOptions{Stage: StageOptions{Project: e.project, Name: "c1", DataDir: e.data, Home: e.home}, Exec: fs, Upload: fs}
+
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	pull(t, e, fs, "c1")
+	if _, err := Refresh(bg, opts); !errors.Is(err, ErrUnappliedPull) {
+		t.Fatalf("refresh over an unapplied pull: %v", err)
+	}
+	// More work after the pull is unpulled work again.
+	fs.write(remoteRepo+"/later.txt", "later\n")
+	if _, err := Refresh(bg, opts); !errors.Is(err, ErrUnpulledChanges) {
+		t.Fatalf("refresh over work after the pull: %v", err)
+	}
+	pull(t, e, fs, "c1")
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("apply: %+v %v", res, err)
+	}
+	if pr, err := LoadPull(e.data, "c1"); err != nil || pr.AppliedAt == nil {
+		t.Fatalf("the pull is not marked applied: %+v %v", pr, err)
+	}
+	rec, err := Refresh(bg, opts)
+	if err != nil {
+		t.Fatalf("refresh after apply: %v", err)
+	}
+	if readFile(t, fs.root, strings.TrimPrefix(remoteRepo, "/")+"/agent.txt") != "agent work\n" {
+		t.Fatal("the refreshed copy misses the applied work")
+	}
+	for _, w := range rec.Warnings {
+		if strings.Contains(w, "never applied") {
+			t.Fatalf("warned about an applied pull: %v", rec.Warnings)
+		}
+	}
+
+	// A pull with nothing to apply (the agent only touched a held-back
+	// file, which the pull drops) is handed back as it is.
+	fs.write(remoteRepo+"/config/server.key", "agent junk\n")
+	fs.agent(remoteRepo, "update-index", "--no-skip-worktree", "config/server.key")
+	fs.agent(remoteRepo, "commit", "-q", "-am", "junk")
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("changes = %s", changePaths(pr.Changes))
+	}
+	if _, err := Refresh(bg, opts); err != nil {
+		t.Fatalf("refresh after an empty pull: %v", err)
+	}
+
+	// Force discards an unapplied pull, and says so.
+	fs.write(remoteRepo+"/discard.txt", "x\n")
+	pull(t, e, fs, "c1")
+	opts.Force = true
+	if rec, err = Refresh(bg, opts); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rec.Warnings, "\n"), "was never applied and is discarded") {
+		t.Fatalf("warnings = %v", rec.Warnings)
+	}
+}
+
 type failUploader struct{ err error }
 
 func (u failUploader) Upload(context.Context, string, string, string) error { return u.err }
@@ -856,7 +923,9 @@ func TestFailedRefreshKeepsTheCopyState(t *testing.T) {
 	unchanged("remove failure")
 	guarded := opts
 	guarded.Force = false
-	if _, err := Refresh(bg, guarded); !errors.Is(err, ErrUnpulledChanges) {
+	// The agent's work was pulled, so what the guard protects now is the
+	// pull, which is not applied yet.
+	if _, err := Refresh(bg, guarded); !errors.Is(err, ErrUnappliedPull) {
 		t.Fatalf("guard skipped after a failed refresh: %v", err)
 	}
 

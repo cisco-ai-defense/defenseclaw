@@ -64,10 +64,13 @@ type PullResult struct {
 	SandboxHead string `json:"sandbox_head,omitempty"`
 	// Result is the sandbox's final state (its HEAD plus uncommitted work);
 	// Effective is Result with held-back paths reset, which Apply uses.
-	Result    string       `json:"result"`
-	Effective string       `json:"effective"`
-	Changes   []TreeChange `json:"changes,omitempty"`
-	Review    ReviewReport `json:"review"`
+	Result    string `json:"result"`
+	Effective string `json:"effective"`
+	// ResultTree is Result's tree: a refresh treats a sandbox whose HEAD
+	// and working tree still match SandboxHead and ResultTree as pulled.
+	ResultTree string       `json:"result_tree,omitempty"`
+	Changes    []TreeChange `json:"changes,omitempty"`
+	Review     ReviewReport `json:"review"`
 	// Blocking are reasons Apply refuses the branch and 3-way modes
 	// without Force.
 	Blocking []string `json:"blocking,omitempty"`
@@ -76,10 +79,20 @@ type PullResult struct {
 	Dropped  []string          `json:"dropped,omitempty"`
 	Remotes  map[string]string `json:"remotes,omitempty"`
 	PulledAt time.Time         `json:"pulled_at"`
+	// AppliedAt is when Apply last put the result somewhere that outlives
+	// the copy: the working tree, a branch, or a patch file of the
+	// operator's choosing.
+	AppliedAt *time.Time `json:"applied_at,omitempty"`
 }
 
 // Empty reports whether the agent changed nothing that would be applied.
 func (p *PullResult) Empty() bool { return len(p.Changes) == 0 }
+
+// handedOver reports whether nothing of the pull is lost when the copy is
+// replaced: it was applied, or it holds no change Apply could land.
+func (p *PullResult) handedOver() bool {
+	return p.AppliedAt != nil || (p.Empty() && p.Effective != "" && len(p.Blocking) == 0)
+}
 
 func (l layout) pullRecord(name string) string { return filepath.Join(l.copyDir(name), "pull.json") }
 
@@ -185,7 +198,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	}
 	pr := &PullResult{
 		Name: rec.Name, Project: rec.Project, Kind: rec.Kind, Baseline: rec.Baseline, Head: rec.Head,
-		SandboxHead: kv["head"], Result: result, PulledAt: time.Now().UTC(),
+		SandboxHead: kv["head"], Result: result, ResultTree: kv["tree"], PulledAt: time.Now().UTC(),
 	}
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit, config: []string{"transfer.fsckObjects=true", "fetch.fsckObjects=true"}}
 	if kv["bundle"] == "none" {
@@ -575,7 +588,10 @@ type ApplyResult struct {
 	Warnings    []string `json:"warnings,omitempty"`
 }
 
-// Apply lands the last pull of a copy-mode sandbox in the project.
+// Apply lands the last pull of a copy-mode sandbox in the project. When
+// the result reached the working tree, a branch or the requested patch
+// file, the pull is marked applied, which lets Refresh replace the copy
+// without Force.
 func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	rec, err := LoadCopy(opts.DataDir, opts.Name)
 	if err != nil {
@@ -585,6 +601,22 @@ func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	res, err := applyPull(ctx, rec, pr, opts)
+	if err != nil {
+		return nil, err
+	}
+	if res.Applied || res.Branch != "" || res.Mode == ApplyPatch {
+		t := time.Now().UTC()
+		pr.AppliedAt = &t
+		lay, _ := newLayout(opts.DataDir)
+		if _, err := savePull(lay, pr); err != nil {
+			return res, fmt.Errorf("workspace: the result was applied, but recording that failed: %w", err)
+		}
+	}
+	return res, nil
+}
+
+func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyOptions) (*ApplyResult, error) {
 	if pr.Result == "" || pr.Effective == "" {
 		return nil, fmt.Errorf("%w: the pull was refused (%s)", ErrBlocked, strings.Join(pr.Blocking, "; "))
 	}
