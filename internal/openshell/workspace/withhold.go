@@ -150,7 +150,10 @@ func withholdHistory(ctx context.Context, sg gitCmd, stage, stageRoot string, wi
 	if err := os.WriteFile(filepath.Join(store, "pack", "pack-"+hash+".promisor"), nil, 0o644); err != nil {
 		return 0, err
 	}
-	for _, kv := range [][2]string{{"core.repositoryformatversion", "1"}, {"extensions.partialClone", withheldRemote}} {
+	// pack.window=0: a thin pack (a push, or the pull's bundle) tries the
+	// prerequisite's blob at a changed path as a delta base, and dies when
+	// that blob was withheld. Without a delta search it never reads it.
+	for _, kv := range [][2]string{{"core.repositoryformatversion", "1"}, {"extensions.partialClone", withheldRemote}, {"pack.window", "0"}} {
 		if err := sg.run(ctx, "config", kv[0], kv[1]); err != nil {
 			return 0, err
 		}
@@ -179,7 +182,13 @@ func restoreWithheldObjects(ctx context.Context, stageRoot, base string) error {
 	if err := os.RemoveAll(partial); err != nil {
 		return err
 	}
-	return gitCmd{dir: filepath.Dir(base), gitDir: base}.run(ctx, "config", "--unset", "extensions.partialClone")
+	g := gitCmd{dir: filepath.Dir(base), gitDir: base}
+	for _, key := range []string{"extensions.partialClone", "pack.window"} {
+		if err := g.run(ctx, "config", "--unset", key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // secretByName reports whether the hold-back name rules (secret

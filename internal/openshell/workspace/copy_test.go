@@ -486,6 +486,20 @@ func TestCopyKeepsHeldBackSecretsOutOfHistory(t *testing.T) {
 	if err != nil || e.git(e.project, "show", res.Branch+":config/server.key") != "marker-v2" {
 		t.Fatalf("branch: %+v %v", res, err)
 	}
+
+	// The agent changes a held-back path after all (it re-enables the
+	// file in its index and commits over it). Its git still packs that
+	// change for a push, and the pull still bundles it (and drops it).
+	remote := filepath.Join(e.root, "remote.git")
+	runGit(t, e.home, e.root, "init", "-q", "--bare", remote)
+	runGit(t, e.home, remote, "fetch", "-q", e.project, "+HEAD:refs/heads/main")
+	fs.agent(remoteRepo, "update-index", "--no-skip-worktree", "config/server.key")
+	fs.write(remoteRepo+"/config/server.key", "agent junk\n")
+	fs.agent(remoteRepo, "commit", "-q", "-am", "overwrite the key")
+	fs.agent(remoteRepo, "push", "-q", remote, "HEAD:refs/heads/agent")
+	if pr := pull(t, e, fs, "c1"); strings.Join(pr.Dropped, ",") != "config/server.key" || changePaths(pr.Changes) != "M:src/app.go" {
+		t.Fatalf("dropped = %v changes = %s", pr.Dropped, changePaths(pr.Changes))
+	}
 }
 
 func TestCopyNoChangesAndUnbornRepo(t *testing.T) {

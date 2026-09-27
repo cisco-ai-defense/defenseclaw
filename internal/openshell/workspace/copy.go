@@ -120,12 +120,15 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
-	Files       int               `json:"files"`
-	Bytes       int64             `json:"bytes"`
-	StagedAt    time.Time         `json:"staged_at"`
-	UploadedAt  *time.Time        `json:"uploaded_at,omitempty"`
-	VerifiedAt  *time.Time        `json:"verified_at,omitempty"`
-	Warnings    []string          `json:"warnings,omitempty"`
+	// Withheld counts the committed blobs left out of the shipped history
+	// (see withholdHistory); the copy is then a partial clone.
+	Withheld   int        `json:"withheld,omitempty"`
+	Files      int        `json:"files"`
+	Bytes      int64      `json:"bytes"`
+	StagedAt   time.Time  `json:"staged_at"`
+	UploadedAt *time.Time `json:"uploaded_at,omitempty"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	Warnings   []string   `json:"warnings,omitempty"`
 	// Replaced is the uploaded copy this record replaced when it was staged
 	// again (Stage with Replace). Until this record is uploaded the sandbox
 	// still holds that copy, so Refresh checks it for unpulled work and
@@ -580,6 +583,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		if err != nil {
 			return err
 		}
+		rec.Withheld = n
 		if n > 0 {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%d committed version(s) of held-back or secret-named files are left out of the copy's history; "+
 				"git commands in the sandbox that need them (git show, git log -p on those paths) fail", n))
@@ -1053,14 +1057,21 @@ func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader)
 
 // remoteGitPrelude is the shell prologue every in-sandbox git script uses:
 // no system or global config, no hooks, no fsmonitor, a fixed identity.
+// A copy with withheld history also gets no delta search, whatever the
+// agent did to its config: the bundle would otherwise die reading a
+// withheld blob as a delta base.
 func remoteGitPrelude(rec *CopyRecord) string {
+	extra := ""
+	if rec.Withheld > 0 {
+		extra = "-c pack.window=0 "
+	}
 	return strings.Join([]string{
 		"set -eu",
 		"export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 LC_ALL=C",
 		"G=" + shellQuote(rec.RemoteGitDir),
 		"W=" + shellQuote(rec.RemoteDir),
 		"D=" + shellQuote(remoteStateDir),
-		`g() { git --git-dir="$G" --work-tree="$W" -c core.hooksPath=/dev/null -c core.fsmonitor=false ` +
+		`g() { git --git-dir="$G" --work-tree="$W" -c core.hooksPath=/dev/null -c core.fsmonitor=false ` + extra +
 			`-c commit.gpgSign=false -c user.name=DefenseClaw -c user.email=defenseclaw@localhost "$@"; }`,
 	}, "\n")
 }
