@@ -564,6 +564,23 @@ func TestProxyOperatorAllowOpensPrivateNetworks(t *testing.T) {
 	}
 }
 
+// The 403 body's hint for a private network follows the sandbox's
+// decider: without unblocking, allow entries the user adds are ignored, so
+// it names the administrator instead of openshell.egress.allow, for an
+// address and for a name refused at dial time alike.
+func TestProxyPrivateNetworkHintWithoutUnblocking(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) { c.decider.NoUnblock = true })
+	h.resolver.set("wiki.example.com", []string{"10.9.9.9"})
+	for _, target := range []string{"10.9.9.9:443", "wiki.example.com:443", "nas.lan:443"} {
+		_, _, resp := h.connect(target, basicAuth(h.cred), nil)
+		b := decodeBlock(t, resp.body)
+		if resp.status != http.StatusForbidden || b.Category != CategoryPrivateNetwork || b.Unblockable ||
+			strings.Contains(b.HowToUnblock, "openshell.egress.allow") || !strings.Contains(b.HowToUnblock, "administrator") {
+			t.Errorf("CONNECT %s = %d %+v", target, resp.status, b)
+		}
+	}
+}
+
 func TestProxyRefusalMatrix(t *testing.T) {
 	h := newHarness(t, nil)
 	tests := []struct {

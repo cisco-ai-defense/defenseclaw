@@ -377,6 +377,31 @@ func TestPrivateNetworkHintMatchesConfig(t *testing.T) {
 	}
 }
 
+// With openshell.admin.allow_unblock: false the sandbox policy drops the
+// allow entries the user adds, so the private-network hint must not send
+// them to openshell.egress.allow: only the administrator can open the
+// destination.
+func TestPrivateNetworkHintWithoutUnblocking(t *testing.T) {
+	d := mustDecider(t, DeciderOptions{NoUnblock: true})
+	d.local = fixedLocalAddrs(ownV4, ownV6)
+	for _, host := range []string{"10.9.9.9", "wiki.corp"} {
+		dec := d.Decide(testPrincipal, host, 443)
+		if dec.Category != CategoryPrivateNetwork || !dec.NoUnblock {
+			t.Fatalf("Decide(%s) = %+v", host, dec)
+		}
+		hint := DefaultUnblockHint(testPrincipal, dec)
+		if strings.Contains(hint, "openshell.egress.allow") || strings.Contains(hint, "sandbox unblock") ||
+			!strings.Contains(hint, "administrator") || !strings.Contains(hint, "openshell.admin.egress_allow_only") {
+			t.Errorf("Decide(%s) hint = %q", host, hint)
+		}
+	}
+	open := mustDecider(t, DeciderOptions{})
+	if dec := open.Decide(testPrincipal, "wiki.corp", 443); dec.NoUnblock ||
+		!strings.Contains(DefaultUnblockHint(testPrincipal, dec), "openshell.egress.allow") {
+		t.Errorf("hint with unblocking = %q", DefaultUnblockHint(testPrincipal, dec))
+	}
+}
+
 func TestDecideAllowlistMode(t *testing.T) {
 	d := mustDecider(t, DeciderOptions{Mode: ModeAllowlist})
 	got := checkDecision(t, d, testPrincipal, "registry.npmjs.org", 443, decisionWant{allowed: true, category: CategoryPackageRegistry, source: SourceFeed})

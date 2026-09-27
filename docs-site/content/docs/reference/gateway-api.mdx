@@ -671,7 +671,10 @@ list, then the feed, then the profile's default. In every mode:
   and cloud metadata addresses.
 - Private networks are reachable only when an allow entry names them: an
   `openshell.egress.allow` entry, the pack's `egress.allow`, or
-  `openshell.admin.egress_allow_only`. An unblock never opens them.
+  `openshell.admin.egress_allow_only`. An unblock never opens them. With
+  `openshell.admin.allow_unblock: false`, your own entries and those of a
+  custom pack you picked are ignored, so only `egress_allow_only` or a
+  required pack's list can open one; the `how_to_unblock` hint says so.
 - Under `open`, a destination given as an IP address is blocked, because it
   would sidestep the name-based feed. An unblock, or an allow entry that
   names it, lifts the block.

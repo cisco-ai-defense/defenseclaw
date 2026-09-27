@@ -105,6 +105,12 @@ func DefaultUnblockHint(p Principal, d Decision) string {
 		return "This cannot be unblocked: sandboxes never reach this machine, link-local or cloud metadata addresses. " +
 			"If the user wants the sandbox to use a service on this machine, they can relaunch it with " +
 			"`defenseclaw sandbox run --host-port PORT`."
+	case d.Category == CategoryPrivateNetwork && d.NoUnblock:
+		// openshell.admin.allow_unblock: false drops the allow entries the
+		// user adds, so openshell.egress.allow would change nothing.
+		return "Tell the user DefenseClaw blocked this private-network destination. Their organization's DefenseClaw policy " +
+			"ignores allow entries they add, so only their administrator can open it, by adding the exact host name or the IP " +
+			"address to openshell.admin.egress_allow_only or to a required sandbox pack. Do not try to reach it another way."
 	case d.Category == CategoryPrivateNetwork:
 		return "Tell the user DefenseClaw blocked this private-network destination. `defenseclaw sandbox unblock` does not " +
 			"open private networks; the operator can, by adding the exact host name or the IP address to " +

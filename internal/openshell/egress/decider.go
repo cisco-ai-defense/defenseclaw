@@ -113,6 +113,12 @@ type Decision struct {
 	Entry       string
 	// Unblockable reports whether an unblock decision can lift the block.
 	Unblockable bool
+	// NoUnblock reports a decider that ignores unblock decisions
+	// (DeciderOptions.NoUnblock, openshell.admin.allow_unblock: false). The
+	// sandbox policy then drops the user's own allow entries too, so only
+	// the administrator can open what the decider refuses
+	// (DefaultUnblockHint).
+	NoUnblock bool
 }
 
 // Unblock lifts a block for one sandbox, or for every sandbox when
@@ -189,7 +195,8 @@ type DeciderOptions struct {
 	//
 	// openshell.egress.allow and sandbox packs accept names, "*." wildcards
 	// and single IP addresses, not CIDRs, so DefaultUnblockHint points
-	// operators at names and IP addresses only.
+	// operators at names and IP addresses only (and, with NoUnblock, which
+	// drops the user's own entries, at the administrator).
 	Block []string
 	Allow []string
 	// NoUnblock is openshell.admin.allow_unblock: false. Unblock decisions
@@ -411,9 +418,10 @@ func (d *Decider) decide(p Principal, host string, port int, checkPort bool) Dec
 	}
 	h, addr, err := normalizeHost(host)
 	if err != nil {
-		return blocked(Decision{Host: sanitizeHost(host), Port: port, Mode: mode}, CategoryInvalidDestination, SourceGuard, "")
+		invalid := Decision{Host: sanitizeHost(host), Port: port, Mode: mode, NoUnblock: d.noUnblock}
+		return blocked(invalid, CategoryInvalidDestination, SourceGuard, "")
 	}
-	dec := Decision{Host: h, Port: port, Mode: mode}
+	dec := Decision{Host: h, Port: port, Mode: mode, NoUnblock: d.noUnblock}
 	if checkPort && (port < 1 || port > 65535) {
 		return blocked(dec, CategoryInvalidDestination, SourceGuard, "")
 	}
