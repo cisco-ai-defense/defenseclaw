@@ -393,13 +393,14 @@ openshell:
   pack_dir: ~/.defenseclaw/policies/sandbox   # custom packs live at <pack_dir>/<name>/pack.yaml
   profile: ""                # "" inherits the pack; open | balanced | strict
   yolo: null                 # null inherits the pack (skip-permissions mode)
-  ingress_port: 0            # 0 → gateway.api_port + 1
-  egress_port: 0             # 0 → gateway.api_port + 2
+  ingress_port: 0            # 0 → gateway.api_port + 1; must differ from egress_port,
+  egress_port: 0             # 0 → gateway.api_port + 2; api_port and guardrail.port
   workdir: {mode: "", masks: [], unmask: [], max_upload_mb: 0, git_depth: 200, on_exit: ask}
   egress: {block: [], allow: [], ports: [], large_upload_mb: 0, feed: ""}
   harnesses: []              # also served rule packs and hook config
   admin:                     # administrator constraints; every key is optional
-    required_pack: ""
+    required_pack: ""        # its profile, yolo, workdir mode, MCP import, feeds and ports are floors
+    required_pack_digest: "" # sha256:<hex> pins the required pack's content
     min_profile: ""          # strict > balanced > open
     allow_yolo: null         # null = no constraint; false forbids
     allow_mount: null
@@ -409,7 +410,7 @@ openshell:
     allowed_harnesses: []
     egress_block: []         # always blocked, never unblockable
     egress_allow_only: []    # forces an allowlist profile
-    require_copy_for: []     # project path globs that must run in copy mode
+    require_copy_for: []     # project path globs that must run in copy mode (parents too)
     max_resources: {cpu: "", memory: ""}
     locked: []               # keys run flags may not override: pack, profile, yolo,
                              # workdir.mode, workdir.unmask, mcp.import, mcp.host_ports, resources
@@ -423,9 +424,26 @@ copy mode, harness prompts kept). A custom pack is one strict YAML file with
 the same sections; unknown keys, duplicate keys, anchors, symbolic links,
 world-writable files, and built-in names are refused.
 
-`required_pack` replaces only the pack layer: the keys above and run flags
-still apply on top of it. To keep them from loosening the required pack, also
-set `min_profile`, the `allow_*` switches, and `locked`.
+Raising the profile above a pack's own network mode (for example
+`--profile balanced` on the `open` pack) brings in the `balanced` pack's
+curated allowlist. Allow entries that cover every host or a whole top-level
+domain (`*`, `*.com`) are ignored, and custom packs may not contain them.
+
+`required_pack` pins the pack and makes its posture a floor: the keys above
+and run flags may tighten its profile, skip-permissions default, workspace
+mode, MCP import, blocklist feeds and proxy ports, but every attempt to loosen
+them is refused. `required_pack_digest` pins the pack's content (the digest
+`defenseclaw sandbox pack show` reports). In a `managed_enterprise` install a
+custom required pack must be a file that root owns and no other user can
+modify, together with every directory above it (for example an absolute path
+under an administrator-owned directory; the default `pack_dir` in the data
+directory usually does not qualify).
+
+`require_copy_for` also covers mounting a folder above a listed project, a
+missing project folder, and differently cased spellings of the path. With
+`allow_unblock: false`, nothing exempts a destination from the blocklist feed,
+allow entries from a custom pack you chose are ignored, and a one-time approval
+cannot reach a blocklisted, feed-listed or private-network destination.
 
 Every loosening that `openshell.admin` refuses is reported as "blocked by your
 organization's DefenseClaw policy: <key>", and the same constraints gate
