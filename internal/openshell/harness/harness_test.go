@@ -435,3 +435,144 @@ func TestProbeVersionPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestBypassArgs(t *testing.T) {
+	cases := []struct {
+		name          string
+		spec          *Spec
+		args          []string
+		kept, dropped []string
+	}{
+		{"claude flags", ClaudeCode,
+			[]string{"--model", "opus", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "-p", "x"},
+			[]string{"--model", "opus", "-p", "x"}, []string{"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"}},
+		{"claude permission mode", ClaudeCode,
+			[]string{"--permission-mode", "bypassPermissions", "--permission-mode=bypassPermissions", "--permission-mode", "plan"},
+			[]string{"--permission-mode", "plan"}, []string{"--permission-mode", "bypassPermissions", "--permission-mode=bypassPermissions"}},
+		{"claude after double dash", ClaudeCode,
+			[]string{"--", "--dangerously-skip-permissions"}, []string{"--", "--dangerously-skip-permissions"}, nil},
+		{"claude inline value on a bare flag", ClaudeCode,
+			[]string{"--dangerously-skip-permissions=true"}, []string{"--dangerously-skip-permissions=true"}, nil},
+		{"claude trailing valued flag", ClaudeCode,
+			[]string{"--permission-mode"}, []string{"--permission-mode"}, nil},
+		{"codex flags", Codex,
+			[]string{"--dangerously-bypass-approvals-and-sandbox", "--yolo", "-m", "gpt"},
+			[]string{"-m", "gpt"}, []string{"--dangerously-bypass-approvals-and-sandbox", "--yolo"}},
+		{"codex approval", Codex,
+			[]string{"-a", "never", "--ask-for-approval=never", "-a", "on-request", "-c", `approval_policy="never"`, "--config", "approval_policy = 'never'", "-c", `approval_policy="untrusted"`, "-c", `model="x"`},
+			[]string{"-a", "on-request", "-c", `approval_policy="untrusted"`, "-c", `model="x"`},
+			[]string{"-a", "never", "--ask-for-approval=never", "-c", `approval_policy="never"`, "--config", "approval_policy = 'never'"}},
+		{"codex keeps claude flags", Codex,
+			[]string{"--dangerously-skip-permissions"}, []string{"--dangerously-skip-permissions"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kept, dropped := tc.spec.BypassArgs(tc.args)
+			if !reflect.DeepEqual(kept, tc.kept) || !reflect.DeepEqual(dropped, tc.dropped) {
+				t.Fatalf("kept %q dropped %q, want %q / %q", kept, dropped, tc.kept, tc.dropped)
+			}
+		})
+	}
+	// Safe launches drop them; yolo launches pass everything through.
+	safe, err := ClaudeCode.LaunchArgv(LaunchOptions{Mode: Interactive, Args: []string{"--dangerously-skip-permissions", "--model", "opus"}})
+	if err != nil || !reflect.DeepEqual(safe, []string{ClaudeCodeLauncherPath, "--model", "opus"}) {
+		t.Fatalf("safe argv = %q, %v", safe, err)
+	}
+	yolo, err := Codex.LaunchArgv(LaunchOptions{Mode: Interactive, Yolo: true, Args: []string{"-a", "never"}})
+	if err != nil || !reflect.DeepEqual(yolo, []string{CodexLauncherPath, "--dangerously-bypass-approvals-and-sandbox", "-a", "never"}) {
+		t.Fatalf("yolo argv = %q, %v", yolo, err)
+	}
+	safeCodex, err := Codex.LaunchArgv(LaunchOptions{Mode: Headless, Prompt: "p", Args: []string{"--dangerously-bypass-approvals-and-sandbox"}})
+	if err != nil || strings.Contains(strings.Join(safeCodex, " "), "bypass") {
+		t.Fatalf("safe codex argv = %q, %v", safeCodex, err)
+	}
+}
+
+func TestCodexProfilesPinTheirProvider(t *testing.T) {
+	openai, err := Codex.CredentialProfile(profiles.OpenAIID, "")
+	if err != nil || openai.ModelProvider == nil || openai.ModelProvider.ID != connector.SandboxModelProviderOpenAI ||
+		openai.ModelProvider.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("openai profile = %+v, %v", openai.ModelProvider, err)
+	}
+	mantle, err := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "eu-west-1")
+	if err != nil || mantle.ModelProvider == nil || mantle.ModelProvider.BaseURL != "https://bedrock-mantle.eu-west-1.api.aws/v1" {
+		t.Fatalf("mantle profile = %+v, %v", mantle.ModelProvider, err)
+	}
+	// The session flags and the managed pin name the same provider.
+	joined := strings.Join(mantle.LaunchArgs, " ")
+	for _, want := range []string{`model_provider="mantle"`, `model_providers.mantle.base_url="` + mantle.ModelProvider.BaseURL + `"`, `model_providers.mantle.env_key="BEDROCK_MANTLE_API_KEY"`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("mantle launch args %q lack %s", joined, want)
+		}
+	}
+	// The base profile table is not mutated by region resolution.
+	if again, _ := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "us-west-2"); again.ModelProvider.BaseURL != "https://bedrock-mantle.us-west-2.api.aws/v1" {
+		t.Fatalf("mantle base URL = %s", again.ModelProvider.BaseURL)
+	}
+	for _, cp := range ClaudeCode.CredentialProfiles("") {
+		if cp.ModelProvider != nil {
+			t.Fatalf("Claude Code profile %s pins a Codex provider", cp.ProfileID)
+		}
+	}
+}
+
+// TestClaudeLauncherMergesRunMCPServers pins that the launcher adds the
+// per-run imported servers to the user-scope registry when the manager
+// mounted them, and leaves ~/.claude.json alone when it did not.
+func TestClaudeLauncherMergesRunMCPServers(t *testing.T) {
+	if _, err := exec.LookPath("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	launcher, _ := launcherHarness(t, ClaudeCode, "/usr/local/bin/claude")
+	dir := t.TempDir()
+	servers := filepath.Join(dir, "servers.json")
+	script, err := os.ReadFile(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), connector.ClaudeCodeSandboxRunMCPServersPath) {
+		t.Fatal("the launcher does not read the run MCP servers file")
+	}
+	if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(script), connector.ClaudeCodeSandboxRunMCPServersPath, servers)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".claude.json")
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	launch := func() map[string]interface{} {
+		t.Helper()
+		cmd := exec.Command(launcher, "-p", "hi")
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("launcher: %v\n%s", err, out)
+		}
+		raw, err := os.ReadFile(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("%v: %s", err, raw)
+		}
+		return doc
+	}
+	write(cfg, `{"hasCompletedOnboarding":true,"mcpServers":{"mine":{"command":"a"},"github":{"command":"old"}}}`)
+	if doc := launch(); doc["mcpServers"].(map[string]interface{})["github"].(map[string]interface{})["command"] != "old" {
+		t.Fatalf("no run file, yet the registry changed: %v", doc)
+	}
+	write(servers, `{"mcpServers":{"github":{"type":"stdio","command":"npx","args":["srv"]}}}`)
+	doc := launch()
+	reg := doc["mcpServers"].(map[string]interface{})
+	if reg["mine"] == nil || reg["github"].(map[string]interface{})["command"] != "npx" || doc["hasCompletedOnboarding"] != true {
+		t.Fatalf("merged registry = %v", doc)
+	}
+	write(servers, `not json`)
+	if doc := launch(); doc["mcpServers"].(map[string]interface{})["github"].(map[string]interface{})["command"] != "npx" {
+		t.Fatalf("a malformed run file changed the registry: %v", doc)
+	}
+}

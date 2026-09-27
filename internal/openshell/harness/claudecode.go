@@ -18,6 +18,7 @@ package harness
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -74,6 +75,11 @@ esac`,
 		}}, nil
 	},
 	launcher: claudeCodeLauncher,
+	bypassFlags: []bypassFlag{
+		{name: "--dangerously-skip-permissions"},
+		{name: "--allow-dangerously-skip-permissions"},
+		{name: "--permission-mode", value: func(v string) bool { return strings.TrimSpace(v) == "bypassPermissions" }},
+	},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{ClaudeCodeLauncherPath}
 		if opts.Yolo {
@@ -138,6 +144,25 @@ if [ -n "$key" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ -w "$cfg" ] && [ -x /u
     if /usr/bin/jq --arg s "$suffix" \
       '.customApiKeyResponses.approved = (((.customApiKeyResponses.approved // []) + [$s]) | unique)
        | .customApiKeyResponses.rejected = (.customApiKeyResponses.rejected // [])' \
+      "$cfg" >"$tmp" 2>/dev/null; then
+      /bin/mv -f "$tmp" "$cfg"
+    else
+      /bin/rm -f "$tmp"
+    fi
+  fi
+fi
+
+# Imported MCP servers when the run lets the project's own servers start too
+# (pack mcp.project_servers: allow): the sandbox manager mounts them
+# read-only and they join the user-scope registry on every start. With
+# project servers blocked it mounts /etc/claude-code/managed-mcp.json
+# instead, which Claude reads exclusively.
+servers=` + "\"" + connector.ClaudeCodeSandboxRunMCPServersPath + "\"" + `
+if [ -f "$servers" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ -w "$cfg" ] && [ -x /usr/bin/jq ]; then
+  tmp="$(/usr/bin/mktemp "$cfg.XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    if /usr/bin/jq --slurpfile run "$servers" \
+      '.mcpServers = ((.mcpServers // {}) + ($run[0].mcpServers // {}))' \
       "$cfg" >"$tmp" 2>/dev/null; then
       /bin/mv -f "$tmp" "$cfg"
     else

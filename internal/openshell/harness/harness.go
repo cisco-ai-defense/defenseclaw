@@ -70,7 +70,9 @@ type LaunchOptions struct {
 	CredentialProfile string
 	// BedrockRegion parameterizes the Bedrock Mantle profiles.
 	BedrockRegion string
-	// Args are passed through after DefenseClaw's flags.
+	// Args are passed through after DefenseClaw's flags. Without Yolo the
+	// harness's bypass flags are dropped from them (BypassArgs); the
+	// sandbox's managed configuration refuses bypass mode either way.
 	Args []string
 }
 
@@ -120,7 +122,11 @@ type CredentialProfile struct {
 	Env map[string]string
 	// LaunchArgs are harness flags the provider needs.
 	LaunchArgs []string
-	Note       string
+	// ModelProvider is the Codex model provider the profile selects; the
+	// sandbox manager pins it in the per-run managed configuration. Claude
+	// Code profiles select their provider through Env instead.
+	ModelProvider *connector.SandboxModelProvider
+	Note          string
 }
 
 // ProbeSpec tells the image probe how to identify the installed harness.
@@ -152,6 +158,7 @@ type Spec struct {
 	install            func(version string) ([]InstallStep, error)
 	launcher           string
 	launchArgv         func(LaunchOptions, CredentialProfile) ([]string, error)
+	bypassFlags        []bypassFlag
 	credentialProfiles []CredentialProfile
 	customization      []CustomizationPath
 	preseedRefresh     []string
@@ -243,7 +250,69 @@ func (s *Spec) LaunchArgv(opts LaunchOptions) ([]string, error) {
 			return nil, err
 		}
 	}
+	if !opts.Yolo {
+		opts.Args, _ = s.BypassArgs(opts.Args)
+	}
 	return s.launchArgv(opts, cp)
+}
+
+// bypassFlag is a harness flag that turns its permission prompts off. When
+// value is set the flag counts only with a matching value, given either as
+// the next argument or after "=".
+type bypassFlag struct {
+	name  string
+	value func(string) bool
+}
+
+// BypassArgs splits passthrough args into the ones a safe (non-yolo) run
+// keeps and the bypass flags it drops, with their values: Claude Code's
+// --dangerously-skip-permissions, --allow-dangerously-skip-permissions and
+// --permission-mode bypassPermissions; Codex's
+// --dangerously-bypass-approvals-and-sandbox, --ask-for-approval never and
+// -c approval_policy="never". Arguments after "--" are never flags. The
+// filter spares the user a confusing refusal; the enforcement is the
+// sandbox's managed configuration, which refuses bypass mode whatever the
+// harness is asked.
+func (s *Spec) BypassArgs(args []string) (kept, dropped []string) {
+	kept = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			kept = append(kept, args[i:]...)
+			break
+		}
+		name, inline, hasInline := strings.Cut(arg, "=")
+		matched := false
+		for _, f := range s.bypassFlags {
+			if name != f.name {
+				continue
+			}
+			switch {
+			case f.value == nil && !hasInline:
+				dropped, matched = append(dropped, arg), true
+			case f.value != nil && hasInline && f.value(inline):
+				dropped, matched = append(dropped, arg), true
+			case f.value != nil && !hasInline && i+1 < len(args) && f.value(args[i+1]):
+				dropped, matched = append(dropped, arg, args[i+1]), true
+				i++
+			}
+			break
+		}
+		if !matched {
+			kept = append(kept, arg)
+		}
+	}
+	return kept, dropped
+}
+
+// tomlStringIs reports whether a -c override's value (a TOML literal, or a
+// bare string Codex accepts) is want.
+func tomlStringIs(value, want string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+		value = value[1 : len(value)-1]
+	}
+	return value == want
 }
 
 // Env returns the environment for `openshell sandbox create --env`: the
@@ -343,6 +412,11 @@ func resolveCredentialProfile(cp CredentialProfile, region string) CredentialPro
 	}
 	host := profiles.BedrockMantleHost(region)
 	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Env: map[string]string{}}
+	if cp.ModelProvider != nil {
+		p := *cp.ModelProvider
+		p.BaseURL = strings.ReplaceAll(p.BaseURL, bedrockHostToken, host)
+		out.ModelProvider = &p
+	}
 	for _, h := range cp.Hosts {
 		out.Hosts = append(out.Hosts, strings.ReplaceAll(h, bedrockHostToken, host))
 	}

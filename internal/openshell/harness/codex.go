@@ -18,6 +18,7 @@ package harness
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -54,6 +55,14 @@ var Codex = register(&Spec{
 		}}, nil
 	},
 	launcher: codexLauncher,
+	bypassFlags: []bypassFlag{
+		{name: "--dangerously-bypass-approvals-and-sandbox"},
+		{name: "--yolo"},
+		{name: "-a", value: func(v string) bool { return tomlStringIs(v, "never") }},
+		{name: "--ask-for-approval", value: func(v string) bool { return tomlStringIs(v, "never") }},
+		{name: "-c", value: codexApprovalNever},
+		{name: "--config", value: codexApprovalNever},
+	},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{CodexLauncherPath}
 		if opts.Mode == Headless {
@@ -74,21 +83,21 @@ var Codex = register(&Spec{
 		return argv, nil
 	},
 	credentialProfiles: []CredentialProfile{
-		{ProfileID: profiles.OpenAIID, Hosts: []string{"api.openai.com"}, Note: "OPENAI_API_KEY sent as a bearer; the launcher exports it as CODEX_API_KEY for codex exec"},
+		{
+			ProfileID: profiles.OpenAIID, Hosts: []string{"api.openai.com"},
+			ModelProvider: &connector.SandboxModelProvider{ID: connector.SandboxModelProviderOpenAI, BaseURL: "https://api.openai.com/v1"},
+			Note:          "OPENAI_API_KEY sent as a bearer; the launcher exports it as CODEX_API_KEY for codex exec",
+		},
 		{
 			ProfileID: profiles.CodexBedrockMantleID,
 			Hosts:     []string{bedrockHostToken},
-			LaunchArgs: []string{
-				"-c", `model_provider="mantle"`,
-				"-c", `model_providers.mantle.name="mantle"`,
-				"-c", `model_providers.mantle.base_url="https://` + bedrockHostToken + `/v1"`,
-				"-c", `model_providers.mantle.env_key="BEDROCK_MANTLE_API_KEY"`,
-				"-c", `model_providers.mantle.wire_api="responses"`,
+			LaunchArgs: append(codexProviderArgs(codexMantleProvider),
 				// Mantle's OpenAI-compatible models do not serve these tools.
 				"--disable", "multi_agent",
 				"-c", `web_search="disabled"`,
-			},
-			Note: "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route",
+			),
+			ModelProvider: &codexMantleProvider,
+			Note:          "Bedrock API key sent as a bearer to a Codex custom provider on the Mantle Responses route",
 		},
 	},
 	customization: []CustomizationPath{
@@ -106,6 +115,31 @@ var Codex = register(&Spec{
 
 // CodexLauncherPath is the in-image Codex launcher.
 const CodexLauncherPath = LauncherDir + "/codex-launch"
+
+// codexMantleProvider is the Codex custom provider on the Bedrock Mantle
+// Responses route (the host is resolved per region).
+var codexMantleProvider = connector.SandboxModelProvider{
+	ID: "mantle", Name: "mantle", BaseURL: "https://" + bedrockHostToken + "/v1",
+	EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses",
+}
+
+// codexProviderArgs selects a custom provider with session -c flags.
+func codexProviderArgs(p connector.SandboxModelProvider) []string {
+	return []string{
+		"-c", `model_provider="` + p.ID + `"`,
+		"-c", `model_providers.` + p.ID + `.name="` + p.Name + `"`,
+		"-c", `model_providers.` + p.ID + `.base_url="` + p.BaseURL + `"`,
+		"-c", `model_providers.` + p.ID + `.env_key="` + p.EnvKey + `"`,
+		"-c", `model_providers.` + p.ID + `.wire_api="` + p.WireAPI + `"`,
+	}
+}
+
+// codexApprovalNever matches a -c override that sets approval_policy to
+// never.
+func codexApprovalNever(v string) bool {
+	key, value, ok := strings.Cut(v, "=")
+	return ok && strings.TrimSpace(key) == "approval_policy" && tomlStringIs(value, "never")
+}
 
 const codexLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v2
