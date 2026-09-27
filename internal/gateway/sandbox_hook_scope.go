@@ -83,6 +83,19 @@ func sandboxHookForConnector(ctx context.Context, connectorName string) bool {
 	return ok && sandboxauth.CanonicalConnector(connectorName) == binding.Connector
 }
 
+// sandboxHookMode is the verdict mode of a hook request: hostMode for host
+// traffic, and always "action" for a request authenticated with a sandbox
+// binding minted for connectorName. DefenseClaw launched that harness
+// itself, usually with its own permission prompts off, so the host's
+// guardrail mode (observe by default) must not turn the sandbox's blocks
+// into warnings: its hooks are the only gate on every tool call.
+func sandboxHookMode(ctx context.Context, connectorName, hostMode string) string {
+	if sandboxHookForConnector(ctx, connectorName) {
+		return "action"
+	}
+	return hostMode
+}
+
 // hookCWDForContext resolves a payload working directory: unchanged host
 // behaviour for host requests, FSView translation for sandbox requests.
 func hookCWDForContext(ctx context.Context, cwd string) string {

@@ -1188,7 +1188,7 @@ func (a *APIServer) safeEvaluateHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = a.agentHookMode(connectorName)
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1212,7 +1212,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = a.agentHookMode(connectorName)
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1853,11 +1853,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
-	mode := a.agentHookMode(req.ConnectorName)
-	// A hook authenticated through a sandbox binding is always evaluated:
-	// DefenseClaw launched that harness itself, usually with its own
-	// permission prompts off, and the host's connector selection says
-	// nothing about what runs inside a sandbox.
+	// A hook authenticated through a sandbox binding is always evaluated and
+	// enforced: DefenseClaw launched that harness itself, usually with its
+	// own permission prompts off, and the host's connector selection and
+	// guardrail mode say nothing about what runs inside a sandbox.
+	mode := sandboxHookMode(ctx, req.ConnectorName, a.agentHookMode(req.ConnectorName))
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}

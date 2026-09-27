@@ -138,6 +138,43 @@ func TestSandboxHooksAreEvaluatedWithoutAHostConnector(t *testing.T) {
 	}
 }
 
+// TestSandboxHooksEnforceInObserveMode pins that a sandbox hook's block
+// stays a block when the host's guardrail runs in observe mode (the
+// default): observe turns host blocks into warnings, never the sandbox's.
+func TestSandboxHooksEnforceInObserveMode(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "claudecode" // guardrail.mode unset: observe
+	api := &APIServer{scannerCfg: cfg}
+	// The prompt TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks uses:
+	// rule TRUST-JAILBREAK blocks it.
+	req := claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: "jailbreak mode activated"}
+	host := api.evaluateClaudeCodeHook(context.Background(), req)
+	if host.RawAction != "block" || host.Action != "allow" || !host.WouldBlock || host.Mode != "observe" {
+		t.Fatalf("host hook in observe mode = %+v, want allow with would_block", host)
+	}
+	binding := sandboxauth.Binding{
+		ID: "sb_0000000000000000000000000000000a", Connector: "claudecode", SandboxName: "dc-claude-app",
+		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+	}
+	got := api.evaluateClaudeCodeHook(sandboxCtx(binding), req)
+	if got.Action != "block" || got.Mode != "action" {
+		t.Fatalf("sandbox hook in observe mode = %+v, want an enforced block", got)
+	}
+	for _, name := range []string{"codex", "opencode"} {
+		b := binding
+		b.Connector = name
+		if mode := sandboxHookMode(sandboxCtx(b), name, "observe"); mode != "action" {
+			t.Fatalf("%s sandbox mode = %q", name, mode)
+		}
+		if mode := sandboxHookMode(sandboxCtx(binding), name, "observe"); mode != "observe" {
+			t.Fatalf("a claudecode binding changed the %s mode to %q", name, mode)
+		}
+	}
+	if mode := sandboxHookMode(context.Background(), "claudecode", "observe"); mode != "observe" {
+		t.Fatalf("host mode = %q", mode)
+	}
+}
+
 func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
 	dataDir := t.TempDir()
 	// The host has its own, different Codex install recorded.
