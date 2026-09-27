@@ -54,10 +54,11 @@ Inserting an inspection step inside the agent process means every agent has to g
 DefenseClaw judges what an agent does; it does not isolate the agent. On the
 host, the agent keeps your user's access to files and the network. Support
 for running Claude Code and Codex inside an NVIDIA OpenShell sandbox is in
-development: OpenShell supplies the isolation boundary, and DefenseClaw keeps
-checking every tool call through its hook ingress and filters web traffic
-through its egress proxy. No command launches a sandbox yet; the
-[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+development. In that design, OpenShell supplies the isolation boundary, and
+DefenseClaw keeps checking every tool call through its hook ingress and
+filters web traffic through its egress proxy. No command launches a sandbox
+yet. The [sandbox guide](/docs/setup/sandbox) will cover the sandbox commands
+once they ship; today it covers legacy cleanup.
 
 ## What DefenseClaw is not
 
