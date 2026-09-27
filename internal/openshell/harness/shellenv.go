@@ -32,9 +32,9 @@ import (
 //
 //   - every harness launcher runs it first (launcherPreamble), so the
 //     harness and every tool it runs use the proxy;
-//   - SandboxProfilePath runs it for login shells: `sandbox connect` (the
-//     OpenShell SSH shell) and `openshell sandbox exec` without
-//     --no-login-shell;
+//   - SandboxProfilePath runs it for login shells: the `sandbox connect`
+//     shell and `openshell sandbox exec` without --no-login-shell (which
+//     OpenShell runs as `bash -lc`);
 //   - SandboxEnvPath runs it for `defenseclaw-gateway sandbox exec`, which
 //     OpenShell starts without a login shell.
 //
@@ -43,14 +43,13 @@ import (
 // in a connect or exec shell gets the launcher's protections. A user
 // start-up file can reset PATH after the profile ran (the community base
 // image's ~/.bashrc does), so for bash the profile also defines, and
-// exports, a function of the harness command's name that runs the shim. A
-// process
-// started by absolute path, from an emptied environment (env -i) or through
-// `openshell sandbox exec --no-login-shell` directly gets neither, and a
-// harness run nested inside a tool call inherits the proxy but not the
-// launcher's per-start checks. The proxy is a convenience path, not the
-// boundary: OpenShell refuses direct egress the policy does not allow either
-// way.
+// exports, a function of the harness command's name that runs the shim.
+// A process started by absolute path, from an emptied environment (env -i)
+// or through `openshell sandbox exec --no-login-shell` directly gets
+// neither, and a harness run nested inside a tool call inherits the proxy
+// but not the launcher's per-start checks. The proxy is a convenience path,
+// not the boundary: OpenShell refuses direct egress the policy does not
+// allow either way.
 const (
 	// SandboxProfilePath is the root-owned login-shell profile fragment
 	// /etc/profile sources.
