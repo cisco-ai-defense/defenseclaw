@@ -44,6 +44,13 @@ import (
 // image against a mock LLM (supplied by the caller) and a stand-in hook
 // ingress it serves itself on the image's baked port.
 
+// ErrHooksNotFired marks a hook-fire probe that ran the harness to completion
+// and proved the image does not enforce: a required hook never fired,
+// arrived unauthenticated or without an idempotency key, or a blocked tool
+// call still ran. Other probe errors (docker, sink or option failures) say
+// nothing about the image.
+var ErrHooksNotFired = errors.New("hooks did not fire as required")
+
 // DefaultHookFireSinkHost keeps 127.0.0.1:<ingress> free for a running
 // DefenseClaw: all of 127.0.0.0/8 is loopback on Linux.
 const DefaultHookFireSinkHost = "127.0.0.2"
@@ -109,16 +116,71 @@ type HookFireResult struct {
 	Runs []HookFireRun `json:"runs"`
 }
 
+// VerifyHooks runs the hook-fire probe against the recorded image of c and
+// persists the verdict under the store lock: HookFireVerified is set when
+// every required hook fired, and cleared when the probe proves the image
+// does not enforce (ErrHooksNotFired). Store.Current selects only verified
+// images. The probe runs against the recorded image ID, and the verdict is
+// stored only while the record still names that image, so a concurrent
+// rebuild is never marked verified by a probe of its predecessor. A probe
+// that could not run leaves the record unchanged.
+func (b *Builder) VerifyHooks(ctx context.Context, c *Context, opts HookFireOptions) (Record, HookFireResult, error) {
+	rec, ok, err := b.Store.Get(c.Tag)
+	if err != nil {
+		return Record{}, HookFireResult{}, err
+	}
+	if !ok || rec.ContentHash != c.ContentHash {
+		return Record{}, HookFireResult{}, fmt.Errorf("openshell image: %s has no build record for content %s; build it first", c.Tag, c.ContentHash)
+	}
+	id, err := b.imageID(ctx, c.Tag)
+	if err != nil {
+		return rec, HookFireResult{}, err
+	}
+	if id != rec.ImageID {
+		return rec, HookFireResult{}, fmt.Errorf("openshell image: %s now names %s, not the recorded %s; rebuild it", c.Tag, id, rec.ImageID)
+	}
+	res, probeErr := b.hookFireProbe(ctx, c, rec.ImageID, opts)
+	if probeErr != nil && !errors.Is(probeErr, ErrHooksNotFired) {
+		return rec, res, probeErr
+	}
+	verified := probeErr == nil
+	verifiedAt := b.now().UTC()
+	updated, err := b.Store.update(c.Tag, func(r *Record) error {
+		if r.ImageID != rec.ImageID || r.ContentHash != rec.ContentHash {
+			return fmt.Errorf("openshell image: %s was rebuilt while its hooks were probed; verify the new image", c.Tag)
+		}
+		r.HookFireVerified = verified
+		r.HookFireVerifiedAt = time.Time{}
+		if verified {
+			r.HookFireVerifiedAt = verifiedAt
+		}
+		return nil
+	})
+	if err != nil {
+		return rec, res, errors.Join(probeErr, err)
+	}
+	return updated, res, probeErr
+}
+
 // HookFireProbe runs the image's harness against the caller's mock LLM and
 // verifies that every required hook fires with the sandbox token and an
-// idempotency key, and that a blocked tool call has no side effect.
+// idempotency key, and that a blocked tool call has no side effect. It only
+// reports: VerifyHooks is the path that records the verdict.
 func (b *Builder) HookFireProbe(ctx context.Context, c *Context, opts HookFireOptions) (HookFireResult, error) {
+	return b.hookFireProbe(ctx, c, c.Tag, opts)
+}
+
+// hookFireProbe runs the probe against image ref (a tag or image ID).
+func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opts HookFireOptions) (HookFireResult, error) {
 	required, ok := requiredHookEvents[c.Spec.Harness.Name]
 	if !ok {
 		return HookFireResult{}, fmt.Errorf("openshell image: no hook-fire contract for %s", c.Spec.Harness.Name)
 	}
 	if strings.TrimSpace(opts.Prompt) == "" {
 		return HookFireResult{}, errors.New("openshell image: hook-fire probe needs a prompt the mock answers with a tool call")
+	}
+	if opts.Block != nil && (opts.Block.Marker == "" || opts.Block.SideEffect == "" || opts.Block.Prompt == "") {
+		return HookFireResult{}, errors.New("openshell image: block scenario needs a prompt, marker and side effect")
 	}
 	host := opts.SinkHost
 	if host == "" {
@@ -145,7 +207,7 @@ func (b *Builder) HookFireProbe(ctx context.Context, c *Context, opts HookFireOp
 	}()
 
 	var result HookFireResult
-	allow, err := b.hookFireRun(ctx, c, opts, host, sink, "allow", opts.Prompt, nil)
+	allow, err := b.hookFireRun(ctx, c, ref, opts, host, sink, "allow", opts.Prompt, nil)
 	result.Runs = append(result.Runs, allow)
 	if err != nil {
 		return result, err
@@ -168,10 +230,7 @@ func (b *Builder) HookFireProbe(ctx context.Context, c *Context, opts HookFireOp
 		}
 	}
 	if opts.Block != nil {
-		if opts.Block.Marker == "" || opts.Block.SideEffect == "" || opts.Block.Prompt == "" {
-			return result, errors.New("openshell image: block scenario needs a prompt, marker and side effect")
-		}
-		blocked, err := b.hookFireRun(ctx, c, opts, host, sink, "block", opts.Block.Prompt, opts.Block)
+		blocked, err := b.hookFireRun(ctx, c, ref, opts, host, sink, "block", opts.Block.Prompt, opts.Block)
 		result.Runs = append(result.Runs, blocked)
 		if err != nil {
 			return result, err
@@ -188,13 +247,13 @@ func (b *Builder) HookFireProbe(ctx context.Context, c *Context, opts HookFireOp
 		}
 	}
 	if len(problems) > 0 {
-		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %s", c.Tag, strings.Join(problems, "; "))
+		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
 	return result, nil
 }
 
 func (b *Builder) hookFireRun(
-	ctx context.Context, c *Context, opts HookFireOptions, host string, sink *hookSink,
+	ctx context.Context, c *Context, ref string, opts HookFireOptions, host string, sink *hookSink,
 	scenario, prompt string, block *BlockScenario,
 ) (HookFireRun, error) {
 	run := HookFireRun{Scenario: scenario}
@@ -254,7 +313,7 @@ func (b *Builder) hookFireRun(
 	for _, key := range keys {
 		args = append(args, "-e", key+"="+env[key])
 	}
-	args = append(args, "--entrypoint", "/bin/bash", c.Tag, "-c", script)
+	args = append(args, "--entrypoint", "/bin/bash", ref, "-c", script)
 
 	timeout := opts.Timeout
 	if timeout <= 0 {

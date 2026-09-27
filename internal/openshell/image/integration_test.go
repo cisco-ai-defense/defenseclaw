@@ -116,7 +116,7 @@ func TestLiveOverlay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			res, err := b.HookFireProbe(ctx, c, HookFireOptions{
+			verified, res, err := b.VerifyHooks(ctx, c, HookFireOptions{
 				Env:             sc.env,
 				Args:            sc.args,
 				Prompt:          "write the marker",
@@ -128,9 +128,9 @@ func TestLiveOverlay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rec.HookFireVerified = true
-			if err := b.Store.Put(rec); err != nil {
-				t.Fatal(err)
+			current, ok, err := b.Store.Current(spec.Harness.Name, spec.UID, spec.GID, spec.IngressPort)
+			if err != nil || !ok || current.Tag != rec.Tag || !verified.HookFireVerified {
+				t.Fatalf("current = %+v %t %v after a passing hook-fire probe", current, ok, err)
 			}
 		})
 	}

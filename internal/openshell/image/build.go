@@ -45,7 +45,10 @@ type BuildOptions struct {
 
 // Build renders the context, streams it to `docker build -t <tag> -`,
 // probes the result with --network none, verifies it and records it. An
-// image that fails verification is removed.
+// image that fails verification is removed. A new build is recorded with
+// HookFireVerified unset (a rebuild clears an earlier verdict), and a cached
+// image keeps its recorded verdict; Store.Current selects the image only
+// after VerifyHooks proves its hooks fire.
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
 	c, err := NewContext(spec)
 	if err != nil {
@@ -97,10 +100,6 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		_, _ = output(ctx, b.Docker, nil, "image", "rm", "-f", c.Tag)
 		return Record{}, err
 	}
-	now := time.Now
-	if b.Now != nil {
-		now = b.Now
-	}
 	rec := Record{
 		Tag:                c.Tag,
 		ImageID:            id,
@@ -113,7 +112,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		GID:                c.Spec.GID,
 		IngressPort:        c.Spec.IngressPort,
 		DefenseClawVersion: c.Spec.DefenseClawVersion,
-		BuiltAt:            now().UTC(),
+		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
 	names := make([]string, 0, len(res.Binaries))
@@ -128,6 +127,13 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		return Record{}, err
 	}
 	return rec, nil
+}
+
+func (b *Builder) now() time.Time {
+	if b.Now != nil {
+		return b.Now()
+	}
+	return time.Now()
 }
 
 // Probe runs the post-build probe for c and parses its output.
@@ -169,9 +175,10 @@ type PruneReport struct {
 	ForgottenStale []string
 }
 
-// Prune removes DefenseClaw overlay images of one repository except the
-// most recent image per (connector, uid, gid, ingress port) and opts.Keep,
-// and forgets store records whose image no longer exists.
+// Prune removes DefenseClaw overlay images of one repository except, per
+// (connector, uid, gid, ingress port), the most recent image and the most
+// recent hook-verified one (the image Store.Current selects), plus
+// opts.Keep, and forgets store records whose image no longer exists.
 func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, error) {
 	repo := opts.Repository
 	if repo == "" {
@@ -205,6 +212,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 		uid, gid, ingress int
 	}
 	latest := map[identity]Record{}
+	verified := map[identity]Record{}
 	var stale []string
 	for _, r := range records {
 		if !strings.HasPrefix(r.Tag, repo+":") {
@@ -218,8 +226,14 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r
 		}
+		if cur, ok := verified[id]; r.HookFireVerified && (!ok || r.BuiltAt.After(cur.BuiltAt)) {
+			verified[id] = r
+		}
 	}
 	for _, r := range latest {
+		keep[r.Tag] = true
+	}
+	for _, r := range verified {
 		keep[r.Tag] = true
 	}
 	var report PruneReport

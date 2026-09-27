@@ -54,8 +54,12 @@ type Record struct {
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
 	NetworkBinaries []Binary `json:"network_binaries"`
-	// HookFireVerified is set once the hook-fire probe passed.
+	// HookFireVerified is set only by Builder.VerifyHooks, once the
+	// hook-fire probe proved that the managed hooks of ImageID fire. Build
+	// always records a fresh, unverified record, so a rebuild clears it.
 	HookFireVerified bool `json:"hook_fire_verified,omitempty"`
+	// HookFireVerifiedAt is when that probe passed.
+	HookFireVerifiedAt time.Time `json:"hook_fire_verified_at,omitzero"`
 }
 
 // NetworkRealpaths lists the realpaths for profiles.Input.Binaries.
@@ -112,7 +116,11 @@ func (s *Store) Get(tag string) (Record, bool, error) {
 	return Record{}, false, nil
 }
 
-// Current returns the most recently built record for an identity.
+// Current returns the image a sandbox of an identity should run: the most
+// recently built record whose hooks were proven to fire (HookFireVerified).
+// A built but unverified image is never selected: Claude silently ignores a
+// managed-settings drop-in with one schema-invalid field, and only the
+// hook-fire probe can tell such an image apart from one that enforces.
 func (s *Store) Current(connectorName string, uid, gid, ingressPort int) (Record, bool, error) {
 	records, err := s.List()
 	if err != nil {
@@ -121,7 +129,7 @@ func (s *Store) Current(connectorName string, uid, gid, ingressPort int) (Record
 	var best Record
 	found := false
 	for _, r := range records {
-		if r.Connector != connectorName || r.UID != uid || r.GID != gid || r.IngressPort != ingressPort {
+		if r.Connector != connectorName || r.UID != uid || r.GID != gid || r.IngressPort != ingressPort || !r.HookFireVerified {
 			continue
 		}
 		if !found || r.BuiltAt.After(best.BuiltAt) {
@@ -153,6 +161,30 @@ func (s *Store) Put(r Record) error {
 		}
 		return s.write(doc)
 	})
+}
+
+// update applies fn to the record with tag and persists the result under
+// the store lock, so a concurrent Put cannot interleave with it.
+func (s *Store) update(tag string, fn func(*Record) error) (Record, error) {
+	var out Record
+	err := s.locked(func() error {
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		for i := range doc.Images {
+			if doc.Images[i].Tag != tag {
+				continue
+			}
+			if err := fn(&doc.Images[i]); err != nil {
+				return err
+			}
+			out = doc.Images[i]
+			return s.write(doc)
+		}
+		return fmt.Errorf("openshell image store: no record for %s", tag)
+	})
+	return out, err
 }
 
 // Remove deletes the records for tags.

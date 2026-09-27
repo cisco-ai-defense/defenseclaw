@@ -207,6 +207,10 @@ func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	for _, r := range []Record{
 		{Tag: "e-repo:claudecode-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
 		{Tag: "e-repo:claudecode-new-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(time.Hour)},
+		// The newest hook-verified image is what Store.Current selects, so it
+		// survives even though a newer unverified build exists.
+		{Tag: "e-repo:claudecode-verified-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(30 * time.Minute), HookFireVerified: true},
+		{Tag: "e-repo:claudecode-verified-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-time.Hour), HookFireVerified: true},
 		{Tag: "e-repo:codex-only-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
 		{Tag: "e-repo:codex-gone-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(2 * time.Hour)},
 		{Tag: "other:claudecode-x-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0},
@@ -217,6 +221,7 @@ func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	}
 	listing := strings.Join([]string{
 		"e-repo:claudecode-old-u1000", "e-repo:claudecode-new-u1000", "e-repo:codex-only-u1000",
+		"e-repo:claudecode-verified-u1000", "e-repo:claudecode-verified-old-u1000",
 		"e-repo:untracked", "e-repo:<none>", "other:claudecode-x-u1000",
 	}, "\n")
 	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
@@ -244,10 +249,11 @@ func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(report.Removed, ",") != "e-repo:claudecode-old-u1000" || strings.Join(dry.Removed, ",") != strings.Join(report.Removed, ",") {
+	if strings.Join(report.Removed, ",") != "e-repo:claudecode-old-u1000,e-repo:claudecode-verified-old-u1000" ||
+		strings.Join(dry.Removed, ",") != strings.Join(report.Removed, ",") {
 		t.Fatalf("removed = %v (dry %v)", report.Removed, dry.Removed)
 	}
-	if strings.Join(report.Kept, ",") != "e-repo:claudecode-new-u1000,e-repo:codex-only-u1000,e-repo:untracked" {
+	if strings.Join(report.Kept, ",") != "e-repo:claudecode-new-u1000,e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000,e-repo:untracked" {
 		t.Fatalf("kept = %v", report.Kept)
 	}
 	if strings.Join(report.ForgottenStale, ",") != "e-repo:codex-gone-u1000" {
@@ -258,7 +264,7 @@ func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	for _, r := range records {
 		tags = append(tags, r.Tag)
 	}
-	if strings.Join(tags, ",") != "e-repo:claudecode-new-u1000,e-repo:codex-only-u1000,other:claudecode-x-u1000" {
+	if strings.Join(tags, ",") != "e-repo:claudecode-new-u1000,e-repo:claudecode-verified-u1000,e-repo:codex-only-u1000,other:claudecode-x-u1000" {
 		t.Fatalf("store after prune = %v", tags)
 	}
 	if _, err := b.Prune(context.Background(), PruneOptions{Repository: "Bad Repo"}); err == nil {
@@ -273,20 +279,25 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 		t.Fatalf("empty store = %v %v", records, err)
 	}
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-	a := Record{Tag: "r:a", Connector: "codex", UID: 1, GID: 1, IngressPort: 2, BuiltAt: t0}
-	b := Record{Tag: "r:b", Connector: "codex", UID: 1, GID: 1, IngressPort: 2, BuiltAt: t0.Add(time.Minute)}
-	for _, r := range []Record{b, a, a} {
+	a := Record{Tag: "r:a", Connector: "codex", UID: 1, GID: 1, IngressPort: 2, BuiltAt: t0, HookFireVerified: true, HookFireVerifiedAt: t0}
+	b := Record{Tag: "r:b", Connector: "codex", UID: 1, GID: 1, IngressPort: 2, BuiltAt: t0.Add(time.Minute), HookFireVerified: true, HookFireVerifiedAt: t0.Add(2 * time.Minute)}
+	// The newest build has not passed the hook-fire probe yet.
+	unverified := Record{Tag: "r:c", Connector: "codex", UID: 1, GID: 1, IngressPort: 2, BuiltAt: t0.Add(time.Hour)}
+	for _, r := range []Record{b, a, a, unverified} {
 		if err := store.Put(r); err != nil {
 			t.Fatal(err)
 		}
 	}
 	records, err := store.List()
-	if err != nil || len(records) != 2 || records[0].Tag != "r:a" {
+	if err != nil || len(records) != 3 || records[0].Tag != "r:a" || !records[1].HookFireVerifiedAt.Equal(b.HookFireVerifiedAt) {
 		t.Fatalf("records = %v %v", records, err)
 	}
 	cur, ok, err := store.Current("codex", 1, 1, 2)
 	if err != nil || !ok || cur.Tag != "r:b" {
-		t.Fatalf("current = %v %t %v", cur, ok, err)
+		t.Fatalf("current = %v %t %v, want the newest hook-verified record", cur, ok, err)
+	}
+	if raw, err := os.ReadFile(store.Path()); err != nil || strings.Count(string(raw), "hook_fire_verified_at") != 2 {
+		t.Fatalf("an unverified record must omit hook_fire_verified_at: %s %v", raw, err)
 	}
 	if _, ok, _ := store.Current("codex", 1, 1, 3); ok {
 		t.Fatal("current matched a different ingress port")
