@@ -98,17 +98,20 @@ func DefaultHookFireNetwork() HookFireNetwork {
 // that a harness fires only best-effort (OpenCode's unawaited session events)
 // or only at teardown of an interactive session are not required.
 var requiredHookEvents = map[string][]string{
-	"amp":        {"session.start", "agent.start", "tool.call", "tool.result", "agent.end"},
-	"claudecode": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"codex":      {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"copilot":    {"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop", "sessionEnd"},
+	"amp":         {"session.start", "agent.start", "tool.call", "tool.result", "agent.end"},
+	"antigravity": {"PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"},
+	"claudecode":  {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"codex":       {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"copilot":     {"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop", "sessionEnd"},
 	// The events Cursor's agent-cli-local build of the pinned release fired
 	// for a headless shell call; beforeSubmitPrompt and stop do not fire in
 	// print mode.
-	"cursor":   {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
-	"devin":    {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"kiro":     {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
-	"opencode": {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
+	"cursor":    {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
+	"devin":     {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"hermes":    {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
+	"kiro":      {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
+	"opencode":  {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
+	"openhands": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
 }
 
 // HookFireOptions configure a hook-fire probe. The zero value runs the
@@ -228,6 +231,20 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 			"COPILOT_OFFLINE": "true",
 		}, nil
 	},
+	"hermes": func(baseURL string) (map[string]string, []string) {
+		return map[string]string{
+				connector.HermesSandboxProviderBaseURLEnv: baseURL + "/v1",
+				connector.HermesSandboxProviderKeyEnv:     "sk-dcprobe-0123456789abcdefghij",
+			},
+			[]string{"--provider", connector.HermesSandboxProviderName, "-m", "mock-model"}
+	},
+	"openhands": func(baseURL string) (map[string]string, []string) {
+		return map[string]string{"LLM_MODEL": "openai/mock-model", "LLM_BASE_URL": baseURL + "/v1", "LLM_API_KEY": "sk-dcprobe-0123456789abcdefghij"},
+			[]string{"--override-with-envs"}
+	},
+	"antigravity": func(baseURL string) (map[string]string, []string) {
+		return map[string]string{"GEMINI_API_KEY": "dcprobe-0123456789abcdefghij", "GOOGLE_GEMINI_BASE_URL": baseURL}, nil
+	},
 }
 
 // scriptedMock drives a harness that replays scripted model responses from a
@@ -311,6 +328,15 @@ var hookSinkAdapters = map[string]hookSinkAdapter{
 	"opencode": {preTool: "tool.execute.before", wholePayload: true, hookOutput: func(reason string) interface{} {
 		return map[string]string{"decision": "deny", "reason": reason}
 	}},
+	"antigravity": {wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "deny", "reason": reason}
+	}},
+	"hermes": {preTool: "pre_tool_call", hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "block", "reason": reason}
+	}},
+	"openhands": {preTool: "PreToolUse", hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "deny", "reason": reason}
+	}},
 }
 
 // preToolEvent is the event whose tool input the block scenario matches.
@@ -322,18 +348,21 @@ func (a hookSinkAdapter) preToolEvent() string {
 }
 
 // hookEventName reads the event a hook request reports: the out-of-band
-// event header the Codex hook (X-DefenseClaw-Hook-Event) and the Copilot hook
-// (whose native payload has no event field) send, else the payload's
-// hook_event_name.
+// event header the Codex hook (X-DefenseClaw-Hook-Event), the Copilot hook
+// (whose native payload has no event field) and the Antigravity hook send,
+// else the payload's hook_event_name (Claude Code, Codex, Hermes, OmniGent)
+// or event_type (OpenHands).
 func hookEventName(r *http.Request, payload map[string]json.RawMessage) string {
-	for _, header := range []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event"} {
+	for _, header := range []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event", "X-DefenseClaw-Antigravity-Event"} {
 		if name := r.Header.Get(header); name != "" {
 			return name
 		}
 	}
-	var name string
-	if raw, ok := payload["hook_event_name"]; ok && json.Unmarshal(raw, &name) == nil {
-		return name
+	for _, key := range []string{"hook_event_name", "event_type"} {
+		var name string
+		if raw, ok := payload[key]; ok && json.Unmarshal(raw, &name) == nil && name != "" {
+			return name
+		}
 	}
 	return ""
 }

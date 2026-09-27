@@ -46,6 +46,9 @@ var sandboxGoldenTargets = []struct {
 	{"devin", NewDevinConnector(), "3000.4.25"},
 	{"kiro", NewKiroConnector(), "2.24.1"},
 	{"opencode", NewOpenCodeConnector(), "1.18.31"},
+	{"antigravity", NewAntigravityConnector(), "1.2.12"},
+	{"hermes", NewHermesConnector(), "0.19.0"},
+	{"openhands", NewOpenHandsConnector(), "1.16.0"},
 }
 
 type sandboxGoldenManifest struct {

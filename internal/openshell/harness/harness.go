@@ -22,7 +22,8 @@
 // sandbox creation, the credential profiles and the user customization paths
 // worth importing, plus the tamper tier of the hook registration and the
 // evidence the harness was verified with. It covers claudecode, codex,
-// opencode, copilot, amp, cursor, kiro and devin.
+// opencode, copilot, amp, cursor, kiro, devin, hermes, openhands,
+// antigravity and omnigent.
 package harness
 
 import (
@@ -233,7 +234,7 @@ type ProbeSpec struct {
 
 // Spec is one harness.
 type Spec struct {
-	// Name is the connector name (claudecode, codex).
+	// Name is the connector name (claudecode, codex, hermes, ...).
 	Name        string
 	DisplayName string
 	// Command is the harness binary on the workload PATH.

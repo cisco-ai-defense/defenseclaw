@@ -39,7 +39,7 @@ func TestRegistry(t *testing.T) {
 	for _, name := range Names() {
 		names[name] = true
 	}
-	for _, want := range []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"} {
+	for _, want := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"} {
 		if !names[want] {
 			t.Fatalf("Names() = %v lacks %s", Names(), want)
 		}

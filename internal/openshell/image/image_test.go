@@ -522,3 +522,34 @@ func replaceField(s, prefix string, field int, value string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// TestDockerfileCreatesUserDirs pins that the directories below HOME that
+// hold user-tier hook files are created, owned by the run-as user and
+// traversable, before the COPY that writes into them: BuildKit gives a
+// directory COPY creates the file's --chmod mode (0600 would lock the
+// workload out of its own ~/.openhands).
+func TestDockerfileCreatesUserDirs(t *testing.T) {
+	for _, tc := range []struct {
+		spec *harness.Spec
+		dirs []string
+	}{
+		{harness.ClaudeCode, nil},
+		{harness.Hermes, []string{"/sandbox/.hermes"}},
+		{harness.OpenHands, []string{"/sandbox/.openhands"}},
+		{harness.Antigravity, []string{"/sandbox/.gemini", "/sandbox/.gemini/config"}},
+	} {
+		spec := testSpec(tc.spec)
+		c := mustContext(t, spec)
+		if strings.Join(c.UserDirs, " ") != strings.Join(tc.dirs, " ") {
+			t.Fatalf("%s user dirs = %v, want %v", tc.spec.Name, c.UserDirs, tc.dirs)
+		}
+		df := string(c.Dockerfile)
+		create := fmt.Sprintf("RUN install -d -o %d -g %d -m 0755 %s\n", spec.UID, spec.GID, strings.Join(tc.dirs, " "))
+		if (len(tc.dirs) > 0) != strings.Contains(df, create) {
+			t.Fatalf("%s Dockerfile user-dir creation (want %t):\n%s", tc.spec.Name, len(tc.dirs) > 0, df)
+		}
+		if len(tc.dirs) > 0 && strings.Index(df, create) > strings.Index(df, "COPY ") {
+			t.Fatalf("%s creates user dirs after the first COPY", tc.spec.Name)
+		}
+	}
+}

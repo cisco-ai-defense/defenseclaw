@@ -549,6 +549,9 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 		{"kiro-hook", NewKiroConnector(), "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, "/api/v1/kiro/hook", true},
 		{"devin-hook", NewDevinConnector(), "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, "/api/v1/devin/hook", true},
 		{"inspect-tool", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool", false},
+		{"hermes-hook", NewHermesConnector(), "0.19.0", "hermes-hook.sh", nil, hermesPreToolCall, "/api/v1/hermes/hook", true},
+		{"openhands-hook", NewOpenHandsConnector(), "1.16.0", "openhands-hook.sh", nil, openHandsPreToolUse, "/api/v1/openhands/hook", true},
+		{"antigravity-hook", NewAntigravityConnector(), "1.2.12", "antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, "/api/v1/antigravity/hook", true},
 	}
 	vectors := map[string]func(t *testing.T, a *sandboxEnvAttack) map[string]string{
 		"planted-path": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
@@ -941,6 +944,19 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 			{script, nil, stdin, token, []string{`401|{}`}},
 		}
 	}
+	// The hook-only lifecycle hooks: allow, block, retry, outage,
+	// auth failure, oversized payload and a missing token.
+	hookOnlyToolScenarios := func(script string, args []string, stdin string, env map[string]string, blockOut, oversized string) []scenario {
+		return []scenario{
+			{script, args, stdin, env, []string{allowResponse}},
+			{script, args, stdin, env, []string{blockOut}},
+			{script, args, stdin, env, []string{"exit:52", allowResponse}},
+			{script, args, stdin, env, []string{"exit:7", "exit:7"}},
+			{script, args, stdin, env, []string{`401|{}`}},
+			{script, args, oversized, env, nil},
+			{script, args, stdin, nil, nil},
+		}
+	}
 	codexArgs := []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
 	for _, tc := range []struct {
 		connector string
@@ -1009,6 +1025,11 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 			{"devin-hook.sh", nil, oversized, token, nil},
 			{"devin-hook.sh", nil, devinPreToolUse, nil, nil},
 		}},
+		{"hermes", NewHermesConnector(), "0.19.0", hookOnlyToolScenarios("hermes-hook.sh", nil, hermesPreToolCall, token, blockOut, oversized)},
+		{"openhands", NewOpenHandsConnector(), "1.16.0", hookOnlyToolScenarios("openhands-hook.sh", nil, openHandsPreToolUse, token, blockOut, oversized)},
+		{"antigravity", NewAntigravityConnector(), "1.2.12", append(
+			hookOnlyToolScenarios("antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, token, blockOut, oversized),
+			scenario{"antigravity-hook.sh", []string{"Unknown"}, antigravityPreToolUse, token, nil})},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
 			artifacts, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})

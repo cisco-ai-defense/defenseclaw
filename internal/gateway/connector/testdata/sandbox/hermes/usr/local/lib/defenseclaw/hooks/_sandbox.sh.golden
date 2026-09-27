@@ -1,0 +1,179 @@
+#!/bin/bash
+# defenseclaw-managed-hook v1
+# DefenseClaw OpenShell sandbox transport helpers.
+#
+# Rendered only into DefenseClaw's OpenShell overlay images, where it is
+# root-owned and read-only to the workload, and sourced by the sandbox
+# variants of the hooks right after _hardening.sh and before
+# defenseclaw_harden_env. Host hook directories never contain this file.
+#
+# Everything a hook needs to reach DefenseClaw is baked here at image build:
+# the ingress address (host.openshell.internal, relayed by the OpenShell
+# supervisor to the host-loopback hook ingress) and the request budgets. The
+# only runtime input is the per-sandbox binding token, which OpenShell
+# delivers as a provider placeholder in DEFENSECLAW_SANDBOX_TOKEN and swaps
+# for the real credential only on the ingress endpoint.
+
+# The workload shapes the environment every hook inherits: Claude Code
+# applies the env block of user and project settings to hook processes, and
+# whatever the agent exports reaches them as well. bash -p has already
+# ignored BASH_ENV, ENV, SHELLOPTS, BASHOPTS, CDPATH, GLOBIGNORE and exported
+# functions at startup, and _hardening.sh, sourced just before this file,
+# only defines helpers. So before the first child process or helper call:
+#
+#   - every inherited variable the sandbox hooks do not read is dropped:
+#     search paths (PATH, PYTHONPATH, PERL5LIB, ...), interpreter, loader,
+#     curl, mktemp and locale inputs, bash knobs such as FUNCNEST, TMOUT,
+#     POSIXLY_CORRECT or EXECIGNORE, and every DEFENSECLAW_* host override
+#     (fail mode, token, payload cap, hook HOME). Values the hook assigned
+#     before this point (HOOK_DIR, the baked PATH) only lose the export bit
+#     an inherited variable of the same name gave them;
+#   - PATH is pinned to the value baked into the sandbox _hardening.sh.
+#
+# Environment entries whose names are not shell identifiers cannot be named
+# here, and none of the tools the hooks run read such names. The ingress
+# requests below still pass -q and --noproxy '*'.
+unset -v _dc_sandbox_var _dc_sandbox_vars
+case "${DEFENSECLAW_BAKED_HOOK_PATH:-}" in
+  /*) ;;
+  *)
+    echo "defenseclaw: sandbox hook helpers carry no baked PATH, blocking (sandbox hooks fail closed)" >&2
+    exit 2
+    ;;
+esac
+if ! _dc_sandbox_vars="$(compgen -e)"; then
+  echo "defenseclaw: cannot enumerate the hook environment, blocking (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+for _dc_sandbox_var in $_dc_sandbox_vars; do
+  case "$_dc_sandbox_var" in
+    DEFENSECLAW_SANDBOX_TOKEN|CLAUDE_TOOL_NAME|TOOL_NAME) ;;
+    DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
+    HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
+    HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    *) unset -v "$_dc_sandbox_var" 2>/dev/null || export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
+  esac
+done
+unset -v _dc_sandbox_var _dc_sandbox_vars
+set +o posix
+PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
+export PATH
+
+# The python3 tiers of defenseclaw_read_stdin_capped and _dc_jq exist for
+# hosts without a byte-exact head(1) or without jq. The overlay image ships
+# both, so sandbox hooks never start an interpreter whose startup reads
+# workload-controlled files (site-packages .pth files, sitecustomize).
+_dc_python3_usable() {
+  return 1
+}
+
+readonly DC_SANDBOX_INGRESS="host.openshell.internal:18971"
+readonly DC_SANDBOX_CONNECT_TIMEOUT=2
+readonly DC_SANDBOX_MAX_TIME=9
+readonly DC_SANDBOX_RETRY_MAX_TIME=12
+readonly DC_SANDBOX_SESSION_END_MAX_TIME=1
+
+# defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
+#
+# The binding token is the only credential a sandbox hook may present. A
+# missing or malformed token always fails closed: a sandbox hook never falls
+# back to a host token file or to an unauthenticated request.
+defenseclaw_sandbox_require_token() {
+  local connector="${1:-unknown}"
+  local hook_name="${2:-unknown}"
+  local subject="${3:-tool}"
+  local reason=""
+  case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+    '') reason="missing sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN unset)" ;;
+    *$'\n'*|*$'\r'*) reason="malformed sandbox binding token" ;;
+  esac
+  if [ -z "$reason" ]; then
+    return 0
+  fi
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed
+  echo "defenseclaw: ${reason}, blocking ${subject} (sandbox hooks fail closed)" >&2
+  exit 2
+}
+
+# defenseclaw_sandbox_idempotency_key prints a fresh 128-bit random key, or
+# nothing when the kernel offers no randomness source. The key names one hook
+# invocation so the ingress can answer a retry from its dedupe window instead
+# of evaluating the same event twice; it must not be guessable by the workload.
+defenseclaw_sandbox_idempotency_key() {
+  local key=""
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    IFS= read -r key < /proc/sys/kernel/random/uuid 2>/dev/null || key=""
+  fi
+  case "$key" in
+    ????????-????-????-????-????????????) ;;
+    *) key="" ;;
+  esac
+  case "$key" in
+    *[!0-9a-f-]*) key="" ;;
+  esac
+  if [ -z "$key" ] && [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
+    key="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" || key=""
+    case "$key" in
+      ????????????????????????????????) ;;
+      *) key="" ;;
+    esac
+    case "$key" in
+      *[!0-9a-f]*) key="" ;;
+    esac
+  fi
+  printf '%s' "$key"
+}
+
+# defenseclaw_sandbox_post PATH BODY MAX_TIME RETRY_MAX_TIME [CURL_ARGS...]
+#
+# POSTs BODY to the baked ingress and prints "<response body>\n<http code>",
+# the same shape the host hooks read from curl -w; output without a
+# three-digit status fails without a retry. A transport failure (no
+# connection, empty reply, timeout) or a relay 502/503/504 is retried exactly
+# once with the same X-DefenseClaw-Hook-Idempotency-Key: the OpenShell relay
+# occasionally drops a request, possibly after the ingress acted on it, and the
+# ingress dedupes retries by key. Without a random key the request is sent
+# once. The body travels on stdin so large payloads never hit the argv limit.
+defenseclaw_sandbox_post() {
+  local path="$1"
+  local body="$2"
+  local max_time="$3"
+  local retry_max_time="$4"
+  shift 4
+  local key attempts=1 attempt=1 status out code
+  local key_args=()
+  key="$(defenseclaw_sandbox_idempotency_key)"
+  if [ -n "$key" ]; then
+    key_args=(-H "X-DefenseClaw-Hook-Idempotency-Key: ${key}")
+    attempts=2
+  fi
+  while :; do
+    status=0
+    out="$(printf '%s' "$body" | curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST \
+      "http://${DC_SANDBOX_INGRESS}${path}" \
+      "${key_args[@]+"${key_args[@]}"}" \
+      "$@" \
+      --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
+      --max-time "$max_time" \
+      --data-binary @- 2>/dev/null)" || status=$?
+    if [ "$status" -eq 0 ]; then
+      code="${out##*$'\n'}"
+      case "$code" in
+        [0-9][0-9][0-9]) ;;
+        *) return 1 ;;
+      esac
+      case "$code" in
+        502|503|504) status=1 ;;
+      esac
+    fi
+    if [ "$status" -eq 0 ] || [ "$attempt" -ge "$attempts" ]; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    max_time="$retry_max_time"
+  done
+  if [ "$status" -ne 0 ]; then
+    return "$status"
+  fi
+  printf '%s' "$out"
+}

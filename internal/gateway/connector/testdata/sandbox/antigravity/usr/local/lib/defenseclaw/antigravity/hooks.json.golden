@@ -1,0 +1,57 @@
+{
+  "defenseclaw-antigravity-postinvocation": {
+    "PostInvocation": [
+      {
+        "command": "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh PostInvocation",
+        "timeout": 30,
+        "type": "command"
+      }
+    ]
+  },
+  "defenseclaw-antigravity-posttooluse": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh PostToolUse",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  },
+  "defenseclaw-antigravity-preinvocation": {
+    "PreInvocation": [
+      {
+        "command": "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh PreInvocation",
+        "timeout": 30,
+        "type": "command"
+      }
+    ]
+  },
+  "defenseclaw-antigravity-pretooluse": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh PreToolUse",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  },
+  "defenseclaw-antigravity-stop": {
+    "Stop": [
+      {
+        "command": "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh Stop",
+        "timeout": 30,
+        "type": "command"
+      }
+    ]
+  }
+}

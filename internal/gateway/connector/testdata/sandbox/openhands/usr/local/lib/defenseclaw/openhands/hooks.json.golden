@@ -1,0 +1,74 @@
+{
+  "post_tool_use": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ],
+  "pre_tool_use": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ],
+  "session_end": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ],
+  "session_start": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ],
+  "stop": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ],
+  "user_prompt_submit": [
+    {
+      "hooks": [
+        {
+          "command": "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60,
+          "type": "command"
+        }
+      ],
+      "matcher": "*"
+    }
+  ]
+}

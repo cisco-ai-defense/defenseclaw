@@ -35,6 +35,8 @@ const (
 	cursorRealpath         = "/opt/defenseclaw-harness/cursor/node"
 	kiroChatRealpath       = "/opt/defenseclaw-harness/kiro/bin/kiro-cli-chat"
 	kiroRealpath           = "/opt/defenseclaw-harness/kiro/bin/kiro-cli"
+	hermesRealpath         = "/opt/defenseclaw-harness/hermes/python/cpython-3.12.13-linux-aarch64-gnu/bin/python3.12"
+	agyRealpath            = "/opt/defenseclaw-harness/antigravity/bin/agy"
 )
 
 func goldenInputs() map[string]Input {
@@ -56,6 +58,8 @@ func goldenInputs() map[string]Input {
 		AmpID:                   {Binaries: []string{ampRealpath}},
 		CursorID:                {Binaries: []string{cursorRealpath}},
 		KiroID:                  {Binaries: []string{kiroChatRealpath, kiroRealpath}},
+		BedrockMantleOpenAIID:   {Binaries: []string{hermesRealpath}},
+		GeminiID:                {Binaries: []string{agyRealpath}},
 	}
 }
 
@@ -211,7 +215,8 @@ func TestProfileIDHelpers(t *testing.T) {
 		"defenseclaw-openai-us-east-1": false, "defenseclaw-claude-bedrock-mantle-evil": false, "defenseclaw-egress": false,
 		"defenseclaw-ingress-0": false, "dc-cred-0123456789ab": false, "user-profile": false,
 		"defenseclaw-opencode-bedrock-mantle-eu-west-1": true, "defenseclaw-copilot-bedrock-mantle-us-east-1": true,
-		"defenseclaw-opencode-anthropic-us-east-1": false,
+		"defenseclaw-opencode-anthropic-us-east-1":    false,
+		"defenseclaw-bedrock-mantle-openai-eu-west-1": true, "defenseclaw-gemini-us-east-1": false,
 	} {
 		if got := IsDefenseClaw(id); got != want {
 			t.Errorf("IsDefenseClaw(%s) = %t, want %t", id, got, want)

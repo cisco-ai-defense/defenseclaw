@@ -1,0 +1,125 @@
+{
+  "connector": "openhands",
+  "hook_contract": "openhands-hooks-v1",
+  "tamper_tier": "user",
+  "env": {
+    "OPENHANDS_SUPPRESS_BANNER": "1"
+  },
+  "binaries": [
+    {
+      "Name": "bash",
+      "Role": "runtime"
+    },
+    {
+      "Name": "chmod",
+      "Role": "runtime"
+    },
+    {
+      "Name": "curl",
+      "Role": "runtime"
+    },
+    {
+      "Name": "date",
+      "Role": "runtime"
+    },
+    {
+      "Name": "find",
+      "Role": "runtime"
+    },
+    {
+      "Name": "head",
+      "Role": "runtime"
+    },
+    {
+      "Name": "id",
+      "Role": "runtime"
+    },
+    {
+      "Name": "jq",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mkdir",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mktemp",
+      "Role": "runtime"
+    },
+    {
+      "Name": "od",
+      "Role": "runtime"
+    },
+    {
+      "Name": "openhands",
+      "Role": "harness"
+    },
+    {
+      "Name": "readlink",
+      "Role": "runtime"
+    },
+    {
+      "Name": "rm",
+      "Role": "runtime"
+    },
+    {
+      "Name": "sed",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tail",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tr",
+      "Role": "runtime"
+    }
+  ],
+  "files": {
+    "/sandbox/.openhands/hooks.json": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "sha256": "86eb4dc6e3fc00c115315840e054f6abab9d51366009a5bdd240767826f3be9d"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "b7c97bd48429e2c906071f587736bd44b79811d10d924325ab513c8072e375b4"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "4c902812d62c0e6aa34c9456ca928e3d2220acc200b76b91cf9256d75bf20281"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "162409810ca283d72527a14334c8c4ce300d0d8c06d7302af49b6f0ab37c4e30"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "99f265bac62bba2eabdcf8391712d62c1689b6cf10aca16778eac3f94fcd23e1"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "96c592062cfbbf9ff0adf9fcd128eba826e7885c3fc19bbe62a540cb996950ce"
+    },
+    "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "sha256": "0cf0cca95e0202a1bad44217d1f6eb383b1482baa5bfd58e072bd720fe04bae5"
+    },
+    "/usr/local/lib/defenseclaw/openhands/hooks.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "sha256": "86eb4dc6e3fc00c115315840e054f6abab9d51366009a5bdd240767826f3be9d"
+    }
+  }
+}

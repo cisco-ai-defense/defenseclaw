@@ -209,12 +209,15 @@ func SandboxIngressAddr(port int) (string, error) {
 // connector in sandbox mode would silently produce host-shaped scripts that
 // read host token files, so it is refused.
 var sandboxHookScriptsByConnector = map[string][]string{
-	"claudecode": {"claude-code-hook.sh"},
-	"codex":      {"codex-hook.sh"},
-	"copilot":    {"copilot-hook.sh"},
-	"cursor":     {"cursor-hook.sh"},
-	"devin":      {"devin-hook.sh"},
-	"kiro":       {"kiro-hook.sh"},
+	"antigravity": {"antigravity-hook.sh"},
+	"claudecode":  {"claude-code-hook.sh"},
+	"codex":       {"codex-hook.sh"},
+	"copilot":     {"copilot-hook.sh"},
+	"cursor":      {"cursor-hook.sh"},
+	"devin":       {"devin-hook.sh"},
+	"hermes":      {"hermes-hook.sh"},
+	"kiro":        {"kiro-hook.sh"},
+	"openhands":   {"openhands-hook.sh"},
 }
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox

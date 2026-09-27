@@ -1,6 +1,6 @@
 id: defenseclaw-anthropic
-display_name: Anthropic API for Claude Code (DefenseClaw)
-description: Binds ANTHROPIC_API_KEY to the Anthropic Messages API as x-api-key; only the Claude Code binary may use it
+display_name: Anthropic API (DefenseClaw)
+description: Binds ANTHROPIC_API_KEY to the Anthropic Messages API as x-api-key; only the pinned harness binaries may use it
 category: inference
 inference_capable: true
 credentials:

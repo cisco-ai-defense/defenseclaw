@@ -106,6 +106,13 @@ const (
 	// KiroID binds KIRO_API_KEY (bearer) to the Kiro and Amazon Q service
 	// endpoints.
 	KiroID = "defenseclaw-kiro"
+	// BedrockMantleOpenAIID binds BEDROCK_MANTLE_API_KEY (bearer) to the
+	// Mantle OpenAI-compatible routes for harnesses that speak Chat
+	// Completions (Hermes, OpenHands), imported as
+	// BedrockProfileID(BedrockMantleOpenAIID, region).
+	BedrockMantleOpenAIID = "defenseclaw-bedrock-mantle-openai"
+	// GeminiID binds GEMINI_API_KEY (x-goog-api-key) to the Gemini API.
+	GeminiID = "defenseclaw-gemini"
 )
 
 // LegacyIngressID is the gateway-wide ingress profile of earlier releases,
@@ -209,6 +216,8 @@ var catalog = map[string]profileKind{
 	AmpID:                   kindHarness,
 	CursorID:                kindHarness,
 	KiroID:                  kindHarness,
+	BedrockMantleOpenAIID:   kindBedrock,
+	GeminiID:                kindHarness,
 }
 
 // IDs lists every profile template, sorted.

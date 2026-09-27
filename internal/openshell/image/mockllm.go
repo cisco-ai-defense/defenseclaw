@@ -28,7 +28,8 @@ import (
 )
 
 // mockLLM is the hook-fire probe's built-in model endpoint: a scripted
-// Anthropic Messages and OpenAI Responses server the probe serves itself, so
+// Anthropic Messages, OpenAI Responses, OpenAI Chat Completions and Gemini
+// generateContent server the probe serves itself, so
 // an image can be verified without a model, a key or network access. Each
 // scenario answers the first request of its prompt with exactly one shell
 // tool call and the request that carries the tool result with a closing
@@ -37,8 +38,11 @@ import (
 //
 // Routes: POST /v1/messages (streaming and not), POST
 // /v1/messages/count_tokens, POST /v1/responses and /responses (streaming
-// and not), GET /v1/models[/<id>] and /models, and HEAD on any path (Claude
-// Code warms the connection up). Anything else is a 404 JSON error.
+// and not), POST /v1/chat/completions and /chat/completions (streaming and
+// not, mockllm_chat.go), POST /v1beta/models/<m>:generateContent and
+// :streamGenerateContent, GET /v1/models[/<id>] and /models, and HEAD on
+// any path (Claude Code warms the connection up). Anything else is a 404
+// JSON error.
 type mockLLM struct {
 	scenarios []mockScenario
 
@@ -124,6 +128,12 @@ func (m *mockLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.messages(w, r)
 	case r.Method == http.MethodPost && (path == "/v1/responses" || path == "/responses"):
 		m.responses(w, r)
+	case r.Method == http.MethodPost && (path == "/v1/chat/completions" || path == "/chat/completions"):
+		m.chatCompletions(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1beta/models/") && strings.HasSuffix(path, ":streamGenerateContent"):
+		m.geminiGenerate(w, r, true)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1beta/models/") && strings.HasSuffix(path, ":generateContent"):
+		m.geminiGenerate(w, r, false)
 	default:
 		mockJSON(w, http.StatusNotFound, map[string]interface{}{
 			"type":  "error",
