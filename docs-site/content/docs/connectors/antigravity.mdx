@@ -291,7 +291,10 @@ exist only in the image; nothing on your host changes.
   managed hook location. The image seeds the reviewed file and keeps a
   root-owned copy under `/usr/local/lib/defenseclaw/antigravity/`. The
   launcher restores the user file from that copy before every start, so an
-  edit made during a session is undone at the next launch.
+  edit made during a session is undone at the next launch. If
+  `~/.gemini/config/hooks.json` is anything but a regular file (a directory,
+  for example), the launcher refuses to start agy and names the path; remove
+  it and start again.
 - **Workspace hooks.** agy also loads `<workspace>/.agents/hooks.json`. The
   launcher refuses to start when that file reuses one of DefenseClaw's
   `defenseclaw-antigravity-*` hook keys. Workspace hooks under their own keys
@@ -299,9 +302,13 @@ exist only in the image; nothing on your host changes.
 - **Fail closed.** agy enforces only a synchronous PreToolUse
   `{"decision":"deny"}`. The sandbox hook prints that deny on every
   PreToolUse failure: missing token, ingress down, or a bad reply.
-- **Known gap.** The agent can edit `~/.gemini/config/hooks.json`, or start a
-  second agy with another `HOME`, from a tool call. DefenseClaw sees that tool
-  call first, and hook-silence detection is the backstop.
+- **Known gaps.** The agent can edit `~/.gemini/config/hooks.json`, or start
+  a second agy with another `HOME`, from a tool call. DefenseClaw sees that
+  tool call first, and hook-silence detection is the backstop. Command rules
+  judge `run_command` calls, and the input `send_command_input` types into a
+  running command (judged as a shell command). A command that a script runs,
+  when the agent writes the script to a file and runs it, is judged by the
+  command that starts the script.
 - **Install pin.** The image installs agy 1.2.12 from the tarball Google's
   installer manifest names. It checks the tarball against the manifest's
   SHA-512, which DefenseClaw pins per architecture (arm64, x86_64). The build
@@ -313,8 +320,12 @@ exist only in the image; nothing on your host changes.
   the launcher selects agy's `gemini` model provider in
   `~/.gemini/antigravity-cli/settings.json`, and the key skips the Google
   sign-in. Signing in with a Google account inside a sandbox is untested.
+  `defenseclaw sandbox run antigravity` shares `GEMINI_API_KEY` when it is
+  set.
 - **Launch flags.** Skip-permissions mode adds
-  `--dangerously-skip-permissions`. A headless run is `agy -p <prompt>`.
+  `--dangerously-skip-permissions`. A run with `--safe` drops it in every
+  form agy accepts (one or two dashes, `=true`). A headless run is
+  `agy -p <prompt>`; pass `-- -p "TEXT"` to `sandbox run` for a detached run.
 - **Other traffic.** Apart from the model, a mock-model run reached only
   `antigravity-unleash.goog` (feature flags) and `play.googleapis.com` (usage
   logging). In a two-prompt daemon run, the proxy counted about 600 KB sent,
@@ -334,6 +345,7 @@ exist only in the image; nothing on your host changes.
   - egress through the proxy, including a blocklisted host that a
     sandbox-scoped unblock then let through.
 
-  The image also passes the hook-fire probe, in which a replaced user
-  `hooks.json` is restored. Signing in with a Google account inside a sandbox
-  is untested.
+  The image also passes the hook-fire probe. In that probe a replaced user
+  `hooks.json` is restored, and the launcher refuses to start when the hooks
+  file is a directory. Signing in with a Google account inside a sandbox, and
+  the `defenseclaw-gemini` profile with a real Gemini key, are untested.

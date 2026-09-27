@@ -156,29 +156,45 @@ exist only in the image; nothing on your host changes.
   seeds the reviewed `~/.openhands/hooks.json` and keeps a root-owned copy
   under `/usr/local/lib/defenseclaw/openhands/`. The launcher restores the
   user file from that copy before every start, so an edit made during a
-  session is undone at the next launch.
+  session is undone at the next launch. If `~/.openhands/hooks.json` is
+  anything but a regular file (a directory, for example), the launcher
+  refuses to start OpenHands and names the path; remove it and start again.
 - **Project hook files are refused.** A working directory with its own
   `.openhands/hooks.json` would replace DefenseClaw's hooks, so the launcher
   refuses to start there with a message that names the file. Rename the file
   to run OpenHands in the sandbox.
 - **Fail closed.** The sandbox hook exits 2, the status OpenHands enforces, on
   every failure: missing token, ingress down, or a bad reply.
-- **Known gap.** The agent can edit `~/.openhands/hooks.json`, or start a
+- **Launch environment.** The launcher drops every `PYTHON*` variable, so a
+  `PYTHONPATH` exported from a shell start-up file cannot load code into
+  OpenHands.
+- **Known gaps.** The agent can edit `~/.openhands/hooks.json`, or start a
   second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
-  tool call first, and hook-silence detection is the backstop.
+  tool call first, and hook-silence detection is the backstop. Command rules
+  judge the terminal tool's commands. Text the terminal tool sends to a
+  running process (`is_input`) is judged as a shell command too. A command
+  that a script runs, when the agent writes the script to a file and runs it,
+  is judged by the command that starts the script.
 - **Install pin.** The image installs OpenHands CLI 1.16.0 from PyPI as a
   root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
   version below the reviewed hook contract (`>=1.12.0`).
 - **Model access.** Every DefenseClaw provider profile runs OpenHands with
   `--override-with-envs`. The launcher copies the profile's credential
   placeholder into `LLM_API_KEY`; you choose the model with `LLM_MODEL`, a
-  LiteLLM name:
+  LiteLLM name. `defenseclaw sandbox run openhands` picks a profile from
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
+  `AWS_BEARER_TOKEN_BEDROCK`:
   - `defenseclaw-openai`: `openai/<model>`
   - `defenseclaw-anthropic`: `anthropic/<model>`
-  - `defenseclaw-bedrock-mantle-openai`: `openai/<Mantle model id>`, with
-    `LLM_BASE_URL` set to the Mantle route
-- **Launch flags.** Skip-permissions mode adds `--always-approve`. A headless
-  run is `openhands --headless --exit-without-confirmation -t <prompt>`.
+  - the regional `defenseclaw-bedrock-mantle-openai-<region>`:
+    `openai/<Mantle model id>`, with `LLM_BASE_URL` set to the Mantle route
+- **Launch flags.** Skip-permissions mode adds `--always-approve`. A run with
+  `--safe` drops `--always-approve`, `--yolo` and `--llm-approve`, and every
+  prefix OpenHands accepts for them. A headless run is
+  `openhands --headless --exit-without-confirmation -t <prompt>`; pass
+  `-- --headless -t "TEXT"` to `sandbox run` for a detached run. OpenHands'
+  headless mode approves every action itself, so `--safe` keeps its prompts
+  only in interactive runs.
 - **Other traffic.** Apart from the model, a mock-model run reached only
   `pypi.org` (the version check), `github.com` and `raw.githubusercontent.com`
   (the public skills download). That traffic goes through the DefenseClaw
@@ -194,8 +210,12 @@ exist only in the image; nothing on your host changes.
   - egress through the proxy, including a blocklisted host that a
     sandbox-scoped unblock then let through.
 
-  The image also passes the hook-fire probe, in which a replaced user
-  `hooks.json` is restored.
+  The image also passes the hook-fire probe. In that probe a replaced user
+  `hooks.json` is restored, a planted `sitecustomize` module in the launch
+  environment never runs, and the launcher refuses to start when the hooks
+  file is a directory. The curated provider profiles have not carried a real
+  model inside a sandbox; see the harness's verification note for what was
+  run.
 
 ## Disable
 

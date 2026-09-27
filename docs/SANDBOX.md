@@ -1079,10 +1079,11 @@ Each connector publishes a tamper tier (`SandboxArtifacts.TamperTier`):
 
 - **managed:** the hook registration lives in the harness's system policy,
   root-owned in the image, and user or project settings cannot switch it off.
-  `claudecode`, `codex`, `copilot` and `cursor` are managed.
+  `claudecode`, `codex`, `copilot`, `cursor` and `omnigent` are managed.
 - **user:** the registration lives in a file the agent can edit, or code the
-  agent or a repository adds runs beside the hooks. `opencode`, `amp`, `kiro`
-  and `devin` are in this tier; the hook-silence finding is the backstop.
+  agent or a repository adds runs beside the hooks. `opencode`, `amp`, `kiro`,
+  `devin`, `hermes`, `openhands` and `antigravity` are in this tier; the
+  hook-silence finding is the backstop.
   [Sandboxed connectors](#sandboxed-connectors) has the details.
 
 ### Hook tamper detection
@@ -1285,7 +1286,11 @@ the switches that would run the harness without its hooks, puts the system
 directories first on `PATH`, switches Node's compile cache off, exports the
 egress proxy settings (see [paths out of the workload](#paths-out-of-the-workload)),
 and drops `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`,
-`NODE_OPTIONS` and `NODE_PATH` from the harness environment. Harnesses run
+`NODE_OPTIONS` and `NODE_PATH` from the harness environment. The Python
+harnesses' launchers (Hermes, OpenHands, OmniGent) also drop every `PYTHON*`
+variable: their uv entry points run the interpreter without `-I`, so a
+`PYTHONPATH` exported from a start-up file would import a planted
+`sitecustomize` module into the harness. Harnesses run
 hooks and tool commands through bash, which reads the file `BASH_ENV` names
 before the command, so one `export` in a shell start-up file the agent can
 edit would otherwise run inside every hook, or end it with exit 0 (allow).
@@ -1316,6 +1321,10 @@ images stay unverified, so they are never selected for a sandbox.
 | Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |
 | Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
 | Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
+| Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
+| OpenHands CLI | 1.16.0 (PyPI, root-owned uv tool on a private CPython) | User-owned `~/.openhands/hooks.json`, restored from a root-owned copy on every start; a project hooks file or a non-file hooks path is refused | user | `--always-approve` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
+| Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
+| OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |
 
 OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
 (`TestLiveSandboxHookOnlyHarness` in `internal/gateway`), with the project
@@ -1371,6 +1380,19 @@ The harness retried them.
 Cursor Agent and Devin CLI images build and pass the static probe (pinned
 version, binary realpaths and digests) but stay unverified: both CLIs need a
 vendor account before any agent turn and fire no hook without one.
+
+Hermes, OpenHands, Antigravity and OmniGent ran end to end through the
+DefenseClaw daemon (`TestSandboxHookOnlyHarness` in `test/e2e/openshell`)
+against the E2E mock model behind a `--credential` binding on
+`host.openshell.internal`: hooks (OmniGent: policy events) reached the
+ingress with the model key substituted, the marker command a test rule
+blocks was denied with the rule's reason, and egress went through the proxy
+with the blocklist and a sandbox unblock. Command rules also judge text these
+harnesses send to a running process (OpenHands terminal input, agy
+`send_command_input`, Hermes' `process` write and submit) as shell input;
+Hermes' `execute_code` tool, whose Python command rules cannot read, is
+turned off in the image. In an OmniGent sandbox a confirm verdict denies:
+OmniGent's approval routes answer any process in the sandbox.
 
 ### Harness facts
 

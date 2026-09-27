@@ -83,14 +83,14 @@ connector-specific fallback; there is no TUI approval queue.
 DefenseClaw can render OpenShell sandbox image files for Claude Code, Codex,
 OpenCode, GitHub Copilot CLI, Amp, Cursor Agent, Kiro CLI, Devin CLI, Hermes,
 OpenHands, Antigravity and OmniGent. The matrix shows each one's tier: Claude
-Code, Codex, Copilot CLI, Cursor Agent, Hermes and OmniGent register their
-hooks in a root-owned managed policy. The others are in the user tier: the
-agent can edit their hook file, or code the agent or a repository adds runs
-beside the hooks. Every sandbox hook fails closed. The **OpenShell sandbox**
-column says which harnesses have run end to end in a sandbox. No
-`defenseclaw` command launches a sandbox yet. The
-[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once
-they ship; today it covers legacy cleanup. Every other connector is pending.
+Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their hooks in a
+root-owned managed policy. The others are in the user tier: the agent can
+edit their hook file, or code the agent or a repository adds runs beside the
+hooks (Hermes, for example, loads `.env` files and plugins from its home).
+Every sandbox hook fails closed. The **OpenShell sandbox** column says which
+harnesses have run end to end in a sandbox. `defenseclaw sandbox run
+<harness>` starts one; `defenseclaw sandbox --help` lists the other sandbox
+commands. Every other connector is pending.
 
 ### "I want fail-closed on transport failures"
 
