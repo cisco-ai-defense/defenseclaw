@@ -72,7 +72,7 @@ parts of the boundary that depend on the project.
 | Identity | The process identity the policy names | Runs as your uid in mount mode (as `sandbox` in copy mode) and builds a per-uid image |
 | Credentials | Placeholders resolve only on bound endpoints, for bound binaries | Per-sandbox binding tokens, provider profiles pinned to the harness binary; LLM traffic never passes through DefenseClaw |
 | Agent actions | None | Hooks feed the existing guardrail pipeline: rule packs, CEL, the judge, HITL |
-| Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe |
+| Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe, hook tamper and hook silence detection |
 | Visibility | OCSF events over `WatchSandbox` | Parse, correlate by sandbox, emit v8 telemetry |
 
 ## Components
@@ -226,6 +226,19 @@ Hook handlers then treat a sandbox request differently from a host request
   agent.
 - Nothing runs git or a subprocess scanner against the agent-writable tree on
   the host.
+- A verdict that is not a plain allow carries a plain reason
+  (`internal/gateway/sandbox_verdict_reason.go`), for example
+  `Blocked by DefenseClaw rule <ID>: <title>. <what to do instead>`. It is
+  built only from the static metadata of the deciding rules, looked up by rule
+  ID in the connector's guardrail catalog and the built-in CodeGuard rules:
+  the ID, the title, and a remediation for the rule's category (CodeGuard
+  rules carry their own). A rule-pack title that its own rule or a secret
+  rule would match is left out, and so are IDs no catalog knows. The reason
+  never quotes matched content, whatever the redaction policy, so the agent
+  can adapt instead of seeing `<redacted len=… sha=…>`. The same text becomes
+  the sandbox's `last_blocked` and its `tool.blocked` activity entry; the
+  audit sinks keep the source reason and redact it as before. Finding labels
+  are left out of the response body; the rule IDs travel in `rule_ids`.
 
 ## Sandbox bindings and tokens
 
@@ -774,7 +787,44 @@ Each connector publishes a tamper tier (`SandboxArtifacts.TamperTier`):
   root-owned in the image, and user or project settings cannot switch it off.
   Both `claudecode` and `codex` are managed.
 - **user:** the registration lives in a file the agent can edit. For future
-  connectors in this tier, the planned hook-silence finding is the backstop.
+  connectors in this tier, the hook-silence finding is the backstop.
+
+### Hook tamper detection
+
+A sandbox hook is judgment inside the boundary. It runs as the workload's
+uid, in the workload's PID namespace, and Claude Code treats a hook that dies
+with anything but exit code 2 as a non-blocking error, so a workload that
+kills its `PreToolUse` hook gets that tool call run without a DefenseClaw
+verdict. The file and egress boundaries are enforced outside the sandbox and
+do not depend on the hooks. The manager watches for the two ways a
+compromised hook shows:
+
+- **Hook silence** (`hook_silence`): the harness is active (OCSF process or
+  network events, egress, native OTLP) for `HookSilence` without a single
+  hook request.
+- **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
+  a tool that ran without a verdict. Claude Code and Codex send the same
+  per-call `tool_use_id` with a call's `PreToolUse` and its `PostToolUse`.
+  Per binding, the manager records each `PreToolUse` decision and pairs it
+  with the result. A `PostToolUse` whose `PreToolUse` was denied, or never
+  arrived, raises a HIGH `hook_tamper` finding, a `finding` activity entry
+  and a count in the sandbox's hook coverage (`tampered`,
+  `last_tamper_at`). Claude Code's `PostToolUseFailure` and `PermissionDenied`
+  close a call but never prove tamper: Claude can report a failure before
+  `PreToolUse` ran.
+
+The pack's `hooks.on_tamper` picks the response: `stop` (the default in
+`balanced` and `strict`) stops the sandbox once per session; `alert` (the
+default in `open`) reports and leaves it running. The ledger is bounded per
+binding (1024 open calls, 1024 finished or denied ones; oversized IDs are kept
+as digests). An open call pushed out by newer ones is remembered as seen, so
+a long-running tool is not flagged. Ledgers are dropped when the binding is
+revoked or no sandbox holds it any more. "Never arrived" is only proved for a
+session that started under the running daemon: after a daemon restart, a
+running sandbox's ledger is partial until its next start, and only denials
+seen since the restart count. The workload can still forge hook requests of
+its own; the detector catches a killed or bypassed hook, not a workload that
+imitates one.
 
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
@@ -831,7 +881,8 @@ to the `open`, `balanced` and `strict` profiles), approvals mode (`auto`,
 `triage` or `manual`), egress feeds, block and allow lists, ports and the
 large-upload threshold, workspace mode, masks, unmasks and review globs, the
 harness skip-permissions default and allowlist, MCP import, host-port access
-and blocked tools, and the hook fail mode (only `closed`).
+and blocked tools, the hook fail mode (only `closed`), and the response to
+hook tamper (`hooks.on_tamper`: `stop` or `alert`).
 
 The built-in packs are embedded from `policies/sandbox/<name>/pack.yaml`:
 

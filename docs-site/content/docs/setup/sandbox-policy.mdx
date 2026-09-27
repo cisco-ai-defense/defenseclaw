@@ -142,6 +142,10 @@ These are the settings each pack controls. The
   servers running on your machine, and MCP tools to block.
 - **Hook fail mode** (`hooks.fail_mode`): always `closed`. A sandbox hook that
   cannot reach DefenseClaw denies the tool call.
+- **Hook tamper response** (`hooks.on_tamper`): what DefenseClaw does when a
+  tool runs without its verdict, because the workload killed or bypassed its
+  hook. `stop` stops the sandbox; `alert` reports a high-severity finding and
+  keeps it running. `open` alerts; `balanced` and `strict` stop.
 
 ## Choose a pack
 
@@ -219,6 +223,7 @@ mcp:
 
 hooks:
   fail_mode: closed
+  on_tamper: stop
 ```
 
 <Callout type="warn" title="A custom pack starts from nothing">
@@ -255,6 +260,7 @@ you need from `policies/sandbox/balanced/pack.yaml`.
 | `mcp.host_ports` | Yes | | `true` or `false`. |
 | `mcp.blocked_tools` | No | `[]` | Tool names or globs using letters, digits, `_`, `.`, `:`, `*`, and `-`. At most 1024. |
 | `hooks.fail_mode` | Yes | | Must be `closed`. |
+| `hooks.on_tamper` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`. When an administrator locks the pack, a pack that alerts where the configured one stops is refused. |
 
 **Host globs** are `*`, an exact host name (`example.com`), `*.example.com`
 (every subdomain, not `example.com` itself), or an IP address. Schemes, ports,
