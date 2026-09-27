@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,9 +150,12 @@ func (DefaultWorkspace) DeleteCopy(dataDir, name string) error {
 // form. The SDK's typed profile drops endpoint access and enforcement, so
 // profiles go through the upstream CLI, which the spike validated.
 type ProfileImporter interface {
-	// Import creates the profile on the named gateway registration, or
-	// replaces an existing one of the same id when replace is set.
-	Import(ctx context.Context, gateway string, p profiles.Profile, replace bool) error
+	// Import creates the profile on the named gateway registration when
+	// resourceVersion is 0. Otherwise it replaces the existing profile of
+	// the same id, which must still be at resourceVersion: a concurrent
+	// update (another DefenseClaw daemon on the gateway) makes it fail
+	// instead of being overwritten.
+	Import(ctx context.Context, gateway string, p profiles.Profile, resourceVersion uint64) error
 }
 
 // CLIProfileImporter imports profiles with `openshell profile import|update
@@ -163,10 +167,19 @@ type CLIProfileImporter struct {
 	TempDir string
 }
 
-// Import implements ProfileImporter.
-func (c CLIProfileImporter) Import(ctx context.Context, gateway string, p profiles.Profile, replace bool) error {
+// Import implements ProfileImporter. An update's file carries the
+// resource_version it replaces, which `openshell profile update` requires
+// (as `openshell profile export` prints it).
+func (c CLIProfileImporter) Import(ctx context.Context, gateway string, p profiles.Profile, resourceVersion uint64) error {
 	if !openshell.ValidGatewayName(gateway) {
 		return fmt.Errorf("profile import needs a gateway name, got %q", gateway)
+	}
+	if p.ID == "" || len(p.YAML) == 0 {
+		return errors.New("profile import needs a rendered profile")
+	}
+	data := p.YAML
+	if resourceVersion != 0 {
+		data = append([]byte("resource_version: "+strconv.FormatUint(resourceVersion, 10)+"\n"), p.YAML...)
 	}
 	dir := c.TempDir
 	if dir == "" {
@@ -182,7 +195,7 @@ func (c CLIProfileImporter) Import(ctx context.Context, gateway string, p profil
 		_ = f.Close()
 		return fmt.Errorf("profile import: %w", err)
 	}
-	if _, err := f.Write(p.YAML); err != nil {
+	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("profile import: %w", err)
 	}
@@ -194,7 +207,7 @@ func (c CLIProfileImporter) Import(ctx context.Context, gateway string, p profil
 		bin = openshell.DefaultBinary
 	}
 	args := []string{"profile", "import", "-f", filepath.Clean(name), "--global", "-g", gateway}
-	if replace {
+	if resourceVersion != 0 {
 		args = []string{"profile", "update", "-f", filepath.Clean(name), "--global", "-g", gateway, p.ID}
 	}
 	runner := c.Runner

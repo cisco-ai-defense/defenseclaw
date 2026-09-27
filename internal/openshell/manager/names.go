@@ -123,7 +123,9 @@ func providerName(sandbox, role string, i int) string {
 }
 
 // credentialProfileID is the provider profile of one --credential binding,
-// shared by every sandbox binding the same variable to the same endpoint.
+// shared by every sandbox binding the same variable to the same endpoint,
+// whichever DefenseClaw daemon on the gateway created it: the id hashes all
+// the profile holds (variable, host, port), so sharing it re-points nothing.
 func credentialProfileID(name, host string, port int) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", name, host, port)))
 	return "dc-cred-" + hex.EncodeToString(sum[:6])

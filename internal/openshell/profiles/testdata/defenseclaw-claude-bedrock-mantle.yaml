@@ -1,4 +1,4 @@
-id: defenseclaw-claude-bedrock-mantle
+id: defenseclaw-claude-bedrock-mantle-us-east-1
 display_name: Amazon Bedrock Mantle (Anthropic route) for Claude Code (DefenseClaw)
 description: Binds a Bedrock API key to the Mantle Anthropic Messages route as x-api-key (ANTHROPIC_BASE_URL=https://bedrock-mantle.us-east-1.api.aws/anthropic); only the Claude Code binary may use it
 category: inference

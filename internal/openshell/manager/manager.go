@@ -197,6 +197,9 @@ type Manager struct {
 	lastReconcile time.Time
 	cfgSeen       *config.Config
 	reconcileMu   sync.Mutex
+	// profileMu serializes this daemon's provider profile imports, so
+	// concurrent creates do not race each other to import the same one.
+	profileMu sync.Mutex
 }
 
 // New validates opts and returns a Manager. Run must be running for

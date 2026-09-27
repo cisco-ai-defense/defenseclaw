@@ -194,22 +194,36 @@ type fakeImporter struct {
 	imported []string
 	updated  []string
 	err      error
+	calls    int
+	// before runs ahead of each import or update, without the lock (another
+	// daemon changing the gateway under this one).
+	before func(p profiles.Profile, resourceVersion uint64)
 }
 
-func (f *fakeImporter) Import(ctx context.Context, _ string, p profiles.Profile, replace bool) error {
+func (f *fakeImporter) Import(ctx context.Context, _ string, p profiles.Profile, resourceVersion uint64) error {
+	f.mu.Lock()
+	f.calls++
+	before := f.before
+	f.mu.Unlock()
+	if before != nil {
+		before(p, resourceVersion)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
 	item := openshell.ProfileImportItem{Profile: p.Spec, Source: "test"}
-	if replace {
+	if resourceVersion != 0 {
 		f.updated = append(f.updated, p.ID)
-		_, err := f.c.UpdateProfile(ctx, p.ID, 0, item)
+		_, err := f.c.UpdateProfile(ctx, p.ID, resourceVersion, item)
 		return err
 	}
 	f.imported = append(f.imported, p.ID)
-	_, err := f.c.ImportProfiles(ctx, []openshell.ProfileImportItem{item})
+	res, err := f.c.ImportProfiles(ctx, []openshell.ProfileImportItem{item})
+	if err == nil && !res.Imported {
+		err = errors.New("profile import rejected")
+	}
 	return err
 }
 
@@ -570,6 +584,20 @@ type harnessEnv struct {
 	done     chan struct{}
 	gw       *Gateway
 	connErr  error
+	// The daemon's identity: its data dir's owner and its listeners.
+	owner                            string
+	ingressPort, egressPort, apiPort int
+}
+
+// daemonOptions place a harnessEnv's manager on a gateway, as one
+// DefenseClaw daemon (data dir) of several.
+type daemonOptions struct {
+	// fake is the OpenShell gateway (default: a new one).
+	fake *openshelltest.Fake
+	// owner and the ports default to testOwner, testIngressPort,
+	// testEgressPort and 18970.
+	owner                            string
+	ingressPort, egressPort, apiPort int
 }
 
 func claudeContract(t *testing.T) string {
@@ -583,7 +611,29 @@ func claudeContract(t *testing.T) string {
 
 func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	t.Helper()
-	e := &harnessEnv{t: t, fake: openshelltest.New(), dataDir: t.TempDir()}
+	return newDaemonEnv(t, daemonOptions{}, edit)
+}
+
+// newDaemonEnv is newEnv for one of several daemons sharing a gateway.
+func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *harnessEnv {
+	t.Helper()
+	if d.fake == nil {
+		d.fake = openshelltest.New()
+	}
+	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(),
+		owner: d.owner, ingressPort: d.ingressPort, egressPort: d.egressPort, apiPort: d.apiPort}
+	if e.owner == "" {
+		e.owner = testOwner
+	}
+	if e.ingressPort == 0 {
+		e.ingressPort = testIngressPort
+	}
+	if e.egressPort == 0 {
+		e.egressPort = testEgressPort
+	}
+	if e.apiPort == 0 {
+		e.apiPort = 18970
+	}
 	e.client = e.fake.Client(openshell.ClientOptions{PollInterval: time.Millisecond, ReadyTimeout: 5 * time.Second})
 	project := filepath.Join(t.TempDir(), "myapp")
 	if err := os.MkdirAll(project, 0o755); err != nil {
@@ -595,7 +645,7 @@ func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	}
 	e.project = real
 	cfg := &config.Config{DataDir: e.dataDir}
-	cfg.Gateway.APIPort = 18970
+	cfg.Gateway.APIPort = e.apiPort
 	cfg.Guardrail.Port = 4000
 	cfg.OpenShell.Enabled = true
 	cfg.OpenShell.Approvals.DebounceMs = 10
@@ -647,7 +697,7 @@ func (e *harnessEnv) setConfig(edit func(*config.Config)) {
 func (e *harnessEnv) newManager() *Manager {
 	e.t.Helper()
 	m, err := New(Options{
-		DataDir: e.dataDir, Owner: testOwner, Config: e.config,
+		DataDir: e.dataDir, Owner: e.owner, Config: e.config,
 		Connect: func(context.Context) (*Gateway, error) {
 			if e.connErr != nil {
 				return nil, e.connErr
@@ -656,7 +706,7 @@ func (e *harnessEnv) newManager() *Manager {
 		},
 		Bindings: e.store, Images: e.images, Workspace: e.ws, Profiles: e.importer, Telemetry: e.tel,
 		Persist: e.persist, ForgetBinding: func(id string) { e.forgot = append(e.forgot, id) },
-		IngressPort: testIngressPort, EgressPort: testEgressPort, APIPort: 18970,
+		IngressPort: e.ingressPort, EgressPort: e.egressPort, APIPort: e.apiPort,
 		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
 		Guard: e.guard.run, GuardGitlinks: func(context.Context, string) ([]string, error) { return nil, nil },
 		DefenseClawVersion: "1.2.3", SettleDelay: -1, HookSilence: 10 * time.Minute,

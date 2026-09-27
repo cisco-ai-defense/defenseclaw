@@ -48,12 +48,15 @@ type teardownPlan struct {
 	sandboxes []string
 	providers []string
 	profiles  []string
-	images    []string
-	gateway   []receiptFile
-	changed   []receiptFile
-	wrappers  []wrapper.Installed
-	gwErr     error
-	client    openshell.Client
+	// ownIngress are this data dir's ingress profiles, found before its
+	// providers are deleted.
+	ownIngress map[string]bool
+	images     []string
+	gateway    []receiptFile
+	changed    []receiptFile
+	wrappers   []wrapper.Installed
+	gwErr      error
+	client     openshell.Client
 }
 
 // Teardown removes everything DefenseClaw created for sandboxes: its
@@ -148,7 +151,8 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 				}
 			}
 		}
-		p.profiles = a.unusedProfiles(ctx, c, p.providers)
+		p.ownIngress = a.ownIngressProfiles(ctx, c, p.providers)
+		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
 	if !o.KeepImages {
@@ -171,9 +175,33 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 	return p, nil
 }
 
-// unusedProfiles are DefenseClaw's provider profiles that no provider
-// outside this teardown uses (profiles are gateway-global).
-func (a *App) unusedProfiles(ctx context.Context, c openshell.Client, ours []string) []string {
+// ownIngressProfiles are the ingress provider profiles this data dir uses:
+// its configured listener's and the ones its providers (ours) were created
+// from, which an earlier ingress port leaves behind.
+func (a *App) ownIngressProfiles(ctx context.Context, c openshell.Client, ours []string) map[string]bool {
+	own := map[string]bool{}
+	if a.Cfg != nil {
+		own[profiles.IngressProfileID(a.Cfg.OpenShellIngressPort())] = true
+	}
+	if list, err := c.ListProviders(ctx); err == nil {
+		for _, pr := range list {
+			if _, ok := profiles.IngressPort(pr.Type); ok && slices.Contains(ours, pr.Name) {
+				own[pr.Type] = true
+			}
+		}
+	}
+	return own
+}
+
+// unusedProfiles are the provider profiles teardown removes, each only when
+// no provider outside this teardown (ours) uses it: profiles are
+// gateway-global, shared with every DefenseClaw data dir on the gateway.
+// Those are this data dir's own ingress profiles (ownIngress), the legacy
+// gateway-wide one, and the shared LLM and credential profiles, which the
+// daemons re-import when they need them. Another daemon's ingress profile
+// (another listener's) is never removed, used or not, and OpenShell itself
+// refuses to delete a profile a provider still uses.
+func (a *App) unusedProfiles(ctx context.Context, c openshell.Client, ours []string, ownIngress map[string]bool) []string {
 	list, err := c.ListProfiles(ctx)
 	if err != nil {
 		return nil
@@ -190,7 +218,10 @@ func (a *App) unusedProfiles(ctx context.Context, c openshell.Client, ours []str
 	}
 	var out []string
 	for _, pf := range list {
-		dc := slices.Contains(profiles.IDs(), pf.ID) || strings.HasPrefix(pf.ID, "dc-cred-")
+		dc := profiles.IsDefenseClaw(pf.ID) || strings.HasPrefix(pf.ID, "dc-cred-")
+		if _, ingress := profiles.IngressPort(pf.ID); ingress && !ownIngress[pf.ID] {
+			dc = false
+		}
 		if dc && !used[pf.ID] {
 			out = append(out, pf.ID)
 		}
@@ -282,7 +313,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 			}
 			a.ok("deleted provider " + name)
 		}
-		for _, id := range a.unusedProfiles(ctx, p.client, p.providers) {
+		for _, id := range a.unusedProfiles(ctx, p.client, p.providers, p.ownIngress) {
 			if _, err := p.client.DeleteProfile(ctx, id); err != nil && !openshell.IsNotFound(err) {
 				fail("delete provider profile "+id, err)
 				continue

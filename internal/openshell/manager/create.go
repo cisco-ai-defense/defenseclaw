@@ -263,7 +263,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		rec.Pack, rec.PackDigest = eff.Pack.Name, eff.Pack.Digest
 	}
 	if llm != nil {
-		rec.CredentialProfile, rec.BedrockRegion = llm.profile.ID, in.req.LLM.BedrockRegion
+		// The harness's name for the credential (a template ID); the
+		// provider's gateway profile may be a regional one.
+		rec.CredentialProfile, rec.BedrockRegion = llm.profile.Template, in.req.LLM.BedrockRegion
 	}
 	workdir := sandboxauth.Workdir{Mode: sandboxauth.WorkdirMode(in.mode)}
 	var plan *workspace.MountPlan
@@ -523,7 +525,18 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 				return upstream("create provider "+pname, err)
 			}
 			// A provider left behind by an interrupted create of the same
-			// name: replace it.
+			// name: replace it. Provider names are gateway-global, so one
+			// that is not this data dir's (another daemon creating a
+			// sandbox of this name right now, or not DefenseClaw's at all)
+			// is never touched.
+			have, gerr := gw.Client.GetProvider(ctx, pname)
+			if gerr != nil {
+				return upstream("look up provider "+pname, gerr)
+			}
+			if have.Labels[LabelManaged] != "true" || have.Labels[LabelOwner] != m.opts.Owner {
+				return sandboxapi.Errorf(sandboxapi.CodeConflict,
+					"an OpenShell provider named %s already exists and is not this DefenseClaw's; pick another sandbox name", pname)
+			}
 			if _, err := gw.Client.EnsureProvider(ctx, p); err != nil {
 				return upstream("replace provider "+pname, err)
 			}
@@ -543,17 +556,19 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 		if err != nil {
 			return nil, nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "render the ingress profile: %v", err)
 		}
+		// This listener's own profile (profiles.IngressProfileID): daemons
+		// on other ports keep theirs, so none re-points another's sandboxes.
 		if err := m.ensureProfile(ctx, gw, ingress, nil); err != nil {
 			return nil, nil, err
 		}
-		if err := create(roleIngress, 0, profiles.IngressID, map[string]string{openshell.EnvSandboxToken: token}); err != nil {
+		if err := create(roleIngress, 0, ingress.ID, map[string]string{openshell.EnvSandboxToken: token}); err != nil {
 			return nil, nil, err
 		}
 	}
 	if llm != nil {
 		region := rec.BedrockRegion
 		render := func(binaries []string) (profiles.Profile, error) {
-			p, err := profiles.Render(llm.profile.ID, profiles.Input{Binaries: binaries, BedrockRegion: region})
+			p, err := profiles.Render(llm.profile.Template, profiles.Input{Binaries: binaries, BedrockRegion: region})
 			if err != nil {
 				return profiles.Profile{}, sandboxapi.Errorf(sandboxapi.CodeInternal, "render profile %s: %v", llm.profile.ID, err)
 			}

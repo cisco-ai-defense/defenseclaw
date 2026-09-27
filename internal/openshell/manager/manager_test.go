@@ -152,7 +152,7 @@ func TestCreateMountMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ingress.Type != profiles.IngressID || ingress.Labels[LabelSandbox] != sb.Name {
+	if ingress.Type != profiles.IngressProfileID(testIngressPort) || ingress.Labels[LabelSandbox] != sb.Name {
 		t.Fatalf("ingress provider = %+v", ingress)
 	}
 	matched, err := e.store.Match(ingress.Spec.Credentials[openshell.EnvSandboxToken])
@@ -163,7 +163,7 @@ func TestCreateMountMode(t *testing.T) {
 	if llm.Type != profiles.AnthropicID || llm.Spec.Credentials["ANTHROPIC_API_KEY"] != "sk-test-secret" {
 		t.Fatalf("llm provider = %+v", llm)
 	}
-	if !slices.Contains(e.importer.imported, profiles.IngressID) || !slices.Contains(e.importer.imported, profiles.AnthropicID) {
+	if !slices.Contains(e.importer.imported, profiles.IngressProfileID(testIngressPort)) || !slices.Contains(e.importer.imported, profiles.AnthropicID) {
 		t.Fatalf("imported profiles = %v", e.importer.imported)
 	}
 

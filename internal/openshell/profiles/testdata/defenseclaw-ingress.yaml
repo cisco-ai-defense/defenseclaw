@@ -1,5 +1,5 @@
-id: defenseclaw-ingress
-display_name: DefenseClaw hook ingress
+id: defenseclaw-ingress-18971
+display_name: DefenseClaw hook ingress on port 18971
 description: Binds the per-sandbox DefenseClaw binding token to the host-loopback hook ingress; the workload only ever sees a placeholder
 category: other
 inference_capable: false

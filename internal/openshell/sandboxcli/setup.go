@@ -311,25 +311,29 @@ func (a *App) credentialLine(specs []*harness.Spec) string {
 	return strings.Join(parts, "  ")
 }
 
-// importIngressProfile imports the DefenseClaw ingress provider profile
-// when the gateway lacks it (best effort: the daemon imports missing
-// profiles at the first run too).
+// importIngressProfile imports the provider profile of this config's hook
+// ingress listener (profiles.IngressProfileID) when the gateway lacks it
+// (best effort: the daemon imports missing profiles at the first run too).
+// With token_delivery: env no sandbox uses it.
 func (a *App) importIngressProfile(ctx context.Context) {
-	c, reg, err := a.OpenShell(ctx)
-	if err != nil {
-		return
-	}
-	defer c.Close()
-	if _, err := c.GetProfile(ctx, profiles.IngressID); err == nil || !openshell.IsNotFound(err) {
+	if strings.EqualFold(a.Cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		return
 	}
 	p, err := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: a.Cfg.OpenShellIngressPort()})
 	if err != nil {
 		return
 	}
+	c, reg, err := a.OpenShell(ctx)
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	if _, err := c.GetProfile(ctx, p.ID); err == nil || !openshell.IsNotFound(err) {
+		return
+	}
 	imp := manager.CLIProfileImporter{Binary: a.Cfg.OpenShell.EffectiveBinary()}
-	if err := imp.Import(ctx, reg.Name, p, false); err != nil {
-		a.warn("could not import the " + profiles.IngressID + " provider profile (the first run imports it): " + err.Error())
+	if err := imp.Import(ctx, reg.Name, p, 0); err != nil {
+		a.warn("could not import the " + p.ID + " provider profile (the first run imports it): " + err.Error())
 	}
 }
 

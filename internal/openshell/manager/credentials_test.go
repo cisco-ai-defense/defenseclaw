@@ -17,7 +17,12 @@
 package manager
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"os"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -126,19 +131,23 @@ func TestEnsureProfileImportsOnceAndUpdatesOnChange(t *testing.T) {
 	if len(e.importer.imported) != 1 || len(e.importer.updated) != 0 {
 		t.Fatalf("imported %v updated %v", e.importer.imported, e.importer.updated)
 	}
+	// Another ingress port is another listener's profile: imported next to
+	// this one, which keeps its endpoint.
 	moved, _ := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: 28971})
 	if err := e.m.ensureProfile(ctx, e.gw, moved, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.importer.updated) != 1 {
-		t.Fatalf("port change not updated: %v", e.importer.updated)
+	if len(e.importer.imported) != 2 || len(e.importer.updated) != 0 {
+		t.Fatalf("a port change updated a profile: imported %v updated %v", e.importer.imported, e.importer.updated)
 	}
-	got, _ := e.client.GetProfile(ctx, profiles.IngressID)
-	if got.Endpoints[0].Port != 28971 {
-		t.Fatalf("profile = %+v", got.Endpoints)
+	for port, id := range map[int]string{testIngressPort: p.ID, 28971: moved.ID} {
+		if got, err := e.client.GetProfile(ctx, id); err != nil || got.Endpoints[0].Port != uint32(port) {
+			t.Fatalf("profile %s = %+v, %v", id, got, err)
+		}
 	}
 
-	// LLM profiles merge network binaries from other images.
+	// LLM profiles merge network binaries from other images, updating the
+	// profile at the resource version they read.
 	render := func(bins []string) (profiles.Profile, error) {
 		return profiles.Render(profiles.AnthropicID, profiles.Input{Binaries: bins})
 	}
@@ -150,9 +159,13 @@ func TestEnsureProfileImportsOnceAndUpdatesOnChange(t *testing.T) {
 	if err := e.m.ensureProfile(ctx, e.gw, second, render); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = e.client.GetProfile(ctx, profiles.AnthropicID)
-	if len(got.Binaries) != 2 {
-		t.Fatalf("binaries = %+v", got.Binaries)
+	got, _ := e.client.GetProfile(ctx, profiles.AnthropicID)
+	if len(got.Binaries) != 2 || got.ResourceVersion != 2 {
+		t.Fatalf("binaries = %+v at version %d", got.Binaries, got.ResourceVersion)
+	}
+	// The image's own binaries again change nothing.
+	if err := e.m.ensureProfile(ctx, e.gw, first, render); err != nil || len(e.importer.updated) != 1 {
+		t.Fatalf("unchanged profile re-imported: %v, updated %v", err, e.importer.updated)
 	}
 
 	e.m.opts.Profiles = nil
@@ -161,3 +174,148 @@ func TestEnsureProfileImportsOnceAndUpdatesOnChange(t *testing.T) {
 		t.Fatalf("missing profile without importer: %v", err)
 	}
 }
+
+// TestEnsureProfileSurvivesAnotherDaemon pins that a shared profile another
+// DefenseClaw daemon imports or updates under this one is merged with, not
+// overwritten or failed on.
+func TestEnsureProfileSurvivesAnotherDaemon(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	render := func(bins []string) (profiles.Profile, error) {
+		return profiles.Render(profiles.OpenAIID, profiles.Input{Binaries: bins})
+	}
+	ours, _ := render([]string{"/opt/ours/codex"})
+	theirs, _ := render([]string{"/opt/theirs/codex"})
+	later, _ := render([]string{"/opt/later/codex"})
+
+	// The other daemon imports the same profile first: our import fails,
+	// and the next pass merges into theirs.
+	raced := 0
+	e.importer.before = func(p profiles.Profile, rv uint64) {
+		if raced == 0 && rv == 0 {
+			raced++
+			if _, err := e.client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: theirs.Spec, Source: "other daemon"}}); err != nil {
+				t.Errorf("other daemon's import: %v", err)
+			}
+		}
+	}
+	if err := e.m.ensureProfile(ctx, e.gw, ours, render); err != nil {
+		t.Fatalf("ensureProfile after a concurrent import: %v", err)
+	}
+	got, _ := e.client.GetProfile(ctx, profiles.OpenAIID)
+	if bins := profileBinaries(*got); !slices.Equal(bins, []string{"/opt/ours/codex", "/opt/theirs/codex"}) {
+		t.Fatalf("binaries after a concurrent import = %v", bins)
+	}
+
+	// The other daemon updates it between our read and our update: the
+	// stale update is refused, and the retry keeps their binary too.
+	raced = 0
+	e.importer.before = func(p profiles.Profile, rv uint64) {
+		if raced == 0 && rv != 0 {
+			raced++
+			cur, _ := e.client.GetProfile(ctx, profiles.OpenAIID)
+			mine, _ := render(append(profileBinaries(*cur), "/opt/theirs2/codex"))
+			if _, err := e.client.UpdateProfile(ctx, profiles.OpenAIID, cur.ResourceVersion, openshell.ProfileImportItem{Profile: mine.Spec, Source: "other daemon"}); err != nil {
+				t.Errorf("other daemon's update: %v", err)
+			}
+		}
+	}
+	if err := e.m.ensureProfile(ctx, e.gw, later, render); err != nil {
+		t.Fatalf("ensureProfile after a concurrent update: %v", err)
+	}
+	got, _ = e.client.GetProfile(ctx, profiles.OpenAIID)
+	want := []string{"/opt/later/codex", "/opt/ours/codex", "/opt/theirs/codex", "/opt/theirs2/codex"}
+	if bins := profileBinaries(*got); !slices.Equal(bins, want) {
+		t.Fatalf("binaries after a concurrent update = %v, want %v", bins, want)
+	}
+
+	// A failure that is not a race is reported at once.
+	e.importer.before = nil
+	e.importer.err = errors.New("openshell: boom")
+	calls := e.importer.calls
+	fresh, _ := profiles.Render(profiles.ClaudeOAuthID, profiles.Input{Binaries: []string{testClaudeBin}})
+	if err := e.m.ensureProfile(ctx, e.gw, fresh, nil); !sandboxapi.IsCode(err, sandboxapi.CodeUpstream) {
+		t.Fatalf("import failure = %v", err)
+	}
+	if n := e.importer.calls - calls; n != 1 {
+		t.Fatalf("a failed import was tried %d times", n)
+	}
+	// So is an update refused while nobody else changed the profile.
+	calls = e.importer.calls
+	if err := e.m.ensureProfile(ctx, e.gw, theirs, func(bins []string) (profiles.Profile, error) {
+		return render(append(bins, "/opt/newer/codex"))
+	}); !sandboxapi.IsCode(err, sandboxapi.CodeUpstream) {
+		t.Fatalf("update failure = %v", err)
+	}
+	if n := e.importer.calls - calls; n != 1 {
+		t.Fatalf("a failed update was tried %d times", n)
+	}
+}
+
+// TestCLIProfileImporter pins the upstream CLI calls: an import, and an
+// update whose file names the resource version it replaces (OpenShell
+// 0.1.1 refuses an update without one).
+func TestCLIProfileImporter(t *testing.T) {
+	p, err := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: 29001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &captureRunner{}
+	imp := CLIProfileImporter{Binary: "/usr/local/bin/openshell", Runner: run, TempDir: t.TempDir()}
+	ctx := context.Background()
+	if err := imp.Import(ctx, "openshell", p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := imp.Import(ctx, "openshell", p, 7); err != nil {
+		t.Fatal(err)
+	}
+	if len(run.calls) != 2 {
+		t.Fatalf("calls = %v", run.calls)
+	}
+	imported, updated := run.calls[0], run.calls[1]
+	if imported.Name != "/usr/local/bin/openshell" || !slices.Equal(imported.Args[:2], []string{"profile", "import"}) ||
+		!slices.Contains(imported.Args, "--global") || imported.Args[len(imported.Args)-1] != "openshell" {
+		t.Fatalf("import = %v", imported)
+	}
+	if !slices.Equal(updated.Args[:2], []string{"profile", "update"}) || updated.Args[len(updated.Args)-1] != "defenseclaw-ingress-29001" {
+		t.Fatalf("update = %v", updated)
+	}
+	if !bytes.Equal(run.files[0], p.YAML) {
+		t.Fatalf("import file:\n%s", run.files[0])
+	}
+	if want := append([]byte("resource_version: 7\n"), p.YAML...); !bytes.Equal(run.files[1], want) {
+		t.Fatalf("update file:\n%s", run.files[1])
+	}
+	if err := imp.Import(ctx, "", p, 0); err == nil {
+		t.Fatal("imported without a gateway name")
+	}
+	run.err = errors.New("exit status 1")
+	run.out = []byte("line\n  × provider profile update failed\n")
+	if err := imp.Import(ctx, "openshell", p, 7); err == nil || !strings.Contains(err.Error(), "provider profile update failed") {
+		t.Fatalf("failed update = %v", err)
+	}
+}
+
+// captureRunner records commands and the profile file each one names.
+type captureRunner struct {
+	calls []openshell.Command
+	files [][]byte
+	out   []byte
+	err   error
+}
+
+func (r *captureRunner) Output(_ context.Context, cmd openshell.Command) ([]byte, error) {
+	r.calls = append(r.calls, cmd)
+	for i, a := range cmd.Args {
+		if a == "-f" && i+1 < len(cmd.Args) {
+			data, err := os.ReadFile(cmd.Args[i+1])
+			if err != nil {
+				return nil, err
+			}
+			r.files = append(r.files, data)
+		}
+	}
+	return r.out, r.err
+}
+
+func (r *captureRunner) Run(context.Context, openshell.Command) error { return nil }

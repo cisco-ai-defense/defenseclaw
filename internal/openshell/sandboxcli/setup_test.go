@@ -238,17 +238,35 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, id := range []string{profiles.IngressID, profiles.AnthropicID} {
-		p, err := profiles.Render(id, profiles.Input{IngressPort: 18971, Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}})
+	// Ingress profiles: this config's listener's, an earlier port's (our
+	// orphan's provider uses it), another daemon's unused one (it is not
+	// ours to remove) and the legacy gateway-wide one of earlier releases.
+	ownPort := ta.Cfg.OpenShellIngressPort()
+	oldPort, otherPort := ownPort+1000, ownPort+2000
+	imports := []struct {
+		id string
+		in profiles.Input
+	}{
+		{profiles.IngressID, profiles.Input{IngressPort: ownPort}},
+		{profiles.IngressID, profiles.Input{IngressPort: oldPort}},
+		{profiles.IngressID, profiles.Input{IngressPort: otherPort}},
+		{profiles.LegacyIngressID, profiles.Input{IngressPort: 18000}},
+		{profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}},
+	}
+	for i, im := range imports {
+		p, err := profiles.Render(im.id, im.in)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if i == 3 {
+			p.Spec.ID = profiles.LegacyIngressID
 		}
 		if _, err := client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: p.Spec, Source: "test"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, p := range []*openshell.Provider{
-		{Name: "dc-claude-orphan-ingress", Type: profiles.IngressID, Labels: ours, Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t"}}},
+		{Name: "dc-claude-orphan-ingress", Type: profiles.IngressProfileID(oldPort), Labels: ours, Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t"}}},
 		{Name: "dc-claude-theirs-llm", Type: profiles.AnthropicID, Labels: theirs, Spec: openshell.ProviderSpec{Credentials: map[string]string{"ANTHROPIC_API_KEY": "k"}}},
 	} {
 		if _, err := client.CreateProvider(ctx, p); err != nil {
@@ -285,6 +303,10 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if !strings.Contains(ta.output(), "dc-claude-live, dc-claude-orphan") || strings.Contains(ta.output(), "dc-claude-theirs") {
 		t.Fatalf("dry run plan:\n%s", ta.output())
 	}
+	wantProfiles := strings.Join([]string{profiles.LegacyIngressID, profiles.IngressProfileID(ownPort), profiles.IngressProfileID(oldPort)}, ", ")
+	if !strings.Contains(ta.output(), "provider profiles "+wantProfiles+"\n") {
+		t.Fatalf("dry run plan does not remove exactly %s:\n%s", wantProfiles, ta.output())
+	}
 	if len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")) != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
 	}
@@ -304,8 +326,13 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if _, err := client.GetProvider(ctx, "dc-claude-orphan-ingress"); !openshell.IsNotFound(err) {
 		t.Fatalf("our provider left: %v", err)
 	}
-	if _, err := client.GetProfile(ctx, profiles.IngressID); !openshell.IsNotFound(err) {
-		t.Fatalf("the unused ingress profile is left: %v", err)
+	for _, id := range []string{profiles.IngressProfileID(ownPort), profiles.IngressProfileID(oldPort), profiles.LegacyIngressID} {
+		if _, err := client.GetProfile(ctx, id); !openshell.IsNotFound(err) {
+			t.Fatalf("the unused ingress profile %s is left: %v", id, err)
+		}
+	}
+	if _, err := client.GetProfile(ctx, profiles.IngressProfileID(otherPort)); err != nil {
+		t.Fatalf("another daemon's ingress profile was deleted: %v", err)
 	}
 	if _, err := client.GetProfile(ctx, profiles.AnthropicID); err != nil {
 		t.Fatalf("a profile another provider uses was deleted: %v", err)

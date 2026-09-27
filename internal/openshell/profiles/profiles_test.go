@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -76,7 +77,10 @@ func TestRenderSpecs(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := ingress.Spec
-	if s.ID != IngressID || s.InferenceCapable || len(s.Credentials) != 1 || s.Credentials[0].EnvVars[0] != "DEFENSECLAW_SANDBOX_TOKEN" ||
+	if ingress.ID != "defenseclaw-ingress-18971" || ingress.Template != IngressID || s.ID != ingress.ID {
+		t.Fatalf("ingress id %q (template %q, spec %q), want the listener's own profile", ingress.ID, ingress.Template, s.ID)
+	}
+	if s.InferenceCapable || len(s.Credentials) != 1 || s.Credentials[0].EnvVars[0] != "DEFENSECLAW_SANDBOX_TOKEN" ||
 		s.Credentials[0].AuthStyle != "bearer" || s.Endpoints[0].Host != "host.openshell.internal" || s.Endpoints[0].Port != 18971 ||
 		s.Binaries[0].Path != "/**" {
 		t.Fatalf("ingress spec = %#v", s)
@@ -108,6 +112,100 @@ func TestRenderSpecs(t *testing.T) {
 	}
 	if string(codex.Spec.Category) != "Inference" || string(ingress.Spec.Category) != "Other" {
 		t.Fatal("categories do not map to the SDK values")
+	}
+	if claude.ID != "defenseclaw-claude-bedrock-mantle-us-east-1" || codex.ID != "defenseclaw-codex-bedrock-mantle-eu-central-1" ||
+		claude.Template != ClaudeBedrockMantleID || codex.Template != CodexBedrockMantleID {
+		t.Fatalf("Mantle ids %q (%q), %q (%q), want one profile per region", claude.ID, claude.Template, codex.ID, codex.Template)
+	}
+	anthropic, err := Render(AnthropicID, Input{Binaries: []string{claudeRealpath}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anthropic.ID != AnthropicID || anthropic.Template != AnthropicID {
+		t.Fatalf("anthropic id %q (%q), want the template id", anthropic.ID, anthropic.Template)
+	}
+}
+
+// TestProfileIDsNameTheirEndpoints pins that no two inputs that put
+// different endpoints in a profile share its gateway id: profiles are
+// gateway-global, and one daemon or sandbox updating a shared profile would
+// re-point every other sandbox using it.
+func TestProfileIDsNameTheirEndpoints(t *testing.T) {
+	seen := map[string]string{}
+	add := func(id string, in Input) {
+		t.Helper()
+		p, err := Render(id, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var eps []string
+		for _, ep := range p.Spec.Endpoints {
+			eps = append(eps, ep.Host+":"+strconv.Itoa(int(ep.Port)))
+		}
+		key := strings.Join(eps, ",")
+		if prev, ok := seen[p.ID]; ok && prev != key {
+			t.Fatalf("profile %s renders endpoints %s and %s", p.ID, prev, key)
+		}
+		seen[p.ID] = key
+	}
+	for _, port := range []int{18971, 18972, 29001, 65535, 1} {
+		add(IngressID, Input{IngressPort: port})
+	}
+	for _, id := range []string{ClaudeBedrockMantleID, CodexBedrockMantleID} {
+		for _, region := range []string{"", "us-east-1", "us-west-2", "eu-central-1", "ap-southeast-2"} {
+			add(id, Input{Binaries: []string{claudeRealpath}, BedrockRegion: region})
+		}
+	}
+	for _, id := range []string{AnthropicID, ClaudeOAuthID, OpenAIID} {
+		add(id, Input{Binaries: []string{claudeRealpath}})
+		add(id, Input{Binaries: []string{codexRealpath}})
+	}
+	if len(seen) != 5+2*4+3 {
+		t.Fatalf("gateway ids = %v", seen)
+	}
+}
+
+func TestProfileIDHelpers(t *testing.T) {
+	if got := IngressProfileID(29001); got != "defenseclaw-ingress-29001" {
+		t.Fatalf("IngressProfileID = %s", got)
+	}
+	if got := BedrockProfileID(ClaudeBedrockMantleID, " "); got != "defenseclaw-claude-bedrock-mantle-us-east-1" {
+		t.Fatalf("BedrockProfileID default region = %s", got)
+	}
+	for id, want := range map[string]int{
+		"defenseclaw-ingress-29001": 29001, "defenseclaw-ingress-1": 1, "defenseclaw-ingress-65535": 65535,
+	} {
+		if port, ok := IngressPort(id); !ok || port != want {
+			t.Errorf("IngressPort(%s) = %d, %t", id, port, ok)
+		}
+	}
+	for _, id := range []string{
+		LegacyIngressID, "defenseclaw-ingress-", "defenseclaw-ingress-0", "defenseclaw-ingress-029001",
+		"defenseclaw-ingress-65536", "defenseclaw-ingress-123456", "defenseclaw-ingress-x", "dc-ingress-29001",
+	} {
+		if _, ok := IngressPort(id); ok {
+			t.Errorf("IngressPort(%s) accepted", id)
+		}
+	}
+	for id, want := range map[string]bool{
+		LegacyIngressID: true, "defenseclaw-ingress-29001": true, AnthropicID: true, ClaudeBedrockMantleID: true,
+		"defenseclaw-claude-bedrock-mantle-eu-west-1": true, "defenseclaw-codex-bedrock-mantle-us-gov-west-1": true,
+		"defenseclaw-openai-us-east-1": false, "defenseclaw-claude-bedrock-mantle-evil": false, "defenseclaw-egress": false,
+		"defenseclaw-ingress-0": false, "dc-cred-0123456789ab": false, "user-profile": false,
+	} {
+		if got := IsDefenseClaw(id); got != want {
+			t.Errorf("IsDefenseClaw(%s) = %t, want %t", id, got, want)
+		}
+	}
+	for _, id := range IDs() {
+		in := goldenInputs()[id]
+		p, err := Render(id, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !IsDefenseClaw(p.ID) {
+			t.Errorf("rendered %s is not recognised as DefenseClaw's", p.ID)
+		}
 	}
 }
 

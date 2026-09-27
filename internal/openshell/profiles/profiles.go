@@ -15,10 +15,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package profiles renders the OpenShell provider profiles DefenseClaw
-// imports once at setup: the hook ingress credential profile and curated
-// harness LLM profiles. A provider created from a profile gives the workload
-// an opaque, revision-scoped placeholder; the supervisor swaps in the real
-// credential only on the profile's endpoints and only for its binaries.
+// imports: the hook ingress credential profile and curated harness LLM
+// profiles. A provider created from a profile gives the workload an opaque,
+// revision-scoped placeholder; the supervisor swaps in the real credential
+// only on the profile's endpoints and only for its binaries.
+//
+// Profiles are gateway-global, shared by every DefenseClaw daemon (data dir)
+// on the gateway, and updating one re-points every sandbox whose providers
+// use it. So a profile's id names everything its endpoints depend on: the
+// ingress profile is one per ingress listener (IngressProfileID) and a
+// Bedrock Mantle profile one per region (BedrockProfileID); the others
+// depend on their template alone. The one thing a shared LLM profile
+// accumulates is binaries, and those only grow (the union over the images
+// of every daemon), so an update never takes one away from a running
+// sandbox.
 //
 // LLM profiles are pinned to the probed realpaths of the harness binaries in
 // the overlay image, so a credential cannot be used by any other program in
@@ -38,6 +48,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -48,9 +59,12 @@ import (
 //go:embed templates/*.yaml.tmpl
 var templateFS embed.FS
 
-// Profile IDs.
+// Profile template IDs (IDs lists them). The ingress and Bedrock Mantle
+// templates are imported under ids naming their inputs (Profile.ID); the
+// others under the template ID.
 const (
-	// IngressID binds DEFENSECLAW_SANDBOX_TOKEN to the hook ingress.
+	// IngressID is the template binding DEFENSECLAW_SANDBOX_TOKEN to one
+	// hook ingress listener, imported as IngressProfileID(port).
 	IngressID = "defenseclaw-ingress"
 	// AnthropicID binds ANTHROPIC_API_KEY (x-api-key) to api.anthropic.com.
 	AnthropicID = "defenseclaw-anthropic"
@@ -58,14 +72,77 @@ const (
 	// api.anthropic.com.
 	ClaudeOAuthID = "defenseclaw-claude-oauth"
 	// ClaudeBedrockMantleID binds a Bedrock API key as x-api-key to the
-	// Mantle Anthropic route (ANTHROPIC_BASE_URL=https://<host>/anthropic).
+	// Mantle Anthropic route (ANTHROPIC_BASE_URL=https://<host>/anthropic),
+	// imported as BedrockProfileID(ClaudeBedrockMantleID, region).
 	ClaudeBedrockMantleID = "defenseclaw-claude-bedrock-mantle"
 	// OpenAIID binds OPENAI_API_KEY (bearer) to api.openai.com.
 	OpenAIID = "defenseclaw-openai"
 	// CodexBedrockMantleID binds BEDROCK_MANTLE_API_KEY (bearer) to the
-	// Mantle OpenAI-compatible route for a Codex custom provider.
+	// Mantle OpenAI-compatible route for a Codex custom provider, imported
+	// as BedrockProfileID(CodexBedrockMantleID, region).
 	CodexBedrockMantleID = "defenseclaw-codex-bedrock-mantle"
 )
+
+// LegacyIngressID is the gateway-wide ingress profile of earlier releases,
+// holding one daemon's ingress port. Sandboxes created then still use it;
+// nothing imports or updates it any more. The Bedrock template IDs are
+// likewise the ids of the single-region Mantle profiles of earlier releases.
+const LegacyIngressID = IngressID
+
+// IngressProfileID is the gateway profile of the hook ingress listening on
+// port. Each listener has its own, so DefenseClaw daemons on different
+// ports (a dev daemon next to the usual one, or a changed port) never
+// rewrite each other's endpoint, and daemons that use one port in turn
+// share an identical profile.
+func IngressProfileID(port int) string {
+	return IngressID + "-" + strconv.Itoa(port)
+}
+
+// BedrockProfileID is the gateway profile of a Bedrock Mantle template in
+// region ("" is DefaultBedrockRegion): sandboxes using different regions
+// must not share, and so rewrite, one endpoint.
+func BedrockProfileID(template, region string) string {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		region = DefaultBedrockRegion
+	}
+	return template + "-" + region
+}
+
+var (
+	ingressProfileRE = regexp.MustCompile(`^` + regexp.QuoteMeta(IngressID) + `-([1-9][0-9]{0,4})$`)
+	bedrockProfileRE = regexp.MustCompile(`^(?:` + regexp.QuoteMeta(ClaudeBedrockMantleID) + `|` +
+		regexp.QuoteMeta(CodexBedrockMantleID) + `)-` + regionPattern + `$`)
+)
+
+// IngressPort returns the port of an IngressProfileID, and whether id is
+// one (the legacy gateway-wide profile is not).
+func IngressPort(id string) (int, bool) {
+	m := ingressProfileRE.FindStringSubmatch(id)
+	if m == nil {
+		return 0, false
+	}
+	port, err := strconv.Atoi(m[1])
+	if err != nil || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
+// IsDefenseClaw reports whether a gateway profile id is one Render
+// produces, now or in an earlier release: a template ID (which covers the
+// legacy ingress and single-region Mantle profiles), an ingress listener's
+// profile or a regional Mantle profile. The sandbox manager's
+// credential-binding profiles (dc-cred-*) are not rendered here.
+func IsDefenseClaw(id string) bool {
+	if _, ok := catalog[id]; ok {
+		return true
+	}
+	if _, ok := IngressPort(id); ok {
+		return true
+	}
+	return bedrockProfileRE.MatchString(id)
+}
 
 // DefaultBedrockRegion is used when a Mantle profile names no region.
 const DefaultBedrockRegion = "us-east-1"
@@ -112,7 +189,12 @@ type Input struct {
 
 // Profile is one rendered provider profile.
 type Profile struct {
+	// ID is the gateway profile id, which the providers created from it
+	// name as their type: IngressProfileID for the ingress template,
+	// BedrockProfileID for the Mantle templates, the template ID otherwise.
 	ID string
+	// Template is the template ID it was rendered from (one of IDs()).
+	Template string
 	// YAML is the profile file for `openshell profile lint|import -f`, the
 	// path the harness spike validated end to end.
 	YAML []byte
@@ -122,30 +204,35 @@ type Profile struct {
 	Spec v1.ProviderProfile
 }
 
+// regionPattern is an AWS region name.
+const regionPattern = `[a-z]{2}(?:-[a-z]+)+-[0-9]`
+
 var (
 	binaryRE = regexp.MustCompile(`^/[A-Za-z0-9._@+/-]+$`)
-	regionRE = regexp.MustCompile(`^[a-z]{2}(?:-[a-z]+)+-[0-9]$`)
+	regionRE = regexp.MustCompile(`^` + regionPattern + `$`)
 )
 
 type templateData struct {
+	ID       string
 	Port     int
 	Binaries []string
 	Host     string
 }
 
-// Render renders the profile with the given ID.
+// Render renders the profile template with the given ID.
 func Render(id string, in Input) (Profile, error) {
 	kind, ok := catalog[id]
 	if !ok {
 		return Profile{}, fmt.Errorf("openshell profiles: unknown profile %q", id)
 	}
-	data := templateData{}
+	data := templateData{ID: id}
 	switch kind {
 	case kindIngress:
 		if in.IngressPort < 1 || in.IngressPort > 65535 {
 			return Profile{}, fmt.Errorf("openshell profiles: %s needs an ingress port, got %d", id, in.IngressPort)
 		}
 		data.Port = in.IngressPort
+		data.ID = IngressProfileID(in.IngressPort)
 	case kindHarness, kindBedrock:
 		binaries, err := validateBinaries(id, in.Binaries)
 		if err != nil {
@@ -161,6 +248,7 @@ func Render(id string, in Input) (Profile, error) {
 				return Profile{}, fmt.Errorf("openshell profiles: invalid Bedrock region %q", in.BedrockRegion)
 			}
 			data.Host = BedrockMantleHost(region)
+			data.ID = BedrockProfileID(id, region)
 		}
 	}
 	raw, err := templateFS.ReadFile("templates/" + id + ".yaml.tmpl")
@@ -179,10 +267,10 @@ func Render(id string, in Input) (Profile, error) {
 	if err != nil {
 		return Profile{}, fmt.Errorf("openshell profiles: rendered %s is invalid: %w", id, err)
 	}
-	if spec.ID != id {
-		return Profile{}, fmt.Errorf("openshell profiles: template %s renders id %q", id, spec.ID)
+	if spec.ID != data.ID {
+		return Profile{}, fmt.Errorf("openshell profiles: template %s renders id %q, want %q", id, spec.ID, data.ID)
 	}
-	return Profile{ID: id, YAML: buf.Bytes(), Spec: spec}, nil
+	return Profile{ID: data.ID, Template: id, YAML: buf.Bytes(), Spec: spec}, nil
 }
 
 // BedrockMantleHost is the Mantle endpoint for region.

@@ -222,13 +222,18 @@ func (p *profileClient) Update(_ context.Context, _, id string, expectedResource
 	if diags := lint([]types.ProfileImportItem{item}); len(diags) > 0 {
 		return &types.UpdateResult{Diagnostics: diags}, nil
 	}
+	// OpenShell 0.1.1 refuses a blind update (`openshell profile update`
+	// with a file lacking resource_version).
+	if expectedResourceVersion == 0 {
+		return nil, statusErr(types.ErrorInvalidArgument, "custom provider profile update requires a non-zero resource_version")
+	}
 	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
 	cur, ok := p.f.profiles[id]
 	if !ok {
 		return nil, statusErr(types.ErrorNotFound, "provider profile %q not found", id)
 	}
-	if expectedResourceVersion != 0 && expectedResourceVersion != cur.ResourceVersion {
+	if expectedResourceVersion != cur.ResourceVersion {
 		return nil, statusErr(types.ErrorConflict, "resource version %d does not match %d", expectedResourceVersion, cur.ResourceVersion)
 	}
 	next := cloneProfile(&item.Profile)
@@ -239,9 +244,20 @@ func (p *profileClient) Update(_ context.Context, _, id string, expectedResource
 	return &types.UpdateResult{Profile: cloneProfile(next), Updated: true}, nil
 }
 
-func (p *profileClient) Delete(_ context.Context, _, id string, opts ...types.DeleteOptions) (*types.DeletionResult, error) {
+func (p *profileClient) Delete(ctx context.Context, _, id string, opts ...types.DeleteOptions) (*types.DeletionResult, error) {
 	if err := p.f.enter(MethodDeleteProfile); err != nil {
 		return nil, err
+	}
+	// Like OpenShell 0.1.1, a profile a provider uses is not deleted.
+	providers, err := p.f.providers.inner.ListAll(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var users []string
+	for _, pr := range providers {
+		if pr.Type == id {
+			users = append(users, pr.Name)
+		}
 	}
 	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
@@ -250,6 +266,10 @@ func (p *profileClient) Delete(_ context.Context, _, id string, opts ...types.De
 			return &types.DeletionResult{Outcome: types.DeletionAlreadyAbsent}, nil
 		}
 		return nil, statusErr(types.ErrorNotFound, "provider profile %q not found", id)
+	}
+	if len(users) > 0 {
+		sort.Strings(users)
+		return nil, statusErr(types.ErrorConflict, "provider profile '%s' is in use by providers: %v", id, users)
 	}
 	delete(p.f.profiles, id)
 	return &types.DeletionResult{Outcome: types.DeletionCompleted}, nil

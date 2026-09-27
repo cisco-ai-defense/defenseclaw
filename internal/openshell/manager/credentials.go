@@ -226,47 +226,81 @@ func validateExtraEnv(extra map[string]string, pinned map[string]string) error {
 	return nil
 }
 
+// profileAttempts bounds how often ensureProfile starts over because
+// another DefenseClaw daemon imported or updated the same profile under it.
+const profileAttempts = 4
+
 // ensureProfile imports p when OpenShell does not have it, and replaces an
-// existing profile that differs (a changed ingress port, or network
-// binaries of another image, which are merged in). Every global profile
+// existing profile that differs (network binaries of another image, which
+// are merged in, or another release's template). Every global profile
 // import closes in-flight connections of running sandboxes, so an
 // unchanged profile is never re-imported.
+//
+// Profiles are gateway-global. A profile's id names everything its
+// endpoints depend on (package profiles: the ingress profile is per
+// listener, the Mantle profiles per region, dc-cred-* per variable and
+// endpoint), so the daemons sharing a gateway share a profile only when
+// they need the same endpoints, and an update only ever adds binaries.
+// Another daemon may still import or update the same profile concurrently:
+// the update names the resource version it replaces, and a race either way
+// starts over from what the gateway holds then.
 func (m *Manager) ensureProfile(ctx context.Context, gw *Gateway, p profiles.Profile, render func(binaries []string) (profiles.Profile, error)) error {
+	m.profileMu.Lock()
+	defer m.profileMu.Unlock()
+	for attempt := 1; ; attempt++ {
+		raced, err := m.ensureProfileOnce(ctx, gw, p, render)
+		if err == nil || !raced || attempt == profileAttempts || ctx.Err() != nil {
+			return err
+		}
+		m.logf("provider profile %s changed on the gateway while it was imported; retrying", p.ID)
+	}
+}
+
+// ensureProfileOnce is one pass of ensureProfile. raced reports that its
+// import or update failed while the profile changed on the gateway.
+func (m *Manager) ensureProfileOnce(ctx context.Context, gw *Gateway, p profiles.Profile, render func(binaries []string) (profiles.Profile, error)) (raced bool, err error) {
 	existing, err := gw.Client.GetProfile(ctx, p.ID)
 	switch {
 	case openshell.IsNotFound(err):
 		if m.opts.Profiles == nil {
-			return sandboxapi.Errorf(sandboxapi.CodeUnavailable,
+			return false, sandboxapi.Errorf(sandboxapi.CodeUnavailable,
 				"the OpenShell provider profile %s is not imported; run `defenseclaw sandbox setup`", p.ID)
 		}
-		if err := m.opts.Profiles.Import(ctx, gw.Name, p, false); err != nil {
-			return &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "import provider profile " + p.ID, Detail: err.Error()}
+		if err := m.opts.Profiles.Import(ctx, gw.Name, p, 0); err != nil {
+			// Another daemon may have imported it first.
+			_, gerr := gw.Client.GetProfile(ctx, p.ID)
+			return gerr == nil, &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "import provider profile " + p.ID, Detail: err.Error()}
 		}
-		return nil
+		return false, nil
 	case err != nil:
-		return upstream("get provider profile "+p.ID, err)
+		return false, upstream("get provider profile "+p.ID, err)
 	}
 	want := p
 	if render != nil {
 		merged := mergeStrings(profileBinaries(*existing), profileBinaries(p.Spec))
 		if !slices.Equal(merged, profileBinaries(p.Spec)) {
 			if want, err = render(merged); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
 	if sameProfile(*existing, want.Spec) {
-		return nil
+		return false, nil
 	}
 	if m.opts.Profiles == nil {
-		return sandboxapi.Errorf(sandboxapi.CodeUnavailable,
+		return false, sandboxapi.Errorf(sandboxapi.CodeUnavailable,
 			"the OpenShell provider profile %s is out of date; run `defenseclaw sandbox setup`", p.ID)
 	}
-	m.logf("updating provider profile %s (running sandboxes briefly lose open connections)", p.ID)
-	if err := m.opts.Profiles.Import(ctx, gw.Name, want, true); err != nil {
-		return &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "update provider profile " + p.ID, Detail: err.Error()}
+	if existing.ResourceVersion == 0 {
+		return false, sandboxapi.Errorf(sandboxapi.CodeUpstream, "the OpenShell provider profile %s has no resource version to update", p.ID)
 	}
-	return nil
+	m.logf("updating provider profile %s (running sandboxes briefly lose open connections)", p.ID)
+	if err := m.opts.Profiles.Import(ctx, gw.Name, want, existing.ResourceVersion); err != nil {
+		now, gerr := gw.Client.GetProfile(ctx, p.ID)
+		raced = openshell.IsNotFound(gerr) || (gerr == nil && now.ResourceVersion != existing.ResourceVersion)
+		return raced, &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "update provider profile " + p.ID, Detail: err.Error()}
+	}
+	return false, nil
 }
 
 func profileBinaries(p openshell.ProviderProfile) []string {
