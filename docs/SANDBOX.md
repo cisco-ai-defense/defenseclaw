@@ -1081,8 +1081,10 @@ do not depend on the hooks. The manager watches for the two ways a
 compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
-  network events, egress, native OTLP) for `HookSilence` without a single
-  hook request.
+  network events of the harness's own binaries under its install root,
+  egress, native OTLP) for `HookSilence` without a single hook request.
+  Commands the harness did not start, such as the CLI's probe, a copy-mode
+  upload or pull, or your own `sandbox exec`, do not count.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Claude Code and Codex send the same
   per-call `tool_use_id` with a call's `PreToolUse` and its `PostToolUse`.

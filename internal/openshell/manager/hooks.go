@@ -324,8 +324,9 @@ func hookLabel(s string, limit int) string {
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
-// harness was active (OCSF process or network events, egress, native OTLP)
-// more than HookSilence after its last hook request, or after it became
+// harness was active (OCSF process or network events of the harness's own
+// binaries, egress, native OTLP) more than HookSilence after its last hook
+// request, or after it became
 // ready when no hook ever arrived. A tampered or disabled hook
 // registration looks exactly like that; user-tier connectors, whose hook
 // config the agent can edit, rely on it.

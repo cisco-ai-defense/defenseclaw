@@ -19,12 +19,14 @@ package manager
 import (
 	"context"
 	"errors"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
@@ -195,19 +197,19 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	}
 	m.mu.Lock()
 	id := b.identity()
-	name := b.rec.Name
+	name, harnessName := b.rec.Name, b.rec.Harness
 	m.mu.Unlock()
 	switch r.Class {
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
 		host := triage.NormalizeHost(r.Host)
 		if host == openshellHostAlias {
-			m.hostAliasEvent(ctx, b, r, at)
+			m.hostAliasEvent(ctx, b, r, at, harnessName)
 			return
 		}
 		if host == "" {
 			return
 		}
-		m.markWork(b, at)
+		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
 		if !r.Denied() && !r.Allowed() {
 			return
 		}
@@ -237,7 +239,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)"})
 		}
 	case ocsf.ClassProcess:
-		m.markActive(b, at)
+		if harnessActivity(harnessName, r.Binary) {
+			m.markActive(b, at)
+		}
 	case ocsf.ClassFinding:
 		severity := ocsfSeverity(r.Severity)
 		ev := audit.SandboxFindingEvent{
@@ -262,25 +266,45 @@ const openshellHostAlias = "host.openshell.internal"
 // the ingress it refused, or one that never became an authenticated
 // request. Any other host port (a local model endpoint, a --host-port
 // service) is harness work.
-func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
 		m.observeHookConnection(ctx, b, r.Denied(), at)
 	case m.opts.EgressPort, 0:
 	default:
-		m.markWork(b, at)
+		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
 	}
 }
 
 // markWork records network activity of the sandbox's workload: it keeps
-// the hooks' silence check and the session's reachability check going.
-func (m *Manager) markWork(b *box, at time.Time) {
-	m.markActive(b, at)
+// the session's reachability check going and, when the harness's own
+// binary made it (harnessActivity), the hooks' silence check too.
+func (m *Manager) markWork(b *box, at time.Time, ofHarness bool) {
+	if ofHarness {
+		m.markActive(b, at)
+	}
 	m.mu.Lock()
 	if !at.Before(b.started) {
 		m.noteWorkLocked(b)
 	}
 	m.mu.Unlock()
+}
+
+// harnessActivity reports an OCSF event of the harness itself: its binary
+// lies under the harness's install root in the overlay image. Only that
+// counts toward hook silence: commands run through `sandbox exec` (the
+// CLI's probe, a copy-mode upload or pull, the user's own) never pass the
+// harness's hooks, and would raise hook_silence on a sandbox whose
+// session is over. A harness whose hooks were disabled still reaches its
+// model, so its own network events keep the check alive. The binary is
+// what the workload reports; a process claiming the harness's path can
+// only raise the alarm, never silence it.
+func harnessActivity(harnessName, binary string) bool {
+	spec, ok := harness.Get(harnessName)
+	if !ok || binary == "" {
+		return false
+	}
+	return strings.HasPrefix(path.Clean(binary), spec.InstallRoot()+"/")
 }
 
 func (m *Manager) markActive(b *box, at time.Time) {
