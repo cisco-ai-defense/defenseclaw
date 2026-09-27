@@ -249,10 +249,24 @@ def test_windows_sandbox_legacy_cleanup_rejects_before_any_inspection() -> None:
 
 
 def test_legacy_sandbox_setup_and_init_commands_are_gone() -> None:
-    for removed in ("setup", "init"):
-        result = CliRunner().invoke(sandbox_group, [removed], obj=AppContext())
-        assert result.exit_code == 2, removed
-        assert "No such command" in result.output, removed
+    result = CliRunner().invoke(sandbox_group, ["init"], obj=AppContext())
+    assert result.exit_code == 2
+    assert "No such command" in result.output
+    # ``sandbox setup`` is the OpenShell 0.1 setup now; the legacy standalone
+    # options are not part of it.
+    for legacy in ("--sandbox-ip", "--host-ip", "--no-auto-pair", "--no-host-networking"):
+        result = CliRunner().invoke(sandbox_group, ["setup", legacy], obj=AppContext())
+        assert result.exit_code == 2, legacy
+        assert "No such option" in result.output, legacy
+
+
+def test_openshell_sandboxes_are_linux_and_macos_only() -> None:
+    from defenseclaw.platform_support import openshell_sandboxes_supported
+
+    assert openshell_sandboxes_supported("linux") is True
+    assert openshell_sandboxes_supported("darwin") is True
+    assert openshell_sandboxes_supported("windows") is False
+    assert openshell_sandboxes_supported("win32") is False
 
 
 def test_all_connector_lists_share_one_taxonomy() -> None:

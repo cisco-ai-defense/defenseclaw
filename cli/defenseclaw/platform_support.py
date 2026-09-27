@@ -258,6 +258,17 @@ def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
     return connector_support_status(name, os_name) == PREVIEW
 
 
+def openshell_sandboxes_supported(os_name: str | None = None) -> bool:
+    """Whether OpenShell sandboxes (``defenseclaw sandbox``) run on this host.
+
+    Mirrors ``openshell.CheckPlatform``: Linux and macOS only. WSL2 reports
+    ``linux`` here; the gateway refuses it with a clear message.
+    """
+
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return resolved_os in {"darwin", "linux"}
+
+
 def local_observability_stack_supported(os_name: str | None = None) -> bool:
     """Whether the shared Python-backed observability controller is available."""
 
