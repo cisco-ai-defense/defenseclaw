@@ -104,6 +104,13 @@ func approvalID(sandbox, ruleDigest string) string {
 	return "ap_" + hex.EncodeToString(sum[:8])
 }
 
+// unresolved reports whether an ask still waits on the operator, on a
+// decision being applied, or on OpenShell applying it. Unresolved asks have
+// no resolvedAt and are never evicted or pruned.
+func (a *approval) unresolved() bool {
+	return a.status == sandboxapi.ApprovalPending || a.status == sandboxapi.ApprovalQueued || a.status == approvalDeciding
+}
+
 func (a *approval) wire() sandboxapi.Approval {
 	p := a.proposal
 	protocol := ""
@@ -532,7 +539,7 @@ func (m *Manager) storeApproval(a *approval) {
 	}
 	resolved := make([]*approval, 0, len(m.approvals))
 	for _, other := range m.approvals {
-		if other.status != sandboxapi.ApprovalPending && other.status != sandboxapi.ApprovalQueued && other.status != approvalDeciding {
+		if !other.unresolved() {
 			resolved = append(resolved, other)
 		}
 	}
@@ -938,7 +945,7 @@ func (m *Manager) pruneApprovals() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, a := range m.approvals {
-		if a.status != sandboxapi.ApprovalPending && a.status != sandboxapi.ApprovalQueued && a.resolvedAt.Before(cutoff) {
+		if !a.unresolved() && a.resolvedAt.Before(cutoff) {
 			delete(m.approvals, id)
 		}
 	}

@@ -241,6 +241,40 @@ func TestDeleteDropsApprovals(t *testing.T) {
 	}
 }
 
+// TestPruneKeepsUnresolvedApprovals pins that the hourly prune forgets only
+// old resolved asks. An ask an operator decision is being applied to has no
+// resolvedAt yet; pruning it would orphan the decision in flight.
+func TestPruneKeepsUnresolvedApprovals(t *testing.T) {
+	e := newEnv(t, nil)
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	e.m.now = func() time.Time { return now }
+	old, recent := now.Add(-2*time.Hour), now.Add(-time.Minute)
+	for _, tc := range []struct {
+		status   string
+		resolved time.Time
+		kept     bool
+	}{
+		{sandboxapi.ApprovalPending, time.Time{}, true},
+		{approvalDeciding, time.Time{}, true},
+		{sandboxapi.ApprovalQueued, time.Time{}, true},
+		{sandboxapi.ApprovalRejected, recent, true},
+		{sandboxapi.ApprovalRejected, old, false},
+		{sandboxapi.ApprovalApproved, old, false},
+	} {
+		id := "ap_" + tc.status + "_" + tc.resolved.Format("1504")
+		e.m.mu.Lock()
+		e.m.approvals[id] = &approval{id: id, sandbox: "s", status: tc.status, createdAt: old, resolvedAt: tc.resolved}
+		e.m.mu.Unlock()
+		e.m.pruneApprovals()
+		e.m.mu.Lock()
+		_, kept := e.m.approvals[id]
+		e.m.mu.Unlock()
+		if kept != tc.kept {
+			t.Errorf("%s ask resolved at %v: kept = %t, want %t", tc.status, tc.resolved, kept, tc.kept)
+		}
+	}
+}
+
 // TestDeniedConnectionTriggersTriage pins that a proposal is decided after
 // OpenShell denies a direct connection even when no draft notification
 // arrives on the stream.
