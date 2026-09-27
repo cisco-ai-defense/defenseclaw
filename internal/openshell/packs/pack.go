@@ -432,9 +432,10 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 	if p.Network.Mode == NetworkOpen {
 		defaultOnTamper = OnTamperAlert
 	}
-	p.Hooks.OnTamper = v.enum("hooks.on_tamper", hooks.OnTamper, OnTamperStop, OnTamperAlert)
 	if hooks.OnTamper == nil {
 		p.Hooks.OnTamper = defaultOnTamper
+	} else {
+		p.Hooks.OnTamper = v.enum("hooks.on_tamper", hooks.OnTamper, OnTamperStop, OnTamperAlert)
 	}
 
 	if p.Network.Mode != NetworkDeny && p.Egress.Ports != nil && len(p.Egress.Ports) == 0 {
