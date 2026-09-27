@@ -27,6 +27,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -1944,6 +1946,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
+		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "cursor") {
+			// beforeShellExecution names no tool: its payload is the shell
+			// command (see connector.CursorTrustedShellArgs).
+			if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
+				actionTool, trustedArgs, toolCWD = "shell", args, dir
+			}
+		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
@@ -2099,11 +2108,12 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // way, so it is judged as shell input rather than not at all. The recorded
 // ToolArgs never change.
 //
-// cwd is the directory the tool call names for its command (agy's Cwd), or
-// "". It is the command's working directory, so the caller uses it in place
-// of the session's; left in the arguments, any Cwd other than the workspace
-// conflicted with the request's working directory and the parse was
-// ambiguous.
+// cwd is the directory the tool call names for its command (agy's Cwd, and
+// the working-directory argument of the shell tools that have one, see
+// connector.TrustedShellWorkdirArgs), or "". It is the command's working
+// directory, so the caller uses it in place of the session's; left in the
+// arguments, any directory other than the workspace conflicted with the
+// request's working directory and the parse was ambiguous.
 func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "openhands":
@@ -2119,16 +2129,39 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 			return out, ""
 		}
 	}
+	if out, dir, ok := connector.TrustedShellWorkdirArgs(connectorName, toolName, args); ok {
+		return out, dir
+	}
 	return args, ""
 }
 
 // agentHookTrustedActionCWD is the working directory of a structured tool
 // call: the one the call names, mapped like the request's (host-sanitized,
 // or to the host directory a sandbox path is mounted from, "" when it has
-// none), else the request's.
+// none), else the request's. A relative directory is resolved against the
+// session's first; one the gateway cannot place ("~" or no session
+// directory) is none.
 func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
 	if toolCWD == "" {
 		return requestCWD
+	}
+	if strings.HasPrefix(toolCWD, "~") {
+		return ""
+	}
+	if !filepath.IsAbs(toolCWD) && !path.IsAbs(toolCWD) {
+		if requestCWD == "" {
+			return ""
+		}
+		if view, ok := sandboxHookView(ctx); ok {
+			// requestCWD is already mapped to the host: join in the
+			// sandbox's namespace and map the result like any other.
+			sandboxCWD, mapped := view.SandboxPath(requestCWD)
+			if !mapped {
+				return ""
+			}
+			return hookCWDForContext(ctx, path.Join(sandboxCWD, toolCWD))
+		}
+		toolCWD = filepath.Join(requestCWD, toolCWD)
 	}
 	return hookCWDForContext(ctx, toolCWD)
 }

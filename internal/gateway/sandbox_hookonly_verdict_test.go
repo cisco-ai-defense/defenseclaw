@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,7 +35,8 @@ import (
 // parse completely, so command rules could not prove a trusted action and a
 // CRITICAL finding stayed an allowed candidate: OmniGent's sys_os_shell tool
 // name, OpenHands' TerminalAction fields, and agy's run_command fields,
-// including a Cwd other than the session's working directory.
+// including a Cwd other than the session's working directory, and the
+// working-directory argument of the other shell tools that name one.
 func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	const command = `{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"}`
 	for _, tc := range []struct {
@@ -47,6 +49,22 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/work/app","WaitMsBeforeAsync":500,"toolSummary":"write marker","toolAction":"Writing marker"}`},
 		{"antigravity-other-cwd", "antigravity", "run_command",
 			`{"CommandLine":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","Cwd":"/tmp"}`},
+		// The working-directory argument of the other shell tools that have
+		// one (connector.TrustedShellWorkdirArgs).
+		{"opencode-bash-workdir", "opencode", "bash",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","timeout":120000,"workdir":"/tmp"}`},
+		{"hermes-terminal-workdir", "hermes", "terminal",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","workdir":"/tmp"}`},
+		{"amp-shell-command-workdir", "amp", "shell_command",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","workdir":"/tmp"}`},
+		{"cursor-shell-cwd", "cursor", "Shell",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","cwd":"/tmp","timeout":30000}`},
+		{"cursor-shell-no-cwd", "cursor", "Shell",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","cwd":""}`},
+		{"devin-exec-workdir", "devin", "exec",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","workdir":"/tmp"}`},
+		{"kiro-shell-working-dir", "kiro", "shell",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","working_dir":"/tmp"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const sessionCWD = "/work/app/sub"
@@ -92,6 +110,19 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	}
 	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", filepath.Join(dir, "missing")); got != "" {
 		t.Errorf("missing tool cwd = %q, want none", got)
+	}
+	// A relative directory is resolved against the session's; one the
+	// gateway cannot place is none.
+	if err := os.Mkdir(filepath.Join(want, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), want, "sub"); got != filepath.Join(want, "sub") {
+		t.Errorf("relative tool cwd = %q, want %q", got, filepath.Join(want, "sub"))
+	}
+	for _, tc := range []struct{ request, tool string }{{"", "sub"}, {want, "~/sub"}, {want, "missing"}} {
+		if got := agentHookTrustedActionCWD(context.Background(), tc.request, tc.tool); got != "" {
+			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
+		}
 	}
 }
 

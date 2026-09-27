@@ -156,3 +156,80 @@ func TestHermesTrustedShellArgs(t *testing.T) {
 		{"other-tool", "terminal", `{"action":"submit","data":"echo hi > /tmp/x"}`, false},
 	})
 }
+
+func TestTrustedShellWorkdirArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name, connector, tool, args, want, cwd string
+		ok                                     bool
+	}{
+		{"opencode-bash", "opencode", "bash", `{"command":"echo hi > /tmp/x","timeout":120000,"workdir":"/work/app/sub"}`,
+			`{"command":"echo hi > /tmp/x","timeout":120000}`, "/work/app/sub", true},
+		{"opencode-relative", "opencode", "bash", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
+		{"hermes-terminal", "hermes", "terminal", `{"command":"ls","workdir":"/tmp","background":false}`,
+			`{"background":false,"command":"ls"}`, "/tmp", true},
+		{"amp-shell-command", "amp", "shell_command", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		{"cursor-shell", "cursor", "Shell", `{"command":"ls","cwd":"/w","timeout":30000}`, `{"command":"ls","timeout":30000}`, "/w", true},
+		// Cursor reports "" when the model named no directory.
+		{"cursor-shell-no-dir", "cursor", "Shell", `{"command":"ls","cwd":""}`, `{"command":"ls"}`, "", true},
+		{"devin-exec", "devin", "exec", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		{"kiro-shell", "kiro", "shell", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		{"kiro-execute-bash", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		{"null-dir", "opencode", "bash", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
+		{"operators-kept", "opencode", "bash", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
+		// Refused: the arguments are left for the parser to judge.
+		{"no-dir", "opencode", "bash", `{"command":"ls"}`, "", "", false},
+		{"dir-not-string", "opencode", "bash", `{"command":"ls","workdir":["/w"]}`, "", "", false},
+		{"duplicate-key", "opencode", "bash", `{"command":"ls","workdir":"/a","workdir":"/b"}`, "", "", false},
+		{"not-an-object", "opencode", "bash", `"ls"`, "", "", false},
+		{"other-key", "kiro", "shell", `{"command":"ls","workdir":"/w"}`, "", "", false},
+		{"other-tool", "opencode", "read", `{"filePath":"/x","workdir":"/w"}`, "", "", false},
+		// Shell tools that name no directory are left alone.
+		{"claudecode", "claudecode", "Bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
+		{"copilot", "copilot", "bash", `{"command":"ls","cwd":"/w"}`, "", "", false},
+		{"openhands", "openhands", "terminal", `{"command":"ls","cwd":"/w"}`, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, cwd, ok := TrustedShellWorkdirArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
+			if ok != tc.ok {
+				t.Fatalf("ok = %t, want %t (%s)", ok, tc.ok, got)
+			}
+			if !ok {
+				if string(got) != tc.args || cwd != "" {
+					t.Fatalf("refused projection = %s, cwd %q", got, cwd)
+				}
+				return
+			}
+			if string(got) != tc.want || cwd != tc.cwd {
+				t.Fatalf("projection = %s, cwd %q; want %s, %q", got, cwd, tc.want, tc.cwd)
+			}
+		})
+	}
+}
+
+func TestCursorTrustedShellArgs(t *testing.T) {
+	const payload = `{"conversation_id":"c1","generation_id":"g1","model":"m","hook_event_name":"beforeShellExecution",` +
+		`"cursor_version":"2026.07.23-e383d2b","workspace_roots":["/w"],"command":"echo hi > /tmp/x","cwd":"/w/sub","sandbox":false}`
+	got, cwd, ok := CursorTrustedShellArgs("beforeShellExecution", json.RawMessage(payload))
+	if !ok || string(got) != `{"command":"echo hi > /tmp/x"}` || cwd != "/w/sub" {
+		t.Fatalf("projection = %s, cwd %q, %t", got, cwd, ok)
+	}
+	if _, cwd, ok := CursorTrustedShellArgs("beforeShellExecution", json.RawMessage(`{"command":"ls"}`)); !ok || cwd != "" {
+		t.Fatalf("without cwd: cwd %q, %t", cwd, ok)
+	}
+	for name, tc := range map[string]struct{ event, payload string }{
+		"other-event":       {"preToolUse", payload},
+		"mcp-event":         {"beforeMCPExecution", payload},
+		"no-command":        {"beforeShellExecution", `{"cwd":"/w"}`},
+		"blank-command":     {"beforeShellExecution", `{"command":"  ","cwd":"/w"}`},
+		"command-not-text":  {"beforeShellExecution", `{"command":["ls"],"cwd":"/w"}`},
+		"cwd-not-string":    {"beforeShellExecution", `{"command":"ls","cwd":1}`},
+		"duplicate-command": {"beforeShellExecution", `{"command":"ls","command":"echo hi > /tmp/x"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, cwd, ok := CursorTrustedShellArgs(tc.event, json.RawMessage(tc.payload))
+			if ok || string(got) != tc.payload || cwd != "" {
+				t.Fatalf("projection = %s, cwd %q, %t; want refused", got, cwd, ok)
+			}
+		})
+	}
+}
