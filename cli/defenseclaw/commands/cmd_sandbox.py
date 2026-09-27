@@ -250,7 +250,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "bedrock-region",
                 "string",
-                "Amazon Bedrock region for --llm bedrock (default $AWS_REGION, then $AWS_DEFAULT_REGION, then us-east-1)",
+                "Amazon Bedrock region for --llm bedrock "
+                "(default $AWS_REGION, then $AWS_DEFAULT_REGION, then us-east-1)",
                 metavar="REGION",
             ),
             _Flag("no-snapshot", "bool", "skip the pre-session snapshot (and so undo)"),
