@@ -222,4 +222,10 @@ func applyEnvelope(e *Event, env CorrelationEnvelope) {
 	if e.Connector == "" {
 		e.Connector = env.Connector
 	}
+	if e.SandboxID == "" {
+		e.SandboxID = env.SandboxID
+	}
+	if e.SandboxName == "" {
+		e.SandboxName = env.SandboxName
+	}
 }

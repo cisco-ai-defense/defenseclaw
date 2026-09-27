@@ -66,6 +66,68 @@ func TestCompatibilityAuditV8OwnsGenericActionCorrelationAndMetric(t *testing.T)
 	}
 }
 
+// TestCompatibilityAuditV8CarriesSandboxIdentity pins the sandbox
+// attribution of generic audit rows (codex notify, inspect, ...): the
+// envelope's sandbox id and name reach the event and its v8 record body,
+// and host traffic carries neither.
+func TestCompatibilityAuditV8CarriesSandboxIdentity(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	sandbox := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
+		Connector: "codex", SandboxID: "0f5c7a3e-1111-2222-3333-444455556666", SandboxName: "dc-codex-app",
+	})
+	if err := logger.LogEventCtx(sandbox, Event{
+		Action: string(ActionCodexNotify), Target: "codex.session", Actor: "codex", Severity: "INFO",
+	}); err != nil {
+		t.Fatalf("LogEventCtx: %v", err)
+	}
+	if err := logger.LogActionCtx(sandbox, string(ActionInspectToolAllow), "shell", "allowed"); err != nil {
+		t.Fatalf("LogActionCtx: %v", err)
+	}
+	host := ContextWithEnvelope(context.Background(), CorrelationEnvelope{Connector: "codex"})
+	if err := logger.LogActionCtx(host, string(ActionInspectToolAllow), "shell", "allowed"); err != nil {
+		t.Fatalf("host LogActionCtx: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 3 {
+		t.Fatalf("records = %d, want 3", len(records))
+	}
+	for i, record := range records {
+		body, ok := record.Body()
+		if !ok {
+			t.Fatalf("record %d has no body", i)
+		}
+		object, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 {
+			if _, present := object["sandbox_id"]; present {
+				t.Fatalf("host record carries sandbox identity: %v", object)
+			}
+			if _, present := object["sandbox_name"]; present {
+				t.Fatalf("host record carries sandbox identity: %v", object)
+			}
+			continue
+		}
+		if object["sandbox_id"] != "0f5c7a3e-1111-2222-3333-444455556666" || object["sandbox_name"] != "dc-codex-app" {
+			t.Fatalf("record %d (%s) body = %v", i, record.Action(), object)
+		}
+		if record.FieldClasses()["/sandbox_id"] != observability.FieldClassIdentifier ||
+			record.FieldClasses()["/sandbox_name"] != observability.FieldClassIdentifier {
+			t.Fatalf("record %d field classes = %v", i, record.FieldClasses())
+		}
+	}
+
+	// A caller that already knows the sandbox keeps it.
+	pinned := Event{SandboxID: "sbx-pinned"}
+	ApplyEnvelope(&pinned, CorrelationEnvelope{SandboxID: "sbx-ctx", SandboxName: "dc-ctx"})
+	if pinned.SandboxID != "sbx-pinned" || pinned.SandboxName != "dc-ctx" {
+		t.Fatalf("ApplyEnvelope = %+v", pinned)
+	}
+}
+
 func TestCompatibilityAuditV8DropAndDetachNeverResurrectLegacy(t *testing.T) {
 	t.Run("collection drop", func(t *testing.T) {
 		logger := newTestLogger(t)

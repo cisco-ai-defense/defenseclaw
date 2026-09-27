@@ -136,6 +136,15 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
+	// SandboxID and SandboxName attribute an event to the OpenShell
+	// sandbox whose request produced it. They are filled from the
+	// correlation envelope, which takes them only from the authenticated
+	// sandbox binding, and are empty for host traffic. There is no
+	// dedicated SQLite column: generic (compatibility) records carry them
+	// in their v8 body, so every sink that receives the record sees them.
+	SandboxID   string `json:"sandbox_id,omitempty"`
+	SandboxName string `json:"sandbox_name,omitempty"`
+
 	// Structured carries sanitized machine-readable data for sink fanout
 	// AND is persisted verbatim in the SQLite audit_events.structured_json
 	// column (see migration 14). Downstream queries — the Alerts counter

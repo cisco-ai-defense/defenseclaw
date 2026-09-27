@@ -190,6 +190,17 @@ func compatibilityAuditV8Body(event Event) (map[string]any, map[string]observabi
 			classes["/structured_json"] = observability.FieldClassContent
 		}
 	}
+	// Sandbox attribution has no generic correlation field yet, so a
+	// sandbox's codex notify, inspect and other generic rows carry it in
+	// the body.
+	if event.SandboxID != "" {
+		body["sandbox_id"] = event.SandboxID
+		classes["/sandbox_id"] = observability.FieldClassIdentifier
+	}
+	if event.SandboxName != "" {
+		body["sandbox_name"] = event.SandboxName
+		classes["/sandbox_name"] = observability.FieldClassIdentifier
+	}
 	return body, classes
 }
 
