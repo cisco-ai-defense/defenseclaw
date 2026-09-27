@@ -352,6 +352,11 @@ project precedence. Only after that succeeds does it run `Repair` with
 proof to the Claude policy identity it exercised: the SHA-256 of the
 DefenseClaw `90-defenseclaw.json` machine policy (which must match its
 DefenseClaw ownership sidecar) and of the installed `defenseclaw-hook.exe`.
+Those digests are captured before the Repair stages anything. An attested
+Upgrade or Repair whose hook binary differs from the installed one is refused
+before its transaction opens, and one whose staging changes the policy or hook
+is refused and rolled back, so the evidence never names bytes the proof did
+not run.
 Only that second transaction may make aggregate `security_complete=true`.
 Enrollment changes that only rewrite `targets.yaml` keep the evidence current.
 A different policy fragment or hook binary, or schema-v2 evidence from an

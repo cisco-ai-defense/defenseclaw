@@ -682,7 +682,12 @@ binds the live Claude proof to the Claude policy identity it exercised: the
 DefenseClaw `90-defenseclaw.json` machine policy and the installed
 `defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
 it current. A different policy or hook binary reports it unverified until the
-proof and this Repair are repeated. The Repair still rebinds it when it first
+proof and this Repair are repeated. The identity is captured before the
+transaction stages anything, so pass the same `defenseclaw-hook.exe` the proof
+ran against: an Upgrade or Repair with `-AttestClaudeEffectivePolicy` and a
+different hook binary is refused before its transaction opens. Do not keep the attestation
+on an Upgrade command line; upgrade, repeat the proof, then run this Repair.
+The Repair still rebinds it when it first
 recovers an interrupted transaction. Install refuses
 `-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
 exists yet for a live proof to have exercised. Application-control evidence, a

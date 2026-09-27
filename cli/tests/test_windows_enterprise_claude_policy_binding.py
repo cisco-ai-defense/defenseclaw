@@ -165,6 +165,43 @@ def test_install_refuses_claude_effective_policy_attestation_up_front() -> None:
     assert "$restoredAttestation.claude_effective_policy_stale_reason" in restore
 
 
+def test_attested_upgrade_or_repair_binds_only_the_pre_transaction_identity() -> None:
+    # Review of #895: Upgrade/Repair -AttestClaudeEffectivePolicy staged the
+    # new hook before writing the evidence, and the refresh skipped the stale
+    # re-check, so the evidence named a hook binary the live proof never ran.
+    module = MODULE.read_text(encoding="utf-8")
+    baseline = _slice(
+        module,
+        "function Get-DefenseClawClaudeEffectivePolicyProofBaseline",
+        "function Write-DefenseClawAgentApplicationControlAttestation",
+    )
+    assert "Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout" in baseline
+    assert "$Sources.ContainsKey('hook')" in baseline
+    assert "[string]$Sources['hook'].sha256" in baseline
+    assert "function Assert-DefenseClawClaudeEffectivePolicyProofBaseline" in baseline
+    assert "[string]$current.hook_sha256 -cne [string]$Baseline.hook_sha256" in baseline
+    assert "[string]$current.managed_policy_sha256 -cne" in baseline
+
+    install_like = _slice(
+        module,
+        "function Invoke-DefenseClawInstallLikeLifecycle",
+        "function Invoke-DefenseClawUninstallLifecycle",
+    )
+    capture = install_like.index(
+        "if ($RefreshClaudeEffectivePolicyAttestation) {\n"
+        "        $claudeProofBaseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `"
+    )
+    # Captured before the transaction opens and before any artifact is staged.
+    assert capture < install_like.index("$snapshot = New-DefenseClawTransaction `")
+    assert capture < install_like.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    assert capture < install_like.index("Install-DefenseClawSourceDescriptor `")
+    # Re-checked after staging, immediately before the evidence is written.
+    check = install_like.index("Assert-DefenseClawClaudeEffectivePolicyProofBaseline `")
+    assert install_like.rindex("Install-DefenseClawSourceDescriptor `") < check
+    assert check < install_like.index("Write-DefenseClawAgentApplicationControlAttestation -Layout $Layout")
+    assert "-Baseline $claudeProofBaseline" in install_like[check : check + 200]
+
+
 def _powershell_engines() -> list[str]:
     candidates: list[str | None] = [shutil.which("powershell.exe"), shutil.which("pwsh.exe")]
     windows_root = os.environ.get("SystemRoot")

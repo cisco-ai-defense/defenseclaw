@@ -9078,6 +9078,78 @@ function Get-DefenseClawClaudeEffectivePolicyBinding {
     }
 }
 
+function Get-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    # -AttestClaudeEffectivePolicy records a live Claude proof the
+    # administrator ran before this transaction started, so it can only vouch
+    # for the Claude policy and hook binary installed at that point. Capture
+    # that identity before anything is staged, and refuse up front when the
+    # transaction would replace the hook the proof exercised (threat model
+    # W-34).
+    try {
+        $baseline = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw (
+            '-AttestClaudeEffectivePolicy requires the installed DefenseClaw ' +
+            'Claude policy and hook binary that the live Claude proof ' +
+            "exercised: $($_.Exception.Message)"
+        )
+    }
+    if ($Sources.ContainsKey('hook') -and
+        -not [string]::Equals(
+            [string]$Sources['hook'].sha256,
+            [string]$baseline.hook_sha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the supplied hook binary ' +
+            'differs from the installed DefenseClaw hook binary that the live ' +
+            'Claude proof exercised. Run this transaction without ' +
+            '-AttestClaudeEffectivePolicy, rerun the live Claude proof against ' +
+            'the new hook, then run Repair -AttestClaudeEffectivePolicy with ' +
+            'the same hook binary'
+        )
+    }
+    return $baseline
+}
+
+function Assert-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][Collections.IDictionary]$Baseline
+    )
+    # The evidence writer hashes the policy and hook on disk after staging.
+    # Both must still be the bytes captured before this transaction, so the
+    # published binding never names bytes the live proof did not run.
+    try {
+        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+    }
+    if ([string]$current.hook_sha256 -cne [string]$Baseline.hook_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: this transaction replaced ' +
+            'the DefenseClaw hook binary that the live Claude proof exercised; ' +
+            'rerun the live Claude proof against the new hook, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+    if ([string]$current.managed_policy_sha256 -cne
+        [string]$Baseline.managed_policy_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the DefenseClaw Claude ' +
+            'policy changed during this transaction, so the live Claude proof ' +
+            'did not exercise it; rerun the live Claude proof, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+}
+
 function Write-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     if ([bool]$Layout.CoreHardeningCertification) {
@@ -22225,6 +22297,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    # Pending-transaction recovery has already run, so this is the Claude
+    # policy identity the administrator's live proof exercised. Capture it
+    # before any service, journal, or artifact is touched.
+    $claudeProofBaseline = $null
+    if ($RefreshClaudeEffectivePolicyAttestation) {
+        $claudeProofBaseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+            -Layout $Layout `
+            -Sources $Sources
+    }
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
@@ -22711,6 +22792,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($RefreshClaudeEffectivePolicyAttestation -and
             -not [bool]$Layout.ClaudeTargetEnabled) {
             throw '-AttestClaudeEffectivePolicy requires at least one enabled Claude target in the protected manifest'
+        }
+        if ($RefreshClaudeEffectivePolicyAttestation) {
+            Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $Layout `
+                -Baseline $claudeProofBaseline
         }
         if (-not [bool]$Layout.ClaudeTargetEnabled -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {

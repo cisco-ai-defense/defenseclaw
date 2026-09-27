@@ -246,6 +246,69 @@ try {
         } 'refusing to re-publish stale Claude effective-policy evidence'
         $layout.ClaudeEffectivePolicyStaleReason = ''
 
+        # Review of #895: Upgrade or Repair -AttestClaudeEffectivePolicy
+        # staged the new hook before writing the evidence, so the evidence
+        # named a hook binary the live proof never ran. The identity is now
+        # captured before staging and must come through staging unchanged.
+        $installedHookSha256 = Get-TestSha256 $layout.HookPath
+        $installedPolicySha256 = Get-TestSha256 $layout.ClaudeManagedPolicyPath
+        $baseline = $null
+        foreach ($sources in @(
+            @{},
+            @{ hook = @{ sha256 = $installedHookSha256.ToUpperInvariant() } }
+        )) {
+            try {
+                $baseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+                    -Layout $layout `
+                    -Sources $sources
+                if ([string]$baseline.hook_sha256 -cne $installedHookSha256 -or
+                    [string]$baseline.managed_policy_sha256 -cne $installedPolicySha256) {
+                    $failures.Add('proof baseline: did not capture the installed Claude policy identity')
+                }
+            }
+            catch {
+                $failures.Add("proof baseline with the installed hook: unexpected throw: $($_.Exception.Message)")
+            }
+        }
+        Assert-TestThrows 'proof baseline with a different hook binary' {
+            [void](Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $layout `
+                -Sources @{ hook = @{ sha256 = ('A' * 64) } })
+        } 'supplied hook binary differs from the installed DefenseClaw hook binary'
+        if ($null -ne $baseline) {
+            try {
+                Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                    -Layout $layout `
+                    -Baseline $baseline
+            }
+            catch {
+                $failures.Add("unchanged Claude policy identity: unexpected throw: $($_.Exception.Message)")
+            }
+            [IO.File]::WriteAllBytes($layout.HookPath, [byte[]](9, 9, 9, 9))
+            Assert-TestThrows 'hook binary staged by an attested transaction' {
+                Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                    -Layout $layout `
+                    -Baseline $baseline
+            } 'replaced the DefenseClaw hook binary that the live Claude proof exercised'
+            [IO.File]::WriteAllBytes($layout.HookPath, [byte[]](1, 2, 3, 4))
+            Set-TestClaudePolicy -Body $policyV2 -TargetSIDs @('S-1-5-21-1-2-3-1001')
+            Assert-TestThrows 'Claude policy rewritten during an attested transaction' {
+                Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                    -Layout $layout `
+                    -Baseline $baseline
+            } 'Claude policy changed during this transaction'
+            Set-TestClaudePolicy -Body $policyV1 -TargetSIDs @('S-1-5-21-1-2-3-1001')
+        }
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $layout.ClaudeManagedPolicyPath `
+            -Force
+        Assert-TestThrows 'proof baseline without the installed Claude policy' {
+            [void](Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $layout `
+                -Sources @{})
+        } 'requires the installed DefenseClaw Claude policy and hook binary'
+        Set-TestClaudePolicy -Body $policyV1 -TargetSIDs @('S-1-5-21-1-2-3-1001')
+
         # Unverified evidence carries no binding and is never stale.
         $layout.ClaudeEffectivePolicyVerified = $false
         Write-DefenseClawAgentApplicationControlAttestation -Layout $layout
