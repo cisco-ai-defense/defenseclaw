@@ -28,9 +28,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -410,6 +410,61 @@ func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
 	return nil
 }
 
+// realParents reports an error unless every parent directory of rel is a
+// real directory inside the root (no symlinks, no missing components).
+func (r *rootFS) realParents(rel string) error {
+	dir := path.Dir(path.Clean(rel))
+	if dir == "." || dir == "" {
+		return nil
+	}
+	cur := ""
+	for _, part := range strings.Split(dir, "/") {
+		cur = path.Join(cur, part)
+		info, err := r.root.Lstat(cur)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink", cur)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", cur)
+		}
+	}
+	return nil
+}
+
+// readRegular reads a regular file inside the root without following a
+// final symlink and without blocking on FIFOs, up to max bytes.
+func (r *rootFS) readRegular(rel string, max int64) ([]byte, error) {
+	info, err := r.root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", rel)
+	}
+	if info.Size() > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", rel, max)
+	}
+	f, err := r.root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !os.SameFile(st, info) {
+		return nil, fmt.Errorf("%s changed while it was read", rel)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", rel, max)
+	}
+	return data, nil
+}
+
 // writeFileNoFollow writes a file atomically with O_NOFOLLOW to prevent
 // following symlinks and O_EXCL to ensure atomicity. It refuses to write if
 // any parent path component is a symlink by checking each component before
@@ -419,14 +474,11 @@ func (r *rootFS) writeFileNoFollow(rel string, src io.Reader, mode fs.FileMode, 
 	if err := r.ensureDirMode(path.Dir(rel), 0o700); err != nil {
 		return err
 	}
+	// The temporary name is random and created with O_EXCL inside the
+	// os.Root, so it can never be an existing file or a symlink, and the
+	// root refuses any path that resolves outside the project.
 	tmp := path.Join(path.Dir(rel), ".dc-restore-"+randomSuffix())
-	// Use O_NOFOLLOW to refuse writing through symlinks.
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	// Note: os.O_NOFOLLOW is platform-specific but available on Linux and macOS
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		flags |= 0x20000 // O_NOFOLLOW value
-	}
-	f, err := r.root.OpenFile(tmp, flags, 0o600)
+	f, err := r.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

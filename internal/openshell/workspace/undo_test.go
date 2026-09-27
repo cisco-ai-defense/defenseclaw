@@ -824,10 +824,7 @@ func TestUndoPreservesIgnoredFileMode(t *testing.T) {
 
 // TestUndoRefusesSymlinkedParent tests that undo refuses to restore ignored
 // files if a parent directory is replaced with a symlink pointing outside.
-// TODO(openshell): os.Root's symlink semantics need further investigation; the check
-// in ensureDirMode should refuse symlinks but os.Root may have special handling.
 func TestUndoRefusesSymlinkedParent(t *testing.T) {
-	t.Skip("os.Root symlink handling needs investigation")
 	e := newEnv(t)
 	e.initRepo()
 
@@ -854,25 +851,28 @@ func TestUndoRefusesSymlinkedParent(t *testing.T) {
 
 	res := mustUndo(t, e, "s1", false)
 
-	// Undo should warn about the symlink and refuse to write.
-	foundWarning := false
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "symlink") || strings.Contains(w, "secret.txt") {
-			foundWarning = true
-			break
-		}
-	}
-	if !foundWarning {
-		t.Error("expected warning about symlink parent, got none")
-	}
-
-	// Verify nothing was written outside the project.
+	_ = res
+	// Git records the planted symlink as a single entry and never lists paths
+	// below it, so undo removes the symlink and never reads through it.
+	// Nothing outside the project changed, and nothing new appeared there.
 	entries, err := os.ReadDir(outsideDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) > 0 {
-		t.Errorf("undo wrote %d entries outside the project through symlink", len(entries))
+	if len(entries) != 1 || entries[0].Name() != "secret.txt" {
+		t.Errorf("outside directory entries = %v, want only secret.txt", entries)
+	}
+	if got := readFile(t, e.root, "outside/secret.txt"); got != "operator marker\n" {
+		t.Errorf("outside file changed to %q", got)
+	}
+
+	// The session-created symlink is gone, and no copy of the outside file
+	// was placed in the project.
+	if info, err := os.Lstat(filepath.Join(e.project, "data")); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		t.Error("undo left the session-created symlink in place")
+	}
+	if _, err := os.Lstat(filepath.Join(e.project, "data", "secret.txt")); err == nil {
+		t.Error("undo copied a file from outside the project into it")
 	}
 }
 
@@ -929,5 +929,44 @@ func TestUndoIgnoredFilesByteCap(t *testing.T) {
 	}
 	if survivedCount == 3 {
 		t.Error("all files survived despite exceeding the cap")
+	}
+}
+
+// TestRootFSRefusesSymlinkedParents checks the helpers undo uses to read
+// preserved files: a parent directory that is a symlink is refused even when
+// it points inside the root, and a path escaping the root never resolves.
+func TestRootFSRefusesSymlinkedParents(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	writeFile(t, outside, "secret.txt", "operator marker\n")
+	writeFile(t, root, "real/keep.txt", "marker\n")
+	if err := os.Symlink(outside, filepath.Join(root, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "in")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := openRootFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for _, rel := range []string{"out/secret.txt", "in/keep.txt"} {
+		if err := r.realParents(rel); err == nil {
+			t.Errorf("realParents(%q) = nil, want a symlink refusal", rel)
+		}
+	}
+	if _, err := r.readRegular("out/secret.txt", 1<<20); err == nil {
+		t.Error("readRegular read a file outside the root")
+	}
+	if err := r.realParents("real/keep.txt"); err != nil {
+		t.Errorf("realParents(real/keep.txt) = %v", err)
+	}
+	data, err := r.readRegular("real/keep.txt", 1<<20)
+	if err != nil || string(data) != "marker\n" {
+		t.Errorf("readRegular(real/keep.txt) = %q, %v", data, err)
+	}
+	if _, err := r.readRegular("real/keep.txt", 3); err == nil {
+		t.Error("readRegular ignored its size limit")
 	}
 }

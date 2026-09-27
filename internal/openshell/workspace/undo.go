@@ -391,35 +391,45 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		data []byte
 		mode fs.FileMode
 	}
+	// Read through the project's os.Root and refuse symlinked parents: the
+	// session may have replaced a directory with a symlink, and a plain
+	// Lstat follows every component but the last, so it would read (and
+	// later copy into the project) a file from elsewhere on the host.
+	r, err := openRootFS(rec.Project)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
 	preserveIgnored := make(map[string]preservedFile)
 	totalBytes := int64(0)
 	var overCapWarned bool
 	for _, c := range allChanges {
-		if c.Status == "A" && wasIgnored(c.Path, gs.Ignored) {
-			absPath := filepath.Join(rec.Project, filepath.FromSlash(c.Path))
-			info, err := os.Lstat(absPath)
-			if err != nil {
-				continue
-			}
-			// Only preserve regular files.
-			if !info.Mode().IsRegular() {
-				continue
-			}
-			// Check the byte cap before reading.
-			if totalBytes+info.Size() > maxPreserveBytes {
-				if !overCapWarned {
-					res.Warnings = append(res.Warnings, fmt.Sprintf("pre-existing ignored files exceed %d MB; some will not be removed to avoid data loss", maxPreserveBytes>>20))
-					overCapWarned = true
-				}
-				continue
-			}
-			data, err := os.ReadFile(absPath)
-			if err != nil {
-				continue
-			}
-			preserveIgnored[c.Path] = preservedFile{data: data, mode: info.Mode()}
-			totalBytes += int64(len(data))
+		if c.Status != "A" || !wasIgnored(c.Path, gs.Ignored) {
+			continue
 		}
+		rel := path.Clean(c.Path)
+		if err := r.realParents(rel); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("did not keep %s: %v", rel, err))
+			continue
+		}
+		info, err := r.root.Lstat(rel)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if totalBytes+info.Size() > maxPreserveBytes {
+			if !overCapWarned {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("pre-existing ignored files exceed %d MB; some will not be removed to avoid data loss", maxPreserveBytes>>20))
+				overCapWarned = true
+			}
+			continue
+		}
+		data, err := r.readRegular(rel, maxPreserveBytes-totalBytes)
+		if err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("did not keep %s: %v", rel, err))
+			continue
+		}
+		preserveIgnored[c.Path] = preservedFile{data: data, mode: info.Mode()}
+		totalBytes += int64(len(data))
 	}
 
 	// The shadow index holds the capture just taken, so a one-way reset
@@ -429,11 +439,6 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 	}
 
 	// Restore pre-existing ignored files that the reset removed.
-	r, err := openRootFS(rec.Project)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
 	for relPath, pf := range preserveIgnored {
 		slashPath := path.Clean(relPath)
 		// Create parent directories with restrictive permissions.
