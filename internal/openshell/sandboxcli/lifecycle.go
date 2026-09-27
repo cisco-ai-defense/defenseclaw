@@ -1,0 +1,498 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package sandboxcli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+)
+
+// List is `sandbox list`.
+func (a *App) List(ctx context.Context, format OutputFormat) error {
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return apiError(err)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+	if format == OutputJSON {
+		if list == nil {
+			list = []sandboxapi.Sandbox{}
+		}
+		return writeJSON(a.IO.Out, map[string]any{"sandboxes": list})
+	}
+	if len(list) == 0 {
+		a.note("no sandboxes; start one with `" + CommandName + " run claude` in a project folder")
+		return nil
+	}
+	rows := make([][]string, 0, len(list))
+	for _, sb := range list {
+		rows = append(rows, []string{
+			sb.Name, firstNonEmpty(sb.HarnessName, sb.Harness), phaseText(sb), sb.WorkdirMode, profileText(sb),
+			humanDuration(time.Duration(sb.UptimeSeconds) * time.Second), hooksText(sb), a.tildePath(sb.Project),
+		})
+	}
+	a.table([]string{"NAME", "HARNESS", "PHASE", "MODE", "PROFILE", "UPTIME", "HOOKS", "PROJECT"}, rows)
+	return nil
+}
+
+func phaseText(sb sandboxapi.Sandbox) string {
+	p := sb.Phase
+	if sb.Orphaned {
+		p += " (orphaned)"
+	}
+	if sb.PendingApprovals > 0 {
+		p += fmt.Sprintf(" (%d ask)", sb.PendingApprovals)
+	}
+	return p
+}
+
+func profileText(sb sandboxapi.Sandbox) string {
+	if sb.Pack != "" && sb.Pack != sb.Profile {
+		return sb.Profile + " (" + sb.Pack + ")"
+	}
+	return sb.Profile
+}
+
+func hooksText(sb sandboxapi.Sandbox) string {
+	switch {
+	case sb.Hooks.Silent:
+		return "silent!"
+	case sb.Hooks.LastHookAt.IsZero():
+		return "-"
+	}
+	s := strconv.FormatInt(sb.Hooks.ToolCalls, 10) + " calls"
+	if sb.Hooks.ToolBlocked > 0 {
+		s += fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
+	}
+	return s
+}
+
+// Status is `sandbox status [name]`.
+func (a *App) Status(ctx context.Context, name string, format OutputFormat) error {
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		st, err := api.Status(ctx)
+		if err != nil {
+			return apiError(err)
+		}
+		if format == OutputJSON {
+			return writeJSON(a.IO.Out, st)
+		}
+		a.printStatus(st)
+		return nil
+	}
+	sb, err := api.Get(ctx, name)
+	if err != nil {
+		return apiError(err)
+	}
+	if format == OutputJSON {
+		return writeJSON(a.IO.Out, sb)
+	}
+	a.printSandbox(sb)
+	return nil
+}
+
+func (a *App) printStatus(st *sandboxapi.Status) {
+	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
+	state := "off (run `" + CommandName + " setup`)"
+	if st.Enabled {
+		state = "on"
+	}
+	row("Sandboxes", state)
+	if st.Enabled {
+		if st.Available {
+			row("OpenShell", "connected")
+		} else {
+			row("OpenShell", "unavailable: "+firstNonEmpty(st.Reason, "not connected"))
+		}
+	}
+	if g := st.Gateway; g != nil {
+		health := "healthy"
+		if !g.Healthy {
+			health = "unhealthy"
+		}
+		row("Gateway", fmt.Sprintf("%s %s (%s, workspace %s) %s", g.Name, g.Version, g.Endpoint, firstNonEmpty(g.Workspace, "default"), health))
+	}
+	if st.IngressAddr != "" {
+		row("Hook ingress", st.IngressAddr)
+	}
+	if st.EgressAddr != "" {
+		row("Egress proxy", st.EgressAddr)
+	}
+	if st.Pack != "" || st.Profile != "" {
+		row("Policy", "pack "+firstNonEmpty(st.Pack, "open")+", profile "+firstNonEmpty(st.Profile, "open"))
+	}
+	if st.Admin.Configured {
+		row("Organization", st.Admin.Authority+" admin policy "+st.Admin.Detail)
+	}
+	row("Running", fmt.Sprintf("%d of %d", st.Running, st.Sandboxes))
+	if st.PendingApprovals > 0 {
+		row("Asks", fmt.Sprintf("%d waiting (`%s approvals`)", st.PendingApprovals, CommandName))
+	}
+}
+
+func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
+	row := func(k, v string) {
+		if v != "" {
+			a.line(fmt.Sprintf("%-14s%s", k, v))
+		}
+	}
+	a.println(a.bold(sb.Name))
+	row("Harness", strings.TrimSpace(firstNonEmpty(sb.HarnessName, sb.Harness)+" "+sb.HarnessVersion))
+	row("Phase", phaseText(*sb))
+	if sb.UptimeSeconds > 0 {
+		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
+	}
+	row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" ("+sb.WorkdirMode+")")
+	yolo := "on"
+	if !sb.Launch.Yolo {
+		yolo = "off (harness prompts kept)"
+	}
+	row("Permissions", "skip-permissions "+yolo)
+	row("Policy", fmt.Sprintf("profile %s, pack %s %s, network %s, approvals %s", sb.Profile, firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest), networkLabel(sb), sb.Approvals))
+	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
+	cov := fmt.Sprintf("%d requests, %d tool calls, %d blocked", sb.Hooks.HookRequests, sb.Hooks.ToolCalls, sb.Hooks.ToolBlocked)
+	if !sb.Hooks.LastHookAt.IsZero() {
+		cov += ", last " + sb.Hooks.LastHookAt.Local().Format("15:04:05")
+	}
+	if sb.Hooks.Silent {
+		cov += a.style(" — SILENT since "+sb.Hooks.SilentSince.Local().Format("15:04:05"), ansiRed)
+	}
+	row("Hook traffic", cov)
+	if sb.Hooks.LastBlocked != "" {
+		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
+	}
+	row("Egress", fmt.Sprintf("%d destinations (%d blocked), %s up, %s down", sb.Egress.Destinations, sb.Egress.Blocked,
+		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown)))
+	for _, ep := range sb.Endpoints {
+		row("Endpoint", ep.Host+" "+ep.Result)
+	}
+	if sb.Snapshot != nil {
+		snap := sb.Snapshot.Kind + " snapshot " + sb.Snapshot.CreatedAt.Local().Format("2006-01-02 15:04")
+		if !sb.Snapshot.UndoneAt.IsZero() {
+			snap += ", undone " + sb.Snapshot.UndoneAt.Local().Format("15:04")
+		}
+		row("Undo", snap)
+	}
+	if sb.PendingApprovals > 0 {
+		row("Asks", fmt.Sprintf("%d waiting (`%s approvals --sandbox %s`)", sb.PendingApprovals, CommandName, sb.Name))
+	}
+	(&session{app: a}).printNested(sb)
+	for _, v := range sb.Violations {
+		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+	}
+	for _, w := range sb.Warnings {
+		a.warn(w)
+	}
+	if sb.Orphaned {
+		a.warn("DefenseClaw holds no binding for this sandbox; its hooks cannot authenticate. Delete it.")
+	}
+}
+
+func shortDigest(d string) string {
+	if strings.HasPrefix(d, "sha256:") && len(d) > 19 {
+		return "(" + d[:19] + "…)"
+	}
+	return ""
+}
+
+// ConnectOptions are the `sandbox connect` flags.
+type ConnectOptions struct {
+	Name    string
+	Shell   bool
+	Refresh bool
+	Rm      bool
+	Yes     bool
+	Args    []string
+}
+
+// Connect resumes a sandbox: it starts it when stopped and attaches the
+// harness (or, with Shell, a login shell) to the terminal.
+func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
+	a.defaults()
+	if !a.IO.TTY {
+		return errors.New("`sandbox connect` needs a terminal")
+	}
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	sb, err := api.Get(ctx, o.Name)
+	if err != nil {
+		return apiError(err)
+	}
+	spec, err := ResolveHarness(sb.Harness)
+	if err != nil {
+		return err
+	}
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return err
+	}
+	cli := a.cli(gateway)
+	if sb.Phase != "ready" {
+		a.note("starting " + sb.Name + "…")
+		if sb, err = api.Start(ctx, sb.Name, sandboxapi.StartRequest{}); err != nil {
+			return apiError(err)
+		}
+	}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes}
+	if err := s.probe(ctx); err != nil {
+		return err
+	}
+	if o.Refresh && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+		if err := a.refreshCopy(ctx, s); err != nil {
+			return err
+		}
+	}
+	if o.Shell {
+		inv, err := cli.Connect(sb.Name)
+		if err != nil {
+			return err
+		}
+		_, err = a.Terminal.Run(ctx, inv)
+		return err
+	}
+	a.banner(sb, llmChoice{}, RunOptions{})
+	code, err := s.attach(ctx, harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
+		CredentialProfile: sb.Launch.CredentialProfile, BedrockRegion: sb.Launch.BedrockRegion,
+		Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}, false)
+	if err != nil {
+		return err
+	}
+	if err := s.end(ctx); err != nil {
+		return err
+	}
+	if code != 0 {
+		return &ExitError{Code: code}
+	}
+	return nil
+}
+
+// refreshCopy re-stages a copy-mode sandbox's project and uploads it.
+func (a *App) refreshCopy(ctx context.Context, s *session) error {
+	home, _ := a.Home()
+	t := a.transport(s.cli)
+	a.note("refreshing the project copy in " + s.sb.Name + "…")
+	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{
+		Stage: workspace.StageOptions{Project: s.sb.Project, Name: s.sb.Name, DataDir: a.dataDir(), Home: home, Replace: true},
+		Exec:  t, Upload: t,
+	})
+	if err != nil {
+		return fmt.Errorf("refresh the copy: %w", err)
+	}
+	files, b := int64(rec.Files), rec.Bytes
+	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, FileCount: &files, ByteCount: &b})
+	return nil
+}
+
+// ExecOptions are the `sandbox exec` flags.
+type ExecOptions struct {
+	Name    string
+	Workdir string
+	TTY     bool
+	NoTTY   bool
+	Command []string
+}
+
+// Exec runs a command in a sandbox.
+func (a *App) Exec(ctx context.Context, o ExecOptions) error {
+	a.defaults()
+	if len(o.Command) == 0 {
+		return errors.New("name the command to run after --")
+	}
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	sb, err := api.Get(ctx, o.Name)
+	if err != nil {
+		return apiError(err)
+	}
+	if sb.Phase != "ready" {
+		return fmt.Errorf("%s is %s; start it with `%s start %s`", sb.Name, sb.Phase, CommandName, sb.Name)
+	}
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return err
+	}
+	cli := a.cli(gateway)
+	tty := (a.IO.TTY || o.TTY) && !o.NoTTY
+	inv, err := cli.Exec(sb.Name, o.Command, openshell.CLIExecOptions{TTY: tty, WorkDir: firstNonEmpty(o.Workdir, sb.Workdir)})
+	if err != nil {
+		return err
+	}
+	var code int
+	if tty {
+		code, err = a.Terminal.Run(ctx, inv)
+	} else {
+		code, err = a.Streamer.Stream(ctx, inv, a.IO.Out, a.IO.Err)
+	}
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return &ExitError{Code: code}
+	}
+	return nil
+}
+
+// Stop is `sandbox stop`.
+func (a *App) Stop(ctx context.Context, name string) error {
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	sb, err := api.Stop(ctx, name)
+	if err != nil {
+		return apiError(err)
+	}
+	a.ok(sb.Name + " is " + sb.Phase)
+	return nil
+}
+
+// Start is `sandbox start`.
+func (a *App) Start(ctx context.Context, name string, noSnapshot bool) error {
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	sb, err := api.Start(ctx, name, sandboxapi.StartRequest{NoSnapshot: noSnapshot})
+	if err != nil {
+		return apiError(err)
+	}
+	a.ok(sb.Name + " is " + sb.Phase + " → attach with `" + CommandName + " connect " + sb.Name + "`")
+	return nil
+}
+
+// DeleteOptions are the `sandbox delete` flags.
+type DeleteOptions struct {
+	Names        []string
+	Yes          bool
+	KeepSnapshot bool
+}
+
+// Delete is `sandbox delete`.
+func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, name := range o.Names {
+		yes, err := a.confirm("Delete sandbox "+name+" (its providers, credentials and, unless --keep-snapshot, its undo snapshot)?", o.Yes)
+		if err != nil {
+			return err
+		}
+		if !yes {
+			continue
+		}
+		res, err := api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: o.KeepSnapshot})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, apiError(err)))
+			continue
+		}
+		a.ok("deleted " + res.Name)
+		for _, w := range res.Warnings {
+			a.warn(w)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// LogsOptions are the `sandbox logs` flags.
+type LogsOptions struct {
+	Name   string
+	Follow bool
+	Lines  int
+}
+
+// Logs prints the output of a sandbox's detached run.
+func (a *App) Logs(ctx context.Context, o LogsOptions) error {
+	a.defaults()
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	sb, err := api.Get(ctx, o.Name)
+	if err != nil {
+		return apiError(err)
+	}
+	if sb.Phase != "ready" {
+		return fmt.Errorf("%s is %s; its logs are readable while it runs (`%s start %s`)", sb.Name, sb.Phase, CommandName, sb.Name)
+	}
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return err
+	}
+	cli := a.cli(gateway)
+	lines := o.Lines
+	if lines <= 0 {
+		lines = 200
+	}
+	log := RunDir + "/latest.log"
+	args := []string{"tail", "-n", strconv.Itoa(lines)}
+	if o.Follow {
+		args = append(args, "-F")
+	}
+	opts := openshell.CLIExecOptions{WorkDir: sb.Workdir}
+	if !o.Follow {
+		opts.Timeout = time.Minute
+	}
+	inv, err := cli.Exec(sb.Name, append(args, log), opts)
+	if err != nil {
+		return err
+	}
+	code, err := a.Streamer.Stream(ctx, inv, a.IO.Out, a.IO.Err)
+	if err != nil {
+		return err
+	}
+	if code != 0 && !o.Follow {
+		return fmt.Errorf("%s has no detached run output (start one with `%s run --detach`)", sb.Name, CommandName)
+	}
+	if !o.Follow {
+		statusInv, err := cli.Exec(sb.Name, []string{"cat", RunDir + "/latest.exit"}, openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: 30 * time.Second})
+		if err == nil {
+			var out bytes.Buffer
+			if code, err := a.Streamer.Stream(ctx, statusInv, &out, &bytes.Buffer{}); err == nil && code == 0 {
+				a.note("the run exited with status " + strings.TrimSpace(out.String()))
+			} else {
+				a.note("the run is still going (follow it with -f)")
+			}
+		}
+	}
+	return nil
+}

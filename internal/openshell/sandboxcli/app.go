@@ -1,0 +1,416 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// Package sandboxcli implements the `defenseclaw sandbox …` commands: the
+// one-time setup, doctor, `run` (preflight, launch banner, terminal attach,
+// end-of-session review), the lifecycle and approval commands that drive
+// the daemon's sandbox REST API, copy-mode pull, policy and pack
+// inspection, overlay image builds, the shell wrappers and teardown.
+//
+// The daemon is the single writer of sandboxes, providers, bindings,
+// approvals and egress rules; the commands here own the terminal, the
+// copy-mode workspace, the installer and the user's shell rc files. Every
+// external effect goes through a field of App, so the commands are tested
+// against a fake REST server, a fake terminal and temporary directories.
+package sandboxcli
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+)
+
+// CommandName is how messages refer to the CLI.
+const CommandName = "defenseclaw sandbox"
+
+// API is the daemon's sandbox REST surface. *sandboxapi.Client implements
+// it.
+type API interface {
+	Status(ctx context.Context) (*sandboxapi.Status, error)
+	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
+	Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
+	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
+	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
+	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
+	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
+	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
+	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
+	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
+	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
+	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+	Activity(ctx context.Context, q sandboxapi.ActivityQuery, fn func(sandboxapi.ActivityEvent) error) error
+}
+
+var _ API = (*sandboxapi.Client)(nil)
+
+// IO is the process's terminal.
+type IO struct {
+	In       io.Reader
+	Out, Err io.Writer
+	// TTY reports that In and Out are a terminal (prompts and attach).
+	TTY bool
+	// Color enables ANSI styling of Out.
+	Color bool
+}
+
+// Terminal runs an interactive openshell invocation as a foreground child
+// that owns the terminal, and returns its exit status.
+type Terminal interface {
+	Run(ctx context.Context, inv openshell.Invocation) (int, error)
+}
+
+// Streamer runs a non-interactive openshell invocation with its output on
+// stdout and stderr, and returns its exit status.
+type Streamer interface {
+	Stream(ctx context.Context, inv openshell.Invocation, stdout, stderr io.Writer) (int, error)
+}
+
+// App runs the sandbox commands. Zero-valued fields take the real system;
+// see defaults.
+type App struct {
+	Cfg *config.Config
+	// ConfigPath is the config.yaml policy and setup changes write.
+	ConfigPath string
+	// API is the daemon's sandbox API (default: built from Cfg).
+	API API
+	IO  IO
+
+	Terminal Terminal
+	Streamer Streamer
+	// ExecProcess replaces the process (nested runs inside a sandbox).
+	ExecProcess func(path string, argv, env []string) error
+	LookPath    func(string) (string, error)
+	Getenv      func(string) string
+	Environ     func() []string
+	Getwd       func() (string, error)
+	Home        func() (string, error)
+	// Executable is the DefenseClaw binary the shell wrappers call.
+	Executable func() (string, error)
+	Now        func() time.Time
+	GOOS       string
+	// Sleep waits between polls (tests make it instant).
+	Sleep func(context.Context, time.Duration) error
+
+	// Host integrations, replaceable in tests. HostDoctor runs the host
+	// checks of d (default d.Run).
+	HostDoctor func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport
+	Images     ImageService
+	Workspace  CopyWorkspace
+	Gateway    GatewayService
+	Installer  func(consent func(*openshell.InstallPlan) (bool, error)) Installer
+	OpenShell  func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
+
+	once   sync.Once
+	reader *bufio.Reader
+}
+
+// ErrUnsupported is returned on platforms and setups sandboxes do not run
+// on.
+var ErrUnsupported = errors.New("OpenShell sandboxes are not supported here")
+
+// ExitError carries a process exit status (a harness's own, or a failed
+// check) without printing anything more.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
+func (e *ExitError) Unwrap() error { return e.Err }
+
+// ExitCode is the status to exit with.
+func (e *ExitError) ExitCode() int { return e.Code }
+
+// Silent marks an error whose message was already printed.
+type Silent struct{ Err error }
+
+func (s *Silent) Error() string { return s.Err.Error() }
+func (s *Silent) Unwrap() error { return s.Err }
+
+func (a *App) defaults() {
+	a.once.Do(func() {
+		if a.IO.In == nil {
+			a.IO.In = os.Stdin
+		}
+		if a.IO.Out == nil {
+			a.IO.Out = os.Stdout
+		}
+		if a.IO.Err == nil {
+			a.IO.Err = os.Stderr
+		}
+		if a.Terminal == nil {
+			a.Terminal = ForegroundTerminal{}
+		}
+		if a.Streamer == nil {
+			a.Streamer = CommandStreamer{}
+		}
+		if a.ExecProcess == nil {
+			a.ExecProcess = execProcess
+		}
+		if a.LookPath == nil {
+			a.LookPath = exec.LookPath
+		}
+		if a.Getenv == nil {
+			a.Getenv = os.Getenv
+		}
+		if a.Environ == nil {
+			a.Environ = os.Environ
+		}
+		if a.Getwd == nil {
+			a.Getwd = os.Getwd
+		}
+		if a.Home == nil {
+			a.Home = os.UserHomeDir
+		}
+		if a.Executable == nil {
+			a.Executable = executable
+		}
+		if a.Now == nil {
+			a.Now = time.Now
+		}
+		if a.GOOS == "" {
+			a.GOOS = runtime.GOOS
+		}
+		if a.Sleep == nil {
+			a.Sleep = sleepCtx
+		}
+		if a.ConfigPath == "" && a.Cfg != nil {
+			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)
+		}
+		if a.ConfigPath == "" {
+			a.ConfigPath = config.ConfigPath()
+		}
+		if a.Images == nil {
+			a.Images = &builderImages{app: a}
+		}
+		if a.Workspace == nil {
+			a.Workspace = defaultCopyWorkspace{}
+		}
+		if a.Gateway == nil {
+			a.Gateway = &gatewayService{app: a}
+		}
+		if a.Installer == nil {
+			a.Installer = a.defaultInstaller
+		}
+		if a.OpenShell == nil {
+			a.OpenShell = a.dialOpenShell
+		}
+		if a.HostDoctor == nil {
+			a.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport { return d.Run(ctx) }
+		}
+		a.reader = bufio.NewReader(a.IO.In)
+	})
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func executable() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	return p, nil
+}
+
+// api returns the daemon client.
+func (a *App) api() (API, error) {
+	a.defaults()
+	if a.API != nil {
+		return a.API, nil
+	}
+	if a.Cfg == nil {
+		return nil, errors.New("no DefenseClaw configuration is loaded; run `defenseclaw setup` first")
+	}
+	c, err := sandboxapi.ClientForConfig(a.Cfg)
+	if err != nil {
+		return nil, err
+	}
+	a.API = c
+	return c, nil
+}
+
+// CheckSupported refuses platforms and deployments sandboxes do not run on,
+// with the reason.
+func (a *App) CheckSupported() error {
+	a.defaults()
+	if err := openshell.CheckPlatform(a.GOOS); err != nil {
+		return fmt.Errorf("%w: OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported", ErrUnsupported)
+	}
+	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
+		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments yet", ErrUnsupported)
+	}
+	if os.Geteuid() == 0 {
+		return fmt.Errorf("%w: run sandboxes as your own user, not root (they run as your uid)", ErrUnsupported)
+	}
+	return nil
+}
+
+// cli is the openshell argv builder for the daemon's gateway.
+func (a *App) cli(gateway string) openshell.CLI {
+	bin := openshell.DefaultBinary
+	ws := ""
+	if a.Cfg != nil {
+		bin = a.Cfg.OpenShell.EffectiveBinary()
+		ws = a.Cfg.OpenShell.Gateway.Workspace
+		if gateway == "" {
+			gateway = a.Cfg.OpenShell.Gateway.Name
+		}
+	}
+	return openshell.CLI{Binary: bin, Gateway: gateway, Workspace: ws}
+}
+
+// gatewayName is the OpenShell registration the daemon drives.
+func (a *App) gatewayName(ctx context.Context) (string, error) {
+	if a.Cfg != nil && a.Cfg.OpenShell.Gateway.Name != "" {
+		return a.Cfg.OpenShell.Gateway.Name, nil
+	}
+	api, err := a.api()
+	if err == nil {
+		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Name != "" {
+			return st.Gateway.Name, nil
+		}
+	}
+	reg, err := openshell.Discover(openshell.DiscoverOptions{})
+	if err != nil {
+		return "", fmt.Errorf("find the OpenShell gateway: %w", err)
+	}
+	return reg.Name, nil
+}
+
+func (a *App) dataDir() string {
+	if a.Cfg != nil && a.Cfg.DataDir != "" {
+		return a.Cfg.DataDir
+	}
+	return config.DefaultDataPath()
+}
+
+func (a *App) dialOpenShell(ctx context.Context) (openshell.Client, *openshell.Registration, error) {
+	opts := openshell.DiscoverOptions{}
+	cliOpts := openshell.ClientOptions{}
+	if a.Cfg != nil {
+		opts.Gateway = a.Cfg.OpenShell.Gateway.Name
+		cliOpts.Workspace = a.Cfg.OpenShell.Gateway.Workspace
+	}
+	reg, err := openshell.Discover(opts)
+	if err != nil {
+		return nil, reg, err
+	}
+	c, err := openshell.Dial(reg, cliOpts)
+	if err != nil {
+		return nil, reg, err
+	}
+	if _, err := c.Health(ctx); err != nil {
+		_ = c.Close()
+		return nil, reg, err
+	}
+	return c, reg, nil
+}
+
+// project is the real launch folder.
+func (a *App) project() (string, error) {
+	wd, err := a.Getwd()
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		return "", err
+	}
+	return real, nil
+}
+
+// apiError explains a daemon error for people. Admin refusals start with
+// "blocked by your organization's DefenseClaw policy".
+func apiError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) {
+		return err
+	}
+	switch e.Code {
+	case sandboxapi.CodeUnavailable:
+		if strings.Contains(e.Message, "daemon is not reachable") {
+			return fmt.Errorf("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`): %s", e.Detail)
+		}
+	case sandboxapi.CodeDisabled:
+		return fmt.Errorf("%s", e.Message)
+	case sandboxapi.CodeAdminViolation:
+		return errors.New(violationMessage(e.Violation, e.Message, e.Detail, true))
+	case sandboxapi.CodePolicyViolation:
+		if e.Violation != nil {
+			return errors.New(violationMessage(e.Violation, e.Message, e.Detail, e.Violation.Admin))
+		}
+	}
+	return e
+}
+
+// violationMessage renders a refused setting. Admin clamps read "blocked by
+// your organization's DefenseClaw policy: <key>".
+func violationMessage(v *sandboxapi.Violation, message, detail string, admin bool) string {
+	if v != nil && (admin || v.Admin) {
+		msg := sandboxapi.AdminMessage + ": " + v.Key
+		if v.Message != "" && !strings.Contains(v.Message, sandboxapi.AdminMessage) {
+			msg += " (" + v.Message + ")"
+		}
+		return msg
+	}
+	if v != nil && v.Message != "" {
+		return v.Message
+	}
+	if admin && !strings.HasPrefix(message, sandboxapi.AdminMessage) {
+		message = sandboxapi.AdminMessage + ": " + message
+	}
+	if detail != "" {
+		return message + ": " + detail
+	}
+	return message
+}
