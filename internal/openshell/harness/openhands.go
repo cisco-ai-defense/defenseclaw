@@ -45,8 +45,8 @@ var OpenHands = register(&Spec{
 	DefaultVersion: "1.16.0",
 	Provider:       connector.NewOpenHandsConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
-	verification: Verification{Status: Unverified,
-		Note: "the image hook-fire probe passed (mock model through --override-with-envs: session, prompt, tool and stop hooks reached the stand-in ingress, BLOCKME denied, a replaced ~/.openhands/hooks.json restored); no run through the DefenseClaw daemon in an OpenShell sandbox yet"},
+	verification: Verification{Status: VerifiedLive,
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=openhands): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/bin/env", "OPENHANDS_SUPPRESS_BANNER=1", "/usr/local/bin/openhands", "--version"},
 		VersionRE:       regexp.MustCompile(`^OpenHands CLI ([0-9]+\.[0-9]+\.[0-9]+)`),

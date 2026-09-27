@@ -182,11 +182,20 @@ exist only in the image; nothing on your host changes.
 - **Other traffic.** Apart from the model, a mock-model run reached only
   `pypi.org` (the version check), `github.com` and `raw.githubusercontent.com`
   (the public skills download). That traffic goes through the DefenseClaw
-  egress proxy, which logs it and applies the blocklist.
-- **Status.** The image passes the hook-fire probe on a mock model: session,
-  prompt, tool and stop hooks reach the ingress, a blocked tool call does not
-  run, and a replaced user `hooks.json` is restored. A run through the
-  DefenseClaw daemon in an OpenShell sandbox is still pending.
+  egress proxy, which logs it and applies the blocklist. OpenShell also
+  logged about 20 refused attempts to reach the sandbox's own hostname;
+  OpenHands worked regardless.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, on a mock model behind a credential binding, showed:
+  - hooks reaching the sandbox ingress, with OpenShell substituting the model
+    key;
+  - a command that a DefenseClaw rule blocks refused by the hook, with the
+    rule's reason passed back to the model;
+  - egress through the proxy, including a blocklisted host that a
+    sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe, in which a replaced user
+  `hooks.json` is restored.
 
 ## Disable
 

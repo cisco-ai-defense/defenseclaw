@@ -42,8 +42,8 @@ var Hermes = register(&Spec{
 	DefaultVersion: "0.19.0",
 	Provider:       connector.NewHermesConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	verification: Verification{Status: Unverified,
-		Note: "the image hook-fire probe passed (mock model through the managed defenseclaw provider: session, LLM and tool hooks reached the stand-in ingress, BLOCKME denied, a hostile user config ignored); no run through the DefenseClaw daemon in an OpenShell sandbox yet"},
+	verification: Verification{Status: VerifiedLive,
+		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=hermes): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/hermes", "--version"},
 		VersionRE:       regexp.MustCompile(`^Hermes Agent v([0-9]+\.[0-9]+\.[0-9]+)`),

@@ -104,7 +104,7 @@
         "supportsFailClosed": false,
         "scope": "user"
       },
-      "sandbox": { "status": "artifacts", "tamperTier": "managed", "hookConfig": "/etc/hermes/config.yaml", "harnessPin": "0.19.0", "verified": "unverified" },
+      "sandbox": { "status": "artifacts", "tamperTier": "managed", "hookConfig": "/etc/hermes/config.yaml", "harnessPin": "0.19.0", "verified": "verified" },
       "hilt": "Hermes has no native human-approval surface; confirm verdicts are recorded and alerted but cannot pause or resume the hook.",
       "notes": "Native Windows setup is supported; validation metadata remains empty and live=false. The connector covers one resolved default HERMES_HOME only and rejects named or multiplex profiles. It stages all 23 Hermes v0.19 hooks in config.yaml while preserving hooks_auto_accept, and transactionally owns only exact DefenseClaw event/command approvals in shell-hooks-allowlist.json. Running hosts cache callbacks, so registration and revocation remain pending reload; Windows teardown writes a direct-native disabled tombstone for stale callbacks. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Other events are audit-only where the official shell parser proves no effect, and all failures remain open. The command is a directly quoted absolute native defenseclaw-hook.exe argv parsed by shlex.split and run with shell=False; there is no shell fallback and Hermes's PortableGit terminal is outside the integration. Bounded default-profile inventory covers MCP, local/external skills, SOUL.md, built-in/provider memory, and bundled/Nix/user/pip plugins; project-conditional, named-profile, and managed/ProgramData/cloud/MDM sources remain unverified."
     },
@@ -214,7 +214,7 @@
         "supportsFailClosed": true,
         "scope": "user,workspace"
       },
-      "sandbox": { "status": "artifacts", "tamperTier": "user", "hookConfig": "/sandbox/.openhands/hooks.json", "harnessPin": "1.16.0", "verified": "unverified" },
+      "sandbox": { "status": "artifacts", "tamperTier": "user", "hookConfig": "/sandbox/.openhands/hooks.json", "harnessPin": "1.16.0", "verified": "verified" },
       "hilt": "OpenHands has no native ask surface in the documented hook contract; confirm verdicts are downgraded with raw_action preserved and optional additionalContext returned to the agent.",
       "notes": "Global ~/.openhands/hooks.json native hook schema by default; optional repo-local .openhands/hooks.json with --workspace; MCP lives in ~/.openhands/mcp.json; skills include user installs and ~/.openhands/cache/skills/public-skills/skills."
     },
