@@ -171,6 +171,7 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
 
     client.stop_sandbox(name)
     client.start_sandbox(name, no_snapshot=True)
+    client.start_sandbox(name, new_snapshot=True)
     client.undo_sandbox(name, preview=True, stop=True)
     client.review_sandbox(name, diff=True)
     assert client.delete_sandbox(name, keep_snapshot=True)["deleted"] is True
@@ -183,6 +184,7 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
     assert bodies == [
         ("POST", f"{escaped}/stop", {}),
         ("POST", f"{escaped}/start", {"no_snapshot": True}),
+        ("POST", f"{escaped}/start", {"new_snapshot": True}),
         ("POST", f"{escaped}/undo", {"preview": True, "stop": True}),
         ("POST", f"{escaped}/review", {"diff": True}),
         ("DELETE", escaped, {"keep_snapshot": True}),

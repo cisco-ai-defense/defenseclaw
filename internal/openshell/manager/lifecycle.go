@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"slices"
 	"sort"
@@ -341,13 +342,21 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
-		if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
-			Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
-			Skip: maskedRels(binding, rec.Workdir), Protected: eff.PolicySources(),
-		}); err != nil {
-			return workspaceError(err)
+		if kept, why := m.keepSnapshot(ctx, rec.Name, req.NewSnapshot); kept {
+			// Replacing it would take the earlier session's changes into the
+			// new baseline, and undo could never revert them.
+			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: rec.Name, Reason: "snapshot_kept",
+				Message: "kept the pre-session snapshot: " + why + "; undo still reverts them (`sandbox start --new-snapshot` accepts them)"})
+		} else {
+			if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
+				Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
+				Skip: maskedRels(binding, rec.Workdir), Protected: eff.PolicySources(),
+			}); err != nil {
+				return workspaceError(err)
+			}
+			m.recordSnapshot(ctx, b)
 		}
-		m.recordSnapshot(ctx, b)
 	}
 	// The harness starts with the sandbox: every tool call of the new
 	// session reaches this process, so its tool-call ledger is complete.
@@ -387,6 +396,31 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
 	return nil
+}
+
+// keepSnapshot reports whether a start must keep the sandbox's pre-session
+// snapshot instead of taking a fresh one, and why: the folder still holds
+// changes an earlier session made that were neither undone nor accepted
+// (newSnapshot). A fresh snapshot would make them part of the new
+// baseline, out of undo's reach. When the folder cannot be compared with
+// the snapshot, it is kept too: replacing it could lose the only way back.
+func (m *Manager) keepSnapshot(ctx context.Context, name string, newSnapshot bool) (bool, string) {
+	if newSnapshot {
+		return false, ""
+	}
+	snap, err := m.ws.LoadSnapshot(m.opts.DataDir, name)
+	if err != nil || snap == nil || snap.UndoneAt != nil {
+		return false, ""
+	}
+	// Only whether anything changed matters here: no content scanners.
+	rep, err := m.ws.Review(ctx, workspace.ReviewOptions{DataDir: m.opts.DataDir, Name: name, Scanners: []workspace.ContentScanner{}})
+	if err != nil {
+		return true, "the folder could not be compared with it (" + truncate(err.Error(), 200) + "), so it may hold an earlier session's changes"
+	}
+	if rep.FilesChanged == 0 && len(rep.Changes) == 0 && len(rep.Flags) == 0 {
+		return false, ""
+	}
+	return true, fmt.Sprintf("the folder still holds %d changed file(s) from an earlier session", max(rep.FilesChanged, len(rep.Changes)))
 }
 
 // stoppedPhase reports an OpenShell phase in which the workload no longer

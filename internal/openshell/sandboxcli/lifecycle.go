@@ -410,13 +410,24 @@ func (a *App) Stop(ctx context.Context, name string) error {
 	return nil
 }
 
+// StartOptions are the `sandbox start` flags.
+type StartOptions struct {
+	// NoSnapshot keeps the previous snapshot; NewSnapshot replaces it even
+	// when the folder still holds an earlier session's changes.
+	NoSnapshot  bool
+	NewSnapshot bool
+}
+
 // Start is `sandbox start`.
-func (a *App) Start(ctx context.Context, name string, noSnapshot bool) error {
+func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
+	if o.NoSnapshot && o.NewSnapshot {
+		return errors.New("--no-snapshot and --new-snapshot are exclusive")
+	}
 	api, err := a.api()
 	if err != nil {
 		return err
 	}
-	sb, err := api.Start(ctx, name, sandboxapi.StartRequest{NoSnapshot: noSnapshot})
+	sb, err := api.Start(ctx, name, sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot})
 	if err != nil {
 		return apiError(err)
 	}

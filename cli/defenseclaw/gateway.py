@@ -740,9 +740,18 @@ class OrchestratorClient:
         result = self._sandbox_call("POST", self._sandbox_path(name, "stop"), timeout=SANDBOX_LIFECYCLE_TIMEOUT)
         return self._sandbox_object(result, "sandbox")
 
-    def start_sandbox(self, name: str, *, no_snapshot: bool = False) -> dict[str, Any]:
-        """Start a stopped sandbox (a new session, with a fresh snapshot unless ``no_snapshot``)."""
-        body = {"no_snapshot": True} if no_snapshot else {}
+    def start_sandbox(self, name: str, *, no_snapshot: bool = False, new_snapshot: bool = False) -> dict[str, Any]:
+        """Start a stopped sandbox (a new session).
+
+        It takes a fresh snapshot unless ``no_snapshot``, or unless the folder
+        still holds an earlier session's changes; ``new_snapshot`` takes one
+        even then, and undo no longer reverts those changes.
+        """
+        body: dict[str, Any] = {}
+        if no_snapshot:
+            body["no_snapshot"] = True
+        if new_snapshot:
+            body["new_snapshot"] = True
         result = self._sandbox_call(
             "POST", self._sandbox_path(name, "start"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
         )

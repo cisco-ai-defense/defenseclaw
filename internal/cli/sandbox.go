@@ -348,16 +348,18 @@ func newSandboxStopCmd() *cobra.Command {
 }
 
 func newSandboxStartCmd() *cobra.Command {
-	var noSnapshot bool
+	var o sandboxcli.StartOptions
 	cmd := &cobra.Command{
 		Use:   "start <name>",
-		Short: "Start a stopped sandbox (a new session, with a fresh snapshot)",
+		Short: "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
 		Args:  nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
-			return app.Start(ctx, args[0], noSnapshot)
+			return app.Start(ctx, args[0], o)
 		}),
 	}
-	cmd.Flags().BoolVar(&noSnapshot, "no-snapshot", false, "keep the previous session's snapshot instead of taking a new one")
+	cmd.Flags().BoolVar(&o.NoSnapshot, "no-snapshot", false, "keep the previous session's snapshot instead of taking a new one")
+	cmd.Flags().BoolVar(&o.NewSnapshot, "new-snapshot", false,
+		"take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them)")
 	return cmd
 }
 

@@ -296,9 +296,17 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(("stop",), "Stop a sandbox (it is kept for start or connect)", args=(_Arg("name"),)),
     _Cmd(
         ("start",),
-        "Start a stopped sandbox (a new session, with a fresh snapshot)",
+        "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
         args=(_Arg("name"),),
-        flags=(_Flag("no-snapshot", "bool", "keep the previous session's snapshot instead of taking a new one"),),
+        flags=(
+            _Flag("no-snapshot", "bool", "keep the previous session's snapshot instead of taking a new one"),
+            _Flag(
+                "new-snapshot",
+                "bool",
+                "take a new snapshot even if the folder still has an earlier session's changes "
+                "(undo no longer reverts them)",
+            ),
+        ),
     ),
     _Cmd(
         ("delete",),

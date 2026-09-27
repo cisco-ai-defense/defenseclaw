@@ -349,8 +349,15 @@ type DeleteResponse struct {
 // StartRequest is POST /sandboxes/{name}/start.
 type StartRequest struct {
 	// NoSnapshot keeps the previous snapshot instead of taking a fresh one
-	// for the new session.
+	// for the new session. Without it a start takes a fresh one only when
+	// nothing would be lost: no snapshot yet, the last one was undone, or
+	// the folder did not change since it; otherwise the snapshot of the
+	// earlier session is kept, so undo still reverts its changes.
 	NoSnapshot bool `json:"no_snapshot,omitempty"`
+	// NewSnapshot takes a fresh snapshot even though the folder still holds
+	// an earlier session's changes: they are accepted, and undo no longer
+	// reverts them.
+	NewSnapshot bool `json:"new_snapshot,omitempty"`
 }
 
 // UndoRequest is POST /sandboxes/{name}/undo. Undo needs the sandbox

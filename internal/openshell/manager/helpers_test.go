@@ -92,6 +92,8 @@ type fakeWorkspace struct {
 	masked       []workspace.MaskedPath
 	lastSnapshot workspace.SnapshotOptions
 	lastMount    workspace.MountOptions
+	// clean makes Review report a folder without changes.
+	clean bool
 }
 
 func newFakeWorkspace() *fakeWorkspace {
@@ -165,6 +167,12 @@ func (f *fakeWorkspace) Undo(_ context.Context, opts workspace.UndoOptions) (*wo
 		return nil, f.undoErr
 	}
 	f.undone = append(f.undone, opts.Name)
+	if rec, ok := f.snapshots[opts.Name]; ok && !opts.Preview {
+		undone := *rec
+		at := time.Now().UTC()
+		undone.UndoneAt = &at
+		f.snapshots[opts.Name] = &undone
+	}
 	return &workspace.UndoResult{Name: opts.Name, Preview: opts.Preview, Changes: []workspace.TreeChange{{Path: "README.md"}}}, nil
 }
 
@@ -172,6 +180,9 @@ func (f *fakeWorkspace) Review(_ context.Context, opts workspace.ReviewOptions) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reviewed = append(f.reviewed, opts.Name)
+	if f.clean {
+		return &workspace.ReviewReport{Name: opts.Name}, nil
+	}
 	return &workspace.ReviewReport{Name: opts.Name, FilesChanged: 2, Insertions: 5, Deletions: 1,
 		Flags: []workspace.Flag{{Path: "package.json", Label: "package.json#scripts.postinstall", Severity: workspace.SeverityHigh}}}, nil
 }

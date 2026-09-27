@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // TestStartRefusesARunningSandbox pins that Start leaves a running
@@ -130,6 +131,61 @@ func TestFailedStopRestoresThePhase(t *testing.T) {
 	}
 	if tamperStop {
 		t.Fatal("a failed stop keeps later tamper alarms from stopping the sandbox")
+	}
+}
+
+// TestStartKeepsTheSnapshotOfPendingChanges pins that a new session keeps
+// the pre-session snapshot while the folder still holds an earlier
+// session's changes (undo must still reach them), and takes a fresh one
+// once they were undone, when the folder is unchanged, or on request.
+func TestStartKeepsTheSnapshotOfPendingChanges(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "keepsnap"})
+	restart := func(req sandboxapi.StartRequest) *workspace.SnapshotRecord {
+		t.Helper()
+		before := e.ws.snapshots["keepsnap"]
+		if _, err := e.m.Stop(ctx, "keepsnap"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.m.Start(ctx, "keepsnap", req); err != nil {
+			t.Fatal(err)
+		}
+		return before
+	}
+
+	// The fake folder differs from its snapshot: the snapshot stays.
+	before := restart(sandboxapi.StartRequest{})
+	if e.ws.snapshots["keepsnap"] != before {
+		t.Fatal("start replaced the snapshot of changes nobody undid or accepted")
+	}
+	kept := false
+	for _, ev := range e.m.ActivitySince(0, "keepsnap") {
+		kept = kept || (ev.Kind == sandboxapi.ActivityWorkspace && ev.Reason == "snapshot_kept")
+	}
+	if !kept {
+		t.Fatal("no notice that the snapshot was kept")
+	}
+	// Accepting the changes takes a fresh one.
+	if before := restart(sandboxapi.StartRequest{NewSnapshot: true}); e.ws.snapshots["keepsnap"] == before {
+		t.Fatal("--new-snapshot kept the old snapshot")
+	}
+	// After an undo the folder is back to its snapshot.
+	if _, err := e.m.Undo(ctx, "keepsnap", sandboxapi.UndoRequest{Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Start(ctx, "keepsnap", sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if snap := e.ws.snapshots["keepsnap"]; snap.UndoneAt != nil {
+		t.Fatal("the start after an undo kept the undone snapshot")
+	}
+	// An unchanged folder loses nothing to a fresh snapshot.
+	e.ws.mu.Lock()
+	e.ws.clean = true
+	e.ws.mu.Unlock()
+	if before := restart(sandboxapi.StartRequest{}); e.ws.snapshots["keepsnap"] == before {
+		t.Fatal("the start of an unchanged folder kept the old snapshot")
 	}
 }
 

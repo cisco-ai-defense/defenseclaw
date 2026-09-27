@@ -778,6 +778,14 @@ another name.
   nested repositories that already exist, and fingerprints of dependency
   directories, so the review sees changes git ignores.
 
+Each start of a stopped sandbox is a new session and takes a fresh snapshot,
+unless the folder still holds changes an earlier session made that were
+neither undone nor accepted. Then the manager keeps the earlier snapshot, so
+undo still reverts them (and everything since), and says so on the activity
+feed. It keeps it too when it cannot compare the folder with the snapshot.
+`sandbox start --new-snapshot` accepts the changes and takes a fresh one;
+`--no-snapshot` always keeps the previous one.
+
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
 preview mode. In a git project it:
 

@@ -680,8 +680,13 @@
   {
     "path": "sandbox start",
     "use": "start \u003cname\u003e",
-    "short": "Start a stopped sandbox (a new session, with a fresh snapshot)",
+    "short": "Start a stopped sandbox (a new session, with a fresh snapshot unless earlier changes are pending)",
     "flags": [
+      {
+        "name": "new-snapshot",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "no-snapshot",
         "type": "bool",
