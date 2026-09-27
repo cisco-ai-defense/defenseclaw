@@ -592,6 +592,9 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	}
 	if c.name == "openhands" {
 		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, opts.profileGOOS())
+		// The CLI reports PascalCase SDK event types; see
+		// openhands_hook_profile.go.
+		profile.Decode = openHandsProfileDecode
 	}
 	if c.name == "amp" {
 		// Amp exposes an opaque plugin span ID but no documented W3C

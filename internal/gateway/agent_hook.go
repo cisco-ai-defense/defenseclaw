@@ -1946,7 +1946,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
-				Args:                     req.ToolArgs,
+				Args:                     agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs),
 				CWD:                      req.CWD,
 				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
@@ -2065,7 +2065,29 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
 		return "shell"
 	}
+	// OmniGent's os_env shell tool (an agent's os_env block registers
+	// sys_os_shell, {"command": "..."}; the DefenseClaw OpenShell sandbox
+	// agent uses it) is the same shell shape under another name. Unmapped,
+	// its commands parse to no command facts and a CRITICAL command finding
+	// stays an unproven candidate that allows.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "omnigent") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "sys_os_shell") {
+		return "shell"
+	}
 	return toolName
+}
+
+// agentHookTrustedActionArgs selects the arguments the trusted-action parser
+// sees. OpenHands' terminal tool reports the SDK's TerminalAction fields next
+// to the command; connector.OpenHandsTrustedShellArgs projects them onto the
+// plain shell shape when that is exact. The recorded ToolArgs never change.
+func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) json.RawMessage {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "openhands") {
+		if projected, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
+			return projected
+		}
+	}
+	return args
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy
