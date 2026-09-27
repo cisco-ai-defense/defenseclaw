@@ -15,6 +15,8 @@ Two connectors are gone: the pre-rename Devin Desktop connector (now covered by
 files may still name them:
 
 * the two legacy-migration modules and their tests, for the old Desktop ID;
+* the two native Windows install-state compatibility lists, which let Setup
+  and the uninstaller read state written by pre-release builds;
 * ``CHANGELOG.md``;
 * the "Renamed and removed connectors" section of the upgrade guide;
 * this test.
@@ -76,7 +78,9 @@ DESKTOP_ONLY_FILES = frozenset(
 UNRESTRICTED_FILES = frozenset(
     {
         "CHANGELOG.md",
+        "cli/defenseclaw/retired_install_state.py",
         "cli/tests/test_retired_connector_names.py",
+        "cmd/defenseclaw-setup/retired_install_state.go",
     }
 )
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"

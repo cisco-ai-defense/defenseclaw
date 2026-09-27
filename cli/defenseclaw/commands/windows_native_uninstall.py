@@ -32,6 +32,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import BinaryIO
 
+from defenseclaw.retired_install_state import (
+    RETIRED_INSTALL_STATE_CONNECTORS,
+    RETIRED_INSTALL_STATE_FIELDS,
+)
+
 _LOCAL_APP_DATA_FOLDER_ID = "f1b32785-6fba-4fcf-9d55-7b8e7f157091"
 _PROFILE_FOLDER_ID = "5e6c858f-0e22-4760-9afe-ea3317b67173"
 _SETUP_NAME = "DefenseClawSetup-x64.exe"
@@ -97,6 +102,8 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "hermes_home",
         "transaction_id",
     }
+    # Pre-release builds may still carry retired connectors' bindings.
+    | RETIRED_INSTALL_STATE_FIELDS
 )
 _PAYLOAD_MANIFEST_FIELDS = frozenset(
     {
@@ -483,6 +490,7 @@ def _validate_install_state(
             "opencode",
             "none",
         }
+        | RETIRED_INSTALL_STATE_CONNECTORS
         or state.get("mode") not in {"observe", "action"}
         or state.get("unsigned_local_artifact") is not False
         or state.get("release_signing_required") is not True
@@ -496,6 +504,9 @@ def _validate_install_state(
             os.path.abspath(expected)
         ):
             raise NativeWindowsUninstallRefusal(f"Native installer state has an unexpected {field.replace('_', ' ')}.")
+    for field in RETIRED_INSTALL_STATE_FIELDS & fields:
+        if not isinstance(state.get(field), str):
+            raise NativeWindowsUninstallRefusal("Native installer state has an invalid retired connector binding.")
     return version, source_commit
 
 
