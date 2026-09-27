@@ -95,3 +95,15 @@ func main() {
         )
     assert completed.returncode == 0, build_log.read_text(encoding="utf-8", errors="replace")
     return binary
+
+
+@pytest.fixture(autouse=True)
+def _no_sandbox_machine_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never run the real ``sandbox doctor`` when a test opens the Sandbox wizard."""
+
+    from defenseclaw.tui import sandbox_panel
+    from defenseclaw.tui.panels.setup import sandbox_machine_check
+
+    monkeypatch.setattr(
+        sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(None, "not probed in tests")
+    )

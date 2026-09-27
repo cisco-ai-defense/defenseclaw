@@ -148,6 +148,19 @@ def _harness_command(name: str) -> str:
     return _HARNESS_COMMANDS.get(name, name)
 
 
+def probe_sandbox_machine() -> Any:
+    """Blocking ``defenseclaw-gateway sandbox doctor --json`` for the Sandbox wizard (run in a thread)."""
+    from defenseclaw.commands.cmd_doctor import sandbox_doctor_report
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.tui.panels.setup import sandbox_machine_check
+
+    binary = resolve_gateway_binary()
+    if not binary:
+        return sandbox_machine_check(None, "defenseclaw-gateway is not installed (run 'defenseclaw upgrade')")
+    report, problem = sandbox_doctor_report(binary)
+    return sandbox_machine_check(report, problem)
+
+
 class SandboxPanelMixin:
     """The Sandboxes panel's polling, streaming, rendering and actions."""
 
@@ -165,6 +178,7 @@ class SandboxPanelMixin:
         self._sandbox_stream_stop = threading.Event()
         self._sandbox_stream: Any = None
         self._sandbox_action_running = False
+        self._sandbox_machine_checking = False
 
     def _sandbox_supported(self) -> bool:
         return openshell_sandboxes_supported()
@@ -222,6 +236,35 @@ class SandboxPanelMixin:
             if model.status.enabled:
                 self._ensure_sandbox_stream()
         if render and not getattr(self, "help_open", False):
+            self._render_chrome()  # type: ignore[attr-defined]
+
+    # ---- the Sandbox wizard's machine check -------------------------------
+
+    def _schedule_sandbox_machine_check(self) -> None:
+        """Run ``sandbox doctor --json`` once the Sandbox wizard opens.
+
+        The form shows "Checking this machine…" meanwhile; the answer sets
+        Install OpenShell and the machine row.
+        """
+        if self._sandbox_machine_checking or getattr(self, "_app_shutting_down", False):
+            return
+        self._sandbox_machine_checking = True
+        self.run_worker(self._check_sandbox_machine(), exclusive=False, thread=False)  # type: ignore[attr-defined]
+
+    async def _check_sandbox_machine(self) -> None:
+        try:
+            check = await asyncio.to_thread(probe_sandbox_machine)
+        except Exception as exc:  # noqa: BLE001 - a failed probe must not break the form
+            from defenseclaw.tui.panels.setup import sandbox_machine_check
+
+            check = sandbox_machine_check(None, f"the sandbox doctor failed: {exc}")
+        finally:
+            self._sandbox_machine_checking = False
+        setup_model = getattr(self, "setup_model", None)
+        if setup_model is None:
+            return
+        setup_model.apply_sandbox_machine_check(check)
+        if getattr(self, "active_panel", "") == "setup" and not getattr(self, "help_open", False):
             self._render_chrome()  # type: ignore[attr-defined]
 
     # ---- the live feed ----------------------------------------------------

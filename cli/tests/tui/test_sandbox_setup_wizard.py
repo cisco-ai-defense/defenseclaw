@@ -20,12 +20,14 @@ from defenseclaw import config as dc_config
 from defenseclaw.commands import cmd_sandbox
 from defenseclaw.context import AppContext
 from defenseclaw.tui.panels.setup import (
+    ADMIN_POLICY_MESSAGE,
     SetupPanelModel,
     SetupWizard,
     _sandbox_credential_summary,
     build_setup_sections,
     build_wizard_args,
     openshell_admin_locks,
+    sandbox_machine_check,
     sandbox_wizard_fields,
     wizard_form_defs,
 )
@@ -170,6 +172,137 @@ def test_other_sandbox_commands_never_mark_the_wizard() -> None:
         assert SetupWizard.SANDBOX not in model.wizard_status, args
 
 
+# ``defenseclaw-gateway sandbox doctor --json`` on a machine without OpenShell.
+NO_OPENSHELL = {
+    "ok": False,
+    "docker_version": "29.4.0",
+    "checks": [
+        {"id": "platform", "title": "Platform", "status": "pass", "detail": "linux/arm64"},
+        {"id": "landlock", "title": "Landlock", "status": "pass", "detail": "ABI 6"},
+        {"id": "docker", "title": "Docker", "status": "pass", "detail": "29.4.0"},
+        {"id": "openshell-cli", "title": "OpenShell CLI", "status": "fail", "detail": "openshell is not on PATH"},
+        {"id": "bind-mounts", "title": "Project bind mounts", "status": "fail", "detail": "disabled in gateway.toml"},
+    ],
+}
+READY = {
+    "ok": True,
+    "docker_version": "29.4.0",
+    "cli_version": "0.1.1",
+    "checks": [
+        {"id": "docker", "title": "Docker", "status": "pass", "detail": "29.4.0"},
+        {"id": "landlock", "title": "Landlock", "status": "skip", "detail": "enforced by the Docker Desktop VM kernel"},
+        {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": "0.1.1 at /usr/bin/openshell"},
+        {"id": "gateway-service", "title": "Gateway service", "status": "pass", "detail": "running"},
+        {"id": "bind-mounts", "title": "Project bind mounts", "status": "pass", "detail": "enabled"},
+    ],
+}
+
+
+def _row(model: SetupPanelModel, label: str):
+    return next(field for field in model.form_fields if field.label == label)
+
+
+def test_the_form_says_it_is_checking_the_machine_until_the_doctor_answers() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    assert model.sandbox_machine_wanted()
+    assert _row(model, "This machine").value.startswith("Checking this machine")
+    assert _row(model, "Install OpenShell").value == "no"
+
+
+def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(sandbox_machine_check(NO_OPENSHELL))
+    assert not model.sandbox_machine_wanted()
+    machine = _row(model, "This machine").value
+    assert machine == "✓ Docker 29.4.0 · ✓ Landlock ABI 6 · ✗ OpenShell not installed · ✗ bind mounts off"
+    install = _row(model, "Install OpenShell")
+    assert install.value == "yes"
+    assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.1")
+    assert "--install-openshell" in model.wizard_command_preview()
+
+    # The operator's own answer survives a later check and an Action rebuild.
+    model.form_fields = _set(model.form_fields, "Install OpenShell", "no")
+    model.apply_sandbox_machine_check(sandbox_machine_check(NO_OPENSHELL))
+    model.recompute_dependent_fields()
+    assert _row(model, "Install OpenShell").value == "no"
+    # Reopening the wizard starts from the check again.
+    model.close_wizard_form()
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    assert _row(model, "Install OpenShell").value == "yes"
+
+
+def test_an_installed_openshell_needs_no_install() -> None:
+    check = sandbox_machine_check(READY)
+    assert check.summary == "✓ Docker 29.4.0 · ✓ OpenShell 0.1.1 · ✓ bind mounts"
+    assert check.openshell_needed is False
+    fields = sandbox_wizard_fields({}, machine=check)
+    install = next(field for field in fields if field.label == "Install OpenShell")
+    assert install.value == "no" and install.hint == "OpenShell 0.1.1 is installed; nothing to install."
+
+
+def test_a_stopped_gateway_or_a_failed_doctor() -> None:
+    service = {"id": "gateway-service", "status": "fail", "detail": "inactive"}
+    stopped = {**READY, "checks": [*READY["checks"][:3], service]}
+    check = sandbox_machine_check(stopped)
+    assert check.openshell_needed and "✗ OpenShell gateway not running" in check.summary
+    failed = sandbox_machine_check(None, "'defenseclaw-gateway sandbox doctor' did not finish within 90s")
+    assert failed.summary.startswith("not checked: ") and failed.error
+    install = next(f for f in sandbox_wizard_fields({}, machine=failed) if f.label == "Install OpenShell")
+    assert install.value == "no" and install.hint.startswith("Could not check this machine")
+
+
+def test_the_answers_are_the_consent() -> None:
+    machine = next(field for field in sandbox_wizard_fields({}) if field.label == "This machine")
+    assert "Your answers here are the consent" in machine.hint
+    assert "asks for your consent" not in machine.hint
+
+
+def test_harnesses_follow_the_organization_allowlist() -> None:
+    cfg = {"openshell": {"admin": {"allowed_harnesses": ["codex"]}}}
+    fields = list(wizard_form_defs(SetupWizard.SANDBOX, cfg))
+    labels = [field.label for field in fields]
+    assert "Codex" in labels and "Claude Code" not in labels
+    assert "--harness claudecode" not in " ".join(build_wizard_args(SetupWizard.SANDBOX, fields))
+    assert "allows: codex" in next(field for field in fields if field.label == "Harnesses").hint
+
+    model = SetupPanelModel({"openshell": {"admin": {"allowed_harnesses": ["geminicli"]}}}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    assert ADMIN_POLICY_MESSAGE in _row(model, "Harnesses").value
+    assert model.submit_wizard_form().intent is None
+    assert ADMIN_POLICY_MESSAGE in model.form_error
+
+
+@pytest.mark.asyncio
+async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
+    from defenseclaw.tui import sandbox_panel
+    from defenseclaw.tui.app import DefenseClawTUI
+    from defenseclaw.tui.panels.setup import SetupPanelAction
+
+    probes: list[int] = []
+
+    def probe():
+        probes.append(1)
+        return sandbox_machine_check(NO_OPENSHELL)
+
+    monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", probe)
+    app = DefenseClawTUI(config=None)
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.setup_model.open_goal_menu(SetupWizard.SANDBOX)
+        app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001
+        app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001 - no second probe while one runs
+        for _ in range(20):
+            await pilot.pause()
+            if app.setup_model.sandbox_machine is not None:
+                break
+        assert app.setup_model.sandbox_machine is not None
+        assert _row(app.setup_model, "Install OpenShell").value == "yes"
+        app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001 - answered: no new probe
+        await pilot.pause()
+    assert probes == [1]
+
+
 def test_credential_summary_names_sources_never_values(tmp_path: Path) -> None:
     (tmp_path / ".codex").mkdir()
     (tmp_path / ".codex" / "auth.json").write_text("{}", encoding="utf-8")
@@ -209,11 +342,41 @@ def test_admin_constraints_make_their_keys_read_only_with_the_reason() -> None:
 
     pack = _field(cfg, "openshell.pack")
     assert pack.interactive is False
-    assert "blocked by your organization's DefenseClaw policy" in pack.value
-    assert "requires the balanced pack" in pack.value
+    # A short value that fits the column; the reason is the row's hint.
+    assert pack.value == "(unset) (locked)"
+    assert pack.hint == (
+        "Read-only: blocked by your organization's DefenseClaw policy; your organization requires the balanced pack."
+    )
+    # The admin switches clamp these: the row shows the value that takes effect.
+    assert _field(cfg, "openshell.yolo").value == "inherit → off by policy"
+    assert _field(cfg, "openshell.workdir.mode").value == "inherit → copy by policy"
+    assert _field({**cfg, "openshell": {**cfg["openshell"], "yolo": False}}, "openshell.yolo").value == (
+        "false (locked)"
+    )
     assert _field(cfg, "openshell.profile").interactive is True
     policy = _field(cfg, "openshell.admin")
     assert "required_pack=balanced" in policy.value and "allow_unblock=false" in policy.value
+
+
+def test_a_locked_row_says_why_when_focused_or_edited() -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    cfg = {"openshell": {"admin": {"required_pack": "balanced", "allow_yolo": False}}}
+    app = DefenseClawTUI(config=None)
+    app.setup_model = SetupPanelModel(cfg, os_name="linux")
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section = next(i for i, section in enumerate(model.sections) if section.name == "OpenShell Sandboxes")
+    fields = model.sections[model.active_section].fields
+    model.active_line = next(i for i, field in enumerate(fields) if field.key == "openshell.yolo")
+    reason = "Read-only: blocked by your organization's DefenseClaw policy; skip-permissions mode is not allowed."
+    assert model.focused_row_metadata().hint == reason
+    assert model.focused_row_action().description == reason
+    for key in ("enter", "space", "x"):
+        action = app._handle_setup_config_key(key)  # noqa: SLF001
+        assert action.hint == reason, key
+    assert model.current_field().value == "inherit → off by policy"
+    assert not model.has_changes()
 
 
 def test_managed_enterprise_makes_the_whole_section_read_only() -> None:

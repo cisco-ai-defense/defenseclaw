@@ -581,6 +581,9 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
+        # What ``sandbox doctor --json`` found (the app runs it when the
+        # Sandbox wizard opens); None until it answers.
+        self.sandbox_machine: SandboxMachineCheck | None = None
 
     def set_config(
         self,
@@ -986,7 +989,7 @@ class SetupPanelModel:
                     "Open the interactive Webhooks editor for list entries.",
                 )
             if not field.interactive:
-                return SetupFocusedRowAction("config", "read_only", "", "This config row is read-only.")
+                return SetupFocusedRowAction("config", "read_only", "", field.hint or "This config row is read-only.")
             if field.kind == "bool":
                 return SetupFocusedRowAction("config", "toggle", "Enter/Space", "Toggle true or false.")
             if field.kind == "choice":
@@ -1201,6 +1204,9 @@ class SetupPanelModel:
                 base = list(rebuild(merged, self.config))
             else:
                 base = list(_overlay_field_overrides(base, presets))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Built with the machine check, when there is one.
+            base = list(self._sandbox_form_fields(presets))
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
         self.form_fields = base
@@ -1293,7 +1299,10 @@ class SetupPanelModel:
         if self.active_goal is not None:
             for key, value in self.active_goal.presets.items():
                 overrides.setdefault(key, value)
-        fields = list(rebuild(overrides, self.config))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            fields = list(self._sandbox_form_fields(overrides))
+        else:
+            fields = list(rebuild(overrides, self.config))
         if self.active_goal is not None:
             fields = list(_filter_fields_for_goal(fields, self.active_goal))
         self.form_fields = fields
@@ -1307,6 +1316,34 @@ class SetupPanelModel:
                         break
         else:
             self.form_cursor = 0
+
+    def _sandbox_form_fields(self, overrides: Mapping[str, str]) -> tuple[WizardFormField, ...]:
+        return _apply_dynamic_fields(
+            sandbox_wizard_fields(self.config, machine=self.sandbox_machine),
+            overrides,
+            {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+        )
+
+    def sandbox_machine_wanted(self) -> bool:
+        """Whether the open Sandbox wizard is waiting for the machine check."""
+        return self.form_active and self.active_wizard == SetupWizard.SANDBOX and self.sandbox_machine is None
+
+    def apply_sandbox_machine_check(self, check: SandboxMachineCheck) -> None:
+        """Take the machine check and refresh an open Sandbox form.
+
+        Install OpenShell follows the check unless the operator already
+        changed it; every other answer stays as entered.
+        """
+        before = next((f for f in self.form_fields if f.flag == "--install-openshell"), None)
+        self.sandbox_machine = check
+        if not (self.form_active and self.active_wizard == SetupWizard.SANDBOX):
+            return
+        overrides = _field_value_overrides(self.form_fields)
+        if before is not None and before.value == before.default:
+            overrides.pop("--install-openshell", None)
+        self.form_fields = list(self._sandbox_form_fields(overrides))
+        if self.form_fields:
+            self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
 
     def toggle_form_reveal(self) -> bool:
         if not any(field.kind == "password" for field in self.form_fields):
@@ -4478,14 +4515,98 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
     return " · ".join(parts)
 
 
-def sandbox_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+@dataclass(frozen=True)
+class SandboxMachineCheck:
+    """What ``defenseclaw sandbox doctor --json`` says about this machine, for the wizard."""
+
+    summary: str
+    openshell_needed: bool = False
+    openshell_detail: str = ""
+    error: str = ""
+
+
+_DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+
+def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> SandboxMachineCheck:
+    """Summarize a ``sandbox doctor --json`` report (or why it did not run).
+
+    OpenShell counts as needed exactly when ``sandbox setup`` would install
+    it: the CLI is missing or unsupported, or the gateway service or its
+    version check failed (sandboxcli/setup.go).
+    """
+
+    if not isinstance(report, Mapping):
+        why = error or "the sandbox doctor did not answer"
+        return SandboxMachineCheck(summary=f"not checked: {why}", error=why)
+    checks: dict[str, Mapping[str, Any]] = {}
+    for item in report.get("checks") or ():
+        if isinstance(item, Mapping) and item.get("id"):
+            checks[str(item["id"])] = item
+
+    def status(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("status") or "").lower()
+
+    def detail(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("detail") or "").strip()
+
+    parts: list[str] = []
+    docker = status("docker")
+    if docker:
+        version = str(report.get("docker_version") or "").strip()
+        text = f"Docker {version}".strip() if docker == "pass" else f"Docker: {detail('docker') or docker}"
+        parts.append(f"{_DOCTOR_GLYPHS.get(docker, '·')} {text}")
+    landlock = status("landlock")
+    if landlock in _DOCTOR_GLYPHS:
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock" + (f" {detail('landlock')}" if landlock == "pass" else ""))
+    cli = status("openshell-cli")
+    needed = cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
+    if not needed:
+        version = str(report.get("cli_version") or "").strip()
+        name = f"OpenShell {version}" if version else "OpenShell"
+        openshell = f"{name} is installed"
+        parts.append(f"✓ {name}")
+    elif cli in {"", "fail"} and "not on PATH" in detail("openshell-cli"):
+        openshell = "OpenShell is not installed"
+        parts.append("✗ OpenShell not installed")
+    elif cli in {"", "fail"}:
+        openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
+    else:
+        failed = "gateway-service" if status("gateway-service") == "fail" else "gateway-version"
+        openshell = f"the OpenShell gateway needs attention: {detail(failed) or 'not running'}"
+        parts.append("✗ OpenShell gateway " + ("not running" if failed == "gateway-service" else "needs an update"))
+    mounts = status("bind-mounts")
+    if mounts == "pass":
+        parts.append("✓ bind mounts")
+    elif mounts in {"warn", "fail"}:
+        off = detail("bind-mounts").startswith("disabled")
+        parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
+    return SandboxMachineCheck(summary=" · ".join(parts), openshell_needed=needed, openshell_detail=openshell)
+
+
+def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """openshell.admin.allowed_harnesses (empty: any harness)."""
+    admin = _openshell_admin(cfg)
+    return tuple(str(h).strip() for h in (_admin_value(admin, "allowed_harnesses", ()) or ()) if str(h).strip())
+
+
+def sandbox_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None,
+    *,
+    machine: SandboxMachineCheck | None = None,
+) -> tuple[WizardFormField, ...]:
     """The OpenShell sandbox setup wizard (``defenseclaw sandbox setup``).
 
     Every consent the interactive command asks for is a field here, so the
-    wizard runs the command with ``--non-interactive`` and explicit flags.
+    wizard runs the command with ``--non-interactive`` and explicit flags:
+    the answers are the consent. ``machine`` is the doctor's check of this
+    machine; until it answers, Install OpenShell stays off.
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
+    allowed = _sandbox_allowed_harnesses(cfg)
+    harnesses = [entry for entry in SANDBOX_WIZARD_HARNESSES if not allowed or entry[0] in allowed]
 
     def is_setup(values: Mapping[str, str]) -> bool:
         return (values.get("action") or "setup") == "setup"
@@ -4499,9 +4620,16 @@ def sandbox_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tupl
             options=("setup", "doctor"),
             hint="setup: the one-time sandbox setup. doctor: only check this machine.",
         ),
-        WizardFormField("Harnesses", "section", hint="The harnesses that run in sandboxes.", visible_when=is_setup),
+        WizardFormField(
+            "Harnesses",
+            "section",
+            value="" if harnesses else f"none may run: {ADMIN_POLICY_MESSAGE}",
+            hint="The harnesses that run in sandboxes."
+            + (f" Your organization allows: {', '.join(allowed)}." if allowed else ""),
+            visible_when=is_setup,
+        ),
     ]
-    for name, label, command in SANDBOX_WIZARD_HARNESSES:
+    for name, label, command in harnesses:
         on = "yes" if not configured or name in configured else "no"
         fields.append(
             WizardFormField(
@@ -4513,17 +4641,37 @@ def sandbox_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tupl
                 visible_when=is_setup,
             )
         )
+    installer = "NVIDIA's pinned, sha256-verified installer (uses sudo; the terminal asks for your password)"
+    if machine is None:
+        machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
+        install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
+    elif machine.error:
+        machine_line = machine.summary
+        install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_needed:
+        machine_line = machine.summary
+        install = "yes"
+        install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    else:
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
     fields += [
         WizardFormField("Credentials", "section", hint=_sandbox_credential_summary(), visible_when=is_setup),
-        WizardFormField("This machine", "section", hint="Each change below asks for your consent.", visible_when=is_setup),
+        WizardFormField(
+            "This machine",
+            "section",
+            value=machine_line,
+            hint="Your answers here are the consent: setup runs without asking again "
+            "(only sudo may ask for your password).",
+            visible_when=is_setup,
+        ),
         WizardFormField(
             "Install OpenShell",
             "bool",
             "--install-openshell",
-            value="no",
-            default="no",
-            hint="Install OpenShell 0.1.1 with NVIDIA's pinned, sha256-verified installer if it is missing "
-            "(uses sudo; the terminal asks for your password).",
+            value=install,
+            default=install,
+            hint=install_hint,
             visible_when=is_setup,
         ),
         WizardFormField(
@@ -4823,7 +4971,9 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             missing.append("Directory")
     if wizard == SetupWizard.SANDBOX and (wizard_field_value(fields, "Action") or "setup") == "setup":
         if not _sandbox_selected_harnesses(fields):
-            missing.append("a harness (Claude Code or Codex)")
+            labels = {field.label for field in fields}
+            offered = [label for _name, label, _command in SANDBOX_WIZARD_HARNESSES if label in labels]
+            missing.append(f"a harness ({' or '.join(offered)})" if offered else f"a harness ({ADMIN_POLICY_MESSAGE})")
     if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
         for label in ("Runtime Data Dir", "Token File"):
             if not wizard_field_value(fields, label):
@@ -7142,6 +7292,19 @@ def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
     return "; ".join(parts) or "none"
 
 
+def _openshell_locked_value(cfg: object | Mapping[str, Any] | None, key: str, value: str) -> str:
+    """A locked key's value as it takes effect: the admin switches clamp these three."""
+    shown = value or "(unset)"
+    admin = _openshell_admin(cfg)
+    if key == "openshell.yolo" and _admin_value(admin, "allow_yolo") is False and value != "false":
+        return f"{shown} → off by policy"
+    if key == "openshell.workdir.mode" and _admin_value(admin, "allow_mount") is False and value != "copy":
+        return f"{shown} → copy by policy"
+    if key == "openshell.mcp.host_ports" and _admin_value(admin, "allow_host_ports") is False and value:
+        return f"{shown} → none by policy"
+    return f"{shown} (locked)"
+
+
 def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     """The ``openshell:`` keys (OpenShell 0.1 sandboxes).
 
@@ -7165,8 +7328,17 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         value = _openshell_inherit_value(cfg, key) if inherit else _value(cfg, key)
         reason = "config.yaml is administrator-owned (managed_enterprise)" if managed else locks.get(key, "")
         if reason:
-            shown = value or "(unset)"
-            return _header(label, key, f"{shown}  — read-only: {ADMIN_POLICY_MESSAGE}; {reason}")
+            # A short value that fits the column; the sentence is the row's
+            # hint (the focused-field line, and the status on Enter).
+            shown = _openshell_locked_value(cfg, key, value)
+            return ConfigField(
+                label=label,
+                key=key,
+                kind="header",
+                value=shown,
+                original=shown,
+                hint=f"Read-only: {ADMIN_POLICY_MESSAGE}; {reason}.",
+            )
         return ConfigField(
             label=label, key=key, kind=kind, value=value, original=value, options=tuple(options), hint=hint
         )

@@ -869,8 +869,11 @@ _SANDBOX_DOCTOR_MAX_OUTPUT_CHARS = 1_000_000
 _SANDBOX_DOCTOR_STATUSES = frozenset({"pass", "warn", "fail", "skip"})
 
 
-def _sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
-    """Run the Go sandbox doctor and return its JSON report, or why not."""
+def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
+    """Run the Go sandbox doctor and return its JSON report, or why not.
+
+    Also the TUI Sandbox wizard's machine check.
+    """
     try:
         completed = subprocess.run(
             [binary, "sandbox", "doctor", "--json"],
@@ -948,7 +951,7 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw upgrade' to install the gateway binary",
         )
         return
-    report, problem = _sandbox_doctor_report(binary)
+    report, problem = sandbox_doctor_report(binary)
     if report is None:
         _emit(
             "warn",

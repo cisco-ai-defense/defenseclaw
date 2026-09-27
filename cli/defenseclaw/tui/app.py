@@ -10149,6 +10149,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.run_worker(self._open_model_picker(), exclusive=False, thread=False)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        if self.setup_model.sandbox_machine_wanted():
+            self._schedule_sandbox_machine_check()
         self._render_chrome()
         if status_message:
             self._set_status(status_message)
@@ -10653,6 +10655,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.setup_model.active_line = min(len(section.fields) - 1, self.setup_model.active_line + 1)
             return SetupPanelAction(True)
         if key in {"enter", "space"}:
+            field = self._current_setup_field()
+            if field is not None and not field.interactive:
+                # A read-only row says why (an admin lock names the policy).
+                return SetupPanelAction(True, hint=field.hint or "This field is read-only.")
             self._cycle_setup_config_field(1)
             return SetupPanelAction(True)
         if key == "backspace":
@@ -10668,7 +10674,11 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return SetupPanelAction(True, hint="Config edits reverted.")
         if len(key) == 1:
             changed = self._append_setup_config_text(value=key)
-            return SetupPanelAction(True, hint="" if changed else "This field is read-only.")
+            if changed:
+                return SetupPanelAction(True)
+            field = self._current_setup_field()
+            reason = field.hint if field is not None and not field.interactive else ""
+            return SetupPanelAction(True, hint=reason or "This field is read-only.")
         return SetupPanelAction(False)
 
     def _save_setup_config(self, restart_reason: str = "config saved from Textual TUI") -> SetupPanelAction:
