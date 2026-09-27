@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -42,11 +43,19 @@ func (m *Manager) box(name string) (*box, error) {
 	return b, nil
 }
 
-// lockBox takes a sandbox's operation lock for a lifecycle operation.
+// lockBox takes a sandbox's operation lock for a lifecycle operation. A
+// sandbox being created is refused at once: its create holds the lock for
+// as long as it runs, an image build included (defaultCreateTimeout).
 func (m *Manager) lockBox(name string) (*box, func(), error) {
 	b, err := m.box(name)
 	if err != nil {
 		return nil, nil, err
+	}
+	m.mu.Lock()
+	creating := b.creating
+	m.mu.Unlock()
+	if creating {
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is being created", name)
 	}
 	b.op.Lock()
 	m.mu.Lock()
@@ -229,6 +238,22 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if orphaned {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s has no DefenseClaw binding; delete it and run a new one", rec.Name)
 	}
+	// Only a stopped sandbox starts a new session: everything below (the
+	// token rotation, the pre-session snapshot, the tool-call ledger and
+	// the guard baseline) would otherwise be reset under a running agent,
+	// wiping what this session's undo and tamper detection rely on.
+	sb, err := gw.Client.GetSandbox(ctx, rec.Name)
+	if err != nil {
+		m.dropGateway(gw, err)
+		return upstream("look up sandbox "+rec.Name, err)
+	}
+	m.mu.Lock()
+	b.sb = sb
+	m.mu.Unlock()
+	if !stoppedPhase(sb.Status.Phase) {
+		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
+			rec.Name, strings.ToLower(string(sb.Status.Phase)))
+	}
 	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {
 		return err
@@ -299,7 +324,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		m.dropGateway(gw, err)
 		return upstream("start sandbox "+rec.Name, err)
 	}
-	sb, err := gw.Client.WaitReady(ctx, rec.Name)
+	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		return upstream("wait for sandbox "+rec.Name, err)
 	}
@@ -315,6 +340,16 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
 	return nil
+}
+
+// stoppedPhase reports an OpenShell phase in which the workload no longer
+// runs, so nothing in the sandbox can write the project folder.
+func stoppedPhase(p openshell.SandboxPhase) bool {
+	switch p {
+	case openshell.PhaseStopped, openshell.PhaseCompleted, openshell.PhaseError:
+		return true
+	}
+	return false
 }
 
 // tokenDelivery is how a sandbox received its ingress token. Records from
@@ -494,11 +529,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 			m.mu.Lock()
 			b.sb = sb
 			m.mu.Unlock()
-			switch sb.Status.Phase {
-			case openshell.PhaseStopped, openshell.PhaseCompleted, openshell.PhaseError:
-			default:
-				running = true
-			}
+			running = !stoppedPhase(sb.Status.Phase)
 		case !openshell.IsNotFound(err):
 			if !req.Preview {
 				return nil, upstream("look up sandbox "+name, err)
