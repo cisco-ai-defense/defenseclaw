@@ -101,10 +101,15 @@ func DefaultUnblockHint(p Principal, d Decision) string {
 		return fmt.Sprintf("Tell the user DefenseClaw blocked this destination. They can allow it for this sandbox with `%s`, "+
 			"for every sandbox with `defenseclaw sandbox unblock %s --always`, or from the DefenseClaw activity feed. "+
 			"Do not try to reach it another way.", cmd, d.Host)
-	case d.Category == CategoryPrivateNetwork:
-		return "This cannot be unblocked: sandboxes never reach this machine, private networks or cloud metadata. " +
+	case d.Category == CategoryHostInternal:
+		return "This cannot be unblocked: sandboxes never reach this machine, link-local or cloud metadata addresses. " +
 			"If the user wants the sandbox to use a service on this machine, they can relaunch it with " +
 			"`defenseclaw sandbox run --host-port PORT`."
+	case d.Category == CategoryPrivateNetwork:
+		return "Tell the user DefenseClaw blocked this private-network destination. `defenseclaw sandbox unblock` does not " +
+			"open private networks; the operator can, by adding the host name, or a CIDR no wider than its private range " +
+			"(for example 10.0.0.0/8), to openshell.egress.allow in the DefenseClaw configuration. " +
+			"Do not try to reach it another way."
 	case d.Category == CategoryPortNotAllowed:
 		return "Only the configured web ports are relayed. The operator can add ports with openshell.egress.ports in the " +
 			"DefenseClaw configuration; prefer an HTTPS alternative (for example an HTTPS git remote instead of SSH)."

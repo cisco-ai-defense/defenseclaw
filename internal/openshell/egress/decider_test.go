@@ -69,6 +69,7 @@ func checkDecision(t *testing.T, d *Decider, p Principal, host string, port int,
 func TestDecideOpenMode(t *testing.T) {
 	d := mustDecider(t, DeciderOptions{})
 	allow := decisionWant{allowed: true, source: SourceDefault}
+	host := decisionWant{category: CategoryHostInternal, source: SourceGuard}
 	private := decisionWant{category: CategoryPrivateNetwork, source: SourceGuard}
 	invalid := decisionWant{category: CategoryInvalidDestination, source: SourceGuard}
 	literal := decisionWant{category: CategoryIPLiteral, source: SourceDefault, unblockable: true}
@@ -96,52 +97,62 @@ func TestDecideOpenMode(t *testing.T) {
 		{"127.1", 443, invalid},
 		{"0x7f.1", 443, invalid},
 
-		// IPv4 literals the guard refuses.
-		{"127.0.0.1", 443, private},
-		{"127.8.9.10", 443, private},
+		// IPv4 literals the guard refuses: this machine and what only it
+		// reaches, and private networks.
+		{"127.0.0.1", 443, host},
+		{"127.8.9.10", 443, host},
 		{"10.0.0.1", 443, private},
 		{"172.16.5.4", 443, private},
 		{"192.168.1.1", 80, private},
-		{"169.254.169.254", 80, private},
-		{"169.254.170.2", 80, private},
+		{"169.254.169.254", 80, host},
+		{"169.254.170.2", 80, host},
 		{"100.64.0.1", 443, private},
-		{"100.100.100.200", 80, private},
-		{"0.0.0.0", 443, private},
-		{"0.1.2.3", 443, private},
-		{"198.18.0.2", 443, private},
-		{"192.0.2.10", 443, private},
-		{"224.0.0.1", 443, private},
-		{"240.0.0.1", 443, private},
-		{"255.255.255.255", 443, private},
+		{"100.100.100.200", 80, host},
+		{"0.0.0.0", 443, host},
+		{"0.1.2.3", 443, host},
+		{"198.18.0.2", 443, host},
+		{"192.0.2.10", 443, host},
+		{"224.0.0.1", 443, host},
+		{"240.0.0.1", 443, host},
+		{"255.255.255.255", 443, host},
 
 		// IPv6 literals the guard refuses, bracketed or not.
-		{"[::1]", 443, private},
-		{"::", 443, private},
-		{"[fe80::1]", 443, private},
-		{"fe80::1%eth0", 443, private},
+		{"[::1]", 443, host},
+		{"::", 443, host},
+		{"[fe80::1]", 443, host},
+		{"fe80::1%eth0", 443, host},
 		{"[fc00::1]", 443, private},
 		{"[fd00::1]", 443, private},
-		{"[fd00:ec2::254]", 80, private},
-		{"[::ffff:127.0.0.1]", 443, private},
-		{"[::ffff:169.254.169.254]", 80, private},
-		{"[::127.0.0.1]", 443, private},
-		{"[64:ff9b::7f00:1]", 443, private},
-		{"[2002:7f00:1::1]", 443, private},
-		{"[2001:db8::1]", 443, private},
-		{"[ff02::1]", 443, private},
+		{"[fd00:ec2::254]", 80, host},
+		{"[::ffff:127.0.0.1]", 443, host},
+		{"[::ffff:10.1.2.3]", 443, private},
+		{"[::ffff:169.254.169.254]", 80, host},
+		{"[::127.0.0.1]", 443, host},
+		{"[64:ff9b::7f00:1]", 443, host},
+		{"[2002:7f00:1::1]", 443, host},
+		{"[2001:db8::1]", 443, host},
+		{"[ff02::1]", 443, host},
 
-		// Names that are host-internal by definition.
-		{"localhost", 443, private},
-		{"LOCALHOST.", 443, private},
-		{"api.localhost", 443, private},
-		{"host.openshell.internal", 443, private},
-		{"host.docker.internal", 443, private},
-		{"metadata.google.internal", 80, private},
+		// Names that are host-internal by definition ...
+		{"localhost", 443, host},
+		{"LOCALHOST.", 443, host},
+		{"api.localhost", 443, host},
+		{"myhost.localdomain", 443, host},
+		{"host.openshell.internal", 443, host},
+		{"x.openshell.internal", 443, host},
+		{"host.docker.internal", 443, host},
+		{"host.containers.internal", 443, host},
+		{"metadata.google.internal", 80, host},
+		// ... intranet names ...
+		{"artifactory.corp.internal", 443, private},
 		{"printer.local", 80, private},
 		{"router.home.arpa", 80, private},
 		{"nas.lan", 80, private},
-		{"metadata", 80, private},
-		{"intranet", 443, private},
+		{"build.corp", 443, private},
+		// ... and single-label names, which only the host's DNS search
+		// domains would resolve.
+		{"metadata", 80, invalid},
+		{"intranet", 443, invalid},
 	}
 	for _, tt := range tests {
 		checkDecision(t, d, testPrincipal, tt.host, tt.port, tt.want)
@@ -227,7 +238,7 @@ func TestDecideOwnAddresses(t *testing.T) {
 	private := decisionWant{category: CategoryPrivateNetwork, source: SourceGuard}
 	for _, host := range []string{ownV4, "::ffff:" + ownV4, ownV6, "[" + ownV6 + "]"} {
 		for _, port := range []int{80, 443} {
-			got := checkDecision(t, d, testPrincipal, host, port, private)
+			got := checkDecision(t, d, testPrincipal, host, port, decisionWant{category: CategoryHostInternal, source: SourceGuard})
 			if !strings.Contains(got.Reason, "belongs to this machine") {
 				t.Errorf("Decide(%s) reason = %q", host, got.Reason)
 			}
@@ -248,6 +259,74 @@ func TestDecideOwnAddresses(t *testing.T) {
 	checkDecision(t, d, testPrincipal, "2620:fe:0:1::1", 443, decisionWant{category: CategoryIPLiteral, source: SourceDefault, unblockable: true})
 }
 
+// Private networks open only through the operator's allow list: a pattern
+// for the name, or an IP or CIDR no wider than the private range or on-link
+// subnet it covers. Unblocks never open them, operator blocks still win,
+// and nothing opens this machine itself or what only it can reach.
+func TestDecidePrivateNetworksOpenThroughOperatorAllow(t *testing.T) {
+	unblocks, err := NewMemoryUnblocks(Unblock{Pattern: "10.9.0.0/16"}, Unblock{Pattern: "db.lan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mustDecider(t, DeciderOptions{
+		Mode:     ModeAllowlist,
+		Unblocks: unblocks,
+		Allow: []string{
+			"10.20.0.0/16", "192.168.1.50", "fd12:3456::/32", "2620:fe::/64", "100.64.0.0/10",
+			"*.corp", "artifactory.example.internal", "0.0.0.0/0", "::/0", "172.0.0.0/8",
+			"127.0.0.1", "localhost", "*.openshell.internal", "metadata.google.internal", "169.254.169.254", ownV4,
+		},
+		Block: []string{"10.20.9.9", "blocked.corp"},
+	})
+	d.local = fixedLocalAddrs(ownV4, ownV6)
+	operator := decisionWant{allowed: true, source: SourceOperator}
+	private := decisionWant{category: CategoryPrivateNetwork, source: SourceGuard}
+	host := decisionWant{category: CategoryHostInternal, source: SourceGuard}
+	tests := []struct {
+		host string
+		want decisionWant
+	}{
+		{"10.20.3.4", withRule(operator, "10.20.0.0/16")},
+		{"192.168.1.50", withRule(operator, "192.168.1.50")},
+		{"[fd12:3456::1]", withRule(operator, "fd12:3456::/32")},
+		{"2620:fe::1", withRule(operator, "2620:fe::/64")},
+		{"100.100.1.1", withRule(operator, "100.64.0.0/10")},
+		{"git.corp", withRule(operator, "*.corp")},
+		{"artifactory.example.internal", withRule(operator, "artifactory.example.internal")},
+		// Operator blocks still win over an opened private destination.
+		{"10.20.9.9", withRule(decisionWant{category: CategoryOperatorBlock, source: SourceOperator}, "10.20.9.9")},
+		{"blocked.corp", withRule(decisionWant{category: CategoryOperatorBlock, source: SourceOperator}, "blocked.corp")},
+		// Wider than the private range: 0.0.0.0/0, ::/0 and 172.0.0.0/8
+		// open public literals but no private network.
+		{"10.1.2.3", private},
+		{"172.16.0.1", private},
+		{"[fd00::1]", private},
+		{"192.168.1.51", private},
+		{"9.9.200.1", private},
+		{"8.8.8.8", withRule(operator, "0.0.0.0/0")},
+		// An unblock is not an operator allow.
+		{"10.9.1.1", private},
+		{"db.lan", private},
+		{"nas.lan", private},
+		// This machine and what only it reaches stay closed.
+		{"127.0.0.1", host},
+		{"localhost", host},
+		{"host.openshell.internal", host},
+		{"metadata.google.internal", host},
+		{"169.254.169.254", host},
+		{ownV4, host},
+	}
+	for _, tt := range tests {
+		got := checkDecision(t, d, testPrincipal, tt.host, 443, tt.want)
+		if got.Category == CategoryPrivateNetwork && !strings.Contains(DefaultUnblockHint(testPrincipal, got), "openshell.egress.allow") {
+			t.Errorf("Decide(%s) hint = %q", tt.host, DefaultUnblockHint(testPrincipal, got))
+		}
+		if got.Category == CategoryHostInternal && !strings.Contains(DefaultUnblockHint(testPrincipal, got), "--host-port") {
+			t.Errorf("Decide(%s) hint = %q", tt.host, DefaultUnblockHint(testPrincipal, got))
+		}
+	}
+}
+
 func TestDecideAllowlistMode(t *testing.T) {
 	d := mustDecider(t, DeciderOptions{Mode: ModeAllowlist})
 	got := checkDecision(t, d, testPrincipal, "registry.npmjs.org", 443, decisionWant{allowed: true, category: CategoryPackageRegistry, source: SourceFeed})
@@ -258,7 +337,7 @@ func TestDecideAllowlistMode(t *testing.T) {
 	checkDecision(t, d, testPrincipal, "example.com", 443, decisionWant{category: CategoryNotAllowlisted, source: SourceDefault, unblockable: true})
 	checkDecision(t, d, testPrincipal, publicV4, 443, decisionWant{category: CategoryNotAllowlisted, source: SourceDefault, unblockable: true})
 	checkDecision(t, d, testPrincipal, "webhook.site", 443, decisionWant{category: CategoryWebhookCatcher, source: SourceFeed, unblockable: true})
-	checkDecision(t, d, testPrincipal, "localhost", 443, decisionWant{category: CategoryPrivateNetwork, source: SourceGuard})
+	checkDecision(t, d, testPrincipal, "localhost", 443, decisionWant{category: CategoryHostInternal, source: SourceGuard})
 
 	// A principal's own mode wins over the decider default.
 	open := testPrincipal
@@ -283,7 +362,7 @@ func TestDecideOperatorLists(t *testing.T) {
 	// Operator allow overrides the feed ...
 	checkDecision(t, d, testPrincipal, "webhook.site", 443, decisionWant{allowed: true, source: SourceOperator, rule: "webhook.site"})
 	// ... but never the guard.
-	checkDecision(t, d, testPrincipal, "127.0.0.1", 443, decisionWant{category: CategoryPrivateNetwork, source: SourceGuard})
+	checkDecision(t, d, testPrincipal, "127.0.0.1", 443, decisionWant{category: CategoryHostInternal, source: SourceGuard})
 	checkDecision(t, d, testPrincipal, "webhook.site", 22, decisionWant{category: CategoryPortNotAllowed, source: SourceGuard})
 
 	// Operator allow admits destinations in allowlist mode.
@@ -319,7 +398,7 @@ func TestDecideUnblocks(t *testing.T) {
 	checkDecision(t, d, other, "x.ngrok-free.app", 443, withRule(unblocked, "*.ngrok-free.app"))
 	// Unblocks never lift operator or guard blocks.
 	checkDecision(t, d, testPrincipal, "example.com", 443, decisionWant{category: CategoryOperatorBlock, source: SourceOperator})
-	checkDecision(t, d, testPrincipal, "localhost", 443, decisionWant{category: CategoryPrivateNetwork, source: SourceGuard})
+	checkDecision(t, d, testPrincipal, "localhost", 443, decisionWant{category: CategoryHostInternal, source: SourceGuard})
 	checkDecision(t, d, testPrincipal, "10.1.2.3", 443, decisionWant{category: CategoryPrivateNetwork, source: SourceGuard})
 
 	// In allowlist mode an unblock admits a not-allowlisted destination.

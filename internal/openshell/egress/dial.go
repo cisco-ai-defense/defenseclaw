@@ -41,7 +41,7 @@ type Dialer = netguard.V8Dialer
 // never contains resolver or socket details, so it is safe to return to the
 // sandbox and to put in events.
 type dialError struct {
-	// category is set for policy refusals (private_network,
+	// category is set for policy refusals (host_internal, private_network,
 	// operator_block); empty for plain failures.
 	category Category
 	status   int
@@ -56,11 +56,9 @@ type dialError struct {
 func (e *dialError) Error() string { return e.reason }
 func (e *dialError) Unwrap() error { return e.err }
 
-var (
-	errOperatorBlockedAddr = errors.New("egress: resolved address blocked by operator rule")
-	errOwnAddr             = errors.New("egress: destination is an address of this machine")
-	errOnLinkAddr          = errors.New("egress: destination is on one of this machine's own subnets")
-)
+// errRefusedAddr stops netguard when a dial hook refused an address; the
+// hook's dialError is what the dial returns.
+var errRefusedAddr = errors.New("egress: resolved address refused")
 
 // guardDialer dials upstreams through netguard's guarded dialer.
 type guardDialer struct {
@@ -69,6 +67,71 @@ type guardDialer struct {
 	timeout  time.Duration
 	// local is this machine's own addresses; nil checks none.
 	local *localAddrs
+}
+
+// dialRules carry a decider's address rules for one decided destination to
+// the checks of its literal or of every address its name resolves to. The
+// zero value applies the guard alone.
+type dialRules struct {
+	d *Decider
+	// nameAllowed reports an operator allow rule covering the destination
+	// name: the private addresses it resolves to are open.
+	nameAllowed bool
+}
+
+// dialRules returns the dial-time rules for a destination Decide allowed.
+func (d *Decider) dialRules(dec Decision) dialRules {
+	r := dialRules{d: d}
+	if _, err := netip.ParseAddr(dec.Host); err != nil {
+		_, r.nameAllowed = d.allow.match(dec.Host, netip.Addr{})
+	}
+	return r
+}
+
+// mayOpenPrivate reports whether any private address can be open, which
+// needs the netguard policy that admits private ranges.
+func (r dialRules) mayOpenPrivate() bool {
+	return r.nameAllowed || (r.d != nil && len(r.d.allow.prefixes) > 0)
+}
+
+// guard applies the address guard to one address: this machine and what
+// only it can reach are refused, private addresses unless an operator allow
+// rule opened them.
+func (r dialRules) guard(addr netip.Addr, local *localAddrs) *dialError {
+	v := classifyAddr(addr, local)
+	switch v.class {
+	case guardHost:
+		return &dialError{category: CategoryHostInternal, status: http.StatusForbidden, reason: "the destination resolves to " + v.what}
+	case guardPrivate:
+		if r.nameAllowed {
+			return nil
+		}
+		if r.d != nil {
+			if _, ok := r.d.allowsPrivate("", addr.Unmap(), v.scope); ok {
+				return nil
+			}
+		}
+		return &dialError{category: CategoryPrivateNetwork, status: http.StatusForbidden, reason: "the destination resolves to " + v.what}
+	}
+	return nil
+}
+
+// check applies every address rule to the address about to be dialed: the
+// guard, then the operator's CIDR blocks.
+func (r dialRules) check(addr netip.Addr, local *localAddrs) *dialError {
+	if de := r.guard(addr, local); de != nil {
+		return de
+	}
+	if r.d == nil {
+		return nil
+	}
+	if item, ok := r.d.block.match("", addr.Unmap()); ok {
+		return &dialError{
+			category: CategoryOperatorBlock, status: http.StatusForbidden, rule: item.pattern,
+			reason: "the destination resolves to an address the operator blocked",
+		}
+	}
+	return nil
 }
 
 // dialerFunc adapts a function to Dialer.
@@ -88,22 +151,30 @@ func (f resolverFunc) LookupIPAddr(ctx context.Context, host string) ([]net.IPAd
 // dial connects to host:port. netguard resolves the name immediately before
 // connecting, refuses the whole destination when any answer is prohibited,
 // and hands the dialer the validated literal, so a rebinding resolver cannot
-// swap the address between check and connect. A name with any answer that
-// is one of this machine's own addresses, or another host on one of its
-// public subnets, is refused like one with a private answer; operator CIDR
-// blocks are checked against the literal, and a
-// connection that turns out to lead back to this machine is closed before
-// any byte is relayed. When a name's first address fails to
-// connect, one more attempt targets the other address family (broken IPv6
-// is common); that attempt resolves and validates again.
-func (g *guardDialer) dial(ctx context.Context, host string, port int, block *hostSet[struct{}]) (net.Conn, netip.AddrPort, error) {
+// swap the address between check and connect. The guard runs on every
+// answer first: this machine's own addresses and what only it can reach are
+// refused, and private addresses (RFC 1918, CGNAT, ULA, the other hosts on
+// its public subnets) unless an operator allow rule opened them. Operator
+// CIDR blocks are checked against the literal, and a connection that turns
+// out to lead back to this machine is closed before any byte is relayed.
+// When a name's first address fails to connect, one more attempt targets
+// the other address family (broken IPv6 is common); that attempt resolves
+// and validates again.
+func (g *guardDialer) dial(ctx context.Context, host string, port int, rules dialRules) (net.Conn, netip.AddrPort, error) {
+	literal, notLiteral := netip.ParseAddr(host)
+	if notLiteral == nil {
+		// netguard would refuse a private literal itself, before the dial
+		// hook could tell which kind of address it is.
+		if de := rules.check(literal, g.local); de != nil {
+			return nil, netip.AddrPortFrom(literal.Unmap(), uint16(port)), de
+		}
+	}
 	address := net.JoinHostPort(host, strconv.Itoa(port))
-	conn, remote, err := g.attempt(ctx, "tcp", address, block)
+	conn, remote, err := g.attempt(ctx, "tcp", address, rules)
 	if err == nil {
 		return conn, remote, nil
 	}
 	var de *dialError
-	_, notLiteral := netip.ParseAddr(host)
 	if notLiteral == nil || !errors.As(err, &de) || !de.retry || !remote.IsValid() || ctx.Err() != nil {
 		return nil, remote, err
 	}
@@ -111,7 +182,7 @@ func (g *guardDialer) dial(ctx context.Context, host string, port int, block *ho
 	if remote.Addr().Is6() {
 		other = "tcp4"
 	}
-	conn, remote2, err2 := g.attempt(ctx, other, address, block)
+	conn, remote2, err2 := g.attempt(ctx, other, address, rules)
 	if err2 == nil {
 		return conn, remote2, nil
 	}
@@ -122,25 +193,14 @@ func (g *guardDialer) dial(ctx context.Context, host string, port int, block *ho
 	return nil, remote, err
 }
 
-func (g *guardDialer) attempt(ctx context.Context, network, address string, block *hostSet[struct{}]) (net.Conn, netip.AddrPort, error) {
+func (g *guardDialer) attempt(ctx context.Context, network, address string, rules dialRules) (net.Conn, netip.AddrPort, error) {
 	var (
-		selected  netip.AddrPort
-		blockedBy string
-		own       bool
-		onLink    bool
+		selected netip.AddrPort
+		refused  *dialError
 	)
-	// local refuses this machine's own addresses and the other hosts on its
-	// public subnets, which the address policy cannot know about.
-	local := func(addr netip.Addr) error {
-		switch isOwn, subnet := g.local.lookup(addr); {
-		case isOwn:
-			own = true
-			return errOwnAddr
-		case subnet.IsValid():
-			onLink = true
-			return errOnLinkAddr
-		}
-		return nil
+	refuse := func(de *dialError) error {
+		refused = de
+		return errRefusedAddr
 	}
 	resolve := resolverFunc(func(ctx context.Context, host string) ([]net.IPAddr, error) {
 		ips, err := g.resolver.LookupIPAddr(ctx, rootedName(host))
@@ -149,8 +209,8 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 		}
 		for _, ip := range ips {
 			if addr, ok := netip.AddrFromSlice(ip.IP); ok {
-				if err := local(addr); err != nil {
-					return nil, err
+				if de := rules.guard(addr, g.local); de != nil {
+					return nil, refuse(de)
 				}
 			}
 		}
@@ -159,49 +219,38 @@ func (g *guardDialer) attempt(ctx context.Context, network, address string, bloc
 	record := dialerFunc(func(ctx context.Context, network, literal string) (net.Conn, error) {
 		selected, _ = netip.ParseAddrPort(literal)
 		addr := selected.Addr().Unmap()
-		if err := local(addr); err != nil {
-			return nil, err
-		}
-		if block != nil {
-			if item, ok := block.match("", addr); ok {
-				blockedBy = item.pattern
-				return nil, errOperatorBlockedAddr
-			}
+		if de := rules.check(addr, g.local); de != nil {
+			return nil, refuse(de)
 		}
 		conn, err := g.dialer.DialContext(ctx, network, literal)
 		if err == nil && selfConnected(conn, addr) {
 			_ = conn.Close()
-			own = true
-			return nil, errOwnAddr
+			return nil, refuse(&dialError{
+				category: CategoryHostInternal, status: http.StatusForbidden,
+				reason: "the destination is an address of this machine",
+			})
 		}
 		return conn, err
 	})
+	policy := guardPolicy
+	if rules.mayOpenPrivate() {
+		policy = openPolicy
+	}
 	dctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
-	conn, err := netguard.V8SafeDialContext(guardPolicy, record, resolve)(dctx, network, address)
+	conn, err := netguard.V8SafeDialContext(policy, record, resolve)(dctx, network, address)
 	if err == nil {
 		return &dialedConn{Conn: conn, remote: selected}, selected, nil
 	}
+	if refused != nil {
+		refused.err = err
+		return nil, selected, refused
+	}
 	switch {
-	case own:
-		return nil, selected, &dialError{
-			category: CategoryPrivateNetwork, status: http.StatusForbidden,
-			reason: "the destination is an address of this machine", err: err,
-		}
-	case onLink:
-		return nil, selected, &dialError{
-			category: CategoryPrivateNetwork, status: http.StatusForbidden,
-			reason: "the destination resolves to another host on one of this machine's own subnets", err: err,
-		}
-	case blockedBy != "":
-		return nil, selected, &dialError{
-			category: CategoryOperatorBlock, status: http.StatusForbidden, rule: blockedBy,
-			reason: "the destination resolves to an address the operator blocked", err: err,
-		}
 	case errors.Is(err, netguard.ErrV8AddressProhibited):
 		return nil, selected, &dialError{
-			category: CategoryPrivateNetwork, status: http.StatusForbidden,
-			reason: "the destination resolves to a private, loopback, link-local, carrier-grade NAT, metadata or reserved address", err: err,
+			category: CategoryHostInternal, status: http.StatusForbidden,
+			reason: "the destination resolves to " + reservedWhat, err: err,
 		}
 	case errors.Is(err, netguard.ErrV8EndpointInvalid):
 		return nil, selected, &dialError{

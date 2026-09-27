@@ -301,7 +301,7 @@ func TestProxyServerNameScreening(t *testing.T) {
 		{name: "blocklisted", hello: helloFor("pastebin.com"), category: CategoryPasteSite, alert: tlsAlertAccessDenied},
 		{name: "blocklisted, pipelined", hello: helloFor("webhook.site"), pipeline: true, category: CategoryWebhookCatcher, alert: tlsAlertAccessDenied},
 		{name: "blocklisted, fragmented", hello: records(helloMsg([]helloExt{sniExt("Abc.NGROK-free.app.")}), 3), category: CategoryTunnel, alert: tlsAlertAccessDenied},
-		{name: "host-internal", hello: helloFor("host.openshell.internal"), category: CategoryPrivateNetwork, alert: tlsAlertAccessDenied},
+		{name: "host-internal", hello: helloFor("host.openshell.internal"), category: CategoryHostInternal, alert: tlsAlertAccessDenied},
 		{name: "invalid name", hello: helloFor("exa mple.com"), category: CategoryInvalidDestination, alert: tlsAlertAccessDenied},
 		{name: "duplicate server_name", hello: records(helloMsg([]helloExt{sniExt("example.com"), sniExt("pastebin.com")}), tlsMaxPlaintext),
 			category: CategoryInvalidDestination, alert: tlsAlertDecodeError},

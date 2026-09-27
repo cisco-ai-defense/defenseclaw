@@ -219,16 +219,8 @@ func (s *hostSet[T]) len() int {
 // match an exact pattern first, then the longest wildcard suffix.
 func (s *hostSet[T]) match(host string, addr netip.Addr) (setItem[T], bool) {
 	if addr.IsValid() {
-		best := -1
-		for i := range s.prefixes {
-			if s.prefixes[i].prefix.Contains(addr) && (best < 0 || s.prefixes[i].prefix.Bits() > s.prefixes[best].prefix.Bits()) {
-				best = i
-			}
-		}
-		if best < 0 {
-			return setItem[T]{}, false
-		}
-		return s.prefixes[best].item, true
+		_, item, ok := s.matchPrefix(addr)
+		return item, ok
 	}
 	if item, ok := s.exact[host]; ok {
 		return item, true
@@ -241,4 +233,18 @@ func (s *hostSet[T]) match(host string, addr netip.Addr) (setItem[T], bool) {
 		}
 	}
 	return setItem[T]{}, false
+}
+
+// matchPrefix returns the longest IP or CIDR pattern covering addr.
+func (s *hostSet[T]) matchPrefix(addr netip.Addr) (netip.Prefix, setItem[T], bool) {
+	best := -1
+	for i := range s.prefixes {
+		if s.prefixes[i].prefix.Contains(addr) && (best < 0 || s.prefixes[i].prefix.Bits() > s.prefixes[best].prefix.Bits()) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return netip.Prefix{}, setItem[T]{}, false
+	}
+	return s.prefixes[best].prefix, s.prefixes[best].item, true
 }

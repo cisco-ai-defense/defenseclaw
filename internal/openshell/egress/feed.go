@@ -56,6 +56,15 @@ const (
 
 // Categories produced by the proxy itself rather than a feed.
 const (
+	// CategoryHostInternal is this machine and what only it can reach:
+	// loopback, its own addresses, host-internal names such as localhost and
+	// host.openshell.internal, link-local and cloud metadata addresses, and
+	// multicast, reserved and address-translation ranges. Nothing opens it.
+	CategoryHostInternal Category = "host_internal"
+	// CategoryPrivateNetwork is the private network around this machine:
+	// RFC 1918, carrier-grade NAT and IPv6 unique local addresses, the other
+	// hosts on its public subnets, and intranet names (.corp, .lan and
+	// similar). Only an operator allow rule opens it.
 	CategoryPrivateNetwork     Category = "private_network"
 	CategoryPortNotAllowed     Category = "port_not_allowed"
 	CategoryInvalidDestination Category = "invalid_destination"
@@ -78,7 +87,8 @@ var categoryReasons = map[Category]string{
 	CategoryToolchain:       "Toolchain download.",
 	CategoryDocumentation:   "Reference documentation.",
 
-	CategoryPrivateNetwork:     "Sandboxes cannot reach this machine's own addresses, private, loopback, link-local, carrier-grade NAT, metadata or reserved addresses, or host-internal names.",
+	CategoryHostInternal:       "Sandboxes never reach this machine (loopback, its own addresses, localhost and host.openshell.internal), link-local and cloud metadata addresses, or reserved addresses.",
+	CategoryPrivateNetwork:     "Sandboxes reach private networks (RFC 1918, carrier-grade NAT and unique local addresses, this machine's own subnets, intranet names) only where the operator allowed them.",
 	CategoryPortNotAllowed:     "The egress proxy only relays the configured web ports.",
 	CategoryInvalidDestination: "The request target is not a valid host and port.",
 	CategoryOperatorBlock:      "The operator blocked this destination in DefenseClaw configuration.",

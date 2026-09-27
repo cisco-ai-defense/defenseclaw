@@ -18,15 +18,12 @@ package egress
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
 // Mode is how the Decider treats a destination no rule covers.
@@ -117,7 +114,8 @@ type Decision struct {
 // Unblock lifts a block for one sandbox, or for every sandbox when
 // SandboxID is empty (a persistent "always" decision). Unblocks override the
 // blocklist feed, the mode defaults (allowlist mode, open-mode IP literals)
-// and the large-upload block, but never guard or operator blocks.
+// and the large-upload block, but never guard or operator blocks: private
+// networks open only through an operator allow rule.
 type Unblock struct {
 	// Pattern is an exact host, a "*." wildcard, an IP literal or a CIDR.
 	Pattern   string
@@ -153,6 +151,15 @@ type DeciderOptions struct {
 	// the blocklist feed and the mode defaults (allowlist mode, open-mode IP
 	// literals). CIDR blocks are also enforced against the resolved address
 	// at dial time.
+	//
+	// Allow is also the only way to open a private network destination
+	// (CategoryPrivateNetwork): a pattern covering the name opens the name
+	// and every private address it resolves to, and an IP or CIDR opens the
+	// private addresses it covers when it is no wider than their private
+	// range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
+	// fc00::/7) or on-link subnet, so 0.0.0.0/0 opens none. Nothing opens
+	// this machine itself, loopback, link-local or metadata addresses
+	// (CategoryHostInternal).
 	Block []string
 	Allow []string
 	// Unblocks supplies unblock decisions; nil means none.
@@ -176,34 +183,6 @@ type Decider struct {
 
 // DefaultPorts returns the default destination ports, 80 and 443.
 func DefaultPorts() []int { return []int{80, 443} }
-
-// guardPolicy is the netguard address policy for sandbox egress: private
-// networks and CGNAT stay prohibited regardless of the operator's
-// private-upstream allowlist or DEFENSECLAW_ALLOW_CGNAT, which exist for the
-// daemon's own upstreams and must never widen what a sandbox can reach.
-var guardPolicy = netguard.V8NetworkSafetyPolicy{}
-
-// reservedNames are names that resolve to this machine or its private
-// network by definition, refused before any DNS lookup. host.openshell.internal
-// (the sandbox's view of host loopback) falls under *.internal.
-var reservedNames = func() *hostSet[struct{}] {
-	set := newHostSet[struct{}]()
-	for _, raw := range []string{
-		"localhost", "*.localhost",
-		"*.internal",    // ICANN private-use TLD: host.openshell.internal, metadata.google.internal
-		"*.local",       // mDNS
-		"*.localdomain", // distro defaults
-		"*.home.arpa",   // RFC 8375 home networks
-		"*.lan", "*.home", "*.corp", "*.intranet", "*.private",
-	} {
-		p, err := parsePattern(raw)
-		if err != nil {
-			panic(fmt.Sprintf("egress: reserved name %q: %v", raw, err))
-		}
-		set.add(p, struct{}{})
-	}
-	return set
-}()
 
 // NewDecider validates opts and builds a Decider.
 func NewDecider(opts DeciderOptions) (*Decider, error) {
@@ -326,13 +305,15 @@ func (d *Decider) Feeds() []FeedInfo {
 
 // Decide returns the verdict for p reaching host:port. host may be a DNS
 // name or an IP literal (bracketed or not). Layers apply in order: guard
-// (validation, SSRF policy, ports), operator block, unblock decisions,
-// operator allow, blocklist feed, then the mode default (open allows names
-// and blocks IP literals, allowlist allows only allowlist feed matches).
+// (validation, SSRF policy with private networks the operator allowed
+// opened, ports), operator block, unblock decisions, operator allow,
+// blocklist feed, then the mode default (open allows names and blocks IP
+// literals, allowlist allows only allowlist feed matches).
 //
 // Decide never resolves DNS: the SSRF policy for names is enforced against
 // every resolved address at dial time. IP literals are also refused when they
-// are one of this machine's own interface addresses.
+// are one of this machine's own interface addresses or another host on one
+// of its public subnets.
 func (d *Decider) Decide(p Principal, host string, port int) Decision {
 	mode := d.mode
 	if p.Mode.valid() {
@@ -346,10 +327,27 @@ func (d *Decider) Decide(p Principal, host string, port int) Decision {
 	if port < 1 || port > 65535 {
 		return blocked(dec, CategoryInvalidDestination, SourceGuard, "")
 	}
-	if reason, private := guardRefusal(h, addr, d.local); private {
-		dec = blocked(dec, CategoryPrivateNetwork, SourceGuard, "")
-		dec.Reason = reason
+	g := classifyName(h)
+	if addr.IsValid() {
+		g = classifyAddr(addr, d.local)
+	}
+	switch g.class {
+	case guardHost:
+		dec = blocked(dec, CategoryHostInternal, SourceGuard, "")
+		dec.Reason = g.reason
 		return dec
+	case guardInvalid:
+		dec = blocked(dec, CategoryInvalidDestination, SourceGuard, "")
+		dec.Reason = g.reason
+		return dec
+	case guardPrivate:
+		// An opened private destination goes on through the other layers:
+		// operator blocks still win, and the allow rule then admits it.
+		if _, ok := d.allowsPrivate(h, addr, g.scope); !ok {
+			dec = blocked(dec, CategoryPrivateNetwork, SourceGuard, "")
+			dec.Reason = g.reason
+			return dec
+		}
 	}
 	if !d.portSet[port] {
 		dec = blocked(dec, CategoryPortNotAllowed, SourceGuard, "")
@@ -401,38 +399,6 @@ func blocked(dec Decision, category Category, source Source, rule string) Decisi
 	dec.Source = source
 	dec.Rule = rule
 	return dec
-}
-
-// guardRefusal applies the destination-level SSRF policy: IP literals go
-// through the netguard address policy and are refused when they are one of
-// this machine's own addresses (a public address on one of its interfaces)
-// or another host on one of its public subnets; names are refused when they
-// are host-internal by definition. Names that resolve to private, own or
-// on-link addresses are caught at dial time.
-func guardRefusal(host string, addr netip.Addr, local *localAddrs) (string, bool) {
-	if addr.IsValid() {
-		if addr.Zone() != "" {
-			return "Zoned IPv6 addresses are link-scoped and never public.", true
-		}
-		if err := guardPolicy.ValidateIP(net.IP(addr.AsSlice())); err != nil {
-			return "The address is private, loopback, link-local, carrier-grade NAT, metadata, reserved or otherwise not publicly routable.", true
-		}
-		own, subnet := local.lookup(addr)
-		if own {
-			return "The address belongs to this machine; sandboxes never reach services on the host through it.", true
-		}
-		if subnet.IsValid() {
-			return "The address is another host on one of this machine's own subnets (" + subnet.String() + "), part of its local network.", true
-		}
-		return "", false
-	}
-	if !strings.Contains(host, ".") {
-		return "Single-label names resolve through the host's DNS search domains to internal machines.", true
-	}
-	if _, ok := reservedNames.match(host, addr); ok {
-		return "The name is host-internal: localhost, .internal (including host.openshell.internal), .local and similar names reach this machine or its private network.", true
-	}
-	return "", false
 }
 
 func joinPorts(ports []int) string {

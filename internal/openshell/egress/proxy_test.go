@@ -391,25 +391,31 @@ func TestProxyGuardRefusals(t *testing.T) {
 	h.resolver.set("own.example.com", []string{ownV6})
 	h.resolver.set("lan-device.example.net", []string{"2620:fe::1"})
 
-	targets := []string{
-		"127.0.0.1:443", "[::1]:443", "169.254.169.254:80", "10.0.0.1:443", "[fd00::1]:443",
-		"[::ffff:127.0.0.1]:443", "100.64.0.1:443", "0.0.0.0:443",
-		"localhost:443", "host.openshell.internal:443", "metadata.google.internal:80",
-		"internal.example.com:443", "split.example.com:443",
+	hints := map[Category]string{CategoryHostInternal: "--host-port", CategoryPrivateNetwork: "openshell.egress.allow"}
+	targets := map[string]Category{
+		"127.0.0.1:443": CategoryHostInternal, "[::1]:443": CategoryHostInternal, "169.254.169.254:80": CategoryHostInternal,
+		"[::ffff:127.0.0.1]:443": CategoryHostInternal, "0.0.0.0:443": CategoryHostInternal,
+		"localhost:443": CategoryHostInternal, "host.openshell.internal:443": CategoryHostInternal,
+		"metadata.google.internal:80": CategoryHostInternal,
+		"10.0.0.1:443":                CategoryPrivateNetwork, "[fd00::1]:443": CategoryPrivateNetwork, "100.64.0.1:443": CategoryPrivateNetwork,
+		"internal.example.com:443": CategoryPrivateNetwork, "split.example.com:443": CategoryPrivateNetwork,
+		"nas.lan:443": CategoryPrivateNetwork,
 		// This machine's own public addresses (fake interface list).
-		ownV4 + ":443", ownV4 + ":80", "[" + ownV6 + "]:443", "own.example.com:443",
+		ownV4 + ":443": CategoryHostInternal, ownV4 + ":80": CategoryHostInternal, "[" + ownV6 + "]:443": CategoryHostInternal,
+		"own.example.com:443": CategoryHostInternal,
 		// Other hosts on its public subnets: the router, a NAS, other
 		// instances in the VPC.
-		"lan-device.example.net:443", "lan-device.example.net:80", "[2620:fe::1]:443", "9.9.40.2:443",
+		"lan-device.example.net:443": CategoryPrivateNetwork, "lan-device.example.net:80": CategoryPrivateNetwork,
+		"[2620:fe::1]:443": CategoryPrivateNetwork, "9.9.40.2:443": CategoryPrivateNetwork,
 	}
-	for _, target := range targets {
+	for target, category := range targets {
 		_, _, resp := h.connect(target, basicAuth(h.cred), nil)
 		if resp.status != http.StatusForbidden {
 			t.Errorf("CONNECT %s = %d, want 403", target, resp.status)
 			continue
 		}
 		b := decodeBlock(t, resp.body)
-		if b.Category != CategoryPrivateNetwork || b.Unblockable || b.Source != SourceGuard || !strings.Contains(b.HowToUnblock, "--host-port") {
+		if b.Category != category || b.Unblockable || b.Source != SourceGuard || !strings.Contains(b.HowToUnblock, hints[category]) {
 			t.Errorf("CONNECT %s body = %+v", target, b)
 		}
 	}
@@ -426,14 +432,14 @@ func TestProxyGuardRefusals(t *testing.T) {
 	}
 
 	// Absolute form goes through the same guard.
-	for _, u := range []string{"http://internal.example.com/", "http://own.example.com/", "http://" + ownV4 + "/"} {
+	for u, category := range map[string]Category{"http://internal.example.com/": CategoryPrivateNetwork, "http://own.example.com/": CategoryHostInternal, "http://" + ownV4 + "/": CategoryHostInternal} {
 		resp2, err := h.clientFor(h.cred, nil).Get(u)
 		if err != nil {
 			t.Fatal(err)
 		}
 		body, _ := io.ReadAll(resp2.Body)
 		resp2.Body.Close()
-		if resp2.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryPrivateNetwork {
+		if resp2.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != category {
 			t.Errorf("absolute-form %s = %d %s", u, resp2.StatusCode, body)
 		}
 	}
@@ -441,6 +447,51 @@ func TestProxyGuardRefusals(t *testing.T) {
 	for _, addr := range h.dialer.addresses() {
 		if isPrivateTarget(addr) {
 			t.Errorf("dialer was handed prohibited address %s", addr)
+		}
+	}
+}
+
+// An operator allow rule opens a private-network destination end to end,
+// such as an npm mirror on the corporate network: CONNECT and absolute-form
+// requests reach it, while private destinations no rule names stay closed
+// with a hint that points at the allow list.
+func TestProxyOperatorAllowOpensPrivateNetworks(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "mirror") }))
+	defer upstream.Close()
+	h := newHarness(t, func(c *harnessConfig) {
+		c.decider.Allow = []string{"artifactory.corp.example", "10.20.0.0/16", "git.corp"}
+	})
+	h.dialer.route(443, startEcho(t))
+	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.resolver.set("artifactory.corp.example", []string{"10.1.2.3"})
+	h.resolver.set("db.example.com", []string{"10.20.1.1"})
+	h.resolver.set("git.corp", []string{"192.168.4.4"})
+	h.resolver.set("wiki.example.com", []string{"10.9.9.9"})
+
+	for _, target := range []string{"artifactory.corp.example:443", "db.example.com:443", "git.corp:443", "10.20.3.3:443"} {
+		conn, _, resp := h.connect(target, basicAuth(h.cred), nil)
+		if resp.status != http.StatusOK {
+			t.Errorf("CONNECT %s = %d %s", target, resp.status, resp.body)
+			continue
+		}
+		_ = conn.Close()
+	}
+	resp, err := h.clientFor(h.cred, nil).Get("http://artifactory.corp.example/api/npm/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "mirror" {
+		t.Errorf("absolute-form to the allowed mirror = %d %q", resp.StatusCode, body)
+	}
+
+	for _, target := range []string{"wiki.example.com:443", "10.9.9.9:443", "nas.lan:443"} {
+		_, _, resp := h.connect(target, basicAuth(h.cred), nil)
+		b := decodeBlock(t, resp.body)
+		if resp.status != http.StatusForbidden || b.Category != CategoryPrivateNetwork || b.Unblockable ||
+			!strings.Contains(b.HowToUnblock, "openshell.egress.allow") || strings.Contains(b.HowToUnblock, "--host-port") {
+			t.Errorf("CONNECT %s = %d %+v", target, resp.status, b)
 		}
 	}
 }

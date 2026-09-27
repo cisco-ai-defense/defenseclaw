@@ -105,28 +105,28 @@ func TestGuardDialSSRFMatrix(t *testing.T) {
 		{host: "mixed-rev.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "mixed6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "private.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "loop.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "loop6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "meta.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "meta6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "alibaba.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "loop.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "loop6.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "meta.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "meta6.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "alibaba.example", category: CategoryHostInternal, status: http.StatusForbidden},
 		{host: "cgnat.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "linklocal.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "linklocal.example", category: CategoryHostInternal, status: http.StatusForbidden},
 		{host: "mapped.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "nat64.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "sixtofour.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "bench.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "zero.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "multicast.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "nat64.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "sixtofour.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "bench.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "zero.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "multicast.example", category: CategoryHostInternal, status: http.StatusForbidden},
 		{host: "10.0.0.1", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "::1", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: "::1", category: CategoryHostInternal, status: http.StatusForbidden},
 		// This machine's own public addresses, as literals and in any answer.
-		{host: ownV4, category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: ownV6, category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "own.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "own6.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "own-mixed.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
-		{host: "own-mapped.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
+		{host: ownV4, category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: ownV6, category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "own.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "own6.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "own-mixed.example", category: CategoryHostInternal, status: http.StatusForbidden},
+		{host: "own-mapped.example", category: CategoryHostInternal, status: http.StatusForbidden},
 		{host: "lan-device.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "lan4.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
 		{host: "lan-mixed.example", category: CategoryPrivateNetwork, status: http.StatusForbidden},
@@ -136,7 +136,7 @@ func TestGuardDialSSRFMatrix(t *testing.T) {
 		{host: "nxdomain.example", status: http.StatusBadGateway},
 	}
 	for _, tt := range tests {
-		conn, remote, err := g.dial(context.Background(), tt.host, 443, nil)
+		conn, remote, err := g.dial(context.Background(), tt.host, 443, dialRules{})
 		if tt.status == 0 {
 			if err != nil {
 				t.Errorf("dial(%s) = %v, want success", tt.host, err)
@@ -176,15 +176,15 @@ func TestGuardDialRebinding(t *testing.T) {
 	r.set("rebind.example", []string{publicV4}, []string{"127.0.0.1"})
 	r.set("rebind-back.example", []string{"10.9.9.9"}, []string{publicV4})
 
-	conn, remote, err := g.dial(context.Background(), "rebind.example", 443, nil)
+	conn, remote, err := g.dial(context.Background(), "rebind.example", 443, dialRules{})
 	if err != nil || remote.Addr().String() != publicV4 {
 		t.Fatalf("first dial = %v, %v", remote, err)
 	}
 	_ = conn.Close()
-	if _, _, err := g.dial(context.Background(), "rebind.example", 443, nil); !isCategory(err, CategoryPrivateNetwork) {
-		t.Fatalf("second dial after rebinding = %v, want private_network", err)
+	if _, _, err := g.dial(context.Background(), "rebind.example", 443, dialRules{}); !isCategory(err, CategoryHostInternal) {
+		t.Fatalf("second dial after rebinding = %v, want host_internal", err)
 	}
-	if _, _, err := g.dial(context.Background(), "rebind-back.example", 443, nil); !isCategory(err, CategoryPrivateNetwork) {
+	if _, _, err := g.dial(context.Background(), "rebind-back.example", 443, dialRules{}); !isCategory(err, CategoryPrivateNetwork) {
 		t.Fatalf("private-first answer = %v, want private_network", err)
 	}
 	if r.callCount("rebind.example") != 2 {
@@ -233,10 +233,10 @@ func TestGuardDialSelfConnection(t *testing.T) {
 	g.dialer = sd
 	r.set("new-own.example", []string{publicV4Alt})
 	for _, host := range []string{publicV4Alt, "new-own.example"} {
-		conn, _, err := g.dial(context.Background(), host, 443, nil)
+		conn, _, err := g.dial(context.Background(), host, 443, dialRules{})
 		var de *dialError
-		if !errors.As(err, &de) || de.category != CategoryPrivateNetwork || de.status != http.StatusForbidden {
-			t.Fatalf("dial(%s) = %v, %v; want a private_network refusal", host, conn, err)
+		if !errors.As(err, &de) || de.category != CategoryHostInternal || de.status != http.StatusForbidden {
+			t.Fatalf("dial(%s) = %v, %v; want a host_internal refusal", host, conn, err)
 		}
 	}
 	if n := sd.closed.Load(); n != 2 {
@@ -256,7 +256,7 @@ func TestGuardDialOperatorCIDRBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = g.dial(context.Background(), "cdn.example", 443, d2.block)
+	_, _, err = g.dial(context.Background(), "cdn.example", 443, d2.dialRules(Decision{Host: "cdn.example"}))
 	var de *dialError
 	if !errors.As(err, &de) || de.category != CategoryOperatorBlock || de.rule != "8.8.8.0/24" || de.status != http.StatusForbidden {
 		t.Fatalf("dial = %v (%+v)", err, de)
@@ -270,7 +270,7 @@ func TestGuardDialFamilyFallback(t *testing.T) {
 	g, r, d := newTestGuard(t)
 	r.set("dual.example", []string{publicV6, publicV4})
 	d.fail[publicV6] = errors.New("network is unreachable")
-	conn, remote, err := g.dial(context.Background(), "dual.example", 443, nil)
+	conn, remote, err := g.dial(context.Background(), "dual.example", 443, dialRules{})
 	if err != nil {
 		t.Fatalf("dial = %v", err)
 	}
@@ -285,11 +285,11 @@ func TestGuardDialFamilyFallback(t *testing.T) {
 	// No fallback for literals, and a single-family name fails with the
 	// original error.
 	d.fail[publicV4] = errors.New("refused")
-	if _, _, err := g.dial(context.Background(), publicV4, 443, nil); err == nil || isCategory(err, CategoryPrivateNetwork) {
+	if _, _, err := g.dial(context.Background(), publicV4, 443, dialRules{}); err == nil || isCategory(err, CategoryHostInternal) {
 		t.Errorf("literal dial = %v", err)
 	}
 	r.set("v4only.example", []string{publicV4})
-	_, _, err = g.dial(context.Background(), "v4only.example", 443, nil)
+	_, _, err = g.dial(context.Background(), "v4only.example", 443, dialRules{})
 	var de *dialError
 	if !errors.As(err, &de) || de.status != http.StatusBadGateway || de.category != "" {
 		t.Errorf("single-family failure = %v", err)
@@ -302,7 +302,7 @@ func TestGuardDialTimeout(t *testing.T) {
 	r.set("slow.example", []string{publicV4})
 	d.hang[publicV4] = true
 	start := time.Now()
-	_, _, err := g.dial(context.Background(), "slow.example", 443, nil)
+	_, _, err := g.dial(context.Background(), "slow.example", 443, dialRules{})
 	var de *dialError
 	if !errors.As(err, &de) || de.status != http.StatusGatewayTimeout {
 		t.Fatalf("dial = %v, want a 504 timeout", err)
@@ -313,7 +313,7 @@ func TestGuardDialTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := g.dial(ctx, "slow.example", 443, nil); err == nil {
+	if _, _, err := g.dial(ctx, "slow.example", 443, dialRules{}); err == nil {
 		t.Error("canceled dial succeeded")
 	}
 }
@@ -325,7 +325,7 @@ func TestGuardDialResolvesRootedNames(t *testing.T) {
 	g, r, _ := newTestGuard(t)
 	r.set("ci.build", []string{publicV4})
 	for _, host := range []string{"ci.build", "ci.build."} {
-		conn, _, err := g.dial(context.Background(), host, 443, nil)
+		conn, _, err := g.dial(context.Background(), host, 443, dialRules{})
 		if err != nil {
 			t.Fatalf("dial(%s) = %v", host, err)
 		}
@@ -336,5 +336,59 @@ func TestGuardDialResolvesRootedNames(t *testing.T) {
 	}
 	if got := rootedName("example.com"); got != "example.com." {
 		t.Errorf("rootedName = %q", got)
+	}
+}
+
+// An operator allow rule opens private answers at dial time: a pattern for
+// the name opens every private address it resolves to, an IP or CIDR the
+// private addresses it covers when it is no wider than their range. Nothing
+// opens this machine, loopback or metadata, whatever the rule says.
+func TestGuardDialOperatorOpensPrivate(t *testing.T) {
+	g, r, d := newTestGuard(t)
+	dec, err := NewDecider(DeciderOptions{Allow: []string{"*.corp.example", "192.168.7.0/24", "0.0.0.0/0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.set("artifactory.corp.example", []string{"10.1.2.3"})
+	r.set("loop.corp.example", []string{"10.1.2.3", "127.0.0.1"})
+	r.set("meta.corp.example", []string{"169.254.169.254"})
+	r.set("own.corp.example", []string{ownV4})
+	r.set("nas.example", []string{"192.168.7.7"})
+	r.set("other.example", []string{"192.168.8.8"})
+	tests := []struct {
+		host     string
+		category Category // empty: the dial succeeds
+	}{
+		{host: "artifactory.corp.example"},
+		{host: "nas.example"},
+		{host: "192.168.7.7"},
+		{host: "loop.corp.example", category: CategoryHostInternal},
+		{host: "meta.corp.example", category: CategoryHostInternal},
+		{host: "own.corp.example", category: CategoryHostInternal},
+		{host: "other.example", category: CategoryPrivateNetwork},
+		{host: "192.168.8.8", category: CategoryPrivateNetwork},
+	}
+	for _, tt := range tests {
+		conn, _, err := g.dial(context.Background(), tt.host, 443, dec.dialRules(Decision{Host: tt.host}))
+		if tt.category == "" {
+			if err != nil {
+				t.Errorf("dial(%s) = %v, want success", tt.host, err)
+				continue
+			}
+			_ = conn.Close()
+			continue
+		}
+		if !isCategory(err, tt.category) {
+			t.Errorf("dial(%s) = %v, want %s", tt.host, err, tt.category)
+		}
+	}
+	for _, addr := range d.addresses() {
+		if a := netip.MustParseAddrPort(addr).Addr().String(); a != "10.1.2.3" && a != "192.168.7.7" {
+			t.Errorf("dialer was handed %s", addr)
+		}
+	}
+	// Without the rules the same answers are refused.
+	if _, _, err := g.dial(context.Background(), "artifactory.corp.example", 443, dialRules{}); !isCategory(err, CategoryPrivateNetwork) {
+		t.Errorf("dial without rules = %v", err)
 	}
 }

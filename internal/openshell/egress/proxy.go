@@ -631,7 +631,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	upstream, remote, err := p.dialer.dial(p.ctx, dec.Host, dec.Port, d.block)
+	upstream, remote, err := p.dialer.dial(p.ctx, dec.Host, dec.Port, d.dialRules(dec))
 	if err != nil {
 		p.dialFailedRaw(conn, pr, dec, err, start)
 		return
