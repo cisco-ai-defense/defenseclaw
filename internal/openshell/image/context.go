@@ -266,8 +266,8 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		LabelHookContract, c.Contract, LabelUID, spec.UID, LabelGID, spec.GID, LabelIngressPort, spec.IngressPort,
 		LabelVersion, spec.DefenseClawVersion)
 	b.WriteString("USER root\n")
-	b.WriteString("# The hooks need jq and curl on the baked PATH.\n")
-	b.WriteString(`RUN set -eu; missing=""; for tool in jq curl; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done; ` +
+	b.WriteString("# The hooks need jq and curl on the baked hook PATH, not just the image PATH.\n")
+	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; missing=""; for tool in jq curl; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done; ` +
 		`if [ -n "$missing" ]; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing && rm -rf /var/lib/apt/lists/*; fi` + "\n")
 	for _, step := range steps {
 		fmt.Fprintf(&b, "# %s\n", step.Comment)

@@ -24,7 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -223,15 +227,19 @@ func goodProbeOutput(c *Context) string {
 	}
 	digest := strings.Repeat("ab", 32)
 	for _, bin := range c.Artifacts.Binaries {
-		fmt.Fprintf(&b, "bin %s /usr/bin/%s %s\n", bin.Name, bin.Name, digest)
+		realpath := "/usr/bin/" + bin.Name
+		if bin.Role == connector.SandboxBinaryHarness {
+			realpath = c.Spec.Harness.InstallRoot() + "/bin/" + bin.Name
+		}
+		fmt.Fprintf(&b, "bin %s %s %s 755 0 0\n", bin.Name, realpath, digest)
 	}
 	switch c.Spec.Harness.Name {
 	case "claudecode":
 		fmt.Fprintf(&b, "version %s (Claude Code)\n", c.HarnessVersion)
-		fmt.Fprintf(&b, "net /opt/defenseclaw-harness/claudecode/bin/claude %s\n", digest)
+		fmt.Fprintf(&b, "net /opt/defenseclaw-harness/claudecode/bin/claude %s 755 0 0\n", digest)
 	case "codex":
 		fmt.Fprintf(&b, "version codex-cli %s\n", c.HarnessVersion)
-		fmt.Fprintf(&b, "net /opt/defenseclaw-harness/codex/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex %s\n", digest)
+		fmt.Fprintf(&b, "net /opt/defenseclaw-harness/codex/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex %s 755 0 0\n", digest)
 	}
 	b.WriteString("end\n")
 	return b.String()
@@ -265,6 +273,15 @@ func TestVerifyRejectsDrift(t *testing.T) {
 		"dir-writable":   func(s string) string { return replaceField(s, "dir "+connector.SandboxHookDir+" ", 2, "775") },
 		"dir-missing":    func(s string) string { return dropLine(s, "dir /etc/claude-code/managed-settings.d ") },
 		"no-jq":          func(s string) string { return dropLine(s, "bin jq ") },
+		"no-mktemp":      func(s string) string { return dropLine(s, "bin mktemp ") },
+		"jq-in-home":     func(s string) string { return replaceField(s, "bin jq ", 2, "/sandbox/.local/bin/jq") },
+		"curl-in-tmp":    func(s string) string { return replaceField(s, "bin curl ", 2, "/tmp/curl") },
+		"sed-user-owned": func(s string) string { return replaceField(s, "bin sed ", 5, "1000") },
+		"tr-group-owned": func(s string) string { return replaceField(s, "bin tr ", 6, "1000") },
+		"head-writable":  func(s string) string { return replaceField(s, "bin head ", 4, "775") },
+		"claude-in-work": func(s string) string { return replaceField(s, "bin claude ", 2, "/work/proj/claude") },
+		"net-user-owned": func(s string) string { return replaceField(s, "net ", 4, "1000") },
+		"net-writable":   func(s string) string { return replaceField(s, "net ", 3, "757") },
 		"wrong-version":  func(s string) string { return strings.Replace(s, "version 2.1.156", "version 2.1.157", 1) },
 		"no-net-binary":  func(s string) string { return dropLine(s, "net ") },
 		"version-absent": func(s string) string { return strings.Replace(s, "version 2.1.156 (Claude Code)", "version", 1) },
@@ -296,13 +313,59 @@ func TestParseProbeIsStrict(t *testing.T) {
 		"unknown-record": strings.Replace(good, "end\n", "surprise 1\nend\n", 1),
 		"bad-digest":     strings.Replace(good, "end\n", "net /usr/bin/x nothex\nend\n", 1),
 		"bad-mode":       strings.Replace(good, "end\n", "dir /x 9z9 0 0\nend\n", 1),
-		"path-injection": strings.Replace(good, "end\n", "bin x /usr/bin/x;rm "+strings.Repeat("a", 64)+"\nend\n", 1),
+		"path-injection": strings.Replace(good, "end\n", "bin x /usr/bin/x;rm "+strings.Repeat("a", 64)+" 755 0 0\nend\n", 1),
+		"bin-no-owner":   strings.Replace(good, "end\n", "bin x /usr/bin/x "+strings.Repeat("a", 64)+"\nend\n", 1),
+		"net-no-owner":   strings.Replace(good, "end\n", "net /usr/bin/x "+strings.Repeat("a", 64)+"\nend\n", 1),
+		"bin-bad-owner":  strings.Replace(good, "end\n", "bin x /usr/bin/x "+strings.Repeat("a", 64)+" 755 root 0\nend\n", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseProbe([]byte(out), harness.Codex.Probe().VersionRE); err == nil {
 				t.Fatal("malformed probe output parsed")
 			}
 		})
+	}
+}
+
+// TestProbeScriptResolvesToolsOnTheHookPATH runs the probe script on this
+// host with a workload-style PATH that shadows jq and curl: the hook tools
+// must still resolve on the baked hook PATH, while the harness resolves on
+// the workload PATH (where the image installs it).
+func TestProbeScriptResolvesToolsOnTheHookPATH(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the probe script uses GNU stat and readlink")
+	}
+	for _, tool := range []string{"/usr/bin/jq", "/usr/bin/curl", "/usr/bin/sha256sum"} {
+		if _, err := os.Stat(tool); err != nil {
+			t.Skipf("%s is required", tool)
+		}
+	}
+	c := mustContext(t, testSpec(harness.ClaudeCode))
+	shadow := t.TempDir()
+	for _, name := range []string{"jq", "curl", "claude"} {
+		if err := os.WriteFile(filepath.Join(shadow, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("/bin/sh", "-c", probeScript(c))
+	cmd.Env = []string{"PATH=" + shadow + ":/usr/local/bin:/usr/bin:/bin"}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe script: %v", err)
+	}
+	res, err := ParseProbe(out, harness.ClaudeCode.Probe().VersionRE)
+	if err != nil {
+		t.Fatalf("ParseProbe: %v\n%s", err, out)
+	}
+	for _, name := range []string{"jq", "curl"} {
+		if got := res.Binaries[name].Realpath; strings.HasPrefix(got, shadow) || !strings.HasPrefix(got, "/usr/") {
+			t.Errorf("%s resolved to %q, not on the hook PATH", name, got)
+		}
+	}
+	if got := res.Binaries["claude"].Realpath; got != filepath.Join(shadow, "claude") {
+		t.Errorf("claude resolved to %q, want the workload PATH entry", got)
+	}
+	if err := c.Verify(res); err == nil || !strings.Contains(err.Error(), "binary claude resolves to "+shadow) {
+		t.Errorf("Verify accepted a harness binary the workload owns: %v", err)
 	}
 }
 

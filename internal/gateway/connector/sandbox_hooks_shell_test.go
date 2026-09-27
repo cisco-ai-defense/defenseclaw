@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,12 +37,18 @@ import (
 // response per call:
 // "exit:<code>" makes curl fail, "<status>|<body>" prints body and status the
 // way `curl -w '\n%{http_code}'` does.
+//
+// The stub records the hook's environment before running anything, then
+// switches to the system PATH so its own tools never show up in a trace of
+// what the hooks execute (TestSandboxHookRuntimeBinariesCoverEveryTool).
 const sandboxCurlStub = `#!/bin/bash
-dir="$(cd "$(dirname "$0")" && pwd)"
+dir="${0%/*}"
+/usr/bin/env > "$dir/env.now"
+PATH=/usr/bin:/bin
 n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$dir/count"
+mv "$dir/env.now" "$dir/env.$n"
 printf '%s\n' "$@" > "$dir/args.$n"
-/usr/bin/env > "$dir/env.$n"
 cat > "$dir/body.$n"
 line="$(sed -n "${n}p" "$dir/responses")"
 case "$line" in
@@ -98,14 +105,15 @@ func newSandboxHookHarness(t *testing.T, provider SandboxArtifactProvider, versi
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newSandboxHookHarnessFiles(t, artifacts.Files)
+	return newSandboxHookHarnessFiles(t, artifacts.Files, SandboxHookPATH)
 }
 
-// newSandboxHookHarnessFiles materializes an explicit sandbox file set.
-func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile) *sandboxHookHarness {
+// newSandboxHookHarnessFiles materializes an explicit sandbox file set whose
+// baked PATH is the curl stub directory followed by systemPATH.
+func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH string) *sandboxHookHarness {
 	t.Helper()
 	h := &sandboxHookHarness{root: t.TempDir(), stubDir: t.TempDir()}
-	stubPath := h.stubDir + ":/usr/bin:/bin:/usr/sbin:/sbin"
+	stubPath := h.stubDir + ":" + systemPATH
 	h.bakedPATH = stubPath
 	for _, file := range files {
 		data := file.Data
@@ -364,7 +372,7 @@ func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h := newSandboxHookHarnessFiles(t, files)
+		h := newSandboxHookHarnessFiles(t, files, SandboxHookPATH)
 		cases := map[string][]string{}
 		for name, r := range replies {
 			cases[name] = r
@@ -784,5 +792,131 @@ func TestSandboxHookScriptsParse(t *testing.T) {
 				t.Errorf("%s %s: %v\n%s", tc.connector, file.Path, err, out)
 			}
 		}
+	}
+}
+
+// TestSandboxHookRuntimeBinariesCoverEveryTool runs the sandbox hooks through
+// their allow, block, retry, outage, oversized-payload, auth-failure and
+// helper paths with every tool on the baked PATH replaced by a tracing
+// wrapper, and requires each tool they started to be listed by
+// sandboxHookRuntimeBinaries: the image probe resolves exactly those on the
+// baked PATH and requires them to be root-owned.
+func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required")
+	}
+	traceDir, traceLog := t.TempDir(), filepath.Join(t.TempDir(), "trace")
+	for _, dir := range strings.Split(SandboxHookPATH, ":") {
+		entries, _ := os.ReadDir(dir)
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.ContainsAny(name, "'\\\n") {
+				continue
+			}
+			wrapper := filepath.Join(traceDir, name)
+			if _, err := os.Lstat(wrapper); err == nil {
+				continue // an earlier PATH entry wins, as in the hook
+			}
+			info, err := os.Stat(filepath.Join(dir, name))
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				continue
+			}
+			script := "#!/bin/sh\nprintf '%s\\n' '" + name + "' >>'" + traceLog + "'\nexec '" + filepath.Join(dir, name) + "' \"$@\"\n"
+			if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	listed := map[string]bool{}
+	for _, bin := range sandboxHookRuntimeBinaries() {
+		listed[bin.Name] = true
+	}
+	type scenario struct {
+		script    string
+		args      []string
+		stdin     string
+		env       map[string]string
+		responses []string
+	}
+	token := map[string]string{SandboxTokenEnv: "tok", "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+	blockOut := `200|{"action":"block","reason":"nope"}`
+	oversized := `{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("a", 1<<20) + `"}}`
+	inspect := func(script, stdin string) []scenario {
+		return []scenario{
+			{script, nil, stdin, token, []string{allowResponse}},
+			{script, nil, stdin, token, []string{blockOut}},
+			{script, nil, stdin, token, []string{"exit:7", "exit:7"}},
+			{script, nil, stdin, token, []string{`401|{}`}},
+		}
+	}
+	codexArgs := []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
+	for _, tc := range []struct {
+		connector string
+		provider  SandboxArtifactProvider
+		version   string
+		scenarios []scenario
+	}{
+		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", append([]scenario{
+			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{allowResponse}},
+			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{blockOut}},
+			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{"exit:52", allowResponse}},
+			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{`401|{}`}},
+			{"claude-code-hook.sh", nil, oversized, token, nil},
+			{"claude-code-hook.sh", nil, claudePreToolUse, nil, nil},
+		}, append(inspect("inspect-tool.sh", `{"command":"ls"}`), inspect("inspect-tool-response.sh", `{"output":"ok"}`)...)...)},
+		{"codex", &CodexConnector{}, "0.146.0", append([]scenario{
+			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{allowResponse}},
+			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{blockOut}},
+			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{"exit:56", allowResponse}},
+			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{"exit:7", "exit:7"}},
+			{"codex-hook.sh", []string{"--event", "SessionEnd", "--hook-contract", "codex-hooks-v4"}, `{"hook_event_name":"SessionEnd"}`, token, []string{allowResponse}},
+			{"codex-hook.sh", codexArgs, oversized, token, nil},
+			{"codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, token, nil},
+			{codexSandboxNotifyScript, []string{`{"type":"agent-turn-complete"}`}, "", token, []string{`200|{}`}},
+		}, append(inspect("inspect-request.sh", `{"content":"hi"}`), inspect("inspect-response.sh", `{"content":"hi"}`)...)...)},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			artifacts, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newSandboxHookHarnessFiles(t, artifacts.Files, traceDir)
+			_ = os.Remove(traceLog)
+			for _, sc := range tc.scenarios {
+				h.run(t, SandboxHookDir+"/"+sc.script, sc.args, sc.stdin, sc.env, sc.responses)
+			}
+			if helper := h.path(claudeCodeSandboxOtelHelperPath); tc.connector == "claudecode" {
+				cmd := exec.Command(helper)
+				cmd.Env = []string{"PATH=" + traceDir, SandboxTokenEnv + "=tok"}
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("otel helper: %v %s", err, out)
+				}
+			}
+			raw, err := os.ReadFile(traceLog)
+			if err != nil {
+				t.Fatalf("no tool was traced (the wrappers are not on the baked PATH?): %v", err)
+			}
+			seen := map[string]bool{}
+			for _, name := range strings.Fields(string(raw)) {
+				seen[name] = true
+			}
+			var missing, names []string
+			for name := range seen {
+				names = append(names, name)
+				if !listed[name] {
+					missing = append(missing, name)
+				}
+			}
+			sort.Strings(missing)
+			sort.Strings(names)
+			t.Logf("%s hooks ran: %s", tc.connector, strings.Join(names, " "))
+			if len(missing) > 0 {
+				t.Fatalf("sandboxHookRuntimeBinaries does not list %s, which the %s hooks run", strings.Join(missing, ", "), tc.connector)
+			}
+		})
 	}
 }

@@ -67,7 +67,14 @@ type ProbeResult struct {
 	VersionLine    string
 	HarnessVersion string
 	NetworkBinary  []Binary
+	// Owners records the mode and owner of every resolved binary and
+	// network binary realpath.
+	Owners map[string]ProbedFile
 }
+
+// workloadWritableRoots hold files the sandbox workload can create or
+// replace; a required binary must never resolve below one of them.
+var workloadWritableRoots = []string{connector.SandboxHomeDir, "/tmp", "/var/tmp", "/dev/shm", "/work", "/home", "/run", "/proc"}
 
 var (
 	probeSHARE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -93,7 +100,13 @@ func probeScript(c *Context) string {
 	}
 	for _, bin := range c.Artifacts.Binaries {
 		q := shQuote(bin.Name)
-		fmt.Fprintf(&b, "p=\"$(command -v %s 2>/dev/null)\"; if [ -n \"$p\" ]; then r=\"$(readlink -f \"$p\")\"; printf 'bin %%s %%s %%s\\n' %s \"$r\" \"$(digest \"$r\")\"; else printf 'nobin %%s\\n' %s; fi\n", q, q, q)
+		// The hooks run their tools from the baked PATH, never the image's;
+		// the harness itself is what the workload PATH starts.
+		lookup := "command -v " + q
+		if bin.Role == connector.SandboxBinaryRuntime {
+			lookup = "PATH=" + shQuote(connector.SandboxHookPATH) + "; " + lookup
+		}
+		fmt.Fprintf(&b, "p=\"$(%s 2>/dev/null)\"; case \"$p\" in /*) r=\"$(readlink -f \"$p\")\"; printf 'bin %%s %%s %%s %%s\\n' %s \"$r\" \"$(digest \"$r\")\" \"$(meta \"$r\")\" ;; *) printf 'nobin %%s\\n' %s ;; esac\n", lookup, q, q)
 	}
 	probe := c.Spec.Harness.Probe()
 	argv := make([]string, 0, len(probe.VersionArgv))
@@ -101,7 +114,7 @@ func probeScript(c *Context) string {
 		argv = append(argv, shQuote(a))
 	}
 	fmt.Fprintf(&b, "printf 'version %%s\\n' \"$(%s 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9 ._()+-')\"\n", strings.Join(argv, " "))
-	fmt.Fprintf(&b, "( %s\n) 2>/dev/null | while IFS= read -r n; do [ -n \"$n\" ] && [ -f \"$n\" ] && printf 'net %%s %%s\\n' \"$n\" \"$(digest \"$n\")\"; done\n", probe.NetworkBinaries)
+	fmt.Fprintf(&b, "( %s\n) 2>/dev/null | while IFS= read -r n; do [ -n \"$n\" ] && [ -f \"$n\" ] && printf 'net %%s %%s %%s\\n' \"$n\" \"$(digest \"$n\")\" \"$(meta \"$n\")\"; done\n", probe.NetworkBinaries)
 	b.WriteString("printf 'end\\n'\n")
 	return b.String()
 }
@@ -110,7 +123,7 @@ func probeScript(c *Context) string {
 // requires the schema header and the end marker, so truncated or foreign
 // output never verifies.
 func ParseProbe(out []byte, versionRE *regexp.Regexp) (ProbeResult, error) {
-	res := ProbeResult{Files: map[string]ProbedFile{}, Dirs: map[string]ProbedDir{}, Binaries: map[string]Binary{}}
+	res := ProbeResult{Files: map[string]ProbedFile{}, Dirs: map[string]ProbedDir{}, Binaries: map[string]Binary{}, Owners: map[string]ProbedFile{}}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	started, ended := false, false
@@ -155,10 +168,15 @@ func ParseProbe(out []byte, versionRE *regexp.Regexp) (ProbeResult, error) {
 			}
 			res.Missing = append(res.Missing, fields[0])
 		case "bin":
-			if len(fields) != 3 || !probePathRE.MatchString(fields[1]) || !probeSHARE.MatchString(fields[2]) {
+			if len(fields) != 6 || !probePathRE.MatchString(fields[1]) || !probeSHARE.MatchString(fields[2]) {
 				return res, fmt.Errorf("probe: malformed bin record %q", line)
 			}
+			mode, uid, gid, err := parseMeta(fields[3], fields[4], fields[5])
+			if err != nil {
+				return res, fmt.Errorf("probe: %q: %w", line, err)
+			}
 			res.Binaries[fields[0]] = Binary{Name: fields[0], Realpath: fields[1], SHA256: fields[2]}
+			res.Owners[fields[1]] = ProbedFile{Path: fields[1], Mode: mode, UID: uid, GID: gid, SHA256: fields[2]}
 		case "nobin":
 			if len(fields) != 1 {
 				return res, fmt.Errorf("probe: malformed nobin record %q", line)
@@ -172,10 +190,15 @@ func ParseProbe(out []byte, versionRE *regexp.Regexp) (ProbeResult, error) {
 				}
 			}
 		case "net":
-			if len(fields) != 2 || !probePathRE.MatchString(fields[0]) || !probeSHARE.MatchString(fields[1]) {
+			if len(fields) != 5 || !probePathRE.MatchString(fields[0]) || !probeSHARE.MatchString(fields[1]) {
 				return res, fmt.Errorf("probe: malformed net record %q", line)
 			}
+			mode, uid, gid, err := parseMeta(fields[2], fields[3], fields[4])
+			if err != nil {
+				return res, fmt.Errorf("probe: %q: %w", line, err)
+			}
 			res.NetworkBinary = append(res.NetworkBinary, Binary{Realpath: fields[0], SHA256: fields[1]})
+			res.Owners[fields[0]] = ProbedFile{Path: fields[0], Mode: mode, UID: uid, GID: gid, SHA256: fields[1]}
 		case "end":
 			ended = true
 		default:
@@ -244,8 +267,22 @@ func (c *Context) Verify(res ProbeResult) error {
 		}
 	}
 	for _, bin := range c.Artifacts.Binaries {
-		if _, ok := res.Binaries[bin.Name]; !ok {
-			problems = append(problems, "binary "+bin.Name+" is not on the image PATH")
+		got, ok := res.Binaries[bin.Name]
+		if !ok {
+			where := "the image PATH"
+			if bin.Role == connector.SandboxBinaryRuntime {
+				where = "the baked hook PATH " + connector.SandboxHookPATH
+			}
+			problems = append(problems, "binary "+bin.Name+" is not on "+where)
+			continue
+		}
+		if problem := workloadWritableBinary(got.Realpath, res.Owners[got.Realpath]); problem != "" {
+			problems = append(problems, "binary "+bin.Name+" "+problem)
+		}
+	}
+	for _, bin := range res.NetworkBinary {
+		if problem := workloadWritableBinary(bin.Realpath, res.Owners[bin.Realpath]); problem != "" {
+			problems = append(problems, "network binary "+problem)
 		}
 	}
 	if res.HarnessVersion != c.HarnessVersion {
@@ -258,6 +295,24 @@ func (c *Context) Verify(res ProbeResult) error {
 		return fmt.Errorf("openshell image %s failed verification: %s", c.Tag, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// workloadWritableBinary explains why the sandbox workload could replace the
+// binary at realpath, or returns "": it must be a root:root file that
+// neither group nor others can write, outside every workload-writable root.
+func workloadWritableBinary(realpath string, meta ProbedFile) string {
+	for _, root := range workloadWritableRoots {
+		if realpath == root || strings.HasPrefix(realpath, root+"/") {
+			return fmt.Sprintf("resolves to %s, under the workload-writable %s", realpath, root)
+		}
+	}
+	if meta.Path != realpath {
+		return fmt.Sprintf("resolves to %s, whose owner the probe did not report", realpath)
+	}
+	if meta.UID != 0 || meta.GID != 0 || meta.Mode&0o022 != 0 {
+		return fmt.Sprintf("resolves to %s (%04o %d:%d), want a root:root file only root can write", realpath, meta.Mode, meta.UID, meta.GID)
+	}
+	return ""
 }
 
 // probeRunArgs is the docker run argv of the post-build probe: no network,

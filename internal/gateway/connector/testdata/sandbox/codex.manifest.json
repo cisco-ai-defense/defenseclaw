@@ -9,6 +9,10 @@
       "Role": "runtime"
     },
     {
+      "Name": "chmod",
+      "Role": "runtime"
+    },
+    {
       "Name": "codex",
       "Role": "harness"
     },
@@ -17,7 +21,55 @@
       "Role": "runtime"
     },
     {
+      "Name": "date",
+      "Role": "runtime"
+    },
+    {
+      "Name": "find",
+      "Role": "runtime"
+    },
+    {
+      "Name": "head",
+      "Role": "runtime"
+    },
+    {
+      "Name": "id",
+      "Role": "runtime"
+    },
+    {
       "Name": "jq",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mkdir",
+      "Role": "runtime"
+    },
+    {
+      "Name": "mktemp",
+      "Role": "runtime"
+    },
+    {
+      "Name": "od",
+      "Role": "runtime"
+    },
+    {
+      "Name": "readlink",
+      "Role": "runtime"
+    },
+    {
+      "Name": "rm",
+      "Role": "runtime"
+    },
+    {
+      "Name": "sed",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tail",
+      "Role": "runtime"
+    },
+    {
+      "Name": "tr",
       "Role": "runtime"
     }
   ],

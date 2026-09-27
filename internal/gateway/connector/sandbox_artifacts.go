@@ -106,8 +106,9 @@ const (
 )
 
 // SandboxBinary is a command the rendered artifacts depend on. Image builds
-// resolve each one inside the image and record its realpath, version and
-// digest; a missing binary fails the build.
+// resolve each one inside the image (runtime tools on SandboxHookPATH, the
+// harness on the image PATH) and record its realpath and digest; a missing
+// binary, or one whose realpath the workload could write, fails the build.
 type SandboxBinary struct {
 	Name string
 	Role SandboxBinaryRole
@@ -384,13 +385,24 @@ func finalizeSandboxArtifacts(a SandboxArtifacts) (SandboxArtifacts, error) {
 	return a, nil
 }
 
+// sandboxHookRuntimeTools are the tools the sandbox hooks and their helpers
+// execute from SandboxHookPATH (bash is the shebang interpreter, readlink
+// resolves a symlinked hook, od derives an idempotency key where
+// /proc/sys/kernel/random/uuid is unreadable). The image probe resolves each
+// one on SandboxHookPATH and requires a root-owned realpath the workload
+// cannot write; TestSandboxHookRuntimeBinariesCoverEveryTool keeps the list
+// complete.
+var sandboxHookRuntimeTools = []string{
+	"bash", "chmod", "curl", "date", "find", "head", "id", "jq", "mkdir", "mktemp", "od", "readlink", "rm", "sed", "tail", "tr",
+}
+
 // sandboxHookRuntimeBinaries are the tools every sandbox hook set executes.
 func sandboxHookRuntimeBinaries() []SandboxBinary {
-	return []SandboxBinary{
-		{Name: "bash", Role: SandboxBinaryRuntime},
-		{Name: "curl", Role: SandboxBinaryRuntime},
-		{Name: "jq", Role: SandboxBinaryRuntime},
+	out := make([]SandboxBinary, 0, len(sandboxHookRuntimeTools))
+	for _, name := range sandboxHookRuntimeTools {
+		out = append(out, SandboxBinary{Name: name, Role: SandboxBinaryRuntime})
 	}
+	return out
 }
 
 var (
