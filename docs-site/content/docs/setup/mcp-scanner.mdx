@@ -21,13 +21,13 @@ DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://gith
 
 ## What you just saw
 
-A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, inspected the server in the scanner sandbox, resolved `mcp_actions.high`, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
+A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, started the server in a short-lived scan subprocess to read its tool list, resolved `mcp_actions.high`, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
 
 ## What it scans
 
 The wrapper at [`cli/defenseclaw/scanner/mcp.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/mcp.py) accepts two target shapes — both as a positional `TARGET` argument (there is no `--server` or `--remote` flag — the scanner figures out which from the target's shape):
 
-- **Local stdio server name** — described by a JSON file with a top-level `mcpServers` block (the format used by Claude Desktop, Cursor, OpenClaw, Gemini, Codex, and Copilot). DefenseClaw spins each server up in a sandbox, lists its tools, and records every advertised description, parameter schema, and example.
+- **Local stdio server name** — described by a JSON file with a top-level `mcpServers` block (the format used by Claude Desktop, Cursor, OpenClaw, Gemini, Codex, and Copilot). DefenseClaw starts each server as a short-lived subprocess, lists its tools, and records every advertised description, parameter schema, and example.
 - **Remote HTTP server URL** — passed as the positional target. The scanner calls `scan_remote_server_tools` directly without spawning a subprocess.
 
 For every tool the scanner produces:
@@ -191,8 +191,18 @@ defenseclaw keys set DEFENSECLAW_LLM_KEY
 
 DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
-<Callout type="info">
-The MCP scanner runs each stdio server inside a subprocess sandbox with a wall-clock timeout. Servers that hang are killed; servers that try to spawn networked side processes are flagged as findings, not just terminated silently.
+<Callout type="warn" title="A local scan runs the server">
+A local stdio scan starts the server as an ordinary subprocess that runs as
+you. It is not isolated: while it runs, the server can reach whatever your
+user can. DefenseClaw narrows what it starts. It launches only servers
+started through `npx` or `uvx` with a package argument, refusing shell
+interpreters, file paths, and code-evaluation flags (on native Windows, Codex
+Desktop's bundled `node_repl.exe` is also accepted after ownership checks).
+The subprocess does not inherit your shell environment: it gets a small
+baseline such as `PATH` and `HOME`, plus the server entry's own `env` block,
+minus any entry that would change what the launcher runs.
+On native Windows the scan also stops the server's whole process tree after
+60 seconds. Scan only servers you would be willing to run.
 </Callout>
 
 ## Availability and recovery
