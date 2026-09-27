@@ -106,4 +106,17 @@ case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
     export OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN
     ;;
 esac
+# The host daemon keeps the proxy variables, but the runner that executes the
+# agent's tools inherits only its own allowlist and the names listed in
+# OMNIGENT_RUNNER_ENV_PASSTHROUGH. List the proxy settings there, so tool
+# commands also go through the DefenseClaw egress proxy.
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  OMNIGENT_RUNNER_ENV_PASSTHROUGH="${OMNIGENT_RUNNER_ENV_PASSTHROUGH:+$OMNIGENT_RUNNER_ENV_PASSTHROUGH,}` + omnigentRunnerProxyPassthrough + `"
+  export OMNIGENT_RUNNER_ENV_PASSTHROUGH
+fi
 ` + launcherExec(`/usr/local/bin/omnigent "$@"`)
+
+// omnigentRunnerProxyPassthrough lists the proxy variables OmniGent's host
+// daemon keeps (_HOST_DAEMON_PROXY_ENV_ALLOWLIST in omnigent/cli.py) that
+// the launcher preamble exports.
+const omnigentRunnerProxyPassthrough = "HTTPS_PROXY,HTTP_PROXY,NO_PROXY,https_proxy,http_proxy,no_proxy"

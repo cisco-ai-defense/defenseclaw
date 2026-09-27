@@ -55,7 +55,8 @@ func newHookOnlyLauncher(t *testing.T, spec *Spec) hookOnlyLauncher {
 	dir := t.TempDir()
 	l := hookOnlyLauncher{path: filepath.Join(dir, "launch"), record: filepath.Join(dir, "record"), canonical: filepath.Join(dir, "canonical.json")}
 	stub := filepath.Join(dir, "stub")
-	body := "#!/bin/bash\n{ printf 'ARG %s\\n' \"$@\"; for v in HERMES_DEFENSECLAW_API_KEY HERMES_ACCEPT_HOOKS HERMES_SAFE_MODE HERMES_MANAGED_DIR LLM_API_KEY OPENHANDS_SUPPRESS_BANNER; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done; } >>" + l.record + "\n"
+	body := "#!/bin/bash\n{ printf 'ARG %s\\n' \"$@\"; for v in HERMES_DEFENSECLAW_API_KEY HERMES_ACCEPT_HOOKS HERMES_SAFE_MODE HERMES_MANAGED_DIR LLM_API_KEY OPENHANDS_SUPPRESS_BANNER" +
+		" OMNIGENT_CONFIG OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN OMNIGENT_RUNNER_ENV_PASSTHROUGH HTTPS_PROXY; do printf 'ENV %s=%s\\n' \"$v\" \"${!v:-}\"; done; } >>" + l.record + "\n"
 	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -363,6 +364,41 @@ func TestAntigravityLauncher(t *testing.T) {
 	}
 	if got := l.run(t, workspace, []string{"HOME=" + home}); got.exit != 2 || got.record != "" {
 		t.Fatalf("workspace hooks reusing a DefenseClaw key: exit %d record %q", got.exit, got.record)
+	}
+}
+
+func TestOmniGentLauncher(t *testing.T) {
+	l := newHookOnlyLauncher(t, OmniGent)
+	home := t.TempDir()
+	token := "openshell:resolve:env:v3_DEFENSECLAW_SANDBOX_TOKEN"
+	got := l.run(t, home, []string{"HOME=" + home, "DEFENSECLAW_EGRESS_URL=http://10.200.0.1:28772",
+		"DEFENSECLAW_SANDBOX_TOKEN=" + token, "OMNIGENT_CONFIG=/tmp/elsewhere.yaml",
+		"OMNIGENT_RUNNER_ENV_PASSTHROUGH=MY_TOOL_VAR"}, "run", "-p", "hi")
+	if got.exit != 0 {
+		t.Fatalf("exit %d: %s", got.exit, got.output)
+	}
+	for _, want := range []string{
+		"ARG run\nARG -p\nARG hi\n",
+		"ENV OMNIGENT_CONFIG=\n",
+		"ENV OMNIGENT_CONFIG_HOME=" + connector.OmnigentSandboxConfigHome + "\n",
+		"ENV OMNIGENT_NO_UPDATE_CHECK=1\n",
+		"ENV OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN=" + token + "\n",
+		// The runner that executes tool commands keeps the proxy settings,
+		// after anything the user already passes through.
+		"ENV OMNIGENT_RUNNER_ENV_PASSTHROUGH=MY_TOOL_VAR," + omnigentRunnerProxyPassthrough + "\n",
+		"ENV HTTPS_PROXY=http://10.200.0.1:28772\n",
+	} {
+		if !strings.Contains(got.record, want) {
+			t.Fatalf("omnigent record lacks %q:\n%s", want, got.record)
+		}
+	}
+	// Without the egress proxy nothing extra is passed through, and a token
+	// that is not a placeholder-shaped value is not copied.
+	got = l.run(t, home, []string{"HOME=" + home, "DEFENSECLAW_SANDBOX_TOKEN=bad token"}, "run")
+	for _, want := range []string{"ENV OMNIGENT_RUNNER_ENV_PASSTHROUGH=\n", "ENV HTTPS_PROXY=\n", "ENV OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN=\n"} {
+		if got.exit != 0 || !strings.Contains(got.record, want) {
+			t.Fatalf("exit %d, record lacks %q:\n%s", got.exit, want, got.record)
+		}
 	}
 }
 
