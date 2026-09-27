@@ -329,6 +329,16 @@ hard-cut version or rerun a fresh installer over an old installation.
 | `defenseclaw uninstall --all` | Same as above, plus deletes `~/.defenseclaw/`. Add `--binaries` to also remove the `defenseclaw` and `defenseclaw-gateway` binaries from `~/.local/bin`. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
+## Sandbox
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. It prints every step with its exact commands and asks once unless you pass `--yes`. |
+
+`legacy-cleanup` is the only `sandbox` command today. Running agents in an
+NVIDIA OpenShell 0.1 sandbox is in development; the
+[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+
 ## Discoverability
 
 ```bash

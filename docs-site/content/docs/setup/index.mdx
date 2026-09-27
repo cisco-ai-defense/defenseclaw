@@ -119,6 +119,15 @@ which ones are interactive and which ones are designed for scripts.
   />
 </Cards>
 
+### OpenShell sandbox
+
+The `sandbox` group has one command today: `defenseclaw sandbox legacy-cleanup`
+removes the retired `openshell-sandbox` 0.0.x install from Linux hosts.
+Running Claude Code and Codex inside an NVIDIA OpenShell 0.1 sandbox is in
+development. The `openshell:` config block is already validated, but no
+command launches a sandbox yet. The [sandbox guide](/docs/setup/sandbox)
+documents the sandbox commands.
+
 ## Deployment and policy references
 
 These pages explain operator policy and deployment architecture in more depth
@@ -161,7 +170,7 @@ below is the canonical mapping for their interactive and scripted forms.
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
-| `sandbox legacy-cleanup` | yes (confirms each step) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. It is the only `sandbox` subcommand. |
+| `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. It is the only `sandbox` subcommand. |
 
 <Callout title="Redaction is a v8 policy editor, not an on/off toggle">
 Run `defenseclaw setup redaction` for the guided workflow, or use subcommands
