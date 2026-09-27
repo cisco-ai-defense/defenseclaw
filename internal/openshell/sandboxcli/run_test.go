@@ -619,6 +619,23 @@ func TestRunCopyFallbackCreateFailureDiscardsTheStagedCopy(t *testing.T) {
 	}
 }
 
+// A name a deleted sandbox's kept snapshot holds is refused before
+// anything is staged, without offering to resume what is gone.
+func TestRunRefusesTheNameOfAKeptSnapshot(t *testing.T) {
+	ta := newTestApp(t, "")
+	kept := sampleSandbox("keptbox")
+	kept.Phase = "deleted"
+	ta.daemon.add(kept)
+	err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "keptbox"})
+	if err == nil || !strings.Contains(err.Error(), "holds the kept undo snapshot of a deleted sandbox") ||
+		!strings.Contains(err.Error(), "`defenseclaw sandbox delete keptbox` drops it") || strings.Contains(err.Error(), "connect") {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(ta.copy.steps) != 0 || len(ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)) != 0 {
+		t.Fatalf("the refused name staged %v or created a sandbox", ta.copy.steps)
+	}
+}
+
 func TestRunOffersResume(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-claude-proj-old", Harness: "claudecode", HarnessName: "Claude Code", Phase: "stopped",

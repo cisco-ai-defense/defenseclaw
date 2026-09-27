@@ -465,8 +465,12 @@ func checkNewName(name string) error {
 
 // checkNameFree refuses a name an existing sandbox has, with the ways on.
 func (a *App) checkNameFree(ctx context.Context, api API, name string, headless bool) error {
-	_, err := api.Get(ctx, name)
+	sb, err := api.Get(ctx, name)
 	switch {
+	case err == nil && sb.Phase == "deleted":
+		// A deleted sandbox whose snapshot was kept: nothing to resume.
+		return fmt.Errorf("the name %s holds the kept undo snapshot of a deleted sandbox: `%s undo %s` restores the folder to it, "+
+			"`%s delete %s` drops it; or choose another --name", name, CommandName, name, CommandName, name)
 	case err == nil:
 		return nameTakenError(name, headless)
 	case sandboxapi.IsCode(err, sandboxapi.CodeNotFound):
