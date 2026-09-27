@@ -245,6 +245,8 @@ type MCP struct {
 	// HostPorts are the consented host ports that passed every check.
 	HostPorts    []int    `json:"host_ports"`
 	BlockedTools []string `json:"blocked_tools"`
+	// ProjectServers is the pack's mcp.project_servers (block or allow).
+	ProjectServers string `json:"project_servers"`
 }
 
 // Resources is the effective resource request; empty means unlimited.
@@ -305,7 +307,7 @@ var explainOrder = []string{
 	"workdir.git_depth", "workdir.on_exit",
 	"egress.feeds", "egress.block", "egress.admin_block", "egress.allow", "egress.allow_only",
 	"egress.ports", "egress.large_upload_mb",
-	"mcp.import", "mcp.host_port_access", "mcp.host_ports", "mcp.blocked_tools",
+	"mcp.import", "mcp.host_port_access", "mcp.host_ports", "mcp.blocked_tools", "mcp.project_servers",
 	"resources.cpu", "resources.memory", "learn", "hooks.fail_mode", "hooks.on_tamper",
 }
 
@@ -1182,6 +1184,11 @@ func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
 	}
 	m.BlockedTools = append([]string{}, pack.MCP.BlockedTools...)
 	r.set("mcp.blocked_tools", listValue(m.BlockedTools), r.packLayer)
+	m.ProjectServers = pack.MCP.ProjectServers
+	if m.ProjectServers == "" {
+		m.ProjectServers = MCPProjectServersBlock
+	}
+	r.set("mcp.project_servers", m.ProjectServers, r.packLayer)
 }
 
 func (r *resolver) resolveResources(o config.OpenShellConfig, flags Flags) error {

@@ -91,6 +91,9 @@ func TestBuiltinPacksLoad(t *testing.T) {
 			if pack.Harness.Yolo != w.yolo || pack.MCP.Import != w.mcpImport || pack.MCP.HostPorts != w.hostPorts {
 				t.Fatalf("switches = yolo %v import %v host_ports %v", pack.Harness.Yolo, pack.MCP.Import, pack.MCP.HostPorts)
 			}
+			if pack.MCP.ProjectServers != MCPProjectServersBlock {
+				t.Fatalf("mcp.project_servers = %q, want block", pack.MCP.ProjectServers)
+			}
 			if pack.Hooks.FailMode != FailModeClosed || pack.Hooks.OnTamper != w.onTamper {
 				t.Fatalf("hooks fail_mode=%q on_tamper=%q, want on_tamper=%q", pack.Hooks.FailMode, pack.Hooks.OnTamper, w.onTamper)
 			}
@@ -239,6 +242,20 @@ func TestParseOnTamper(t *testing.T) {
 	}
 }
 
+// mcp.project_servers defaults to block; allow must be explicit.
+func TestParseProjectServers(t *testing.T) {
+	for mcp, want := range map[string]string{
+		"{import: true, host_ports: false}":                         MCPProjectServersBlock,
+		"{import: true, host_ports: false, project_servers: block}": MCPProjectServersBlock,
+		"{import: true, host_ports: false, project_servers: allow}": MCPProjectServersAllow,
+	} {
+		doc := strings.Replace(minimalPack, "mcp: {import: true, host_ports: false}", "mcp: "+mcp, 1)
+		if got := mustParse(t, doc).MCP.ProjectServers; got != want {
+			t.Errorf("mcp %s: project_servers = %q, want %q", mcp, got, want)
+		}
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	replace := func(old, new string) string { return strings.Replace(minimalPack, old, new, 1) }
 	for _, tc := range []struct {
@@ -274,6 +291,8 @@ func TestParseRejects(t *testing.T) {
 		{"list tamper response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_tamper: [stop]}"), "yaml_type", "hooks.on_tamper"},
 		{"missing yolo", replace("harness: {yolo: true}", "harness: {}"), "missing_field", "harness.yolo"},
 		{"missing mcp import", replace("mcp: {import: true, host_ports: false}", "mcp: {host_ports: false}"), "missing_field", "mcp.import"},
+		{"unknown project servers", replace("mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: false, project_servers: trusted}"), "invalid_value", "mcp.project_servers"},
+		{"bool project servers", replace("mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: false, project_servers: true}"), "yaml_type", "mcp.project_servers"},
 		{"unknown feed", replace("network: {mode: open}", "network: {mode: open}\negress: {feeds: [custom]}"), "invalid_value", "egress.feeds[0]"},
 		{"host glob with scheme", replace("network: {mode: open}", "network: {mode: open}\negress: {block: ['https://x.example']}"), "invalid_value", "egress.block[0]"},
 		{"inner wildcard", replace("network: {mode: open}", "network: {mode: open}\negress: {allow: ['a.*.example']}"), "invalid_value", "egress.allow[0]"},

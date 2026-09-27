@@ -306,6 +306,7 @@ func looserPackKey(candidate, baseline *Pack, mode string) string {
 		{"mcp.import", c.MCP.Import && !b.MCP.Import},
 		{"mcp.host_ports", c.MCP.HostPorts && !b.MCP.HostPorts},
 		{"mcp.blocked_tools", !containsAll(c.MCP.BlockedTools, b.MCP.BlockedTools)},
+		{"mcp.project_servers", c.MCP.ProjectServers == MCPProjectServersAllow && b.MCP.ProjectServers != MCPProjectServersAllow},
 		{"hooks.fail_mode", c.Hooks.FailMode != b.Hooks.FailMode},
 		// on_tamper: alert is looser than stop.
 		{"hooks.on_tamper", c.Hooks.OnTamper == OnTamperAlert && b.Hooks.OnTamper == OnTamperStop},

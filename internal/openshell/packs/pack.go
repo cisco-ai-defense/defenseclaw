@@ -84,6 +84,14 @@ const (
 // FeedBuiltin is DefenseClaw's curated exfiltration/abuse blocklist feed.
 const FeedBuiltin = "builtin"
 
+// MCP project-server postures (mcp.project_servers): block runs only the MCP
+// servers the run brings along, allow also runs the servers a repository
+// defines (Claude Code .mcp.json, Codex .codex/config.toml).
+const (
+	MCPProjectServersBlock = "block"
+	MCPProjectServersAllow = "allow"
+)
+
 // FailModeClosed is the only hook fail mode a sandbox supports: a hook that
 // cannot reach DefenseClaw denies the tool call.
 const FailModeClosed = "closed"
@@ -181,6 +189,11 @@ type MCPPolicy struct {
 	HostPorts bool `yaml:"host_ports" json:"host_ports"`
 	// BlockedTools become OpenShell MCP deny rules.
 	BlockedTools []string `yaml:"blocked_tools" json:"blocked_tools"`
+	// ProjectServers is MCPProjectServersBlock (the default) or
+	// MCPProjectServersAllow: whether the MCP servers a repository defines
+	// may start inside the sandbox. They start without a tool call, so no
+	// DefenseClaw hook sees them launch.
+	ProjectServers string `yaml:"project_servers" json:"project_servers"`
 }
 
 // HooksPolicy configures the sandbox hook variant.
@@ -317,9 +330,10 @@ type harnessFile struct {
 }
 
 type mcpFile struct {
-	Import       *bool    `yaml:"import"`
-	HostPorts    *bool    `yaml:"host_ports"`
-	BlockedTools []string `yaml:"blocked_tools"`
+	Import         *bool    `yaml:"import"`
+	HostPorts      *bool    `yaml:"host_ports"`
+	BlockedTools   []string `yaml:"blocked_tools"`
+	ProjectServers *string  `yaml:"project_servers"`
 }
 
 type hooksFile struct {
@@ -421,6 +435,10 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 	p.MCP.Import = v.requiredBool("mcp.import", mcp.Import)
 	p.MCP.HostPorts = v.requiredBool("mcp.host_ports", mcp.HostPorts)
 	p.MCP.BlockedTools = v.blockedTools("mcp.blocked_tools", mcp.BlockedTools)
+	p.MCP.ProjectServers = MCPProjectServersBlock
+	if mcp.ProjectServers != nil {
+		p.MCP.ProjectServers = v.enum("mcp.project_servers", mcp.ProjectServers, MCPProjectServersBlock, MCPProjectServersAllow)
+	}
 
 	hooks := f.Hooks
 	if hooks == nil {

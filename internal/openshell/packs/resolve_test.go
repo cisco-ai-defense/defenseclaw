@@ -119,6 +119,10 @@ func TestResolveDefaults(t *testing.T) {
 	wantSetting(t, eff, "learn", "false", SourceDefault, "")
 	wantSetting(t, eff, "hooks.fail_mode", "closed", SourcePack, "pack open")
 	wantSetting(t, eff, "hooks.on_tamper", "alert", SourcePack, "pack open")
+	wantSetting(t, eff, "mcp.project_servers", "block", SourcePack, "pack open")
+	if eff.MCP.ProjectServers != MCPProjectServersBlock {
+		t.Fatalf("mcp project servers = %q", eff.MCP.ProjectServers)
+	}
 	if eff.HookOnTamper != OnTamperAlert {
 		t.Fatalf("hook on_tamper = %q", eff.HookOnTamper)
 	}
@@ -801,6 +805,15 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
 			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)
 		}
+	}
+	// Letting a repository's MCP servers start is looser than blocking them.
+	allowing := *open
+	allowing.Name, allowing.MCP.ProjectServers = "allowing", MCPProjectServersAllow
+	if got := looserPackKey(&allowing, open, allowing.Network.Mode); got != "mcp.project_servers" {
+		t.Errorf("looserPackKey(allowing, open) = %q, want mcp.project_servers", got)
+	}
+	if got := looserPackKey(open, &allowing, open.Network.Mode); got != "" {
+		t.Errorf("looserPackKey(open, allowing) = %q, want none", got)
 	}
 	// A tamper response of alert is looser than stop; stop is never looser.
 	alerting := *balanced

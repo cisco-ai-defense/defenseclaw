@@ -89,6 +89,9 @@ mcp:
   import: false
   host_ports: false
   blocked_tools: []
+  # MCP servers a repository defines (.mcp.json, .codex/config.toml) start
+  # without a tool call, unseen by DefenseClaw hooks: keep them stopped.
+  project_servers: block
 
 hooks:
   fail_mode: closed
