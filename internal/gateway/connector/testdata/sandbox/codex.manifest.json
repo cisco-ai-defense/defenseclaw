@@ -97,7 +97,7 @@
     "/usr/local/lib/defenseclaw/hooks/codex-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "sha256": "5b9a22a0e13262818b7852bb2b56ba61165d709bdbae8432aacaa0310684b655"
+      "sha256": "8d21557b1f473ee4015e1e4a09ff76614ef982a379b54ddb4bded0d0cf64824b"
     },
     "/usr/local/lib/defenseclaw/hooks/codex-notify.sh": {
       "mode": "-rwxr-xr-x",

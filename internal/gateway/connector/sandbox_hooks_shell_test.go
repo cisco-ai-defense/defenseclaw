@@ -378,7 +378,8 @@ func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
 		"no-action":      {`200|{"ok":true}`},
 	}
 	// Inspect verdicts other than block (allow, alert) allow; the lifecycle
-	// hooks accept only allow, block and confirm.
+	// hooks accept only allow, alert, block and confirm
+	// (TestSandboxHooksTreatAlertAsAdvisory).
 	lifecycle := map[string]string{"unknown-action": `200|{"action":"maybe"}`}
 	for _, tc := range []struct {
 		connector string

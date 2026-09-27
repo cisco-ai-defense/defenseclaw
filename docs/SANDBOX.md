@@ -1352,6 +1352,11 @@ plus `{{if .Sandbox}}` branches) differs from the host hooks:
 - The bearer reaches curl as `--config` on a file descriptor, never on its
   command line (with `token_delivery: env` it is the token itself); the
   Codex notify bridge does the same.
+- A reply must name one of the verdicts `allow`, `alert`, `block` or
+  `confirm`; anything else fails closed. `alert` is advisory (`would_block`
+  false, for example a HIGH rule in the default guardrail profile): the hook
+  prints the harness notice the gateway rendered and the tool runs, as with
+  the host hooks and the native hook runner.
 
 ## Sandboxed connectors
 
