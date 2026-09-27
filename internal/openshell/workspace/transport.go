@@ -38,7 +38,17 @@ type ExecRequest struct {
 	// listings); credentials go through OpenShell providers.
 	Env map[string]string
 	// Timeout bounds the command; zero uses the implementation's default.
+	// The sandbox stops the command when it expires, as
+	// openshell.Client.Exec does (coreutils timeout(1)), and the call then
+	// fails with an error wrapping openshell.ErrExecTimeout.
 	Timeout time.Duration
+	// Idempotent marks a command that is safe to run twice. Only such a
+	// command is ever tried again, and only after an attempt that printed
+	// nothing at all (the OpenShell 0.1.1 exec that hangs or fails
+	// silently right after a sandbox starts). Any other command runs at
+	// most once: OpenShell does not stop a command when its client gives
+	// up, so a second run could overlap the first.
+	Idempotent bool
 }
 
 // ExecResult is a finished command. A non-zero ExitCode is not an error.
@@ -97,18 +107,25 @@ type CLI struct {
 	TransferTimeout time.Duration
 	// ExecTimeout is used when a request sets none (default 2 min).
 	ExecTimeout time.Duration
-	// Attempts is how often an exec that produced no output at all (a
-	// known OpenShell 0.1.1 flake right after create) is tried (default 2).
+	// Attempts bounds the tries of an Idempotent exec (default
+	// openshell.DefaultIdempotentExecAttempts); see ExecRequest.Idempotent.
 	Attempts int
 
-	// run is the process seam used by tests.
-	run func(ctx context.Context, argv []string) (stdout, stderr []byte, code int, err error)
+	// run is the process seam used by tests; attemptLimit, when set,
+	// replaces the local deadline of an exec attempt.
+	run          func(ctx context.Context, argv []string) (stdout, stderr []byte, code int, err error)
+	attemptLimit time.Duration
 }
 
 const (
 	defaultTransferTimeout = 10 * time.Minute
 	defaultExecTimeout     = 2 * time.Minute
 	maxExecOutput          = 16 << 20
+	// cliExecSlack is how long after the sandbox's timeout(1) has sent
+	// SIGKILL the binary's own --timeout fires. That timeout only makes
+	// OpenShell 0.1.1 report status 124 and leaves the command running, so
+	// it must never beat timeout(1), which actually stops it.
+	cliExecSlack = 5 * time.Second
 )
 
 // upstream is the openshell package's argv builder for c. It refuses an
@@ -136,18 +153,31 @@ func (c *CLI) DownloadArgv(sandbox, remotePath, localDir string) ([]string, erro
 	return inv.Argv, nil
 }
 
-// ExecArgv is `openshell sandbox exec` without a TTY or login shell.
+// ExecArgv is `openshell sandbox exec` without a TTY or login shell. The
+// command is wrapped in openshell.SandboxTimeoutArgv, so the sandbox stops
+// it at the request's timeout.
 func (c *CLI) ExecArgv(sandbox string, req ExecRequest) ([]string, error) {
-	if len(req.Argv) == 0 || req.Argv[0] == "" {
-		return nil, errors.New("workspace: exec needs a command")
-	}
-	inv, err := c.upstream().Exec(sandbox, req.Argv, openshell.CLIExecOptions{
-		WorkDir: req.Workdir, Timeout: c.execTimeout(req), Env: req.Env,
-	})
+	inv, err := c.execInvocation(sandbox, req)
 	if err != nil {
-		return nil, fmt.Errorf("workspace: %w", err)
+		return nil, err
 	}
 	return inv.Argv, nil
+}
+
+// execInvocation prepares one exec. Its Timeout is the local deadline of
+// an attempt: the binary's --timeout plus openshell's grace.
+func (c *CLI) execInvocation(sandbox string, req ExecRequest) (openshell.Invocation, error) {
+	if len(req.Argv) == 0 || req.Argv[0] == "" {
+		return openshell.Invocation{}, errors.New("workspace: exec needs a command")
+	}
+	timeout := c.execTimeout(req)
+	inv, err := c.upstream().Exec(sandbox, openshell.SandboxTimeoutArgv(req.Argv, timeout), openshell.CLIExecOptions{
+		WorkDir: req.Workdir, Timeout: timeout + openshell.ExecKillAfter + cliExecSlack, Env: req.Env,
+	})
+	if err != nil {
+		return openshell.Invocation{}, fmt.Errorf("workspace: %w", err)
+	}
+	return inv, nil
 }
 
 func (c *CLI) execTimeout(req ExecRequest) time.Duration {
@@ -198,49 +228,62 @@ func (c *CLI) transfer(ctx context.Context, what string, argv []string) error {
 	return nil
 }
 
-// Exec implements Execer. A run that hangs, or fails without printing
-// anything, is retried (the OpenShell 0.1.1 post-create flake), so commands
-// must be idempotent. When every attempt completed silently the last exit
-// code is returned: "test -e" failing quietly is an answer.
+// Exec implements Execer with the semantics of openshell.Client.Exec: the
+// sandbox stops the command at its timeout (the call then fails with an
+// error wrapping openshell.ErrExecTimeout), and a command runs at most
+// once unless the request is Idempotent. An Idempotent command is tried
+// again (up to Attempts) only after an attempt that printed nothing, and
+// when every attempt completed silently the last exit status is returned:
+// "test -e" failing quietly is an answer.
 func (c *CLI) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecResult, error) {
-	argv, err := c.ExecArgv(sandbox, req)
+	inv, err := c.execInvocation(sandbox, req)
 	if err != nil {
 		return nil, err
 	}
-	attempts := c.Attempts
-	if attempts <= 0 {
-		attempts = 2
+	attempts := 1
+	if req.Idempotent {
+		attempts = c.Attempts
+		if attempts <= 0 {
+			attempts = openshell.DefaultIdempotentExecAttempts
+		}
 	}
-	// The CLI enforces the remote timeout; the local one is a little longer
-	// so a wedged client cannot hang the caller.
-	limit := c.execTimeout(req) + 15*time.Second
-	var lastErr error
-	var last *ExecResult
-	for i := 0; i < attempts; i++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, limit)
-		stdout, stderr, code, err := c.exec(attemptCtx, argv)
-		timedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
-		cancel()
+	for i := 1; ; i++ {
+		res, silent, err := c.execOnce(ctx, sandbox, inv, c.execTimeout(req))
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if err == nil {
-			last = &ExecResult{ExitCode: code, Stdout: stdout, Stderr: stderr}
-			if code == 0 || len(stdout) > 0 || len(stderr) > 0 {
-				return last, nil
-			}
-			continue
-		}
-		if timedOut {
-			lastErr = fmt.Errorf("workspace: openshell exec timed out after %s", limit)
-		} else {
-			lastErr = fmt.Errorf("workspace: openshell exec: %w", err)
+		if !silent || !req.Idempotent || i >= attempts {
+			return res, err
 		}
 	}
-	if last != nil {
-		return last, nil
+}
+
+// execOnce runs one attempt. silent reports an attempt that printed
+// nothing and was not stopped by the sandbox's timeout(1): it either
+// exited with a status or never answered by the local deadline, by which
+// time the sandbox has stopped the command if it ever started.
+func (c *CLI) execOnce(ctx context.Context, sandbox string, inv openshell.Invocation, timeout time.Duration) (*ExecResult, bool, error) {
+	limit := inv.Timeout
+	if c.attemptLimit > 0 {
+		limit = c.attemptLimit
 	}
-	return nil, lastErr
+	attemptCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	start := time.Now()
+	stdout, stderr, code, err := c.exec(attemptCtx, inv.Argv)
+	elapsed := time.Since(start)
+	silent := len(stdout) == 0 && len(stderr) == 0
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+			return nil, silent, fmt.Errorf("workspace: exec in sandbox %s: %w: openshell reported no exit status within %s", sandbox, openshell.ErrExecTimeout, limit)
+		}
+		// The binary did not run at all: retrying will not help.
+		return nil, false, fmt.Errorf("workspace: openshell exec: %w", err)
+	}
+	if err := openshell.SandboxExitError(code, stderr, elapsed, timeout); err != nil {
+		return nil, false, fmt.Errorf("workspace: exec in sandbox %s: %w", sandbox, err)
+	}
+	return &ExecResult{ExitCode: code, Stdout: stdout, Stderr: stderr}, silent && code != 0, nil
 }
 
 func (c *CLI) exec(ctx context.Context, argv []string) ([]byte, []byte, int, error) {

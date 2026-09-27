@@ -1092,7 +1092,10 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		`h=$(g rev-parse -q --verify 'HEAD^{commit}' || true)`,
 		`printf 'baseline=%s\nhead=%s\n' "$b" "$h"`,
 	}, "\n")
-	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 2 * time.Minute})
+	// Idempotent: it sets a ref to a fixed commit and reads state back. It
+	// is also the first exec after the upload, the one OpenShell 0.1.1
+	// sometimes leaves hanging.
+	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 2 * time.Minute, Idempotent: true})
 	if err != nil {
 		return err
 	}

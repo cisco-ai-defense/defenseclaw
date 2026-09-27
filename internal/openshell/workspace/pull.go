@@ -165,6 +165,8 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
+	// Not Idempotent: two captures must never run at once (they share the
+	// scratch index, the result ref and the bundle).
 	res, err := opts.Exec.Exec(ctx, opts.Name, ExecRequest{Argv: []string{"sh", "-c", captureScript(rec, true)}, Timeout: timeout})
 	if err != nil {
 		return nil, err

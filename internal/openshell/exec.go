@@ -293,14 +293,28 @@ func (c *client) execOnce(parent context.Context, sandbox string, argv []string,
 	if err != nil {
 		return failed(err)
 	}
-	switch {
-	case (code == exitTimedOut || code == exitKilled) && time.Since(start) >= opts.Timeout:
-		return nil, attemptStarted, fmt.Errorf("%w after %s: the sandbox stopped the command (exit status %d)", ErrExecTimeout, opts.Timeout, code)
-	case code == exitNotFound && missingTimeoutCommand(res.Stderr):
-		return nil, attemptStarted, fmt.Errorf("%w: %s", ErrNoSandboxTimeout, bytes.TrimSpace(res.Stderr))
+	if err := SandboxExitError(code, res.Stderr, time.Since(start), opts.Timeout); err != nil {
+		return nil, attemptStarted, err
 	}
 	res.ExitCode = code
 	return res, attemptStarted, nil
+}
+
+// SandboxExitError interprets the exit status of a command that
+// SandboxTimeoutArgv wrapped with timeout, once it ran for elapsed. It
+// returns an error wrapping ErrExecTimeout when timeout(1) stopped the
+// command (status 124, or 137 when it had to be killed), one wrapping
+// ErrNoSandboxTimeout when the shell found no timeout(1), and nil when
+// status is the command's own. Client.Exec applies it; other transports
+// that send the same wrapper (the CLI) use it to agree with Client.Exec.
+func SandboxExitError(status int, stderr []byte, elapsed, timeout time.Duration) error {
+	switch {
+	case (status == exitTimedOut || status == exitKilled) && elapsed >= timeout:
+		return fmt.Errorf("%w after %s: the sandbox stopped the command (exit status %d)", ErrExecTimeout, timeout, status)
+	case status == exitNotFound && missingTimeoutCommand(stderr):
+		return fmt.Errorf("%w: %s", ErrNoSandboxTimeout, bytes.TrimSpace(stderr))
+	}
+	return nil
 }
 
 // missingTimeoutCommand recognizes the shell's complaint (bash, dash or

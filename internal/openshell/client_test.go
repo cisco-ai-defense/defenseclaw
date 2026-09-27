@@ -399,6 +399,31 @@ func TestSandboxTimeoutArgv(t *testing.T) {
 	}
 }
 
+func TestSandboxExitError(t *testing.T) {
+	const limit = 10 * time.Second
+	cases := []struct {
+		status  int
+		stderr  string
+		elapsed time.Duration
+		want    error
+	}{
+		{124, "", limit, openshell.ErrExecTimeout},
+		{137, "", limit + time.Second, openshell.ErrExecTimeout},
+		// The command's own 124 before the deadline is an answer.
+		{124, "", time.Second, nil},
+		{127, "sh: 1: timeout: not found", 0, openshell.ErrNoSandboxTimeout},
+		{127, "timeout: failed to run command 'nope': No such file or directory", 0, nil},
+		{0, "", limit, nil},
+		{1, "", limit, nil},
+	}
+	for _, tc := range cases {
+		err := openshell.SandboxExitError(tc.status, []byte(tc.stderr), tc.elapsed, limit)
+		if (tc.want == nil) != (err == nil) || (tc.want != nil && !errors.Is(err, tc.want)) {
+			t.Errorf("SandboxExitError(%d, %q, %s) = %v, want %v", tc.status, tc.stderr, tc.elapsed, err, tc.want)
+		}
+	}
+}
+
 // TestExecStopsCommandsInsteadOfOverlapping is the quiet long-running
 // command: an attempt that times out is stopped in the sandbox and never
 // retried, so no two runs of the command overlap, even when the caller

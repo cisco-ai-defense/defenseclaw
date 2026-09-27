@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 var _ Transport = (*CLI)(nil)
@@ -53,7 +55,7 @@ func TestCLIArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := strings.Join(argv, " "); got !=
-		"/usr/bin/openshell sandbox exec -g openshell --workspace default --color never --name f1-x --workdir /sandbox --timeout 2 --no-tty --no-login-shell --env A=1 --env B=2 -- sh -c echo hi" {
+		"/usr/bin/openshell sandbox exec -g openshell --workspace default --color never --name f1-x --workdir /sandbox --timeout 12 --no-tty --no-login-shell --env A=1 --env B=2 -- timeout -k 5 1.5 sh -c echo hi" {
 		t.Fatalf("exec argv = %s", got)
 	}
 	// The workspace defaults to openshell's; the binary to the one on PATH.
@@ -131,50 +133,135 @@ func TestRunProcessScrubsGatewayEnvironment(t *testing.T) {
 	}
 }
 
-func TestCLIExecRetriesSilentFailures(t *testing.T) {
-	calls := 0
-	c := &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
-		calls++
-		if calls == 1 {
-			return nil, nil, 255, nil // the post-create flake: no output at all
-		}
-		return []byte("ok\n"), nil, 0, nil
+// scriptedCLI answers exec attempts in order; the last answer repeats.
+type scriptedCLI struct {
+	answers []func(ctx context.Context) ([]byte, []byte, int, error)
+	argv    [][]string
+}
+
+func (s *scriptedCLI) cli() *CLI {
+	return &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+		s.argv = append(s.argv, argv)
+		return s.answers[min(len(s.argv), len(s.answers))-1](ctx)
 	}}
-	res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}})
-	if err != nil || calls != 2 || string(res.Stdout) != "ok\n" {
-		t.Fatalf("res=%+v err=%v calls=%d", res, err, calls)
-	}
+}
 
-	// A real non-zero exit with output is an answer, not a retry.
-	calls = 0
-	c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
-		calls++
-		return nil, []byte("no such file"), 2, nil
-	}
-	res, err = c.Exec(bg, "s", ExecRequest{Argv: []string{"false"}})
-	if err != nil || calls != 1 || res.ExitCode != 2 {
-		t.Fatalf("res=%+v err=%v calls=%d", res, err, calls)
-	}
+func answer(stdout, stderr string, code int) func(context.Context) ([]byte, []byte, int, error) {
+	return func(context.Context) ([]byte, []byte, int, error) { return []byte(stdout), []byte(stderr), code, nil }
+}
 
-	// Persistent silence is retried, then returned as the exit code it is
-	// ("test -e" failing quietly).
-	calls = 0
-	c.Attempts = 3
-	c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
-		calls++
-		return nil, nil, 1, nil
+func TestCLIExecWrapsTheCommandInTimeout(t *testing.T) {
+	s := &scriptedCLI{answers: []func(context.Context) ([]byte, []byte, int, error){answer("ok\n", "", 0)}}
+	if _, err := s.cli().Exec(bg, "s", ExecRequest{Argv: []string{"git", "status"}, Timeout: 90 * time.Second}); err != nil {
+		t.Fatal(err)
 	}
-	res, err = c.Exec(bg, "s", ExecRequest{Argv: []string{"test", "-e", "/x"}})
-	if err != nil || calls != 3 || res.ExitCode != 1 {
-		t.Fatalf("res=%+v err=%v calls=%d", res, err, calls)
+	argv := s.argv[0]
+	sep := -1
+	for i, a := range argv {
+		if a == "--" {
+			sep = i
+			break
+		}
 	}
+	cmd, limit, ok := openshell.ParseSandboxTimeoutArgv(argv[sep+1:])
+	if sep < 0 || !ok || limit != 90*time.Second || strings.Join(cmd, " ") != "git status" {
+		t.Fatalf("argv = %q", argv)
+	}
+	// The binary's own --timeout (which leaves the command running) comes
+	// only after the sandbox has had time to stop it.
+	if got := strings.Join(argv[:sep], " "); !strings.Contains(got, "--timeout 100") {
+		t.Fatalf("CLI --timeout: %s", got)
+	}
+}
 
-	// Failures to run at all are errors.
-	c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
-		return nil, nil, -1, errors.New("fork failed")
+func TestCLIExecRetriesOnlyIdempotentSilence(t *testing.T) {
+	type answers = []func(context.Context) ([]byte, []byte, int, error)
+	cases := []struct {
+		name       string
+		idempotent bool
+		attempts   int
+		answers    answers
+		wantCalls  int
+		wantCode   int
+		wantErr    error
+	}{
+		// The post-create flake: a silent failure, then an answer.
+		{"idempotent silent failure is retried", true, 0, answers{answer("", "", 255), answer("ok\n", "", 0)}, 2, 0, nil},
+		// A command that is not idempotent may have run: never again.
+		{"other silent failure is returned", false, 0, answers{answer("", "", 255), answer("ok\n", "", 0)}, 1, 255, nil},
+		{"an exit with output is an answer", true, 0, answers{answer("", "no such file", 2)}, 1, 2, nil},
+		// "test -e" failing quietly, every time, is an answer too.
+		{"persistent silence returns the status", true, 3, answers{answer("", "", 1)}, 3, 1, nil},
+		// OpenShell reports 124 when its --timeout or the sandbox's
+		// timeout(1) fired; the command may still be finishing.
+		{"a silent 124 after the timeout is not retried", true, 0, answers{answer("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
+		{"a silent 124 is not retried either way", false, 0, answers{answer("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
+		{"a killed command is a timeout", true, 0, answers{answer("", "", 137)}, 1, 0, openshell.ErrExecTimeout},
+		{"a missing timeout(1) is reported", true, 0, answers{answer("", "sh: 1: timeout: not found", 127)}, 1, 0, openshell.ErrNoSandboxTimeout},
+		{"a binary that cannot start is not retried", true, 0, answers{func(context.Context) ([]byte, []byte, int, error) {
+			return nil, nil, -1, errors.New("fork failed")
+		}}, 1, 0, errors.New("")},
 	}
-	if _, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"x"}}); err == nil {
-		t.Fatal("start failure ignored")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scriptedCLI{answers: tc.answers}
+			c := s.cli()
+			c.Attempts = tc.attempts
+			res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"sh", "-c", "x"}, Timeout: time.Nanosecond, Idempotent: tc.idempotent})
+			if len(s.argv) != tc.wantCalls {
+				t.Fatalf("ran %d times, want %d", len(s.argv), tc.wantCalls)
+			}
+			switch {
+			case tc.wantErr == nil && err != nil:
+				t.Fatalf("err = %v", err)
+			case tc.wantErr != nil && err == nil:
+				t.Fatalf("res = %+v, want an error", res)
+			case tc.wantErr != nil && tc.wantErr.Error() != "" && !errors.Is(err, tc.wantErr):
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			case tc.wantErr == nil && res.ExitCode != tc.wantCode:
+				t.Fatalf("exit = %d, want %d", res.ExitCode, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestCLIExecDeadlineIsNotRetriedUnlessIdempotent: an attempt that never
+// answered is only rerun for an idempotent command, and only when it
+// printed nothing.
+func TestCLIExecDeadlineIsNotRetriedUnlessIdempotent(t *testing.T) {
+	hang := func(ctx context.Context) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return nil, nil, -1, ctx.Err()
+	}
+	talkThenHang := func(ctx context.Context) ([]byte, []byte, int, error) {
+		<-ctx.Done()
+		return []byte("partial"), nil, -1, ctx.Err()
+	}
+	for _, tc := range []struct {
+		name       string
+		idempotent bool
+		first      func(context.Context) ([]byte, []byte, int, error)
+		wantCalls  int
+	}{
+		{"not idempotent", false, hang, 1},
+		{"idempotent and silent", true, hang, 2},
+		{"idempotent but it printed", true, talkThenHang, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scriptedCLI{answers: []func(context.Context) ([]byte, []byte, int, error){tc.first, answer("ok\n", "", 0)}}
+			c := s.cli()
+			c.attemptLimit = 20 * time.Millisecond
+			res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}, Idempotent: tc.idempotent})
+			if len(s.argv) != tc.wantCalls {
+				t.Fatalf("ran %d times, want %d", len(s.argv), tc.wantCalls)
+			}
+			if tc.wantCalls == 1 && !errors.Is(err, openshell.ErrExecTimeout) {
+				t.Fatalf("res=%+v err=%v, want a timeout", res, err)
+			}
+			if tc.wantCalls == 2 && (err != nil || string(res.Stdout) != "ok\n") {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+		})
 	}
 }
 

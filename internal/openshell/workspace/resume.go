@@ -178,6 +178,8 @@ func sandboxHasWork(ctx context.Context, ex Execer, rec *CopyRecord) (bool, erro
 	script := remoteGitPrelude(rec) + "\n" +
 		`if [ ! -e "$W" ] && [ ! -L "$W" ] && [ ! -e "$G" ] && [ ! -L "$G" ]; then echo copy=missing; exit 0; fi` + "\n" +
 		captureScript(rec, false) + "\nprintf 'basetree=%s\\n' \"$(g rev-parse \"$B^{tree}\")\""
+	// Not Idempotent: a run the client gave up on may still be writing the
+	// scratch index a second run would use.
 	res, err := ex.Exec(ctx, rec.Name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 5 * time.Minute})
 	if err != nil {
 		return false, err
@@ -218,7 +220,8 @@ func removeRemoteCopy(ctx context.Context, ex Execer, name string, recs ...*Copy
 			}
 		}
 	}
-	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", "rm -rf -- " + strings.Join(quoted, " ")}, Timeout: 5 * time.Minute})
+	// Removing the same paths twice, even at once, is harmless.
+	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", "rm -rf -- " + strings.Join(quoted, " ")}, Timeout: 5 * time.Minute, Idempotent: true})
 	if err != nil {
 		return err
 	}
