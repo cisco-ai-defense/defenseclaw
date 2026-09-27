@@ -55,6 +55,10 @@ type SnapshotOptions struct {
 	Replace bool
 	// MaxCopyBytes caps non-git snapshots (DefaultMaxCopySnapshotBytes).
 	MaxCopyBytes int64
+	// MaxWalkEntries caps the files and directories of a non-git folder
+	// (default 250k). A larger folder is refused: a partial snapshot would
+	// make Undo delete the files it left out.
+	MaxWalkEntries int
 	// Skip lists project-relative paths a non-git snapshot neither copies
 	// nor restores (masked secrets: the sandbox cannot change them).
 	Skip []string
@@ -127,6 +131,9 @@ type CopyTree struct {
 	// Opaque lists heavy directories (node_modules, .venv) that were not
 	// copied; Undo leaves them alone.
 	Opaque []string `json:"opaque,omitempty"`
+	// MaxEntries is the walk limit the snapshot was taken under (0: the
+	// default); Review and Undo read the folder under the same limit.
+	MaxEntries int `json:"max_entries,omitempty"`
 }
 
 // DirFingerprint is a cheap change signal for a dependency directory.
@@ -422,7 +429,7 @@ func snapshotCopy(lay layout, src *Source, opts SnapshotOptions, rec *SnapshotRe
 		info fs.FileInfo
 	}
 	var entries []entry
-	_, err := walkProject(src.Path, 0, func(rel string, d fs.DirEntry) error {
+	truncated, err := walkProject(src.Path, opts.MaxWalkEntries, func(rel string, d fs.DirEntry) error {
 		if skipped(skip, rel) {
 			if d.IsDir() {
 				return fs.SkipDir
@@ -463,6 +470,9 @@ func snapshotCopy(lay layout, src *Source, opts SnapshotOptions, rec *SnapshotRe
 		}
 		return fmt.Errorf("workspace: snapshot %s: %w", src.Path, err)
 	}
+	if truncated {
+		return tooManyEntries("the folder (for its undo snapshot)", opts.MaxWalkEntries)
+	}
 	dst := lay.plainTree(opts.Name)
 	if err := os.Mkdir(dst, 0o700); err != nil {
 		return err
@@ -498,7 +508,7 @@ func snapshotCopy(lay layout, src *Source, opts SnapshotOptions, rec *SnapshotRe
 		_ = os.Chtimes(to, dirs[i].info.ModTime(), dirs[i].info.ModTime())
 	}
 	sort.Strings(opaque)
-	rec.Copy = &CopyTree{Dir: dst, Files: files, Bytes: total, Skipped: sortedCopy(opts.Skip), Opaque: opaque}
+	rec.Copy = &CopyTree{Dir: dst, Files: files, Bytes: total, Skipped: sortedCopy(opts.Skip), Opaque: opaque, MaxEntries: opts.MaxWalkEntries}
 	if len(opaque) > 0 {
 		rec.Warnings = append(rec.Warnings, "not part of the undo snapshot: "+strings.Join(firstN(opaque, 5), ", "))
 	}

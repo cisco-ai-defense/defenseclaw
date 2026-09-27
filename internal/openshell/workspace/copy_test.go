@@ -150,6 +150,32 @@ func TestStageSizePreflight(t *testing.T) {
 	}
 }
 
+func TestStagePlainFolderEntryLimit(t *testing.T) {
+	e := newEnv(t)
+	for _, rel := range []string{"a.txt", "d/b.txt", "d/c.txt", "e.txt"} {
+		writeFile(t, e.project, rel, rel+"\n")
+	}
+	// Five entries: a walk that stops at four must not stage part of the
+	// folder as if it were all of it.
+	opts := StageOptions{Project: e.project, Name: "p1", DataDir: e.data, Home: e.home, MaxWalkEntries: 4}
+	_, err := Stage(bg, opts)
+	var tl *TooLargeError
+	if !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || !tl.Entries || tl.Limit != 4 {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := LoadCopy(e.data, "p1"); !errors.Is(err, ErrCopyNotFound) {
+		t.Fatalf("refused stage left a record: %v", err)
+	}
+	opts.MaxWalkEntries = 5
+	rec, err := Stage(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Kind != CopyPlain || rec.Files != 4 {
+		t.Fatalf("record: kind %s, %d files", rec.Kind, rec.Files)
+	}
+}
+
 func TestCopyRoundTripApplyMerge(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()

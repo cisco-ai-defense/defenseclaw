@@ -501,6 +501,62 @@ func TestPlainSnapshotUndo(t *testing.T) {
 	}
 }
 
+func TestPlainSnapshotEntryLimit(t *testing.T) {
+	e := newEnv(t)
+	for _, rel := range []string{"a.txt", "b.txt", "c.txt", "d/e.txt", "d/f.txt"} {
+		writeFile(t, e.project, rel, rel+"\n")
+	}
+	// Six entries (five files, one directory): a walk that stops at five
+	// must not become a snapshot of part of the folder.
+	opts := e.snapOpts("p1")
+	opts.MaxWalkEntries = 5
+	_, err := Snapshot(bg, opts)
+	var tl *TooLargeError
+	if !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || !tl.Entries || tl.Limit != 5 {
+		t.Fatalf("err = %v", err)
+	}
+	if pathExists(filepath.Join(e.data, "snapshots", "p1")) {
+		t.Fatal("refused snapshot left data behind")
+	}
+
+	opts.MaxWalkEntries = 8
+	rec, err := Snapshot(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Copy.Files != 5 || rec.Copy.MaxEntries != 8 {
+		t.Fatalf("record: %+v", rec.Copy)
+	}
+	// Review and Undo read the folder under the snapshot's limit. Once the
+	// session grows it past that, they refuse instead of comparing a
+	// partial listing (which would call the unread files deleted and keep
+	// what was created among them).
+	for _, rel := range []string{"g.txt", "h.txt", "i.txt"} {
+		writeFile(t, e.project, rel, "created in the session\n")
+	}
+	if _, err := Review(bg, ReviewOptions{DataDir: e.data, Name: "p1", Scanners: []ContentScanner{}}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("review: %v", err)
+	}
+	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "p1"}); !errors.As(err, &tl) || !tl.Entries {
+		t.Fatalf("undo: %v", err)
+	}
+	for _, rel := range []string{"a.txt", "d/f.txt", "g.txt", "i.txt"} {
+		if !pathExists(filepath.Join(e.project, filepath.FromSlash(rel))) {
+			t.Fatalf("refused undo changed the folder: %s is gone", rel)
+		}
+	}
+	// Back under the limit, undo works again.
+	if err := os.Remove(filepath.Join(e.project, "i.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if got := changePaths(mustUndo(t, e, "p1", false).Changes); got != "A:g.txt A:h.txt" {
+		t.Fatalf("undo changes = %s", got)
+	}
+	if pathExists(filepath.Join(e.project, "g.txt")) || readFile(t, e.project, "d/f.txt") != "d/f.txt\n" {
+		t.Fatal("undo did not restore the folder")
+	}
+}
+
 func TestPlainSnapshotSizeCap(t *testing.T) {
 	e := newEnv(t)
 	writeFile(t, e.project, "big.bin", strings.Repeat("x", 4096))

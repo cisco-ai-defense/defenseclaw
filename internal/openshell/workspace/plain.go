@@ -18,6 +18,7 @@ package workspace
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -48,8 +49,10 @@ func gitMode(info fs.FileInfo) string {
 }
 
 // listTree collects every entry under root. When project is set it skips
-// what the snapshot skipped (.git, heavy caches, the skip set).
-func listTree(root string, project bool, skip map[string]struct{}) (map[string]treeEntry, error) {
+// what the snapshot skipped (.git, heavy caches, the skip set) and refuses
+// a folder with more than maxEntries entries (walkLimit): a partial listing
+// would report the rest as deleted and miss what was created there.
+func listTree(root string, project bool, skip map[string]struct{}, maxEntries int) (map[string]treeEntry, error) {
 	out := map[string]treeEntry{}
 	visit := func(rel string, d fs.DirEntry) error {
 		if skipped(skip, rel) {
@@ -72,8 +75,12 @@ func listTree(root string, project bool, skip map[string]struct{}) (map[string]t
 		return nil
 	}
 	if project {
-		if _, err := walkProject(root, 0, visit); err != nil {
+		truncated, err := walkProject(root, maxEntries, visit)
+		if err != nil {
 			return nil, err
+		}
+		if truncated {
+			return nil, tooManyEntries("the folder (compared with its undo snapshot)", maxEntries)
 		}
 		return out, nil
 	}
@@ -95,15 +102,19 @@ func listTree(root string, project bool, skip map[string]struct{}) (map[string]t
 // or mode changed, T: type changed). Every file and symlink is listed;
 // directories appear only where a whole directory was created or deleted
 // (mode 040000). Line counts for text files are a multiset estimate; exact
-// diffs come from git for repositories.
-func compareTrees(snap, project string, skip []string) ([]TreeChange, map[string]treeEntry, map[string]treeEntry, error) {
-	skipSet := toSet(skip)
-	before, err := listTree(snap, false, skipSet)
+// diffs come from git for repositories. The folder is read under the walk
+// limit the snapshot was taken with.
+func compareTrees(snap *CopyTree, project string) ([]TreeChange, map[string]treeEntry, map[string]treeEntry, error) {
+	skipSet := toSet(snap.Skipped)
+	before, err := listTree(snap.Dir, false, skipSet, 0)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("workspace: read snapshot: %w", err)
 	}
-	after, err := listTree(project, true, skipSet)
+	after, err := listTree(project, true, skipSet, snap.MaxEntries)
 	if err != nil {
+		if errors.Is(err, ErrTooLarge) {
+			return nil, nil, nil, err
+		}
 		return nil, nil, nil, fmt.Errorf("workspace: read %s: %w", project, err)
 	}
 	var changes []TreeChange

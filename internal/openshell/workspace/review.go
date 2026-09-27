@@ -272,7 +272,7 @@ func scanChanges(changes []TreeChange, scanners []ContentScanner, content conten
 }
 
 func reviewCopy(rec *SnapshotRecord, opts ReviewOptions, rep *ReviewReport) error {
-	changes, _, _, err := compareTrees(rec.Copy.Dir, rec.Project, rec.Copy.Skipped)
+	changes, _, _, err := compareTrees(rec.Copy, rec.Project)
 	if err != nil {
 		return err
 	}
@@ -409,7 +409,7 @@ func ReviewDiff(ctx context.Context, dataDir, name string) ([]byte, error) {
 		defer st.unlock()
 		return st.sh.bare().output(ctx, "diff-tree", "-p", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", rec.Git.Tree, st.postTree)
 	case SnapshotCopy:
-		changes, _, _, err := compareTrees(rec.Copy.Dir, rec.Project, rec.Copy.Skipped)
+		changes, _, _, err := compareTrees(rec.Copy, rec.Project)
 		if err != nil {
 			return nil, err
 		}

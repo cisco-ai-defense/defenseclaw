@@ -73,6 +73,9 @@ type StageOptions struct {
 	GitDepth int
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
+	// MaxWalkEntries caps the files and directories of a non-git folder
+	// (default 250k); a larger folder is refused rather than copied in part.
+	MaxWalkEntries int
 	// Masks, Unmask, Detector and DisableContentScan select the secrets
 	// that are held back, with the same rules as a live mount's masks
 	// (tracked files included: nothing secret leaves the host).
@@ -258,7 +261,7 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 		if parent := enclosingRepo(real); parent != "" {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s is inside the git repository at %s; it is copied as a plain folder", real, parent))
 		}
-		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes)
+		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries)
 	}
 	if err != nil {
 		return nil, err
@@ -483,10 +486,10 @@ func gitConfigPath(ctx context.Context, g gitCmd) string {
 	return filepath.Join(p, "config")
 }
 
-func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64) error {
+func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int) error {
 	var candidates []string
 	var opaque []string
-	_, err := walkProject(rec.Project, 0, func(rel string, d fs.DirEntry) error {
+	truncated, err := walkProject(rec.Project, maxEntries, func(rel string, d fs.DirEntry) error {
 		if isOpaqueDir(d) || d.Name() == ".git" {
 			opaque = append(opaque, rel)
 			return nil
@@ -498,6 +501,9 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 	})
 	if err != nil {
 		return err
+	}
+	if truncated {
+		return tooManyEntries("the folder", maxEntries)
 	}
 	if len(opaque) > 0 {
 		sort.Strings(opaque)

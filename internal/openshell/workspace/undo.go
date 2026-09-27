@@ -655,7 +655,7 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 	if rec.Copy == nil {
 		return fmt.Errorf("workspace: snapshot %s has no copy", rec.Name)
 	}
-	changes, before, _, err := compareTrees(rec.Copy.Dir, rec.Project, rec.Copy.Skipped)
+	changes, before, _, err := compareTrees(rec.Copy, rec.Project)
 	if err != nil {
 		return err
 	}

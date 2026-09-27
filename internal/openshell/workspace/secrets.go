@@ -101,12 +101,19 @@ type secretScan struct {
 // descended into, whatever the callback returns.
 type walkFunc func(rel string, d fs.DirEntry) error
 
-// walkProject walks root without following symlinks. It returns true when
-// the entry limit stopped the walk early.
-func walkProject(root string, limit int, fn walkFunc) (bool, error) {
-	if limit <= 0 {
-		limit = defaultMaxWalkEntries
+// walkLimit is the entry limit a walk uses for the configured value n.
+func walkLimit(n int) int {
+	if n <= 0 {
+		return defaultMaxWalkEntries
 	}
+	return n
+}
+
+// walkProject walks root without following symlinks. It returns true when
+// the entry limit (walkLimit) stopped the walk early; callers that need
+// the whole folder must refuse a truncated walk.
+func walkProject(root string, limit int, fn walkFunc) (bool, error) {
+	limit = walkLimit(limit)
 	count := 0
 	truncated := false
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {

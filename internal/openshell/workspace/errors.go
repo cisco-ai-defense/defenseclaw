@@ -94,10 +94,22 @@ type TooLargeError struct {
 	What  string
 	Size  int64
 	Limit int64
+	// Entries says Size and Limit count files and directories, not bytes.
+	// The walk stops at the limit, so Size is then only a lower bound.
+	Entries bool
 }
 
 func (e *TooLargeError) Error() string {
+	if e.Entries {
+		return fmt.Sprintf("workspace: %s has more than the limit of %d files and directories", e.What, e.Limit)
+	}
 	return fmt.Sprintf("workspace: %s is %s, above the %s limit", e.What, humanBytes(e.Size), humanBytes(e.Limit))
+}
+
+// tooManyEntries is the error for a folder walk that hit its entry limit.
+func tooManyEntries(what string, limit int) *TooLargeError {
+	limit = walkLimit(limit)
+	return &TooLargeError{What: what, Size: int64(limit) + 1, Limit: int64(limit), Entries: true}
 }
 
 func (e *TooLargeError) Unwrap() error { return ErrTooLarge }
