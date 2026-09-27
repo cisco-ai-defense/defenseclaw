@@ -18,12 +18,12 @@ package workspace
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func changePaths(cs []TreeChange) string {
@@ -694,7 +694,7 @@ func TestUndoSavesPostSessionRefTips(t *testing.T) {
 	e.git(e.project, "tag", "agent-tag")
 	agentTagTip := e.git(e.project, "rev-parse", "agent-tag")
 
-	mustUndo(t, e, "s1", false)
+	res := mustUndo(t, e, "s1", false)
 	// The pre-session state should be restored.
 	if e.git(e.project, "rev-parse", "HEAD") != hostBranch {
 		t.Fatal("HEAD not restored")
@@ -702,19 +702,103 @@ func TestUndoSavesPostSessionRefTips(t *testing.T) {
 	if e.git(e.project, "rev-parse", "refs/tags/v1") != hostBranch {
 		t.Fatal("v1 tag not restored")
 	}
-	// But the agent's work must be saved under refs/defenseclaw/post-refs/.
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/main"); got != agentMainTip {
+	// The agent's work must be saved under refs/defenseclaw/post-refs/s1/<undo-id>/.
+	// Extract the undo-id from the saved refs list or the warning hint.
+	var undoID string
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
+			// Extract undo-id from the hint: "...refs/defenseclaw/post-refs/s1/<undo-id>/..."
+			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
+			if len(parts) > 1 {
+				idParts := strings.Split(parts[1], "/")
+				if len(idParts) > 0 {
+					undoID = idParts[0]
+				}
+			}
+			break
+		}
+	}
+	if undoID == "" {
+		t.Fatalf("could not find undo-id in warnings: %v", res.Warnings)
+	}
+	// Verify refs are saved under the undo-id namespace.
+	prefix := "refs/defenseclaw/post-refs/s1/" + undoID + "/"
+	if got := e.git(e.project, "rev-parse", prefix+"refs/heads/main"); got != agentMainTip {
 		t.Fatalf("agent's main tip not saved: got %s, want %s", got, agentMainTip)
 	}
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/feature"); got != agentFeatureTip {
+	if got := e.git(e.project, "rev-parse", prefix+"refs/heads/feature"); got != agentFeatureTip {
 		t.Fatalf("agent's feature tip not saved: got %s, want %s", got, agentFeatureTip)
 	}
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/tags/agent-tag"); got != agentTagTip {
+	if got := e.git(e.project, "rev-parse", prefix+"refs/tags/agent-tag"); got != agentTagTip {
 		t.Fatalf("agent's tag not saved: got %s, want %s", got, agentTagTip)
 	}
-	// The pre-session feature branch must also be saved (it existed but was not changed).
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/feature"); got != agentFeatureTip {
-		t.Fatalf("pre-session feature tip not saved")
+}
+
+// TestUndoTwoUndosOfSameNameSaveToDifferentNamespaces tests that multiple
+// undos of the same snapshot name save refs to unique namespaces.
+func TestUndoTwoUndosOfSameNameSaveToDifferentNamespaces(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	initial := e.git(e.project, "rev-parse", "HEAD")
+	mustSnapshot(t, e, "s1")
+
+	// First session: create a commit.
+	writeFile(t, e.project, "v1.txt", "version 1\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "v1")
+	firstTip := e.git(e.project, "rev-parse", "HEAD")
+
+	// First undo.
+	res1 := mustUndo(t, e, "s1", false)
+	if e.git(e.project, "rev-parse", "HEAD") != initial {
+		t.Fatal("first undo did not restore")
+	}
+
+	// Second session: create a different commit.
+	writeFile(t, e.project, "v2.txt", "version 2\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "v2")
+	secondTip := e.git(e.project, "rev-parse", "HEAD")
+
+	// Second undo of the same name.
+	res2 := mustUndo(t, e, "s1", false)
+	if e.git(e.project, "rev-parse", "HEAD") != initial {
+		t.Fatal("second undo did not restore")
+	}
+
+	// Both undos should succeed and save to different namespaces.
+	var id1, id2 string
+	for _, w := range res1.Warnings {
+		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
+			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
+			if len(parts) > 1 {
+				id1 = strings.Split(parts[1], "/")[0]
+			}
+			break
+		}
+	}
+	for _, w := range res2.Warnings {
+		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
+			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
+			if len(parts) > 1 {
+				id2 = strings.Split(parts[1], "/")[0]
+			}
+			break
+		}
+	}
+	if id1 == "" || id2 == "" {
+		t.Fatalf("could not extract undo IDs from warnings: %v, %v", res1.Warnings, res2.Warnings)
+	}
+	if id1 == id2 {
+		t.Fatalf("both undos used the same ID: %s", id1)
+	}
+
+	// Both session tips should be recoverable from their respective namespaces.
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/"+id1+"/refs/heads/main"); got != firstTip {
+		t.Fatalf("first session tip not saved: got %s, want %s", got, firstTip)
+	}
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/"+id2+"/refs/heads/main"); got != secondTip {
+		t.Fatalf("second session tip not saved: got %s, want %s", got, secondTip)
 	}
 }
 
@@ -876,59 +960,71 @@ func TestUndoRefusesSymlinkedParent(t *testing.T) {
 	}
 }
 
-// TestUndoIgnoredFilesByteCap tests that undo caps the total bytes preserved
-// and warns when the cap is exceeded.
-func TestUndoIgnoredFilesByteCap(t *testing.T) {
+// TestUndoPreservesLargeIgnoredFiles tests that undo preserves large
+// pre-existing ignored files without reading them into memory (no byte cap).
+func TestUndoPreservesLargeIgnoredFiles(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 
-	// Pre-session: create ignored files that together exceed the cap.
-	// The cap is 128 MB; create files totaling > 128 MB.
-	writeFile(t, e.project, ".gitignore", "large*.dat\n")
-	// Create multiple 50 MB files (total 150 MB).
-	largeData := make([]byte, 50<<20)
-	for i := range largeData {
-		largeData[i] = byte(i % 256)
+	// Pre-session: create a large ignored file using a sparse file.
+	writeFile(t, e.project, ".gitignore", "large.dat\n")
+	largePath := filepath.Join(e.project, "large.dat")
+	// Create a sparse file (2 GB nominal size, but minimal actual disk use).
+	f, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := 1; i <= 3; i++ {
-		path := filepath.Join(e.project, fmt.Sprintf("large%d.dat", i))
-		if err := os.WriteFile(path, largeData, 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := f.Truncate(2 << 30); err != nil {
+		f.Close()
+		t.Fatal(err)
 	}
+	// Write a marker at the beginning and end.
+	f.WriteString("START")
+	f.Seek(2<<30-3, 0)
+	f.WriteString("END")
+	origMtime := time.Now().Add(-1 * time.Hour)
+	f.Close()
+	os.Chtimes(largePath, origMtime, origMtime)
+
+	origInfo, _ := os.Stat(largePath)
 
 	mustSnapshot(t, e, "s1")
 
-	// Session: agent clears .gitignore.
+	// Session: agent clears .gitignore, making the file visible.
 	writeFile(t, e.project, ".gitignore", "")
 
 	res := mustUndo(t, e, "s1", false)
 
-	// Undo should warn about the cap.
-	foundCapWarning := false
+	// The file should survive with no warning about size.
 	for _, w := range res.Warnings {
-		if strings.Contains(w, "128 MB") || strings.Contains(w, "exceed") {
-			foundCapWarning = true
-			break
+		if strings.Contains(w, "large.dat") || strings.Contains(w, "MB") {
+			t.Errorf("unexpected warning: %s", w)
 		}
 	}
-	if !foundCapWarning {
-		t.Error("expected warning about byte cap, got none")
+	newInfo, err := os.Stat(largePath)
+	if err != nil {
+		t.Fatal("large.dat was not preserved")
 	}
-
-	// At least one file should survive (within the cap), but not all.
-	survivedCount := 0
-	for i := 1; i <= 3; i++ {
-		path := filepath.Join(e.project, fmt.Sprintf("large%d.dat", i))
-		if _, err := os.Stat(path); err == nil {
-			survivedCount++
-		}
+	if newInfo.Size() != origInfo.Size() {
+		t.Errorf("large.dat size changed from %d to %d", origInfo.Size(), newInfo.Size())
 	}
-	if survivedCount == 0 {
-		t.Error("no files survived despite being under the cap initially")
+	// Verify content is intact.
+	f, _ = os.Open(largePath)
+	defer f.Close()
+	start := make([]byte, 5)
+	f.Read(start)
+	if string(start) != "START" {
+		t.Errorf("large.dat content start = %q", start)
 	}
-	if survivedCount == 3 {
-		t.Error("all files survived despite exceeding the cap")
+	f.Seek(2<<30-3, 0)
+	end := make([]byte, 3)
+	f.Read(end)
+	if string(end) != "END" {
+		t.Errorf("large.dat content end = %q", end)
+	}
+	// Verify mtime is preserved (within 1 second tolerance).
+	if newInfo.ModTime().Sub(origInfo.ModTime()).Abs() > time.Second {
+		t.Errorf("mtime changed from %v to %v", origInfo.ModTime(), newInfo.ModTime())
 	}
 }
 
