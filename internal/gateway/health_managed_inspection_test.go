@@ -392,6 +392,75 @@ func TestManagedHealthTickerRewiresAnUnwiredHookLane(t *testing.T) {
 	}
 }
 
+// The single-connector proxy boot has no guardrail health ticker, so in
+// managed_enterprise it runs the managed inspection upkeep beside the proxy:
+// a hook lane left unwired when the API server started (OpenClaw sends its
+// tool calls there) is rewired once the provider builds, instead of blocking
+// every tool call under unavailable_action=block until a reload.
+func TestManagedProxyBootRewiresAnUnwiredHookLane(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buildable atomic.Bool
+	setCMIDDirectLaneRefused(t, false)
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		if !buildable.Load() {
+			return nil, errors.New("managed cloud auth library not trusted yet")
+		}
+		return newFakeCloudProvider("token"), nil
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	api := managedBlockingHookServer(nil)
+	s.apiServer = api
+	req := &ToolInspectRequest{Tool: "run_shell", Args: json.RawMessage(`{"command":"ls -la"}`)}
+
+	// runAPI's wiring with a provider that cannot be built yet.
+	if inspector := s.pickInspector(context.Background()); inspector != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", inspector)
+	}
+	s.setManagedHookInspectorWired(false)
+	v := api.inspectToolPolicy(req)
+	if v == nil {
+		t.Fatal("unwired hook lane returned no verdict")
+	}
+	assertManagedAIDUnavailableBlock(t, v.Action, v.Severity, v.Reason, v.Findings)
+
+	buildable.Store(true)
+	// A disabled proxy parks until ctx ends, which is all this test needs
+	// from it.
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{}, health: s.health}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runGuardrailProxy(ctx, proxy) }()
+	for deadline := time.Now().Add(5 * time.Second); api.currentCiscoInspector() == nil && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("proxy boot: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy boot did not stop with its context")
+	}
+	if api.currentCiscoInspector() == nil || s.managedHookInspector.Load() != managedHookInspectorWired {
+		t.Fatal("the managed proxy boot did not rewire the hook lane after the provider became buildable")
+	}
+	if v := api.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+		t.Fatalf("rewired hook lane verdict = %+v, want the AI Defense allow", v)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+		t.Fatalf("after the rewired lane got a verdict: %+v", got)
+	}
+}
+
 // A reload that leaves managed_enterprise clears the managed inspection
 // state after any publish that read the managed config before the reload.
 // Nothing publishes outside managed_enterprise, so a snapshot that publish

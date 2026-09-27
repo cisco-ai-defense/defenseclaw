@@ -332,9 +332,7 @@ func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[str
 	if s == nil || detail == nil {
 		return
 	}
-	s.retryManagedHookInspector(ctx)
-	s.probeManagedInspection(ctx)
-	s.publishManagedInspectionHealth()
+	s.maintainManagedInspection(ctx)
 	available, cause := s.managedInspectionState()
 	cfg := s.currentConfig()
 	action := managedAIDUnavailablePosture(cfg, s.health)

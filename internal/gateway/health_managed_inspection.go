@@ -108,6 +108,10 @@ const (
 	// endpoint recovers without waiting for the next tool call.
 	managedInspectionProbeInterval = 30 * time.Second
 	managedInspectionProbeTimeout  = 5 * time.Second
+	// managedInspectionUpkeepInterval is how often the single-connector
+	// proxy boot runs maintainManagedInspection, the same cadence as the
+	// hook-only boots' guardrail health ticker.
+	managedInspectionUpkeepInterval = 5 * time.Second
 )
 
 // setManagedHookInspectorWired records whether the API server's hook lane
@@ -191,7 +195,8 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 // or failed on a condition that has since cleared. Without it the lane
 // stays unwired until a reload changes cisco_ai_defense, and with
 // unavailable_action=block every tool call that needs inspection is
-// blocked. Runs on the guardrail health ticker, at most once per
+// blocked. Runs from maintainManagedInspection (the guardrail health
+// ticker, or the proxy boot's upkeep), at most once per
 // managedInspectionProbeInterval; an empty endpoint is left to the reload
 // that sets one. The build is quiet: a failure with the same cause as the
 // last one is not logged or recorded as a failed inspection again, since
@@ -282,4 +287,56 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 	s.recordInspectionAvailabilityLocked(err)
 	s.inspectionMu.Unlock()
 	s.publishManagedInspectionHealth()
+}
+
+// maintainManagedInspection is the periodic managed inspection upkeep:
+// rewire a hook lane left without an inspector, re-probe an unavailable
+// provider, and republish the Secure Client availability. The retry and
+// the probe are each rate limited on their own.
+func (s *Sidecar) maintainManagedInspection(ctx context.Context) {
+	s.retryManagedHookInspector(ctx)
+	s.probeManagedInspection(ctx)
+	s.publishManagedInspectionHealth()
+}
+
+// runGuardrailProxy runs the single-connector guardrail proxy. The hook-only
+// boots run maintainManagedInspection from their guardrail health ticker
+// (addManagedInspectionHealth); the proxy boot has no such ticker, so in
+// managed_enterprise it runs the same upkeep beside the proxy. Without it a
+// hook lane left unwired at startup (OpenClaw sends its tool calls there)
+// stays unwired until a reload.
+func (s *Sidecar) runGuardrailProxy(ctx context.Context, proxy *GuardrailProxy) error {
+	if cfg := s.currentConfig(); cfg != nil && cfg.Guardrail.Enabled && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		stop := s.startManagedInspectionUpkeep(ctx)
+		defer stop()
+	}
+	return proxy.Run(ctx)
+}
+
+// startManagedInspectionUpkeep runs maintainManagedInspection now and then
+// every managedInspectionUpkeepInterval until ctx ends or the returned stop
+// is called. stop waits for a pass in progress to finish.
+func (s *Sidecar) startManagedInspectionUpkeep(ctx context.Context) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(managedInspectionUpkeepInterval)
+		defer ticker.Stop()
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			s.maintainManagedInspection(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }

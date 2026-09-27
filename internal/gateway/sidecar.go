@@ -3974,7 +3974,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	return proxy.Run(ctx)
+	return s.runGuardrailProxy(ctx, proxy)
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
