@@ -66,6 +66,8 @@ func TestBuiltinFeeds(t *testing.T) {
 	blocked := map[string]Category{
 		"pastebin.com":                 CategoryPasteSite,
 		"www.pastebin.com":             CategoryPasteSite,
+		"paste.ee":                     CategoryPasteSite,
+		"api.paste.ee":                 CategoryPasteSite,
 		"termbin.com":                  CategoryPasteSite,
 		"transfer.sh":                  CategoryFileDrop,
 		"files.catbox.moe":             CategoryFileDrop,

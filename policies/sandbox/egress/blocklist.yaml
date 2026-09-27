@@ -23,7 +23,7 @@
 schema_version: 1
 kind: blocklist
 name: defenseclaw-blocklist
-feed_version: "2026.09.26"
+feed_version: "2026.09.26.1"
 entries:
   # --- paste sites -----------------------------------------------------------
   - name: Pastebin
@@ -31,7 +31,7 @@ entries:
     hosts: [pastebin.com, "*.pastebin.com"]
   - name: paste.ee
     category: paste_site
-    hosts: [paste.ee]
+    hosts: [paste.ee, "*.paste.ee"] # the upload API is api.paste.ee
   - name: Rentry
     category: paste_site
     hosts: [rentry.co, rentry.org]
