@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -326,6 +327,110 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	}
 	if last := ta.copy.apply[len(ta.copy.apply)-1]; last.Mode != workspace.ApplyMerge || !last.AcceptSensitive {
 		t.Fatalf("apply = %+v", last)
+	}
+}
+
+// With -o json stdout holds exactly one JSON document; the preview, the
+// prompt and the progress lines go to stderr.
+func TestUndoJSONKeepsStdoutParseable(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		setup func(*testApp)
+		// restored is whether stdout is the restore's response rather
+		// than the preview's.
+		restored bool
+		undos    int
+		stderr   []string
+	}{
+		{"restore", "y\n", nil, true, 2, []string{"revert  README.md", "Restore "}},
+		{"declined", "n\n", nil, false, 1, []string{"revert  README.md", "nothing changed"}},
+		{"nothing to undo", "", func(ta *testApp) {
+			ta.daemon.undo = sandboxapi.UndoResponse{Result: &workspace.UndoResult{Project: ta.project, Preview: true}}
+		}, false, 1, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, c.input)
+			ta.daemon.add(sampleSandbox("box"))
+			if c.setup != nil {
+				c.setup(ta)
+			}
+			if err := ta.Undo(context.Background(), UndoOptions{Name: "box", Output: OutputJSON}); err != nil {
+				t.Fatal(err)
+			}
+			var res sandboxapi.UndoResponse
+			if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Result == nil || res.Stopped != c.restored {
+				t.Fatalf("stdout is not one undo response (%v):\n%s", err, ta.output())
+			}
+			if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/box/undo")); n != c.undos {
+				t.Fatalf("undo calls = %d, want %d", n, c.undos)
+			}
+			for _, want := range c.stderr {
+				if !strings.Contains(ta.err.String(), want) {
+					t.Errorf("stderr lacks %q:\n%s", want, ta.err.String())
+				}
+			}
+			if ta.IO.Out != io.Writer(ta.out) {
+				t.Fatal("stdout was not restored after the command")
+			}
+		})
+	}
+}
+
+func TestPullJSONKeepsStdoutParseable(t *testing.T) {
+	cases := []struct {
+		name  string
+		opts  PullOptions
+		setup func(*testApp)
+		// review is whether stdout is the pull's result rather than the
+		// apply's.
+		review  bool
+		mode    workspace.ApplyMode
+		applied bool
+		stderr  []string
+	}{
+		{"review", PullOptions{}, nil, true, "", false, []string{"starting copybox", "Pulling copybox's work"}},
+		{"branch", PullOptions{Branch: true}, nil, false, workspace.ApplyBranch, true,
+			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}},
+		{"nothing to bring back", PullOptions{Apply: true}, func(ta *testApp) {
+			ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+		}, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			sb := sampleSandbox("copybox")
+			sb.WorkdirMode, sb.Workdir, sb.Phase = "copy", "/sandbox/work/proj", "stopped"
+			ta.daemon.add(sb)
+			if c.setup != nil {
+				c.setup(ta)
+			}
+			o := c.opts
+			o.Name, o.Output = "copybox", OutputJSON
+			if err := ta.Pull(context.Background(), o); err != nil {
+				t.Fatalf("Pull: %v\n%s", err, ta.err.String())
+			}
+			if c.review {
+				var res workspace.PullResult
+				if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Name != "copybox" {
+					t.Fatalf("stdout is not one pull result (%v):\n%s", err, ta.output())
+				}
+			} else {
+				var res workspace.ApplyResult
+				if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Mode != c.mode || res.Applied != c.applied {
+					t.Fatalf("stdout is not one apply result (%v):\n%s", err, ta.output())
+				}
+			}
+			for _, want := range c.stderr {
+				if !strings.Contains(ta.err.String(), want) {
+					t.Errorf("stderr lacks %q:\n%s", want, ta.err.String())
+				}
+			}
+			if ta.IO.Out != io.Writer(ta.out) {
+				t.Fatal("stdout was not restored after the command")
+			}
+		})
 	}
 }
 

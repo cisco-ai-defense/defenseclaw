@@ -98,6 +98,21 @@ const (
 	OutputJSON OutputFormat = "json"
 )
 
+// jsonOutput prepares a command that talks to the user before its result:
+// with -o json it returns stdout, kept for the one JSON document the
+// command prints, and until restore runs every human-readable line
+// (progress, the preview a prompt asks about, the prompt, warnings) goes to
+// stderr. For text output it returns a nil writer and changes nothing.
+func (a *App) jsonOutput(format OutputFormat) (stdout io.Writer, restore func()) {
+	a.defaults()
+	if format != OutputJSON {
+		return nil, func() {}
+	}
+	out := a.IO.Out
+	a.IO.Out = a.IO.Err
+	return out, func() { a.IO.Out = out }
+}
+
 // ParseOutput validates --output.
 func ParseOutput(s string) (OutputFormat, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {

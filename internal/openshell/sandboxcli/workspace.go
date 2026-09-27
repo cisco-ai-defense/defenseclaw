@@ -72,7 +72,8 @@ type UndoOptions struct {
 }
 
 // Undo restores a mounted project to its pre-session snapshot after a
-// preview.
+// preview. With -o json stdout carries the restore's response, or the
+// preview's (result.preview true) when nothing was restored.
 func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	api, err := a.api()
 	if err != nil {
@@ -82,10 +83,13 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	if o.Output == OutputJSON && o.Preview {
-		return writeJSON(a.IO.Out, preview)
+	stdout, restore := a.jsonOutput(o.Output)
+	defer restore()
+	empty := preview.Result == nil || preview.Result.Empty()
+	if stdout != nil && (o.Preview || empty) {
+		return writeJSON(stdout, preview)
 	}
-	if preview.Result == nil || preview.Result.Empty() {
+	if empty {
 		a.ok("nothing to undo: " + o.Name + "'s folder matches its pre-session snapshot")
 		return nil
 	}
@@ -99,14 +103,17 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	}
 	if !yes {
 		a.note("nothing changed")
+		if stdout != nil {
+			return writeJSON(stdout, preview)
+		}
 		return nil
 	}
 	res, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Stop: true, Restart: o.Restart, KeepRefs: o.KeepRefs})
 	if err != nil {
 		return apiError(err)
 	}
-	if o.Output == OutputJSON {
-		return writeJSON(a.IO.Out, res)
+	if stdout != nil {
+		return writeJSON(stdout, res)
 	}
 	if res.Stopped {
 		a.note("stopped " + o.Name)
@@ -236,7 +243,9 @@ type PullOptions struct {
 }
 
 // Pull brings a copy-mode sandbox's work back: review, then apply (3-way),
-// a dc/<name> branch, or a patch file.
+// a dc/<name> branch, or a patch file. With -o json stdout carries the
+// pull's result, or with a mode the apply's (applied false when nothing
+// was brought back).
 func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	modes := 0
 	for _, set := range []bool{o.Apply, o.Branch || o.BranchAs != "", o.PatchOut != ""} {
@@ -251,6 +260,8 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
+	stdout, restore := a.jsonOutput(o.Output)
+	defer restore()
 	sb, err := api.Get(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
@@ -273,8 +284,8 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
-	if o.Output == OutputJSON && modes == 0 {
-		return writeJSON(a.IO.Out, res)
+	if stdout != nil && modes == 0 {
+		return writeJSON(stdout, res)
 	}
 	a.line(a.bold(o.Name) + ": " + res.Review.SummaryLine())
 	if line := res.Review.RiskLine(); line != "" {
@@ -293,9 +304,15 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		a.note("bring it back with --apply, --branch or --patch-out FILE")
 		return nil
 	}
+	nothing := func() error {
+		if stdout == nil {
+			return nil
+		}
+		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
+	}
 	if res.Empty() {
 		a.ok("nothing to bring back")
-		return nil
+		return nothing()
 	}
 	if res.Review.Sensitive() && !o.AcceptSensitive {
 		yes, err := a.ask("Some changes can run code on this machine. Bring them back anyway?", false, false)
@@ -306,7 +323,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			return err
 		}
 		if !yes {
-			return nil
+			return nothing()
 		}
 		o.AcceptSensitive = true
 	}
@@ -314,10 +331,22 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
-	if o.Output == OutputJSON {
-		return writeJSON(a.IO.Out, applied)
+	if stdout != nil {
+		return writeJSON(stdout, applied)
 	}
 	return nil
+}
+
+// applyMode is how --apply, --branch or --patch-out brings the work back
+// (a patch when none is set).
+func (o PullOptions) applyMode() workspace.ApplyMode {
+	switch {
+	case o.Apply:
+		return workspace.ApplyMerge
+	case o.Branch || o.BranchAs != "":
+		return workspace.ApplyBranch
+	}
+	return workspace.ApplyPatch
 }
 
 // pull captures the sandbox's work.
@@ -336,14 +365,11 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 
 // applyPull lands a pull and records it with the daemon.
 func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, res *workspace.PullResult, o PullOptions) (*workspace.ApplyResult, error) {
-	opts := workspace.ApplyOptions{DataDir: a.dataDir(), Name: sb.Name, AcceptSensitive: o.AcceptSensitive, Force: o.Force}
-	switch {
-	case o.Apply:
-		opts.Mode = workspace.ApplyMerge
-	case o.Branch || o.BranchAs != "":
-		opts.Mode, opts.Branch = workspace.ApplyBranch, o.BranchAs
-	default:
-		opts.Mode = workspace.ApplyPatch
+	opts := workspace.ApplyOptions{DataDir: a.dataDir(), Name: sb.Name, Mode: o.applyMode(), AcceptSensitive: o.AcceptSensitive, Force: o.Force}
+	switch opts.Mode {
+	case workspace.ApplyBranch:
+		opts.Branch = o.BranchAs
+	case workspace.ApplyPatch:
 		p, err := filepath.Abs(o.PatchOut)
 		if err != nil {
 			return nil, err
