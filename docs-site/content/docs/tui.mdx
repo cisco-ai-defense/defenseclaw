@@ -1,17 +1,19 @@
 ---
 title: Terminal UI (TUI)
-description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it and a tour of the panels.
+description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it, a tour of the panels, and the Sandboxes panel for OpenShell sandboxes.
 keywords:
   - DefenseClaw TUI
   - defenseclaw tui
   - terminal UI
   - dashboard
+  - Sandboxes panel
+  - OpenShell sandbox wizard
 ---
 
 The DefenseClaw **TUI** is a full-screen, keyboard-driven dashboard over the
 `defenseclaw` CLI. It surfaces the gateway status, your scanned inventory
-(skills, MCPs, and plugins), alerts, logs, audit trail, and setup — all in
-one place. Operator actions use the same supported CLI and gateway surfaces, so
+(skills, MCPs, and plugins), alerts, logs, audit trail, OpenShell sandboxes,
+and setup — all in one place. Operator actions use the same supported CLI and gateway surfaces, so
 you do not have to memorize their syntax.
 
 ## Open the TUI
@@ -42,10 +44,12 @@ Switch panels with the number/letter key shown, or cycle with `Tab` /
 | `4` | MCPs | Scanned MCP servers |
 | `5` | Plugins | Scanned plugins |
 | `6` | Inventory | Combined inventory view |
+| `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets |
 | `9` | Audit | Audit trail |
 | `A` | Activity | Live output from commands you run |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
+| `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
 | `0` | Setup | Connector and gateway setup |
 
@@ -69,6 +73,157 @@ pressing `D` runs Doctor in the background to refresh the view. Failed
 credential checks also feed the bounded missing-credential notice without
 exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
 for the on-disk format.
+
+## Sandboxes panel
+
+Press `7` for **Sandboxes**, the TUI's view of the NVIDIA OpenShell sandboxes
+the DefenseClaw daemon runs (see the [sandbox guide](/docs/setup/sandbox)). It
+reads the daemon's `/api/v1/sandbox` API every 5 seconds while the panel is
+open, and every 15 seconds in the background once sandboxes are on, and it
+follows the daemon's live activity feed. When a refresh fails, the panel keeps
+the last good snapshot and says how old it is, so a daemon restart does not
+look like "no sandboxes". Sandboxes run on Linux and macOS only; on Windows the
+panel says so. The [macOS app](/docs/macos-app#openshell-sandboxes) shows the
+same sandboxes in its menu bar, notifications and Sandboxes panel.
+
+The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
+`UNREACHABLE`), how many sandboxes run, how many asks wait, and your
+organization's policy when `openshell.admin` is set. `OFF` points to the
+[Sandbox wizard](#sandbox-wizard); `UNAVAILABLE` gives the daemon's reason and
+suggests `defenseclaw sandbox doctor`.
+
+### Views
+
+`t` cycles through three views. `Enter` opens the highlighted row's details;
+the details window takes the keys of its view, and `Esc` closes it.
+
+| View | Columns | What it shows |
+| --- | --- | --- |
+| Sandboxes | Name, Phase, Harness, Pack/Profile, Mode, Up, Sites, Blocked, Tools, Alerts | Every sandbox, running ones first. Tools is blocked/total tool calls. Above the table: the newest blocked destination still in force, and the most urgent alert. A narrow terminal drops Pack/Profile, Mode and Up; the details show them. |
+| Activity | Time, Sandbox, glyph, Event | The live feed, newest first (the last 500 events): `✓` an allowed destination, `✗` a blocked destination or tool call, `↺` a lifted block, `⚠` a large upload or a finding, `?` an ask. A block you can lift ends in `(u unblocks)`. |
+| Asks | Sandbox, Kind, Destination, Binary, Risk, Reason | Asks waiting for you. Only doors into your machine or network ask, such as a localhost port or a private address. |
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| `t` | Switch between Sandboxes, Activity and Asks |
+| `j`/`k` or `Up`/`Down` | Move through the view |
+| `Enter` | Open the highlighted row's details |
+| `u` | Unblock a blocked destination: in Activity the selected one, elsewhere the newest one of the selected sandbox. Choose **Only in** the sandbox (until it is deleted) or **In every sandbox (always)**, which asks again and adds the host to `openshell.egress.unblocked` |
+| `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too), or reject it. An approval applies when the agent is idle. Outside Asks, `a` switches to Asks when one waits |
+| `c` | Connect: start the sandbox if it is stopped and attach its harness |
+| `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
+| `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it |
+| `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
+| `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot |
+| `R` | Review the changed files that can run code on your machine |
+| `w` | Sandboxed by default: turn the shell wrapper on or off per harness (`defenseclaw sandbox enable` or `defenseclaw sandbox disable`) |
+| `r` | Refresh now |
+
+Blocks of private networks, cloud metadata addresses and your organization's
+block lists cannot be lifted here. When `openshell.admin.allow_unblock` is
+`false`, `u` and `A` say "blocked by your organization's DefenseClaw policy".
+A sandbox that works on a copy has no undo or review; bring its work back with
+`defenseclaw sandbox pull <name>`.
+
+### Alerts and notifications
+
+The Alerts column, the alert line above the table, and the details name
+what needs attention:
+
+- **tamper**: tool calls ran without a DefenseClaw verdict.
+- **nested repo**: a new git repository or submodule entry appeared inside
+  the mounted project. DefenseClaw renames a new `.git` to
+  `.git.defenseclaw-quarantine-<time>` as soon as it appears; see the
+  [sandbox guide](/docs/setup/sandbox).
+- **hooks unreachable**: the harness's hooks cannot reach DefenseClaw, so they
+  block every tool call. Run `defenseclaw sandbox doctor`.
+- **silent**: the harness is active, but no DefenseClaw hook has been heard.
+  A user-tier harness could have edited its own hook settings.
+- **orphaned**: the sandbox has no DefenseClaw binding, so its hooks cannot
+  authenticate. Delete it and run again.
+
+The TUI also toasts a blocked destination you can unblock (once per sandbox
+and host per minute), a new ask, hooks that stop or start reaching
+DefenseClaw, and a new git repository in a project. The Sandboxes tab badge
+counts the waiting asks plus the distinct destinations `u` could lift.
+
+### Start a run from the TUI
+
+`n` opens **New sandboxed run**:
+
+- **Harness:** Claude Code or Codex, with the ones in `openshell.harnesses`
+  first and only those `openshell.admin.allowed_harnesses` allows. Run the
+  other harnesses from the command line.
+- **Project folder:** the only folder the agent sees. Your home folder, a
+  folder that contains it, and top-level system folders are refused.
+- **Name** (optional), **Network profile** (the pack's, `open`, `balanced` or
+  `strict`), **Work on a copy** (`--copy`) and **Keep the harness's own
+  permission prompts** (`--safe`).
+
+`Ctrl+S` starts and `Esc` cancels. The TUI then hands the terminal to
+`defenseclaw sandbox run` in that folder, exactly as on the command line: the
+harness owns the terminal, and after its end-of-session summary, `Enter`
+brings the TUI back. `c` hands the terminal to
+`defenseclaw sandbox connect <name>` the same way.
+
+## Sandbox wizard
+
+In Setup (`0`), select **Sandbox**, slot 13, and press `Enter`. The form runs
+`defenseclaw sandbox setup --non-interactive` with your answers as flags, so
+your answers are the consent: the command asks nothing else, and only `sudo`
+may ask for your password. Choose the action `doctor` to check this machine
+with `defenseclaw sandbox doctor` instead.
+
+| Field | Flag | Default |
+| --- | --- | --- |
+| Claude Code, Codex | `--harness claudecode`, `--harness codex` | Both, or the ones in `openshell.harnesses`; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
+| Credentials | none | Shows, by name only, the model key each harness would share |
+| This machine | none | Docker, Landlock (Linux), OpenShell and bind-mount status, from a `sandbox doctor` check that runs when the form opens |
+| Install OpenShell | `--install-openshell` | On when OpenShell is missing or its gateway needs attention: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` |
+| Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy |
+| Disable OpenShell Telemetry | `--upstream-telemetry` when off | On |
+| Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes `claude` and `codex` run sandboxed when you type them |
+| Build Images Now | `--skip-images` when off | On. The first build downloads about 3 GB; off leaves it to the first run |
+
+The `Will run` line previews the command. `Ctrl+R` runs it: after a
+confirmation, the TUI hands the terminal to the command so `sudo` prompts and
+image builds show, and comes back when it ends.
+
+## Sandbox settings in the config editor
+
+In Setup, `c` opens the config editor. Its **OpenShell Sandboxes** section
+edits the `openshell:` keys described in the
+[configuration reference](/docs/reference/configuration#openshell-sandbox-settings).
+Keys the selected policy pack governs show `inherit` until you set them, and
+`defenseclaw sandbox policy explain` shows every resolved setting with its
+source. The **Organization Policy** row summarizes `openshell.admin`; the
+editor never changes it, so edit `config.yaml` directly.
+
+Keys an administrator constrains through `openshell.admin` are read-only. The
+row shows the value that takes effect, for example `open (locked)`, or
+`true → off by policy` for `yolo` under `allow_yolo: false`. Its hint, which
+`Enter` or `Space` also shows in the status line, reads "Read-only: blocked by
+your organization's DefenseClaw policy" with the reason. The Profile choice
+offers only profiles at least as strict as `admin.min_profile`. In a
+`managed_enterprise` install every key of the section is read-only, because
+the administrator owns `config.yaml`.
+
+| `openshell.admin` setting | Read-only `openshell` keys |
+| --- | --- |
+| `required_pack` | `pack`, `pack_dir` |
+| `allow_yolo: false` | `yolo` |
+| `allow_mount: false` | `workdir.mode` |
+| `allow_host_ports: false` | `mcp.host_ports` |
+| `allow_unblock: false` | `egress.allow`, `egress.unblocked`, `egress.feed` |
+| `locked` entry `pack` | `pack`, `pack_dir` |
+| `locked` entry `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import` or `mcp.host_ports` | The key of the same name |
+| `locked` entry `resources` | `resources.cpu`, `resources.memory` |
+
+The [policy packs and admin limits](/docs/setup/sandbox-policy) page explains
+what each setting enforces. The macOS app's config editor applies the same
+rules.
 
 ## Handy keys
 
