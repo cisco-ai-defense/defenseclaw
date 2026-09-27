@@ -3757,6 +3757,28 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_E2E_HARNESS",
+      "category": "test_fixture",
+      "purpose": "Names the hook-only harness the live hook-only sandbox test drives (hermes, openhands, antigravity or omnigent); the test is skipped when it is unset.",
+      "default": "unset",
+      "accepted_values": [
+        "hermes",
+        "openhands",
+        "antigravity",
+        "omnigent",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/hookonly_e2e_test.go",
+          "description": "Live hook-only harness sandbox test (openshell_integration build tag)"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_E2E_IMAGE_REPO",
       "category": "test_fixture",
       "purpose": "Image repository the live overlay build test tags and prunes.",
