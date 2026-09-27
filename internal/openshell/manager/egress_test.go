@@ -35,19 +35,25 @@ import (
 )
 
 type fakeProxy struct {
-	mu      sync.Mutex
-	decider *egress.Decider
-	sets    int
-	counter *egress.Counter
+	mu       sync.Mutex
+	decider  *egress.Decider
+	sets     int
+	rechecks []string
+	counter  *egress.Counter
 }
-
-func (p *fakeProxy) Recheck(string) int { return 0 }
 
 func (p *fakeProxy) SetDecider(d *egress.Decider) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.decider, p.sets = d, p.sets+1
 	return nil
+}
+
+func (p *fakeProxy) Recheck(bindingID string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rechecks = append(p.rechecks, bindingID)
+	return 0
 }
 
 func (p *fakeProxy) Counter() *egress.Counter { return p.counter }

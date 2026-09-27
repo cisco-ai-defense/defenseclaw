@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -120,9 +121,10 @@ func (f dialerFunc) DialContext(ctx context.Context, network, address string) (n
 	return f(ctx, network, address)
 }
 
-// connect sends a CONNECT for sandbox's credential and returns the status
-// and, for a refusal, the block body.
-func (lp *liveProxy) connect(t *testing.T, e *harnessEnv, sandbox, target string) (int, egress.BlockResponse) {
+// send sends a CONNECT for sandbox's credential and returns the
+// connection, its reader and the response head. The caller closes the
+// connection.
+func (lp *liveProxy) send(t *testing.T, e *harnessEnv, sandbox, target string) (net.Conn, *bufio.Reader, *http.Response) {
 	t.Helper()
 	e.m.mu.Lock()
 	cred := e.m.boxes[sandbox].cred
@@ -131,16 +133,44 @@ func (lp *liveProxy) connect(t *testing.T, e *harnessEnv, sandbox, target string
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	auth := base64.StdEncoding.EncodeToString([]byte(cred.Username + ":" + cred.Password))
 	if _, err := io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\nProxy-Authorization: Basic "+auth+"\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		t.Fatalf("CONNECT %s: %v", target, err)
 	}
+	return conn, br, resp
+}
+
+// open establishes a CONNECT tunnel for sandbox's credential.
+func (lp *liveProxy) open(t *testing.T, e *harnessEnv, sandbox, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, br, resp := lp.send(t, e, sandbox, target)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s CONNECT %s = %d", sandbox, target, resp.StatusCode)
+	}
+	return conn, br
+}
+
+// tunnelOpen reports whether the proxy still holds a tunnel open: a read
+// waits for bytes instead of ending.
+func tunnelOpen(conn net.Conn, br *bufio.Reader) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, err := br.ReadByte()
+	return errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// connect sends a CONNECT for sandbox's credential and returns the status
+// and, for a refusal, the block body.
+func (lp *liveProxy) connect(t *testing.T, e *harnessEnv, sandbox, target string) (int, egress.BlockResponse) {
+	t.Helper()
+	conn, _, resp := lp.send(t, e, sandbox, target)
+	defer conn.Close()
 	defer resp.Body.Close()
 	var body egress.BlockResponse
 	if resp.StatusCode == http.StatusForbidden {
@@ -471,6 +501,65 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 	}
 	e.m.triageSandbox(context.Background(), b)
 	eventually(t, "the waiting proposal approved", func() bool { return chunkStatus(e, "teambox", waiting) == "approved" })
+}
+
+// TestOpenTunnelsFollowPolicyChanges: the proxy decides a tunnel when it
+// opens, and traffic keeps it open, so every change the manager makes to a
+// sandbox's proxy credential reaches the tunnels already open. An
+// administrator's block list ends the ones it now refuses (and only those),
+// a policy that no longer resolves ends all of the sandbox's, and so does
+// the deny network mode an administrator's min_profile moves it to.
+func TestOpenTunnelsFollowPolicyChanges(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	proxy := startLiveProxy(t, e)
+	e.create(sandboxapi.CreateRequest{Name: "openbox"})
+	e.create(sandboxapi.CreateRequest{Name: "teambox", Pack: "team", Project: e.otherProject("team")})
+	blockedConn, blockedBr := proxy.open(t, e, "openbox", "example.org:443")
+	keptConn, keptBr := proxy.open(t, e, "openbox", "keep.example.net:443")
+	teamConn, teamBr := proxy.open(t, e, "teambox", "keep.example.net:443")
+	for name, open := range map[string]bool{
+		"openbox example.org": tunnelOpen(blockedConn, blockedBr), "openbox keep.example.net": tunnelOpen(keptConn, keptBr),
+		"teambox keep.example.net": tunnelOpen(teamConn, teamBr),
+	} {
+		if !open {
+			t.Fatalf("the %s tunnel did not stay open", name)
+		}
+	}
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"example.org"} })
+	e.m.refreshEgress()
+	if tunnelOpen(blockedConn, blockedBr) {
+		t.Fatal("an open tunnel to a destination the administrator blocked survived")
+	}
+	if !tunnelOpen(keptConn, keptBr) || !tunnelOpen(teamConn, teamBr) {
+		t.Fatal("the administrator's block list ended tunnels it does not refuse")
+	}
+
+	// The pack goes away; the next resolution (triage, an approval, a
+	// hook) fails the sandbox closed, without a configuration change.
+	if err := os.Remove(filepath.Join(packDir, "team", "pack.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	teambox, err := e.m.box("teambox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.resolveBox(teambox); err == nil {
+		t.Fatal("teambox's policy still resolves without its pack")
+	}
+	if tunnelOpen(teamConn, teamBr) {
+		t.Fatal("an open tunnel of a sandbox whose policy cannot be resolved survived")
+	}
+	if !tunnelOpen(keptConn, keptBr) {
+		t.Fatal("another sandbox's policy failure ended openbox's tunnel")
+	}
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict })
+	e.m.refreshEgress()
+	if tunnelOpen(keptConn, keptBr) {
+		t.Fatal("an open tunnel of a sandbox moved to the deny network mode survived")
+	}
 }
 
 // TestNoPolicyRemovesDirectRules: when not even the organization's policy

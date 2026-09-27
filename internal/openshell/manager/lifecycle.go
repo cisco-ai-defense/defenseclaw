@@ -576,6 +576,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	if rec.BindingID != "" {
 		warn(m.revokeBinding(rec.BindingID))
 		m.creds.Revoke(rec.BindingID)
+		m.recheckEgress(rec.BindingID)
 	}
 	m.unblocks.RemoveSandbox(scopeID(rec.ID, rec.Name))
 	for _, it := range m.batcher.Forget(rec.Name) {

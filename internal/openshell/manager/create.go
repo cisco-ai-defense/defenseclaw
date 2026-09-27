@@ -353,7 +353,11 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		if err := m.creds.Register(cred, m.principal(binding.ID, "", name, egressDec, eff)); err != nil {
 			return nil, err
 		}
-		rb.add("revoke proxy credential", func(context.Context) error { m.creds.Revoke(binding.ID); return nil })
+		rb.add("revoke proxy credential", func(context.Context) error {
+			m.creds.Revoke(binding.ID)
+			m.recheckEgress(binding.ID)
+			return nil
+		})
 		proxyURL = cred.ProxyURL(connector.SandboxIngressHost, m.opts.EgressPort)
 		rec.EgressUser = cred.Username
 	}

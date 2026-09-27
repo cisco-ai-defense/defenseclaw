@@ -157,9 +157,9 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	if skip {
 		return
 	}
-	if bindingID != "" && m.creds.Revoke(bindingID) {
-		// Its open tunnels go too, not only new ones.
-		m.recheckTunnels()
+	if bindingID != "" {
+		m.creds.Revoke(bindingID)
+		m.recheckEgress(bindingID)
 	}
 	if !changed {
 		return
