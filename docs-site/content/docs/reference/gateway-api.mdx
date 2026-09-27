@@ -542,14 +542,16 @@ The code for both listeners ships in this release, but `defenseclaw-gateway`
 does not start either of them yet, whatever `openshell.enabled` says, and
 nothing issues the per-sandbox credentials they check. They are part of the
 NVIDIA OpenShell sandbox integration, which is in development. The
-[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+[sandbox guide](/docs/setup/sandbox) will cover the sandbox commands once they
+ship; today it covers legacy cleanup.
 </Callout>
 
-An OpenShell sandbox has no network of its own. Its traffic leaves through
-the host-networked OpenShell supervisor, which connects to host loopback, so
-every sandbox request reaches DefenseClaw from `127.0.0.1`. Neither listener
-trusts loopback for that reason: each request must carry a credential issued
-to one sandbox. Inside the sandbox, both listeners are addressed as
+A sandboxed agent cannot connect out directly. The host-networked OpenShell
+supervisor carries the connections its policy allows, and it relays
+connections to `host.openshell.internal` to host loopback, so every sandbox
+request reaches DefenseClaw from `127.0.0.1`. Neither listener trusts
+loopback for that reason: each request must carry a credential issued to one
+sandbox. Inside the sandbox, both listeners are addressed as
 `host.openshell.internal:<port>`.
 
 | Listener | Config key | Default port | Listens on |
@@ -557,9 +559,14 @@ to one sandbox. Inside the sandbox, both listeners are addressed as
 | Hook ingress | `openshell.ingress_port` | `gateway.api_port` + 1 (`18971`) | A loopback IP address only, never the main API address |
 | Egress proxy | `openshell.egress_port` | `gateway.api_port` + 2 (`18972`) | Loopback addresses only |
 
-When `openshell.enabled` is `true`, config validation rejects a port above
-65535, a port equal to `gateway.api_port` or `guardrail.port`, and two
-listeners on the same port.
+The gateway checks the `openshell:` block every time it loads the config,
+even though it starts no sandbox listener yet, and refuses a config that
+fails; the error starts with `config: openshell:`. An explicit port that is
+not between 1 and 65535, or both keys set to the same port, always fails. When
+`openshell.enabled` is `true`, the effective ports must also be at most
+65535 and differ from `gateway.api_port`, `guardrail.port` and each other.
+On a config reload, turning `openshell.enabled` on or off, or moving either
+port while it is on, restarts the main API listener.
 
 ### Hook ingress
 
@@ -583,11 +590,10 @@ form, which would put a credential in the URL.
 
 **Authentication.** A request must send exactly one
 `Authorization: Bearer dcsb_…` header with the sandbox's binding credential.
-With the default `openshell.token_delivery: provider`, the harness never sees
-the real value: OpenShell gives the sandbox a placeholder and substitutes the
-credential only on the way to the ingress. (`token_delivery: env` puts the
-real value in the sandbox environment instead.) The master gateway token,
-connector hook tokens and OTLP path tokens are never accepted here.
+The integration is designed to deliver that credential as an OpenShell
+provider credential, so the harness sees only a placeholder that OpenShell
+swaps for the real value on the way to the ingress. The master gateway
+token, connector hook tokens and OTLP path tokens are never accepted here.
 
 | Response | When |
 | --- | --- |
@@ -642,14 +648,17 @@ attributes each connection to a sandbox and applies per-sandbox limits.
   handshake and closes a tunnel whose name it would block.
 - Absolute-form `http://` requests, with hop-by-hop headers and the proxy
   credential removed.
-- Only destination ports on the allowlist: 80 and 443 in the built-in policy
-  packs, replaced by `openshell.egress.ports` when you set it. On 80 and 443
-  the proxy relays only web traffic; other protocols such as SSH pass only on
-  ports you add.
+- Only destination ports on the allowlist: 80 and 443 in the `open` and
+  `balanced` packs, replaced by `openshell.egress.ports` when you set it. On
+  80 and 443 the proxy relays only web traffic; other protocols such as SSH
+  pass only on ports you add.
 
 **What it decides.** Under the `open` profile, destination names are allowed
 unless they are on the built-in feed of exfiltration and abuse destinations
-(paste sites, file drops, webhook catchers, tunnels, anonymizers). Under
+(paste sites, file drops, webhook catchers, tunnels, anonymizers).
+`openshell.egress.feed: none` turns that feed off, unless
+`openshell.admin.allow_unblock` is `false` or `openshell.admin.required_pack`
+names a pack that uses it. Under
 `balanced`, only names on the curated allowlist are allowed. The `strict`
 profile runs without the proxy. Operator block rules always win; unblocks and
 operator allow rules are checked next, then the feed, then the profile's
@@ -659,8 +668,9 @@ default. In every mode:
   and cloud metadata addresses.
 - Private networks are reachable only when an operator allow rule, such as
   an `openshell.egress.allow` entry, names them. An unblock never opens them.
-- Under `open`, a destination given as an IP address is blocked until it is
-  unblocked, because it would sidestep the name-based feed.
+- Under `open`, a destination given as an IP address is blocked, because it
+  would sidestep the name-based feed. An unblock, or an operator allow rule
+  that names it, lifts the block.
 - Names are resolved by the proxy, and each answer is checked just before the
   connection, so a DNS answer that changes between check and connect cannot
   redirect it.
