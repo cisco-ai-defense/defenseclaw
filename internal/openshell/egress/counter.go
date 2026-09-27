@@ -107,7 +107,9 @@ type DestinationStats struct {
 	BindingID string
 	Host      string
 	// BytesUp and BytesDown are payload bytes sent and received across all
-	// tunnels and requests (bodies only for absolute-form requests).
+	// tunnels and requests. For absolute-form requests BytesUp is the
+	// request as sent upstream (head and body, TLS records for https://)
+	// and BytesDown the response body.
 	BytesUp   int64
 	BytesDown int64
 	// Tunnels counts tunnels and forwarded requests that reached the

@@ -195,7 +195,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 	}()
 	out := r.WithContext(ctx)
 	if r.Body != nil && r.Body != http.NoBody {
-		out.Body = &countingBody{ReadCloser: r.Body, st: st, rc: rc, idle: p.idle}
+		out.Body = &idleBody{ReadCloser: r.Body, st: st, rc: rc, idle: p.idle}
 	}
 	cw := &countingWriter{ResponseWriter: w, st: st, rc: rc, idle: p.idle}
 
@@ -271,7 +271,7 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 		return nil, err
 	}
 	st.setRemote(remote.String())
-	return newIdleConn(conn, p.idle), nil
+	return newIdleConn(p, conn, p.idle), nil
 }
 
 // idleConn is a forwarded request's upstream connection. Every read or
@@ -280,15 +280,24 @@ func (p *Proxy) transportDial(ctx context.Context, network, addr string) (net.Co
 // for that long: an upstream that stalls after its response headers, or
 // stops reading a request body, cannot hold the request, its client
 // connection and its tunnel slot indefinitely.
+//
+// Its writes are the request's upload: the request line, headers and body
+// as sent upstream (TLS records for https://), and after a protocol upgrade
+// everything the client sends. They are counted and put through the
+// large-upload block before they are written, as a tunnel's bytes are, so a
+// URL or header cannot carry data past the accounting.
 type idleConn struct {
 	net.Conn
+	p    *Proxy
 	idle time.Duration
-	// owner is the request using the connection; the idle timeout marks it.
+	// owner is the request using the connection: its uploads are counted,
+	// and the idle timeout marks it. Writes without an owner (the TLS
+	// handshake before the request gets the connection) are not upload.
 	owner atomic.Pointer[tunnel]
 }
 
-func newIdleConn(conn net.Conn, idle time.Duration) *idleConn {
-	c := &idleConn{Conn: conn, idle: idle}
+func newIdleConn(p *Proxy, conn net.Conn, idle time.Duration) *idleConn {
+	c := &idleConn{Conn: conn, p: p, idle: idle}
 	c.touch()
 	return c
 }
@@ -323,6 +332,16 @@ func (c *idleConn) Read(b []byte) (int, error) {
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
+	if t := c.owner.Load(); t != nil && len(b) > 0 {
+		v := t.flow.addUp(int64(len(b)), t.exempt)
+		if v.signal {
+			c.p.emitLargeUpload(t, v)
+		}
+		if v.cut {
+			t.cut.Store(true)
+			return 0, errLargeUpload
+		}
+	}
 	n, err := c.Conn.Write(b)
 	c.moved(n, err)
 	return n, err
@@ -394,30 +413,19 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	writeJSON(w, status, unreachableResponse(dec.Host, dec.Port, reason))
 }
 
-// countingBody accounts request body bytes as upload, applies the
-// large-upload block, and keeps an idle deadline on the client connection
-// while the body streams.
-type countingBody struct {
+// idleBody keeps an idle deadline on the client connection while a request
+// body streams. The body is counted as upload where it is written upstream
+// (idleConn).
+type idleBody struct {
 	io.ReadCloser
 	st   *forwardState
 	rc   *http.ResponseController
 	idle time.Duration
 }
 
-func (b *countingBody) Read(buf []byte) (int, error) {
+func (b *idleBody) Read(buf []byte) (int, error) {
 	_ = b.rc.SetReadDeadline(time.Now().Add(b.idle))
 	n, err := b.ReadCloser.Read(buf)
-	if n > 0 {
-		t := b.st.tunnel
-		v := t.flow.addUp(int64(n), t.exempt)
-		if v.signal {
-			b.st.p.emitLargeUpload(t, v)
-		}
-		if v.cut {
-			t.cut.Store(true)
-			return 0, errLargeUpload
-		}
-	}
 	if err != nil {
 		// The server starts its background read once the body is done;
 		// lift the idle deadline so it cannot cancel a long response.
@@ -480,19 +488,20 @@ func (w *countingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	w.code.CompareAndSwap(0, http.StatusSwitchingProtocols)
 	_ = conn.SetDeadline(time.Time{})
 	t := w.st.tunnel
-	uc := &upgradedConn{Conn: conn, tunnel: t, p: w.st.p, done: make(chan struct{})}
+	uc := &upgradedConn{Conn: conn, tunnel: t, done: make(chan struct{})}
 	uc.touch()
 	go watchIdle(w.idle, &uc.last, uc.done, t.closeIdle)
 	t.setCloser(func() { _ = conn.Close() })
 	return uc, brw, nil
 }
 
-// upgradedConn counts an upgraded client connection: reads are uploads,
-// writes are downloads.
+// upgradedConn watches an upgraded client connection for the idle timeout
+// and counts its writes as download. What the client sends is counted as
+// upload where it is written upstream (idleConn), which also applies the
+// large-upload block.
 type upgradedConn struct {
 	net.Conn
 	tunnel    *tunnel
-	p         *Proxy
 	last      atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
@@ -504,15 +513,6 @@ func (c *upgradedConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.touch()
-		t := c.tunnel
-		v := t.flow.addUp(int64(n), t.exempt)
-		if v.signal {
-			c.p.emitLargeUpload(t, v)
-		}
-		if v.cut {
-			t.cut.Store(true)
-			return 0, errLargeUpload
-		}
 	}
 	return n, err
 }

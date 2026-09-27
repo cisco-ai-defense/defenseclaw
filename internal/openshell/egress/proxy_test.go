@@ -221,7 +221,10 @@ func TestProxyAbsoluteForm(t *testing.T) {
 		allowed.RemoteAddr != publicV4+":80" || !allowed.FirstSeen {
 		t.Errorf("allowed event = %+v", allowed)
 	}
-	if closed.TunnelID != allowed.TunnelID || closed.BytesUp != 1234 || closed.BytesDown != int64(len(body)) || closed.Status != http.StatusOK {
+	// Upload is the request as sent upstream: its head and the 1234-byte
+	// body.
+	if closed.TunnelID != allowed.TunnelID || closed.BytesUp <= 1234+int64(len("POST /v1/items?q=1&r=two HTTP/1.1\r\n")) ||
+		closed.BytesUp > 1234+512 || closed.BytesDown != int64(len(body)) || closed.Status != http.StatusOK {
 		t.Errorf("closed event = %+v", closed)
 	}
 }
@@ -900,6 +903,109 @@ func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	}
 	if got.Load() > 1024 {
 		t.Errorf("upstream received %d bytes", got.Load())
+	}
+}
+
+// startHTTPCounter runs an HTTP/1.1 upstream that answers every request
+// with "ok" and counts the bytes it receives, request heads included.
+func startHTTPCounter(t *testing.T) (string, func() int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var total atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(&countingReader{r: c, n: &total})
+				for {
+					req, err := http.ReadRequest(br)
+					if err != nil {
+						return
+					}
+					_, _ = io.Copy(io.Discard, req.Body)
+					if _, err := io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String(), total.Load
+}
+
+type countingReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// An absolute-form request's head (request line, URL and headers) is upload
+// like its body: a header or query string cannot carry data past the byte
+// counts, the large-upload signal or its block. The counts are exactly what
+// the upstream received.
+func TestProxyAbsoluteFormCountsRequestHeads(t *testing.T) {
+	for _, block := range []bool{false, true} {
+		t.Run(fmt.Sprintf("block=%v", block), func(t *testing.T) {
+			addr, received := startHTTPCounter(t)
+			h := newHarness(t, func(c *harnessConfig) {
+				c.counter = &CounterOptions{LargeUploadBytes: 4096, BlockLargeUploads: block}
+			})
+			h.dialer.route(80, addr)
+			conn, br := h.dialProxy()
+			pad := strings.Repeat("A", 2<<10)
+			refused := false
+			for i := 0; i < 4 && !refused; i++ {
+				fmt.Fprintf(conn, "GET http://example.com/c%d?d=%s HTTP/1.1\r\nHost: example.com\r\nX-Pad: %s\r\nProxy-Authorization: %s\r\n\r\n",
+					i, pad[:64], pad, basicAuth(h.cred))
+				resp, err := http.ReadResponse(br, nil)
+				if err != nil {
+					t.Fatalf("request %d: %v", i, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				switch {
+				case resp.StatusCode == http.StatusOK:
+				case block && resp.StatusCode == http.StatusForbidden && decodeBlock(t, body).Category == CategoryLargeUpload:
+					refused = true
+				default:
+					t.Fatalf("request %d = %d %s", i, resp.StatusCode, body)
+				}
+			}
+			e := h.sink.wait(t, EventLargeUpload, 1)[0]
+			if e.Terminated != block || e.Host != "example.com" {
+				t.Errorf("large_upload event = %+v", e)
+			}
+			if block != refused {
+				t.Errorf("refused = %v with block = %v", refused, block)
+			}
+			var up int64
+			eventually(t, "every request to close", func() bool {
+				up = 0
+				for _, s := range h.proxy.Counter().DestinationsFor("binding-one") {
+					up += s.BytesUp
+				}
+				return len(h.proxy.Tunnels()) == 0
+			})
+			if got := received(); up != got || up == 0 {
+				t.Errorf("counted %d bytes up; the upstream received %d", up, got)
+			}
+			if block && received() > 4096 {
+				t.Errorf("the upstream received %d bytes past the 4096-byte block", received())
+			}
+		})
 	}
 }
 
