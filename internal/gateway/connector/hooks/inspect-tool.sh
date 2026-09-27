@@ -135,8 +135,10 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-{{if .Sandbox}}INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
-  '{tool: $tool, args: $args}')"
+{{if .Sandbox}}INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | jq -Rs --arg tool "$TOOL_NAME" \
+  '{tool: $tool, args: .}')" || {
+  fail_unreachable "failed to build inspect body"
+}
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
