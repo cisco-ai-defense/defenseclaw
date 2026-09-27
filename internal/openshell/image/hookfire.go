@@ -409,7 +409,7 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	// p2-render-7: in host mode, serialize probes that bind the same address
 	// to prevent EADDRINUSE collisions.
 	var unlock func()
-	if netw.mode == HookFireNetworkHost {
+	if netw.mode == HookFireNetworkHost && b.Store != nil {
 		lockPath := filepath.Join(filepath.Dir(b.Store.Path()), fmt.Sprintf("hookfire-%s-%d.lock", netw.bindHost, netw.sinkPort))
 		unlock, err = lockFile(lockPath)
 		if err != nil {
