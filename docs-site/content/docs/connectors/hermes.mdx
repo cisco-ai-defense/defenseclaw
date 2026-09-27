@@ -292,10 +292,12 @@ only in the image; nothing on your host changes.
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A headless run is
   `hermes chat -q <prompt> -Q`.
 - **Other traffic.** Apart from the model, a daemon run on a mock model
-  reached `pypi.org` and `github.com` (Hermes' update check) and downloaded
-  from `files.pythonhosted.org` and `release-assets.githubusercontent.com`.
-  That traffic goes through the DefenseClaw egress proxy, which logs it and
-  applies the blocklist.
+  reached `pypi.org` and `github.com` (Hermes' update check). It also
+  downloaded about 20 MB from `release-assets.githubusercontent.com` and
+  `files.pythonhosted.org`. At startup, Hermes fetches its Tirith command
+  scanner from GitHub releases into `~/.hermes/bin`, outside the pinned
+  install. That traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist.
 - **Status.** Verified end to end. A run through the DefenseClaw daemon in an
   OpenShell sandbox, on a mock model behind a credential binding, showed:
   - hooks reaching the sandbox ingress, with OpenShell substituting the model
