@@ -571,3 +571,120 @@ func TestPlainSnapshotSizeCap(t *testing.T) {
 		t.Fatal("failed snapshot left data behind")
 	}
 }
+
+// TestUndoPreservesIgnoredDirectoryWithNestedRepo tests p1a-19: when the
+// agent plants a .git marker inside an ignored directory that existed before
+// the session, undo must only remove the .git entry, not the whole directory.
+func TestUndoPreservesIgnoredDirectoryWithNestedRepo(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	// Pre-session: an ignored directory with operator files.
+	writeFile(t, e.project, "build/data.json", "operator marker data\n")
+	writeFile(t, e.project, "build/cache.bin", "operator marker cache\n")
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent creates .git inside the ignored directory.
+	writeFile(t, e.project, "build/.git/config", "[core]\n")
+	writeFile(t, e.project, "build/.git/HEAD", "ref: refs/heads/main\n")
+
+	preview := mustUndo(t, e, "s1", true)
+	if len(preview.NestedRepos) != 1 || preview.NestedRepos[0] != "build" {
+		t.Fatalf("nested repos = %v", preview.NestedRepos)
+	}
+
+	mustUndo(t, e, "s1", false)
+	// The .git entry should be removed, but operator files kept.
+	if pathExists(filepath.Join(e.project, "build/.git")) {
+		t.Fatal("nested .git survived undo")
+	}
+	if readFile(t, e.project, "build/data.json") != "operator marker data\n" {
+		t.Fatal("pre-existing ignored file was lost")
+	}
+	if readFile(t, e.project, "build/cache.bin") != "operator marker cache\n" {
+		t.Fatal("pre-existing ignored file was lost")
+	}
+}
+
+// TestUndoPreservesIgnoredFilesWhenIgnoreRuleRemoved tests p1a-21: when a
+// file was ignored before the session and the agent removes its ignore rule,
+// undo must keep the pre-existing file.
+func TestUndoPreservesIgnoredFilesWhenIgnoreRuleRemoved(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	// Pre-session: ignored files exist.
+	writeFile(t, e.project, ".env", "SECRET=operator marker value\n")
+	writeFile(t, e.project, "debug.log", "operator marker log\n")
+	writeFile(t, e.project, "build/output.bin", "operator marker output\n")
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent removes .env and *.log from .gitignore.
+	writeFile(t, e.project, ".gitignore", "build/\n")
+
+	preview := mustUndo(t, e, "s1", true)
+	// The ignored files should not appear as "A" (added).
+	for _, c := range preview.Changes {
+		if c.Path == ".env" || c.Path == "debug.log" {
+			t.Fatalf("pre-session ignored file %s reported as %s", c.Path, c.Status)
+		}
+	}
+
+	mustUndo(t, e, "s1", false)
+	// The pre-session ignored files must survive.
+	if readFile(t, e.project, ".env") != "SECRET=operator marker value\n" {
+		t.Fatal("pre-existing .env was removed")
+	}
+	if readFile(t, e.project, "debug.log") != "operator marker log\n" {
+		t.Fatal("pre-existing debug.log was removed")
+	}
+	if readFile(t, e.project, "build/output.bin") != "operator marker output\n" {
+		t.Fatal("pre-existing build/output.bin was removed")
+	}
+}
+
+// TestUndoSavesPostSessionRefTips tests p1a-22: before resetting branches
+// and tags, undo must save the post-session tips so they are recoverable.
+func TestUndoSavesPostSessionRefTips(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	e.git(e.project, "tag", "v1")
+	hostBranch := e.git(e.project, "rev-parse", "HEAD")
+	e.git(e.project, "branch", "feature")
+	mustSnapshot(t, e, "s1")
+
+	// Session: agent creates commits, moves branches and tags.
+	writeFile(t, e.project, "agent.txt", "agent marker commit\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "agent commit on main")
+	agentMainTip := e.git(e.project, "rev-parse", "HEAD")
+	e.git(e.project, "checkout", "-q", "feature")
+	writeFile(t, e.project, "feature.txt", "agent marker feature\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "agent feature commit")
+	agentFeatureTip := e.git(e.project, "rev-parse", "HEAD")
+	e.git(e.project, "tag", "-d", "v1")
+	e.git(e.project, "tag", "agent-tag")
+	agentTagTip := e.git(e.project, "rev-parse", "agent-tag")
+
+	mustUndo(t, e, "s1", false)
+	// The pre-session state should be restored.
+	if e.git(e.project, "rev-parse", "HEAD") != hostBranch {
+		t.Fatal("HEAD not restored")
+	}
+	if e.git(e.project, "rev-parse", "refs/tags/v1") != hostBranch {
+		t.Fatal("v1 tag not restored")
+	}
+	// But the agent's work must be saved under refs/defenseclaw/post-refs/.
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/main"); got != agentMainTip {
+		t.Fatalf("agent's main tip not saved: got %s, want %s", got, agentMainTip)
+	}
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/feature"); got != agentFeatureTip {
+		t.Fatalf("agent's feature tip not saved: got %s, want %s", got, agentFeatureTip)
+	}
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/tags/agent-tag"); got != agentTagTip {
+		t.Fatalf("agent's tag not saved: got %s, want %s", got, agentTagTip)
+	}
+	// The pre-session feature branch must also be saved (it existed but was not changed).
+	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/refs/heads/feature"); got != agentFeatureTip {
+		t.Fatalf("pre-session feature tip not saved")
+	}
+}
