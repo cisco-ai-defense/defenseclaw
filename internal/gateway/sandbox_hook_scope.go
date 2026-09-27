@@ -22,7 +22,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -188,8 +190,86 @@ func resolveConnectorInstanceForRequest(
 		connectorName, profileVersion, custody)
 }
 
+// Sandbox coverage gaps name host-side checks that a sandbox request could
+// not run because the files they read have no host counterpart the gateway
+// may open (copy mode, or a path outside the mounted project). Each hook
+// request records its gaps and reports them on its audit row
+// (extra.sandbox_coverage_gaps), so a skipped check reads as partial
+// coverage rather than as a clean result. Verdicts are unchanged: an
+// unreadable script stays an opaque artifact to the command analysis, as
+// it is on the host, and the sandbox boundary still contains it.
+const (
+	// sandboxGapArtifactUnreadable: a script a tool call executes or
+	// sources could not be read for artifact analysis.
+	sandboxGapArtifactUnreadable = "artifact_unreadable"
+	// sandboxGapStopScanNoHostView: a Stop scan was skipped because the
+	// sandbox's files are not on the host.
+	sandboxGapStopScanNoHostView = "stop_scan_no_host_view"
+	// sandboxGapStopScanNoChangedFiles: a Stop scan covered only the
+	// configured scan paths; changed-file discovery needs host git, which
+	// never runs against a sandbox tree.
+	sandboxGapStopScanNoChangedFiles = "stop_scan_no_changed_files"
+	// sandboxGapEventFileUnreadable: a file named by a hook event could not
+	// be scanned, so only the event text was inspected.
+	sandboxGapEventFileUnreadable = "event_file_unreadable"
+	// sandboxGapComponentScanSkipped: a requested or scheduled component
+	// scan (skills, plugins, MCP) does not run for a sandbox.
+	sandboxGapComponentScanSkipped = "component_scan_skipped"
+)
+
+type sandboxCoverage struct {
+	mu   sync.Mutex
+	gaps map[string]struct{}
+}
+
+type sandboxCoverageContextKey struct{}
+
+// withSandboxCoverage gives a sandbox request a gap recorder. Host requests
+// and requests that already have one are returned unchanged.
+func withSandboxCoverage(ctx context.Context) context.Context {
+	if !isSandboxHookRequest(ctx) {
+		return ctx
+	}
+	if _, ok := ctx.Value(sandboxCoverageContextKey{}).(*sandboxCoverage); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, sandboxCoverageContextKey{}, &sandboxCoverage{})
+}
+
+// noteSandboxCoverageGap records gap for the request, if it is a sandbox
+// request with a recorder.
+func noteSandboxCoverageGap(ctx context.Context, gap string) {
+	coverage, ok := ctx.Value(sandboxCoverageContextKey{}).(*sandboxCoverage)
+	if !ok {
+		return
+	}
+	coverage.mu.Lock()
+	if coverage.gaps == nil {
+		coverage.gaps = make(map[string]struct{}, 2)
+	}
+	coverage.gaps[gap] = struct{}{}
+	coverage.mu.Unlock()
+}
+
+// sandboxCoverageGaps returns the request's recorded gaps, sorted.
+func sandboxCoverageGaps(ctx context.Context) []string {
+	coverage, ok := ctx.Value(sandboxCoverageContextKey{}).(*sandboxCoverage)
+	if !ok {
+		return nil
+	}
+	coverage.mu.Lock()
+	defer coverage.mu.Unlock()
+	gaps := make([]string, 0, len(coverage.gaps))
+	for gap := range coverage.gaps {
+		gaps = append(gaps, gap)
+	}
+	slices.Sort(gaps)
+	return gaps
+}
+
 // sandboxHookAuditExtra is the sandbox identity stamped onto hook audit
-// envelopes, taken from the authenticated binding only.
+// envelopes, taken from the authenticated binding only, plus the request's
+// coverage gaps.
 func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
@@ -205,6 +285,9 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	}
 	if binding.PolicyProfile != "" {
 		extra["sandbox_profile"] = binding.PolicyProfile
+	}
+	if gaps := sandboxCoverageGaps(ctx); len(gaps) > 0 {
+		extra["sandbox_coverage_gaps"] = strings.Join(gaps, ",")
 	}
 	return extra
 }
@@ -231,11 +314,14 @@ const sandboxStopTargetLimit = 200
 // sandboxStopTargets returns the configured Stop-scan paths that resolve
 // inside the sandbox's mounted project, relative ones joined to the mapped
 // working directory. There is no changed-file discovery: host git never
-// runs against a sandbox tree.
-func sandboxStopTargets(view *sandboxauth.FSView, hostCWD string, scanPaths []string) []string {
+// runs against a sandbox tree. Both that and a copy-mode sandbox, which has
+// nothing to scan on the host, are recorded as coverage gaps.
+func sandboxStopTargets(ctx context.Context, view *sandboxauth.FSView, hostCWD string, scanPaths []string) []string {
 	if view == nil || !view.HostAccess() {
+		noteSandboxCoverageGap(ctx, sandboxGapStopScanNoHostView)
 		return nil
 	}
+	noteSandboxCoverageGap(ctx, sandboxGapStopScanNoChangedFiles)
 	var out []string
 	seen := map[string]bool{}
 	for _, p := range scanPaths {

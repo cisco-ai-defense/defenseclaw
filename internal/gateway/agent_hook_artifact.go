@@ -7,7 +7,9 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -374,26 +376,40 @@ type promotedArtifactReadResult struct {
 	ok      bool
 }
 
+// readPromotedArtifactBounded reads one candidate script within the hook's
+// time and concurrency budget. For a sandbox request, a script the check
+// could not read (no host view, outside the mounted project, or no read
+// slot or time left) is recorded as a coverage gap on the request.
 func readPromotedArtifactBounded(
 	ctx context.Context,
 	path string,
 	dialect actionfacts.Dialect,
 ) ([]byte, actionfacts.Dialect, bool) {
+	view, sandboxed := sandboxHookView(ctx)
+	unread := func() ([]byte, actionfacts.Dialect, bool) {
+		if sandboxed {
+			noteSandboxCoverageGap(ctx, sandboxGapArtifactUnreadable)
+		}
+		return nil, actionfacts.DialectNone, false
+	}
 	select {
 	case promotedArtifactReadSlots <- struct{}{}:
 	case <-ctx.Done():
-		return nil, actionfacts.DialectNone, false
+		return unread()
 	default:
-		return nil, actionfacts.DialectNone, false
+		return unread()
 	}
-	view, sandboxed := sandboxHookView(ctx)
 	result := make(chan promotedArtifactReadResult, 1)
 	go func() {
 		defer func() { <-promotedArtifactReadSlots }()
 		read := readPromotedArtifact
 		if sandboxed {
 			read = func(path string, dialect actionfacts.Dialect) ([]byte, actionfacts.Dialect, bool) {
-				return readPromotedArtifactFromView(view, path, dialect)
+				body, resolved, ok, readable := readPromotedArtifactFromView(view, path, dialect)
+				if !readable {
+					noteSandboxCoverageGap(ctx, sandboxGapArtifactUnreadable)
+				}
+				return body, resolved, ok
 			}
 		}
 		body, resolvedDialect, ok := read(path, dialect)
@@ -407,9 +423,9 @@ func readPromotedArtifactBounded(
 	case read := <-result:
 		return read.body, read.dialect, read.ok
 	case <-ctx.Done():
-		return nil, actionfacts.DialectNone, false
+		return unread()
 	case <-timer.C:
-		return nil, actionfacts.DialectNone, false
+		return unread()
 	}
 }
 
@@ -469,28 +485,35 @@ func readPromotedArtifact(
 // working directory; the read is confined to the mounted project, so a
 // script anywhere else (including the sandbox's own /tmp, which is not the
 // host's) is never read from the host. The size, execute-bit and shebang
-// rules are unchanged.
+// rules are unchanged. readable is false when the view could not read a
+// file that may exist in the sandbox, so that script went unanalysed. A
+// mounted file that is missing, a masked file (empty inside the sandbox)
+// and a readable file that is not a script are not gaps.
 func readPromotedArtifactFromView(
 	view *sandboxauth.FSView,
 	path string,
 	dialectHint actionfacts.Dialect,
-) ([]byte, actionfacts.Dialect, bool) {
+) (body []byte, dialect actionfacts.Dialect, ok bool, readable bool) {
 	body, info, err := view.ReadFile(path, promotedArtifactMaxBytes)
-	if err != nil || len(body) == 0 {
-		return nil, actionfacts.DialectNone, false
+	if err != nil {
+		return nil, actionfacts.DialectNone, false,
+			errors.Is(err, fs.ErrNotExist) || errors.Is(err, sandboxauth.ErrMasked)
+	}
+	if len(body) == 0 {
+		return nil, actionfacts.DialectNone, false, true
 	}
 	if dialectHint == actionfacts.DialectNone && runtime.GOOS != "windows" &&
 		info.Mode().Perm()&0o111 == 0 {
-		return nil, actionfacts.DialectNone, false
+		return nil, actionfacts.DialectNone, false, true
 	}
-	dialect := dialectHint
+	dialect = dialectHint
 	if dialect == actionfacts.DialectNone {
 		dialect = promotedArtifactShebangDialect(body)
 	}
 	if dialect == actionfacts.DialectNone {
-		return nil, actionfacts.DialectNone, false
+		return nil, actionfacts.DialectNone, false, true
 	}
-	return body, dialect, true
+	return body, dialect, true, true
 }
 
 func samePromotedArtifactVersion(left, right os.FileInfo) bool {

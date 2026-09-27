@@ -3504,7 +3504,7 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 		if a.scannerCfg != nil {
 			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
 		}
-		return sandboxStopTargets(req.sandboxView, req.CWD, scanPaths)
+		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -3712,11 +3712,15 @@ func runGitList(ctx context.Context, cwd string, args ...string) ([]string, erro
 }
 
 func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookRequest) int {
-	if a.scannerCfg == nil || req.sandboxView != nil {
+	if a.scannerCfg == nil {
+		return 0
+	}
+	if req.sandboxView != nil {
 		// Component targets are the host user's Codex home plus project
 		// layers found by walking up the host tree. Neither applies to a
 		// sandbox, and the skill/plugin/MCP scanners are subprocesses that
 		// must not be pointed at an agent-writable tree on the host.
+		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
 	if !req.ScanComponents && !a.codexComponentScanDue() {

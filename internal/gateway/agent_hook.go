@@ -323,6 +323,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// decision and can still protect the exact pre-execution boundary.
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
+		ctx = withSandboxCoverage(ctx)
 		ctx = enrichAgentHookContext(ctx, req)
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
 			a.hookJudge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))

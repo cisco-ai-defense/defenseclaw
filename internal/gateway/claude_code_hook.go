@@ -763,6 +763,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 		// working directory); read it only inside the mounted project.
 		results := sandboxCodeGuardScan(req.sandboxView, rulesDir, []string{target})
 		if len(results) == 0 {
+			noteSandboxCoverageGap(ctx, sandboxGapEventFileUnreadable)
 			return nil
 		}
 		result = results[0]
@@ -868,7 +869,7 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 		if a.scannerCfg != nil {
 			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
 		}
-		return sandboxStopTargets(req.sandboxView, req.CWD, scanPaths)
+		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -907,11 +908,15 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 }
 
 func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCodeHookRequest) int {
-	if a.scannerCfg == nil || req.sandboxView != nil {
+	if a.scannerCfg == nil {
+		return 0
+	}
+	if req.sandboxView != nil {
 		// Component targets are the host user's Claude home plus workspace
 		// trees found by walking up with git. Neither applies to a sandbox,
 		// and the skill/plugin/MCP scanners are subprocesses that must not be
 		// pointed at an agent-writable tree on the host.
+		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
 	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {

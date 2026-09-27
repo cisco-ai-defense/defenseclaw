@@ -366,6 +366,69 @@ func TestSandboxToolCallsResolveHomeInTheSandbox(t *testing.T) {
 	}
 }
 
+// TestSandboxCoverageGapsAreRecorded pins the signal for host-side checks a
+// sandbox request cannot run: an unreadable promoted artifact and a skipped
+// or partial Stop scan are recorded on the request and reported on its hook
+// audit row, while checks that did run (or had nothing to read) record
+// nothing, and host requests never carry gaps.
+func TestSandboxCoverageGapsAreRecorded(t *testing.T) {
+	p := newSandboxProject(t)
+	p.write(t, "build.sh", "#!/bin/sh\necho hi\n", 0o755)
+	p.write(t, "notes.txt", "plain\n", 0o644)
+	for _, tc := range []struct {
+		name    string
+		binding sandboxauth.Binding
+		path    string
+		dialect actionfacts.Dialect
+		gap     bool
+	}{
+		{"copy mode", p.copy, "/work/app/build.sh", actionfacts.DialectPOSIX, true},
+		{"sandbox tmp", p.mount, "/tmp/build.sh", actionfacts.DialectPOSIX, true},
+		{"outside the mount", p.mount, filepath.Join(p.outside, "build.sh"), actionfacts.DialectPOSIX, true},
+		{"in the project", p.mount, "/work/app/build.sh", actionfacts.DialectNone, false},
+		{"missing in the project", p.mount, "/work/app/missing.sh", actionfacts.DialectPOSIX, false},
+		{"masked", p.mount, "/work/app/.env", actionfacts.DialectPOSIX, false},
+		{"not a script", p.mount, "/work/app/notes.txt", actionfacts.DialectNone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := withSandboxCoverage(sandboxCtx(tc.binding))
+			readPromotedArtifactBounded(ctx, tc.path, tc.dialect)
+			gaps := sandboxCoverageGaps(ctx)
+			if got := slices.Contains(gaps, sandboxGapArtifactUnreadable); got != tc.gap {
+				t.Fatalf("gaps = %v, want artifact gap %v", gaps, tc.gap)
+			}
+		})
+	}
+
+	copyCtx := withSandboxCoverage(sandboxCtx(p.copy))
+	if got := sandboxStopTargets(copyCtx, viewFor(copyCtx), "", []string{"src/a.go"}); got != nil {
+		t.Fatalf("copy-mode stop targets = %v", got)
+	}
+	mountCtx := withSandboxCoverage(sandboxCtx(p.mount))
+	sandboxStopTargets(mountCtx, viewFor(mountCtx), p.root, []string{"build.sh"})
+	if got := sandboxCoverageGaps(copyCtx); !slices.Equal(got, []string{sandboxGapStopScanNoHostView}) {
+		t.Fatalf("copy-mode stop gaps = %v", got)
+	}
+	if got := sandboxCoverageGaps(mountCtx); !slices.Equal(got, []string{sandboxGapStopScanNoChangedFiles}) {
+		t.Fatalf("mount-mode stop gaps = %v", got)
+	}
+	noteSandboxCoverageGap(copyCtx, sandboxGapArtifactUnreadable)
+	extra := hookRequestAuditExtra(copyCtx, connector.HookProfile{})
+	if want := sandboxGapArtifactUnreadable + "," + sandboxGapStopScanNoHostView; extra["sandbox_coverage_gaps"] != want {
+		t.Fatalf("audit extra gaps = %q, want %q", extra["sandbox_coverage_gaps"], want)
+	}
+	if _, present := hookRequestAuditExtra(withSandboxCoverage(sandboxCtx(p.mount)), connector.HookProfile{})["sandbox_coverage_gaps"]; present {
+		t.Fatal("a request without gaps reports some")
+	}
+
+	host := withSandboxCoverage(context.Background())
+	readPromotedArtifactBounded(host, "/tmp/definitely-missing.sh", actionfacts.DialectPOSIX)
+	noteSandboxCoverageGap(host, sandboxGapArtifactUnreadable)
+	if gaps := sandboxCoverageGaps(host); gaps != nil {
+		t.Fatalf("host request recorded gaps %v", gaps)
+	}
+}
+
 func TestSandboxPromotedArtifactReadsOnlyProject(t *testing.T) {
 	p := newSandboxProject(t)
 	inside := p.write(t, "build.sh", "#!/bin/sh\necho hi\n", 0o755)
