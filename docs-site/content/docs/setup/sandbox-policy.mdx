@@ -156,8 +156,9 @@ create this directory, so create it when you add your first custom pack.
 
 ## Write a custom pack
 
-Start from the built-in pack closest to what you want. Copy it to
-`<pack_dir>/<name>/pack.yaml`, then change the `name` to match the directory.
+Start from the built-in pack closest to what you want: copy
+`policies/sandbox/<pack>/pack.yaml` from the DefenseClaw repository to
+`<pack_dir>/<name>/pack.yaml`, then change `name` to match the directory.
 
 ```yaml
 version: 1
@@ -315,7 +316,8 @@ override the one before it, and the last one can only make things stricter:
    Examples are a stricter profile, copy mode, keeping the harness prompts, or
    leaving MCP servers behind.
 4. **`openshell.admin`** clamps the result. Anything looser than the
-   administrator allows is replaced with the allowed value.
+   administrator allows is replaced with the allowed value, and a harness the
+   administrator doesn't allow is refused.
 
 Keys that the pack governs have no default of their own, so a key you leave
 unset follows the pack. Some settings merge instead of replacing:
@@ -384,7 +386,7 @@ checks each destination in this order, and the first match decides:
 The `openshell.admin` block holds the administrator's limits. Every key is
 optional, and a key you leave unset adds no limit. The three-state switches
 (`allow_*`) only restrict when set to `false`. Leaving one unset, or setting
-`true`, allows the action.
+it to `true`, adds no limit.
 
 ```yaml
 openshell:
@@ -616,8 +618,9 @@ No pack or admin setting can change these:
 - DefenseClaw never opens its own listeners to a sandbox: the API
   (`gateway.api_port`, 18970 by default), the sandbox hook ingress and egress
   proxy (the next two ports by default), the guardrail proxy, and the model
-  router when routing is on. The OpenShell gateway (17670 by default) and the
-  OpenClaw gateway (`gateway.port`, 18789 by default) are never opened either.
+  router when routing runs on this machine. The OpenShell gateway (17670 by
+  default) and the OpenClaw gateway (`gateway.port`, 18789 by default) are
+  never opened either.
 - Link-local, cloud metadata, multicast, and reserved addresses are never
   approved.
 - Allow entries that cover every host or a whole top-level domain are ignored.
