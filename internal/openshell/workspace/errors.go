@@ -19,6 +19,8 @@ package workspace
 import (
 	"errors"
 	"fmt"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // Sentinel errors. Typed errors below unwrap to these so callers can branch
@@ -30,8 +32,9 @@ var (
 	// protected by a live mount (worktree, external git dir); use --copy.
 	ErrNeedsCopy = errors.New("workspace: project needs copy mode")
 	// ErrUnsupportedPlatform: live mounts, snapshots and copy staging are
-	// implemented for Linux and macOS hosts only.
-	ErrUnsupportedPlatform = errors.New("workspace: sandbox workspaces are supported on Linux and macOS only")
+	// implemented for Linux and macOS hosts only, like OpenShell sandboxes.
+	// It is the openshell package's sentinel, so errors.Is matches either.
+	ErrUnsupportedPlatform = openshell.ErrUnsupportedPlatform
 	// ErrTooLarge: a size preflight failed.
 	ErrTooLarge = errors.New("workspace: too large")
 	// ErrSnapshotExists: a snapshot with this name is already recorded.

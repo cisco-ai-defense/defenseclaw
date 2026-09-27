@@ -36,9 +36,11 @@ type SandboxInfo struct {
 }
 
 // SandboxLister finds sandboxes whose labels include every given pair.
-// The OpenShell client implements it with a label-selector list call.
+// GatewayClient implements it on an openshell.Client. The method is not
+// named ListSandboxes because openshell.Client already has a method of
+// that name returning []*openshell.Sandbox.
 type SandboxLister interface {
-	ListSandboxes(ctx context.Context, labels map[string]string) ([]SandboxInfo, error)
+	FindSandboxes(ctx context.Context, labels map[string]string) ([]SandboxInfo, error)
 }
 
 // ResumeCandidate is an existing sandbox for the same folder.
@@ -70,7 +72,7 @@ func FindResumable(ctx context.Context, lister SandboxLister, dataDir, project s
 		return nil, fmt.Errorf("workspace: resolve %s: %w", project, err)
 	}
 	key, value := ProjectLabel(real)
-	boxes, err := lister.ListSandboxes(ctx, map[string]string{key: value})
+	boxes, err := lister.FindSandboxes(ctx, map[string]string{key: value})
 	if err != nil {
 		return nil, err
 	}

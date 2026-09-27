@@ -158,7 +158,7 @@ type fakeLister struct {
 	got   map[string]string
 }
 
-func (l *fakeLister) ListSandboxes(_ context.Context, labels map[string]string) ([]SandboxInfo, error) {
+func (l *fakeLister) FindSandboxes(_ context.Context, labels map[string]string) ([]SandboxInfo, error) {
 	l.got = labels
 	if l.err != nil {
 		return nil, l.err

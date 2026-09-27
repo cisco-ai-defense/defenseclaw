@@ -44,7 +44,10 @@
 // copy (hard links where possible) of the project's objects, so the snapshot
 // survives an agent deleting .git/objects.
 //
-// OpenShell is reached only through the Execer, Uploader and Downloader
-// interfaces; CLI implements them with the upstream openshell binary and the
-// OpenShell client package can supply SDK-backed versions later.
+// OpenShell is reached only through the Execer, Uploader, Downloader and
+// SandboxLister interfaces. CLI implements the transfers and exec with the
+// upstream openshell binary, pinned to one gateway; GatewayClient
+// implements exec and sandbox listing on an openshell.Client. Both follow
+// the openshell package's exec rules: the sandbox stops a command at its
+// timeout, and only commands marked Idempotent are ever retried.
 package workspace
