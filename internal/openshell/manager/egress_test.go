@@ -118,6 +118,13 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	if !decide(t, e, "otherbox", "pastebin.com", 443).Allowed {
 		t.Fatal("always unblock not effective")
 	}
+	// It lives in the configuration only: taking it out of
+	// openshell.egress.unblocked takes it back.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Unblocked = nil })
+	e.m.refreshEgress()
+	if decide(t, e, "otherbox", "pastebin.com", 443).Allowed {
+		t.Fatal("the always unblock outlived its removal from the configuration")
+	}
 	var unblocks int
 	for _, pe := range e.tel.policy {
 		if pe.Operation == audit.SandboxEgressUnblock {

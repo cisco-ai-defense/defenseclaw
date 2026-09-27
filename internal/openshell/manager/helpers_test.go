@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -392,6 +393,9 @@ type fakePersister struct {
 	mu           sync.Mutex
 	allow, block []string
 	err          error
+	// save, when set, writes a decision into the configuration, as the
+	// daemon's persister does (config.yaml, then a synchronous reload).
+	save func(block bool, host string)
 }
 
 func (p *fakePersister) AllowAlways(_ context.Context, host string) error {
@@ -401,6 +405,9 @@ func (p *fakePersister) AllowAlways(_ context.Context, host string) error {
 		return p.err
 	}
 	p.allow = append(p.allow, host)
+	if p.save != nil {
+		p.save(false, host)
+	}
 	return nil
 }
 
@@ -411,6 +418,9 @@ func (p *fakePersister) BlockAlways(_ context.Context, host string) error {
 		return p.err
 	}
 	p.block = append(p.block, host)
+	if p.save != nil {
+		p.save(true, host)
+	}
 	return nil
 }
 
@@ -682,7 +692,15 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 			t.Errorf("the audit recorder refused %d sandbox record(s):\n%s", len(refused), strings.Join(refused, "\n"))
 		}
 	})
-	e.persist = &fakePersister{}
+	e.persist = &fakePersister{save: func(block bool, host string) {
+		e.setConfig(func(c *config.Config) {
+			if block {
+				c.OpenShell.Egress.Block = append(slices.Clip(c.OpenShell.Egress.Block), host)
+			} else {
+				c.OpenShell.Egress.Unblocked = append(slices.Clip(c.OpenShell.Egress.Unblocked), host)
+			}
+		})
+	}}
 	e.watch = newFakeWatch()
 	e.dns = newFakeDNS()
 	e.guard = newFakeGuard()

@@ -36,9 +36,9 @@ import (
 )
 
 // unblockIndex serves a sandbox decider's unblock lookups: the unblocks
-// scoped to the principal's sandbox and the persistent ones ("always"
-// decisions made since the daemon started, and the saved
-// openshell.egress.unblocked). The decider consults them only after its
+// scoped to the principal's sandbox (live) and the "always" ones, which
+// exist only as the saved openshell.egress.unblocked, so taking one out of
+// the configuration takes it back. The decider consults them only after its
 // guard, the administrator's lists and the block list, and not at all while
 // the administrator forbids unblocking, so an unblock never lifts more than
 // the sandbox's own policy allows.
@@ -230,12 +230,17 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	resp := &sandboxapi.UnblockResponse{Host: host, Sandbox: req.Sandbox}
 	var ident audit.SandboxIdentity
 	if req.Always {
+		probe, _ := egress.NewMemoryUnblocks()
+		if err := probe.Add(egress.Unblock{Pattern: host}); err != nil {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "%v", err)
+		}
+		// The saved list is the only record of an "always" unblock: the
+		// persister reloads the configuration, and the deciders are
+		// rebuilt from it (configLoop would within two seconds too).
 		if err := m.persistAllow(ctx, host); err != nil {
 			return nil, err
 		}
-		if err := m.unblocks.Add(egress.Unblock{Pattern: host, CreatedAt: m.now().UTC()}); err != nil {
-			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "%v", err)
-		}
+		m.refreshEgress()
 		resp.Scope, resp.Persisted = string(audit.SandboxApprovalScopeAlways), true
 		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.unblocked)"
 	} else {
