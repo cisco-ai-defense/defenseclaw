@@ -102,6 +102,10 @@ const (
 // provider is healthy but whose hook lane never received an inspector.
 const managedInspectionUnwiredDetail = "no managed inspector is wired for agent hooks; check cisco_ai_defense.endpoint and managed-cloud enrollment (the gateway retries every 30 seconds)"
 
+// managedInspectionProxyUnwiredDetail is managedInspectionUnwiredDetail for
+// the lane of the guardrail proxy the gateway serves.
+const managedInspectionProxyUnwiredDetail = "no managed inspector is wired for the guardrail proxy; check cisco_ai_defense.endpoint and managed-cloud enrollment (the gateway retries every 30 seconds)"
+
 const (
 	// managedInspectionProbeInterval bounds how often an unavailable
 	// provider is re-probed from the guardrail health ticker, so an idle
@@ -128,14 +132,18 @@ func (s *Sidecar) setManagedHookInspectorWired(wired bool) {
 	s.publishManagedInspectionHealth()
 }
 
-// managedInspectionState combines the provider availability with the hook
-// lane wiring: a healthy provider does not help when the hook lane has no
-// inspector (for example an empty endpoint, or a provider that only became
-// buildable after the API server started).
+// managedInspectionState combines the provider availability with the lane
+// wiring: a healthy provider does not help when the hook lane, or the lane
+// of the guardrail proxy the gateway serves, has no inspector (for example
+// an empty endpoint, or a provider that only became buildable after the
+// lane was wired).
 func (s *Sidecar) managedInspectionState() (bool, string) {
 	available, detail := s.inspectionAvailability()
 	if available && s.managedHookInspector.Load() == managedHookInspectorUnwired {
 		return false, managedInspectionUnwiredDetail
+	}
+	if available && s.managedGuardrailProxy.Load().managedInspectorUnwired() {
+		return false, managedInspectionProxyUnwiredDetail
 	}
 	return available, detail
 }
@@ -234,6 +242,44 @@ func (s *Sidecar) retryManagedHookInspector(ctx context.Context) {
 	fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: hook-lane Cisco AI Defense inspector wired on retry")
 }
 
+// retryManagedProxyInspector is retryManagedHookInspector for the lane of the
+// guardrail proxy runGuardrailProxy serves, which gets its managed inspector
+// when the proxy starts and on a reload that changes cisco_ai_defense. It
+// runs under the same conditions and lock, rate limited on its own
+// timestamp, with a quiet build.
+func (s *Sidecar) retryManagedProxyInspector(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	proxy := s.managedGuardrailProxy.Load()
+	if !proxy.managedInspectorUnwired() {
+		return
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cloudreg.Registered() ||
+		strings.TrimSpace(cfg.CiscoAIDefense.Endpoint) == "" {
+		return
+	}
+	// A reload may be wiring right now; the next tick retries.
+	if !s.hookInspectorMu.TryLock() {
+		return
+	}
+	defer s.hookInspectorMu.Unlock()
+	now := time.Now()
+	if s.managedGuardrailProxy.Load() != proxy || !proxy.managedInspectorUnwired() ||
+		now.Sub(s.proxyInspectorLastRetry) < managedInspectionProbeInterval {
+		return
+	}
+	s.proxyInspectorLastRetry = now
+	inspector := s.buildManagedInspector(ctx, "proxy remote inspection still disabled", true)
+	if inspector == nil {
+		return
+	}
+	proxy.SetManagedInspection(true, inspector)
+	s.publishManagedInspectionHealth()
+	fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: proxy-lane Cisco AI Defense inspector wired on retry")
+}
+
 // probeManagedInspection re-checks an unavailable managed provider by
 // minting a token, at most once per managedInspectionProbeInterval. Only a
 // provider that was already built is probed; a provider that failed to
@@ -290,11 +336,13 @@ func (s *Sidecar) probeManagedInspection(ctx context.Context) {
 }
 
 // maintainManagedInspection is the periodic managed inspection upkeep:
-// rewire a hook lane left without an inspector, re-probe an unavailable
-// provider, and republish the Secure Client availability. The retry and
-// the probe are each rate limited on their own.
+// rewire a hook lane or served proxy lane left without an inspector,
+// re-probe an unavailable provider, and republish the Secure Client
+// availability. The retries and the probe are each rate limited on their
+// own.
 func (s *Sidecar) maintainManagedInspection(ctx context.Context) {
 	s.retryManagedHookInspector(ctx)
+	s.retryManagedProxyInspector(ctx)
 	s.probeManagedInspection(ctx)
 	s.publishManagedInspectionHealth()
 }
@@ -303,10 +351,16 @@ func (s *Sidecar) maintainManagedInspection(ctx context.Context) {
 // boots run maintainManagedInspection from their guardrail health ticker
 // (addManagedInspectionHealth); the proxy boot has no such ticker, so in
 // managed_enterprise it runs the same upkeep beside the proxy. Without it a
-// hook lane left unwired at startup (OpenClaw sends its tool calls there)
-// stays unwired until a reload.
+// hook lane (OpenClaw sends its tool calls there) or proxy lane left unwired
+// at startup stays unwired until a reload. While the proxy runs, its lane
+// also counts toward the managed inspection state.
 func (s *Sidecar) runGuardrailProxy(ctx context.Context, proxy *GuardrailProxy) error {
 	if cfg := s.currentConfig(); cfg != nil && cfg.Guardrail.Enabled && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		s.managedGuardrailProxy.Store(proxy)
+		defer func() {
+			s.managedGuardrailProxy.CompareAndSwap(proxy, nil)
+			s.publishManagedInspectionHealth()
+		}()
 		stop := s.startManagedInspectionUpkeep(ctx)
 		defer stop()
 	}

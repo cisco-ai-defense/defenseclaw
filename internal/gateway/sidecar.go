@@ -224,11 +224,19 @@ type Sidecar struct {
 	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
 	// until the API server has picked one.
 	managedHookInspector atomic.Int32
-	// hookInspectorMu serializes wiring the API server's hook-lane
-	// inspector (runAPI, a reload, and retryManagedHookInspector);
-	// hookInspectorLastRetry, guarded by it, rate-limits the retry.
+	// hookInspectorMu serializes wiring the managed inspectors of the API
+	// server's hook lane and the served guardrail proxy's lane (runAPI, a
+	// reload, retryManagedHookInspector and retryManagedProxyInspector);
+	// hookInspectorLastRetry and proxyInspectorLastRetry, guarded by it,
+	// rate-limit the two retries.
 	hookInspectorMu        sync.Mutex
 	hookInspectorLastRetry time.Time
+	// managedGuardrailProxy is the guardrail proxy runGuardrailProxy is
+	// serving in managed_enterprise, nil otherwise. While its lane has no
+	// managed inspector the managed inspection state is unavailable, and
+	// retryManagedProxyInspector rewires it.
+	managedGuardrailProxy   atomic.Pointer[GuardrailProxy]
+	proxyInspectorLastRetry time.Time
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -1975,13 +1983,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			api.SetCiscoInspector(nil)
 			s.setManagedHookInspectorWired(false)
 		}
-		s.hookInspectorMu.Unlock()
 		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 				proxy.SetManagedUnavailableAction(managedAIDEffectiveUnavailableAction(s.currentConfig()))
 			}
 		}
+		s.hookInspectorMu.Unlock()
 	}
 	// Keep the Secure Client availability in step with the reloaded
 	// posture (unavailable_action, or leaving managed_enterprise).

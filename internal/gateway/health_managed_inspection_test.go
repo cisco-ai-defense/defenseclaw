@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -460,6 +461,170 @@ func TestManagedProxyBootRewiresAnUnwiredHookLane(t *testing.T) {
 		t.Fatalf("after the rewired lane got a verdict: %+v", got)
 	}
 }
+
+// The proxy boot gives the proxy lane its managed inspector once, when the
+// proxy starts, from the same provider build as the hook lane. When that
+// build fails, the upkeep rewires the proxy lane as well, and a rewired hook
+// lane alone does not report the managed inspection available: OpenClaw's
+// LLM traffic still goes through the proxy lane.
+func TestManagedProxyBootRewiresAnUnwiredProxyLane(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buildable atomic.Bool
+	setCMIDDirectLaneRefused(t, false)
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		if !buildable.Load() {
+			return nil, errors.New("managed cloud auth library not trusted yet")
+		}
+		return newFakeCloudProvider("token"), nil
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	ctx := context.Background()
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	api := managedBlockingHookServer(nil)
+	s.apiServer = api
+
+	// runAPI's and runGuardrail's wiring with a provider that cannot be built
+	// yet.
+	if inspector := s.pickInspector(ctx); inspector != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", inspector)
+	}
+	s.setManagedHookInspectorWired(false)
+	guardrail := NewGuardrailInspector("remote", nil, nil, "")
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{}, health: s.health, inspector: guardrail}
+	proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+	proxy.SetManagedUnavailableAction(config.AIDUnavailableActionBlock)
+	messages := []ChatMessage{{Role: "user", Content: "list the files in this folder"}}
+	if v := guardrail.inspectManagedAIDOnly(ctx, "prompt", messages); v == nil || v.Action != "block" {
+		t.Fatalf("unwired proxy lane verdict = %+v, want the unavailable_action block", v)
+	}
+
+	buildable.Store(true)
+	// A disabled proxy config parks until ctx ends, which is all this test
+	// needs from proxy.Run.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- s.runGuardrailProxy(runCtx, proxy) }()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if got := s.health.Snapshot().ManagedInspection; api.currentCiscoInspector() != nil && got != nil && got.Available {
+			break
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("proxy boot: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy boot did not stop with its context")
+	}
+	if api.currentCiscoInspector() == nil {
+		t.Fatal("the managed proxy boot did not rewire the hook lane after the provider became buildable")
+	}
+	if guardrail.ciscoClient == nil {
+		t.Fatal("the managed proxy boot reported the managed inspection available but left the proxy lane without an inspector")
+	}
+	if v := guardrail.inspectManagedAIDOnly(ctx, "prompt", messages); v == nil || v.Action != "allow" {
+		t.Fatalf("rewired proxy lane verdict = %+v, want the AI Defense allow", v)
+	}
+}
+
+// Only the proxy the gateway serves counts: a boot that builds a proxy it
+// never binds (the direct-upstream connectors) has no proxy lane in use.
+func TestManagedInspectionStateAccountsForTheServedProxyLane(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.setInspectionAvailability(nil)
+	s.setManagedHookInspectorWired(true)
+	proxy := &GuardrailProxy{inspector: NewGuardrailInspector("remote", nil, nil, "")}
+	proxy.SetManagedInspection(true, nil)
+	s.publishManagedInspectionHealth()
+	if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+		t.Fatalf("an unwired proxy the gateway does not serve changed the state: %+v", got)
+	}
+	s.managedGuardrailProxy.Store(proxy)
+	s.publishManagedInspectionHealth()
+	got := s.health.Snapshot().ManagedInspection
+	if got == nil || got.Available || got.Error != managedInspectionProxyUnwiredDetail {
+		t.Fatalf("provider healthy, served proxy lane unwired: %+v", got)
+	}
+	s.setManagedHookInspectorWired(false)
+	if got := s.health.Snapshot().ManagedInspection; got.Available || got.Error != managedInspectionUnwiredDetail {
+		t.Fatalf("both lanes unwired: %+v", got)
+	}
+	s.setManagedHookInspectorWired(true)
+	s.managedGuardrailProxy.Store(nil)
+	s.publishManagedInspectionHealth()
+	if got := s.health.Snapshot().ManagedInspection; !got.Available {
+		t.Fatalf("after the proxy stopped: %+v", got)
+	}
+}
+
+// The managed inspection upkeep and a reload replace the proxy lane's AI
+// Defense inspector while the proxy is inspecting requests. Each inspection
+// reads the inspector once, so a swap never races with a read or leaves an
+// inspection calling a nil inspector. Run it with -race.
+func TestGuardrailInspectorSwapsTheRemoteInspectorWhileInspecting(t *testing.T) {
+	g := NewGuardrailInspector("remote", nil, nil, "")
+	g.SetManagedMode(true)
+	remote := &concurrentAIDInspector{}
+	messages := []ChatMessage{{Role: "user", Content: "list the files in this folder"}}
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var inspections atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if v := g.Inspect(ctx, "prompt", "list the files in this folder", messages, "gpt", "block"); v == nil {
+					t.Error("Inspect returned no verdict while the remote inspector was replaced")
+					return
+				}
+				inspections.Add(1)
+			}
+		}()
+	}
+	// Keep replacing it until the inspections have run alongside the swaps.
+	deadline := time.Now().Add(5 * time.Second)
+	for i := 0; inspections.Load() < 2000 && time.Now().Before(deadline); i++ {
+		if i%2 == 0 {
+			g.SetCiscoInspector(remote)
+		} else {
+			g.SetCiscoInspector(nil)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if remote.calls.Load() == 0 {
+		t.Fatal("no inspection reached the remote inspector")
+	}
+}
+
+// concurrentAIDInspector is stubAIDInspector for concurrent inspections:
+// each call returns its own allow verdict, as the AI Defense client does.
+type concurrentAIDInspector struct {
+	calls atomic.Int64
+}
+
+func (c *concurrentAIDInspector) Inspect(_ context.Context, _ []ChatMessage) *ScanVerdict {
+	c.calls.Add(1)
+	return allowVerdict("ai-defense")
+}
+
+func (c *concurrentAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
 
 // A reload that leaves managed_enterprise clears the managed inspection
 // state after any publish that read the managed config before the reload.
