@@ -241,6 +241,17 @@ def test_events_are_deduplicated_by_sequence_and_toast_once() -> None:
     assert len(model.add_events([later], now=100.0 + TOAST_DEDUPE_SECONDS + 1)) == 1
 
 
+def test_a_restarted_daemon_resets_the_resume_point() -> None:
+    model = _model()
+    model.add_events([{**ALLOWED, "seq": 500}], toast=False)
+    assert model.last_seq == 500
+    # The daemon restarted: its counter starts over on the new live stream.
+    notices = model.add_events([{**BLOCKED, "seq": 1}], live=True, now=1.0)
+    assert model.last_seq == 1 and len(notices) == 1
+    # A buffered read still skips what it has seen.
+    assert model.add_events([{**BLOCKED, "seq": 1}]) == []
+
+
 def test_backlog_replay_never_toasts() -> None:
     model = _model()
     assert model.add_events([BLOCKED], toast=False) == []

@@ -547,8 +547,21 @@ class SandboxesPanelModel:
 
     # ---- activity ---------------------------------------------------------
 
-    def add_events(self, events: Any, *, toast: bool = True, now: float | None = None) -> list[SandboxNotice]:
-        """Append new events (by sequence number) and return toasts to raise."""
+    def add_events(
+        self,
+        events: Any,
+        *,
+        toast: bool = True,
+        now: float | None = None,
+        live: bool = False,
+    ) -> list[SandboxNotice]:
+        """Append events and return the toasts to raise.
+
+        Buffered reads skip events at or below the resume point. ``live``
+        events come from a stream opened after ``last_seq``, so each one is
+        new: a sequence number below the resume point means the daemon
+        restarted (its counter starts over), and the resume point follows it.
+        """
         notices: list[SandboxNotice] = []
         for raw in _list(events):
             row = decode_activity(raw)
@@ -557,9 +570,12 @@ class SandboxesPanelModel:
             if row.kind != "dropped":
                 # A "dropped" marker shares its sequence number with the event
                 # after it, so it never advances the resume point.
-                if row.seq and row.seq <= self.last_seq:
+                if live:
+                    self.last_seq = row.seq or self.last_seq
+                elif row.seq and row.seq <= self.last_seq:
                     continue
-                self.last_seq = max(self.last_seq, row.seq)
+                else:
+                    self.last_seq = max(self.last_seq, row.seq)
             self.feed.append(row)
             if toast:
                 notice = self._notice_for(row, now=now)

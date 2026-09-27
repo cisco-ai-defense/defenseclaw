@@ -250,6 +250,9 @@ final class AppState {
     @ObservationIgnored private var sandboxRefreshInProgress = false
     /// The first activity read returns the daemon's buffer; it never notifies.
     @ObservationIgnored private var sandboxActivitySynced = false
+    /// When the daemon started (from /health uptime): a restarted daemon
+    /// numbers its activity from 1 again, so the resume point starts over.
+    @ObservationIgnored private var sandboxDaemonStartedAt: Date?
 
     // UI state
     var selectedPanel: PanelID = .overview
@@ -495,6 +498,7 @@ final class AppState {
         sandboxActionFailed = false
         sandboxActionsInFlight = []
         sandboxActivitySynced = false
+        sandboxDaemonStartedAt = nil
 
         connectorFilter = ""
         connectorStatsCache = [:]
@@ -939,6 +943,15 @@ final class AppState {
         guard !sandboxRefreshInProgress, !installationBindInProgress, gatewayReachable, sandboxesWatched else { return }
         sandboxRefreshInProgress = true
         defer { sandboxRefreshInProgress = false }
+        if health.uptimeMs > 0 {
+            let startedAt = Date().addingTimeInterval(-Double(health.uptimeMs) / 1000)
+            if let previous = sandboxDaemonStartedAt, startedAt.timeIntervalSince(previous) > 30 {
+                sandbox.lastSeq = 0
+                sandbox.activity = []
+                sandboxActivitySynced = false
+            }
+            sandboxDaemonStartedAt = startedAt
+        }
         let generation = installationGeneration
         let status: SandboxStatus
         do {

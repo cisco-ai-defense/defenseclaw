@@ -299,7 +299,8 @@ class SandboxPanelMixin:
             self._render_chrome()  # type: ignore[attr-defined]
 
     def _on_sandbox_events(self, events: list[dict[str, Any]], toast: bool) -> None:
-        notices = self.sandbox_model.add_events(events, toast=toast)
+        # Stream events (toast=True) are live; the one buffered backlog read is not.
+        notices = self.sandbox_model.add_events(events, toast=toast, live=toast)
         for notice in notices:
             self.notify_toast(notice.level, notice.message)  # type: ignore[attr-defined]
         if any(event.get("kind") in {"approval.requested", "approval.resolved"} for event in events):
