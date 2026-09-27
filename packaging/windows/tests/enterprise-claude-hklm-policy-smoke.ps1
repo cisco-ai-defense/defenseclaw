@@ -79,40 +79,134 @@ try {
 '@
         [IO.File]::WriteAllText($policyPath, $installed, [Text.UTF8Encoding]::new($false))
         $hook = 'C:\\Program Files\\Cisco\\Cisco Secure Client\\DefenseClaw\\bin\\defenseclaw-hook.exe'
+        $dc = '{"type":"command","timeout":30,"command":"' + $hook + '","args":["hook","--connector","claudecode","--enterprise-managed"]}'
+        $admin = '{"type":"command","command":"C:\\audit.exe"}'
+        $carried = '{"Stop":[{"hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"*","hooks":[' + $dc + ']}]}'
+        $adminOnly = '{"PreToolUse":[{"matcher":"*","hooks":[' + $admin + ']}]}'
+        # #899 review: the Status mirror follows the gateway admission rules
+        # (claudeCodeSourceHasHookContract): a covering matcher, any matching
+        # handler in an entry, and no timeout comparison.
         $cases = [ordered]@{
             # Reordered keys, compact form, and an extra administrator hook.
             'carries the installed matrix' = @{
                 want = $true
                 json = '{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","timeout":30,"command":"' + $hook + '","args":["hook","--connector","claudecode","--enterprise-managed"]}]}],"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\audit.exe"}]},{"matcher":"*","hooks":[{"timeout":30,"type":"command","command":"' + $hook + '","args":["hook","--connector","claudecode","--enterprise-managed"]}]}]}}'
             }
+            'shares an administrator entry' = @{
+                want = $true
+                json = '{"hooks":{"Stop":[{"hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"*","hooks":[' + $admin + ',' + $dc + ']}]}}'
+            }
+            'uses an empty matcher and a matcher Stop ignores' = @{
+                want = $true
+                json = '{"hooks":{"Stop":[{"matcher":"anything","hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"","hooks":[' + $dc + ']}]}}'
+            }
+            'changes a timeout' = @{
+                want = $true
+                json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":5,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
+            }
+            'spells the hook path in another case' = @{
+                want = $true
+                json = ('{"hooks":' + $carried + '}').Replace('defenseclaw-hook.exe', 'DefenseClaw-Hook.EXE')
+            }
+            'adds an unrelated administrator event' = @{
+                want = $true
+                json = '{"hooks":' + $carried.TrimEnd('}') + ',"Notification":[{"hooks":[' + $admin + ']}]}}'
+            }
             'misses an event' = @{
                 want = $false
                 json = '{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
             }
-            'changes a timeout' = @{
+            'narrows the matcher' = @{
                 want = $false
-                json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":5,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode","--enterprise-managed"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
+                json = '{"hooks":{"Stop":[{"hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"Bash","hooks":[' + $dc + ']}]}}'
+            }
+            'makes the hook asynchronous' = @{
+                want = $false
+                json = '{"hooks":{"Stop":[{"hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"*","hooks":[' + $dc.TrimEnd('}') + ',"async":true}]}]}}'
+            }
+            'adds a hook condition' = @{
+                want = $false
+                json = '{"hooks":{"Stop":[{"hooks":[' + $dc + ']}],"PreToolUse":[{"matcher":"*","hooks":[' + $dc.TrimEnd('}') + ',"if":"Bash(ls)"}]}]}}'
+            }
+            'adds a DefenseClaw hook outside the matrix' = @{
+                want = $false
+                json = '{"hooks":' + $carried.TrimEnd('}') + ',"Notification":[{"hooks":[' + $dc + ']}]}}'
             }
             'drops the enterprise flag' = @{
                 want = $false
                 json = '{"hooks":{"Stop":[{"hooks":[{"args":["hook","--connector","claudecode"],"command":"' + $hook + '","timeout":30,"type":"command"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"args":["hook","--connector","claudecode"],"command":"' + $hook + '","timeout":30,"type":"command"}]}]}}'
             }
+            'has a non-list event' = @{ want = $false; json = '{"hooks":{"Stop":"x","PreToolUse":[{"matcher":"*","hooks":[' + $dc + ']}]}}' }
             'has no hooks' = @{ want = $false; json = '{"model":"x"}' }
-            'has non-object hooks' = @{ want = $false; json = '{"hooks":"none"}' }
+            'has non-object hooks' = @{ want = 'throw'; json = '{"hooks":"none"}' }
         }
         foreach ($name in $cases.Keys) {
             $case = $cases[$name]
             try {
                 $settings = $case.json | Microsoft.PowerShell.Utility\ConvertFrom-Json
                 $got = Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $layout
-                if ([bool]$got -ne [bool]$case.want) {
+                if ($case.want -is [string]) {
+                    $failures.Add("${name}: carries=$got, want a throw")
+                }
+                elseif ([bool]$got -ne [bool]$case.want) {
                     $failures.Add("${name}: carries=$got, want $($case.want)")
                 }
             }
             catch {
-                $failures.Add("${name}: threw $($_.Exception.Message)")
+                if ($case.want -isnot [string]) {
+                    $failures.Add("${name}: threw $($_.Exception.Message)")
+                }
             }
         }
+
+        # Admission: the gateway also requires the managed-hooks-only lock to
+        # survive the outranking policy unless the administrator opted out,
+        # which the installed policy records by omitting the key.
+        $installedLocked = $installed -replace '^\{', '{"allowManagedHooksOnly": true,'
+        $decisions = @(
+            @($true, ('{"allowManagedHooksOnly":true,"hooks":' + $carried + '}'), $false, $false, 'carried with the lock'),
+            @($true, ('{"hooks":' + $carried + '}'), $true, $false, 'carried without the lock'),
+            @($true, ('{"managedSourcesBehavior":"merge","hooks":' + $carried + '}'), $true, $false, 'merge carried without the lock'),
+            @($true, ('{"managedSourcesBehavior":"merge","allowManagedHooksOnly":true,"hooks":' + $carried + '}'), $false, $false, 'merge carried with the lock'),
+            @($true, ('{"managedSourcesBehavior":"merge","hooks":' + $adminOnly + '}'), $false, $true, 'merge relying on the drop-in'),
+            @($true, ('{"managedSourcesBehavior":"merge","allowManagedHooksOnly":false,"hooks":' + $adminOnly + '}'), $true, $false, 'merge unlocking the drop-in'),
+            @($true, ('{"managedSourcesBehavior":"merge","hooks":{"Stop":"x"}}'), $true, $false, 'merge with an unmergeable list'),
+            @($true, ('{"hooks":' + $adminOnly + '}'), $true, $false, 'outranking without the hooks'),
+            @($true, ('{"allowManagedHooksOnly":"yes","hooks":' + $carried + '}'), $true, $false, 'non-boolean lock'),
+            @($true, ('{"disableAllHooks":true,"hooks":' + $carried + '}'), $true, $false, 'hooks disabled'),
+            @($false, ('{"hooks":' + $carried + '}'), $false, $false, 'opt-out carried without the lock'),
+            @($false, ('{"managedSourcesBehavior":"merge","allowManagedHooksOnly":false,"hooks":' + $adminOnly + '}'), $false, $true, 'opt-out merge unlocking the drop-in')
+        )
+        foreach ($decision in $decisions) {
+            $body = if ([bool]$decision[0]) { $installedLocked } else { $installed }
+            [IO.File]::WriteAllText($policyPath, $body, [Text.UTF8Encoding]::new($false))
+            $state = [ordered]@{
+                shadowed = $false
+                managed_sources_merge = $false
+                merge_client_floor_required = $false
+                detail = $null
+            }
+            try {
+                Set-DefenseClawClaudeHKLMPolicyDecision `
+                    -State $state `
+                    -Settings ($decision[1] | Microsoft.PowerShell.Utility\ConvertFrom-Json) `
+                    -Layout $layout `
+                    -PolicyName 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings' `
+                    -Remedy 'fix it'
+                if ([bool]$state.shadowed -ne [bool]$decision[2] -or
+                    [bool]$state.merge_client_floor_required -ne [bool]$decision[3]) {
+                    $failures.Add("$($decision[4]): shadowed=$($state.shadowed) floor=$($state.merge_client_floor_required), want $($decision[2])/$($decision[3]) ($($state.detail))")
+                }
+                if ([bool]$state.shadowed -and [string]::IsNullOrWhiteSpace([string]$state.detail)) {
+                    $failures.Add("$($decision[4]): shadowed without a detail")
+                }
+            }
+            catch {
+                $failures.Add("$($decision[4]): threw $($_.Exception.Message)")
+            }
+        }
+        [IO.File]::WriteAllText($policyPath, $installed, [Text.UTF8Encoding]::new($false))
+
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $policyPath -Force
         $settings = $cases['carries the installed matrix'].json | Microsoft.PowerShell.Utility\ConvertFrom-Json
         if (Test-DefenseClawClaudeHKLMCarriesInstalledHooks -Settings $settings -Layout $layout) {

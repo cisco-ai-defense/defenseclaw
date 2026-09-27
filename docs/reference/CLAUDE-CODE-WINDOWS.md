@@ -155,7 +155,11 @@ windows status --json` reports `claude_policy_shadowed_by_hklm`,
 `claude_minimum_client_version` (v2.1.242 under a merge policy that does not
 carry the DefenseClaw hooks) and
 `agent_application_control_claude_minimum_version` (the floor the
-application-control evidence was attested at). A shadowed policy, or a merge
+application-control evidence was attested at). Status applies the same
+admission rules as enrollment (a covering matcher and any matching handler in
+an entry carry a hook; the timeout does not matter), so a policy enrollment
+refuses, such as one that carries the hooks without the lock, reports
+`claude_policy_shadowed_by_hklm=true`. A shadowed policy, or a merge
 policy whose floor is not attested, reports
 `claude_effective_policy_verified=false`. Status reads the policy by the same
 rules as enrollment, comparing it with the installed DefenseClaw drop-in:

@@ -141,12 +141,15 @@ def test_module_merge_client_floor_matches_the_connector_constant() -> None:
 
 def test_status_withholds_claude_verification_under_merge_until_the_floor_is_attested() -> None:
     module = MODULE.read_text(encoding="utf-8")
-    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyVerdict", "function Get-DefenseClawClaudeHKLMPolicyState")
+    view = _slice(module, "function Get-DefenseClawClaudeHKLMPolicyState", "function ConvertTo-DefenseClawBoundedDiagnostic")
+    assert "Set-DefenseClawClaudeHKLMPolicyDecision `" in view
+    decision = _slice(
+        module, "function Set-DefenseClawClaudeHKLMPolicyDecision", "function ConvertTo-DefenseClawBoundedDiagnostic"
+    )
     # A merge policy that carries the DefenseClaw hooks is effective on every
     # client; only one that relies on merge raises the approved-client floor.
-    floor = view[view.index("$merge = [bool]") :]
-    assert floor.index("Test-DefenseClawClaudeHKLMCarriesInstalledHooks") < floor.index(
-        "$state.merge_client_floor_required = $true"
+    assert decision.index("Test-DefenseClawClaudeHKLMCarriesInstalledHooks") < decision.index(
+        "$State.merge_client_floor_required = $true"
     )
     status = _slice(module, "function Get-DefenseClawLifecycleStatus", "function Test-DefenseClawGuardianCoverageReport")
     branch = status[status.index("elseif ([bool]$claudeHKLMPolicy.merge_client_floor_required) {") :]
@@ -161,6 +164,54 @@ def test_status_withholds_claude_verification_under_merge_until_the_floor_is_att
     # security_complete depends on the Claude effective-policy claim.
     external = status[status.index("$externalSecuritySatisfied = [bool](") :]
     assert "$claudeEffectivePolicyVerified" in external[: external.index("return [pscustomobject]")]
+
+
+def _go_string_list(source: str, start: str) -> list[str]:
+    block = source[source.index(start) :]
+    block = block[: block.index(":")]
+    return re.findall(r'"([A-Za-z_]+)"', block)
+
+
+def test_status_mirrors_the_gateway_admission_rules() -> None:
+    # #899 review: Status required exact, key-sorted copies of the installed
+    # entries and never checked the managed-hooks-only lock, so it disagreed
+    # with the gateway in both directions.
+    module = MODULE.read_text(encoding="utf-8")
+    connector = (ROOT / "internal" / "gateway" / "connector" / "claudecode.go").read_text(encoding="utf-8")
+    merge = CONNECTOR_MERGE.read_text(encoding="utf-8")
+
+    carries = _slice(
+        module, "function Test-DefenseClawClaudeHKLMCarriesInstalledHooks", "function Get-DefenseClawClaudeMergePendingTargets"
+    )
+    assert "ConvertTo-DefenseClawCanonicalJsonText" not in carries
+    assert "Test-DefenseClawClaudeMatcherCovers `" in carries
+    assert "Test-DefenseClawClaudeHandlerMatchesContract `" in carries
+    # Unexpected DefenseClaw handlers outside the matrix are refused.
+    assert "Test-DefenseClawClaudeHandlerTargetsHook `" in carries
+    assert "throw 'its hooks value is not a JSON object'" in carries
+
+    # The matcher-less events and async spellings match the Go connector.
+    go_matcher = _slice(connector, "func claudeCodeMatcherCovers(", "\nfunc ")
+    go_events = sorted(_go_string_list(go_matcher, "case "))
+    ps_matcher = _slice(module, "function Test-DefenseClawClaudeMatcherCovers", "function Get-DefenseClawClaudeHandlerAsyncState")
+    ps_events = sorted(re.findall(r"'([A-Za-z]+)'", ps_matcher[ps_matcher.index("-cin @(") : ps_matcher.index(")) {")]))
+    assert go_events and go_events == ps_events
+    go_async = _slice(connector, "func claudeCodeHandlerAsync(", "\nfunc ")
+    ps_async = _slice(module, "function Get-DefenseClawClaudeHandlerAsyncState", "function Test-DefenseClawClaudeHandlerTargetsHook")
+    assert re.findall(r'"(async[A-Za-z_]*)"', go_async) == re.findall(r"'(async[A-Za-z_]*)'", ps_async)
+
+    decision = _slice(
+        module, "function Set-DefenseClawClaudeHKLMPolicyDecision", "function ConvertTo-DefenseClawBoundedDiagnostic"
+    )
+    assert "Test-DefenseClawClaudeInstalledPolicyLocksManagedHooks -Layout $Layout" in decision
+    assert "managed-hooks-only lock in that policy does not apply" in decision
+    assert "sets allowManagedHooksOnly=false, which conflicts with the DefenseClaw managed-hooks-only lock" in decision
+    opt_out = "or set claude_code.allow_unmanaged_hooks: true in the DefenseClaw config"
+    assert opt_out in decision and opt_out in merge
+    # The lock is checked for a carried policy before the merge floor applies.
+    assert decision.index("if ($lockRequired -and -not $locked) {") < decision.index(
+        "$State.merge_client_floor_required = $true"
+    )
 
 
 def test_attestation_records_the_floor_the_administrator_attested() -> None:
