@@ -208,10 +208,11 @@ func TestHookSinkAdapters(t *testing.T) {
 			t.Errorf("%s %s %s: blocks = %t, want %t", tc.name, tc.event, tc.body, got, tc.want)
 		}
 	}
-	// The hook-only harnesses the Chat Completions and Gemini mocks drive.
-	for _, name := range []string{"antigravity", "hermes", "openhands"} {
+	// The hook-only harnesses the Chat Completions, Gemini and Responses
+	// mocks drive (OmniGent's policy answers in its own shape).
+	for _, name := range []string{"antigravity", "hermes", "omnigent", "openhands"} {
 		adapter := hookSinkAdapters[name]
-		if adapter.hookOutput == nil {
+		if adapter.hookOutput == nil && name != "omnigent" {
 			t.Errorf("%s adapter renders no hook_output", name)
 		}
 		if _, ok := requiredHookEvents[name]; !ok {

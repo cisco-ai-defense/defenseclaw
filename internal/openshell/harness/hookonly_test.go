@@ -36,6 +36,7 @@ var harnessBinaries = map[string]string{
 	"claudecode":  "/usr/local/bin/claude",
 	"codex":       "/usr/local/bin/codex",
 	"hermes":      "/usr/local/bin/hermes",
+	"omnigent":    "/usr/local/bin/omnigent",
 	"openhands":   "/usr/local/bin/openhands",
 }
 

@@ -167,7 +167,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "sandbox": { "status": "pending" },
+      "sandbox": { "status": "artifacts", "tamperTier": "managed", "hookConfig": "/etc/omnigent/config.yaml", "harnessPin": "0.13.0", "verified": "unverified" },
       "hilt": "OmniGent parks request, tool_call, and llm_request for native ASK approval. Post-phase confirm findings are audited and continue without a pause; DENY may suppress onward-visible content but cannot roll back completed work.",
       "notes": "The documented custom Python policy bridge maps all six OmniGent policy phases. Post-phase DENY uses OmniGent's denial/sentinel behavior rather than custom replacement data. Native OTLP is inactive until the launch process exports OMNIGENT_TELEMETRY_ENABLED=true plus the standard OTLP variables, while content capture stays off. Policy-event usage, cost, model, harness, actor, and labels are bounded; v0.7 exposes no policy-event session ID. Component scanning of agent YAML functions, MCP tools, and subagents is unsupported/unverified."
     },

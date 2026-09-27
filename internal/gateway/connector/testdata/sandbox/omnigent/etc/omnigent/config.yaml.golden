@@ -1,0 +1,8 @@
+# DefenseClaw managed OmniGent server configuration (OpenShell sandbox image, root-owned).
+# Read through OMNIGENT_CONFIG_HOME=/etc/omnigent; policy contract omnigent-custom-policy-v1.
+policies:
+    defenseclaw_guardrail:
+        handler: defenseclaw_omnigent_policy.defenseclaw_policy
+        type: function
+policy_modules:
+    - defenseclaw_omnigent_policy

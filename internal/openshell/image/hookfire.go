@@ -106,10 +106,13 @@ var requiredHookEvents = map[string][]string{
 	// The events Cursor's agent-cli-local build of the pinned release fired
 	// for a headless shell call; beforeSubmitPrompt and stop do not fire in
 	// print mode.
-	"cursor":    {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
-	"devin":     {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"hermes":    {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
-	"kiro":      {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
+	"cursor": {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
+	"devin":  {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"hermes": {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
+	"kiro":   {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
+	// OmniGent's policy phases request, llm_request, tool_call, tool_result
+	// and response.
+	"omnigent":  {"UserPromptSubmit", "BeforeModel", "PreToolUse", "PostToolUse", "AfterAgentResponse"},
 	"opencode":  {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
 	"openhands": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
 }
@@ -245,6 +248,12 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 	"antigravity": func(baseURL string) (map[string]string, []string) {
 		return map[string]string{"GEMINI_API_KEY": "dcprobe-0123456789abcdefghij", "GOOGLE_GEMINI_BASE_URL": baseURL}, nil
 	},
+	// The image's sandbox agent on the openai-agents harness (Responses);
+	// an unpinned model would route to Databricks.
+	"omnigent": func(baseURL string) (map[string]string, []string) {
+		return map[string]string{"OPENAI_API_KEY": "sk-dcprobe-0123456789abcdefghij", "OPENAI_BASE_URL": baseURL + "/v1"},
+			[]string{connector.OmnigentSandboxAgentPath, "--model", "mock-model"}
+	},
 }
 
 // scriptedMock drives a harness that replays scripted model responses from a
@@ -334,6 +343,8 @@ var hookSinkAdapters = map[string]hookSinkAdapter{
 	"hermes": {preTool: "pre_tool_call", hookOutput: func(reason string) interface{} {
 		return map[string]string{"decision": "block", "reason": reason}
 	}},
+	// OmniGent's policy bridge maps the top-level action to DENY itself.
+	"omnigent": {preTool: "PreToolUse"},
 	"openhands": {preTool: "PreToolUse", hookOutput: func(reason string) interface{} {
 		return map[string]string{"decision": "deny", "reason": reason}
 	}},

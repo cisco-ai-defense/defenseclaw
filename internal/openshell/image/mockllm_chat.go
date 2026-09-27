@@ -34,7 +34,7 @@ import (
 
 // mockShellTools are the shell tool names the mock recognizes, most specific
 // first.
-var mockShellTools = []string{"terminal", "execute_bash", "run_command", "run_shell_command", "bash", "Bash", "shell", "exec_command", "shell_command"}
+var mockShellTools = []string{"terminal", "execute_bash", "run_command", "run_shell_command", "sys_os_shell", "bash", "Bash", "shell", "exec_command", "shell_command"}
 
 // mockCommandKeys are the argument names that carry the command line.
 var mockCommandKeys = []string{"command", "cmd", "CommandLine", "commandLine", "script"}

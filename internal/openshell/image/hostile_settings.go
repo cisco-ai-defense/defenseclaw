@@ -84,6 +84,7 @@ var hostileSettingsPlans = map[string]hostileSettings{
 	"copilot":     copilotHostileSettings(),
 	"hermes":      hermesHostileSettings(),
 	"kiro":        kiroHostileSettings(),
+	"omnigent":    omnigentHostileSettings(),
 	"opencode":    openCodeHostileSettings(),
 	"openhands":   openHandsHostileSettings(),
 }
@@ -295,6 +296,18 @@ func openCodeHostileSettings() hostileSettings {
 			},
 		},
 	}
+}
+
+// omnigentHostileSettings plants the default user configuration
+// (~/.omnigent/config.yaml) without DefenseClaw's policy module or policy.
+// The launcher points OmniGent at the image's root-owned configuration, so
+// the planted file must not take effect.
+func omnigentHostileSettings() hostileSettings {
+	p := newHostilePlanter("user")
+	p.file(path.Join(connector.SandboxHomeDir, ".omnigent", "config.yaml"), mustJSON(map[string]interface{}{
+		"policy_modules": []string{}, "policies": map[string]interface{}{},
+	}))
+	return p.plan()
 }
 
 // hostilePlanter writes the shell fragment of a user-tier hostile plan: the

@@ -326,9 +326,10 @@ type responsesRequest struct {
 	Stream bool            `json:"stream"`
 	Input  json.RawMessage `json:"input"`
 	Tools  []struct {
-		Type     string `json:"type"`
-		Name     string `json:"name"`
-		Function struct {
+		Type       string          `json:"type"`
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+		Function   struct {
 			Name string `json:"name"`
 		} `json:"function"`
 	} `json:"tools"`
@@ -432,6 +433,7 @@ func (m *mockLLM) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	seq := m.next()
 	tools := map[string]string{}
+	schemas := map[string]json.RawMessage{}
 	for _, t := range req.Tools {
 		name := t.Name
 		if name == "" {
@@ -441,13 +443,23 @@ func (m *mockLLM) responses(w http.ResponseWriter, r *http.Request) {
 			name = t.Type
 		}
 		tools[name] = t.Type
+		if t.Type == "function" && len(t.Parameters) > 0 {
+			schemas[name] = t.Parameters
+		}
 	}
 	prompt, turn := responsesPosition(req.Input)
 	items := []map[string]interface{}{responsesMessage(mockAuxText, seq)}
 	if sc := m.pick(prompt); sc != nil {
 		switch {
 		case turn == 0:
-			if call := responsesShellCall(sc.command, tools, seq); call != nil {
+			call := responsesShellCall(sc.command, tools, seq)
+			if name, ok := pickShellTool(schemas); call == nil && ok {
+				// Any other known shell tool (OmniGent's sys_os_shell), filled
+				// from its schema.
+				args, _ := json.Marshal(shellToolArgs(schemas[name], sc.command))
+				call = map[string]interface{}{"type": "function_call", "name": name, "call_id": fmt.Sprintf("call_dcprobe_%d", seq), "arguments": string(args)}
+			}
+			if call != nil {
 				items = []map[string]interface{}{call}
 				m.served(sc.match)
 			} else {

@@ -49,6 +49,7 @@ var sandboxGoldenTargets = []struct {
 	{"antigravity", NewAntigravityConnector(), "1.2.12"},
 	{"hermes", NewHermesConnector(), "0.19.0"},
 	{"openhands", NewOpenHandsConnector(), "1.16.0"},
+	{"omnigent", NewOmnigentConnector(), "0.13.0"},
 }
 
 type sandboxGoldenManifest struct {

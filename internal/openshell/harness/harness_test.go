@@ -39,7 +39,7 @@ func TestRegistry(t *testing.T) {
 	for _, name := range Names() {
 		names[name] = true
 	}
-	for _, want := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"} {
+	for _, want := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode", "openhands"} {
 		if !names[want] {
 			t.Fatalf("Names() = %v lacks %s", Names(), want)
 		}
@@ -988,7 +988,9 @@ func TestBypassArgs(t *testing.T) {
 				added = append(added, arg)
 			}
 		}
-		if len(added) == 0 {
+		// OmniGent has no permission prompts of its own to skip: its
+		// policies, DefenseClaw's among them, decide in the server.
+		if len(added) == 0 && name != "omnigent" {
 			t.Errorf("%s: a yolo launch adds no flag", name)
 		}
 		if kept, _ := spec.BypassArgs(added); len(kept) != 0 {
