@@ -240,6 +240,27 @@ func TestSurgicalRemovalKeepsLaterAdminEditsByteForByte(t *testing.T) {
 		removeCodexRequirementsForTest(t, edited, admin, opts), want)
 }
 
+// A baseline that defines [features] only through a sub-table gets a
+// DefenseClaw-written [features] header inside the region. Surgical removal
+// must delete that header together with hooks = true instead of leaving a
+// region that holds only [features].
+func TestSurgicalRemovalDropsTheManagedHeaderOfAnImplicitFeaturesTable(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	admin := []byte("[features.sub]\nx = 1\n")
+	installed := reconcileCodexRequirementsForTest(t, admin, opts)
+	if !bytes.Contains(installed, []byte("\n[features]\nhooks = true\n")) {
+		t.Fatalf("install did not add a managed [features] header:\n%s", installed)
+	}
+	requireCodexRequirementsBytes(t, "surgical removal",
+		removeCodexRequirementsForTest(t, installed, admin, opts), admin)
+
+	trailer := []byte("\n[profiles.audit]\nmodel = \"gpt-5\"\n")
+	edited := append(append([]byte(nil), installed...), trailer...)
+	want := append(append([]byte(nil), admin...), trailer...)
+	requireCodexRequirementsBytes(t, "surgical removal after an administrator edit",
+		removeCodexRequirementsForTest(t, edited, admin, opts), want)
+}
+
 func TestWindowsCodexRequirementsCRLFDocumentRoundTrips(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	admin := []byte(strings.ReplaceAll(commentedAdminCodexRequirements, "\n", "\r\n"))

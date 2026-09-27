@@ -213,6 +213,37 @@ func (d *codexTOMLDocument) tableForm(name string) codexTOMLTableForm {
 	return form
 }
 
+// headerKeyValues returns the key/value expressions defined directly under
+// the first [name] header, before the next table header.
+func (d *codexTOMLDocument) headerKeyValues(name string) []*codexTOMLExpr {
+	var values []*codexTOMLExpr
+	inside, seen := false, false
+	for index := range d.exprs {
+		expr := &d.exprs[index]
+		switch expr.kind {
+		case unstable.Table, unstable.ArrayTable:
+			inside = !seen && expr.kind == unstable.Table && codexTOMLPathEqual(expr.path, name)
+			seen = seen || inside
+		case unstable.KeyValue:
+			if inside {
+				values = append(values, expr)
+			}
+		}
+	}
+	return values
+}
+
+// insideRegion reports whether offset lies between the markers of a
+// DefenseClaw region.
+func (d *codexTOMLDocument) insideRegion(offset int) bool {
+	for _, region := range codexTOMLRegions(d.raw) {
+		if offset > region.beginLineStart && offset < region.endLineStart {
+			return true
+		}
+	}
+	return false
+}
+
 // keyValueLineRange covers the complete lines of a scalar key/value
 // expression, including a trailing comment and the terminating newline.
 func (d *codexTOMLDocument) keyValueLineRange(expr *codexTOMLExpr) (int, int) {
@@ -637,21 +668,54 @@ func renderWindowsCodexRequirementsRemoval(
 	if plan.removeFeaturesTable {
 		removeTable("features")
 	}
-	cleaned, err := applyCodexTOMLEdits(raw, edits)
-	if err != nil {
-		return nil, err
+
+	// When the baseline defined a table only through sub-tables (for example
+	// [features.sub]), install wrote its own [features] or [hooks] header
+	// inside the DefenseClaw region. That header is DefenseClaw's once its only
+	// key is removed, and dropping it keeps the policy because the sub-tables
+	// still define the table. The edit is tried first and skipped if the
+	// policy would change.
+	var headerEdits []codexTOMLEdit
+	removeRegionHeader := func(name, key string) {
+		header := doc.header(name)
+		if header == nil || !doc.insideRegion(header.lineStart) {
+			return
+		}
+		for _, expr := range doc.headerKeyValues(name) {
+			if !codexTOMLPathEqual(expr.path, name, key) {
+				return
+			}
+		}
+		headerEdits = append(headerEdits, codexTOMLEdit{start: header.lineStart, end: doc.lineEnd(header.keyOffset)})
 	}
-	tidied, err := tidyWindowsCodexRequirementsRegions(cleaned, doc.newline)
-	if err != nil {
-		return nil, err
+	if plan.removeFeatureHooks && !plan.removeFeaturesTable {
+		removeRegionHeader("features", "hooks")
 	}
-	if requireWindowsCodexRequirementsModel(tidied, want) == nil {
-		return tidied, nil
+	if plan.removeManagedDir && !plan.removeHooksTable {
+		removeRegionHeader("hooks", "windows_managed_dir")
 	}
-	if err := requireWindowsCodexRequirementsModel(cleaned, want); err != nil {
-		return nil, err
+	candidates := [][]codexTOMLEdit{edits}
+	if len(headerEdits) > 0 {
+		candidates = [][]codexTOMLEdit{append(append([]codexTOMLEdit(nil), edits...), headerEdits...), edits}
 	}
-	return cleaned, nil
+	var mismatch error
+	for _, candidate := range candidates {
+		cleaned, err := applyCodexTOMLEdits(raw, candidate)
+		if err != nil {
+			return nil, err
+		}
+		tidied, err := tidyWindowsCodexRequirementsRegions(cleaned, doc.newline)
+		if err != nil {
+			return nil, err
+		}
+		if requireWindowsCodexRequirementsModel(tidied, want) == nil {
+			return tidied, nil
+		}
+		if mismatch = requireWindowsCodexRequirementsModel(cleaned, want); mismatch == nil {
+			return cleaned, nil
+		}
+	}
+	return nil, mismatch
 }
 
 // tidyWindowsCodexRequirementsRegions drops blank lines at the edges of each
