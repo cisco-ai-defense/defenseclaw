@@ -104,6 +104,12 @@ func TestOrphanLockDropsUnregisteredConnector(t *testing.T) {
 func TestTeardownRemovedConnectorsDropsUnregistered(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	hookPath, hookBody := stageRetiredExampleLock(t, dataDir)
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", retiredExampleConnector+"-hook.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	codex := &recordingConnector{stubConnector: stubConnector{name: "codex"}}
 	reg := newRecordingRegistry(codex)
 
@@ -130,8 +136,81 @@ func TestTeardownRemovedConnectorsDropsUnregistered(t *testing.T) {
 		t.Fatalf("host hook file = %q, %v; want untouched %q", body, readErr, hookBody)
 	}
 
+	// DefenseClaw's own hook script for the dropped name is gone.
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks", retiredExampleConnector+"-hook.sh")); !os.IsNotExist(err) {
+		t.Fatalf("hook script for the dropped connector survived: %v", err)
+	}
+
 	// The compatibility wrapper keeps its historical return value.
 	if got := teardownRemovedConnectors(reg, []string{retiredExampleConnector}, nil, connector.SetupOpts{DataDir: dataDir}, context.Background()); len(got) != 0 {
 		t.Fatalf("teardownRemovedConnectors failed = %v, want none", got)
+	}
+}
+
+// registryWithFailedPluginDiscovery returns a registry whose plugin discovery
+// reported an error, so any unresolved name may still be a plugin.
+func registryWithFailedPluginDiscovery(t *testing.T, conns ...*recordingConnector) *connector.Registry {
+	t.Helper()
+	reg := newRecordingRegistry(conns...)
+	notADir := filepath.Join(testenv.PrivateTempDir(t), "plugins")
+	if err := os.WriteFile(notADir, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DiscoverPlugins(notADir); err == nil {
+		t.Fatal("plugin discovery on a regular file must fail")
+	}
+	return reg
+}
+
+// A lock-only name that a plugin may still provide (discovery failed) keeps
+// the strict behaviour: boot reports it instead of forgetting its state.
+func TestOrphanLockKeepsNameWhenPluginDiscoveryFailed(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	stageRetiredExampleLock(t, dataDir)
+	err := reconcileOrphanedConnectorRegistrations(
+		context.Background(),
+		registryWithFailedPluginDiscovery(t),
+		dataDir,
+		nil,
+		orphanConnectorReconcileOps{
+			resolveOpts: func(connector.Connector) (connector.SetupOpts, error) { return connector.SetupOpts{}, nil },
+			clearLock:   connector.ClearHookContractLockEntry,
+		},
+	)
+	if err == nil {
+		t.Fatal("a lock-only name a plugin may provide must not be dropped silently")
+	}
+	if got := connector.LoadHookContractLockEntry(dataDir, retiredExampleConnector); got.Connector == "" {
+		t.Fatal("lock entry was dropped although plugin discovery failed")
+	}
+}
+
+// A removed name that a plugin may still provide is retained for a later
+// teardown retry and none of its files are removed.
+func TestTeardownRemovedConnectorsRetainsNameWhenPluginDiscoveryFailed(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	stageRetiredExampleLock(t, dataDir)
+	script := filepath.Join(dataDir, "hooks", retiredExampleConnector+"-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failed, dropped := teardownRemovedConnectorsReport(
+		registryWithFailedPluginDiscovery(t),
+		[]string{retiredExampleConnector},
+		nil,
+		connector.SetupOpts{DataDir: dataDir},
+		context.Background(),
+	)
+	if !reflect.DeepEqual(failed, []string{retiredExampleConnector}) || len(dropped) != 0 {
+		t.Fatalf("failed=%v dropped=%v; want the name retained for retry", failed, dropped)
+	}
+	if got := connector.LoadHookContractLockEntry(dataDir, retiredExampleConnector); got.Connector == "" {
+		t.Fatal("lock entry was dropped although plugin discovery failed")
+	}
+	if _, err := os.Lstat(script); err != nil {
+		t.Fatalf("hook script removed although plugin discovery failed: %v", err)
 	}
 }
