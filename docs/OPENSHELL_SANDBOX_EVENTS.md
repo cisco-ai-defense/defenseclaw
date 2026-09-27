@@ -64,6 +64,21 @@ unknown phase is counted only when it enters `creating`, so a restarted gateway
 reconciling running sandboxes, or a repeated `deleted`, does not count a
 sandbox twice.
 
+## Agent-chosen values
+
+The sandboxed agent picks destinations, file names, and finding targets. None
+of these values can make the producer drop the record:
+
+- An egress or approval host has its port split off. It is lowercased and
+  IDNA-encoded (`bücher.example` becomes `xn--bcher-kva.example`). If the host
+  still does not canonicalize, egress records it as
+  `defenseclaw.network.target_ref` `invalid-host` with `server.address`
+  absent, and an approval omits it. An out-of-range port is omitted.
+- Workspace paths: invalid UTF-8 is replaced and NUL bytes are dropped.
+  Absolute paths, drive-qualified paths, and paths that leave the workspace
+  are skipped. The counts still describe every file.
+- A finding `target_ref` is cut to its registered 256 bytes.
+
 ## Retired legacy events
 
 The legacy standalone sandbox's events were retired with it: the

@@ -1033,15 +1033,6 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		{"egress without source", func(r *SandboxRecorder) error {
 			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Host: "example.org"})
 		}},
-		{"egress bad host", func(r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy, Host: "user:pw@example.org"})
-		}},
-		{"egress empty host", func(r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy})
-		}},
-		{"egress bad port", func(r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy, Host: "example.org", Port: 70000})
-		}},
 		{"egress bad resolved ip", func(r *SandboxRecorder) error {
 			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy, Host: "example.org", ResolvedIP: "not-an-ip"})
 		}},
@@ -1104,9 +1095,6 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		}},
 		{"workspace negative count", func(r *SandboxRecorder) error {
 			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceReview, FileCount: &count})
-		}},
-		{"workspace absolute path", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceMask, Paths: []string{"/home/me/.ssh/id_rsa"}})
 		}},
 		{"workspace unknown pull mode", func(r *SandboxRecorder) error {
 			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspacePull, PullMode: "rsync"})
@@ -1252,23 +1240,234 @@ func TestSandboxActionsRequireTypedFamilies(t *testing.T) {
 func TestSandboxHostCanonicalization(t *testing.T) {
 	for _, test := range []struct {
 		in, want string
+		port     int
 		ok       bool
 	}{
-		{"Example.ORG", "example.org", true},
-		{"example.org.", "example.org", true},
-		{"[2001:db8::1]", "2001:db8::1", true},
-		{"::1", "0:0:0:0:0:0:0:1", true},
-		{"::ffff:10.0.0.1", "10.0.0.1", true},
-		{"169.254.169.254", "169.254.169.254", true},
-		{"", "", false},
-		{"exa mple.org", "", false},
-		{"-bad.example", "", false},
-		{strings.Repeat("a", 254), "", false},
+		{"Example.ORG", "example.org", 0, true},
+		{"example.org.", "example.org", 0, true},
+		{" example.org ", "example.org", 0, true},
+		{"[2001:db8::1]", "2001:db8::1", 0, true},
+		{"::1", "0:0:0:0:0:0:0:1", 0, true},
+		{"::ffff:10.0.0.1", "10.0.0.1", 0, true},
+		{"169.254.169.254", "169.254.169.254", 0, true},
+		{"fe80::1%eth0", "fe80::1", 0, true},
+		{"[fe80::1%25eth0]:443", "fe80::1", 443, true},
+		{"example.com:443", "example.com", 443, true},
+		{"10.0.0.8:5432", "10.0.0.8", 5432, true},
+		{"[::1]:18970", "0:0:0:0:0:0:0:1", 18970, true},
+		{"Bücher.Example", "xn--bcher-kva.example", 0, true},
+		{"bücher.example:8443", "xn--bcher-kva.example", 8443, true},
+		{"r3---sn-abc.example", "r3---sn-abc.example", 0, true},
+		{"my_service.internal", "my_service.internal", 0, true},
+		{"", "", 0, false},
+		{"exa mple.org", "", 0, false},
+		{"-bad.example", "", 0, false},
+		{"a/b", "", 0, false},
+		{"example.com:", "", 0, false},
+		{"example.com:0", "", 0, false},
+		{"example.com:99999", "", 0, false},
+		{"example.com:https", "", 0, false},
+		{"user@example.com", "", 0, false},
+		{"user:pw@example.com", "", 0, false},
+		{"*.example.com", "", 0, false},
+		{"100%.example", "", 0, false},
+		{"a:b:c", "", 0, false},
+		{"bad\xffhost", "", 0, false},
+		{"b\u00fccher/evil.example", "", 0, false},
+		{strings.Repeat("a", 254), "", 0, false},
+		{strings.Repeat("a", 2048), "", 0, false},
 	} {
-		got, ok := canonicalSandboxHost(test.in)
-		if got != test.want || ok != test.ok {
-			t.Errorf("canonicalSandboxHost(%q)=(%q,%v) want (%q,%v)", test.in, got, ok, test.want, test.ok)
+		got, port, ok := canonicalSandboxAuthority(test.in)
+		if got != test.want || port != test.port || ok != test.ok {
+			t.Errorf("canonicalSandboxAuthority(%q)=(%q,%d,%v) want (%q,%d,%v)",
+				test.in, got, port, ok, test.want, test.port, test.ok)
 		}
+	}
+}
+
+// TestSandboxRecorderToleratesAgentChosenValues covers values the sandboxed
+// agent picks (destinations, file names, finding targets): they are
+// canonicalized, sanitized, bounded, or omitted, never allowed to cost the
+// occurrence its record. The cases share one store.
+func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
+	harness := newSandboxHarness(t)
+	t.Run("egress hosts", func(t *testing.T) { testSandboxEgressHostileHostsAreStillRecorded(t, harness) })
+	t.Run("approval hosts", func(t *testing.T) { testSandboxApprovalHostileHostIsOmitted(t, harness) })
+	t.Run("workspace paths", func(t *testing.T) { testSandboxWorkspacePathsAreSanitizedNotRejected(t, harness) })
+	t.Run("finding target ref", func(t *testing.T) { testSandboxFindingTargetRefIsBoundedNotDropped(t, harness) })
+}
+
+// testSandboxEgressHostileHostsAreStillRecorded feeds agent-chosen
+// destinations into a blocked decision. Each must still produce the mandatory
+// record, on both the ordinary and the floor path, without the raw host text.
+func testSandboxEgressHostileHostsAreStillRecorded(t *testing.T, harness *sandboxHarness) {
+	for _, test := range []struct {
+		name, host string
+		port       int
+		target     string
+		address    string // empty when server.address must be absent
+		wantPort   int64  // zero when server.port must be absent
+		leak       string
+	}{
+		{name: "idn name", host: "Bücher.example", target: "xn--bcher-kva.example", address: "xn--bcher-kva.example"},
+		{name: "host with port", host: "Example.com:8443", target: "example.com", address: "example.com", wantPort: 8443},
+		{name: "explicit port wins", host: "example.com:8443", port: 443, target: "example.com", address: "example.com", wantPort: 443},
+		{name: "bracketed ipv6 authority", host: "[2001:db8::1]:443", target: "2001:db8::1", address: "2001:db8::1", wantPort: 443},
+		{name: "ipv6 zone", host: "fe80::1%eth0", target: "fe80::1", address: "fe80::1", leak: "eth0"},
+		{name: "explicit port out of range", host: "example.org", port: 70000, target: "example.org", address: "example.org"},
+		{name: "userinfo", host: "dcuser:dcsecret@example.org", target: sandboxInvalidHost, leak: "dcsecret"},
+		{name: "path", host: "example.org/dcpathmarker", target: sandboxInvalidHost, leak: "dcpathmarker"},
+		{name: "percent", host: "dc%41marker.example", target: sandboxInvalidHost, leak: "%41marker"},
+		{name: "wildcard", host: "*.dcwildcard.example", target: sandboxInvalidHost, leak: "dcwildcard"},
+		{name: "space", host: "dc space.example", target: sandboxInvalidHost, leak: "dc space"},
+		{name: "too long", host: strings.Repeat("a", 254), target: sandboxInvalidHost, leak: strings.Repeat("a", 254)},
+		{name: "port out of range", host: "dcport.example:99999", target: sandboxInvalidHost, leak: "dcport"},
+		{name: "invalid utf-8", host: "dcbad\xffhost.example", target: sandboxInvalidHost, leak: "dcbad"},
+		{name: "empty", host: "", target: sandboxInvalidHost},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, admission := range []router.Admission{router.AdmissionOrdinary, router.AdmissionFloor} {
+				runtime, recorder := harness.bind(t, admission)
+				if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: test.host, Port: test.port,
+					Blocked: true, DecisionCode: "SANDBOX_EGRESS_BLOCKLIST",
+				}); err != nil {
+					t.Fatalf("admission %v: the host cost the blocked decision its record: %v", admission, err)
+				}
+				_, record := onlySandboxRecord(t, runtime)
+				encoded, err := record.MarshalJSON()
+				if err != nil || !record.Mandatory() || record.IsFloorOnly() != (admission == router.AdmissionFloor) {
+					t.Fatalf("admission %v: err=%v mandatory=%v floor=%v", admission, err, record.Mandatory(), record.IsFloorOnly())
+				}
+				if test.leak != "" && bytes.Contains(encoded, []byte(test.leak)) {
+					t.Fatalf("admission %v: record kept the raw host text %q: %s", admission, test.leak, encoded)
+				}
+				if admission == router.AdmissionFloor {
+					continue
+				}
+				assertRecordMatchesRuntimeCatalog(t, record)
+				body := sandboxBody(t, record)
+				if body["defenseclaw.network.target_ref"] != test.target {
+					t.Fatalf("target_ref=%#v want %q", body["defenseclaw.network.target_ref"], test.target)
+				}
+				if address, present := body["server.address"]; present != (test.address != "") || (present && address != test.address) {
+					t.Fatalf("server.address=%#v present=%v want %q", address, present, test.address)
+				}
+				if port, present := body["server.port"]; present != (test.wantPort != 0) || (present && port != test.wantPort) {
+					t.Fatalf("server.port=%#v present=%v want %d", port, present, test.wantPort)
+				}
+				if events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents); len(events) != 1 {
+					t.Fatalf("egress metrics=%d want 1", len(events))
+				}
+			}
+		})
+	}
+}
+
+func testSandboxApprovalHostileHostIsOmitted(t *testing.T, harness *sandboxHarness) {
+	for _, test := range []struct {
+		name, host string
+		port       int
+		address    string
+		wantPort   int64
+	}{
+		{name: "userinfo", host: "dcuser:dcsecret@example.org"},
+		{name: "idn authority", host: "Bücher.example:8443", address: "xn--bcher-kva.example", wantPort: 8443},
+		{name: "port out of range", host: "10.0.0.8", port: 70000, address: "10.0.0.8"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
+				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-11",
+				Kind: SandboxApprovalNetworkRule, Host: test.host, Port: test.port, Result: SandboxApprovalDenied,
+			}); err != nil {
+				t.Fatalf("the host cost the approval its record: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeCatalog(t, record)
+			encoded, _ := record.MarshalJSON()
+			if bytes.Contains(encoded, []byte("dcsecret")) {
+				t.Fatalf("approval kept userinfo: %s", encoded)
+			}
+			body := sandboxBody(t, record)
+			if address, present := body["server.address"]; present != (test.address != "") || (present && address != test.address) {
+				t.Fatalf("server.address=%#v present=%v want %q", address, present, test.address)
+			}
+			if port, present := body["server.port"]; present != (test.wantPort != 0) || (present && port != test.wantPort) {
+				t.Fatalf("server.port=%#v present=%v want %d", port, present, test.wantPort)
+			}
+		})
+	}
+}
+
+func testSandboxWorkspacePathsAreSanitizedNotRejected(t *testing.T, harness *sandboxHarness) {
+	count := func(value int64) *int64 { return &value }
+	for _, test := range []struct {
+		name  string
+		paths []string
+		want  []string
+	}{
+		{
+			name: "hostile names",
+			paths: []string{
+				"bin/run\xff\xfe.sh", "hooks/pre\x00commit", "/etc/cron.d/job", "C:\\Users\\me\\run.bat",
+				"c:relative.bat", "\\\\server\\share\\x", "../outside.sh", "a/../../escape.sh", "./scripts//build.sh",
+				"", "\x00", ".", "..",
+			},
+			want: []string{"bin/run\uFFFD.sh", "hooks/precommit", "scripts/build.sh"},
+		},
+		{name: "nothing survives", paths: []string{"/abs", "../up", "\x00"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+				Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview,
+				FileCount: count(int64(len(test.paths))), FlaggedCount: count(int64(len(test.paths))), Paths: test.paths,
+			}); err != nil {
+				t.Fatalf("a hostile file name cost the review its record: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeCatalog(t, record)
+			body := sandboxBody(t, record)
+			if body["defenseclaw.sandbox.workspace.flagged_count"] != int64(len(test.paths)) {
+				t.Fatalf("flagged count=%#v want %d", body["defenseclaw.sandbox.workspace.flagged_count"], len(test.paths))
+			}
+			kept, present := body["defenseclaw.sandbox.workspace.paths"].([]any)
+			if present != (len(test.want) > 0) || len(kept) != len(test.want) {
+				t.Fatalf("paths=%#v want %q", body["defenseclaw.sandbox.workspace.paths"], test.want)
+			}
+			for index, want := range test.want {
+				if kept[index] != want {
+					t.Fatalf("paths[%d]=%q want %q", index, kept[index], want)
+				}
+			}
+		})
+	}
+}
+
+func testSandboxFindingTargetRefIsBoundedNotDropped(t *testing.T, harness *sandboxHarness) {
+	overLimit := "binary:" + strings.Repeat("b", 250)
+	for _, test := range []struct{ name, in, want string }{
+		{"at the limit", strings.Repeat("t", 256), strings.Repeat("t", 256)},
+		{"one byte over", overLimit, overLimit[:256]},
+		{"probe length", strings.Repeat("x", 304), strings.Repeat("x", 256)},
+		{"admin target bound", strings.Repeat("y", 1024), strings.Repeat("y", 256)},
+		{"not an identifier", "/usr/local/bin/claude", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
+				Sandbox: testSandboxIdentity(), Kind: SandboxFindingBinaryDrift, Severity: "HIGH", TargetRef: test.in,
+			}); err != nil {
+				t.Fatalf("the target reference cost the finding its record: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeCatalog(t, record)
+			got, present := sandboxBody(t, record)["defenseclaw.finding.target_ref"]
+			if present != (test.want != "") || (present && got != test.want) {
+				t.Fatalf("target_ref=%#v present=%v want %q", got, present, test.want)
+			}
+		})
 	}
 }
 

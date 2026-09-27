@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/google/uuid"
+	"golang.org/x/net/idna"
 )
 
 // SandboxTelemetry is the narrow v8 telemetry surface of the OpenShell sandbox
@@ -195,9 +198,13 @@ const (
 type SandboxEgressEvent struct {
 	Sandbox SandboxIdentity
 	Source  SandboxEgressSource
-	// Host is the destination host name or IP literal, without a port.
+	// Host is the destination the sandboxed agent named: a host name, an IP
+	// literal, or a host:port authority. It is canonicalized (port split off,
+	// lowercased, IDNA-encoded); a value that cannot be is recorded as
+	// target_ref invalid-host with server.address absent, never rejected.
 	Host string
-	// Port is the destination port; 0 when unknown.
+	// Port is the destination port; 0 takes the port of a host:port Host.
+	// A value outside 1-65535 is omitted.
 	Port int
 	// Scheme is http or https when known.
 	Scheme string
@@ -261,7 +268,9 @@ type SandboxApprovalEvent struct {
 	Stage      SandboxApprovalStage
 	ApprovalID string
 	Kind       SandboxApprovalKind
-	// Host and Port identify the destination the approval would open.
+	// Host and Port identify the destination the approval would open. They
+	// are canonicalized like SandboxEgressEvent's; a host or port that cannot
+	// be is omitted rather than failing the approval record.
 	Host string
 	Port int
 	// Result is approved, denied, expired, or cancelled (resolved only).
@@ -373,7 +382,9 @@ type SandboxFindingEvent struct {
 	// Evidence is a bounded, already-minimized evidence summary.
 	Evidence    string
 	Remediation string
-	// TargetRef is a bounded reference such as a host or binary path token.
+	// TargetRef is a reference such as a host or binary path token. It is cut
+	// to the registered 256 bytes; a value that is not an identifier is
+	// omitted, and neither case drops the finding.
 	TargetRef string
 	// Confidence is in (0, 1]; 0 means not reported.
 	Confidence float64
@@ -435,7 +446,11 @@ type SandboxWorkspaceEvent struct {
 	// FlaggedCount is the number of changed files that can run code on the host.
 	FlaggedCount *int64
 	ByteCount    *int64
-	// Paths are workspace-relative masked or flagged paths; the first 64 are kept.
+	// Paths are workspace-relative masked or flagged paths; the first 64 are
+	// kept. Names come from the sandboxed agent, so they are sanitized, never
+	// rejected: invalid UTF-8 is replaced, NUL bytes are dropped, and paths
+	// that are absolute, drive-qualified, or escape the workspace are skipped.
+	// The counts still describe every file.
 	Paths []string
 	// Severity overrides the default (HIGH when failed, MEDIUM when files were
 	// flagged, else INFO).
@@ -486,10 +501,18 @@ const (
 	maxSandboxWorkspacePathTotal = 16384
 	maxSandboxFindingTextBytes   = 4096
 	maxSandboxFindingEvidence    = 8192
+	maxSandboxFindingTargetBytes = 256
+	maxSandboxAuthorityBytes     = 1024
+	maxSandboxHostBytes          = 253
 )
+
+// sandboxInvalidHost is the target_ref of a destination that cannot be
+// canonicalized; server.address is then absent.
+const sandboxInvalidHost = "invalid-host"
 
 var (
 	sandboxIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	sandboxHostPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 	sandboxDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	sandboxPolicyHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -577,7 +600,8 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 
 // RecordSandboxEgress emits log.egress.allowed or log.egress.blocked with the
 // sandbox correlation and increments metric.defenseclaw.egress.events with
-// source openshell or dc-egress-proxy. A blocked decision is mandatory.
+// source openshell or dc-egress-proxy. A blocked decision is mandatory. The
+// destination is agent-chosen, so no host or port value fails the record.
 func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input SandboxEgressEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -589,13 +613,10 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	if input.Source != SandboxEgressSourceOpenShell && input.Source != SandboxEgressSourceProxy {
 		return fmt.Errorf("audit: sandbox egress source %q is not registered", input.Source)
 	}
-	host, ok := canonicalSandboxHost(input.Host)
-	if !ok {
-		return fmt.Errorf("audit: sandbox egress requires a canonical destination host")
-	}
-	port, err := optionalSandboxPort(input.Port)
-	if err != nil {
-		return err
+	destination := canonicalSandboxDestination(input.Host, input.Port)
+	host, serverAddress, port := destination.host, observability.Present(destination.host), destination.port
+	if !destination.canonical {
+		host, serverAddress = sandboxInvalidHost, observability.Absent[string]()
 	}
 	defaultSeverity := "INFO"
 	if input.Blocked {
@@ -642,7 +663,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawNetworkDecision: observability.Present(decision), DefenseClawNetworkDecisionCode: decisionCode,
 				DefenseClawNetworkReason: reason, DefenseClawNetworkSource: source,
 				DefenseClawNetworkBlocked: observability.Present(input.Blocked),
-				URLScheme:                 scheme, ServerAddress: observability.Present(host), ServerPort: port,
+				URLScheme:                 scheme, ServerAddress: serverAddress, ServerPort: port,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
@@ -692,17 +713,10 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 	if input.Kind != SandboxApprovalNetworkRule && input.Kind != SandboxApprovalHostPort {
 		return fmt.Errorf("audit: sandbox approval kind %q is not registered", input.Kind)
 	}
-	host := observability.Absent[string]()
-	if strings.TrimSpace(input.Host) != "" {
-		canonical, ok := canonicalSandboxHost(input.Host)
-		if !ok {
-			return fmt.Errorf("audit: sandbox approval host is not canonical")
-		}
-		host = observability.Present(canonical)
-	}
-	port, err := optionalSandboxPort(input.Port)
-	if err != nil {
-		return err
+	destination := canonicalSandboxDestination(input.Host, input.Port)
+	host, port := observability.Absent[string](), destination.port
+	if destination.canonical {
+		host = observability.Present(destination.host)
 	}
 	severity, err := sandboxSeverity(input.Severity, "INFO")
 	if err != nil {
@@ -1004,7 +1018,7 @@ func (recorder *SandboxRecorder) RecordSandboxFinding(ctx context.Context, input
 				DefenseClawFindingCategory:          observability.Present(category),
 				DefenseClawSecuritySeverity:         string(normalized.Severity),
 				DefenseClawFindingConfidence:        confidence,
-				DefenseClawFindingTargetRef:         optionalControlPlaneV8Target(input.TargetRef),
+				DefenseClawFindingTargetRef:         optionalSandboxFindingTarget(input.TargetRef),
 				DefenseClawGuardrailEvidenceSummary: optionalSandboxText(input.Evidence, maxSandboxFindingEvidence),
 				DefenseClawFindingTitle:             optionalSandboxText(input.Title, maxSandboxFindingTextBytes),
 				DefenseClawFindingDescription:       optionalSandboxText(input.Description, maxSandboxFindingTextBytes),
@@ -1069,10 +1083,7 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 			return fmt.Errorf("audit: sandbox workspace %s count must not be negative", name)
 		}
 	}
-	paths, err := sandboxWorkspacePaths(input.Paths)
-	if err != nil {
-		return err
-	}
+	paths := sandboxWorkspacePaths(input.Paths)
 	defaultSeverity := "INFO"
 	switch {
 	case result == SandboxWorkspaceFailed:
@@ -1527,21 +1538,91 @@ func sandboxConditionFields(condition *SandboxCondition) sandboxConditionV8 {
 	return result
 }
 
-// canonicalSandboxHost lowercases a host name, strips IPv6 brackets and a
-// trailing root dot, and spells IPv6 literals so they satisfy the identifier
-// normalizer (which requires a leading alphanumeric).
+// sandboxDestination is one canonicalized agent-chosen destination. host is
+// meaningful only when canonical.
+type sandboxDestination struct {
+	host      string
+	canonical bool
+	port      observability.Optional[int64]
+}
+
+// canonicalSandboxDestination canonicalizes an agent-chosen host and port.
+// The host may be a name, an IP literal, or a host:port authority; an
+// explicit port wins over the authority's, and a port outside 1-65535 is
+// omitted. Nothing here fails: the sandboxed agent picks these values, so a
+// hostile one must never cost the decision its record.
+func canonicalSandboxDestination(value string, port int) sandboxDestination {
+	host, authorityPort, canonical := canonicalSandboxAuthority(value)
+	if port == 0 {
+		port = authorityPort
+	}
+	destination := sandboxDestination{host: host, canonical: canonical, port: observability.Absent[int64]()}
+	if port >= 1 && port <= 65535 {
+		destination.port = observability.Present(int64(port))
+	}
+	return destination
+}
+
+// canonicalSandboxAuthority canonicalizes a host, first as given and then as
+// a host:port authority whose port it returns (0 when there is none).
+func canonicalSandboxAuthority(value string) (string, int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxSandboxAuthorityBytes {
+		return "", 0, false
+	}
+	if host, ok := canonicalSandboxHost(value); ok {
+		return host, 0, true
+	}
+	name, portText, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", 0, false
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return "", 0, false
+	}
+	host, ok := canonicalSandboxHost(name)
+	if !ok {
+		return "", 0, false
+	}
+	return host, int(port), true
+}
+
+// canonicalSandboxHost canonicalizes a host without a port. IP literals lose
+// their brackets and IPv6 zone and are spelled so they satisfy the identifier
+// normalizer (which requires a leading alphanumeric). Names lose a trailing
+// root dot, are lowercased, and internationalized ones take their ASCII
+// (punycode) form; a name must then be letters, digits, '.', '-', and '_'
+// only, so a port, path, userinfo, or wildcard never reaches telemetry.
 func canonicalSandboxHost(value string) (string, bool) {
-	host := strings.TrimSpace(value)
-	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	host = strings.TrimSuffix(host, ".")
-	if ip := net.ParseIP(host); ip != nil {
+	literal := value
+	if strings.HasPrefix(literal, "[") && strings.HasSuffix(literal, "]") {
+		literal = literal[1 : len(literal)-1]
+	}
+	if ip := parseSandboxIP(literal); ip != nil {
 		return sandboxIPIdentifier(ip), true
 	}
-	host = strings.ToLower(host)
-	if len(host) > 253 || !sandboxIdentifier(host, 253) {
+	name := strings.TrimSuffix(value, ".")
+	if strings.IndexFunc(name, func(r rune) bool { return r >= utf8.RuneSelf }) >= 0 {
+		ascii, err := idna.Lookup.ToASCII(name)
+		if err != nil {
+			return "", false
+		}
+		name = ascii
+	}
+	name = strings.ToLower(name)
+	if len(name) > maxSandboxHostBytes || !sandboxHostPattern.MatchString(name) {
 		return "", false
 	}
-	return host, true
+	return name, true
+}
+
+// parseSandboxIP parses an IP literal, dropping an IPv6 zone (fe80::1%eth0).
+func parseSandboxIP(value string) net.IP {
+	if zone := strings.IndexByte(value, '%'); zone > 0 && strings.Contains(value[:zone], ":") {
+		value = value[:zone]
+	}
+	return net.ParseIP(value)
 }
 
 func sandboxIPIdentifier(ip net.IP) string {
@@ -1560,50 +1641,76 @@ func sandboxIPIdentifier(ip net.IP) string {
 	return strings.Join(groups, ":")
 }
 
-func optionalSandboxPort(port int) (observability.Optional[int64], error) {
-	if port == 0 {
-		return observability.Absent[int64](), nil
-	}
-	if port < 1 || port > 65535 {
-		return observability.Absent[int64](), fmt.Errorf("audit: sandbox port %d is out of range", port)
-	}
-	return observability.Present(int64(port)), nil
-}
-
 // sandboxEgressPath keeps only an origin-form path: userinfo cannot appear in
 // one, and the query and fragment are cut before telemetry construction.
-func sandboxEgressPath(path string) observability.Optional[string] {
-	if index := strings.IndexAny(path, "?#"); index >= 0 {
-		path = path[:index]
+func sandboxEgressPath(value string) observability.Optional[string] {
+	if index := strings.IndexAny(value, "?#"); index >= 0 {
+		value = value[:index]
 	}
-	if !strings.HasPrefix(path, "/") || !utf8.ValidString(path) {
+	if !strings.HasPrefix(value, "/") || !utf8.ValidString(value) {
 		return observability.Absent[string]()
 	}
-	return observability.Present(truncateUTF8(path, maxSandboxPathBytes))
+	return observability.Present(truncateUTF8(value, maxSandboxPathBytes))
 }
 
-func sandboxWorkspacePaths(paths []string) (observability.Optional[[]string], error) {
-	if len(paths) == 0 {
-		return observability.Absent[[]string](), nil
-	}
+// sandboxWorkspacePaths keeps the first workspace paths that fit their
+// registered bounds. The sandboxed agent names these files and Linux names
+// are arbitrary bytes, so a path is sanitized or skipped, never allowed to
+// fail the record: see sandboxWorkspacePath.
+func sandboxWorkspacePaths(paths []string) observability.Optional[[]string] {
 	kept := make([]string, 0, min(len(paths), maxSandboxWorkspacePaths))
 	total := 0
-	for _, path := range paths {
-		if path == "" || !utf8.ValidString(path) || strings.HasPrefix(path, "/") ||
-			strings.ContainsRune(path, 0) {
-			return observability.Absent[[]string](), fmt.Errorf("audit: sandbox workspace paths must be relative")
-		}
+	for _, candidate := range paths {
 		if len(kept) == maxSandboxWorkspacePaths {
 			break
 		}
-		path = truncateUTF8(path, maxSandboxWorkspacePathBytes)
-		if total+len(path) > maxSandboxWorkspacePathTotal {
+		relative, ok := sandboxWorkspacePath(candidate)
+		if !ok {
+			continue
+		}
+		if total+len(relative) > maxSandboxWorkspacePathTotal {
 			break
 		}
-		total += len(path)
-		kept = append(kept, path)
+		total += len(relative)
+		kept = append(kept, relative)
 	}
-	return observability.Present(kept), nil
+	if len(kept) == 0 {
+		return observability.Absent[[]string]()
+	}
+	return observability.Present(kept)
+}
+
+// sandboxWorkspacePath replaces invalid UTF-8, drops NUL bytes, and cleans
+// value. It rejects a path that is empty, absolute, drive- or UNC-qualified,
+// or escapes the workspace, since none of those is workspace-relative.
+func sandboxWorkspacePath(value string) (string, bool) {
+	value = strings.ReplaceAll(strings.ToValidUTF8(value, "\uFFFD"), "\x00", "")
+	if value == "" || value[0] == '/' || value[0] == '\\' || sandboxDriveQualified(value) {
+		return "", false
+	}
+	value = path.Clean(value)
+	if value == "." || value == ".." || strings.HasPrefix(value, "../") {
+		return "", false
+	}
+	return truncateUTF8(value, maxSandboxWorkspacePathBytes), true
+}
+
+// sandboxDriveQualified reports a Windows drive prefix such as C: or C:\.
+func sandboxDriveQualified(value string) bool {
+	return len(value) >= 2 && value[1] == ':' &&
+		(value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z')
+}
+
+// optionalSandboxFindingTarget bounds a finding target reference to the
+// registered 256 bytes rather than dropping the finding. Identifier
+// characters are ASCII and every prefix of an identifier is one, so the cut
+// value still fits the registry.
+func optionalSandboxFindingTarget(value string) observability.Optional[string] {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || !sandboxIdentifierPattern.MatchString(value) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(truncateUTF8(value, maxSandboxFindingTargetBytes))
 }
 
 func sandboxIdentifier(value string, maxBytes int) bool {
