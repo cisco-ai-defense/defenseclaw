@@ -218,6 +218,11 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   administrator's lists, the block list, the blocklist feed, this machine,
   link-local and metadata addresses.
 - A public IP literal in the open mode is rejected until it is unblocked.
+- A request the pinned harness binary itself makes around the proxy for
+  something it does without (`harness.Spec.DirectFetches`: the Codex TUI's
+  startup tip download from `raw.githubusercontent.com`) is rejected with
+  reason `harness_background_fetch`; the same destination from any other
+  binary is judged as usual.
 - Doors into your machine or network ask: host ports, private addresses and
   intranet names.
 - Everything else follows the pack's approvals mode.
@@ -381,7 +386,14 @@ after create, so it is not rotated on start.
 Placeholders are revision-scoped (they change on every start), so nothing may
 bake them into static files. The sandbox hooks read the variable on each
 request, Claude Code's `otelHeadersHelper` prints the header on each export,
-and the Codex launcher adds the OTLP header as `-c` flags at launch.
+and the Codex launcher exports the OTLP header as
+`OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_HEADERS`, which Codex's exporters
+add to the managed exporters' headers. With `token_delivery: env` the value is
+the token itself, so it never goes on a command line, which every process in
+the sandbox can read (unlike another process's environment): the hooks hand
+curl the `Authorization` header as configuration on a file descriptor, and
+the managed config blanks the OTLP header variables for the commands Codex
+runs.
 
 ## Egress proxy
 
@@ -1143,7 +1155,9 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
 
 - OpenShell refuses a hook's connection or request to the ingress port: the
   sandbox's policy does not allow it. This is reported at once, also after
-  hooks that got through.
+  hooks that got through. A connection OpenShell closes because the policy
+  changed while it was open ("policy generation is stale"; every policy
+  reload does that) is no refusal and only counts as an attempt.
 - OpenShell lets a hook connect but no authenticated request follows within
   15 seconds: the ingress does not answer, or the sandbox token did not reach
   the hook.
@@ -1183,13 +1197,52 @@ holds the hook matrix. `/etc/codex/managed_config.toml` turns off the update
 check, analytics and features that sync over the network, sets notify and
 the OTLP exporters, and pins `BASH_ENV`, `ENV` and the loader variables to
 empty in `shell_environment_policy.set`, which a user or trusted project
-config could otherwise use to make every command source a file first.
-Codex's own sandbox cannot nest inside OpenShell, so
-skip-permissions runs pass `--dangerously-bypass-approvals-and-sandbox`, and
-runs that keep the prompts pass `sandbox_mode="danger-full-access"` with
-`approval_policy="on-request"`. The launcher exports `CODEX_API_KEY` from
-`OPENAI_API_KEY`, trusts the exact working directory, stores the API key
-login for interactive runs, and adds the OTLP authorization header.
+config could otherwise use to make every command source a file first; the
+OTLP header variables and `NODE_OPTIONS`, which the launcher sets for Codex
+alone, are blanked there too. Codex's own sandbox cannot nest inside
+OpenShell, so skip-permissions runs pass
+`--dangerously-bypass-approvals-and-sandbox`, and runs that keep the prompts
+(`--safe`) pass `sandbox_mode="danger-full-access"` with
+`approval_policy="untrusted"`, which asks before every command outside
+Codex's read-only set and every edit. (`on-request` would ask only when the
+model escalates out of a sandbox Codex no longer has, so harmless-looking
+writes and test runs went through unasked.) `codex exec` cannot ask, so a
+headless `--safe` run refuses those commands. The launcher exports
+`CODEX_API_KEY` from `OPENAI_API_KEY`, trusts the exact working directory,
+stores the API key login for interactive runs, exports the OTLP
+authorization header, and passes Codex's Node wrapper
+`NODE_OPTIONS=--disable-warning=UNDICI-EHPA` (Node otherwise prints its
+EnvHttpProxyAgent warning at every start).
+
+Two Codex behaviours need no user action but explain what the activity feed
+shows:
+
+- The Codex TUI downloads its startup tip
+  (`raw.githubusercontent.com/openai/codex/main/announcement_tip.toml`) at
+  every start with an HTTP client that ignores the proxy, whatever
+  `tui.show_tooltips` says, and keeps it in memory only, so no managed
+  setting or pre-seeded file prevents it (Codex 0.146
+  `tui/src/tooltips.rs`). OpenShell refuses the connection and drafts a
+  proposal; triage rejects it (`harness_background_fetch`) instead of
+  opening a direct rule, whose policy reload would close the session's open
+  connections, and Codex shows a built-in tip.
+- On Amazon Bedrock (`--llm bedrock`) the run pins `openai.gpt-oss-20b` in
+  the managed config, because Mantle does not serve Codex's own default
+  model (its requests fail with `validation_error: Invalid 'input'`). The
+  banner's Model line names the model; `-- -m MODEL` picks another (a
+  `-c model=` override does not, because the managed config wins over it).
+  Mantle's Responses route rejects every turn after the first of a Codex
+  conversation: Codex replays its earlier replies as assistant `message`
+  items with `output_text` content, Mantle drops their `id` and `status`
+  and then fails its own validation of them (`invalid_prompt`, 219
+  validation errors, sent as an SSE `error` event after
+  `response.in_progress`), which Codex reports as `stream disconnected
+  before completion: stream closed before response.completed`. The same
+  request with the reply as plain string content completes, so this is a
+  Mantle limitation no provider setting avoids (Codex 0.146 has only
+  `wire_api = "responses"` and no setting for how it serializes history).
+  Start each task with `/new` in the TUI (or one `codex exec` per task);
+  tool calls within one turn work.
 
 ### Per-sandbox managed configuration
 
@@ -1218,10 +1271,12 @@ and copy mode alike. Stop and start keep the files; delete removes them.
   `requirements.toml`, so both are the image's documents with run keys
   added, mounted over the image's files and re-verified with the image
   verifier. `managed_config.toml` pins the run's model provider
-  (`model_provider`, plus `openai_base_url` or a `model_providers` table) and
-  defines the imported servers with `cwd` and `env_vars` pinned.
+  (`model_provider`, plus `openai_base_url` or a `model_providers` table),
+  the provider's default `model` when it does not serve Codex's own
+  (Bedrock Mantle: `openai.gpt-oss-20b`; only `-m` at launch overrides it),
+  and defines the imported servers with `cwd` and `env_vars` pinned.
   `requirements.toml` gets `allowed_approval_policies` without `never`
-  (`on-request` first; Codex falls back to the first entry) and
+  (`untrusted` first; Codex falls back to the first entry) and
   `allowed_sandbox_modes` in safe mode. With `block` it also gets an
   `mcp_servers` allowlist by name and command or URL identity, empty when
   nothing is imported.
@@ -1268,6 +1323,9 @@ plus `{{if .Sandbox}}` branches) differs from the host hooks:
   with the same idempotency key, and the retry gets its own 12-second limit,
   so one hook can wait about 21 seconds. Codex's `SessionEnd` gets 1 second
   per attempt, because Codex caps that hook at three seconds.
+- The bearer reaches curl as `--config` on a file descriptor, never on its
+  command line (with `token_delivery: env` it is the token itself); the
+  Codex notify bridge does the same.
 
 ## Sandboxed connectors
 
