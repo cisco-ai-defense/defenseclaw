@@ -3694,6 +3694,44 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_OPENSHELL_GATEWAY",
+      "category": "test_fixture",
+      "purpose": "OpenShell gateway name the live workspace mount and copy test drives instead of the active gateway.",
+      "default": "unset",
+      "accepted_values": [
+        "registered OpenShell gateway name",
+        "unset (active gateway)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/workspace/live_integration_test.go",
+          "description": "Live workspace mount and copy test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_OPENSHELL_IMAGE",
+      "category": "test_fixture",
+      "purpose": "Sandbox image the live workspace mount and copy test starts instead of the digest-pinned community base.",
+      "default": "unset",
+      "accepted_values": [
+        "image reference",
+        "unset (digest-pinned community base)"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/workspace/live_integration_test.go",
+          "description": "Live workspace mount and copy test"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_E2E_INGRESS_PORT",
       "category": "test_fixture",
       "purpose": "Ingress port the live overlay build test bakes into the images and binds the stand-in ingress on.",
