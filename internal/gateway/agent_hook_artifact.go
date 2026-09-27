@@ -453,7 +453,9 @@ func readPromotedArtifact(
 	if err != nil || !os.SameFile(before, resolvedInfo) {
 		return nil, actionfacts.DialectNone, false
 	}
-	file, err := os.Open(path) // #nosec G304 -- exact hook-derived path, checked above and below.
+	// A FIFO swapped in after the checks above would park this reader (and
+	// its slot) in open(2); samePromotedArtifactVersion refuses it below.
+	file, err := openHostFileForInspection(path)
 	if err != nil {
 		return nil, actionfacts.DialectNone, false
 	}

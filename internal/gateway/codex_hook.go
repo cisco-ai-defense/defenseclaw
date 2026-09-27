@@ -1384,7 +1384,9 @@ func codexReadVerifiedGitDiffCurrentLines(
 		!codexSingleLinkRegularFile(target, listed) {
 		return nil, false
 	}
-	file, err := os.Open(target)
+	// The target may be swapped for a FIFO after the Lstat above; open it
+	// without blocking and let the regular-file check below refuse it.
+	file, err := openHostFileForInspection(target)
 	if err != nil {
 		return nil, false
 	}
