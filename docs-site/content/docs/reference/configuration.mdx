@@ -445,8 +445,9 @@ domain (`*`, `*.com`) are ignored, and custom packs may not contain them.
 `required_pack` pins the pack and makes its posture a floor: the keys above
 and run flags may tighten its profile, skip-permissions default, workspace
 mode, MCP import, blocklist feeds and proxy ports, but every attempt to loosen
-them is refused. `required_pack_digest` pins the pack's content (the digest
-`defenseclaw sandbox pack show` reports). In a `managed_enterprise` install a
+them is refused. `required_pack_digest` pins the pack's content: it is
+`sha256:` followed by the SHA-256 of the pack file's bytes, and a pack with any
+other content refuses to run. In a `managed_enterprise` install a
 custom required pack must be a file that root owns and no other user can
 modify, together with every directory above it (for example an absolute path
 under an administrator-owned directory; the default `pack_dir` in the data
@@ -465,8 +466,8 @@ missing project folder, and differently cased spellings of the path. With
 allow entries from a custom pack you chose are ignored, and a one-time approval
 cannot reach a blocklisted, feed-listed or private-network destination.
 
-Every loosening that `openshell.admin` refuses is reported as "blocked by your
-organization's DefenseClaw policy: <key>", and the same constraints gate
+Every loosening that `openshell.admin` refuses is reported as
+`blocked by your organization's DefenseClaw policy: <key>`, and the same constraints gate
 runtime actions such as unblocking a destination or opening a host port. In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the admin
 block is authoritative. Elsewhere it is still enforced, but it is advisory

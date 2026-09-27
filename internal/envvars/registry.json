@@ -3559,7 +3559,7 @@
     {
       "name": "DEFENSECLAW_SANDBOX_NAME",
       "category": "hook_internal",
-      "purpose": "Human-readable DefenseClaw sandbox name (dc-<harness>-<repo>-<rand>) set inside every sandbox; hooks and telemetry use it for display and correlation.",
+      "purpose": "Human-readable DefenseClaw sandbox name (`dc-<harness>-<repo>-<rand>`) set inside every sandbox; hooks and telemetry use it for display and correlation.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "sandbox name",
