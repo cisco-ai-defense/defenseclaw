@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func TestDevinPatchUserConfigAcceptsJSONCAndPreservesForeignHooks(t *testing.T) {
@@ -207,13 +209,48 @@ func TestDevinProfileUsesNativeLifecycleContract(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistryPublishesDevinNotRetiredWindsurf(t *testing.T) {
+func TestDefaultRegistryPublishesDevinAndRetiredIDCanonicalizesToDevin(t *testing.T) {
 	registry := NewDefaultRegistry()
 	if _, ok := registry.Get("devin"); !ok {
 		t.Fatal("default registry omitted Devin")
 	}
-	if _, ok := registry.Get("windsurf"); ok {
-		t.Fatal("retired Windsurf connector remains public")
+	if _, ok := registry.Get(legacyconnector.RetiredDesktopID); ok {
+		t.Fatal("the retired Desktop connector ID remains public")
+	}
+	if got, migrated := legacyconnector.Canonical(legacyconnector.RetiredDesktopID); got != "devin" || !migrated {
+		t.Fatalf("retired Desktop ID canonicalizes to %q (migrated=%v), want devin", got, migrated)
+	}
+}
+
+func TestDevinInventoryReadsDesktopLegacyPaths(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	configHome := filepath.Join(t.TempDir(), "devin")
+	if err := WithUserHomeDir(home, func() error {
+		opts := SetupOpts{ConfigHome: configHome, WorkspaceDir: workspace}
+		caps := NewDevinConnector().Capabilities(opts)
+		for _, want := range legacyconnector.DesktopLegacyRulePaths(home, workspace) {
+			if !slices.Contains(caps.Rules.ReadPaths, want) {
+				t.Errorf("rule read paths = %v, missing %q", caps.Rules.ReadPaths, want)
+			}
+		}
+		for _, want := range legacyconnector.DesktopLegacySkillPaths(home, workspace) {
+			if !slices.Contains(caps.Skills.ReadPaths, want) {
+				t.Errorf("skill read paths = %v, missing %q", caps.Skills.ReadPaths, want)
+			}
+		}
+		if !slices.Equal(caps.Skills.WritePaths, []string{filepath.Join(workspace, ".devin", "skills")}) {
+			t.Errorf("skill write paths changed: %v", caps.Skills.WritePaths)
+		}
+		if !slices.Equal(caps.Rules.WritePaths, []string{filepath.Join(workspace, ".devin", "rules")}) {
+			t.Errorf("rule write paths changed: %v", caps.Rules.WritePaths)
+		}
+		if !slices.Equal(caps.MCP.WritePaths, devinMCPWritePaths(opts)) {
+			t.Errorf("MCP write paths changed: %v", caps.MCP.WritePaths)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -282,4 +319,41 @@ func TestDevinGlobalSkillWritePathUsesNativeConfigRoot(t *testing.T) {
 	if !slices.Equal(caps.Skills.WritePaths, []string{filepath.Join(configHome, "skills")}) {
 		t.Fatalf("global skill write paths = %v, want native user config target", caps.Skills.WritePaths)
 	}
+}
+
+// The Devin CLI reads ~/.config/devin/config.json on macOS as well, so
+// DefenseClaw must register its hooks there rather than under
+// ~/Library/Application Support (seen live on macOS 15).
+func TestDevinConfigRootUsesXDGConfigOnDarwin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home layout")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got, want := devinConfigRootFor("darwin", SetupOpts{}), filepath.Join(home, ".config", "devin"); got != want {
+		t.Fatalf("devin config root = %q, want %q", got, want)
+	}
+	if got, want := devinHooksPathForTest("darwin"), filepath.Join(home, ".config", "devin", "config.json"); got != want {
+		t.Fatalf("devin hooks path = %q, want %q (never ~/Library/Application Support)", got, want)
+	}
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if got, want := devinConfigRootFor("darwin", SetupOpts{}), filepath.Join(xdg, "devin"); got != want {
+		t.Fatalf("devin config root with XDG_CONFIG_HOME = %q, want %q", got, want)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "relative/xdg")
+	if got, want := devinConfigRootFor("darwin", SetupOpts{}), filepath.Join(home, ".config", "devin"); got != want {
+		t.Fatalf("devin config root with relative XDG_CONFIG_HOME = %q, want %q", got, want)
+	}
+	if runtime.GOOS == "darwin" {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		if got, want := devinConfigRoot(SetupOpts{}), filepath.Join(home, ".config", "devin"); got != want {
+			t.Fatalf("native devin config root = %q, want %q", got, want)
+		}
+	}
+}
+
+func devinHooksPathForTest(goos string) string {
+	return filepath.Join(devinConfigRootFor(goos, SetupOpts{}), "config.json")
 }

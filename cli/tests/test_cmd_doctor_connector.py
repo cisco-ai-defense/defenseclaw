@@ -1779,7 +1779,7 @@ class TestDoctorActiveConnectors(unittest.TestCase):
 
 class TestCheckHookHealth(unittest.TestCase):
     """D4: generic hook-health rows for connectors that previously had no
-    Services check (hermes/cursor/windsurf/geminicli/opencode). The check
+    Services check (hermes/cursor/opencode). The check
     prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
     format-agnostic (YAML for hermes, flat ``.js`` for opencode).
     """
@@ -3227,16 +3227,6 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_connector_hooks(cfg, connector, r)
             self.assertTrue(r.checks, msg=connector)
             self.assertIn(label, {check["label"] for check in r.checks}, msg=connector)
-
-    def test_dispatch_reports_gemini_deprecation_instead_of_hook_health(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._cfg(tmp, "geminicli", [os.path.join(tmp, "missing")])
-            r = _DoctorResult()
-            _check_connector_hooks(cfg, "geminicli", r)
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertEqual(r.checks[-1]["reason_code"], "connector_deprecated")
-        self.assertIn("use Antigravity", r.checks[-1]["detail"])
-
 
 class TestConnectorEnabled(unittest.TestCase):
     """N1 — doctor must not render an operator-disabled connector as active.

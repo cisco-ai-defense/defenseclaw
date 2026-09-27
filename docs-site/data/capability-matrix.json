@@ -233,7 +233,7 @@
       "label": "Devin",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 supports the admitted same-user Devin CLI and system-PowerShell bridge.",
-      "summary": "Native Devin CLI lifecycle hooks with a source-reviewed 3000.4.25 contract.",
+      "summary": "Native lifecycle hooks for Devin CLI and Devin Desktop's Devin Local agent, with a source-reviewed 3000.4.25 contract.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
@@ -251,7 +251,7 @@
         "scope": "user,workspace"
       },
       "hilt": "Can block documented events but has no native resumable human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. The separate native devin acp entry point is cataloged for the shared DefenseClaw ACP guard but is not certified; cloud Devin, proxy transport, native OTLP, closed-beta plugins, and managed higher-layer enforcement are excluded."
+      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. Devin Desktop's default Devin Local agent shares the Devin CLI hook config; its legacy Cascade agent is not covered. The separate native devin acp entry point is cataloged for the shared DefenseClaw ACP guard but is not certified; cloud Devin, proxy transport, native OTLP, closed-beta plugins, and managed higher-layer enforcement are excluded."
     },
     {
       "id": "kiro",

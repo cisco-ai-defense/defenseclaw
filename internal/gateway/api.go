@@ -145,8 +145,8 @@ type APIServer struct {
 	// per-source OTLP credentials loaded from
 	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
 	// loopback OTLP request authenticated by either a scoped Authorization
-	// header (Codex and Claude Code) or the legacy path-token transport
-	// (Gemini CLI), so the map is held under an RWMutex to keep the hot
+	// header (Codex and Claude Code) or the path-token transport for
+	// exporters that cannot set headers, so the map is held under an RWMutex to keep the hot
 	// path lock-free for readers.
 	//
 	// The map is populated at boot by SetOTLPPathTokens AND refreshed
@@ -155,7 +155,7 @@ type APIServer struct {
 	//  1. Cache miss for a KNOWN scope (F4 fix). Closes the
 	//     boot-vs-setup race where the sidecar boots with an empty
 	//     or stale map, the operator subsequently runs
-	//     `defenseclaw setup geminicli` (which mints a fresh on-disk
+	//     `defenseclaw setup <connector>` (which mints a fresh on-disk
 	//     token), and the next OTLP request would otherwise 401
 	//     because the in-memory snapshot hasn't been refreshed.
 	//  2. Bounded secure revalidation for a HIT scope. Closes the rotation
@@ -253,7 +253,7 @@ type APIServer struct {
 	// at boot via SetCiscoInspector. Only the proxy lane held an
 	// AID client historically; this field extends coverage to the
 	// hook surface (Codex / Claude Code / Cursor / Devin /
-	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
+	// Hermes / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
 	// Widened from *CiscoInspectClient to the Inspector interface so
 	// managed_enterprise installs can inject the token-authenticated
@@ -425,7 +425,7 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	// The validation throttle (otlpPathTokenLastStatAt) is checked for
 	// BOTH cache-hit and cache-miss cases — a missing token file
 	// for a known scope must not turn into one file open per request,
-	// or a hostile caller probing /otlp/geminicli/<random>/v1/*
+	// or a hostile caller probing /otlp/<scope>/<random>/v1/*
 	// before any operator-side setup mints the on-disk token can
 	// weaponise the auth check into a per-request disk syscall.
 	a.otlpPathTokenMu.RLock()
@@ -1438,12 +1438,9 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands",
+	case "hermes", "cursor", "devin", "copilot", "openhands",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-		if name == "geminicli" {
-			telemetry = append(telemetry, "otel")
-		}
 	case "omnigent":
 		// OmniGent enforces through its own policy API rather than the
 		// shared lifecycle-hook bridge, so it keeps a distinct surface.
@@ -3317,8 +3314,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// credential out of the URL. Once a scoped credential exists, refuse the
 		// master gateway bearer for that source exactly as the path-token route
 		// does; a leaked connector configuration must never grant management API
-		// authority. Gemini CLI still uses the path form below because its native
-		// exporter cannot set an authorization header.
+		// authority. Exporters that cannot set an authorization header use the
+		// path form below.
 		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
 			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
 			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
@@ -3512,8 +3509,8 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		}
 		if _, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
 			// SECURITY (Plan B5 follow-up): the X-DefenseClaw-Client header
-			// CANNOT be enforced here because OTLP exporters (Gemini CLI's
-			// settings.json, etc.) cannot set arbitrary HTTP headers — only
+			// CANNOT be enforced here because some OTLP exporters cannot set
+			// arbitrary HTTP headers — only
 			// path / Content-Type / body. We do however enforce:
 			//   1. Loopback (the conditional above; a non-loopback request
 			//      bypasses this branch entirely and falls into the standard

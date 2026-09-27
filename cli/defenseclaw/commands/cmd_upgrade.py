@@ -169,12 +169,10 @@ _NATIVE_WINDOWS_INSTALLER_CONNECTORS = frozenset(
         "copilot",
         "cursor",
         "devin",
-        "geminicli",
         "hermes",
         "kiro",
         "omnigent",
         "opencode",
-        "windsurf",
     }
 )
 _RELEASE_CHANNEL_REF_URL = f"https://api.github.com/repos/{GITHUB_REPO}/git/ref/heads/release-channel"

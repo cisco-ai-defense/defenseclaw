@@ -36,6 +36,7 @@ Design contract for every migration:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib
 import json
@@ -54,8 +55,8 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
+from defenseclaw import legacy_connector, ux
 from defenseclaw import migration_state as migration_state_helpers
-from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
@@ -3145,6 +3146,291 @@ def _line_ending(line: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Migration: retired Desktop connector ID → devin
+# ---------------------------------------------------------------------------
+
+
+def _migrate_retired_desktop_connector(ctx: MigrationContext) -> None:
+    """Persist the move of the retired Desktop connector ID to ``devin``.
+
+    Both config loaders already apply the rename in memory
+    (``legacy_connector.migrate_raw_config`` and the Go
+    ``legacyconnector.MigrateConnectorKeys``); this step writes it to
+    ``config.yaml`` so the file matches what runs. The gateway removes the
+    DefenseClaw hook entries an older release left on the host on its next
+    start.
+
+    The rewrite is surgical (values and one map key, comments kept) and is
+    accepted only when the result parses to exactly the migrated document;
+    otherwise the migrated document is written in full. A failure never
+    aborts the upgrade: the in-memory rename keeps both loaders working.
+    """
+    try:
+        _persist_retired_desktop_connector(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"retired connector ID migration step failed: {exc}", indent="    ")
+
+
+def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
+    cfg_path = ctx.active_config_path()
+    if not os.path.isfile(cfg_path):
+        return
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    raw = yaml.safe_load(text)
+    migrated, notices = legacy_connector.migrated_copy(raw, cfg_path)
+    if not notices:
+        return
+    new_text = _rewrite_retired_desktop_connector_text(text)
+    try:
+        surgical_ok = new_text != text and yaml.safe_load(new_text) == migrated
+    except yaml.YAMLError:
+        surgical_ok = False
+    if not surgical_ok:
+        new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+    ctx.changes.extend(notices)
+
+
+def _rewrite_retired_desktop_connector_text(text: str) -> str:
+    """Rename the retired ID in ``claw.mode``, ``guardrail.connector`` and the
+    per-connector map keys (``legacy_connector.CONNECTOR_MAP_BLOCKS``),
+    keeping every other byte."""
+    retired = re.escape(legacy_connector.RETIRED_DESKTOP_ID)
+    replacement = legacy_connector.REPLACEMENT
+    for block_key, field_name in (("claw", "mode"), ("guardrail", "connector")):
+        text = _replace_block_scalar_text(text, block_key, field_name, retired, replacement)
+
+    def plan(keys: list[str]) -> tuple[dict[str, str], set[str]]:
+        _, rename, dropped = legacy_connector.migrate_connector_keys("", keys)
+        return rename, set(dropped)
+
+    for block_key in legacy_connector.CONNECTOR_MAP_BLOCKS:
+        text = _edit_connector_map_keys(text, block_key, plan)
+    return text
+
+
+def _replace_block_scalar_text(text: str, block_key: str, field_name: str, value_re: str, new_value: str) -> str:
+    """Replace ``<block_key>.<field_name>`` when its scalar value matches
+    *value_re* (case-insensitive, optionally quoted), keeping quotes, inline
+    comments and every other byte."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    pattern = re.compile(
+        r"(?P<prefix>^[ \t]+" + re.escape(field_name) + r":[ \t]*)(?P<quote>[\"']?)"
+        + value_re
+        + r"(?P=quote)(?P<suffix>[ \t]*(?:#[^\n]*)?(?:\r?\n|$))",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    body = pattern.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}{new_value}{m.group('quote')}{m.group('suffix')}",
+        block.group("body"),
+    )
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+def _edit_connector_map_keys(
+    text: str,
+    block_key: str,
+    plan: Callable[[list[str]], tuple[dict[str, str], set[str]]],
+) -> str:
+    """Rename or drop keys of ``<block_key>.connectors`` as *plan* decides,
+    keeping every other byte.
+
+    *plan* receives the map's keys and returns ``(rename, drop)``. Only a
+    block-style ``connectors:`` mapping that is a direct child of the block is
+    touched; nested selector lists of the same name and flow-style maps are
+    left alone (callers verify the result and fall back to a full rewrite)."""
+    block = _find_top_level_block(text, block_key)
+    if not block:
+        return text
+    lines = block.group("body").splitlines(keepends=True)
+
+    def indent_of(line: str) -> int:
+        return len(line) - len(line.lstrip(" \t"))
+
+    def is_blank(line: str) -> bool:
+        return not line.strip() or line.lstrip().startswith("#")
+
+    first = next((i for i, line in enumerate(lines) if not is_blank(line)), None)
+    if first is None:
+        return text
+    block_child = indent_of(lines[first])
+    header = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if indent_of(line) == block_child
+            and re.match(r"^[ \t]+connectors:[ \t]*(?:#[^\n]*)?\r?\n?$", line)
+        ),
+        None,
+    )
+    if header is None:
+        return text
+    parent = indent_of(lines[header])
+    end = header + 1
+    while end < len(lines) and (is_blank(lines[end]) or indent_of(lines[end]) > parent):
+        end += 1
+    children = [i for i in range(header + 1, end) if not is_blank(lines[i])]
+    if not children:
+        return text
+    child = indent_of(lines[children[0]])
+    key_re = re.compile(r"^[ \t]*(?P<quote>[\"']?)(?P<key>[^:\"'#]+)(?P=quote)[ \t]*:")
+    keyed = [i for i in children if indent_of(lines[i]) == child and key_re.match(lines[i])]
+    keys = {i: key_re.match(lines[i]).group("key").strip() for i in keyed}
+    rename, drop_keys = plan([keys[i] for i in keyed])
+    if not rename and not drop_keys:
+        return text
+    drop: set[int] = set()
+    for row in keyed:
+        key = keys[row]
+        if key in drop_keys:
+            stop = row + 1
+            while stop < end and (is_blank(lines[stop]) or indent_of(lines[stop]) > child):
+                stop += 1
+            drop.update(range(row, stop))
+        elif key in rename:
+            match = key_re.match(lines[row])
+            lines[row] = lines[row][: match.start("key")] + rename[key] + lines[row][match.end("key") :]
+    body = "".join(line for i, line in enumerate(lines) if i not in drop)
+    return text[: block.start("body")] + body + text[block.end("body") :]
+
+
+# ---------------------------------------------------------------------------
+# Migration: drop connectors this release does not ship
+# ---------------------------------------------------------------------------
+
+
+def _migrate_0_8_11_connectors(ctx: MigrationContext) -> None:
+    """0.8.11 connector changes: rename the retired Desktop ID first (so it is
+    already ``devin``), then drop any name this release does not ship."""
+    _migrate_retired_desktop_connector(ctx)
+    _migrate_unshipped_connectors(ctx)
+
+_REMOVED_CONNECTORS_DOC = (
+    "see Upgrade → Renamed and removed connectors "
+    "(https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/#renamed-and-removed-connectors)"
+)
+
+
+def _migrate_unshipped_connectors(ctx: MigrationContext) -> None:
+    """Drop connector names this release does not ship from ``config.yaml``.
+
+    A connector an older release shipped and this one removed stays named in
+    ``guardrail.connectors`` / ``guardrail.connector`` / ``claw.mode`` after
+    an upgrade, and the gateway refuses to boot while config names a
+    connector it cannot resolve, leaving every other connector on the host
+    unprotected. This step removes such names without knowing them: a name is
+    unshipped when it is neither a built-in connector
+    (``connector_paths.KNOWN_CONNECTORS``) nor declared by a plugin directory
+    under ``plugin_dir``. The primary and ``claw.mode`` mirror move to the
+    first remaining connector.
+
+    When no shipped connector would remain, the file is left unchanged and
+    the operator is told to choose one: defaulting to another connector
+    silently would be worse than the loud boot failure. The agent's own
+    config files are never touched (the gateway removes DefenseClaw's hook
+    scripts for the dropped names on its next start). A failure never aborts
+    the upgrade.
+    """
+    try:
+        _drop_unshipped_connectors(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"unshipped connector cleanup step failed: {exc}", indent="    ")
+
+
+def _shipped_connector_names(raw: dict, data_dir: str) -> set[str]:
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, declared_plugin_connectors
+
+    plugin_dir = raw.get("plugin_dir") if isinstance(raw.get("plugin_dir"), str) else ""
+    plugin_dir = (plugin_dir or "").strip() or os.path.join(data_dir, "plugins")
+    try:
+        declared = declared_plugin_connectors(plugin_dir)
+    except OSError as exc:
+        # Cannot tell which plugins exist: treat nothing as unshipped.
+        raise RuntimeError(f"cannot read plugin directory {plugin_dir}: {exc}") from exc
+    return set(KNOWN_CONNECTORS) | declared
+
+
+def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
+    from defenseclaw.connector_contracts import normalize_connector
+
+    cfg_path = ctx.active_config_path()
+    if not os.path.isfile(cfg_path):
+        return
+    text = _read_config_text(cfg_path)
+    if text is None:
+        return
+    raw = yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        return
+    guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), dict) else {}
+    claw = raw.get("claw") if isinstance(raw.get("claw"), dict) else {}
+    connectors = guardrail.get("connectors") if isinstance(guardrail.get("connectors"), dict) else {}
+    primary = guardrail.get("connector") if isinstance(guardrail.get("connector"), str) else ""
+    mode = claw.get("mode") if isinstance(claw.get("mode"), str) else ""
+    shipped = _shipped_connector_names(raw, ctx.data_dir)
+
+    def unshipped(name: object) -> bool:
+        value = normalize_connector(str(name or ""))
+        return bool(value) and value not in shipped and not legacy_connector.is_retired(value)
+
+    dropped_keys = [str(key) for key in connectors if unshipped(key)]
+    names = sorted({*dropped_keys, *(n.strip() for n in (primary, mode) if unshipped(n))})
+    if not names:
+        return
+    remaining = sorted(str(key) for key in connectors if not unshipped(key))
+    if not connectors and primary and not unshipped(primary):
+        remaining = [primary.strip()]
+    listed = ", ".join(repr(n) for n in names)
+    if not remaining:
+        message = (
+            f"connector {listed} is not shipped by this release and is the only connector configured; "
+            f"config.yaml was left unchanged and the gateway will not start until you choose a supported "
+            f"connector (`defenseclaw setup <connector>`) or remove it (`defenseclaw setup remove <name> --yes`); "
+            f"{_REMOVED_CONNECTORS_DOC}"
+        )
+        ux.warn(message, indent="    ")
+        ctx.changes.append(message)
+        return
+    new_primary = primary.strip() if primary and not unshipped(primary) else remaining[0]
+    migrated = copy.deepcopy(raw)
+    if dropped_keys:
+        migrated["guardrail"]["connectors"] = {
+            key: value for key, value in connectors.items() if str(key) not in dropped_keys
+        }
+    if primary and unshipped(primary):
+        migrated["guardrail"]["connector"] = new_primary
+    if mode and unshipped(mode):
+        migrated["claw"]["mode"] = new_primary
+
+    new_text = text
+    if primary and unshipped(primary):
+        new_text = _replace_block_scalar_text(new_text, "guardrail", "connector", re.escape(primary.strip()), new_primary)
+    if mode and unshipped(mode):
+        new_text = _replace_block_scalar_text(new_text, "claw", "mode", re.escape(mode.strip()), new_primary)
+    drop = set(dropped_keys)
+    new_text = _edit_connector_map_keys(new_text, "guardrail", lambda keys: ({}, {k for k in keys if k in drop}))
+    try:
+        surgical_ok = new_text != text and yaml.safe_load(new_text) == migrated
+    except yaml.YAMLError:
+        surgical_ok = False
+    if not surgical_ok:
+        new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+    ctx.changes.append(
+        f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
+        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -3206,6 +3492,14 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         "validate it with the installed target gateway, and activate it "
         "transactionally during defenseclaw upgrade",
         _migrate_observability_v8,
+    ),
+    (
+        # Forward-keyed to the next stamped release; the upgrade manifest lists
+        # it as required once the release workflow stamps the checkout.
+        "0.8.11",
+        "Move the retired Desktop connector ID to devin and drop connectors "
+        "this release does not ship from config.yaml",
+        _migrate_0_8_11_connectors,
     ),
 ]
 

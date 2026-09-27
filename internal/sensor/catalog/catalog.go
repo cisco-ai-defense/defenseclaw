@@ -40,6 +40,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // Category is the provider risk class an egress peer falls into.
@@ -130,9 +131,11 @@ var vendorCategories = map[string]Category{
 	"github":      CategoryCodingAssistant,
 	"sourcegraph": CategoryCodingAssistant,
 	"tabnine":     CategoryCodingAssistant,
-	"codeium":     CategoryCodingAssistant,
-	"windsurf":    CategoryCodingAssistant,
-	"cognition":   CategoryCodingAssistant,
+	// Pre-rename Devin Desktop vendor tokens stay detectable: un-upgraded
+	// installs still report them.
+	legacyconnector.PublisherToken: CategoryCodingAssistant,
+	legacyconnector.VendorToken:    CategoryCodingAssistant,
+	"cognition":                    CategoryCodingAssistant,
 
 	"langchain":        CategoryAgentOps,
 	"langsmith":        CategoryAgentOps,

@@ -796,12 +796,12 @@ func TestScrubReturnsRC5OnEmptyConnector(t *testing.T) {
 	}
 }
 
-// TestScrubReturnsRC3OnUnsupportedConnector guards the "geminicli
+// TestScrubReturnsRC3OnUnsupportedConnector guards the "unsupported connector
 // returns rc 3" contract from the previous shell test suite.
 func TestScrubReturnsRC3OnUnsupportedConnector(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "x.json")
 	writeFile(t, filePath, "{}")
-	setScrubFlags(t, "geminicli", filePath, false)
+	setScrubFlags(t, "retired-example", filePath, false)
 	err := runEnterpriseHooksScrub(enterpriseHooksScrubCmd, nil)
 	if err == nil {
 		t.Fatalf("expected error for unsupported connector")

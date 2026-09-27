@@ -1,9 +1,11 @@
 ---
-title: Devin
-description: Native Devin CLI lifecycle hooks on Windows, macOS, and Linux, with a source-reviewed 3000.4.25 contract.
+title: Devin (Devin CLI and Devin Desktop)
+description: Native Devin lifecycle hooks for Devin CLI and Devin Desktop's Devin Local agent on Windows, macOS, and Linux, with a source-reviewed 3000.4.25 contract.
 keywords:
   - DefenseClaw Devin connector
   - Devin CLI hooks
+  - Devin Desktop
+  - Devin Local
   - Devin guardrail
   - Devin Windows
 ---
@@ -12,6 +14,23 @@ The `devin` connector wires DefenseClaw into the native
 [Devin CLI lifecycle-hook surface](https://docs.devin.ai/cli/extensibility/hooks/overview).
 Devin continues to contact its model provider directly; DefenseClaw does not
 proxy its model traffic.
+
+<Callout type="info" title="One connector for Devin CLI and Devin Desktop">
+Use `devin` for both Devin CLI and Devin Desktop. If an older DefenseClaw
+release protected Devin Desktop under its previous product name, upgrading
+moves that configuration to `devin` and removes the hook entries DefenseClaw
+wrote for the old app. See
+[Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
+</Callout>
+
+## What this connector protects
+
+| Surface | Protected | Why |
+| --- | --- | --- |
+| Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
+| Devin Desktop, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file, and hooks with Devin CLI, so the same hook registration applies. DefenseClaw has not yet recorded a live Devin Desktop validation run. |
+| Devin Desktop, legacy **Cascade** agent | **No** | Cascade uses a separate hook contract that this connector does not register. New Devin Desktop conversations never start on Cascade, but existing Cascade conversations still run unprotected. |
+| Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
 The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
 macOS, and Linux. This is source-reviewed compatibility evidence. Authentic
@@ -49,7 +68,9 @@ defenseclaw setup devin --mode action
 </Tabs>
 
 Use `--mode action` only after reviewing observed events and policy findings.
-The connector can join an existing hook-connector roster.
+The connector can join an existing hook-connector roster. After setup, restart
+any open Devin CLI session and reopen Devin Desktop tabs so they load the new
+hooks.
 
 ### Native Windows admission
 
@@ -67,15 +88,17 @@ or add Bash, WSL, Docker, a VM, Git Bash, Cygwin/MSYS, or a proxy dependency.
 
 ## Configuration custody
 
-DefenseClaw manages only the documented Devin-native hook locations:
+DefenseClaw manages only the documented Devin-native hook locations. Devin CLI
+and Devin Desktop's Devin Local agent read the same files:
 
 - Windows user hooks: `%APPDATA%\devin\config.json`, nested under `hooks`;
 - macOS/Linux user hooks: `~/.config/devin/config.json`, nested under `hooks`;
 - project hooks: `<workspace>/.devin/hooks.v1.json`, where the hook map is the
   whole JSONC document.
 
-Existing foreign hook groups and JSONC content are preserved. DefenseClaw does
-not claim or modify Devin's Claude-compatibility hook locations.
+Existing foreign hook groups and JSONC content are preserved. Devin also loads
+hooks from `.claude/` settings for compatibility; DefenseClaw does not claim or
+modify those locations.
 
 ## Lifecycle and enforcement
 
@@ -109,8 +132,15 @@ Read/write MCP custody is limited to the canonical user and project
 `mcp_config.json` files. Higher-precedence local compatibility files may be
 read for effective inventory but are not rewritten. Skills and rules are
 discovered from the documented `.devin` and `.agents` roots, including
-`AGENT.md`, `AGENTS.md`, and `AGENTS.local.md` where applicable. Traversal is
-bounded and does not follow links or reparse points.
+`AGENT.md`, `AGENTS.md`, and `AGENTS.local.md` where applicable. Inventory
+also reads the pre-rename Devin Desktop rule and skill locations that the
+vendor still loads (see Cognition's
+[memories and rules](https://docs.devin.ai/desktop/cascade/memories) and
+[skills](https://docs.devin.ai/desktop/cascade/skills) documentation).
+Setup never installs anything there; `defenseclaw skill quarantine` and
+`restore` can move a flagged skill out of and back into those folders, as for
+any other skill folder. Traversal is bounded and does not follow links or
+reparse points.
 
 Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
 or enforcement. The separate `devin acp` entry point is cataloged for the
@@ -133,13 +163,12 @@ policy are also outside this connector's support boundary.
   </Folder>
 </Files>
 
-## Retired predecessor cleanup
+## Upgrading an older Devin Desktop install
 
-Windsurf/Cascade is not a setup alias, selectable connector, discovery target,
-or public hook route. A packaged upgrade from an authenticated older install
-may still recognize its old receipt and restore only the previously managed
-hook entries before publishing canonical Devin state. Full uninstall retains
-the same receipt-bound cleanup so unrelated legacy configuration is preserved.
+Upgrades migrate the previous Devin Desktop connector automatically; you do
+not need to edit files by hand. The details, including what DefenseClaw removes and what it
+leaves alone, are in
+[Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
 
 ## Disable
 

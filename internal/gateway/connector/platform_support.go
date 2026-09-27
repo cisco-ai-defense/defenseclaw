@@ -48,16 +48,6 @@ var proxyConnectors = map[string]struct{}{
 	"zeptoclaw": {},
 }
 
-// deprecatedConnectorSupport keeps retired built-ins resolvable only for
-// teardown and migration. Setup and presentation surfaces must not offer them
-// on any operating system.
-var deprecatedConnectorSupport = map[string]PlatformSupport{
-	"geminicli": {
-		Status: PlatformUnsupported,
-		Reason: "Gemini CLI integration is deprecated; use the Antigravity connector. Existing managed Gemini CLI state remains removable through teardown and uninstall.",
-	},
-}
-
 // windowsConnectorSupport is the Go source of truth for native Windows
 // connector availability. Keep it in exact parity with the Python
 // cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT mapping.
@@ -81,10 +71,6 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	"devin": {
 		Status: PlatformSupported,
 		Reason: "Native Devin CLI lifecycle hooks are supported on Windows x64 using the pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client live certification, cloud Devin, proxy, native OTLP, and managed higher-layer enforcement are not covered.",
-	},
-	"geminicli": {
-		Status: PlatformUnsupported,
-		Reason: "Gemini CLI integration is deprecated; use the Antigravity connector. Existing managed Gemini CLI state remains removable through teardown and uninstall.",
 	},
 	"copilot": {
 		Status: PlatformSupported,
@@ -135,9 +121,6 @@ func IsProxyConnector(name string) bool {
 // classification with a human-readable reason. Unknown plugin connectors fail
 // closed on Windows pending separate certification.
 func ConnectorSupportOnOS(name, goos string) PlatformSupport {
-	if support, ok := deprecatedConnectorSupport[name]; ok {
-		return support
-	}
 	if goos == "windows" {
 		if support, ok := windowsConnectorSupport[name]; ok {
 			return support

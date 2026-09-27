@@ -17,8 +17,8 @@ import (
 
 func TestBuiltinCorrelationProfilesAreVersionedAndValid(t *testing.T) {
 	reg := NewDefaultRegistry()
-	if got := len(reg.Names()); got != 15 {
-		t.Fatalf("builtin count=%d want 15", got)
+	if got := len(reg.Names()); got != 14 {
+		t.Fatalf("builtin count=%d want 14", got)
 	}
 	for _, name := range reg.Names() {
 		name := name
@@ -378,9 +378,6 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 
 func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 	for _, name := range NewDefaultRegistry().Names() {
-		if name == "geminicli" {
-			continue // retained in the internal registry for legacy cleanup only
-		}
 		spec := DefaultCorrelationSpec(name)
 		if err := spec.Validate(); err != nil {
 			t.Fatalf("%s profile invalid: %v", name, err)
@@ -603,9 +600,6 @@ func TestConnectorLifecycleSemantics(t *testing.T) {
 
 func TestNativeRegistryNeverRecognizesNonStandardGenAIRequestID(t *testing.T) {
 	for _, name := range NewDefaultRegistry().Names() {
-		if name == "geminicli" {
-			continue // retained in the internal registry for legacy cleanup only
-		}
 		spec := DefaultCorrelationSpec(name)
 		if got, ok := spec.NativeOTLPValue(map[string]interface{}{"gen_ai.request.id": "not-standard"}, CorrelationTargetModelRequest); ok {
 			t.Errorf("%s accepted non-standard gen_ai.request.id as %+v", name, got)

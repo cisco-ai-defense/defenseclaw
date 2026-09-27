@@ -33,7 +33,7 @@ func identityHookScripts(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("glob hooks: %v", err)
 	}
-	if len(scripts) < 10 {
+	if len(scripts) < 9 {
 		t.Fatalf("found only %d connector hooks (%q); the glob is no longer matching them", len(scripts), scripts)
 	}
 	return scripts

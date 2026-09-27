@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
-from defenseclaw import connector_paths, ux
+from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -2703,7 +2703,7 @@ def _all_active_skill_dirs(app: AppContext) -> list[str]:
             connectors = [
                 name
                 for name in cfg.active_connectors()
-                if name and not connector_paths.is_cleanup_only(name)
+                if name
             ] or [None]
         except Exception:  # noqa: BLE001 — fall back to the active connector.
             connectors = [None]
@@ -2724,7 +2724,7 @@ def _active_skill_connectors(app: AppContext) -> list[str]:
             names = [
                 n
                 for n in cfg.active_connectors()
-                if n and not connector_paths.is_cleanup_only(n)
+                if n
             ]
             if names:
                 return names
@@ -2733,7 +2733,7 @@ def _active_skill_connectors(app: AppContext) -> list[str]:
     if hasattr(cfg, "active_connector"):
         active = cfg.active_connector()
         if active:
-            return [] if connector_paths.is_cleanup_only(active) else [active]
+            return [active]
     return ["openclaw"]
 
 

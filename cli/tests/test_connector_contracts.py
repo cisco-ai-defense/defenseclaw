@@ -31,7 +31,6 @@ from defenseclaw.commands.cmd_setup import (
 )
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
-    HOOK_CONTRACTS,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -441,7 +440,6 @@ class TestConnectorContractManifest(unittest.TestCase):
             "openhands": (("openhands-hooks-v1", "1.12.0", "", True, "v6", 6),),
             "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10),),
             "amp": (("amp-plugin-v1", "0.0.1785334225", "", True, "v2", 5),),
-            "geminicli": (("geminicli-hooks-v1", "0.26.0", "", True, "v6", 11),),
         }
 
         for platform_name in ("darwin", "linux", "windows"):
@@ -484,11 +482,6 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertTrue(compat.supported)
         self.assertEqual(compat.contract.contract_id, "cursor-hooks-v1")
         self.assertTrue(compat.contract.default_for_unversioned)
-
-        self.assertIn("geminicli", HOOK_CONTRACTS)
-        gemini = resolve_connector_contract("gemini-cli", "")
-        self.assertEqual(gemini.connector, "geminicli")
-        self.assertEqual(gemini.status, STATUS_UNVERSIONED)
 
     def test_cursor_current_supported_contract_is_pinned_to_exact_agent_build(self) -> None:
         for raw_version in (
@@ -997,7 +990,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
                 return_value=_discovery(
-                    "geminicli",
+                    "openhands",
                     installed=True,
                     version="",
                     error="version probe timed out",
@@ -1006,7 +999,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
             patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}),
         ):
             ok = _check_connector_version_supported_for_setup(
-                "gemini-cli",
+                "openhands",
                 mode="action",
                 emit=False,
             )
@@ -1017,12 +1010,12 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("geminicli", installed=True, version=""),
+                return_value=_discovery("openhands", installed=True, version=""),
             ),
             patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}),
         ):
             ok = _check_connector_version_supported_for_setup(
-                "gemini-cli",
+                "openhands",
                 mode="action",
                 emit=False,
             )

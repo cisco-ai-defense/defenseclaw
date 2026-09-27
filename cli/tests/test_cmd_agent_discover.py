@@ -84,7 +84,7 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.guardrail.connectors = {
             "hermes": PerConnectorGuardrailConfig(mode="observe"),
-            "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+            "devin": PerConnectorGuardrailConfig(mode="observe"),
         }
         disc = _discovery()
         disc.agents["hermes"] = AgentSignal(
@@ -96,10 +96,10 @@ class TestAgentDiscoverCommand(unittest.TestCase):
             error="",
             configured=True,
         )
-        disc.agents["windsurf"] = AgentSignal(
-            name="windsurf",
+        disc.agents["devin"] = AgentSignal(
+            name="devin",
             installed=False,
-            config_path="C:/Users/alice/.codeium/windsurf/hooks.json",
+            config_path="C:/Users/alice/AppData/Roaming/devin/config.json",
             binary_path="",
             version="",
             error="",
@@ -130,7 +130,7 @@ class TestAgentDiscoverCommand(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)["agents"]
-        for name in ("hermes", "windsurf"):
+        for name in ("hermes", "devin"):
             self.assertFalse(payload[name]["installed"])
             self.assertTrue(payload[name]["configured"])
             self.assertTrue(payload[name]["active"])

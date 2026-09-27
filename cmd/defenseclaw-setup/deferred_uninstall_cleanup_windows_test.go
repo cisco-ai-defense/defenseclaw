@@ -669,27 +669,7 @@ func TestDeferredCleanupRecordCarriesCopilotRestorationReceipt(t *testing.T) {
 	}
 }
 
-func TestDeferredCleanupAcceptsCompleteWindsurfConnectorSet(t *testing.T) {
-	fixture := newDeferredCleanupFixture(t)
-	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "windsurf"}
-	paths := hookruntime.Paths{
-		Root:     fixture.record.RuntimeRoot,
-		Launcher: fixture.record.LauncherPath,
-		State:    fixture.record.StatePath,
-	}
-	if err := validateDeferredUninstallCleanupRecord(
-		fixture.record,
-		paths,
-		fixture.record.InstallerStateRoot,
-		fixture.record.MaintenancePath,
-		fixture.record.RunValueName,
-		fixture.record.RunCommand,
-	); err != nil {
-		t.Fatalf("Windsurf deferred-cleanup receipt rejected: %v", err)
-	}
-}
-
-func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndGemini(t *testing.T) {
+func TestDeferredCleanupConnectorCustodyAcceptsAntigravity(t *testing.T) {
 	fixture := newDeferredCleanupFixture(t)
 	paths := hookruntime.Paths{
 		Root:     fixture.record.RuntimeRoot,
@@ -707,18 +687,6 @@ func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndGemini(t *testing.T
 		fixture.record.RunCommand,
 	); err != nil {
 		t.Fatalf("Antigravity deferred-cleanup custody rejected: %v", err)
-	}
-
-	fixture.record.VerifiedConnectors = []string{"antigravity", "geminicli"}
-	if err := validateDeferredUninstallCleanupRecord(
-		fixture.record,
-		paths,
-		fixture.record.InstallerStateRoot,
-		fixture.record.MaintenancePath,
-		fixture.record.RunValueName,
-		fixture.record.RunCommand,
-	); err != nil {
-		t.Fatalf("Gemini native-Windows deferred-cleanup custody rejected: %v", err)
 	}
 }
 

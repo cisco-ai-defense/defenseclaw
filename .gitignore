@@ -24,7 +24,6 @@ cmd/defenseclaw-enterprise-setup/payload/*
 .idea/
 .vscode/
 .cursor/
-.windsurf/
 *.swp
 *.swo
 *~

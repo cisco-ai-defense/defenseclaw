@@ -31,7 +31,7 @@ import (
 //     flowing through the unified pipeline (vs. an out-of-tree
 //     registration that bypasses audit/metrics emission).
 //  2. Delegate to handleAgentHook(name). EVERY connector — codex,
-//     claudecode, hermes, cursor, windsurf, geminicli, copilot —
+//     claudecode, hermes, cursor, copilot —
 //     flows through the same handler now. Connector-specific event
 //     emission, dedupe, and evaluation live behind HookProfile runtime
 //     callbacks; shared audit, generated metrics, trace propagation,

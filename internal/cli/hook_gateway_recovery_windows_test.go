@@ -23,7 +23,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
-	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
@@ -86,53 +85,6 @@ func TestTrustedGatewayStartCommandIsExactBoundAndWindowless(t *testing.T) {
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.HideWindow ||
 		cmd.SysProcAttr.CreationFlags&windows.CREATE_NO_WINDOW == 0 {
 		t.Fatalf("gateway start command can allocate a console: %+v", cmd.SysProcAttr)
-	}
-}
-
-func TestTrustedGatewayColdStartRehydratesAuthenticatedGeminiHome(t *testing.T) {
-	root := t.TempDir()
-	dataRoot := filepath.Join(root, "data")
-	geminiCLIHome := filepath.Join(root, "profile")
-	geminiHome := filepath.Join(geminiCLIHome, ".gemini")
-	state := hookruntime.State{
-		GatewayPath: filepath.Join(root, "bin", hookruntime.GatewayName),
-		DataRoot:    dataRoot,
-	}
-	previousReader := nativeGatewayInstallStateReader
-	nativeGatewayInstallStateReader = func(executable string) (nativeinstallstate.State, bool, error) {
-		if executable != state.GatewayPath {
-			t.Fatalf("install-state executable = %q, want %q", executable, state.GatewayPath)
-		}
-		return nativeinstallstate.State{
-			InstallRoot:     root,
-			DataRoot:        dataRoot,
-			GeminiCLIHome:   geminiCLIHome,
-			GeminiConfigDir: geminiHome,
-		}, true, nil
-	}
-	t.Cleanup(func() { nativeGatewayInstallStateReader = previousReader })
-
-	environment, err := trustedNativeGatewayStartEnvironment([]string{
-		"HOME=" + filepath.Join(root, "hostile-home"),
-		"USERPROFILE=" + filepath.Join(root, "hostile-profile"),
-		"GEMINI_CLI_HOME=" + filepath.Join(root, "hostile-vendor-root"),
-		"GEMINI_CONFIG_DIR=" + filepath.Join(root, "hostile-vendor-home"),
-		"DEFENSECLAW_GEMINI_CONFIG_HOME=" + filepath.Join(root, "hostile-internal-home"),
-	}, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(environment, "\n")
-	if !strings.Contains(joined, "DEFENSECLAW_GEMINI_CONFIG_HOME="+geminiHome) {
-		t.Fatalf("authenticated Gemini home missing from cold-start environment: %s", joined)
-	}
-	if !strings.Contains(joined, "GEMINI_CLI_HOME="+geminiCLIHome) {
-		t.Fatalf("authenticated Gemini CLI root missing from cold-start environment: %s", joined)
-	}
-	for _, forbidden := range []string{"hostile-vendor-root", "hostile-vendor-home", "hostile-internal-home"} {
-		if strings.Contains(joined, forbidden) {
-			t.Fatalf("hostile Gemini binding survived cold-start sanitization: %s", joined)
-		}
 	}
 }
 

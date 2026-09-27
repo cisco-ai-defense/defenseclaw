@@ -40,7 +40,7 @@ import (
 //     general /api/v1/... routes.
 //
 // Per-source scoping means a process that can read one connector's
-// OTLP token (e.g. by reading ~/.gemini/settings.json) cannot replay it
+// OTLP token (e.g. by reading that agent's config file) cannot replay it
 // against another connector's OTLP namespace, and cannot escalate to
 // the full sidecar admin surface — both of which were possible with
 // the previous design that wrote the master gateway bearer into
@@ -50,7 +50,6 @@ type OTLPPathTokenScope string
 const (
 	// Every hook-only connector that persists an OTLP credential in agent
 	// configuration gets a distinct namespace here.
-	OTLPScopeGeminiCLI OTLPPathTokenScope = "geminicli"
 	OTLPScopeCodex     OTLPPathTokenScope = "codex"
 	OTLPScopeClaude    OTLPPathTokenScope = "claudecode"
 	OTLPScopeOmnigent  OTLPPathTokenScope = "omnigent"
@@ -63,7 +62,7 @@ const (
 // guaranteeing that a new scope can never be added in one half of
 // the codebase without the other.
 func OTLPPathTokenScopes() []OTLPPathTokenScope {
-	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude, OTLPScopeOmnigent, OTLPScopeOpenHands}
+	return []OTLPPathTokenScope{OTLPScopeCodex, OTLPScopeClaude, OTLPScopeOmnigent, OTLPScopeOpenHands}
 }
 
 // OTLPPathTokenScopeForConnector returns the path-token namespace owned by a
@@ -71,8 +70,6 @@ func OTLPPathTokenScopes() []OTLPPathTokenScope {
 // false so callers can leave OTLP provisioning disabled for them.
 func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, bool) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "geminicli":
-		return OTLPScopeGeminiCLI, true
 	case "codex":
 		return OTLPScopeCodex, true
 	case "claudecode":

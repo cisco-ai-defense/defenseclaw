@@ -360,13 +360,8 @@ func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 			t.Errorf("default registry missing %q", name)
 		}
 	}
-	// Gemini CLI remains internally resolvable only for teardown of older
-	// managed state; it is not part of the active connector matrix.
-	if _, ok := r.Get("geminicli"); !ok {
-		t.Error("default registry missing Gemini CLI cleanup connector")
-	}
-	if r.Len() != len(active)+1 {
-		t.Errorf("registry has %d connectors, want %d active plus one cleanup-only", r.Len(), len(active))
+	if r.Len() != len(active) {
+		t.Errorf("registry has %d connectors, want %d", r.Len(), len(active))
 	}
 }
 
@@ -7398,8 +7393,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 15 {
-		t.Errorf("HookScripts() returned %d scripts, want 15", len(scripts))
+	if len(scripts) != 13 {
+		t.Errorf("HookScripts() returned %d scripts, want 13", len(scripts))
 	}
 }
 
@@ -7927,8 +7922,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 15 {
-		t.Errorf("expected 15 built-in connectors, got %d", r.Len())
+	if r.Len() != 14 {
+		t.Errorf("expected 14 built-in connectors, got %d", r.Len())
 	}
 }
 

@@ -282,7 +282,6 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     assert first.cache_hit is False
     assert first.agents["codex"].installed is True
     assert set(calls) == set(ad.DISCOVERABLE_CONNECTORS)
-    assert "geminicli" not in calls
 
     cache_file = Path(os.environ["DEFENSECLAW_HOME"]) / ad.CACHE_FILENAME
     assert cache_file.is_file()
@@ -862,7 +861,6 @@ def test_antigravity_config_evidence_ignores_undocumented_home_overrides(monkeyp
     hooks.parent.mkdir(parents=True)
     hooks.write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("ANTIGRAVITY_CONFIG_DIR", str(configured))
-    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(configured / "gemini"))
     monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args, **_kwargs: ())
 
     signal = ad._scan_agent("antigravity")
@@ -2261,31 +2259,6 @@ def test_opencode_version_probe_allows_bounded_packaged_binary_startup(monkeypat
     assert calls[0][1]["timeout"] == 10.0
 
 
-def test_gemini_version_probe_does_not_receive_private_path_authority(monkeypatch):
-    calls = []
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", "/authenticated/.gemini")
-    monkeypatch.setenv("GEMINI_CLI_HOME", "/authenticated")
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout="0.26.0\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
-
-    version, error = ad._version_for_binary("/opt/bin/gemini", ("--version",))
-
-    assert error == ""
-    assert version == "0.26.0"
-    assert "DEFENSECLAW_GEMINI_CONFIG_HOME" not in calls[0][1]["env"]
-    assert calls[0][1]["env"]["GEMINI_CLI_HOME"] == "/authenticated"
-
-
 @pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
 def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "cursor.CMD"
@@ -2700,7 +2673,7 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
     assert ad.first_installed(_discovery(*ad.DISCOVERABLE_CONNECTORS), "codex") == "codex"
-    assert ad.first_installed(_discovery(), "geminicli") == "codex"
+    assert ad.first_installed(_discovery(), "retired-example") == "codex"
     assert ad.first_installed(_discovery(), "codex") == "codex"
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
 

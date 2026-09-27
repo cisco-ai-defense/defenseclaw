@@ -47,7 +47,7 @@ fi
 # missing-token branch so the bypass goes through
 # defenseclaw_handle_missing_token and honors
 # DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
-# codex-hook / geminicli-hook).
+# codex-hook).
 . "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env

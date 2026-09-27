@@ -77,7 +77,6 @@ EXPECTED_CLAW_MODE_ENUM = {
     "hermes",
     "cursor",
     "devin",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",

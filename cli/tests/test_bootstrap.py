@@ -1858,33 +1858,5 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     assert result.status == "pass"
 
 
-def test_gemini_readiness_reports_deprecation_and_safe_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bound = tmp_path / "authenticated" / ".gemini"
-    hostile = tmp_path / "hostile"
-    settings = bound / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text("{}", encoding="utf-8")
-    hostile_settings = hostile / ".gemini" / "settings.json"
-    hostile_settings.parent.mkdir(parents=True)
-    hostile_settings.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(hostile))
-    monkeypatch.setenv("USERPROFILE", str(hostile))
-    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(hostile / "vendor-override"))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(bound))
-    monkeypatch.setattr(Path, "home", lambda: hostile)
-
-    result = _connector_readiness(SimpleNamespace(), "geminicli")
-    assert result.status == "warn"
-    assert "deprecated" in result.detail.lower()
-    assert result.next_command == "defenseclaw setup remove geminicli --yes"
-
-    settings.unlink()
-    result = _connector_readiness(SimpleNamespace(), "geminicli")
-    assert result.status == "warn"
-    assert result.next_command == "defenseclaw setup antigravity"
-
-
 if __name__ == "__main__":
     unittest.main()

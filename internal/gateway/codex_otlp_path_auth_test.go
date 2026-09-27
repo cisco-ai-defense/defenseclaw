@@ -153,7 +153,7 @@ func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 		wantOK bool
 	}{
 		{name: "codex scope", path: "/otlp/codex/" + codexToken + "/v1/logs", wantOK: true},
-		{name: "cross connector", path: "/otlp/geminicli/" + codexToken + "/v1/logs"},
+		{name: "cross connector", path: "/otlp/omnigent/" + codexToken + "/v1/logs"},
 		{name: "shared receiver", path: "/v1/logs", header: codexToken},
 		{name: "header rejected on scoped path", path: "/otlp/codex/" + codexToken + "/v1/logs", header: gatewayToken},
 	}
@@ -163,8 +163,8 @@ func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 			t.Parallel()
 			api, called := tokenAuthTestServer(t, gatewayToken)
 			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-				connector.OTLPScopeCodex:     codexToken,
-				connector.OTLPScopeGeminiCLI: geminiToken,
+				connector.OTLPScopeCodex:    codexToken,
+				connector.OTLPScopeOmnigent: geminiToken,
 			})
 			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				*called = true

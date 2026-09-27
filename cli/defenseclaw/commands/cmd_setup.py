@@ -209,9 +209,6 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "CLAUDE_CONFIG_DIR",
     "COPILOT_HOME",
     "DEFENSECLAW_CURSOR_CONFIG_HOME",
-    "WINDSURF_USER_HOME",
-    "WINDSURF_HOOK_CONFIG_PATH",
-    "DEFENSECLAW_GEMINI_CONFIG_HOME",
     "OPENCODE_CONFIG_DIR",
     "OMNIGENT_CONFIG",
     "OMNIGENT_CONFIG_HOME",
@@ -4277,14 +4274,6 @@ class _PlatformConnectorChoice(click.Choice):
     ) -> Any:
         if isinstance(value, str):
             connector = normalize_connector(value)
-            if connector in platform_support.DEPRECATED_CONNECTORS:
-                support = platform_support.connector_platform_support(connector)
-                self.fail(
-                    f"connector {connector!r} is {support.status} on "
-                    f"{platform_support.host_os()}: {support.reason}",
-                    param,
-                    ctx,
-                )
             if connector in _CONNECTOR_NAMES_FALLBACK:
                 support = platform_support.connector_platform_support(connector)
                 if not support.available:
@@ -4336,13 +4325,10 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "devin": {
         "label": "Devin",
-        "description": "project hooks + documented local MCP, skill, rule, and agent discovery",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
-    "geminicli": {
-        "label": "Gemini CLI (deprecated; use Antigravity)",
-        "description": "retired integration retained only for safe teardown and uninstall",
+        "description": (
+            "Devin CLI and Devin Desktop (Devin Local) hooks + documented local MCP, "
+            "skill, rule, and agent discovery"
+        ),
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -4470,11 +4456,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "Canonical user/project mcp_config.json plus read-only legacy config*.json MCP compatibility",
         "User and project .devin/.agents skills, rules, and file agents are discovered locally",
         "Plugins are closed beta and are not claimed; native OTLP is not claimed",
-    ),
-    "geminicli": (
-        "New setup is disabled on every platform; use the Antigravity connector",
-        "Existing managed settings.json hooks and native OTLP state remain removable",
-        "Legacy receipts and backups are retained only for exact restore or surgical cleanup",
     ),
     "copilot": (
         "~/.copilot/hooks/defenseclaw.json hooks by default",
@@ -10693,6 +10674,25 @@ def setup_claude_code(
     )
 
 
+def _connector_not_shipped(cfg, name: str) -> bool:
+    """Report whether neither a built-in connector nor a plugin provides *name*.
+
+    A name that a plugin directory under ``plugin_dir`` declares is a plugin
+    connector, even when the plugin currently fails to load, so it keeps the
+    normal teardown path and the last-connector ``--force`` gate. An unreadable
+    plugin directory counts every name as possibly provided by a plugin.
+    """
+    normalized = normalize_connector(name)
+    if normalized in _CONNECTOR_META:
+        return False
+    plugin_dir = (getattr(cfg, "plugin_dir", "") or "").strip() or os.path.join(cfg.data_dir, "plugins")
+    try:
+        declared = connector_paths.declared_plugin_connectors(plugin_dir)
+    except OSError:
+        return False
+    return normalized not in declared and name.strip().lower() not in declared
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -10749,10 +10749,16 @@ def _remove_connector(
         return False
 
     remaining = [c for c in configured if c != match]
+    # A configured name this build does not ship (an older release registered
+    # it) has no teardown owner: DefenseClaw drops it from config and its own
+    # state, but never guesses at that agent's config files.
+    unshipped = _connector_not_shipped(cfg, match)
 
-    # WU8 D2=A — last-connector gate.
+    # WU8 D2=A — last-connector gate. An unshipped connector already enforces
+    # nothing (the gateway refuses to start while config names it), so
+    # removing it does not need --force.
     if not remaining:
-        if not force:
+        if not force and not unshipped:
             click.echo(
                 f"  ✗ Refusing to remove the last connector ({match!r}) — the gateway would enforce nothing.",
                 err=True,
@@ -10820,6 +10826,13 @@ def _remove_connector(
         return False
 
     click.echo(f"  ✓ Removed connector {match!r}")
+    if unshipped:
+        click.echo(
+            f"  ⚠ {match!r} is not a connector this DefenseClaw build ships, so DefenseClaw "
+            "did not change that agent's config files. Remove any DefenseClaw hook entries "
+            "there by hand; see Upgrade → Renamed and removed connectors in the docs.",
+            err=True,
+        )
     if remaining:
         click.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
     else:
@@ -10827,7 +10840,10 @@ def _remove_connector(
 
     if restart:
         click.echo()
-        click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
+        if unshipped:
+            click.echo("  Restarting gateway so it drops the removed connector's DefenseClaw state…")
+        else:
+            click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
         # The set-difference teardown (WU6b) runs at gateway boot and is
         # connector-agnostic, so a plain defense-gateway bounce is the
         # precise primitive here. _restart_defense_gateway also marks the
@@ -10850,10 +10866,16 @@ def _remove_connector(
         if ctx is not None:
             ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo()
-        click.echo(
-            "  --no-restart: config updated, but the removed connector's hooks are "
-            "still installed until you restart defenseclaw-gateway."
-        )
+        if unshipped:
+            click.echo(
+                "  --no-restart: config updated; restart defenseclaw-gateway so it drops "
+                "the removed connector's DefenseClaw state."
+            )
+        else:
+            click.echo(
+                "  --no-restart: config updated, but the removed connector's hooks are "
+                "still installed until you restart defenseclaw-gateway."
+            )
 
     remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
     _log_setup_action(
@@ -11105,24 +11127,6 @@ for _observability_connector in (
     "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
-
-
-def _deprecated_gemini_setup() -> None:
-    raise click.ClickException(
-        "Gemini CLI integration is deprecated; use `defenseclaw setup antigravity`. "
-        "Existing managed Gemini CLI hooks remain removable with "
-        "`defenseclaw setup remove geminicli`."
-    )
-
-
-for _deprecated_gemini_alias in ("geminicli", "gemini-cli", "gemini"):
-    setup.add_command(
-        click.Command(
-            _deprecated_gemini_alias,
-            callback=_deprecated_gemini_setup,
-            hidden=True,
-        )
-    )
 
 
 # Two orthogonal facts about a connector — split deliberately so the
