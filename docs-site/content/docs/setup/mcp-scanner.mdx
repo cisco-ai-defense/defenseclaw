@@ -202,7 +202,9 @@ The subprocess does not inherit your shell environment: it gets a small
 baseline such as `PATH` and `HOME`, plus the server entry's own `env` block,
 minus any entry that would change what the launcher runs.
 On native Windows the scan also stops the server's whole process tree after
-60 seconds. Scan only servers you would be willing to run.
+60 seconds. On macOS and Linux DefenseClaw sets no time limit of its own; the
+scan relies on the MCP scanner SDK's own timeouts. Scan only servers you would
+be willing to run.
 </Callout>
 
 ## Availability and recovery
