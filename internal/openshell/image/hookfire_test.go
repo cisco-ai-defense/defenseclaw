@@ -298,10 +298,8 @@ func TestHookFireBuiltinMockDrivesEveryHarness(t *testing.T) {
 				if err != nil {
 					t.Fatalf("HookFireProbe: %v", err)
 				}
-				wantRuns := 2
-				if h == harness.ClaudeCode {
-					wantRuns = 3
-				}
+				// p2-render-10: Codex now has hostile-settings too, so both harnesses get 3 runs.
+				wantRuns := 3
 				if len(res.Runs) != wantRuns || res.Network != mode {
 					t.Fatalf("result = %+v", res)
 				}
