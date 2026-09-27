@@ -91,6 +91,19 @@ func RemoveCursorPerUserHookRegistrations(data []byte, install CursorPerUserInst
 // canonicalNativeWindowsInstalledHookBinary and
 // canonicalNativeWindowsInstalledGatewayBinary.
 func cursorNativeHookCommandsInUserFolders(localAppData, userProgramFiles string) []string {
+	binaries := nativeHookBinariesInUserFolders(localAppData, userProgramFiles)
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range binaries {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return commands
+}
+
+// nativeHookBinariesInUserFolders returns DefenseClaw's executables in the
+// given Known Folders that per-user setup registered directly: the
+// HookRuntime launcher under LocalAppData and the per-user installation's
+// launcher and gateway under UserProgramFiles. An empty folder adds none.
+func nativeHookBinariesInUserFolders(localAppData, userProgramFiles string) []string {
 	var binaries []string
 	if localAppData = strings.TrimSpace(localAppData); localAppData != "" {
 		binaries = append(binaries, filepath.Join(localAppData, "DefenseClaw", "HookRuntime", windowsHookBinaryName))
@@ -99,11 +112,7 @@ func cursorNativeHookCommandsInUserFolders(localAppData, userProgramFiles string
 		bin := filepath.Join(userProgramFiles, "DefenseClaw", "bin")
 		binaries = append(binaries, filepath.Join(bin, windowsHookBinaryName), filepath.Join(bin, windowsGatewayBinaryName))
 	}
-	commands := make([]string, 0, len(binaries))
-	for _, binary := range binaries {
-		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
-	}
-	return commands
+	return binaries
 }
 
 func removeCursorHookRegistrations(data []byte, owned cursorHookCommandMatcher) ([]byte, []CursorUserHookRemoval, error) {
@@ -324,6 +333,13 @@ func nextJSONValueSpan(decoder *json.Decoder) (jsonSpan, error) {
 // before it; the first kept element takes the text after the opening bracket.
 // An array with no kept element becomes [].
 func jsonArrayWithout(array []byte, elements []jsonSpan, keep []bool) []byte {
+	return jsonArrayRewrite(array, elements, keep, nil)
+}
+
+// jsonArrayRewrite is jsonArrayWithout with each kept element whose
+// replacement is not nil written as that replacement instead of its own
+// bytes. replacements is nil or has one entry per element.
+func jsonArrayRewrite(array []byte, elements []jsonSpan, keep []bool, replacements [][]byte) []byte {
 	out := []byte{'['}
 	last := -1
 	for index, element := range elements {
@@ -335,7 +351,11 @@ func jsonArrayWithout(array []byte, elements []jsonSpan, keep []bool) []byte {
 		} else {
 			out = append(out, array[elements[index-1].end:element.start]...)
 		}
-		out = append(out, array[element.start:element.end]...)
+		if replacements != nil && replacements[index] != nil {
+			out = append(out, replacements[index]...)
+		} else {
+			out = append(out, array[element.start:element.end]...)
+		}
 		last = index
 	}
 	if last < 0 {
