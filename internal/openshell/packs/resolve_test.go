@@ -962,26 +962,39 @@ func TestExplainProvenance(t *testing.T) {
 }
 
 func TestResolveReservedHostPorts(t *testing.T) {
+	routed := func(port int, endpoint string) func(*config.Config) {
+		return func(c *config.Config) {
+			c.Routing.Enabled, c.Routing.Port, c.Routing.Remote.Endpoint = true, port, endpoint
+		}
+	}
 	for _, tc := range []struct {
-		name string
-		edit func(*config.Config)
-		port int
-		what string
+		name        string
+		edit        func(*config.Config)
+		gatewayPort int // Flags.OpenShellGatewayPort
+		port        int
+		what        string
 	}{
-		{"api", nil, 18970, "DefenseClaw's API"},
-		{"ingress", nil, 18971, "sandbox hook ingress"},
-		{"egress", nil, 18972, "egress proxy"},
-		{"openshell gateway", nil, OpenShellGatewayPort, "the OpenShell gateway"},
-		{"guardrail proxy", nil, 4000, "guardrail proxy"},
-		{"default api port", func(c *config.Config) { c.Gateway.APIPort = 0 }, 18970, "DefenseClaw's API"},
-		{"custom ingress", func(c *config.Config) { c.OpenShell.IngressPort = 20001 }, 20001, "sandbox hook ingress"},
+		{"api", nil, 0, 18970, "DefenseClaw's API"},
+		{"ingress", nil, 0, 18971, "sandbox hook ingress"},
+		{"egress", nil, 0, 18972, "egress proxy"},
+		{"default openshell gateway", nil, 0, OpenShellGatewayPort, "the OpenShell gateway"},
+		{"registered openshell gateway", nil, 18080, 18080, "the OpenShell gateway"},
+		{"guardrail proxy", nil, 0, 4000, "guardrail proxy"},
+		{"default api port", func(c *config.Config) { c.Gateway.APIPort = 0 }, 0, 18970, "DefenseClaw's API"},
+		{"custom ingress", func(c *config.Config) { c.OpenShell.IngressPort = 20001 }, 0, 20001, "sandbox hook ingress"},
+		{"default openclaw gateway", nil, 0, 18789, "the OpenClaw gateway"},
+		{"custom openclaw gateway", func(c *config.Config) { c.Gateway.Port = 28789 }, 0, 28789, "the OpenClaw gateway"},
+		{"default model router", routed(0, ""), 0, 8080, "model router"},
+		{"custom model router", routed(8801, ""), 0, 8801, "model router"},
+		{"loopback remote router", routed(0, "http://127.0.0.1:8802"), 0, 8802, "model router"},
+		{"localhost remote router", routed(0, "http://localhost"), 0, 80, "model router"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(nil)
 			if tc.edit != nil {
 				tc.edit(cfg)
 			}
-			eff, violations := mustResolve(t, cfg, Flags{HostPorts: []int{tc.port, 5432}})
+			eff, violations := mustResolve(t, cfg, Flags{HostPorts: []int{tc.port, 5432}, OpenShellGatewayPort: tc.gatewayPort})
 			v := onlyViolation(t, violations)
 			if v.Constraint != "defenseclaw" || v.Source != SourceFlag || !strings.Contains(v.Message, tc.what) ||
 				!strings.HasPrefix(v.Message, "DefenseClaw never opens") {
@@ -990,7 +1003,41 @@ func TestResolveReservedHostPorts(t *testing.T) {
 			if !reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) {
 				t.Fatalf("host ports %v", eff.MCP.HostPorts)
 			}
+			if err := eff.Allow(Action{Kind: ActionHostPort, Port: tc.port}); err == nil {
+				t.Fatalf("Allow(host port %d) = nil, want a refusal", tc.port)
+			}
+			if err := eff.Allow(Action{Kind: ActionApprove, Host: OpenShellHostAlias, Port: tc.port}); err == nil {
+				t.Fatalf("approving %s:%d was allowed", OpenShellHostAlias, tc.port)
+			}
 		})
+	}
+
+	// Ports that are not listeners of this run stay available.
+	for _, tc := range []struct {
+		name        string
+		edit        func(*config.Config)
+		gatewayPort int
+		port        int
+	}{
+		{"default gateway port once the registration names another", nil, 18080, OpenShellGatewayPort},
+		{"router port while routing is off", nil, 0, 8080},
+		{"router port with a remote router", routed(0, "https://router.corp.example:8080"), 0, 8080},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(nil)
+			if tc.edit != nil {
+				tc.edit(cfg)
+			}
+			eff, violations := mustResolve(t, cfg, Flags{HostPorts: []int{tc.port}, OpenShellGatewayPort: tc.gatewayPort})
+			if len(violations) != 0 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{tc.port}) {
+				t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
+			}
+		})
+	}
+
+	if _, _, err := Resolve(testConfig(nil), Flags{OpenShellGatewayPort: 70000}); err == nil ||
+		!strings.Contains(err.Error(), "OpenShell gateway port 70000") {
+		t.Fatalf("invalid registration port: %v", err)
 	}
 }
 

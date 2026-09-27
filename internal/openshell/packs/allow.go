@@ -263,8 +263,8 @@ func (e *Effective) harnessAllowed(harness string) error {
 }
 
 // hostPortAllowed checks one host port: DefenseClaw's own listeners and the
-// OpenShell gateway are never opened; then the admin switch and the pack's
-// host-port access apply.
+// OpenClaw and OpenShell gateways (reservedPorts) are never opened; then the
+// admin switch and the pack's host-port access apply.
 func (e *Effective) hostPortAllowed(port int) error {
 	const key = "mcp.host_ports"
 	attempted := strconv.Itoa(port)

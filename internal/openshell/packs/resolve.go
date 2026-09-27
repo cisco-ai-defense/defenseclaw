@@ -19,6 +19,8 @@ package packs
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,11 +28,18 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/routing"
 )
 
 // OpenShellGatewayPort is the local OpenShell gateway's default port. A
-// sandbox must never reach it: it accepts host mount requests.
+// sandbox must never reach the gateway: it accepts host mount requests.
+// Resolve reserves Flags.OpenShellGatewayPort, the registered gateway's
+// port, and this default only when the registration's port is unknown.
 const OpenShellGatewayPort = 17670
+
+// openClawGatewayPort is the config loader's default gateway.port (the
+// OpenClaw gateway WebSocket), for configs built without the loader.
+const openClawGatewayPort = 18789
 
 // Source names the layer a setting came from.
 type Source string
@@ -80,6 +89,11 @@ type Flags struct {
 	// CPU and Memory are resource requests (see config.ParseOpenShellCPU).
 	CPU    string
 	Memory string
+	// OpenShellGatewayPort is not a flag: it is the port of the OpenShell
+	// gateway registration the run uses (metadata.json gateway_port). It is
+	// reserved like DefenseClaw's own listeners; 0 reserves the default
+	// OpenShellGatewayPort instead.
+	OpenShellGatewayPort int
 }
 
 // Authority says how far the admin block can be trusted to bind the user.
@@ -344,7 +358,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 			home:          home,
 			hostNames:     ownHostNames(),
 			settings:      make(map[string]Setting),
-			reservedPorts: reservedPorts(cfg),
+			reservedPorts: reservedPorts(cfg, flags.OpenShellGatewayPort),
 		},
 	}
 	flags = r.dropLockedFlags(flags)
@@ -387,6 +401,9 @@ func validateFlags(flags Flags) error {
 			return fmt.Errorf("sandbox policy: --host-port %d must be between 1 and 65535", port)
 		}
 	}
+	if port := flags.OpenShellGatewayPort; port < 0 || port > 65535 {
+		return fmt.Errorf("sandbox policy: OpenShell gateway port %d must be between 1 and 65535", port)
+	}
 	return nil
 }
 
@@ -406,23 +423,71 @@ func ownHostNames() []string {
 	return names
 }
 
-// reservedPorts are DefenseClaw's own host listeners and the OpenShell
-// gateway. No policy, flag or approval ever opens them to a sandbox.
-func reservedPorts(cfg *config.Config) map[int]string {
+// reservedPorts are the host listeners no policy, flag or approval ever
+// opens to a sandbox: DefenseClaw's own (API, sandbox ingress, egress proxy,
+// guardrail proxy, managed model router), the OpenClaw gateway, and the
+// OpenShell gateway the run is registered with.
+func reservedPorts(cfg *config.Config, openShellGatewayPort int) map[int]string {
+	ports := map[int]string{}
+	reserve := func(port int, what string) {
+		if _, taken := ports[port]; port > 0 && !taken {
+			ports[port] = what
+		}
+	}
 	apiPort := cfg.Gateway.APIPort
 	if apiPort <= 0 {
 		apiPort = config.DefaultGatewayAPIPort
 	}
-	ports := map[int]string{
-		apiPort:                    "DefenseClaw's API",
-		cfg.OpenShellIngressPort(): "DefenseClaw's sandbox hook ingress",
-		cfg.OpenShellEgressPort():  "DefenseClaw's egress proxy",
-		OpenShellGatewayPort:       "the OpenShell gateway",
+	if openShellGatewayPort <= 0 {
+		openShellGatewayPort = OpenShellGatewayPort
 	}
-	if cfg.Guardrail.Port > 0 {
-		ports[cfg.Guardrail.Port] = "DefenseClaw's guardrail proxy"
+	gatewayPort := cfg.Gateway.Port
+	if gatewayPort <= 0 {
+		gatewayPort = openClawGatewayPort
 	}
+	reserve(apiPort, "DefenseClaw's API")
+	reserve(cfg.OpenShellIngressPort(), "DefenseClaw's sandbox hook ingress")
+	reserve(cfg.OpenShellEgressPort(), "DefenseClaw's egress proxy")
+	reserve(cfg.Guardrail.Port, "DefenseClaw's guardrail proxy")
+	reserve(routerPort(cfg.Routing), "DefenseClaw's model router")
+	reserve(openShellGatewayPort, "the OpenShell gateway")
+	reserve(gatewayPort, "the OpenClaw gateway")
 	return ports
+}
+
+// routerPort returns the host port of the semantic model router when routing
+// is enabled and the router listens on this machine: the managed router's
+// routing.port, or a loopback routing.remote.endpoint. It returns 0 otherwise.
+func routerPort(r config.RoutingConfig) int {
+	if !r.Enabled {
+		return 0
+	}
+	endpoint := strings.TrimSpace(r.Remote.Endpoint)
+	if endpoint == "" {
+		if r.Port > 0 {
+			return r.Port
+		}
+		return routing.DefaultAPIPort
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return 0
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	ip := net.ParseIP(host)
+	if host != "localhost" && !strings.HasSuffix(host, ".localhost") && (ip == nil || !ip.IsLoopback()) {
+		return 0
+	}
+	if port, err := strconv.Atoi(u.Port()); err == nil {
+		return port
+	}
+	switch u.Scheme {
+	case "http":
+		return 80
+	case "https":
+		return 443
+	}
+	return 0
 }
 
 func (r *resolver) set(key, value string, from layer) {
