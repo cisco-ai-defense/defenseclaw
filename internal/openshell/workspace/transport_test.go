@@ -19,6 +19,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -89,10 +90,10 @@ func TestCLIArgv(t *testing.T) {
 func TestCLIRequiresAnExplicitGateway(t *testing.T) {
 	for _, c := range []*CLI{{}, {Gateway: "-bad"}, {Gateway: "gw", Workspace: "../ws"}} {
 		ran := 0
-		c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+		c.run = fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 			ran++
 			return nil, nil, 0, nil
-		}
+		})
 		if err := c.Upload(bg, "s", "/a", "/b"); err == nil {
 			t.Errorf("%+v: upload accepted", c)
 		}
@@ -123,13 +124,14 @@ func TestRunProcessScrubsGatewayEnvironment(t *testing.T) {
 	defer cancel()
 	script := `for k in OPENSHELL_GATEWAY OPENSHELL_GATEWAY_ENDPOINT OPENSHELL_GATEWAY_INSECURE OPENSHELL_WORKSPACE; do ` +
 		`eval "v=\${$k-unset}"; printf '%s=%s\n' "$k" "$v"; done; printf 'keep=%s\n' "$DC_WORKSPACE_TEST_KEEP"`
-	stdout, stderr, code, err := runProcess(ctx, []string{"sh", "-c", script})
+	var stdout strings.Builder
+	stderr, code, err := runProcess(ctx, []string{"sh", "-c", script}, &stdout)
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr)
 	}
 	want := "OPENSHELL_GATEWAY=unset\nOPENSHELL_GATEWAY_ENDPOINT=unset\nOPENSHELL_GATEWAY_INSECURE=unset\nOPENSHELL_WORKSPACE=unset\nkeep=kept\n"
-	if string(stdout) != want {
-		t.Fatalf("child environment:\n%s", stdout)
+	if stdout.String() != want {
+		t.Fatalf("child environment:\n%s", stdout.String())
 	}
 }
 
@@ -140,10 +142,23 @@ type scriptedCLI struct {
 }
 
 func (s *scriptedCLI) cli() *CLI {
-	return &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	return &CLI{Gateway: "gw", run: fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		s.argv = append(s.argv, argv)
 		return s.answers[min(len(s.argv), len(s.answers))-1](ctx)
-	}}
+	})}
+}
+
+// fakeRun turns a scripted answer into CLI's process seam.
+func fakeRun(f func(ctx context.Context, argv []string) ([]byte, []byte, int, error)) func(context.Context, []string, io.Writer) ([]byte, int, error) {
+	return func(ctx context.Context, argv []string, stdout io.Writer) ([]byte, int, error) {
+		out, stderr, code, err := f(ctx, argv)
+		if len(out) > 0 {
+			if _, werr := stdout.Write(out); werr != nil {
+				return stderr, -1, werr
+			}
+		}
+		return stderr, code, err
+	}
 }
 
 func answer(stdout, stderr string, code int) func(context.Context) ([]byte, []byte, int, error) {
@@ -265,11 +280,53 @@ func TestCLIExecDeadlineIsNotRetriedUnlessIdempotent(t *testing.T) {
 	}
 }
 
+// failAfter accepts limit bytes, then fails every write.
+type failAfter struct {
+	limit int
+	got   strings.Builder
+}
+
+var errWriterFull = errors.New("writer full")
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.got.Len()+len(p) > f.limit {
+		return 0, errWriterFull
+	}
+	return f.got.WriteString(string(p))
+}
+
+func TestCLIExecStreamsStdout(t *testing.T) {
+	calls := 0
+	c := &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string, stdout io.Writer) ([]byte, int, error) {
+		calls++
+		for i := 0; i < 4; i++ {
+			if _, err := stdout.Write([]byte("marker")); err != nil {
+				// The writer's error cancelled the attempt.
+				if ctx.Err() == nil {
+					t.Error("the attempt was not stopped")
+				}
+				return nil, -1, err
+			}
+		}
+		return nil, 0, nil
+	}}
+	w := &failAfter{limit: 1 << 10}
+	res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: w})
+	if err != nil || len(res.Stdout) != 0 || w.got.String() != strings.Repeat("marker", 4) {
+		t.Fatalf("res=%+v err=%v streamed=%q", res, err, w.got.String())
+	}
+	calls = 0
+	_, err = c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: &failAfter{limit: 10}, Idempotent: true})
+	if !errors.Is(err, errWriterFull) || calls != 1 {
+		t.Fatalf("err=%v calls=%d, want the writer's error from one attempt", err, calls)
+	}
+}
+
 func TestCLIExecTimesOutAndRespectsCancel(t *testing.T) {
-	c := &CLI{Gateway: "gw", ExecTimeout: time.Millisecond, Attempts: 1, run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c := &CLI{Gateway: "gw", ExecTimeout: time.Millisecond, Attempts: 1, run: fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		<-ctx.Done()
 		return nil, nil, -1, ctx.Err()
-	}}
+	})}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
 	defer cancel()
@@ -282,16 +339,16 @@ func TestCLIExecTimesOutAndRespectsCancel(t *testing.T) {
 }
 
 func TestCLITransferErrors(t *testing.T) {
-	c := &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c := &CLI{Gateway: "gw", run: fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		return nil, []byte("line1\nError: × ssh tar extract exited with status 2\n"), 1, nil
-	}}
+	})}
 	err := c.Upload(bg, "s", "/a", "/work")
 	if err == nil || !strings.Contains(err.Error(), "tar extract") {
 		t.Fatalf("err = %v", err)
 	}
-	c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c.run = fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		return nil, nil, -1, errors.New("exec: not found")
-	}
+	})
 	if err := c.Download(bg, "s", "/a", "/tmp"); err == nil {
 		t.Fatal("start failure ignored")
 	}
@@ -303,9 +360,10 @@ func TestRunProcessReadsStdinFromDevNull(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(bg, 10*time.Second)
 	defer cancel()
-	stdout, _, code, err := runProcess(ctx, []string{"sh", "-c", "cat; echo done; exit 3"})
-	if err != nil || code != 3 || string(stdout) != "done\n" {
-		t.Fatalf("stdout=%q code=%d err=%v", stdout, code, err)
+	var stdout strings.Builder
+	_, code, err := runProcess(ctx, []string{"sh", "-c", "cat; echo done; exit 3"}, &stdout)
+	if err != nil || code != 3 || stdout.String() != "done\n" {
+		t.Fatalf("stdout=%q code=%d err=%v", stdout.String(), code, err)
 	}
 }
 

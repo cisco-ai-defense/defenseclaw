@@ -49,6 +49,11 @@ type ExecRequest struct {
 	// most once: OpenShell does not stop a command when its client gives
 	// up, so a second run could overlap the first.
 	Idempotent bool
+	// Stdout, when set, receives the command's standard output as it
+	// arrives, and ExecResult.Stdout stays empty. The first write error
+	// stops the command and is returned, so a writer can bound what it
+	// accepts.
+	Stdout io.Writer
 }
 
 // ExecResult is a finished command. A non-zero ExitCode is not an error.
@@ -113,7 +118,7 @@ type CLI struct {
 
 	// run is the process seam used by tests; attemptLimit, when set,
 	// replaces the local deadline of an exec attempt.
-	run          func(ctx context.Context, argv []string) (stdout, stderr []byte, code int, err error)
+	run          func(ctx context.Context, argv []string, stdout io.Writer) (stderr []byte, code int, err error)
 	attemptLimit time.Duration
 }
 
@@ -218,7 +223,7 @@ func (c *CLI) Download(ctx context.Context, sandbox, remotePath, localDir string
 func (c *CLI) transfer(ctx context.Context, what string, argv []string) error {
 	ctx, cancel := context.WithTimeout(ctx, c.transferTimeout())
 	defer cancel()
-	_, stderr, code, err := c.exec(ctx, argv)
+	stderr, code, err := c.exec(ctx, argv, io.Discard)
 	if err != nil {
 		return fmt.Errorf("workspace: openshell %s: %w", what, err)
 	}
@@ -248,7 +253,7 @@ func (c *CLI) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecR
 		}
 	}
 	for i := 1; ; i++ {
-		res, silent, err := c.execOnce(ctx, sandbox, inv, c.execTimeout(req))
+		res, silent, err := c.execOnce(ctx, sandbox, inv, c.execTimeout(req), req.Stdout)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -262,17 +267,25 @@ func (c *CLI) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecR
 // nothing and was not stopped by the sandbox's timeout(1): it either
 // exited with a status or never answered by the local deadline, by which
 // time the sandbox has stopped the command if it ever started.
-func (c *CLI) execOnce(ctx context.Context, sandbox string, inv openshell.Invocation, timeout time.Duration) (*ExecResult, bool, error) {
+func (c *CLI) execOnce(ctx context.Context, sandbox string, inv openshell.Invocation, timeout time.Duration, stream io.Writer) (*ExecResult, bool, error) {
 	limit := inv.Timeout
 	if c.attemptLimit > 0 {
 		limit = c.attemptLimit
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
+	captured := &limitedBuffer{limit: maxExecOutput}
+	out := &streamWriter{w: captured, cancel: cancel}
+	if stream != nil {
+		out.w = stream
+	}
 	start := time.Now()
-	stdout, stderr, code, err := c.exec(attemptCtx, inv.Argv)
+	stderr, code, err := c.exec(attemptCtx, inv.Argv, out)
 	elapsed := time.Since(start)
-	silent := len(stdout) == 0 && len(stderr) == 0
+	if out.err != nil {
+		return nil, false, out.err
+	}
+	silent := out.n == 0 && len(stderr) == 0
 	if err != nil {
 		if ctx.Err() == nil && errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 			return nil, silent, fmt.Errorf("workspace: exec in sandbox %s: %w: openshell reported no exit status within %s", sandbox, openshell.ErrExecTimeout, limit)
@@ -283,39 +296,67 @@ func (c *CLI) execOnce(ctx context.Context, sandbox string, inv openshell.Invoca
 	if err := openshell.SandboxExitError(code, stderr, elapsed, timeout); err != nil {
 		return nil, false, fmt.Errorf("workspace: exec in sandbox %s: %w", sandbox, err)
 	}
-	return &ExecResult{ExitCode: code, Stdout: stdout, Stderr: stderr}, silent && code != 0, nil
+	res := &ExecResult{ExitCode: code, Stderr: stderr}
+	if stream == nil {
+		res.Stdout = captured.Bytes()
+	}
+	return res, silent && code != 0, nil
 }
 
-func (c *CLI) exec(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+func (c *CLI) exec(ctx context.Context, argv []string, stdout io.Writer) ([]byte, int, error) {
 	if c.run != nil {
-		return c.run(ctx, argv)
+		return c.run(ctx, argv, stdout)
 	}
-	return runProcess(ctx, argv)
+	return runProcess(ctx, argv, stdout)
+}
+
+// streamWriter passes a command's stdout on to w and counts it. The first
+// write error stops the command (cancel) and is kept for the caller.
+type streamWriter struct {
+	w      io.Writer
+	cancel context.CancelFunc
+	n      int64
+	err    error
+}
+
+func (s *streamWriter) Write(p []byte) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	n, err := s.w.Write(p)
+	s.n += int64(n)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		s.err = err
+		s.cancel()
+	}
+	return n, err
 }
 
 // runProcess runs argv as openshell.Invocation.Command prepares it: stdin
 // from the null device, a bounded wait for inherited pipes, and the
 // environment without the gateway-selecting OPENSHELL_ variables. Output
 // is bounded.
-func runProcess(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+func runProcess(ctx context.Context, argv []string, stdout io.Writer) ([]byte, int, error) {
 	cmd, cancel, err := openshell.Invocation{Argv: argv}.Command(ctx)
 	if err != nil {
-		return nil, nil, -1, err
+		return nil, -1, err
 	}
 	defer cancel()
-	var stdout, stderr limitedBuffer
-	stdout.limit, stderr.limit = maxExecOutput, 1<<20
-	cmd.Stdout = &stdout
+	stderr := limitedBuffer{limit: 1 << 20}
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && ctx.Err() == nil {
-		return stdout.Bytes(), stderr.Bytes(), exitErr.ExitCode(), nil
+		return stderr.Bytes(), exitErr.ExitCode(), nil
 	}
 	if err != nil {
-		return stdout.Bytes(), stderr.Bytes(), -1, err
+		return stderr.Bytes(), -1, err
 	}
-	return stdout.Bytes(), stderr.Bytes(), 0, nil
+	return stderr.Bytes(), 0, nil
 }
 
 // limitedBuffer keeps the first limit bytes and discards the rest.

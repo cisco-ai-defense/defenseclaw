@@ -118,6 +118,22 @@ func TestGatewayClientExecFollowsTheOpenShellRules(t *testing.T) {
 	}
 }
 
+func TestGatewayClientExecStreamsStdout(t *testing.T) {
+	f, c := newGatewayFake(t)
+	addSandbox(f, "box", nil, openshell.PhaseReady, time.Now(), false)
+	f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte(strings.Repeat("marker", 100))}
+	})
+	w := &failAfter{limit: 1 << 20}
+	res, err := GatewayClient{Client: c}.Exec(bg, "box", ExecRequest{Argv: []string{"cat", "f"}, Stdout: w})
+	if err != nil || len(res.Stdout) != 0 || w.got.String() != strings.Repeat("marker", 100) {
+		t.Fatalf("res=%+v err=%v streamed %d bytes", res, err, w.got.Len())
+	}
+	if _, err := (GatewayClient{Client: c}).Exec(bg, "box", ExecRequest{Argv: []string{"cat", "f"}, Stdout: &failAfter{limit: 10}}); !errors.Is(err, errWriterFull) {
+		t.Fatalf("err = %v, want the writer's error", err)
+	}
+}
+
 func TestUnsupportedPlatformIsTheOpenShellSentinel(t *testing.T) {
 	if !errors.Is(ErrUnsupportedPlatform, openshell.ErrUnsupportedPlatform) ||
 		!errors.Is(openshell.CheckPlatform("windows"), ErrUnsupportedPlatform) {

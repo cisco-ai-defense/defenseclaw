@@ -79,6 +79,9 @@ func (f *fakeSandbox) Exec(ctx context.Context, sandbox string, req ExecRequest)
 	cmd.Env = append(os.Environ(), "HOME="+f.home)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if req.Stdout != nil {
+		cmd.Stdout = req.Stdout
+	}
 	err := cmd.Run()
 	code := 0
 	var ee *exec.ExitError

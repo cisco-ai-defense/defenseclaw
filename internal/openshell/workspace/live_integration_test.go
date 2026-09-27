@@ -74,14 +74,15 @@ func liveArgv(cli *CLI, verbs ...string) []string {
 func runProcessOK(argv ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	stdout, stderr, code, err := runProcess(ctx, argv)
+	var stdout strings.Builder
+	stderr, code, err := runProcess(ctx, argv, &stdout)
 	if err != nil {
 		return "", err
 	}
 	if code != 0 {
 		return "", fmt.Errorf("%s: exit %d: %s", strings.Join(argv[:2], " "), code, lastLines(stderr, 8))
 	}
-	return string(stdout), nil
+	return stdout.String(), nil
 }
 
 func liveImage() string {
@@ -312,7 +313,7 @@ network_policies: {}
 	}
 	writeFile(t, e.project, "README.md", "host edit during the session\n")
 
-	pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: name, Exec: cli, Download: cli})
+	pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: name, Exec: cli})
 	if err != nil {
 		t.Fatal(err)
 	}

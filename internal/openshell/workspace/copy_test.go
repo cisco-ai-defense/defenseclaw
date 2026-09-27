@@ -17,7 +17,9 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -51,7 +53,7 @@ func launchCopy(t *testing.T, e *env, name string, mutate func(*StageOptions)) (
 
 func pull(t *testing.T, e *env, fs *fakeSandbox, name string) *PullResult {
 	t.Helper()
-	pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: name, Exec: fs, Download: fs, Scanners: []ContentScanner{SecretsScanner()}})
+	pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: name, Exec: fs, Scanners: []ContentScanner{SecretsScanner()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +206,9 @@ func TestCopyRoundTripApplyMerge(t *testing.T) {
 	if got := changePaths(pr.Changes); got != "A:docs/notes.md M:src/app.go" {
 		t.Fatalf("changes = %s", got)
 	}
-	if len(fs.downloads) != 1 {
+	// The bundle arrives over exec, where the host counts every byte; the
+	// CLI's download (which unpacks an archive the agent made) is unused.
+	if len(fs.downloads) != 0 {
 		t.Fatalf("downloads = %v", fs.downloads)
 	}
 	res, err := apply(e, "c1", ApplyMerge, nil)
@@ -458,34 +462,161 @@ func TestCopyPlainFolder(t *testing.T) {
 	}
 }
 
+// tamperExec lets a test act as the agent between the capture and the
+// transfer of the result bundle, or replace the transfer outright (an
+// agent that swaps the file after the in-sandbox check).
+type tamperExec struct {
+	*fakeSandbox
+	afterCapture func()
+	stream       func(req ExecRequest) (*ExecResult, error)
+}
+
+func (x *tamperExec) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecResult, error) {
+	if req.Stdout != nil && x.stream != nil {
+		return x.stream(req)
+	}
+	res, err := x.fakeSandbox.Exec(ctx, sandbox, req)
+	if req.Stdout == nil && err == nil && x.afterCapture != nil {
+		x.afterCapture()
+	}
+	return res, err
+}
+
 func TestPullRejectsTamperedBundles(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 	_, fs := launchCopy(t, e, "c1", nil)
 	fs.write(remoteRepo+"/x.txt", "x\n")
-	bad := &tamperDownloader{fakeSandbox: fs}
-	_, err := Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Download: bad, Scanners: []ContentScanner{}})
-	if err == nil || !strings.Contains(err.Error(), "bytes") {
+	bundle := fs.local(remoteStateDir + "/result.bundle")
+	pullDir := filepath.Join(e.data, "sandboxes", "c1", "copy", "pull")
+	pullWith := func(ex Execer, limit int64) error {
+		t.Helper()
+		_, err := Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: ex, MaxBundleBytes: limit, Scanners: []ContentScanner{}})
+		if pathExists(pullDir) {
+			t.Fatalf("the pull left %s behind", pullDir)
+		}
+		return err
+	}
+
+	err := pullWith(&tamperExec{fakeSandbox: fs, afterCapture: func() { _ = os.Truncate(bundle, 20) }}, 0)
+	if err == nil || !strings.Contains(err.Error(), "received a 20-byte bundle") {
 		t.Fatalf("truncated bundle accepted: %v", err)
 	}
-	_, err = Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Download: fs, MaxBundleBytes: 10, Scanners: []ContentScanner{}})
-	if !errors.Is(err, ErrTooLarge) {
+	if err := pullWith(fs, 10); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("oversized bundle: %v", err)
 	}
+
+	// The agent reports a small bundle, then makes it a huge sparse file,
+	// a directory or a link.
+	const limit = 64 << 10
+	for _, tc := range []struct {
+		name string
+		swap func()
+	}{
+		{"sparse file", func() {
+			writeFile(t, fs.local(remoteStateDir), "result.bundle", "marker\n")
+			if err := os.Truncate(bundle, 1<<30); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"directory", func() { writeFile(t, bundle, "inner", "marker\n") }},
+		{"symlink", func() {
+			writeFile(t, fs.local(remoteStateDir), "elsewhere", "marker\n")
+			if err := os.Symlink("elsewhere", bundle); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		err := pullWith(&tamperExec{fakeSandbox: fs, afterCapture: func() { _ = os.RemoveAll(bundle); tc.swap() }}, limit)
+		if err == nil || !(strings.Contains(err.Error(), "not a regular file") || strings.Contains(err.Error(), "bundle has")) {
+			t.Fatalf("%s accepted: %v", tc.name, err)
+		}
+		_ = os.RemoveAll(bundle)
+	}
+
+	// The in-sandbox check is only a courtesy: an agent that swaps the file
+	// after it streams more than the limit, and the host stops reading.
+	accepted := 0
+	flood := &tamperExec{fakeSandbox: fs, stream: func(req ExecRequest) (*ExecResult, error) {
+		line := []byte(strings.Repeat("bWFya2Vy", 9) + "\n") // "marker" x9, base64
+		for i := 0; i < 1<<16; i++ {
+			n, err := req.Stdout.Write(line)
+			accepted += n
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &ExecResult{}, nil
+	}}
+	if err := pullWith(flood, limit); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("flood: %v", err)
+	}
+	// 72 base64 characters (54 bytes) per 73-byte line.
+	if accepted > (limit/54+2)*73 {
+		t.Fatalf("the host accepted %d encoded bytes for a %d-byte limit", accepted, limit)
+	}
+
 	fs.failExec = errors.New("sandbox gone")
-	if _, err := Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Download: fs}); err == nil {
+	if err := pullWith(fs, 0); err == nil {
 		t.Fatal("exec failure ignored")
+	}
+	// Nothing above got through: a clean pull still works.
+	if pr := pull(t, e, fs, "c1"); changePaths(pr.Changes) != "A:x.txt" {
+		t.Fatalf("changes = %s", changePaths(pr.Changes))
 	}
 }
 
-type tamperDownloader struct{ *fakeSandbox }
-
-func (d *tamperDownloader) Download(ctx context.Context, sandbox, remotePath, localDir string) error {
-	if err := d.fakeSandbox.Download(ctx, sandbox, remotePath, localDir); err != nil {
-		return err
+func TestBase64SinkBoundsAndValidates(t *testing.T) {
+	data := []byte(strings.Repeat("marker bytes\x00\xff", 1000))
+	enc := base64.StdEncoding.EncodeToString(data)
+	var wrapped strings.Builder
+	for i := 0; i < len(enc); i += 76 {
+		wrapped.WriteString(enc[i:min(i+76, len(enc))] + "\n")
 	}
-	p := filepath.Join(localDir, filepath.Base(remotePath))
-	return os.Truncate(p, 20)
+	feed := func(limit int64, text string, chunk int) (*bytes.Buffer, error) {
+		var out bytes.Buffer
+		sink := &base64Sink{w: &out, limit: limit}
+		for i := 0; i < len(text); i += chunk {
+			if _, err := sink.Write([]byte(text[i:min(i+chunk, len(text))])); err != nil {
+				return &out, err
+			}
+		}
+		return &out, sink.Close()
+	}
+	for _, chunk := range []int{1, 3, 7, 4096} {
+		out, err := feed(int64(len(data)), wrapped.String(), chunk)
+		if err != nil || !bytes.Equal(out.Bytes(), data) {
+			t.Fatalf("chunk %d: round trip failed: %v", chunk, err)
+		}
+		out, err = feed(int64(len(data))-1, wrapped.String(), chunk)
+		if !errors.Is(err, errBundleLimit) || int64(out.Len()) >= int64(len(data)) {
+			t.Fatalf("chunk %d: limit not enforced: %v (%d bytes written)", chunk, err, out.Len())
+		}
+	}
+	for text, why := range map[string]string{
+		"bWFy":       "",
+		"bWFya2":     "truncated",
+		"bWE=bWFy":   "base64|after its end",
+		"bW!y":       "base64",
+		"bWE=\nbWFy": "base64|after its end",
+	} {
+		for _, chunk := range []int{4, 1 << 10} {
+			_, err := feed(1<<20, text, chunk)
+			if (why == "") != (err == nil) {
+				t.Errorf("%q in %d-byte writes: err = %v, want %q", text, chunk, err, why)
+				continue
+			}
+			if err != nil {
+				ok := false
+				for _, w := range strings.Split(why, "|") {
+					ok = ok || strings.Contains(err.Error(), w)
+				}
+				if !ok {
+					t.Errorf("%q in %d-byte writes: err = %v, want %q", text, chunk, err, why)
+				}
+			}
+		}
+	}
 }
 
 func TestFindResumableAndRefresh(t *testing.T) {

@@ -66,13 +66,30 @@ func (g GatewayClient) FindSandboxes(ctx context.Context, labels map[string]stri
 	return out, nil
 }
 
-// Exec implements Execer.
+// Exec implements Execer. A request's Stdout receives the stream as it
+// arrives; the first write error ends the call.
 func (g GatewayClient) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecResult, error) {
-	res, err := g.Client.Exec(ctx, sandbox, req.Argv, openshell.ExecOptions{
-		Env: req.Env, WorkDir: req.Workdir, Timeout: req.Timeout, Idempotent: req.Idempotent,
-	})
+	opts := openshell.ExecOptions{Env: req.Env, WorkDir: req.Workdir, Timeout: req.Timeout, Idempotent: req.Idempotent}
+	var stream *streamWriter
+	if req.Stdout != nil {
+		// The client ignores tee errors, so the writer cancels the call
+		// itself; the capture keeps only a token byte.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		stream = &streamWriter{w: req.Stdout, cancel: cancel}
+		opts.Stdout, opts.MaxOutputBytes = stream, 1
+	}
+	res, err := g.Client.Exec(ctx, sandbox, req.Argv, opts)
+	if stream != nil && stream.err != nil {
+		return nil, stream.err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("workspace: %w", err)
 	}
-	return &ExecResult{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}, nil
+	out := &ExecResult{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}
+	if stream != nil {
+		out.Stdout = nil
+	}
+	return out, nil
 }

@@ -19,8 +19,10 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,11 +37,13 @@ const DefaultMaxBundleBytes int64 = 1 << 30
 
 // PullOptions configures Pull.
 type PullOptions struct {
-	DataDir  string
-	Name     string
-	Exec     Execer
-	Download Downloader
-	// MaxBundleBytes caps the downloaded bundle (DefaultMaxBundleBytes).
+	DataDir string
+	Name    string
+	// Exec runs the capture and streams the result bundle back.
+	Exec Execer
+	// MaxBundleBytes caps the result bundle (DefaultMaxBundleBytes). The
+	// cap applies to the bytes the host actually receives, whatever size
+	// the sandbox reports.
 	MaxBundleBytes int64
 	// Timeout bounds the in-sandbox capture (default 10 min).
 	Timeout time.Duration
@@ -193,7 +197,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 			return nil, err
 		}
 	} else {
-		if err := fetchBundle(ctx, rec, opts, base, kv["bundle"], result, maxBundle); err != nil {
+		if err := fetchBundle(ctx, rec, opts, base, kv["bundle"], result, maxBundle, timeout); err != nil {
 			return nil, err
 		}
 	}
@@ -251,7 +255,7 @@ func savePull(lay layout, pr *PullResult) (*PullResult, error) {
 	return pr, nil
 }
 
-func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gitCmd, reported, result string, maxBundle int64) error {
+func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gitCmd, reported, result string, maxBundle int64, timeout time.Duration) error {
 	size, err := strconv.ParseInt(reported, 10, 64)
 	if err != nil || size <= 0 {
 		return fmt.Errorf("workspace: sandbox reported bundle size %q", reported)
@@ -266,19 +270,13 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 		return err
 	}
 	defer os.RemoveAll(dir)
-	if err := opts.Download.Download(ctx, rec.Name, remoteStateDir+"/result.bundle", dir); err != nil {
-		return err
-	}
 	local := filepath.Join(dir, "result.bundle")
-	info, err := os.Lstat(local)
-	if err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("workspace: the downloaded result bundle is missing")
-	}
-	if info.Size() != size || info.Size() > maxBundle {
-		return fmt.Errorf("workspace: the downloaded bundle is %d bytes, the sandbox reported %d", info.Size(), size)
-	}
-	if err := os.Chmod(local, 0o600); err != nil {
+	got, err := receiveBundle(ctx, opts.Exec, rec.Name, local, maxBundle, timeout)
+	if err != nil {
 		return err
+	}
+	if got != size {
+		return fmt.Errorf("workspace: received a %d-byte bundle, the sandbox reported %d", got, size)
 	}
 	if err := base.run(ctx, "bundle", "verify", local); err != nil {
 		return fmt.Errorf("workspace: the result bundle does not apply to the uploaded history: %w", err)
@@ -299,6 +297,118 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 	}
 	return base.run(ctx, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-auto-maintenance",
 		"--no-recurse-submodules", local, "+"+resultRef+":"+resultRef)
+}
+
+// receiveBundle streams the sandbox's result bundle into the new private
+// file local and returns its size. The bundle travels base64-encoded on
+// the stdout of an exec rather than through `openshell sandbox download`:
+// the agent controls that file and can swap it for a huge or sparse file,
+// a directory or a link after any check, so the host counts the bytes it
+// actually receives and stops the transfer past limit, and it never
+// unpacks an archive the agent made. The in-sandbox check only makes the
+// common refusals quick and clear.
+func receiveBundle(ctx context.Context, ex Execer, name, local string, limit int64, timeout time.Duration) (int64, error) {
+	f, err := os.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	sink := &base64Sink{w: f, limit: limit}
+	script := strings.Join([]string{
+		"set -eu",
+		"f=" + shellQuote(remoteStateDir+"/result.bundle"),
+		`if [ -h "$f" ] || [ ! -f "$f" ]; then echo "the result bundle is not a regular file" >&2; exit 3; fi`,
+		`n=$(wc -c < "$f" | tr -d ' ')`,
+		`if [ "$n" -gt ` + strconv.FormatInt(limit, 10) + ` ]; then echo "the result bundle has $n bytes" >&2; exit 4; fi`,
+		`base64 < "$f"`,
+	}, "\n")
+	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: timeout, Stdout: sink})
+	if errors.Is(err, errBundleLimit) || errors.Is(sink.err, errBundleLimit) {
+		return 0, &TooLargeError{What: "the sandbox result", Size: limit + 1, Limit: limit}
+	}
+	if err != nil {
+		return 0, fmt.Errorf("workspace: receive the result bundle: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return 0, fmt.Errorf("workspace: receive the result bundle (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+	}
+	if err := sink.Close(); err != nil {
+		return 0, err
+	}
+	if err := f.Close(); err != nil {
+		return 0, err
+	}
+	return sink.n, nil
+}
+
+// errBundleLimit stops a bundle stream that grew past its limit.
+var errBundleLimit = errors.New("workspace: the result bundle exceeds its size limit")
+
+// base64Sink decodes a streamed base64 text (line breaks allowed) into w
+// and fails, without writing them, once decoded bytes would exceed limit.
+type base64Sink struct {
+	w     io.Writer
+	limit int64
+	n     int64
+	// pending holds encoded bytes not decoded yet; out is decode scratch.
+	pending, out []byte
+	ended        bool // a padded quantum was decoded: nothing may follow
+	err          error
+}
+
+func (s *base64Sink) Write(p []byte) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	for _, b := range p {
+		if b != '\n' && b != '\r' {
+			s.pending = append(s.pending, b)
+		}
+	}
+	if err := s.flush(); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// flush decodes the whole quanta in pending.
+func (s *base64Sink) flush() error {
+	whole := len(s.pending) / 4 * 4
+	if whole == 0 {
+		return nil
+	}
+	if s.ended {
+		s.err = errors.New("workspace: the result bundle stream continues after its end")
+		return s.err
+	}
+	if need := base64.StdEncoding.DecodedLen(whole); cap(s.out) < need {
+		s.out = make([]byte, need)
+	}
+	n, err := base64.StdEncoding.Decode(s.out[:cap(s.out)], s.pending[:whole])
+	if err != nil {
+		s.err = fmt.Errorf("workspace: the result bundle stream is not base64: %w", err)
+		return s.err
+	}
+	if s.n+int64(n) > s.limit {
+		s.err = errBundleLimit
+		return s.err
+	}
+	if _, err := s.w.Write(s.out[:n]); err != nil {
+		s.err = err
+		return err
+	}
+	s.n += int64(n)
+	s.ended = s.pending[whole-1] == '='
+	s.pending = append(s.pending[:0], s.pending[whole:]...)
+	return nil
+}
+
+// Close reports a stream that stopped inside a quantum.
+func (s *base64Sink) Close() error {
+	if s.err == nil && len(s.pending) > 0 {
+		s.err = errors.New("workspace: the result bundle stream is truncated")
+	}
+	return s.err
 }
 
 // dropHeldBack resets every held-back path in result to its baseline
