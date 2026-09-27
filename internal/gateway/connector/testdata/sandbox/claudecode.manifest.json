@@ -121,7 +121,7 @@
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "sha256": "53bca7874eff23e1b9226e18d129db5b551805172c0e55b03366c4fdb80cf5aa"
+      "sha256": "f531de55381193c87cfa7048678bde0f21816a6ed1fbdc5cac3a8b2d89523f70"
     },
     "/usr/local/lib/defenseclaw/otel-headers.sh": {
       "mode": "-rwxr-xr-x",
