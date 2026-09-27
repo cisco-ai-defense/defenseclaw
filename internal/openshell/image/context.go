@@ -286,6 +286,16 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		fmt.Fprintf(&b, "# %s\n", step.Comment)
 		fmt.Fprintf(&b, "RUN %s\n", step.Run)
 	}
+	// p2-render-9: fail if the base image has managed-settings.d files that
+	// could override DC's drop-in (files are loaded alphabetically).
+	b.WriteString("RUN set -eu; " +
+		"if [ -f /etc/claude-code/managed-settings.json ]; then " +
+		"echo 'Base image has /etc/claude-code/managed-settings.json that would be deep-merged with DC drop-in' >&2; " +
+		"exit 1; fi; " +
+		"if [ -d /etc/claude-code/managed-settings.d ]; then " +
+		"for f in /etc/claude-code/managed-settings.d/*.json; do " +
+		"[ ! -e \"$f\" ] || { echo \"Base image has managed-settings.d file $f that could override DC drop-in\" >&2; exit 1; }; " +
+		"done; fi\n")
 	b.WriteString("# DefenseClaw artifacts: root-owned and read-only to the workload unless under HOME.\n")
 	for _, f := range c.ImageFiles {
 		fmt.Fprintf(&b, "COPY --chown=%d:%d --chmod=%04o %s %s\n", f.UID, f.GID, uint32(f.Mode), contextName(f.Path), f.Path)
