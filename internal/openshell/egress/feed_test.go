@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -108,6 +109,31 @@ func TestBuiltinFeeds(t *testing.T) {
 		m, ok := allow.Match(host)
 		if !ok || m.Entry.Category != want {
 			t.Errorf("allowlist.Match(%q) = %+v, %v; want %s", host, m, ok, want)
+		}
+	}
+}
+
+// Every exact host in the built-in blocklist has its "*." companion in the
+// same entry, so the service's API, upload and www hosts are blocked with
+// it.
+func TestBuiltinBlocklistCoversSubdomains(t *testing.T) {
+	block, err := BuiltinBlocklist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range block.Entries {
+		for _, p := range e.Hosts {
+			if strings.HasPrefix(p, "*.") {
+				continue
+			}
+			if !slices.Contains(e.Hosts, "*."+p) {
+				t.Errorf("blocklist entry %q lists %s without *.%s", e.Name, p, p)
+			}
+		}
+	}
+	for _, host := range []string{"api.paste.gg", "www.controlc.com", "www.justpaste.it", "api.rentry.co", "upload.tmpfiles.org", "www.0x0.st"} {
+		if _, ok := block.Match(host); !ok {
+			t.Errorf("blocklist does not cover %s", host)
 		}
 	}
 }
