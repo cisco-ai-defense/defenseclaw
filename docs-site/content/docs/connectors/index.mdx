@@ -90,6 +90,17 @@ See the [HITL reference](/docs/hitl) for the canonical per-event matrix and
 [Connector Compatibility](/docs/connectors/compatibility) for exact version
 ranges and script generations.
 
+## OpenShell sandbox
+
+Running an agent inside an NVIDIA OpenShell sandbox is in development, and no
+command launches one yet; the [sandbox guide](/docs/setup/sandbox) documents
+the sandbox commands. DefenseClaw already renders sandbox image files for
+[Claude Code](/docs/connectors/claudecode#openshell-sandbox) and
+[Codex](/docs/connectors/codex#openshell-sandbox). Both register their hooks
+in the harness's root-owned managed policy tier, so user and project settings
+cannot switch them off. Every other connector is pending; the
+[capability matrix](/docs/capability-matrix) shows the status per connector.
+
 ## How a connector is structured
 
 <Flow

@@ -207,6 +207,37 @@ block, ask, or decision authority.
   <Edge from="otel" to="gateway" />
 </Flow>
 
+## OpenShell sandbox
+
+<Callout type="info" title="In development">
+No command launches Claude Code in an OpenShell sandbox yet. The
+[sandbox guide](/docs/setup/sandbox) documents the sandbox commands.
+</Callout>
+
+DefenseClaw already renders the files it adds to a Claude Code OpenShell
+overlay image. Nothing on your host changes; the files exist only in the
+image:
+
+- **Hooks in the managed tier.** The hooks are registered in the root-owned
+  managed policy drop-in
+  `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
+  `allowManagedHooksOnly` set. User and project settings cannot add hooks or
+  switch DefenseClaw's off.
+- **Checked at build.** Every image build runs Claude Code against a mock
+  model and keeps the image only when every required hook fired and a blocked
+  tool call did not run. It repeats the run with hostile user and project
+  settings planted, including `disableAllHooks`, and rejects the image if any
+  hook stops firing.
+- **Fail closed.** The hook scripts live in root-owned
+  `/usr/local/lib/defenseclaw/hooks` and always fail closed. They reach the
+  gateway through the [hook ingress](/docs/reference/gateway-api#hook-ingress)
+  with a per-sandbox token, never the host gateway token.
+- **Settings pinned for the sandbox.** Claude Code's own sandbox is switched
+  off (it cannot run inside OpenShell), and the auto-updater and non-essential
+  traffic are disabled.
+- **Image pin.** The image installs Claude Code 2.1.156 by default. The build
+  refuses a Claude Code version that has no reviewed Linux hook contract.
+
 ## Disable
 
 ```bash
