@@ -471,7 +471,10 @@ func (c *cliEnv) codexMockArgs() []string {
 	base := "http://host.openshell.internal:" + strconv.Itoa(c.openaiPort) + "/v1"
 	return []string{"-c", `model_provider="mock"`, "-c", `model_providers.mock.name="mock"`,
 		"-c", `model_providers.mock.base_url="` + base + `"`, "-c", `model_providers.mock.env_key="OPENAI_API_KEY"`,
-		"-c", `model_providers.mock.wire_api="responses"`}
+		"-c", `model_providers.mock.wire_api="responses"`,
+		// Codex sends a known model's tools in an input item the mock does
+		// not read; an unknown model gets the classic tools field.
+		"-m", "mock-model"}
 }
 
 func (c *cliEnv) runCodex() {
