@@ -210,10 +210,13 @@ type Workspace struct {
 
 // Egress is the effective egress-proxy posture. Effective.DecideEgress
 // applies it to a destination; the decision order is: AdminBlock (never
-// unblockable) → AllowOnly (when set, nothing outside it) → Ports → Block →
-// Feeds (Allow exempts a host from the feeds, unless
-// openshell.admin.allow_unblock is false) → the network mode (open allows;
-// allowlist needs Allow or AllowOnly; deny refuses).
+// unblockable) → AllowOnly (when set, nothing outside it) → Ports → Block
+// (the pack's and openshell.egress.block; not unblockable either, the proxy
+// applies it before unblocks) → Feeds (Allow exempts a host from the feeds,
+// unless openshell.admin.allow_unblock is false) → the network mode (open
+// allows; allowlist needs Allow or AllowOnly; deny refuses). The host lists
+// hold canonical egress patterns (config.ParseOpenShellEgressPattern): names,
+// "*." wildcards, IP addresses and CIDR prefixes.
 type Egress struct {
 	Feeds         []string `json:"feeds"`
 	Block         []string `json:"block"`

@@ -147,10 +147,36 @@ func (e *Effective) allowUnblock(host string) error {
 	if v := e.Egress.adminVerdict(key, host); v != nil {
 		return v
 	}
+	if v := e.blockVerdict(key, host); v != nil {
+		return v
+	}
 	if e.NetworkMode == NetworkDeny {
 		return e.profileViolation(key, host, "the proxy is off, so destinations cannot be unblocked")
 	}
 	return nil
+}
+
+// blockVerdict refuses a host on the block list (the pack's egress.block and
+// openshell.egress.block). The egress proxy applies those entries before any
+// unblock decision, like the administrator's (egress.Decider operator
+// blocks), so neither an unblock nor an approval, which bypasses the proxy,
+// may lift them: reaching the host takes removing the entry.
+func (e *Effective) blockVerdict(key, host string) *Violation {
+	glob, ok := firstMatch(e.Egress.Block, host)
+	if !ok {
+		return nil
+	}
+	if e.Pack != nil && MatchAnyHost(e.Pack.Egress.Block, host) {
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "pack " + e.Pack.Name,
+			Message: packMessage(e.Pack.Name, key), Detail: host + " matches " + glob + " on the pack's block list",
+		}
+	}
+	return &Violation{
+		Key: key, Source: SourceUser, Attempted: host, Constraint: "openshell.egress.block",
+		Message: "blocked by your own openshell.egress.block list: " + key,
+		Detail:  host + " matches " + glob + "; remove the entry to reach it",
+	}
 }
 
 // allowApproval gates an OpenShell draft proposal. An approval opens a
@@ -158,12 +184,19 @@ func (e *Effective) allowUnblock(host string) error {
 // SSRF guard, so it is checked against what the proxy would enforce:
 //   - the administrator's blocklist and allow-only list always apply;
 //   - the host itself (host.openshell.internal, loopback addresses and
-//     names, this machine's name) is a host-port request;
+//     names, this machine's names and interface addresses) is a host-port
+//     request;
 //   - link-local, cloud metadata, multicast and reserved addresses are
 //     never approved;
-//   - when openshell.admin.allow_unblock is false, a destination on the
-//     block list or a blocklist feed, or a private network address, is
-//     refused too: approving it would lift the proxy's refusal.
+//   - a destination on the block list (the pack's and the user's) is
+//     never approved: no unblock lifts those entries either;
+//   - when openshell.admin.allow_unblock is false, a destination on a
+//     blocklist feed, or a private network address, is refused too:
+//     approving it would lift the proxy's refusal.
+//
+// Address checks see the host as named: a name that resolves to a blocked
+// or local address is caught only by what OpenShell enforces on the direct
+// rule, because this check does not resolve names.
 func (e *Effective) allowApproval(key string, action Action, always bool) error {
 	host, err := validHost(action.Host)
 	if err != nil {
@@ -196,12 +229,11 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 			Detail:  host + " is one of them",
 		}
 	}
+	if v := e.blockVerdict(key, host); v != nil {
+		return v
+	}
 	if !unblockForbidden {
 		return nil
-	}
-	if glob, ok := firstMatch(e.Egress.Block, host); ok {
-		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
-			host+" matches "+glob+" on the blocklist, and blocked destinations cannot be approved")
 	}
 	if len(e.Egress.Feeds) > 0 {
 		if action.Feed == nil {
@@ -382,7 +414,8 @@ func (e *Effective) DecideEgress(host string, port int, feed FeedMatcher) Egress
 	}
 	unblockable := !isFalse(e.admin.AllowUnblock)
 	if glob, ok := firstMatch(eg.Block, h); ok {
-		return EgressDecision{Rule: RuleBlock, Match: glob, Unblockable: unblockable}
+		// The proxy applies block entries before unblocks (blockVerdict).
+		return EgressDecision{Rule: RuleBlock, Match: glob}
 	}
 	allowGlob, allowed := firstMatch(eg.Allow, h)
 	// With unblocking forbidden, nothing lifts a feed entry.
@@ -457,20 +490,21 @@ func validPort(port int) error {
 	return nil
 }
 
-// hostLocalNames reach the host itself: the OpenShell and Docker host
+// hostLocalNames reach the host itself: the OpenShell, Docker and Podman host
 // aliases and the loopback names distributions put in /etc/hosts.
 var hostLocalNames = map[string]bool{
-	OpenShellHostAlias:        true,
-	"host.docker.internal":    true,
-	"gateway.docker.internal": true,
-	"localhost":               true,
-	"localhost.localdomain":   true,
-	"localhost4":              true,
-	"localhost4.localdomain4": true,
-	"localhost6":              true,
-	"localhost6.localdomain6": true,
-	"ip6-localhost":           true,
-	"ip6-loopback":            true,
+	OpenShellHostAlias:         true,
+	"host.docker.internal":     true,
+	"gateway.docker.internal":  true,
+	"host.containers.internal": true,
+	"localhost":                true,
+	"localhost.localdomain":    true,
+	"localhost4":               true,
+	"localhost4.localdomain4":  true,
+	"localhost6":               true,
+	"localhost6.localdomain6":  true,
+	"ip6-localhost":            true,
+	"ip6-loopback":             true,
 }
 
 // metadataNames are cloud instance-metadata host names.
@@ -484,14 +518,48 @@ var metadataNames = map[string]bool{
 
 var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
-// isHostLocal reports a destination that is the host itself. host is
-// normalized (validHost).
+// interfaceAddrs lists this machine's interface addresses; swapped in tests.
+var interfaceAddrs = net.InterfaceAddrs
+
+// isHostLocal reports a destination that is the host itself: a host alias,
+// a loopback name or address, the unspecified address, one of this machine's
+// names, or an address on one of its interfaces (a Docker bridge gateway such
+// as 172.17.0.1, a LAN, VPC or VPN address), which reaches every host service
+// listening on all interfaces. host is canonical (validHost). The interface
+// list is read on every call, so an address that came up after Resolve (a
+// VPN) counts too; when it cannot be read, only the other checks apply.
 func (e *Effective) isHostLocal(host string) bool {
 	if hostLocalNames[host] || strings.HasSuffix(host, ".localhost") || containsString(e.hostNames, host) {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	if addr = addr.Unmap(); addr.IsLoopback() || addr.IsUnspecified() {
+		return true
+	}
+	if neverApproved(host) {
+		// A link-local interface address stays never approved.
+		return false
+	}
+	list, err := interfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range list {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if own, ok := netip.AddrFromSlice(ip); ok && own.Unmap() == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // neverApproved reports metadata host names and addresses no sandbox may
