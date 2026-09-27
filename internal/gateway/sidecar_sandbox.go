@@ -160,6 +160,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	}
 	decider, err := mgr.Decider()
 	if err != nil {
+		_ = api.SetSandboxIngress(SandboxIngressConfig{})
 		return nil, fmt.Errorf("egress policy: %w", err)
 	}
 	proxy, err := egress.New(egress.Options{
@@ -167,6 +168,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),
 	})
 	if err != nil {
+		_ = api.SetSandboxIngress(SandboxIngressConfig{})
 		return nil, fmt.Errorf("egress proxy: %w", err)
 	}
 	mgr.AttachProxy(proxy)
