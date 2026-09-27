@@ -43,6 +43,9 @@ var (
 	ErrNotRegular = errors.New("sandboxauth: path is not a regular file")
 	// ErrTooLarge is returned by ReadFile when the file exceeds the limit.
 	ErrTooLarge = errors.New("sandboxauth: file exceeds the read limit")
+	// ErrPathChanged is returned by ReadFile when the path stopped naming
+	// the opened file while it was checked.
+	ErrPathChanged = errors.New("sandboxauth: path changed while it was read")
 )
 
 // FS is the host filesystem surface an FSView uses. Production uses OSFS;
@@ -192,7 +195,9 @@ func (v *FSView) SandboxPath(hostPath string) (string, bool) {
 // path inside the view. The open is confined to the mount's host root, so a
 // symlink or directory swapped in after validation still cannot redirect
 // the read outside the project, and a masked secret is refused by file
-// identity as well as by name.
+// identity as well as by name: a hard link to a mask, a symlink into a
+// masked directory, and another spelling of a mask on a case-insensitive
+// host volume are all refused.
 func (v *FSView) ReadFile(name string, maxBytes int64) ([]byte, fs.FileInfo, error) {
 	if !v.HostAccess() {
 		return nil, nil, ErrNoHostView
@@ -232,8 +237,8 @@ func (v *FSView) ReadFile(name string, maxBytes int64) ([]byte, fs.FileInfo, err
 	if info.Size() > maxBytes {
 		return nil, nil, ErrTooLarge
 	}
-	if v.maskedIdentity(info) {
-		return nil, nil, ErrMasked
+	if err := v.openedOutsideMasks(m, rel, info); err != nil {
+		return nil, nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
@@ -311,6 +316,15 @@ func (v *FSView) resolve(m Mount, rel string) (string, error) {
 	if v.maskedReal(real) {
 		return "", ErrMasked
 	}
+	if len(v.hostMasks) > 0 {
+		info, err := v.fs.Lstat(real)
+		if err != nil {
+			return "", err
+		}
+		if v.maskedIdentity(root, real, info) {
+			return "", ErrMasked
+		}
+	}
 	return real, nil
 }
 
@@ -360,17 +374,91 @@ func (v *FSView) maskedReal(real string) bool {
 	return false
 }
 
-func (v *FSView) maskedIdentity(opened fs.FileInfo) bool {
+// openedOutsideMasks proves that the file opened for rel under m is neither
+// a mask nor inside a masked directory. The open followed any symlinks the
+// agent planted, so the check runs on the opened file's real path: that
+// path must still name the opened file, and neither it nor any directory
+// above it up to the mount's real root may be a mask.
+func (v *FSView) openedOutsideMasks(m Mount, rel string, opened fs.FileInfo) error {
+	if len(v.hostMasks) == 0 {
+		return nil
+	}
+	root, err := v.realRootOf(m)
+	if err != nil {
+		return err
+	}
+	real, err := v.fs.EvalSymlinks(joinHost(m.HostPath, rel))
+	if err != nil {
+		return err
+	}
+	if _, ok := hostRel(root, real); !ok {
+		return ErrOutsideView
+	}
+	if v.maskedReal(real) {
+		return ErrMasked
+	}
+	current, err := v.fs.Lstat(real)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(current, opened) {
+		return ErrPathChanged
+	}
+	if v.maskedIdentity(root, real, opened) {
+		return ErrMasked
+	}
+	return nil
+}
+
+// maskedIdentity reports whether target (whose FileInfo is info), or any
+// directory between it and root, is the same file as a mask. Names alone
+// miss a mask reached through a hard link, or spelled differently on a
+// case- or normalization-insensitive host volume (APFS, NTFS): the sandbox
+// is case-sensitive, so /work/app/.ENV is not masked there, yet on such a
+// host it names the masked .env, and /work/app/CERTS/key.pem sits inside
+// a masked certs directory.
+func (v *FSView) maskedIdentity(root, target string, info fs.FileInfo) bool {
+	var masks []fs.FileInfo
 	for _, mask := range v.hostMasks {
-		target := mask
-		if resolved, err := v.fs.EvalSymlinks(mask); err == nil {
-			target = resolved
+		resolved := mask
+		if real, err := v.fs.EvalSymlinks(mask); err == nil {
+			resolved = real
 		}
-		if info, err := v.fs.Lstat(target); err == nil && os.SameFile(opened, info) {
-			return true
+		if maskInfo, err := v.fs.Lstat(resolved); err == nil {
+			masks = append(masks, maskInfo)
 		}
 	}
-	return false
+	isMask := func(candidate fs.FileInfo) bool {
+		for _, mask := range masks {
+			if os.SameFile(candidate, mask) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(masks) == 0 {
+		return false
+	}
+	if isMask(info) {
+		return true
+	}
+	for dir := target; ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+		rel, inside := hostRel(root, dir)
+		if !inside {
+			return false
+		}
+		if dirInfo, err := v.fs.Lstat(dir); err == nil && isMask(dirInfo) {
+			return true
+		}
+		if rel == "" {
+			return false
+		}
+	}
 }
 
 // sandboxRel returns p relative to root ("" for root itself) when p is root

@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -268,6 +269,89 @@ func TestMountViewRefusesMasks(t *testing.T) {
 	for _, name := range []string{"/work/app/src/env-link", "/work/app/src/env-hardlink"} {
 		if _, _, err := p.view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
 			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
+		}
+	}
+}
+
+// foldingFS presents the host tree below root the way a case-insensitive
+// volume (APFS, NTFS) does: a name matches whatever its letter case, and
+// EvalSymlinks keeps the spelling it was given. The project fixture names
+// every file in lower case.
+type foldingFS struct{ root string }
+
+func (f foldingFS) fold(name string) string {
+	rel, ok := hostRel(f.root, name)
+	if !ok || rel == "" {
+		return name
+	}
+	return filepath.Join(f.root, strings.ToLower(filepath.FromSlash(rel)))
+}
+
+func (f foldingFS) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(f.fold(name)) }
+
+func (f foldingFS) EvalSymlinks(name string) (string, error) {
+	if _, err := filepath.EvalSymlinks(f.fold(name)); err != nil {
+		return "", err
+	}
+	return filepath.Clean(name), nil
+}
+
+func (f foldingFS) OpenInRoot(root, name string) (fs.File, error) {
+	return OSFS{}.OpenInRoot(root, strings.ToLower(name))
+}
+
+// TestMountViewRefusesMasksUnderAnotherSpelling covers a case-insensitive
+// host volume: the sandbox is case-sensitive, so /work/app/.ENV is not a
+// mask there, yet on the host it opens the masked .env, and
+// /work/app/CERTS/dev.pem lies inside the masked certs directory.
+func TestMountViewRefusesMasksUnderAnotherSpelling(t *testing.T) {
+	p := newProject(t)
+	b := Binding{Workdir: Workdir{
+		Mode:   WorkdirMount,
+		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
+		Masks:  []string{"/work/app/.env", "/work/app/certs"},
+	}}
+	view := NewFSView(b, foldingFS{root: p.root})
+	for _, name := range []string{
+		"/work/app/.ENV",
+		"/work/app/.Env",
+		"/work/app/CERTS/dev.pem",
+		"/work/app/Certs/DEV.PEM",
+		filepath.Join(p.root, "CERTS", "dev.pem"),
+	} {
+		if _, _, err := view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
+			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
+		}
+		if _, err := view.HostPath(name); !errors.Is(err, ErrMasked) && strings.HasPrefix(name, "/work/") {
+			t.Errorf("HostPath(%q) = %v, want ErrMasked", name, err)
+		}
+	}
+	// Other spellings of unmasked files still resolve.
+	if data, _, err := view.ReadFile("/work/app/SRC/main.go", 1024); err != nil || string(data) != "package main\n" {
+		t.Fatalf("ReadFile of an unmasked spelling = %q, %v", data, err)
+	}
+	if _, err := view.HostPath("/work/app/Src/Main.go"); err != nil {
+		t.Fatalf("HostPath of an unmasked spelling: %v", err)
+	}
+}
+
+// TestMountViewRefusesLinksIntoMaskedDirectories covers the links an agent
+// can plant in the project: a symlink to a masked directory and a hard
+// link to a masked file.
+func TestMountViewRefusesLinksIntoMaskedDirectories(t *testing.T) {
+	p := newProject(t)
+	if err := os.Symlink("../certs", filepath.Join(p.root, "src", "certs-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(p.root, ".env"), filepath.Join(p.root, "src", "env-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"/work/app/src/certs-link/dev.pem", "/work/app/src/env-hardlink"} {
+		if _, _, err := p.view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
+			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
+		}
+		if _, err := p.view.HostPath(name); !errors.Is(err, ErrMasked) {
+			t.Errorf("HostPath(%q) = %v, want ErrMasked", name, err)
 		}
 	}
 }
