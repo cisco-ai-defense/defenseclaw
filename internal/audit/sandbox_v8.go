@@ -707,7 +707,8 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 	if err := identity.validate(true); err != nil {
 		return err
 	}
-	if !runtimeV8Identifier(input.ApprovalID) {
+	approvalID := strings.TrimSpace(input.ApprovalID)
+	if !runtimeV8Identifier(approvalID) {
 		return fmt.Errorf("audit: sandbox approval requires a stable approval id")
 	}
 	if input.Kind != SandboxApprovalNetworkRule && input.Kind != SandboxApprovalHostPort {
@@ -755,7 +756,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 		return fmt.Errorf("audit: sandbox approval stage %q is not registered", input.Stage)
 	}
 	fields := sandboxV8FieldsFor(identity)
-	event := recorder.newEvent(ctx, ActionSandboxApproval, identity, input.ApprovalID, severity, input.Timestamp)
+	event := recorder.newEvent(ctx, ActionSandboxApproval, identity, approvalID, severity, input.Timestamp)
 	reason := optionalSandboxText(input.Reason, maxSandboxFindingTextBytes)
 	kind := observability.Present(string(input.Kind))
 	risky := observability.Present(input.Risky)
@@ -771,7 +772,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 					GenAIConversationID:   optionalNetworkText(event.SessionID),
 					GenAIAgentID:          optionalNetworkText(event.AgentID),
-					DefenseClawApprovalID: input.ApprovalID, DefenseClawApprovalDangerous: risky,
+					DefenseClawApprovalID: approvalID, DefenseClawApprovalDangerous: risky,
 					DefenseClawGuardrailReason: reason, DefenseClawSandboxApprovalKind: kind,
 					ServerAddress: host, ServerPort: port,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
@@ -785,7 +786,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 				GenAIConversationID:   optionalNetworkText(event.SessionID),
 				GenAIAgentID:          optionalNetworkText(event.AgentID),
-				DefenseClawApprovalID: input.ApprovalID, DefenseClawApprovalResult: input.Result,
+				DefenseClawApprovalID: approvalID, DefenseClawApprovalResult: input.Result,
 				DefenseClawApprovalActorType: optionalSandboxEnum(input.ActorType),
 				DefenseClawApprovalDangerous: risky, DefenseClawGuardrailReason: reason,
 				DefenseClawSandboxApprovalKind:  kind,
@@ -1071,7 +1072,8 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 	if input.FailureClass != "" && !observability.IsStableToken(input.FailureClass) {
 		return fmt.Errorf("audit: sandbox workspace failure class must be a stable token")
 	}
-	if input.Initiator != "" && !runtimeV8Identifier(input.Initiator) {
+	initiator := strings.TrimSpace(input.Initiator)
+	if initiator != "" && !runtimeV8Identifier(initiator) {
 		return fmt.Errorf("audit: sandbox workspace initiator is not a stable identifier")
 	}
 	counts := map[string]*int64{
@@ -1111,7 +1113,7 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
 				DefenseClawEnforcementEffectiveAction:   observability.Present(string(input.Operation)),
-				DefenseClawEnforcementInitiator:         optionalSandboxEnum(input.Initiator),
+				DefenseClawEnforcementInitiator:         optionalSandboxEnum(initiator),
 				DefenseClawEnforcementFailureClass:      optionalSandboxEnum(input.FailureClass),
 				DefenseClawSandboxWorkspaceOperation:    string(input.Operation),
 				DefenseClawSandboxWorkspaceSnapshotKind: optionalSandboxEnum(input.SnapshotKind),

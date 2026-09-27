@@ -912,6 +912,75 @@ func TestSandboxApprovalFamilies(t *testing.T) {
 	}
 }
 
+// TestSandboxRecorderEmitsTrimmedIdentifiers covers identifiers the producers
+// validate after trimming: the record carries the trimmed value, so padding
+// can neither fail the registered pattern nor cost a mandatory record.
+func TestSandboxRecorderEmitsTrimmedIdentifiers(t *testing.T) {
+	harness := newSandboxHarness(t)
+	for _, test := range []struct {
+		name      string
+		record    func(*SandboxRecorder) error
+		mandatory bool
+		field     string
+		want      string
+	}{
+		{
+			name: "requested approval id",
+			record: func(r *SandboxRecorder) error {
+				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
+					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalRequested, ApprovalID: " draft-7",
+					Kind: SandboxApprovalNetworkRule,
+				})
+			},
+			field: "defenseclaw.approval.id", want: "draft-7",
+		},
+		{
+			name: "resolved approval id",
+			record: func(r *SandboxRecorder) error {
+				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
+					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-7 \t",
+					Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalApproved, ActorType: SandboxApprovalByOperator,
+				})
+			},
+			mandatory: true, field: "defenseclaw.approval.id", want: "draft-7",
+		},
+		{
+			name: "workspace initiator",
+			record: func(r *SandboxRecorder) error {
+				return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+					Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceSnapshot, Initiator: "operator ",
+				})
+			},
+			field: "defenseclaw.enforcement.initiator", want: "operator",
+		},
+		{
+			name: "egress decision code",
+			record: func(r *SandboxRecorder) error {
+				return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "pastebin.com", Blocked: true,
+					DecisionCode: " SANDBOX_EGRESS_BLOCKLIST\n",
+				})
+			},
+			mandatory: true, field: "defenseclaw.network.decision_code", want: "SANDBOX_EGRESS_BLOCKLIST",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+			if err := test.record(recorder); err != nil {
+				t.Fatalf("a padded identifier cost the record: %v", err)
+			}
+			_, record := onlySandboxRecord(t, runtime)
+			assertRecordMatchesRuntimeContract(t, record)
+			if record.Mandatory() != test.mandatory {
+				t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
+			}
+			if got := sandboxBody(t, record)[test.field]; got != test.want {
+				t.Fatalf("%s=%#v want %q", test.field, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
 	harness := newSandboxHarness(t)
 	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
@@ -1192,6 +1261,12 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		{"approval without id", func(r *SandboxRecorder) error {
 			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, Kind: SandboxApprovalNetworkRule})
 		}},
+		{"approval blank id", func(r *SandboxRecorder) error {
+			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: " \t", Kind: SandboxApprovalNetworkRule})
+		}},
+		{"approval id with spaces", func(r *SandboxRecorder) error {
+			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "draft 7", Kind: SandboxApprovalNetworkRule})
+		}},
 		{"approval unknown kind", func(r *SandboxRecorder) error {
 			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "a1", Kind: "mount"})
 		}},
@@ -1251,6 +1326,9 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		}},
 		{"workspace unknown pull mode", func(r *SandboxRecorder) error {
 			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspacePull, PullMode: "rsync"})
+		}},
+		{"workspace initiator with spaces", func(r *SandboxRecorder) error {
+			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceUndo, Initiator: "the operator"})
 		}},
 		{"workspace unknown snapshot kind", func(r *SandboxRecorder) error {
 			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceSnapshot, SnapshotKind: "zfs"})
