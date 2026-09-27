@@ -441,3 +441,58 @@ func TestContextHelpers(t *testing.T) {
 		t.Fatal("nil view was not replaced by the binding's view")
 	}
 }
+
+// TestMaskBypassViaDirectoryRename reproduces p2-ingress-1: mask checks are
+// tied to lexical host paths computed at construction time. When a directory
+// containing a masked file is renamed, the mask still covers the file inside
+// the container, but the host path changes and lexical checks fail.
+func TestMaskBypassViaDirectoryRename(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	configDir := filepath.Join(project, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(configDir, ".env")
+	secret := []byte("SECRET_KEY=supersecret\n")
+	if err := os.WriteFile(envFile, secret, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create FSView with /work/app/config/.env masked.
+	b := Binding{Workdir: Workdir{
+		Mode:   WorkdirMount,
+		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: project}},
+		Masks:  []string{"/work/app/config/.env"},
+	}}
+	view := NewFSView(b, nil)
+
+	// Before rename: mask works.
+	if _, err := view.HostPath("/work/app/config/.env"); !errors.Is(err, ErrMasked) {
+		t.Fatalf("before rename, mask should block: got %v", err)
+	}
+
+	// Rename config → config2. The file now lives at project/config2/.env on
+	// the host, but the FSView's hostMasks still contain project/config/.env.
+	// If we only use lexical checks, the mask no longer applies.
+	renamedDir := filepath.Join(project, "config2")
+	if err := os.Rename(configDir, renamedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// After rename: a lexical-only implementation allows access.
+	// A correct implementation records the mask's file identity at construction
+	// or first use and detects that the opened file is still the masked one.
+	if _, err := view.HostPath("/work/app/config/.env"); !errors.Is(err, ErrMasked) {
+		t.Errorf("after rename, sandbox path still masked: got %v", err)
+	}
+
+	// Attempting to read the file through its new host path should also fail.
+	renamedEnv := filepath.Join(renamedDir, ".env")
+	if _, err := view.ContainHostPath(renamedEnv); !errors.Is(err, ErrMasked) {
+		t.Errorf("after rename, host path should detect mask: got %v", err)
+	}
+	if data, _, err := view.ReadFile("/work/app/config/.env", 1024); !errors.Is(err, ErrMasked) {
+		t.Errorf("after rename, ReadFile should refuse mask: got %q %v", data, err)
+	}
+}

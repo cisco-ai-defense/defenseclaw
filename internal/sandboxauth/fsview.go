@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 var (
@@ -102,13 +103,20 @@ type FSView struct {
 	hostMasks []string
 	fs        FS
 
-	mu        sync.Mutex
-	realRoots map[string]realRoot
+	mu             sync.Mutex
+	realRoots      map[string]realRoot
+	maskIdentities []maskIdentity // lazily resolved mask file identities
+	masksResolved  bool
 }
 
 type realRoot struct {
 	path string
 	err  error
+}
+
+type maskIdentity struct {
+	dev uint64
+	ino uint64
 }
 
 // NewFSView builds the view for b. A nil fsys uses OSFS. Construction never
@@ -374,6 +382,47 @@ func (v *FSView) maskedReal(real string) bool {
 	return false
 }
 
+// resolveMaskIdentities lazily resolves all mask file identities. On any
+// resolution error it fails closed (sets masksResolved with no identities),
+// treating the whole mount as potentially containing masked data.
+func (v *FSView) resolveMaskIdentities() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.masksResolved {
+		return
+	}
+	v.masksResolved = true
+	if len(v.hostMasks) == 0 {
+		return
+	}
+	for _, mask := range v.hostMasks {
+		resolved := mask
+		if real, err := v.fs.EvalSymlinks(mask); err == nil {
+			resolved = real
+		} else {
+			// Cannot resolve this mask; fail closed for all masks.
+			v.maskIdentities = nil
+			return
+		}
+		info, err := v.fs.Lstat(resolved)
+		if err != nil {
+			// Cannot stat this mask; fail closed for all masks.
+			v.maskIdentities = nil
+			return
+		}
+		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+			v.maskIdentities = append(v.maskIdentities, maskIdentity{
+				dev: uint64(sys.Dev),
+				ino: sys.Ino,
+			})
+		} else {
+			// Platform does not provide dev/ino; fail closed.
+			v.maskIdentities = nil
+			return
+		}
+	}
+}
+
 // openedOutsideMasks proves that the file opened for rel under m is neither
 // a mask nor inside a masked directory. The open followed any symlinks the
 // agent planted, so the check runs on the opened file's real path: that
@@ -417,31 +466,46 @@ func (v *FSView) openedOutsideMasks(m Mount, rel string, opened fs.FileInfo) err
 // is case-sensitive, so /work/app/.ENV is not masked there, yet on such a
 // host it names the masked .env, and /work/app/CERTS/key.pem sits inside
 // a masked certs directory.
+//
+// This check uses cached mask file identities (dev/ino) resolved at first use,
+// making it robust against directory renames that would invalidate lexical
+// path checks.
 func (v *FSView) maskedIdentity(root, target string, info fs.FileInfo) bool {
-	var masks []fs.FileInfo
-	for _, mask := range v.hostMasks {
-		resolved := mask
-		if real, err := v.fs.EvalSymlinks(mask); err == nil {
-			resolved = real
-		}
-		if maskInfo, err := v.fs.Lstat(resolved); err == nil {
-			masks = append(masks, maskInfo)
-		}
+	if len(v.hostMasks) == 0 {
+		return false
 	}
-	isMask := func(candidate fs.FileInfo) bool {
-		for _, mask := range masks {
-			if os.SameFile(candidate, mask) {
+	// Ensure mask identities are resolved.
+	v.resolveMaskIdentities()
+	v.mu.Lock()
+	identities := v.maskIdentities
+	masksResolved := v.masksResolved
+	v.mu.Unlock()
+
+	// If masks could not be resolved, fail closed: treat everything as
+	// potentially masked.
+	if masksResolved && len(identities) == 0 && len(v.hostMasks) > 0 {
+		return true
+	}
+
+	isMasked := func(candidate fs.FileInfo) bool {
+		sys, ok := candidate.Sys().(*syscall.Stat_t)
+		if !ok {
+			// Platform does not provide dev/ino; fail closed.
+			return len(v.hostMasks) > 0
+		}
+		candidateID := maskIdentity{dev: uint64(sys.Dev), ino: sys.Ino}
+		for _, maskID := range identities {
+			if candidateID == maskID {
 				return true
 			}
 		}
 		return false
 	}
-	if len(masks) == 0 {
-		return false
-	}
-	if isMask(info) {
+
+	if isMasked(info) {
 		return true
 	}
+	// Check every directory from target up to root.
 	for dir := target; ; {
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -452,7 +516,7 @@ func (v *FSView) maskedIdentity(root, target string, info fs.FileInfo) bool {
 		if !inside {
 			return false
 		}
-		if dirInfo, err := v.fs.Lstat(dir); err == nil && isMask(dirInfo) {
+		if dirInfo, err := v.fs.Lstat(dir); err == nil && isMasked(dirInfo) {
 			return true
 		}
 		if rel == "" {
