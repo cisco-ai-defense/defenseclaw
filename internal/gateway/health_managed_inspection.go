@@ -13,8 +13,12 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 )
 
 // ManagedInspectionHealth is the managed_enterprise inspection state shown in
@@ -96,7 +100,7 @@ const (
 
 // managedInspectionUnwiredDetail explains an unavailable inspection whose
 // provider is healthy but whose hook lane never received an inspector.
-const managedInspectionUnwiredDetail = "no managed inspector is wired for agent hooks; check cisco_ai_defense.endpoint and managed-cloud enrollment, then reload the configuration"
+const managedInspectionUnwiredDetail = "no managed inspector is wired for agent hooks; check cisco_ai_defense.endpoint and managed-cloud enrollment (the gateway retries every 30 seconds)"
 
 const (
 	// managedInspectionProbeInterval bounds how often an unavailable
@@ -176,10 +180,52 @@ func (s *Sidecar) refreshManagedInspectionHealth(managedEnterprise bool) {
 	}
 }
 
+// retryManagedHookInspector wires a managed inspector onto the API server's
+// hook lane when it was left without one: for example the provider build
+// failed when the API server started and succeeded later for the guardrail,
+// or failed on a condition that has since cleared. Without it the lane
+// stays unwired until a reload changes cisco_ai_defense, and with
+// unavailable_action=block every tool call that needs inspection is
+// blocked. Runs on the guardrail health ticker, at most once per
+// managedInspectionProbeInterval; an empty endpoint is left to the reload
+// that sets one.
+func (s *Sidecar) retryManagedHookInspector(ctx context.Context) {
+	if s == nil || s.managedHookInspector.Load() != managedHookInspectorUnwired {
+		return
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || !cfg.ManagedAIDOnly() || !cloudreg.Registered() ||
+		strings.TrimSpace(cfg.CiscoAIDefense.Endpoint) == "" {
+		return
+	}
+	// runAPI or a reload may be wiring right now; the next tick retries.
+	if !s.hookInspectorMu.TryLock() {
+		return
+	}
+	defer s.hookInspectorMu.Unlock()
+	now := time.Now()
+	if s.managedHookInspector.Load() != managedHookInspectorUnwired ||
+		now.Sub(s.hookInspectorLastRetry) < managedInspectionProbeInterval {
+		return
+	}
+	s.hookInspectorLastRetry = now
+	api := s.apiSnapshot()
+	if api == nil {
+		return
+	}
+	inspector := s.newManagedInspector(ctx, "hook remote inspection still disabled")
+	if inspector == nil {
+		return
+	}
+	api.SetCiscoInspector(inspector)
+	s.setManagedHookInspectorWired(true)
+	fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: hook-lane Cisco AI Defense inspector wired on retry")
+}
+
 // probeManagedInspection re-checks an unavailable managed provider by
 // minting a token, at most once per managedInspectionProbeInterval. Only a
 // provider that was already built is probed; a provider that failed to
-// build is left to the next reload, which also rebuilds the inspector. A
+// build is rebuilt by retryManagedHookInspector or the next reload. A
 // failure reported by an inspection that had a token (AI Defense returned
 // no verdict) is not probed: a token says nothing about whether AI Defense
 // answers, so only the next real verdict clears it. The same holds for an

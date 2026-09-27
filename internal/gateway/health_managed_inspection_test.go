@@ -14,6 +14,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -318,5 +321,72 @@ func TestPublishManagedInspectionHealthCannotWriteAnOlderSnapshotLast(t *testing
 	if got := s.health.Snapshot().ManagedInspection; got == nil || got.Available ||
 		got.Error != errManagedAIDNoVerdict.Error() {
 		t.Fatalf("an older snapshot was written last: %+v", got)
+	}
+}
+
+// A hook lane left without an inspector because the provider build failed
+// when the API server started is rewired from the guardrail health ticker
+// once the build succeeds, so unavailable_action=block stops blocking every
+// tool call. Retries are rate limited.
+func TestManagedHealthTickerRewiresAnUnwiredHookLane(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buildable atomic.Bool
+	var builds atomic.Int32
+	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
+		builds.Add(1)
+		if !buildable.Load() {
+			return nil, errors.New("managed cloud auth library not trusted yet")
+		}
+		return newFakeCloudProvider("token"), nil
+	})
+	t.Cleanup(func() { cloudreg.Register(nil) })
+
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = srv.URL
+	api := managedBlockingHookServer(nil)
+	s.apiServer = api
+	req := &ToolInspectRequest{Tool: "run_shell", Args: json.RawMessage(`{"command":"ls -la"}`)}
+
+	// runAPI's wiring with a provider that cannot be built yet.
+	if inspector := s.pickInspector(context.Background()); inspector != nil {
+		t.Fatalf("pickInspector with a failing build returned %T", inspector)
+	}
+	s.setManagedHookInspectorWired(false)
+	v := api.inspectToolPolicy(req)
+	if v == nil {
+		t.Fatal("unwired hook lane returned no verdict")
+	}
+	assertManagedAIDUnavailableBlock(t, v.Action, v.Severity, v.Reason, v.Findings)
+
+	// Still failing: one retry, then rate limited.
+	before := builds.Load()
+	s.addManagedInspectionHealth(context.Background(), map[string]interface{}{})
+	s.addManagedInspectionHealth(context.Background(), map[string]interface{}{})
+	if got := builds.Load() - before; got != 1 {
+		t.Fatalf("provider builds during two ticks = %d, want 1", got)
+	}
+	if api.currentCiscoInspector() != nil {
+		t.Fatal("a failed retry wired an inspector")
+	}
+
+	buildable.Store(true)
+	s.hookInspectorMu.Lock()
+	s.hookInspectorLastRetry = time.Now().Add(-managedInspectionProbeInterval)
+	s.hookInspectorMu.Unlock()
+	detail := map[string]interface{}{}
+	s.addManagedInspectionHealth(context.Background(), detail)
+	if api.currentCiscoInspector() == nil || s.managedHookInspector.Load() != managedHookInspectorWired {
+		t.Fatal("the health ticker did not rewire the hook lane after the provider became buildable")
+	}
+	if v := api.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+		t.Fatalf("rewired hook lane verdict = %+v, want the AI Defense allow", v)
+	}
+	if got := s.health.Snapshot().ManagedInspection; got == nil || !got.Available {
+		t.Fatalf("after the rewired lane got a verdict: %+v", got)
 	}
 }

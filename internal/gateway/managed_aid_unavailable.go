@@ -293,12 +293,14 @@ func (s *Sidecar) requireManagedInspectionSupport() error {
 // guardrail health detail map: whether AI Defense can currently be reached,
 // what happens to requests it cannot inspect (managedAIDUnavailablePosture),
 // and, while it cannot, the cause and a hint that says what happens to tool
-// calls. It runs on the guardrail health ticker, so it also re-probes an
-// unavailable provider and refreshes the Secure Client availability.
+// calls. It runs on the guardrail health ticker, so it also rewires a hook
+// lane left without an inspector, re-probes an unavailable provider and
+// refreshes the Secure Client availability.
 func (s *Sidecar) addManagedInspectionHealth(ctx context.Context, detail map[string]interface{}) {
 	if s == nil || detail == nil {
 		return
 	}
+	s.retryManagedHookInspector(ctx)
 	s.probeManagedInspection(ctx)
 	s.publishManagedInspectionHealth()
 	available, cause := s.managedInspectionState()

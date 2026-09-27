@@ -277,7 +277,10 @@ type APIServer struct {
 	// *CiscoDefenseClawInspectClient instead. Callers still hold the
 	// same nil-guard semantics: only assign non-nil concrete values to
 	// this field (see inspector.go for the nil-interface trap).
-	ciscoInspector Inspector
+	// Guarded by ciscoInspectorMu: a reload or the managed health
+	// ticker can rewire it while hooks are being inspected.
+	ciscoInspector   Inspector
+	ciscoInspectorMu sync.RWMutex
 	// managedSupport records a managed_enterprise build that can never
 	// reach Cisco AI Defense; see SetManagedInspectionUnsupported.
 	managedSupport managedInspectionSupport
@@ -322,7 +325,20 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 		a.observabilityV8Mu.RUnlock()
 		c.bindObservabilityV8(metricRuntime)
 	}
+	a.ciscoInspectorMu.Lock()
 	a.ciscoInspector = c
+	a.ciscoInspectorMu.Unlock()
+}
+
+// currentCiscoInspector returns the hook lane's Cisco AI Defense inspector,
+// or nil when none is wired.
+func (a *APIServer) currentCiscoInspector() Inspector {
+	if a == nil {
+		return nil
+	}
+	a.ciscoInspectorMu.RLock()
+	defer a.ciscoInspectorMu.RUnlock()
+	return a.ciscoInspector
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook

@@ -221,8 +221,8 @@ func (a *APIServer) bindObservabilityV8Runtimes(
 	a.observabilityV8Lifecycle = lifecycle
 	a.observabilityV8Mu.Unlock()
 	metricRuntime, _ := lifecycle.(hookLifecycleMetricV8Runtime)
-	if a.ciscoInspector != nil {
-		a.ciscoInspector.bindObservabilityV8(metricRuntime)
+	if inspector := a.currentCiscoInspector(); inspector != nil {
+		inspector.bindObservabilityV8(metricRuntime)
 	}
 }
 

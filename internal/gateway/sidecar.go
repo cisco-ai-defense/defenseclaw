@@ -217,6 +217,11 @@ type Sidecar struct {
 	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
 	// until the API server has picked one.
 	managedHookInspector atomic.Int32
+	// hookInspectorMu serializes wiring the API server's hook-lane
+	// inspector (runAPI, a reload, and retryManagedHookInspector);
+	// hookInspectorLastRetry, guarded by it, rate-limits the retry.
+	hookInspectorMu        sync.Mutex
+	hookInspectorLastRetry time.Time
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -1949,6 +1954,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// lane's SetManagedInspection is called only in managed_enterprise
 	// mode.
 	if inspectorNeedsRebuild(oldCfg, newCfg) {
+		s.hookInspectorMu.Lock()
 		if inspector := s.pickInspector(ctx); inspector != nil {
 			if api := s.apiSnapshot(); api != nil {
 				api.SetCiscoInspector(inspector)
@@ -1962,6 +1968,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			api.SetCiscoInspector(nil)
 			s.setManagedHookInspectorWired(false)
 		}
+		s.hookInspectorMu.Unlock()
 		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
@@ -6664,6 +6671,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Callers must nil-check the concrete pointer BEFORE assigning to
 	// Inspector (interface): a typed-nil wrapper is a non-nil
 	// interface and defeats every downstream `!= nil` guard.
+	s.hookInspectorMu.Lock()
 	inspector := s.pickInspector(ctx)
 	if inspector != nil {
 		api.SetCiscoInspector(inspector)
@@ -6673,6 +6681,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// whatever cisco_ai_defense.unavailable_action says.
 	api.SetManagedInspectionUnsupported(managedInspectionUnsupported(s.currentConfig()))
 	s.setManagedHookInspectorWired(inspector != nil)
+	s.hookInspectorMu.Unlock()
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication
 	// on the hook lane (inspectMessageContent). Same instance as the
