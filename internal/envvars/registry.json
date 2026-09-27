@@ -3637,7 +3637,7 @@
     {
       "name": "DEFENSECLAW_SANDBOX_TOKEN",
       "category": "credential",
-      "purpose": "Per-sandbox binding token the sandbox hooks present to the DefenseClaw hook ingress. Delivered as an OpenShell provider credential by default (openshell.token_delivery: provider), so the agent only ever sees a revision-scoped placeholder that the supervisor substitutes at the ingress endpoint. Authorizes only that sandbox's own hook routes; revoked on delete and rotated on start.",
+      "purpose": "Per-sandbox binding token the sandbox hooks present to the DefenseClaw hook ingress. Delivered as an OpenShell provider credential by default (openshell.token_delivery: provider), so the agent only ever sees a revision-scoped placeholder that the supervisor substitutes at the ingress endpoint. Authorizes only that sandbox's own hook routes; revoked on delete. With provider delivery (the default) it is rotated on every start; with env delivery it is kept for the sandbox's life.",
       "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
         "OpenShell credential placeholder",
