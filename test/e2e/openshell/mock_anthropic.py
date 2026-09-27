@@ -19,8 +19,9 @@ Serves a scripted conversation to Claude Code (or any Messages API client):
   anything else                          logged, 404 JSON error
 
 Every request is appended to --log as one JSON line (path, query, headers with
-credential values redacted, summary of the body). --dump-dir additionally
-stores each full request body.
+credential values redacted, summary of the body, including the text of the
+last message's tool_result blocks). --dump-dir additionally stores each full
+request body.
 
 Script file (JSON), selected per request by substring match against the most
 recent *real* user prompt (a user message that is not only tool_result blocks):
@@ -133,6 +134,18 @@ def block_text(content):
     for block in content or []:
         if isinstance(block, dict) and block.get("type") == "text":
             out.append(block.get("text", ""))
+    return "\n".join(out)
+
+
+def tool_result_text(content):
+    """The text of the tool_result blocks of one message's content."""
+    if not isinstance(content, list):
+        return ""
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            inner = block.get("content")
+            out.append(inner if isinstance(inner, str) else block_text(inner))
     return "\n".join(out)
 
 
@@ -285,6 +298,9 @@ class Handler(BaseHTTPRequestHandler):
                 "tools": [t.get("name") for t in (body.get("tools") or []) if isinstance(t, dict)][:80],
                 "roles": [m.get("role") for m in msgs],
                 "last_user_text": block_text(msgs[-1].get("content"))[-400:] if msgs else None,
+                # What the harness told the model a tool returned; a hook
+                # denial's reason reaches the model here.
+                "last_tool_result": tool_result_text(msgs[-1].get("content"))[-400:] if msgs else None,
             }
         elif raw:
             rec["body_excerpt"] = raw[:400].decode(errors="replace")

@@ -25,11 +25,19 @@
 //   - create (overlay image build and hook-fire verification when missing),
 //     then a tool call whose hook reaches the sandbox ingress;
 //   - a harmless marker command that a test-only guardrail rule
-//     (testdata/guardrail-e2e-marker.yaml) blocks, denied by the hook;
+//     (testdata/guardrail-e2e-marker.yaml) blocks, denied by the hook with a
+//     plain reason (rule, title, what to do instead) that reaches the model,
+//     last_blocked and the activity feed;
+//   - hook tamper: a PostToolUse for a harmless marker call whose PreToolUse
+//     never reached DefenseClaw raises a hook_tamper finding; the open pack
+//     alerts and keeps the sandbox running;
 //   - egress through the DefenseClaw proxy: an allowed host, a blocklisted
 //     host, a sandbox-scoped unblock, and a direct connection OpenShell
 //     denies until triage approves the proposal;
-//   - stop, start (with a rotated ingress binding), review, undo and delete.
+//   - stop, start (with a rotated ingress binding), review, undo;
+//   - hook tamper in a second sandbox whose custom pack sets
+//     hooks.on_tamper: stop, which DefenseClaw stops;
+//   - delete.
 //
 // Opt-in, on a host with OpenShell 0.1.x, Docker, git, Python 3 and the
 // openshell CLI on PATH:
@@ -58,6 +66,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -67,6 +76,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -84,6 +94,11 @@ const (
 	allowedHost = "example.org"
 	blockedHost = "webhook.site"
 	directHost  = "www.example.com"
+	// stopSuffix names the second sandbox and its custom pack, a copy of
+	// the open pack with hooks.on_tamper: stop.
+	stopSuffix = "-stop"
+	// blockedReason is the plain reason of the marker rule's denial.
+	blockedReason = "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command."
 	// mockKey is what the sandbox's ANTHROPIC_API_KEY binding carries. The
 	// mock never checks it; it only proves the credential path.
 	mockKey = "dce2e-mock-key-not-a-secret"
@@ -102,6 +117,8 @@ type env struct {
 	token   string
 	project string
 	readme  string
+	// stopProject is the second sandbox's project.
+	stopProject string
 
 	gw  openshell.Client
 	api *sandboxapi.Client
@@ -134,10 +151,12 @@ func TestSandboxDaemon(t *testing.T) {
 	sb := e.stepValue("create", e.create)
 	e.step("hook reaches the ingress", func() { e.hookReachesIngress(sb) })
 	e.step("DefenseClaw blocks the marker command", func() { e.blockedToolCall(sb) })
+	e.step("hook tamper raises an alert", func() { e.tamperAlert(sb) })
 	e.step("egress through the proxy", func() { e.egressThroughProxy(sb) })
 	e.step("direct connection and triage", func() { e.directConnection(sb) })
 	e.step("stop and start", func() { e.stopStart(sb) })
 	e.step("review and undo", func() { e.reviewUndo(sb) })
+	e.step("hook tamper stops the sandbox", e.tamperStop)
 	e.step("delete", func() { e.deleteSandbox(sb) })
 }
 
@@ -230,6 +249,18 @@ func (e *env) setup() {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(policies, "guardrail", "default", "rules", "e2e-marker.yaml"), rule, 0o600)
+	// The second sandbox's custom pack: the open pack with hooks.on_tamper:
+	// stop.
+	open, err := os.ReadFile(filepath.Join(e.repo, "policies", "sandbox", "open", "pack.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopPack := strings.Replace(string(open), "\nname: open\n", "\nname: "+e.prefix+stopSuffix+"\n", 1)
+	stopPack = strings.Replace(stopPack, "on_tamper: alert", "on_tamper: stop", 1)
+	if !strings.Contains(stopPack, "name: "+e.prefix+stopSuffix) || !strings.Contains(stopPack, "on_tamper: stop") {
+		t.Fatal("the open pack no longer has the name and hooks.on_tamper lines the stop pack rewrites")
+	}
+	writeFile(t, filepath.Join(policies, "sandbox", e.prefix+stopSuffix, "pack.yaml"), []byte(stopPack), 0o600)
 
 	// The project: a git repository with a masked secret-looking file.
 	e.project = filepath.Join(e.work, "proj", e.prefix+"-proj")
@@ -242,6 +273,8 @@ func (e *env) setup() {
 	git("init", "-q")
 	git("add", "README.md")
 	git("commit", "-q", "-m", "initial")
+	e.stopProject = filepath.Join(e.work, "proj", e.prefix+stopSuffix+"-proj")
+	writeFile(t, filepath.Join(e.stopProject, "README.md"), []byte(e.readme), 0o644)
 
 	// The daemon configuration (schema v8). gateway.port points the
 	// OpenClaw client at a port nothing listens on.
@@ -442,21 +475,163 @@ func (e *env) blockedToolCall(sb *sandboxapi.Sandbox) {
 		t.Fatalf("the blocked command ran: %s exists (harness said %q)", blockedMarkerFile, out)
 	}
 	after := e.waitHooks(sb.Name, func(h sandboxapi.HookCoverage) bool { return h.ToolBlocked > before.ToolBlocked })
-	// LastBlocked is the verdict reason; it names the test rule.
-	if !strings.Contains(after.LastBlocked, "E2E-SANDBOX-MARKER") {
-		t.Fatalf("last blocked reason = %q, want the E2E-SANDBOX-MARKER rule", after.LastBlocked)
+	// LastBlocked is the plain reason: the rule, its title and what to do
+	// instead, never a redaction placeholder.
+	if !strings.HasPrefix(after.LastBlocked, blockedReason) || strings.Contains(after.LastBlocked, "<redacted") {
+		t.Fatalf("last blocked reason = %q, want it to start with %q", after.LastBlocked, blockedReason)
 	}
+	var blocked sandboxapi.ActivityEvent
 	waitFor(t, 30*time.Second, "tool.blocked on the SSE feed", func() error {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, ev := range stream {
 			if ev.Kind == sandboxapi.ActivityToolBlocked && ev.Tool == "Bash" {
+				blocked = ev
 				return nil
 			}
 		}
 		return fmt.Errorf("%d events so far", len(stream))
 	})
-	t.Logf("blocked: tool_blocked %d → %d; harness said %q", before.ToolBlocked, after.ToolBlocked, out)
+	if !strings.HasPrefix(blocked.Reason, blockedReason) || !strings.Contains(blocked.Message, blockedReason) {
+		t.Fatalf("tool.blocked event = %+v, want the plain reason", blocked)
+	}
+	// The model was told the same reason in the tool result.
+	var told string
+	for _, r := range mockToolResults(filepath.Join(e.work, "logs", "mock.jsonl")) {
+		if strings.Contains(r, "E2E-SANDBOX-MARKER") {
+			told = r
+		}
+	}
+	if !strings.Contains(told, blockedReason) || strings.Contains(told, "<redacted") {
+		t.Fatalf("the model's tool result for the denial = %q, want %q", told, blockedReason)
+	}
+	t.Logf("blocked: tool_blocked %d → %d; the model was told %q; harness said %q",
+		before.ToolBlocked, after.ToolBlocked, truncate(told, 200), out)
+}
+
+// tamperAlert: in the open pack (hooks.on_tamper: alert) a tool call whose
+// PreToolUse never reached DefenseClaw raises a hook_tamper finding on the
+// activity feed and leaves the sandbox running.
+func (e *env) tamperAlert(sb *sandboxapi.Sandbox) {
+	t := e.t
+	before := e.get(sb.Name).Hooks
+	// The harness's own calls so far (an allowed one, a denied one) paired
+	// up: none of them was taken for tamper.
+	if before.Tampered != 0 {
+		t.Fatalf("real harness traffic raised hook tamper: %+v", before)
+	}
+	id := e.tamperHook(sb)
+	ev := e.waitActivity(sb.Name, "hook_tamper on the feed", func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Kind == sandboxapi.ActivityFinding && ev.Reason == "hook_tamper" && ev.Tool == "Bash"
+	})
+	if ev.Severity != "HIGH" || !strings.Contains(ev.Message, "keeps running") {
+		t.Fatalf("hook_tamper event = %+v, want a HIGH alert that keeps the sandbox running", ev)
+	}
+	after := e.waitHooks(sb.Name, func(h sandboxapi.HookCoverage) bool { return h.Tampered > before.Tampered })
+	// Give a wrong stop time to happen, then prove the sandbox still works.
+	time.Sleep(5 * time.Second)
+	if got := e.get(sb.Name); got.Phase != "ready" {
+		t.Fatalf("the open pack stopped the sandbox on hook tamper: phase %s", got.Phase)
+	}
+	e.exec(sb, 30*time.Second, true, "true")
+	e.noTamperTelemetryErrors()
+	t.Logf("hook tamper (alert): %s, tampered %d → %d, %q", id, before.Tampered, after.Tampered, ev.Message)
+}
+
+// tamperStop: a sandbox whose pack sets hooks.on_tamper: stop is stopped on
+// hook tamper.
+func (e *env) tamperStop() {
+	t := e.t
+	// The first sandbox's later harness runs (after a restart, an edit)
+	// raised no tamper of their own.
+	if h := e.get(e.prefix).Hooks; h.Tampered != 1 {
+		t.Fatalf("%s hook coverage = %+v, want exactly the one simulated tamper", e.prefix, h)
+	}
+	name := e.prefix + stopSuffix
+	e.root.Cleanup(func() { e.restDeleteName(name) })
+	sb, err := e.api.Create(e.ctx(20*time.Minute), sandboxapi.CreateRequest{
+		Name: name, Harness: "claudecode", Project: e.stopProject, Pack: name,
+	})
+	if err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	if sb.Phase != "ready" || sb.Pack != name {
+		t.Fatalf("created %s = phase %s pack %s", name, sb.Phase, sb.Pack)
+	}
+	e.exec(sb, 30*time.Second, true, "true")
+	id := e.tamperHook(sb)
+	ev := e.waitActivity(name, "hook_tamper on the feed", func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Kind == sandboxapi.ActivityFinding && ev.Reason == "hook_tamper" && ev.Tool == "Bash"
+	})
+	if !strings.Contains(ev.Message, "stopping the sandbox") {
+		t.Fatalf("hook_tamper event = %+v, want the stop", ev)
+	}
+	waitFor(t, 5*time.Minute, "DefenseClaw to stop "+name, func() error {
+		if got := e.get(name); got.Phase != "stopped" {
+			return fmt.Errorf("phase %s", got.Phase)
+		}
+		return nil
+	})
+	if log := e.daemonLog(); !strings.Contains(log, "hook tamper: stopped "+name) {
+		t.Fatalf("the daemon log does not record the tamper stop of %s", name)
+	}
+	e.noTamperTelemetryErrors()
+	if res, err := e.api.Delete(e.ctx(5*time.Minute), name, sandboxapi.DeleteRequest{}); err != nil || !res.Deleted {
+		t.Fatalf("delete %s = %+v, %v", name, res, err)
+	}
+	waitFor(t, 3*time.Minute, "OpenShell to forget "+name, func() error {
+		_, err := e.gw.GetSandbox(e.ctx(20*time.Second), name)
+		if openshell.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get sandbox: %v", err)
+	})
+	t.Logf("hook tamper (stop): %s stopped %s", id, name)
+}
+
+// tamperHook runs the sandbox's Claude Code hook by hand with a PostToolUse
+// for a harmless marker call that never had a PreToolUse: what DefenseClaw
+// sees when a workload kills the PreToolUse hook and the tool runs anyway.
+// It returns the call's tool_use_id.
+func (e *env) tamperHook(sb *sandboxapi.Sandbox) string {
+	t := e.t
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		t.Fatal(err)
+	}
+	id := "toolu_dce2e_tamper_" + hex.EncodeToString(raw[:])
+	payload, err := json.Marshal(map[string]any{
+		"session_id": "dce2e-tamper-" + hex.EncodeToString(raw[:4]), "transcript_path": "/tmp/dce2e-tamper.jsonl",
+		"cwd": sb.Workdir, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": id,
+		"tool_input":    map[string]any{"command": "echo DCE2E-TAMPER-MARKER", "description": "Harmless tamper marker"},
+		"tool_response": map[string]any{"stdout": "DCE2E-TAMPER-MARKER\n", "stderr": "", "interrupted": false, "isImage": false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The payload travels as an argument: exec stdin must stay closed.
+	script := `printf '%s' "$1" > /tmp/dce2e-tamper.json && "$2" < /tmp/dce2e-tamper.json`
+	res := e.exec(sb, time.Minute, false, "sh", "-c", script, "sh", string(payload), path.Join(connector.SandboxHookDir, "claude-code-hook.sh"))
+	if res.code != 0 {
+		t.Fatalf("the PostToolUse hook exited %d: %s", res.code, truncate(res.stdout, 300))
+	}
+	return id
+}
+
+// noTamperTelemetryErrors fails when the daemon could not record a
+// hook_tamper finding.
+func (e *env) noTamperTelemetryErrors() {
+	if log := e.daemonLog(); strings.Contains(log, "hook tamper: record the finding") {
+		e.t.Fatal("the daemon failed to record a hook_tamper finding (see logs/daemon.log)")
+	}
+}
+
+func (e *env) daemonLog() string {
+	raw, err := os.ReadFile(filepath.Join(e.work, "logs", "daemon.log"))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func (e *env) egressThroughProxy(sb *sandboxapi.Sandbox) {
@@ -660,12 +835,15 @@ func (e *env) waitHooks(name string, ok func(sandboxapi.HookCoverage) bool) sand
 	return h
 }
 
-func (e *env) waitActivity(sandbox, what string, match func(sandboxapi.ActivityEvent) bool) {
+func (e *env) waitActivity(sandbox, what string, match func(sandboxapi.ActivityEvent) bool) sandboxapi.ActivityEvent {
 	e.t.Helper()
+	var got sandboxapi.ActivityEvent
 	waitFor(e.t, time.Minute, what, func() error {
 		found := false
 		err := e.api.Activity(e.ctx(20*time.Second), sandboxapi.ActivityQuery{Sandbox: sandbox}, func(ev sandboxapi.ActivityEvent) error {
-			found = found || match(ev)
+			if !found && match(ev) {
+				found, got = true, ev
+			}
 			return nil
 		})
 		switch {
@@ -676,6 +854,7 @@ func (e *env) waitActivity(sandbox, what string, match func(sandboxapi.ActivityE
 		}
 		return nil
 	})
+	return got
 }
 
 func (e *env) prefixedProviders(ctx context.Context) []string {
@@ -694,15 +873,17 @@ func (e *env) prefixedProviders(ctx context.Context) []string {
 
 // restDelete deletes the sandbox through the daemon when a step failed
 // before the delete step.
-func (e *env) restDelete() {
+func (e *env) restDelete() { e.restDeleteName(e.prefix) }
+
+func (e *env) restDeleteName(name string) {
 	if e.api == nil {
 		return
 	}
-	if _, err := e.api.Get(e.ctx(10*time.Second), e.prefix); err != nil {
+	if _, err := e.api.Get(e.ctx(10*time.Second), name); err != nil {
 		return
 	}
-	if _, err := e.api.Delete(e.ctx(5*time.Minute), e.prefix, sandboxapi.DeleteRequest{}); err != nil {
-		e.t.Logf("cleanup: daemon delete of %s: %v", e.prefix, err)
+	if _, err := e.api.Delete(e.ctx(5*time.Minute), name, sandboxapi.DeleteRequest{}); err != nil {
+		e.t.Logf("cleanup: daemon delete of %s: %v", name, err)
 	}
 }
 
@@ -713,12 +894,14 @@ func (e *env) sweep(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	if _, err := e.gw.GetSandbox(ctx, e.prefix); err == nil {
-		e.t.Logf("cleanup: deleting leftover sandbox %s", e.prefix)
-		if _, err := e.gw.DeleteSandbox(ctx, e.prefix); err != nil {
-			e.t.Logf("cleanup: delete sandbox %s: %v", e.prefix, err)
-		} else if err := e.gw.WaitDeleted(ctx, e.prefix); err != nil {
-			e.t.Logf("cleanup: wait for %s: %v", e.prefix, err)
+	for _, name := range []string{e.prefix, e.prefix + stopSuffix} {
+		if _, err := e.gw.GetSandbox(ctx, name); err == nil {
+			e.t.Logf("cleanup: deleting leftover sandbox %s", name)
+			if _, err := e.gw.DeleteSandbox(ctx, name); err != nil {
+				e.t.Logf("cleanup: delete sandbox %s: %v", name, err)
+			} else if err := e.gw.WaitDeleted(ctx, name); err != nil {
+				e.t.Logf("cleanup: wait for %s: %v", name, err)
+			}
 		}
 	}
 	list, err := e.gw.ListProviders(ctx)
@@ -970,4 +1153,30 @@ func mockAuth(path string) (messages, substituted, placeholder int) {
 		}
 	}
 	return messages, substituted, placeholder
+}
+
+// mockToolResults returns the tool-result text of every Messages call the
+// mock model logged (what the harness told the model a tool returned).
+func mockToolResults(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []string
+	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for s.Scan() {
+		var rec struct {
+			Path    string `json:"path"`
+			Summary struct {
+				LastToolResult string `json:"last_tool_result"`
+			} `json:"summary"`
+		}
+		if json.Unmarshal(s.Bytes(), &rec) != nil || !strings.HasPrefix(rec.Path, "/v1/messages") || rec.Summary.LastToolResult == "" {
+			continue
+		}
+		out = append(out, rec.Summary.LastToolResult)
+	}
+	return out
 }
