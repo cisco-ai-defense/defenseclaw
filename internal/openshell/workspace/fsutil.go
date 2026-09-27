@@ -203,6 +203,17 @@ func copyRegular(src, dst string, mode fs.FileMode, mtime time.Time) error {
 	return nil
 }
 
+// removeTree deletes dir; when a plain removal fails it makes every
+// directory below it writable first (read-only directories copied from a
+// project).
+func removeTree(dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		_ = chmodTree(dir)
+		return os.RemoveAll(dir)
+	}
+	return nil
+}
+
 func randomSuffix() string {
 	var b [6]byte
 	_, _ = rand.Read(b[:])

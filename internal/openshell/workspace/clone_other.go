@@ -18,4 +18,8 @@
 
 package workspace
 
+import "errors"
+
 func cloneFile(string, string) bool { return false }
+
+func exchangeDirs(string, string) error { return errors.ErrUnsupported }

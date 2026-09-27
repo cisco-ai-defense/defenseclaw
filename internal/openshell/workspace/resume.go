@@ -106,43 +106,79 @@ type RefreshOptions struct {
 // Refresh replaces a copy-mode sandbox's copy with the project as it is
 // now: it refuses when the sandbox holds work that was not pulled (unless
 // Force), stages again, removes the old copy inside the sandbox, uploads
-// and re-establishes the baseline.
+// and re-establishes the baseline. The local record, base.git and last
+// pull stay as they were until all of that succeeded, so a failed refresh
+// can be retried and a pull not yet applied still applies.
 func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	name := opts.Stage.Name
 	old, err := LoadCopy(opts.Stage.DataDir, name)
 	if err != nil {
 		return nil, err
 	}
-	if old.UploadedAt != nil && !opts.Force {
-		dirty, err := sandboxHasWork(ctx, opts.Exec, old)
-		if err != nil {
-			return nil, err
-		}
-		if dirty {
-			return nil, fmt.Errorf("%w: pull or discard them first (sandbox %s)", ErrUnpulledChanges, name)
+	live := old.inSandbox()
+	if !opts.Force {
+		for _, c := range live {
+			dirty, err := sandboxHasWork(ctx, opts.Exec, c)
+			if err != nil {
+				return nil, err
+			}
+			if dirty {
+				return nil, fmt.Errorf("%w: pull or discard them first (sandbox %s)", ErrUnpulledChanges, name)
+			}
 		}
 	}
 	stage := opts.Stage
-	stage.Replace = true
 	if stage.Project == "" {
 		stage.Project = old.Project
 	}
-	if _, err := Stage(ctx, stage); err != nil {
+	lay, err := newLayout(stage.DataDir)
+	if err != nil {
 		return nil, err
 	}
-	if err := removeRemoteCopy(ctx, opts.Exec, name, old); err != nil {
+	rec, dir, err := stageCopy(ctx, lay, stage)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := Upload(ctx, stage.DataDir, name, opts.Upload); err != nil {
+	installed := false
+	defer func() {
+		if !installed {
+			_ = removeTree(dir)
+		}
+	}()
+	// old's own paths too: a failed upload of it may have left files there.
+	if err := removeRemoteCopy(ctx, opts.Exec, name, append([]*CopyRecord{old}, live...)...); err != nil {
 		return nil, err
 	}
-	return EstablishBaseline(ctx, stage.DataDir, name, opts.Exec)
+	err = uploadStaged(ctx, dir, rec, opts.Upload)
+	if err == nil {
+		err = establishBaseline(ctx, rec, opts.Exec)
+	}
+	if err == nil {
+		err = installCopyDir(lay, rec, dir)
+	}
+	if err != nil {
+		// The old copy is gone from the sandbox and the record still
+		// describes it. Take out whatever of the new copy arrived as well:
+		// a sandbox without a copy is one a retry refreshes without Force,
+		// while a copy the record does not describe would pass for work.
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		_ = removeRemoteCopy(cleanup, opts.Exec, name, rec)
+		return nil, err
+	}
+	installed = true
+	return rec, nil
 }
 
 // sandboxHasWork reports whether the sandbox copy differs from what was
-// uploaded (new commits, or a working tree other than the baseline's).
+// uploaded (new commits, or a working tree other than the baseline's). A
+// sandbox without the copy at all (removed by a refresh that failed later,
+// or a new sandbox under the same name) holds nothing to pull.
 func sandboxHasWork(ctx context.Context, ex Execer, rec *CopyRecord) (bool, error) {
-	res, err := ex.Exec(ctx, rec.Name, ExecRequest{Argv: []string{"sh", "-c", captureScript(rec, false) + "\nprintf 'basetree=%s\\n' \"$(g rev-parse \"$B^{tree}\")\""}, Timeout: 5 * time.Minute})
+	script := remoteGitPrelude(rec) + "\n" +
+		`if [ ! -e "$W" ] && [ ! -L "$W" ] && [ ! -e "$G" ] && [ ! -L "$G" ]; then echo copy=missing; exit 0; fi` + "\n" +
+		captureScript(rec, false) + "\nprintf 'basetree=%s\\n' \"$(g rev-parse \"$B^{tree}\")\""
+	res, err := ex.Exec(ctx, rec.Name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 5 * time.Minute})
 	if err != nil {
 		return false, err
 	}
@@ -150,6 +186,9 @@ func sandboxHasWork(ctx context.Context, ex Execer, rec *CopyRecord) (bool, erro
 		return false, fmt.Errorf("workspace: inspect the sandbox copy (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
 	}
 	kv := parseKV(res.Stdout)
+	if kv["copy"] == "missing" {
+		return false, nil
+	}
 	head := rec.Head
 	if rec.Kind == CopyPlain {
 		head = rec.Baseline
@@ -157,21 +196,27 @@ func sandboxHasWork(ctx context.Context, ex Execer, rec *CopyRecord) (bool, erro
 	return kv["head"] != head || kv["tree"] != kv["basetree"] || kv["tree"] == "", nil
 }
 
-// removeRemoteCopy deletes the previous copy (and hidden git dir) inside
+// removeRemoteCopy deletes previous copies (and hidden git dirs) inside
 // the sandbox before a fresh upload. Paths are checked to stay under the
 // expected roots.
-func removeRemoteCopy(ctx context.Context, ex Execer, name string, rec *CopyRecord) error {
-	targets := []string{rec.RemoteDir}
-	if rec.Kind == CopyPlain {
-		targets = append(targets, rec.RemoteGitDir)
-	}
+func removeRemoteCopy(ctx context.Context, ex Execer, name string, recs ...*CopyRecord) error {
 	var quoted []string
-	for _, t := range targets {
-		clean := path.Clean(t)
-		if clean != t || !strings.HasPrefix(clean, "/sandbox/") || strings.Count(clean, "/") < 3 {
-			return fmt.Errorf("workspace: refusing to remove %q inside the sandbox", t)
+	seen := map[string]bool{}
+	for _, rec := range recs {
+		targets := []string{rec.RemoteDir}
+		if rec.Kind == CopyPlain {
+			targets = append(targets, rec.RemoteGitDir)
 		}
-		quoted = append(quoted, shellQuote(clean))
+		for _, t := range targets {
+			clean := path.Clean(t)
+			if clean != t || !strings.HasPrefix(clean, "/sandbox/") || strings.Count(clean, "/") < 3 {
+				return fmt.Errorf("workspace: refusing to remove %q inside the sandbox", t)
+			}
+			if !seen[clean] {
+				seen[clean] = true
+				quoted = append(quoted, shellQuote(clean))
+			}
+		}
 	}
 	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", "rm -rf -- " + strings.Join(quoted, " ")}, Timeout: 5 * time.Minute})
 	if err != nil {

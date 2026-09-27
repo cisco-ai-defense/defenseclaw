@@ -34,6 +34,7 @@ import (
 //	<data>/snapshots/git/<project-key>.git  shadow git dir shared by a project
 //	<data>/sandboxes/<name>/workspace/      mask files and mount state
 //	<data>/sandboxes/<name>/copy/           copy-mode record, base.git, pulls
+//	<data>/sandboxes/<name>/copy.new-<rnd>/ a copy being staged, swapped in whole
 type layout struct {
 	dataDir string
 }

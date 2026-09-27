@@ -83,7 +83,10 @@ type StageOptions struct {
 	Unmask             []string
 	Detector           SecretDetector
 	DisableContentScan bool
-	// Replace discards an existing copy record of the same name.
+	// Replace discards an existing copy record of the same name once the
+	// new copy is staged (a failed Stage leaves it as it was). A replaced
+	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
+	// uploaded, since the sandbox still holds it.
 	Replace bool
 	Now     func() time.Time
 }
@@ -121,6 +124,20 @@ type CopyRecord struct {
 	UploadedAt  *time.Time        `json:"uploaded_at,omitempty"`
 	VerifiedAt  *time.Time        `json:"verified_at,omitempty"`
 	Warnings    []string          `json:"warnings,omitempty"`
+	// Replaced is the uploaded copy this record replaced when it was staged
+	// again (Stage with Replace). Until this record is uploaded the sandbox
+	// still holds that copy, so Refresh checks it for unpulled work and
+	// removes it.
+	Replaced *SandboxCopy `json:"replaced,omitempty"`
+}
+
+// SandboxCopy locates an uploaded copy inside the sandbox.
+type SandboxCopy struct {
+	Kind         CopyKind `json:"kind"`
+	RemoteDir    string   `json:"remote_dir"`
+	RemoteGitDir string   `json:"remote_git_dir"`
+	Baseline     string   `json:"baseline"`
+	Head         string   `json:"head,omitempty"`
 }
 
 // Labels are the sandbox labels for a copy-mode sandbox.
@@ -129,10 +146,59 @@ func (r *CopyRecord) Labels() map[string]string {
 	return map[string]string{key: value, ModeLabelKey: "copy"}
 }
 
+// inSandbox returns the uploaded copies the sandbox may hold for this
+// record: the record itself once uploaded, else the copy it replaced.
+func (r *CopyRecord) inSandbox() []*CopyRecord {
+	if r.UploadedAt != nil {
+		return []*CopyRecord{r}
+	}
+	if p := r.Replaced; p != nil {
+		return []*CopyRecord{{
+			Version: r.Version, Name: r.Name, Project: r.Project, Kind: p.Kind,
+			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, Baseline: p.Baseline, Head: p.Head,
+		}}
+	}
+	return nil
+}
+
+// replacing sets r.Replaced for a record staged in place of prev.
+func (r *CopyRecord) replacing(prev *CopyRecord) {
+	switch {
+	case prev == nil:
+	case prev.UploadedAt != nil:
+		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, Baseline: prev.Baseline, Head: prev.Head}
+	default:
+		r.Replaced = prev.Replaced
+	}
+}
+
+// relocate rewrites r's local paths from one copy directory to another.
+func (r *CopyRecord) relocate(from, to string) {
+	move := func(p string) string {
+		if p == "" {
+			return p
+		}
+		rel, err := filepath.Rel(from, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return p
+		}
+		return filepath.Join(to, rel)
+	}
+	r.Stage, r.BaseGit = move(r.Stage), move(r.BaseGit)
+}
+
 func (l layout) copyDir(name string) string { return filepath.Join(l.sandboxDir(name), "copy") }
 func (l layout) copyRecord(name string) string {
 	return filepath.Join(l.copyDir(name), "copy.json")
 }
+
+// A new copy directory is built at <copy>.new-<random> and the one it
+// replaces may be moved to <copy>.old-<random> on its way out; both are
+// left behind only by a process that died in between.
+const (
+	copyNewInfix = ".new-"
+	copyOldInfix = ".old-"
+)
 
 // LoadCopy reads the copy-mode record for name.
 func LoadCopy(dataDir, name string) (*CopyRecord, error) {
@@ -170,9 +236,20 @@ func DeleteCopy(dataDir, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(lay.copyDir(name)); err != nil {
-		_ = chmodTree(lay.copyDir(name))
-		return os.RemoveAll(lay.copyDir(name))
+	live := lay.copyDir(name)
+	dirs := []string{live}
+	if entries, err := os.ReadDir(filepath.Dir(live)); err == nil {
+		prefix := filepath.Base(live)
+		for _, e := range entries {
+			if n := e.Name(); strings.HasPrefix(n, prefix+copyNewInfix) || strings.HasPrefix(n, prefix+copyOldInfix) {
+				dirs = append(dirs, filepath.Join(filepath.Dir(live), n))
+			}
+		}
+	}
+	for _, d := range dirs {
+		if err := removeTree(d); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -181,7 +258,9 @@ func DeleteCopy(dataDir, name string) error {
 // sanitized shallow clone (no hooks, DefenseClaw-written config, remotes
 // without credentials) with the current working tree on top; for other
 // folders the files plus a hidden git dir. Secrets are held back and the
-// size is checked before anything is copied.
+// size is checked before anything is copied. The copy is built beside an
+// existing copy of the same name (Replace), which stays as it was unless
+// the new one is complete.
 func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 	if !platformSupported() {
 		return nil, ErrUnsupportedPlatform
@@ -193,22 +272,47 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireGit(ctx, lay.dataDir); err != nil {
+	var prev *CopyRecord
+	if pathExists(lay.copyRecord(opts.Name)) {
+		if !opts.Replace {
+			return nil, fmt.Errorf("workspace: copy %s already exists", opts.Name)
+		}
+		// An unreadable record is replaced like any other.
+		prev, _ = LoadCopy(lay.dataDir, opts.Name)
+	}
+	rec, dir, err := stageCopy(ctx, lay, opts)
+	if err != nil {
 		return nil, err
 	}
-	if !opts.Replace && pathExists(lay.copyRecord(opts.Name)) {
-		return nil, fmt.Errorf("workspace: copy %s already exists", opts.Name)
+	rec.replacing(prev)
+	if err := installCopyDir(lay, rec, dir); err != nil {
+		_ = removeTree(dir)
+		return nil, err
+	}
+	return rec, nil
+}
+
+// stageCopy builds a complete copy directory for opts beside the live one
+// (<copy>.new-<random>) and returns its record, whose paths point into it.
+// Nothing else is touched: the caller installs the directory
+// (installCopyDir) or removes it.
+func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord, string, error) {
+	if !platformSupported() {
+		return nil, "", ErrUnsupportedPlatform
+	}
+	if _, err := requireGit(ctx, lay.dataDir); err != nil {
+		return nil, "", err
 	}
 	real, warnings, err := validateShareable(opts.Project, SourceOptions{Home: opts.Home, DataDir: lay.dataDir, Protected: opts.Protected})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	root := opts.RemoteRoot
 	if root == "" {
 		root = DefaultRemoteRoot
 	}
 	if !path.IsAbs(root) || path.Clean(root) == "/" {
-		return nil, fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
+		return nil, "", fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
 	}
 	maxBytes := opts.MaxBytes
 	if maxBytes <= 0 {
@@ -224,22 +328,19 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 		RemoteDir: path.Join(path.Clean(root), repo), StagedAt: now().UTC(),
 		Warnings: warnings,
 	}
-	copyDir := lay.copyDir(opts.Name)
-	if err := os.RemoveAll(copyDir); err != nil {
-		return nil, err
-	}
-	if err := ensurePrivateDir(copyDir); err != nil {
-		return nil, err
+	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
+	if err := ensurePrivateDir(dir); err != nil {
+		return nil, "", err
 	}
 	ok := false
 	defer func() {
 		if !ok {
-			_ = os.RemoveAll(copyDir)
+			_ = removeTree(dir)
 		}
 	}()
-	stageRoot := filepath.Join(copyDir, "stage")
+	stageRoot := filepath.Join(dir, "stage")
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	rec.Stage = filepath.Join(stageRoot, repo)
 
@@ -264,13 +365,58 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries)
 	}
 	if err != nil {
-		return nil, err
-	}
-	if err := saveCopy(lay.dataDir, rec); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	ok = true
-	return rec, nil
+	return rec, dir, nil
+}
+
+// installCopyDir puts dir, a copy directory from stageCopy, in place of
+// rec's live copy directory. rec's paths follow it and its record is
+// written into it first; the previous directory (old record, base.git and
+// pull) is removed only once dir is in place. On error nothing changed and
+// dir is the caller's to remove.
+func installCopyDir(lay layout, rec *CopyRecord, dir string) error {
+	live := lay.copyDir(rec.Name)
+	moved := *rec
+	moved.relocate(dir, live)
+	if err := writeJSON(filepath.Join(dir, "copy.json"), &moved); err != nil {
+		return err
+	}
+	old, err := replaceDir(dir, live, exchangeDirs)
+	if err != nil {
+		return err
+	}
+	*rec = moved
+	if old != "" {
+		_ = removeTree(old)
+	}
+	return nil
+}
+
+// replaceDir moves dir to live. An existing live directory is swapped with
+// dir in one step where the filesystem can (exchange), so there is no
+// moment without one; otherwise it is moved aside first and put back if
+// the move fails. It returns where the previous live directory is now (""
+// when there was none).
+func replaceDir(dir, live string, exchange func(a, b string) error) (string, error) {
+	if !pathExists(live) {
+		return "", os.Rename(dir, live)
+	}
+	if exchange(dir, live) == nil {
+		return dir, nil
+	}
+	aside := live + copyOldInfix + randomSuffix()
+	if err := os.Rename(live, aside); err != nil {
+		return "", err
+	}
+	if err := os.Rename(dir, live); err != nil {
+		if rerr := os.Rename(aside, live); rerr != nil {
+			return "", fmt.Errorf("workspace: install %s: %w (the previous state is in %s)", live, err, aside)
+		}
+		return "", err
+	}
+	return aside, nil
 }
 
 // stagedFile is one working-tree path to copy.
@@ -850,43 +996,55 @@ func Upload(ctx context.Context, dataDir, name string, up Uploader) (*CopyRecord
 	if err != nil {
 		return nil, err
 	}
-	if rec.Stage == "" || !pathExists(rec.Stage) {
-		return nil, fmt.Errorf("workspace: copy %s has nothing staged to upload", name)
-	}
 	lay, _ := newLayout(dataDir)
-	remoteRoot := path.Dir(rec.RemoteDir)
-	if err := up.Upload(ctx, name, rec.Stage, remoteRoot); err != nil {
+	if err := uploadStaged(ctx, lay.copyDir(name), rec, up); err != nil {
 		return nil, err
+	}
+	if err := saveCopy(dataDir, rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// uploadStaged sends rec's staged copy into the sandbox, moves the staged
+// git dir to dir/base.git and discards the staged files. It updates rec
+// but does not save it.
+func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader) error {
+	if rec.Stage == "" || !pathExists(rec.Stage) {
+		return fmt.Errorf("workspace: copy %s has nothing staged to upload", rec.Name)
+	}
+	remoteRoot := path.Dir(rec.RemoteDir)
+	if err := up.Upload(ctx, rec.Name, rec.Stage, remoteRoot); err != nil {
+		return err
 	}
 	stageRoot := filepath.Dir(rec.Stage)
 	var localGit string
 	if rec.Kind == CopyPlain {
 		localGit = filepath.Join(stageRoot, ".dc", "git")
-		if err := up.Upload(ctx, name, localGit, remoteStateDir); err != nil {
-			return nil, err
+		if err := up.Upload(ctx, rec.Name, localGit, remoteStateDir); err != nil {
+			return err
 		}
 	} else {
 		localGit = filepath.Join(rec.Stage, ".git")
 	}
-	base := filepath.Join(lay.copyDir(name), "base.git")
+	base := filepath.Join(dir, "base.git")
 	_ = os.RemoveAll(base)
 	if err := os.Rename(localGit, base); err != nil {
-		return nil, err
+		return err
 	}
 	if err := (gitCmd{dir: filepath.Dir(base), gitDir: base}).run(ctx, "config", "core.bare", "true"); err != nil {
-		return nil, err
+		return err
 	}
 	if err := os.RemoveAll(stageRoot); err != nil {
-		return nil, err
+		return err
 	}
 	rec.BaseGit = base
 	rec.Stage = ""
 	t := time.Now().UTC()
 	rec.UploadedAt = &t
-	if err := saveCopy(dataDir, rec); err != nil {
-		return nil, err
-	}
-	return rec, nil
+	// The sandbox copy is this one now.
+	rec.Replaced = nil
+	return nil
 }
 
 // remoteGitPrelude is the shell prologue every in-sandbox git script uses:
@@ -911,8 +1069,20 @@ func EstablishBaseline(ctx context.Context, dataDir, name string, ex Execer) (*C
 	if err != nil {
 		return nil, err
 	}
+	if err := establishBaseline(ctx, rec, ex); err != nil {
+		return nil, err
+	}
+	if err := saveCopy(dataDir, rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// establishBaseline does EstablishBaseline's work on rec without saving it.
+func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
+	name := rec.Name
 	if rec.UploadedAt == nil {
-		return nil, fmt.Errorf("workspace: copy %s was not uploaded", name)
+		return fmt.Errorf("workspace: copy %s was not uploaded", name)
 	}
 	script := remoteGitPrelude(rec) + "\n" + strings.Join([]string{
 		`test -d "$W"`,
@@ -924,28 +1094,25 @@ func EstablishBaseline(ctx context.Context, dataDir, name string, ex Execer) (*C
 	}, "\n")
 	res, err := ex.Exec(ctx, name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 2 * time.Minute})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+		return fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
 	}
 	kv := parseKV(res.Stdout)
 	if kv["baseline"] != rec.Baseline {
-		return nil, fmt.Errorf("workspace: sandbox baseline is %q, expected %s", kv["baseline"], rec.Baseline)
+		return fmt.Errorf("workspace: sandbox baseline is %q, expected %s", kv["baseline"], rec.Baseline)
 	}
 	wantHead := rec.Head
 	if rec.Kind == CopyPlain {
 		wantHead = rec.Baseline
 	}
 	if kv["head"] != wantHead {
-		return nil, fmt.Errorf("workspace: sandbox HEAD is %q, expected %q", kv["head"], wantHead)
+		return fmt.Errorf("workspace: sandbox HEAD is %q, expected %q", kv["head"], wantHead)
 	}
 	t := time.Now().UTC()
 	rec.VerifiedAt = &t
-	if err := saveCopy(dataDir, rec); err != nil {
-		return nil, err
-	}
-	return rec, nil
+	return nil
 }
 
 // parseKV reads key=value lines; repeated "remote" lines are joined.

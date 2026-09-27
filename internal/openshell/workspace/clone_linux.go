@@ -48,3 +48,10 @@ func cloneFile(src, dst string) bool {
 	}
 	return true
 }
+
+// exchangeDirs atomically swaps two existing paths (renameat2
+// RENAME_EXCHANGE). It fails where the kernel or filesystem cannot, so the
+// caller can fall back to two renames.
+func exchangeDirs(a, b string) error {
+	return unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_EXCHANGE)
+}

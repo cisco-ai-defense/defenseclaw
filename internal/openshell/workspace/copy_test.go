@@ -533,3 +533,223 @@ func TestFindResumableAndRefresh(t *testing.T) {
 		t.Fatal("forced refresh kept the old copy")
 	}
 }
+
+type failUploader struct{ err error }
+
+func (u failUploader) Upload(context.Context, string, string, string) error { return u.err }
+
+// failingExec fails the sandbox scripts that contain marker.
+type failingExec struct {
+	*fakeSandbox
+	marker string
+}
+
+func (f failingExec) Exec(ctx context.Context, sandbox string, req ExecRequest) (*ExecResult, error) {
+	if strings.Contains(strings.Join(req.Argv, " "), f.marker) {
+		return nil, errors.New("exec failed: " + f.marker)
+	}
+	return f.fakeSandbox.Exec(ctx, sandbox, req)
+}
+
+// copyLeftovers lists copy directories of a stage or refresh that did not
+// clean up after itself.
+func copyLeftovers(t *testing.T, e *env, name string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(e.data, "sandboxes", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, en := range entries {
+		if strings.HasPrefix(en.Name(), "copy.") {
+			out = append(out, en.Name())
+		}
+	}
+	return out
+}
+
+func TestFailedRefreshKeepsTheCopyState(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	before, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	pr := pull(t, e, fs, "c1") // pulled, not applied yet
+	unchanged := func(step string) {
+		t.Helper()
+		rec, err := LoadCopy(e.data, "c1")
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if rec.Baseline != before.Baseline || rec.UploadedAt == nil || rec.BaseGit != before.BaseGit || !pathExists(rec.BaseGit) {
+			t.Fatalf("%s: copy record changed: %+v", step, rec)
+		}
+		if got, err := LoadPull(e.data, "c1"); err != nil || got.Effective != pr.Effective {
+			t.Fatalf("%s: pull lost: %v", step, err)
+		}
+		if left := copyLeftovers(t, e, "c1"); len(left) > 0 {
+			t.Fatalf("%s: left behind %v", step, left)
+		}
+	}
+	opts := RefreshOptions{Stage: StageOptions{Project: e.project, Name: "c1", DataDir: e.data, Home: e.home}, Exec: fs, Upload: fs, Force: true}
+
+	// Staging fails: the project has outgrown the size limit.
+	tooBig := opts
+	tooBig.Stage.MaxBytes = 1
+	if _, err := Refresh(bg, tooBig); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	unchanged("stage failure")
+
+	// Removing the old copy in the sandbox fails. The copy is still there,
+	// and so is the guard for the agent's work in it.
+	fs.failExec = errors.New("transient exec error")
+	if _, err := Refresh(bg, opts); err == nil || !strings.Contains(err.Error(), "transient") {
+		t.Fatalf("err = %v", err)
+	}
+	unchanged("remove failure")
+	guarded := opts
+	guarded.Force = false
+	if _, err := Refresh(bg, guarded); !errors.Is(err, ErrUnpulledChanges) {
+		t.Fatalf("guard skipped after a failed refresh: %v", err)
+	}
+
+	// The upload fails after the old copy in the sandbox was removed.
+	failing := opts
+	failing.Upload = failUploader{errors.New("upload interrupted")}
+	if _, err := Refresh(bg, failing); err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("err = %v", err)
+	}
+	unchanged("upload failure")
+	if pathExists(fs.local(remoteRepo)) {
+		t.Fatal("the old sandbox copy should be gone")
+	}
+	// The new copy arrives but its baseline cannot be set. It is taken out
+	// again: no copy in the sandbox beats one the record does not describe.
+	noBaseline := opts
+	noBaseline.Exec = failingExec{fs, "update-ref " + baselineRef}
+	uploads := len(fs.uploads)
+	if _, err := Refresh(bg, noBaseline); err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("err = %v", err)
+	}
+	unchanged("baseline failure")
+	if len(fs.uploads) == uploads || pathExists(fs.local(remoteRepo)) {
+		t.Fatalf("the unrecorded copy was left in the sandbox (uploads %v)", fs.uploads)
+	}
+	// The pull made before still applies.
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("apply after a failed refresh: %+v %v", res, err)
+	}
+	if readFile(t, e.project, "agent.txt") != "agent work\n" {
+		t.Fatal("pulled work not applied")
+	}
+	// Retrying needs no force: the sandbox holds nothing to lose.
+	rec, err := Refresh(bg, guarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.UploadedAt == nil || rec.VerifiedAt == nil || rec.Stage != "" || rec.BaseGit != before.BaseGit || !pathExists(rec.BaseGit) {
+		t.Fatalf("refreshed record: %+v", rec)
+	}
+	if saved, err := LoadCopy(e.data, "c1"); err != nil || saved.Baseline != rec.Baseline || saved.VerifiedAt == nil {
+		t.Fatalf("saved record: %+v %v", saved, err)
+	}
+	if _, err := LoadPull(e.data, "c1"); err == nil {
+		t.Fatal("the old pull must go with the old copy")
+	}
+	if left := copyLeftovers(t, e, "c1"); len(left) > 0 {
+		t.Fatalf("left behind %v", left)
+	}
+	if !pathExists(fs.local(remoteRepo + "/agent.txt")) {
+		t.Fatal("refresh did not upload the project")
+	}
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("fresh copy has changes: %s", changePaths(pr.Changes))
+	}
+}
+
+func TestStageReplaceKeepsTheUploadedCopyGuarded(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	before, fs := launchCopy(t, e, "c1", nil)
+	opts := StageOptions{Project: e.project, Name: "c1", DataDir: e.data, Home: e.home, Replace: true}
+
+	// A re-stage that fails leaves the uploaded copy as it was.
+	tooBig := opts
+	tooBig.MaxBytes = 1
+	if _, err := Stage(bg, tooBig); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	if rec, err := LoadCopy(e.data, "c1"); err != nil || rec.UploadedAt == nil || rec.Baseline != before.Baseline || !pathExists(rec.BaseGit) {
+		t.Fatalf("failed re-stage changed the copy: %+v %v", rec, err)
+	}
+	// One that succeeds but is never uploaded remembers the copy the
+	// sandbox still holds, so Refresh keeps guarding the work in it.
+	rec, err := Stage(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.UploadedAt != nil || rec.Replaced == nil || rec.Replaced.RemoteDir != remoteRepo || rec.Replaced.Baseline != before.Baseline {
+		t.Fatalf("re-staged record: %+v", rec)
+	}
+	if again, err := Stage(bg, opts); err != nil || again.Replaced == nil || *again.Replaced != *rec.Replaced {
+		t.Fatalf("second re-stage lost the uploaded copy: %+v %v", again, err)
+	}
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	ropts := RefreshOptions{Stage: StageOptions{Project: e.project, Name: "c1", DataDir: e.data, Home: e.home}, Exec: fs, Upload: fs}
+	if _, err := Refresh(bg, ropts); !errors.Is(err, ErrUnpulledChanges) {
+		t.Fatalf("guard skipped for a re-staged copy: %v", err)
+	}
+	ropts.Force = true
+	rec, err = Refresh(bg, ropts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Replaced != nil || rec.UploadedAt == nil || pathExists(fs.local(remoteRepo+"/agent.txt")) {
+		t.Fatalf("forced refresh: %+v", rec)
+	}
+
+	// DeleteCopy also removes what an interrupted stage left behind.
+	mustMkdir(t, filepath.Join(e.data, "sandboxes", "c1", "copy"+copyNewInfix+"0123", "stage"))
+	mustMkdir(t, filepath.Join(e.data, "sandboxes", "c1", "copy"+copyOldInfix+"4567"))
+	if err := DeleteCopy(e.data, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if left := copyLeftovers(t, e, "c1"); len(left) > 0 || pathExists(filepath.Join(e.data, "sandboxes", "c1", "copy")) {
+		t.Fatalf("DeleteCopy left %v", left)
+	}
+}
+
+func TestReplaceDirKeepsOneLiveDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	live := filepath.Join(root, "copy")
+	stage := func(content string) string {
+		dir := filepath.Join(root, "copy"+copyNewInfix+randomSuffix())
+		writeFile(t, dir, "copy.json", content)
+		return dir
+	}
+	// No live directory yet: a plain rename.
+	old, err := replaceDir(stage("one"), live, exchangeDirs)
+	if err != nil || old != "" || readFile(t, live, "copy.json") != "one" {
+		t.Fatalf("first install: %q %v", old, err)
+	}
+	// The platform exchange (or its fallback where there is none).
+	old, err = replaceDir(stage("two"), live, exchangeDirs)
+	if err != nil || readFile(t, live, "copy.json") != "two" || readFile(t, old, "copy.json") != "one" {
+		t.Fatalf("exchange: %q %v", old, err)
+	}
+	// Without an exchange the live directory is moved aside first.
+	noExchange := func(string, string) error { return errors.ErrUnsupported }
+	old, err = replaceDir(stage("three"), live, noExchange)
+	if err != nil || readFile(t, live, "copy.json") != "three" || readFile(t, old, "copy.json") != "two" ||
+		!strings.HasPrefix(filepath.Base(old), "copy"+copyOldInfix) {
+		t.Fatalf("fallback: %q %v", old, err)
+	}
+	// A failed move puts the live directory back.
+	if _, err := replaceDir(filepath.Join(root, "missing"), live, noExchange); err == nil {
+		t.Fatal("moving a missing directory succeeded")
+	}
+	if readFile(t, live, "copy.json") != "three" {
+		t.Fatal("failed install lost the live directory")
+	}
+}

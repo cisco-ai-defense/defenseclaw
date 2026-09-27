@@ -26,3 +26,10 @@ import "golang.org/x/sys/unix"
 func cloneFile(src, dst string) bool {
 	return unix.Clonefile(src, dst, unix.CLONE_NOFOLLOW) == nil
 }
+
+// exchangeDirs atomically swaps two existing paths (renamex_np
+// RENAME_SWAP). It fails where the filesystem cannot, so the caller can
+// fall back to two renames.
+func exchangeDirs(a, b string) error {
+	return unix.RenamexNp(a, b, unix.RENAME_SWAP)
+}
