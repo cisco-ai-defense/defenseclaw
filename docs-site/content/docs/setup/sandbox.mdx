@@ -744,7 +744,10 @@ start without one. With `--llm bedrock` it defaults to `openai.gpt-oss-20b`.
 `bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
 sandbox. `--llm bedrock` uses a short-term Amazon Bedrock key from
 `AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
-then `$AWS_DEFAULT_REGION`, then `us-east-1`).
+then `$AWS_DEFAULT_REGION`, then `us-east-1`). Codex on Bedrock runs
+`openai.gpt-oss-20b` unless `-- -m MODEL` picks another, and Bedrock rejects
+every follow-up turn of a Codex conversation: start each task with `/new`
+(the banner says so).
 A login you do inside a kept sandbox stays in it; the sandbox's files are
 readable by the agent, so prefer an API key where you can.
 
@@ -787,7 +790,10 @@ defenseclaw sandbox run claude --safe
 ```
 
 The harness asks before commands as it does outside a sandbox. Flags after
-`--` that would turn its prompts off are dropped, with a warning.
+`--` that would turn its prompts off are dropped, with a warning. Codex
+asks before every command outside its read-only set and before every edit
+(`approval_policy="untrusted"`), so a headless `--safe` Codex run refuses
+those commands.
 
 ### Use a service on your machine
 
