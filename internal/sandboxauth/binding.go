@@ -47,6 +47,17 @@ var (
 	ErrUnsupportedPlatform = errors.New("sandboxauth: sandbox bindings are not supported on this platform")
 )
 
+const (
+	// SandboxGOOS is the operating system every OpenShell sandbox runs,
+	// whatever the host is. Hook contracts for a sandboxed harness resolve
+	// for it.
+	SandboxGOOS = "linux"
+	// SandboxHome is the agent's HOME inside every OpenShell sandbox. A "~"
+	// in a sandboxed tool call means this directory, never the host user's
+	// home.
+	SandboxHome = "/sandbox"
+)
+
 // WorkdirMode says how the project reached the sandbox.
 type WorkdirMode string
 

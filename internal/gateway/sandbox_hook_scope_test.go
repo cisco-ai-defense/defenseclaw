@@ -143,6 +143,24 @@ func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
 	if _, err := api.correlationSpecForRequestV8(ctx, "claudecode"); err == nil {
 		t.Fatal("sandbox resolved another connector's correlation spec")
 	}
+
+	// The sandbox runs Linux whatever the host is: the macOS-only OpenHands
+	// native OTLP lane and the Windows compatibility band never apply.
+	openhands := sandboxauth.Binding{
+		ID: "sb_00000000000000000000000000000004", Connector: "openhands",
+		AgentVersion: "OpenHands 1.12.0", HookContractID: "openhands-hooks-v1",
+		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+	}
+	ohCtx := sandboxauth.WithRequest(context.Background(), openhands, nil)
+	if got := api.hookProfileForRequest(ohCtx, "openhands"); got.NativeOTLP != nil ||
+		got.CompatibilityStatus != connector.HookCompatibilityKnown {
+		t.Fatalf("sandbox openhands profile = %q native_otlp=%v", got.CompatibilityStatus, got.NativeOTLP != nil)
+	}
+	openhands.AgentVersion = "OpenHands 1.11.99"
+	ohCtx = sandboxauth.WithRequest(context.Background(), openhands, nil)
+	if got := api.hookProfileForRequest(ohCtx, "openhands"); got.CompatibilityStatus != connector.HookCompatibilityUnknown {
+		t.Fatalf("sandbox openhands below the Linux floor = %q", got.CompatibilityStatus)
+	}
 }
 
 func TestHookCWDForContext(t *testing.T) {

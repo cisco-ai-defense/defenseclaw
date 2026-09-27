@@ -138,12 +138,15 @@ func (a *APIServer) hookProfileProvider(name string) (connector.HookProfileProvi
 
 // sandboxSetupOpts is the profile input for a sandbox binding. The
 // workspace directory stays empty: the sandbox's project is not a host
-// workspace the connector may configure.
+// workspace the connector may configure. The contract resolves for Linux,
+// which every sandbox runs, so host-OS contract adjustments (such as the
+// macOS-only OpenHands native OTLP lane) never apply to a sandboxed harness.
 func sandboxSetupOpts(a *APIServer, binding sandboxauth.Binding) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        a.configDataDir(),
 		APIAddr:        a.apiAddrForCapabilities(),
 		AgentVersion:   binding.AgentVersion,
 		HookContractID: binding.HookContractID,
+		GOOS:           sandboxauth.SandboxGOOS,
 	}
 }

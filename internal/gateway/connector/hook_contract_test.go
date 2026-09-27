@@ -252,6 +252,48 @@ func TestOpenHandsPOSIXContractFloorAndWindowsCompatibilityOverride(t *testing.T
 	}
 }
 
+// TestHookProfileResolvesForSetupOptsGOOS pins SetupOpts.GOOS: a profile for
+// an agent that runs on another OS (an OpenShell sandbox is always linux)
+// takes that OS's contract adjustments, whatever this host runs.
+func TestHookProfileResolvesForSetupOptsGOOS(t *testing.T) {
+	conn := NewOpenHandsConnector()
+	for _, tc := range []struct {
+		goos       string
+		version    string
+		wantStatus string
+		wantOTLP   bool
+	}{
+		{"linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
+		{"darwin", "OpenHands 1.12.0", HookCompatibilityKnown, true},
+		{"linux", "OpenHands 1.11.99", HookCompatibilityUnknown, false},
+		{"windows", "OpenHands 1.11.99", HookCompatibilityKnown, false},
+		{"Linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
+	} {
+		opts := SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: tc.version, GOOS: tc.goos}
+		profile := conn.HookProfile(opts)
+		if profile.CompatibilityStatus != tc.wantStatus {
+			t.Errorf("%s %s: status = %q, want %q", tc.goos, tc.version, profile.CompatibilityStatus, tc.wantStatus)
+		}
+		if (profile.NativeOTLP != nil) != tc.wantOTLP {
+			t.Errorf("%s %s: native OTLP = %v, want %v", tc.goos, tc.version, profile.NativeOTLP != nil, tc.wantOTLP)
+		}
+		if spec := correlationSpecForOptions("openhands", opts); tc.wantStatus == HookCompatibilityKnown &&
+			spec.CompatibilityStatus == HookCompatibilityUnknown {
+			t.Errorf("%s %s: correlation spec fell back: %+v", tc.goos, tc.version, spec)
+		}
+	}
+	// A pinned contract is looked up for the target OS too.
+	pinned := conn.HookProfile(SetupOpts{AgentVersion: "OpenHands 1.11.99", HookContractID: "openhands-hooks-v1", GOOS: "linux"})
+	if pinned.ContractID != "openhands-hooks-v1" || pinned.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("pinned linux profile = %q/%q", pinned.ContractID, pinned.CompatibilityStatus)
+	}
+	// Empty GOOS keeps the host behaviour.
+	host := conn.HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: "OpenHands 1.12.0"})
+	if want := runtime.GOOS == "darwin"; (host.NativeOTLP != nil) != want {
+		t.Fatalf("host profile native OTLP = %v, want %v", host.NativeOTLP != nil, want)
+	}
+}
+
 func TestClaudeCodeHookContractDirectoryAddedIsObservationOnly(t *testing.T) {
 	tests := []struct {
 		version       string

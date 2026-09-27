@@ -165,6 +165,13 @@ type SetupOpts struct {
 	// different hook surface.
 	HookContractID string
 
+	// GOOS is the operating system the agent runs on when that is not this
+	// host, such as "linux" for a harness inside an OpenShell sandbox.
+	// HookProfile then resolves hook contracts and OS-specific profile
+	// surfaces for it instead of runtime.GOOS. Empty means this host. Setup
+	// and hook-writing paths ignore it: they always configure this host.
+	GOOS string
+
 	// CodexEnforcement signals that the operator turned on hard
 	// enforcement for the codex connector (see avarice F-0681).
 	// When true, an empty HookFailMode upgrades to "closed" instead

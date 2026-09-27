@@ -591,7 +591,7 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)
 	}
 	if c.name == "openhands" {
-		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, runtime.GOOS)
+		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, opts.profileGOOS())
 	}
 	if c.name == "amp" {
 		// Amp exposes an opaque plugin span ID but no documented W3C
