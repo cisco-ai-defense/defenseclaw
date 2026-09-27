@@ -35,11 +35,16 @@ package gateway
 //	go test -tags openshell_integration ./internal/gateway/ -run TestLiveSandboxHookOnlyHarness -v -timeout 30m
 //
 // For each harness it proves: the hooks reach the ingress with the binding
-// token and an idempotency key, an allowed tool call runs, web egress works through
-// the DefenseClaw proxy, a blocklisted destination is refused by it, and a
-// connection that bypasses the proxy is refused by OpenShell. Every
-// OpenShell object it creates (profile, provider, sandbox) carries the
-// prefix and is deleted again.
+// token and an idempotency key, an allowed tool call runs, a tool call
+// DefenseClaw blocks (the mock's DCBLOCK scenario, with the shell tool on
+// DefenseClaw's block list) gets the real gateway's block verdict, has no
+// side effect and the harness passes the reason on,
+// the harness's own tools reach the web through the DefenseClaw proxy the
+// launcher exports (OpenShell drops HTTPS_PROXY given at create), a
+// blocklisted destination is refused by the proxy, and a connection that
+// bypasses the proxy is refused by OpenShell. Every OpenShell object it
+// creates (profile, provider, sandbox) carries the prefix and is deleted
+// again.
 
 import (
 	"bytes"
@@ -64,8 +69,11 @@ import (
 	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
@@ -132,9 +140,9 @@ func liveImportMantle(t *testing.T, harnessName, prefix, suffix string, binaries
 
 // liveHookEvent is one request the recording front of the ingress saw.
 type liveHookEvent struct {
-	Path, Event, Action string
-	Status              int
-	Authorized, Keyed   bool
+	Path, Event, Action, Reason string
+	Status                      int
+	Authorized, Keyed           bool
 }
 
 // liveIngressRecorder fronts the real ingress on the baked port and records
@@ -177,9 +185,10 @@ func (r *liveIngressRecorder) handler(t *testing.T, target string) http.Handler 
 		}
 		var verdict struct {
 			Action string `json:"action"`
+			Reason string `json:"reason"`
 		}
 		_ = json.Unmarshal(body, &verdict)
-		ev.Action = verdict.Action
+		ev.Action, ev.Reason = verdict.Action, verdict.Reason
 		r.mu.Lock()
 		r.events = append(r.events, ev)
 		r.mu.Unlock()
@@ -326,7 +335,16 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	cfg := &config.Config{DataDir: t.TempDir(), Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = h.Name
-	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
+	// The audit store holds DefenseClaw's tool block list.
+	auditStore, err := audit.NewStore(filepath.Join(cfg.DataDir, "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = auditStore.Close() })
+	if err := auditStore.Init(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, auditStore, nil, cfg)
 	store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(cfg.DataDir), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
 		t.Fatal(err)
@@ -392,15 +410,17 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	t.Cleanup(func() { _ = proxy.Close() })
 
 	// The E2E mock model, with the scenarios' tool renamed to the harness's
-	// bash tool.
+	// bash tool and the DCBLOCK read redirected into a marker file, which
+	// exists once the blocked command has run.
 	mockPort := liveFreePort(t)
 	script := filepath.Join(t.TempDir(), "scenarios.json")
-	if err := os.WriteFile(script, bytes.ReplaceAll(scenarios, []byte(`"name": "Bash"`), []byte(`"name": "bash"`)), 0o600); err != nil {
+	if err := os.WriteFile(script, liveScenarios(t, scenarios), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	mockLog := filepath.Join(t.TempDir(), "mock.jsonl")
+	mockDump := t.TempDir()
 	mock := exec.CommandContext(ctx, "python3", filepath.Join("..", "..", "test", "e2e", "openshell", "mock_anthropic.py"),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(mockPort), "--script", script, "--log", mockLog, "--quiet")
+		"--host", "127.0.0.1", "--port", strconv.Itoa(mockPort), "--script", script, "--log", mockLog, "--dump-dir", mockDump, "--quiet")
 	if err := mock.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -547,12 +567,80 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 		}
 	}
 
-	// 2. Egress: the proxy carries web traffic, refuses a blocklisted
-	//    destination, and OpenShell refuses a connection around the proxy.
-	//    Log which create-time variables an exec session sees (names only:
-	//    the proxy URL holds a secret).
-	t.Logf("exec session env names: %s", strings.TrimSpace(liveExec(t, sandboxName, time.Minute,
-		"/bin/sh", "-c", `env | cut -d= -f1 | sort | tr '\n' ' '`)))
+	// 2. A tool call DefenseClaw blocks: with the shell tool on
+	//    DefenseClaw's block list (what `POST /enforce/block` or `defenseclaw
+	//    tool block` records), the mock's DCBLOCK tool call gets the real
+	//    gateway's block verdict, never runs (its redirect would have created
+	//    the marker), and the reason reaches the model and shows in the
+	//    harness output. The default rules do not flag the scenario's read,
+	//    so the block list is what blocks it. A real model is not asked to
+	//    read a key.
+	var blockedVerdicts []liveHookEvent
+	if mantleKey == "" {
+		engine := enforce.NewPolicyEngine(auditStore)
+		if err := engine.Block("tool", liveShellTool, "DefenseClaw live check: the shell tool is blocked"); err != nil {
+			t.Fatal(err)
+		}
+		from := len(recorder.snapshot())
+		out := run("DefenseClaw live check: " + liveBlockPrompt)
+		if err := engine.Unblock("tool", liveShellTool); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("block run:\n%s", liveTail(out, 1500))
+		blockedVerdicts = verdicts(from)
+		if len(blockedVerdicts) == 0 || blockedVerdicts[0].Action != "block" || blockedVerdicts[0].Reason == "" {
+			t.Errorf("DCBLOCK pre-tool verdicts = %+v, want a DefenseClaw block with a reason", blockedVerdicts)
+		}
+		if got := liveExec(t, sandboxName, time.Minute, "/bin/sh", "-c", "if [ -e "+liveBlockMarker+" ]; then echo present; else echo absent; fi"); !strings.Contains(got, "absent") {
+			t.Errorf("the blocked tool call ran: %s is %q", liveBlockMarker, got)
+		}
+		if len(blockedVerdicts) > 0 && blockedVerdicts[0].Reason != "" {
+			// The harness may shorten or wrap a long reason; its opening
+			// words are enough to tell DefenseClaw's reason apart.
+			reason := liveReasonHead(blockedVerdicts[0].Reason)
+			if !strings.Contains(out, reason) {
+				t.Errorf("the harness output does not show DefenseClaw's reason %q", reason)
+			}
+			if !liveDumpContains(t, mockDump, reason) {
+				t.Errorf("no model request carried DefenseClaw's reason %q back to the model", reason)
+			}
+		}
+	}
+
+	// 3. Web access from the harness's own tools: the launcher exports the
+	//    DefenseClaw proxy from the create-time variable that survives, so a
+	//    plain curl in a tool call (no --proxy) reaches example.org through
+	//    it. Log which create-time variables an exec session sees (names
+	//    only: the proxy URL holds a secret).
+	envNames := strings.TrimSpace(liveExec(t, sandboxName, time.Minute,
+		"/bin/sh", "-c", `env | cut -d= -f1 | sort | tr '\n' ' '`))
+	t.Logf("exec session env names: %s", envNames)
+	if !strings.Contains(" "+envNames+" ", " "+openshell.EnvEgressURL+" ") {
+		t.Errorf("%s did not survive sandbox create", openshell.EnvEgressURL)
+	}
+	egressMu.Lock()
+	egressFrom := len(egressEvents)
+	egressMu.Unlock()
+	egressPrompt := "DefenseClaw live check: EGRESSOK"
+	if mantleKey != "" {
+		egressPrompt = "Use your shell tool to run exactly this command and nothing else: curl -s -o /dev/null -w '%{http_code}' https://example.org > /tmp/egress.txt"
+	}
+	out = run(egressPrompt)
+	if got := strings.TrimSpace(liveExec(t, sandboxName, time.Minute, "/bin/cat", "/tmp/egress.txt")); got != "200" {
+		t.Errorf("a tool call's plain curl to example.org got %q, want 200 through the DefenseClaw proxy\n%s", got, liveTail(out, 1500))
+	}
+	egressMu.Lock()
+	viaProxy := false
+	for _, e := range egressEvents[egressFrom:] {
+		viaProxy = viaProxy || (e.Host == "example.org" && e.Kind == egress.EventAllowed)
+	}
+	egressMu.Unlock()
+	if !viaProxy {
+		t.Errorf("the tool call's request to example.org never reached the DefenseClaw proxy")
+	}
+
+	// 4. Egress: the proxy refuses a blocklisted destination, and OpenShell
+	//    refuses a connection around the proxy.
 	proxyURL := cred.ProxyURL(connector.SandboxIngressHost, egressPort)
 	curl := func(extra ...string) string {
 		args := append([]string{"/usr/bin/curl", "-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}"}, extra...)
@@ -606,8 +694,89 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 		seen[ev.Event]++
 	}
 	t.Logf("%s hooks at the ingress: %v", h.Name, seen)
-	summary, _ := json.Marshal(map[string]interface{}{"harness": h.Name, "image": rec.Tag, "hooks": seen, "allow": allowed})
+	summary, _ := json.Marshal(map[string]interface{}{"harness": h.Name, "image": rec.Tag, "hooks": seen, "allow": allowed, "block": blockedVerdicts, "egress_via_proxy": viaProxy})
 	fmt.Fprintf(os.Stderr, "LIVE-SUMMARY %s\n", summary)
+}
+
+// The DCBLOCK scenario of the E2E mock, the marker its command writes once
+// it runs, and the hook-only harnesses' shell tool it calls.
+const (
+	liveBlockPrompt = "DCBLOCK"
+	liveBlockMarker = "/tmp/dcblock.txt"
+	liveShellTool   = "bash"
+)
+
+// liveScenarios is the E2E mock script with every Bash tool call renamed to
+// the hook-only harnesses' bash tool and the DCBLOCK scenario's key read
+// redirected into liveBlockMarker.
+func liveScenarios(t *testing.T, scenarios []byte) []byte {
+	t.Helper()
+	var doc map[string]interface{}
+	if err := json.Unmarshal(scenarios, &doc); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := doc["scenarios"].([]interface{})
+	blocked := false
+	for _, raw := range list {
+		sc, _ := raw.(map[string]interface{})
+		turns, _ := sc["turns"].([]interface{})
+		for _, rawTurn := range turns {
+			turn, _ := rawTurn.(map[string]interface{})
+			use, ok := turn["tool_use"].(map[string]interface{})
+			if !ok || use["name"] != "Bash" {
+				continue
+			}
+			use["name"] = liveShellTool
+			if sc["match"] == liveBlockPrompt {
+				input, _ := use["input"].(map[string]interface{})
+				command, _ := input["command"].(string)
+				input["command"] = command + " > " + liveBlockMarker
+				blocked = true
+			}
+		}
+	}
+	if !blocked {
+		t.Fatalf("the E2E mock script has no %s Bash scenario", liveBlockPrompt)
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// liveReasonHead is the opening of a DefenseClaw reason: up to its first
+// six words.
+func liveReasonHead(reason string) string {
+	words := strings.Fields(reason)
+	if len(words) > 6 {
+		words = words[:6]
+	}
+	return strings.Join(words, " ")
+}
+
+// liveDumpContains reports whether any request body the mock stored in dir
+// contains s (JSON-escaped, as a tool result carries it).
+func liveDumpContains(t *testing.T, dir, s string) bool {
+	t.Helper()
+	var quoted bytes.Buffer
+	enc := json.NewEncoder(&quoted)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		t.Fatal(err)
+	}
+	needle := bytes.Trim(bytes.TrimSpace(quoted.Bytes()), `"`)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err == nil && bytes.Contains(data, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // liveDestinationRE matches host:port in OpenShell's OCSF log lines.
