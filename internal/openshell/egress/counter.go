@@ -536,9 +536,15 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 	if exempt {
 		aggs = nil
 	}
-	if armed && c.block && !exempt {
+	if armed {
+		// Account the chunk against the destination and its aggregates as
+		// one step: a destination and its registrable domain cross the
+		// threshold on the same chunk, and interleaved flows would
+		// otherwise each report one of the two crossings.
 		c.reserve.Lock()
 		defer c.reserve.Unlock()
+	}
+	if armed && c.block && !exempt {
 		over := d.flagged.Load() || d.up.Load()+n > c.threshold
 		for _, a := range aggs {
 			over = over || a.flagged.Load() || a.up.Load()+n > c.threshold
