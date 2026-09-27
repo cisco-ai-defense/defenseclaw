@@ -31,6 +31,7 @@ struct SandboxModelTests {
         decodesSandboxAPIErrorBodies()
         adminLocksMirrorThePythonEditor()
         decodingToleratesOmittedFields()
+        unreachableHooksAreAnAlertAndANotification()
         if failureCount > 0 {
             FileHandle.standardError.write("\(failureCount) failure(s)\n".data(using: .utf8)!)
             exit(1)
@@ -203,6 +204,26 @@ struct SandboxModelTests {
         expect(locks["openshell.profile"] == nil, "profile stays editable")
         let managed = SandboxAdminLocks.locks(admin: [:], managed: true, keys: keys)
         expect(managed.count == keys.count, "managed_enterprise locks every key")
+    }
+
+    private static func unreachableHooksAreAnAlertAndANotification() {
+        var raw = running
+        raw["hooks"] = ["unreachable": true, "unreachable_reason": "no hook arrived in 90s"]
+        let row = SandboxDecoding.sandbox(raw)!
+        expect(row.alerts.contains {
+            $0.hasPrefix("\(sandboxHooksUnreachableWarning) (no hook arrived in 90s)")
+                && $0.contains("defenseclaw sandbox doctor")
+        }, "unreachable alert: \(row.alerts)")
+        raw["hooks"] = ["ingress_refused": 2]
+        expect(SandboxDecoding.sandbox(raw)!.alerts.contains { $0.contains("refused 2 hook request(s)") },
+               "refused ingress alert")
+        var snapshot = SandboxSnapshot()
+        let notes = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [
+            ["seq": 50, "kind": "finding", "sandbox": "x", "reason": "hooks_unreachable",
+             "message": "⚠ \(sandboxHooksUnreachableWarning) (why). Run: defenseclaw sandbox doctor"],
+        ]]), notify: true)
+        expect(notes.count == 1 && notes[0].title == "x: hooks are not reaching DefenseClaw", "unreachable note")
+        expect(notes.first?.body.hasPrefix(sandboxHooksUnreachableWarning) == true, "note body without the glyph")
     }
 
     private static func decodingToleratesOmittedFields() {

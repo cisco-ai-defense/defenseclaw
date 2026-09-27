@@ -935,3 +935,42 @@ async def test_the_launch_dialog_returns_a_run_and_refuses_a_bad_folder(tmp_path
     assert results == [
         SandboxLaunch(("sandbox", "run", "codex", "--copy"), str(project), f"sandbox run codex in {project}")
     ]
+
+
+def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
+    row = decode_sandbox(
+        {
+            **RUNNING,
+            "hooks": {"unreachable": True, "unreachable_reason": "no hook arrived in 90s", "ingress_refused": 3},
+        }
+    )
+    assert row is not None
+    assert "hooks unreachable" in row.alert_badge
+    assert any(
+        "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (no hook arrived in 90s)"
+        in alert
+        and "defenseclaw sandbox doctor" in alert
+        for alert in row.alerts
+    )
+    refused = decode_sandbox({**RUNNING, "hooks": {"ingress_refused": 2}})
+    assert refused is not None and any("refused 2 hook request(s)" in alert for alert in refused.alerts)
+
+    model = _model()
+    unreachable = (
+        "⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (why). "
+        "Run: defenseclaw sandbox doctor"
+    )
+    notices = model.add_events(
+        [
+            {"seq": 40, "kind": "finding", "sandbox": "x", "reason": "hooks_unreachable", "message": unreachable},
+            {
+                "seq": 41,
+                "kind": "finding",
+                "sandbox": "x",
+                "reason": "hooks_restored",
+                "message": "DefenseClaw hooks reach the daemon again",
+            },
+        ]
+    )
+    assert [n.level for n in notices] == ["error", "success"]
+    assert notices[0].message.startswith("x: DefenseClaw hooks are not reaching the daemon")

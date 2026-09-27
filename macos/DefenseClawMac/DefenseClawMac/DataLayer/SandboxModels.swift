@@ -17,6 +17,8 @@ import Foundation
 
 /// The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
 let sandboxAdminMessage = "blocked by your organization's DefenseClaw policy"
+/// sandboxapi.HooksUnreachableWarning.
+let sandboxHooksUnreachableWarning = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
 
 struct SandboxStatus: Sendable, Hashable {
     var loaded = false
@@ -54,6 +56,11 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var lastBlocked = ""
     var tampered = 0
     var hooksSilent = false
+    /// The session's hooks do not reach DefenseClaw (they fail closed, so
+    /// the harness can do nothing); ingressRefused counts refused requests.
+    var hooksUnreachable = false
+    var unreachableReason = ""
+    var ingressRefused = 0
     var orphaned = false
     var undoAvailable = false
     var nestedRepos: [String] = []
@@ -76,6 +83,12 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
             out.append("hook tamper: \(tampered) tool call(s) ran without a DefenseClaw verdict")
         }
         out.append(contentsOf: nestedRepos)
+        if hooksUnreachable {
+            let why = unreachableReason.isEmpty ? "" : " (\(unreachableReason))"
+            out.append("\(sandboxHooksUnreachableWarning)\(why). Run: defenseclaw sandbox doctor")
+        } else if ingressRefused > 0 {
+            out.append("OpenShell refused \(ingressRefused) hook request(s) to DefenseClaw")
+        }
         if hooksSilent {
             out.append("hooks are silent: the harness is active but no DefenseClaw hook has been heard")
         }
@@ -295,6 +308,14 @@ struct SandboxSnapshot: Sendable {
                 body: event.summary,
                 sandbox: event.sandbox
             )
+        case "finding" where event.reason == "hooks_unreachable":
+            return SandboxNotification(
+                kind: .finding,
+                id: "sandbox-finding-\(event.seq)",
+                title: "\(event.sandbox.isEmpty ? "A sandbox" : event.sandbox): hooks are not reaching DefenseClaw",
+                body: event.summary,
+                sandbox: event.sandbox
+            )
         default:
             return nil
         }
@@ -386,6 +407,9 @@ enum SandboxDecoding {
         row.lastBlocked = str(hooks["last_blocked"])
         row.tampered = int(hooks["tampered"])
         row.hooksSilent = (hooks["silent"] as? Bool) ?? false
+        row.hooksUnreachable = (hooks["unreachable"] as? Bool) ?? false
+        row.unreachableReason = str(hooks["unreachable_reason"])
+        row.ingressRefused = int(hooks["ingress_refused"])
         row.orphaned = (d["orphaned"] as? Bool) ?? false
         // undone_at is omitted until undo ran (Go omitzero).
         row.undoAvailable = !snapshot.isEmpty && DCDates.parse(snapshot["undone_at"]) == nil

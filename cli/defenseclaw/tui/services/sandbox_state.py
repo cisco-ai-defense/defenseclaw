@@ -36,6 +36,8 @@ FEED_LIMIT = 500
 TOAST_DEDUPE_SECONDS = 60.0
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# sandboxapi.HooksUnreachableWarning.
+HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
 
 _RUNNING_PHASES = frozenset({"ready", "running"})
 
@@ -131,6 +133,11 @@ class SandboxRow:
     last_blocked: str = ""
     tampered: int = 0
     hooks_silent: bool = False
+    # The session's hooks do not reach DefenseClaw (they fail closed, so the
+    # harness can do nothing), and why; hook requests OpenShell refused.
+    hooks_unreachable: bool = False
+    unreachable_reason: str = ""
+    ingress_refused: int = 0
     orphaned: bool = False
     undo_available: bool = False
     nested_repos: tuple[NestedRepoRow, ...] = ()
@@ -165,6 +172,13 @@ class SandboxRow:
         if self.tampered:
             out.append(f"hook tamper: {self.tampered} tool call(s) ran without a DefenseClaw verdict")
         out.extend(repo.line for repo in self.nested_repos)
+        if self.hooks_unreachable:
+            why = f" ({self.unreachable_reason})" if self.unreachable_reason else ""
+            out.append(
+                f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor"
+            )
+        elif self.ingress_refused:
+            out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
         if self.hooks_silent:
             out.append("hooks are silent: the harness is active but no DefenseClaw hook has been heard")
         if self.orphaned:
@@ -178,6 +192,8 @@ class SandboxRow:
             parts.append("tamper")
         if self.nested_repos:
             parts.append("nested repo")
+        if self.hooks_unreachable:
+            parts.append("hooks unreachable")
         if self.hooks_silent:
             parts.append("silent")
         if self.orphaned:
@@ -225,6 +241,9 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         last_blocked=_text(hooks.get("last_blocked")),
         tampered=_int(hooks.get("tampered")),
         hooks_silent=bool(hooks.get("silent")),
+        hooks_unreachable=bool(hooks.get("unreachable")),
+        unreachable_reason=_text(hooks.get("unreachable_reason")),
+        ingress_refused=_int(hooks.get("ingress_refused")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
         nested_repos=nested,
@@ -607,6 +626,10 @@ class SandboxesPanelModel:
             where = f"{row.sandbox} asks" if row.sandbox else "A sandbox asks"
             target = row.message or host_port(row.host, row.port) or "a destination"
             return SandboxNotice("warn", f"? {where} to reach {target}. Sandboxes panel (7): t for Asks")
+        if row.kind == "finding" and row.reason == "hooks_unreachable":
+            return SandboxNotice("error", f"{row.sandbox}: {row.summary}")
+        if row.kind == "finding" and row.reason == "hooks_restored":
+            return SandboxNotice("success", f"{row.sandbox}: {row.summary}")
         if row.kind == "finding" and row.reason == "nested_repo":
             return SandboxNotice("warn", f"⚠ {row.sandbox}: {row.summary}")
         return None
