@@ -310,11 +310,16 @@ ingress:
 
 `openshell.token_delivery` selects how the manager hands the token to the
 sandbox. With `provider` (the default) it becomes an OpenShell provider
-credential created from the `defenseclaw-ingress` profile: variable
-`DEFENSECLAW_SANDBOX_TOKEN`, sent as a bearer in `authorization`, bound to
+credential created from the daemon's own ingress profile,
+`defenseclaw-ingress-<ingress_port>`: variable `DEFENSECLAW_SANDBOX_TOKEN`,
+sent as a bearer in `authorization`, bound to
 `host.openshell.internal:<ingress_port>` with `protocol: rest`. The workload
-only ever sees a placeholder. With `env` it is a plain variable the agent can
-read.
+only ever sees a placeholder, and the provider's rule is what lets the
+sandbox reach the ingress. With `env` it is a plain variable the agent can
+read; the sandbox has no ingress provider, and its policy opens the ingress
+with a `defenseclaw_ingress` rule instead (same endpoint, every binary, no
+substitution). The token then lives in the sandbox spec, which cannot change
+after create, so it is not rotated on start.
 
 Placeholders are revision-scoped (they change on every start), so nothing may
 bake them into static files. The sandbox hooks read the variable on each
@@ -524,16 +529,19 @@ that they agree.
 LLM traffic never goes through DefenseClaw. OpenShell adds a
 `_provider_<name>` rule for every provider attached to a sandbox, and only
 those rules substitute credential placeholders. `internal/openshell/profiles`
-renders the provider profiles, which are meant to be imported once at setup:
+renders the provider profiles, which the manager imports the first time a
+sandbox needs one (`defenseclaw sandbox setup` imports the ingress profile
+ahead of time):
 
 | Profile | Credential | Sent as | Endpoint |
 | --- | --- | --- | --- |
-| `defenseclaw-ingress` | `DEFENSECLAW_SANDBOX_TOKEN` | bearer | `host.openshell.internal:<ingress_port>` |
+| `defenseclaw-ingress-<ingress_port>` | `DEFENSECLAW_SANDBOX_TOKEN` | bearer | `host.openshell.internal:<ingress_port>` |
 | `defenseclaw-anthropic` | `ANTHROPIC_API_KEY` | `x-api-key` | `api.anthropic.com:443` |
 | `defenseclaw-claude-oauth` | `CLAUDE_CODE_OAUTH_TOKEN` | bearer | `api.anthropic.com:443` |
-| `defenseclaw-claude-bedrock-mantle` | `ANTHROPIC_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
+| `defenseclaw-claude-bedrock-mantle-<region>` | `ANTHROPIC_API_KEY` | `x-api-key` | `bedrock-mantle.<region>.api.aws:443` |
 | `defenseclaw-openai` | `OPENAI_API_KEY` | bearer | `api.openai.com:443` |
-| `defenseclaw-codex-bedrock-mantle` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` |
+| `defenseclaw-codex-bedrock-mantle-<region>` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` |
+| `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
 LLM profiles are pinned to the realpaths of the harness binaries that the
 image probe recorded, so no other program in the sandbox can use the key; an
@@ -541,6 +549,43 @@ inference credential usable by every binary is refused. The ingress profile
 allows every binary: hooks post with `curl`, and the harness itself exports
 OTLP. There is no egress profile: the proxy credential travels in
 `HTTPS_PROXY`, which OpenShell cannot substitute on a raw relay.
+
+Provider profiles are global to the OpenShell gateway, so every DefenseClaw
+daemon (every data dir) on it shares them, and updating one re-points every
+sandbox whose providers use it. A profile's id therefore names everything its
+endpoints depend on:
+
+- The ingress profile is one per ingress listener. A second daemon on other
+  ports (a dev daemon next to the usual one), or the same daemon after a port
+  change, imports its own and never rewrites another's endpoint. Daemons that
+  use the same port in turn share an identical profile.
+- A Bedrock Mantle profile is one per region, so sandboxes using different
+  regions never share an endpoint.
+- The Anthropic, Claude OAuth and OpenAI profiles have fixed endpoints and are
+  shared. The one thing they accumulate is the binaries of every image that
+  used them, and that list only grows, so an update never takes a binary away
+  from a running sandbox. An update names the resource version it replaces:
+  when another daemon updated or imported the profile first, the manager
+  merges again from what the gateway holds.
+- A `dc-cred-<hash>` profile hashes the variable, host and port it binds, all
+  it holds, so sharing it is safe too.
+
+Everything else DefenseClaw creates on the gateway is its own: sandboxes and
+providers (`<sandbox>-ingress`, `<sandbox>-llm`, `<sandbox>-cred-<n>`) carry
+the data dir's owner label, and a create never replaces a provider of that
+name that another data dir (or a user) owns. Policy rules, `defenseclaw_egress`
+among them, belong to one sandbox's policy, and the overlay image tags hash
+the owner and the ingress port. Earlier releases imported one gateway-wide
+`defenseclaw-ingress` profile, holding one daemon's port, and single-region
+`defenseclaw-claude-bedrock-mantle` and `defenseclaw-codex-bedrock-mantle`
+profiles. Sandboxes created then keep using them, and nothing updates them
+any more.
+
+`defenseclaw sandbox teardown` deletes this data dir's own ingress profiles
+(the configured listener's and any its providers used), the legacy
+`defenseclaw-ingress`, and the shared LLM and credential profiles, each only
+when no other provider uses it. It never deletes another daemon's ingress
+profile, and OpenShell refuses to delete a profile a provider still uses.
 
 ## Sandbox policy
 
@@ -558,7 +603,9 @@ because every policy reload closes connections.
   image's `sandbox` user in copy mode. Root is refused.
 - **Network:** `defenseclaw_egress` for the `open` and `balanced` profiles,
   nothing for `strict`. Credentialed endpoints are left to OpenShell's
-  provider rules. Extra rules (for example a consented host port) may not use
+  provider rules, except the ingress of a `token_delivery: env` sandbox,
+  which has no ingress provider and gets `defenseclaw_ingress` in every
+  profile. Extra rules (for example a consented host port) may not use
   the reserved `defenseclaw_` or `_provider_` prefixes. They may reach
   `host.openshell.internal` only on a consented host port, which can never be
   the ingress, egress, main API or OpenShell gateway port. Loopback names,
