@@ -28,10 +28,12 @@ import (
 
 // TestDocsCapabilityMatrixSandboxColumn keeps the docs capability matrix's
 // OpenShell sandbox column a checked projection of the harness registry: a
-// harness row shows its artifacts' tamper tier, a hook config file the
-// artifacts really contain (root-owned for the managed tier), and the default
-// image pin; every other row is pending. internal/gateway/connector checks the status against the
-// SandboxArtifactProvider implementations.
+// harness row shows its artifacts' tamper tier, the hook config file the
+// harness reads (root-owned for the managed tier; for the user tier the
+// workload's copy, or a root-owned file the launcher forces, as for Kiro's
+// agent), the default image pin and the verification status; every other
+// row is pending. internal/gateway/connector checks the status against
+// SandboxArtifactsSupported.
 func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
@@ -53,6 +55,7 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 				TamperTier string `json:"tamperTier"`
 				HookConfig string `json:"hookConfig"`
 				HarnessPin string `json:"harnessPin"`
+				Verified   string `json:"verified"`
 			} `json:"sandbox"`
 		} `json:"connectors"`
 	}
@@ -65,7 +68,7 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 		sb := row.Sandbox
 		spec, ok := Get(row.ID)
 		if !ok {
-			if sb.Status != "pending" || sb.TamperTier != "" || sb.HookConfig != "" || sb.HarnessPin != "" {
+			if sb.Status != "pending" || sb.TamperTier != "" || sb.HookConfig != "" || sb.HarnessPin != "" || sb.Verified != "" {
 				t.Errorf("%s has no sandbox harness but documents sandbox %+v; want only status pending", row.ID, sb)
 			}
 			continue
@@ -81,8 +84,12 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 		if sb.HarnessPin != spec.DefaultVersion {
 			t.Errorf("%s sandbox.harnessPin=%q want %q", row.ID, sb.HarnessPin, spec.DefaultVersion)
 		}
+		if sb.Verified != spec.Verification().Status {
+			t.Errorf("%s sandbox.verified=%q want %q", row.ID, sb.Verified, spec.Verification().Status)
+		}
 		// A managed registration is a root-owned file; a user-tier one is
-		// the file in the image HOME the harness reads.
+		// the file in the image HOME the harness reads, or a root-owned file
+		// the launcher points the harness at (Kiro's agent directory).
 		found := false
 		for _, file := range artifacts.Files {
 			if file.Path == sb.HookConfig && (file.Owner == connector.SandboxOwnerRoot || artifacts.TamperTier == connector.SandboxTamperTierUser) {

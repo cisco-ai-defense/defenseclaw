@@ -27,13 +27,15 @@ interface ConnectorRow {
   };
   // OpenShell sandbox support. "artifacts" means DefenseClaw renders the
   // connector's overlay-image hook files (tamperTier and hookConfig, the
-  // root-owned file that registers the hooks, come from its
-  // SandboxArtifacts); "pending" means it renders none yet.
+  // file the harness reads its hooks from, come from its SandboxArtifacts);
+  // "pending" means it renders none yet. verified says whether the harness
+  // has run end to end in a sandbox.
   sandbox: {
     status: 'artifacts' | 'pending';
     tamperTier?: 'managed' | 'user';
     hookConfig?: string;
     harnessPin?: string;
+    verified?: 'verified' | 'unverified';
   };
   hilt: string;
   notes?: string;
@@ -86,6 +88,11 @@ function Sandbox({ sandbox }: { sandbox: ConnectorRow['sandbox'] }) {
       )}
       {sandbox.harnessPin && (
         <div className="mt-1 text-xs text-fd-muted-foreground">image pin {sandbox.harnessPin}</div>
+      )}
+      {sandbox.verified && (
+        <div className="mt-1 text-xs text-fd-muted-foreground">
+          {sandbox.verified === 'verified' ? 'verified end to end' : 'not yet verified end to end'}
+        </div>
       )}
     </>
   );

@@ -255,7 +255,7 @@ func (r *liveRig) run(ctx context.Context, opts HookFireOptions, sc hookFireScen
 
 func (r *liveRig) requireHooks(run HookFireRun) {
 	r.t.Helper()
-	if problems := requiredHookProblems(run, hookFireContracts[r.c.Spec.Harness.Name].required); len(problems) > 0 {
+	if problems := requiredHookProblems(run, requiredHookEvents[r.c.Spec.Harness.Name]); len(problems) > 0 {
 		r.t.Fatalf("%s: %s\n%s", run.Scenario, strings.Join(problems, "; "), run.Output)
 	}
 }

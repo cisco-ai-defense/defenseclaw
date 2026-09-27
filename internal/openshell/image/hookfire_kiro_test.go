@@ -223,10 +223,10 @@ func TestHookSinkDeniesCursorKiroDevin(t *testing.T) {
 		"kiro":   `"decision":"block"`,
 		"devin":  `"decision":"block"`,
 	} {
-		contract := hookFireContracts[name]
-		sink := &hookSink{token: "tok", contract: contract}
+		adapter := hookSinkAdapters[name]
+		sink := &hookSink{token: "tok", adapter: adapter}
 		sink.begin(&BlockScenario{Marker: "BLOCKME"})
-		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": contract.preTool, "tool_input": map[string]string{"command": "echo BLOCKME"}})
+		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": adapter.preToolEvent(), "tool_input": map[string]string{"command": "echo BLOCKME"}})
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/"+name+"/hook", bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer tok")
 		rec := &responseRecorder{header: http.Header{}}

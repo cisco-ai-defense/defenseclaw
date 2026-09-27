@@ -37,10 +37,7 @@ var ClaudeCode = register(&Spec{
 	DefaultVersion: claudeCodeBaseVersion,
 	Provider:       connector.NewClaudeCodeConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	Verification: Verification{
-		Status: Verified,
-		Reason: "hook-fire probe (built-in mock LLM, hostile user and project settings) and live OpenShell runs with Bedrock Mantle",
-	},
+	verification:   Verification{Status: VerifiedLive, Note: "test/e2e/openshell TestSandboxDaemon: hooks at the ingress, a DefenseClaw-blocked command denied, egress blocklist and OpenShell deny"},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/claude", "--version"},
 		VersionRE:   regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)`),

@@ -565,7 +565,7 @@ func TestHookSinkHookOnlyContracts(t *testing.T) {
 			`"action":"block"`},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
-			sink := &hookSink{token: "tok", contract: hookFireContracts[tc.harness]}
+			sink := &hookSink{token: "tok", adapter: hookSinkAdapters[tc.harness]}
 			sink.begin(&BlockScenario{Marker: "BLOCKME"})
 			post := func(body string, headers map[string]string) string {
 				req, _ := http.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
@@ -589,14 +589,17 @@ func TestHookSinkHookOnlyContracts(t *testing.T) {
 				t.Fatalf("a non-pre-tool hook carrying the marker was answered %s", body)
 			}
 			events, _ := sink.end()
-			if len(events) != 2 || !events[0].Blocked || events[1].Blocked || events[0].Event != hookFireContracts[tc.harness].preTool {
+			if len(events) != 2 || !events[0].Blocked || events[1].Blocked || events[0].Event != hookSinkAdapters[tc.harness].preToolEvent() {
 				t.Fatalf("events = %+v", events)
 			}
 		})
 	}
 	for _, name := range harness.Names() {
-		if _, ok := hookFireContracts[name]; !ok {
-			t.Errorf("harness %s has no hook-fire contract", name)
+		if len(requiredHookEvents[name]) == 0 {
+			t.Errorf("harness %s has no required hook events", name)
+		}
+		if name != "claudecode" && name != "codex" && hookSinkAdapters[name].preTool == "" && !hookSinkAdapters[name].wholePayload {
+			t.Errorf("harness %s has no hook-sink adapter", name)
 		}
 	}
 }

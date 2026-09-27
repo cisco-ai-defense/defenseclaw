@@ -34,10 +34,7 @@ var Codex = register(&Spec{
 	DefaultVersion: "0.146.0",
 	Provider:       connector.NewCodexConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	Verification: Verification{
-		Status: Verified,
-		Reason: "hook-fire probe (built-in mock LLM) and live OpenShell runs with Bedrock Mantle",
-	},
+	verification:   Verification{Status: VerifiedLive, Note: "OpenShell 0.1.1 harness spike (hooks fired, deny honoured, Bedrock Mantle gpt-oss-20b) and the image hook-fire probe (allow, BLOCKME, hostile settings)"},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/codex", "--version"},
 		VersionRE:   regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)`),

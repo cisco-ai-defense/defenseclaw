@@ -88,7 +88,7 @@ func TestLiveOverlay(t *testing.T) {
 			rec, err := b.Build(ctx, spec, BuildOptions{HookFire: HookFireOptions{ContainerPrefix: containerPrefix}})
 			pretty, _ := json.MarshalIndent(rec, "", "  ")
 			t.Logf("build record:\n%s", pretty)
-			if h.Verification.Status == harness.Unverified {
+			if h.Verification().Status == harness.Unverified {
 				// The image builds and passes the static probe, but the
 				// built-in mock cannot drive the harness, so it must stay
 				// unverified and unselectable.

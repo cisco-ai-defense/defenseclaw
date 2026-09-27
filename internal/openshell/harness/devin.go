@@ -53,9 +53,9 @@ var Devin = register(&Spec{
 	DefaultVersion: devinPin.Version,
 	Provider:       connector.NewDevinConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
-	Verification: Verification{
+	verification: Verification{
 		Status: Unverified,
-		Reason: "the Devin CLI needs a Devin account login (`devin auth login`, a browser or pasted-token flow) before any agent turn: without one `devin -p` stops at \"Login canceled\" and fires no hook, also with ACP_BACKEND=openai pointed at a mock, and there is no API-key or bring-your-own-model path that skips the login. Measured on the pin: the archive matches the vendor manifest, the binary runs in the community base, and --permission-mode dangerous is the skip-permissions mode. The launcher passes --respect-workspace-trust false (accepted before a prompt and before a subcommand): Devin's bundled docs say --print fails in an untrusted directory, and a declined trust prompt runs Restricted Mode without hooks; the trade-off is that a project's own hooks (.devin/hooks.v1.json) load beside DefenseClaw's without a prompt, which the user tier leaves open. Hook firing at the ingress, blocking, the trust bypass in a real turn and the Devin endpoint set need a logged-in sandbox",
+		Note:   "the Devin CLI needs a Devin account login (`devin auth login`, a browser or pasted-token flow) before any agent turn: without one `devin -p` stops at \"Login canceled\" and fires no hook, also with ACP_BACKEND=openai pointed at a mock, and there is no API-key or bring-your-own-model path that skips the login. Measured on the pin: the archive matches the vendor manifest, the binary runs in the community base, and --permission-mode dangerous is the skip-permissions mode. The launcher passes --respect-workspace-trust false (accepted before a prompt and before a subcommand): Devin's bundled docs say --print fails in an untrusted directory, and a declined trust prompt runs Restricted Mode without hooks; the trade-off is that a project's own hooks (.devin/hooks.v1.json) load beside DefenseClaw's without a prompt, which the user tier leaves open. Hook firing at the ingress, blocking, the trust bypass in a real turn and the Devin endpoint set need a logged-in sandbox",
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/devin", "--version"},

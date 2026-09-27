@@ -56,9 +56,9 @@ var Amp = register(&Spec{
 	DefaultVersion: ampPin.Version,
 	Provider:       connector.NewAMPConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
-	Verification: Verification{
+	verification: Verification{
 		Status: Unverified,
-		Reason: "Amp needs an Amp account API key (AMP_API_KEY) for every run: without one `amp -x` stops at getUserInfo before any agent turn, and Amp has no local or bring-your-own model endpoint a mock or Bedrock could serve. Measured on the pin: the sandbox plugin loads from ~/.config/amp/plugins before any server call and its executable contract (env token, idempotency key, one retry, fail closed) passes; hook firing at the ingress, blocking and the ampcode.com endpoint set need a key",
+		Note:   "Amp needs an Amp account API key (AMP_API_KEY) for every run: without one `amp -x` stops at getUserInfo before any agent turn, and Amp has no local or bring-your-own model endpoint a mock or Bedrock could serve. Measured on the pin: the sandbox plugin loads from ~/.config/amp/plugins before any server call and its executable contract (env token, idempotency key, one retry, fail closed) passes; hook firing at the ingress, blocking and the ampcode.com endpoint set need a key",
 	},
 	versionPattern: ampVersionRE,
 	probe: ProbeSpec{

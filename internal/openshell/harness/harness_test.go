@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -33,13 +34,27 @@ import (
 )
 
 func TestRegistry(t *testing.T) {
-	if got := Names(); !reflect.DeepEqual(got, []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"}) {
-		t.Fatalf("Names() = %v", got)
+	names := map[string]bool{}
+	for _, name := range Names() {
+		names[name] = true
 	}
+	for _, want := range []string{"amp", "claudecode", "codex", "copilot", "cursor", "devin", "kiro", "opencode"} {
+		if !names[want] {
+			t.Fatalf("Names() = %v lacks %s", Names(), want)
+		}
+	}
+	if !sort.StringsAreSorted(Names()) {
+		t.Fatalf("Names() = %v is not sorted", Names())
+	}
+	// Every registered name has a default pin inside a reviewed hook
+	// contract, a launcher, an install root and its evidence.
 	for _, name := range Names() {
 		spec, ok := Get(name)
 		if !ok || spec.Name != name || spec.Provider == nil {
 			t.Fatalf("Get(%s) = %#v, %t", name, spec, ok)
+		}
+		if strings.TrimSpace(spec.DefaultVersion) == "" {
+			t.Fatalf("%s has no default pin", name)
 		}
 		if err := CheckContract(name, spec.DefaultVersion); err != nil {
 			t.Fatalf("%s default pin %s: %v", name, spec.DefaultVersion, err)
@@ -69,12 +84,12 @@ func TestRegistry(t *testing.T) {
 		if a := artifactsFor(t, spec); a.TamperTier != spec.TamperTier {
 			t.Fatalf("%s spec tier %s, rendered artifacts %s", name, spec.TamperTier, a.TamperTier)
 		}
-		switch spec.Verification.Status {
-		case Verified, Unverified:
+		switch spec.Verification().Status {
+		case VerifiedLive, Unverified:
 		default:
-			t.Fatalf("%s verification status %q", name, spec.Verification.Status)
+			t.Fatalf("%s verification status %q", name, spec.Verification().Status)
 		}
-		if strings.TrimSpace(spec.Verification.Reason) == "" {
+		if strings.TrimSpace(spec.Verification().Note) == "" {
 			t.Fatalf("%s verification carries no evidence or reason", name)
 		}
 		login, hasLogin := spec.Login()
@@ -87,9 +102,11 @@ func TestRegistry(t *testing.T) {
 			t.Fatalf("%s login %#v does not run through %s", name, login, spec.LauncherPath())
 		}
 	}
-	for _, name := range []string{"hermes", "openhands", "antigravity", "omnigent", "openclaw"} {
+	// Gemini CLI is out of scope for sandboxes (plan decision); OpenClaw
+	// and ZeptoClaw use the shims subprocess policy.
+	for _, name := range []string{"geminicli", "openclaw", "zeptoclaw"} {
 		if _, ok := Get(name); ok {
-			t.Fatalf("%s has no sandbox harness", name)
+			t.Fatalf("%s must not be registered as a sandbox harness", name)
 		}
 	}
 }
@@ -117,35 +134,35 @@ func TestTamperTiersAndVerification(t *testing.T) {
 	for _, tc := range []struct {
 		spec   *Spec
 		tier   string
-		status VerificationStatus
+		status string
 	}{
-		{ClaudeCode, connector.SandboxTamperTierManaged, Verified},
-		{Codex, connector.SandboxTamperTierManaged, Verified},
+		{ClaudeCode, connector.SandboxTamperTierManaged, VerifiedLive},
+		{Codex, connector.SandboxTamperTierManaged, VerifiedLive},
 		// Managed registration, but other plugins load into the same process.
-		{OpenCode, connector.SandboxTamperTierUser, Verified},
-		{Copilot, connector.SandboxTamperTierManaged, Verified},
+		{OpenCode, connector.SandboxTamperTierUser, VerifiedLive},
+		{Copilot, connector.SandboxTamperTierManaged, VerifiedLive},
 		{Amp, connector.SandboxTamperTierUser, Unverified},
 		// Enterprise hooks.json: root-owned, and its deny wins over user
 		// and project hooks.
 		{Cursor, connector.SandboxTamperTierManaged, Unverified},
 		{Devin, connector.SandboxTamperTierUser, Unverified},
-		{Kiro, connector.SandboxTamperTierUser, Verified},
+		{Kiro, connector.SandboxTamperTierUser, VerifiedLive},
 	} {
-		if tc.spec.TamperTier != tc.tier || tc.spec.Verification.Status != tc.status {
-			t.Errorf("%s: tier %s status %s, want %s %s", tc.spec.Name, tc.spec.TamperTier, tc.spec.Verification.Status, tc.tier, tc.status)
+		if tc.spec.TamperTier != tc.tier || tc.spec.Verification().Status != tc.status {
+			t.Errorf("%s: tier %s status %s, want %s %s", tc.spec.Name, tc.spec.TamperTier, tc.spec.Verification().Status, tc.tier, tc.status)
 		}
 	}
-	if !strings.Contains(Amp.Verification.Reason, "AMP_API_KEY") {
-		t.Fatalf("Amp must say what is missing: %s", Amp.Verification.Reason)
+	if !strings.Contains(Amp.Verification().Note, "AMP_API_KEY") {
+		t.Fatalf("Amp must say what is missing: %s", Amp.Verification().Note)
 	}
-	if !strings.Contains(Cursor.Verification.Reason, "CURSOR_API_KEY") || !strings.Contains(Cursor.Verification.Reason, "agent-cli-local") {
-		t.Fatalf("Cursor must say what is missing and what was measured where: %s", Cursor.Verification.Reason)
+	if !strings.Contains(Cursor.Verification().Note, "CURSOR_API_KEY") || !strings.Contains(Cursor.Verification().Note, "agent-cli-local") {
+		t.Fatalf("Cursor must say what is missing and what was measured where: %s", Cursor.Verification().Note)
 	}
-	if !strings.Contains(Devin.Verification.Reason, "devin auth login") {
-		t.Fatalf("Devin must say what is missing: %s", Devin.Verification.Reason)
+	if !strings.Contains(Devin.Verification().Note, "devin auth login") {
+		t.Fatalf("Devin must say what is missing: %s", Devin.Verification().Note)
 	}
-	if !strings.Contains(Kiro.Verification.Reason, "KIRO_MOCK_CHAT_RESPONSE") || !strings.Contains(Kiro.Verification.Reason, "unverified") {
-		t.Fatalf("Kiro must say what the probe used and what stays unverified: %s", Kiro.Verification.Reason)
+	if !strings.Contains(Kiro.Verification().Note, "KIRO_MOCK_CHAT_RESPONSE") || !strings.Contains(Kiro.Verification().Note, "unverified") {
+		t.Fatalf("Kiro must say what the probe used and what stays unverified: %s", Kiro.Verification().Note)
 	}
 }
 

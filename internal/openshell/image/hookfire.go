@@ -94,87 +94,21 @@ func DefaultHookFireNetwork() HookFireNetwork {
 	return HookFireNetworkRelay
 }
 
-// hookFireContract is how one harness's hooks look to the stand-in ingress.
-type hookFireContract struct {
-	// required hooks must each arrive, authenticated, from a clean run.
-	required []string
-	// preTool is the hook whose payload the block marker is matched in.
-	preTool string
-	// deny is the verdict that blocks the pre-tool call, in the shape the
-	// harness's sandbox hook reads.
-	deny func(reason string) map[string]interface{}
-}
-
-// hookFireContracts covers every harness with a sandbox hook variant. Hooks
-// that a harness fires only best-effort (OpenCode's unawaited session
-// events) or only at teardown of an interactive session are not required.
-var hookFireContracts = map[string]hookFireContract{
-	"claudecode": {required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}, preTool: "PreToolUse", deny: claudeCodexDeny},
-	"codex":      {required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}, preTool: "PreToolUse", deny: claudeCodexDeny},
-	"opencode": {
-		required: []string{"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
-		preTool:  "tool.execute.before",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "deny", "reason": reason}}
-		},
-	},
-	"copilot": {
-		required: []string{"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop", "sessionEnd"},
-		preTool:  "preToolUse",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"permissionDecision": "deny", "permissionDecisionReason": reason}}
-		},
-	},
-	"amp": {
-		required: []string{"session.start", "agent.start", "tool.call", "tool.result", "agent.end"},
-		preTool:  "tool.call",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason}
-		},
-	},
+// requiredHookEvents must each arrive, authenticated, from a clean run. Hooks
+// that a harness fires only best-effort (OpenCode's unawaited session events)
+// or only at teardown of an interactive session are not required.
+var requiredHookEvents = map[string][]string{
+	"amp":        {"session.start", "agent.start", "tool.call", "tool.result", "agent.end"},
+	"claudecode": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"codex":      {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"copilot":    {"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop", "sessionEnd"},
 	// The events Cursor's agent-cli-local build of the pinned release fired
 	// for a headless shell call; beforeSubmitPrompt and stop do not fire in
 	// print mode.
-	"cursor": {
-		required: []string{"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
-		preTool:  "preToolUse",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{
-				"permission": "deny", "user_message": reason, "agent_message": reason,
-			}}
-		},
-	},
-	"devin": {
-		required: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-		preTool:  "PreToolUse",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "block", "reason": reason}}
-		},
-	},
-	"kiro": {
-		required: []string{"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
-		preTool:  "preToolUse",
-		deny: func(reason string) map[string]interface{} {
-			return map[string]interface{}{"action": "block", "reason": reason, "hook_output": map[string]interface{}{"decision": "block", "reason": reason}}
-		},
-	},
-}
-
-// claudeCodexDeny is the PreToolUse deny Claude Code and Codex hooks print.
-func claudeCodexDeny(reason string) map[string]interface{} {
-	deny := map[string]interface{}{
-		"hookSpecificOutput": map[string]interface{}{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "deny",
-			"permissionDecisionReason": reason,
-		},
-	}
-	return map[string]interface{}{
-		"action":             "block",
-		"reason":             reason,
-		"claude_code_output": deny,
-		"codex_output":       deny,
-	}
+	"cursor":   {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
+	"devin":    {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"kiro":     {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
+	"opencode": {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
 }
 
 // HookFireOptions configure a hook-fire probe. The zero value runs the
@@ -345,6 +279,75 @@ var builtinScriptedMocks = map[string]scriptedMock{
 			return json.Marshal(turns)
 		},
 	},
+}
+
+// hookSinkAdapter is how the stand-in ingress reads one harness's hooks and
+// shapes its block verdict. The zero value is the Claude Code / Codex shape.
+type hookSinkAdapter struct {
+	// preTool is the event whose tool input the block scenario matches
+	// (default PreToolUse).
+	preTool string
+	// wholePayload matches the block marker anywhere in the pre-tool
+	// payload instead of its tool_input field (Copilot sends toolArgs).
+	wholePayload bool
+	// hookOutput renders the connector's hook_output block directive.
+	hookOutput func(reason string) interface{}
+}
+
+var hookSinkAdapters = map[string]hookSinkAdapter{
+	"amp": {preTool: "tool.call", wholePayload: true},
+	"copilot": {preTool: "preToolUse", wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"permissionDecision": "deny", "permissionDecisionReason": reason}
+	}},
+	"cursor": {preTool: "preToolUse", wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"permission": "deny", "user_message": reason, "agent_message": reason}
+	}},
+	"devin": {wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "block", "reason": reason}
+	}},
+	"kiro": {preTool: "preToolUse", wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "block", "reason": reason}
+	}},
+	"opencode": {preTool: "tool.execute.before", wholePayload: true, hookOutput: func(reason string) interface{} {
+		return map[string]string{"decision": "deny", "reason": reason}
+	}},
+}
+
+// preToolEvent is the event whose tool input the block scenario matches.
+func (a hookSinkAdapter) preToolEvent() string {
+	if a.preTool == "" {
+		return "PreToolUse"
+	}
+	return a.preTool
+}
+
+// hookEventName reads the event a hook request reports: the out-of-band
+// event header the Codex hook (X-DefenseClaw-Hook-Event) and the Copilot hook
+// (whose native payload has no event field) send, else the payload's
+// hook_event_name.
+func hookEventName(r *http.Request, payload map[string]json.RawMessage) string {
+	for _, header := range []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event"} {
+		if name := r.Header.Get(header); name != "" {
+			return name
+		}
+	}
+	var name string
+	if raw, ok := payload["hook_event_name"]; ok && json.Unmarshal(raw, &name) == nil {
+		return name
+	}
+	return ""
+}
+
+// blocks reports whether a hook request is the block scenario's pre-tool
+// call.
+func (a hookSinkAdapter) blocks(event string, body []byte, payload map[string]json.RawMessage, marker string) bool {
+	if event != a.preToolEvent() {
+		return false
+	}
+	if a.wholePayload {
+		return bytes.Contains(body, []byte(marker))
+	}
+	return bytes.Contains(payload["tool_input"], []byte(marker))
 }
 
 // HookEvent is one request the stand-in ingress received.
@@ -587,11 +590,11 @@ func serveHTTP(host string, port int, h http.Handler) (int, func(), error) {
 
 // hookFireProbe runs the probe against image ref (a tag or image ID).
 func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opts HookFireOptions) (HookFireResult, error) {
-	contract, ok := hookFireContracts[c.Spec.Harness.Name]
+	required, ok := requiredHookEvents[c.Spec.Harness.Name]
 	if !ok {
 		return HookFireResult{}, fmt.Errorf("openshell image: no hook-fire contract for %s", c.Spec.Harness.Name)
 	}
-	required := contract.required
+	adapter := hookSinkAdapters[c.Spec.Harness.Name]
 	netw, err := resolveHookFireNet(opts, c.Spec.IngressPort)
 	if err != nil {
 		return HookFireResult{}, err
@@ -615,8 +618,8 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 	if builtin && !isScripted {
 		if launch, ok = builtinMockLaunch[c.Spec.Harness.Name]; !ok {
 			reason := "no built-in mock LLM wiring"
-			if v := c.Spec.Harness.Verification; v.Status == harness.Unverified && v.Reason != "" {
-				reason += ": " + v.Reason
+			if v := c.Spec.Harness.Verification(); v.Status == harness.Unverified && v.Note != "" {
+				reason += ": " + v.Note
 			}
 			return result, fmt.Errorf("openshell image: %s has %s; verify it with HookFireOptions naming a model the harness can reach", c.Spec.Harness.Name, reason)
 		}
@@ -632,7 +635,7 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		}
 		defer unlock()
 	}
-	sink := &hookSink{token: "dcprobe-" + token, contract: contract}
+	sink := &hookSink{token: "dcprobe-" + token, adapter: adapter}
 	sinkPort, stopSink, err := serveHTTP(netw.bindHost, netw.sinkPort, sink)
 	if err != nil {
 		return result, fmt.Errorf("openshell image: hook-fire sink: %w", err)
@@ -696,7 +699,7 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 			denied = denied || ev.Blocked
 		}
 		if !denied {
-			problems = append(problems, "the block scenario never reached a "+contract.preTool+" carrying the marker")
+			problems = append(problems, "the block scenario never reached a "+adapter.preToolEvent()+" carrying the marker")
 		} else {
 			sideEffect(blocked, blockSc, "")
 		}
@@ -955,14 +958,12 @@ func (b *Builder) hookFireRun(
 // bearer, records every hook, notify and OTLP request, and answers with
 // DefenseClaw-shaped verdicts.
 type hookSink struct {
-	token string
-	// contract selects the pre-tool hook and its deny verdict; the zero
-	// value is Claude Code's and Codex's.
-	contract hookFireContract
-	mu       sync.Mutex
-	events   []HookEvent
-	otlp     int
-	block    *BlockScenario
+	token   string
+	adapter hookSinkAdapter
+	mu      sync.Mutex
+	events  []HookEvent
+	otlp    int
+	block   *BlockScenario
 }
 
 func (s *hookSink) begin(block *BlockScenario) {
@@ -983,19 +984,7 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev := HookEvent{Path: r.URL.Path, Authorized: authorized, IdempotencyKey: r.Header.Get("X-DefenseClaw-Hook-Idempotency-Key")}
 	var payload map[string]json.RawMessage
 	_ = json.Unmarshal(body, &payload)
-	// Codex binds its event in a header, Copilot (whose native payload has
-	// no event field) in its own; everything else names it in the body.
-	if name := r.Header.Get("X-DefenseClaw-Hook-Event"); name != "" {
-		ev.Event = name
-	} else if name := r.Header.Get("X-DefenseClaw-Copilot-Event"); name != "" {
-		ev.Event = name
-	} else if raw, ok := payload["hook_event_name"]; ok {
-		_ = json.Unmarshal(raw, &ev.Event)
-	}
-	preTool, deny := s.contract.preTool, s.contract.deny
-	if preTool == "" {
-		preTool, deny = "PreToolUse", claudeCodexDeny
-	}
+	ev.Event = hookEventName(r, payload)
 
 	s.mu.Lock()
 	block := s.block
@@ -1012,9 +1001,7 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("{}"))
 		return
 	}
-	// The marker is matched anywhere in the pre-tool payload: the tool input
-	// is tool_input for most harnesses and toolArgs for Copilot.
-	if authorized && block != nil && ev.Event == preTool && bytes.Contains(body, []byte(block.Marker)) {
+	if authorized && block != nil && s.adapter.blocks(ev.Event, body, payload, block.Marker) {
 		ev.Blocked = true
 	}
 	s.events = append(s.events, ev)
@@ -1029,7 +1016,24 @@ func (s *hookSink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 		return
 	}
-	resp, _ := json.Marshal(deny("Blocked by the DefenseClaw hook-fire probe"))
+	reason := "Blocked by the DefenseClaw hook-fire probe"
+	deny := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		},
+	}
+	verdict := map[string]interface{}{
+		"action":             "block",
+		"reason":             reason,
+		"claude_code_output": deny,
+		"codex_output":       deny,
+	}
+	if s.adapter.hookOutput != nil {
+		verdict["hook_output"] = s.adapter.hookOutput(reason)
+	}
+	resp, _ := json.Marshal(verdict)
 	_, _ = w.Write(resp)
 }
 

@@ -215,25 +215,26 @@ type LoginOption struct {
 	Unverified string
 }
 
-// VerificationStatus says how far a harness was proven inside OpenShell.
-type VerificationStatus string
-
+// Verification states.
 const (
-	// Verified: the overlay image's hook-fire probe passes (hooks fire,
-	// a blocked tool call has no side effect, an allowed one has) and the
-	// harness ran end to end in an OpenShell sandbox.
-	Verified VerificationStatus = "verified"
-	// Unverified: everything up to the harness run is implemented, but the
-	// harness could not be driven (see Verification.Reason). Its images
+	// VerifiedLive: the harness ran in an OpenShell sandbox built from its
+	// overlay image, its hooks reached the ingress, a DefenseClaw-blocked
+	// command was blocked and egress blocking held; its image's hook-fire
+	// probe passes (hooks fire, a blocked tool call has no side effect, an
+	// allowed one has).
+	VerifiedLive = "verified"
+	// Unverified: the overlay renders and builds, but an end-to-end run is
+	// missing; Verification.Note says exactly what is missing. Its images
 	// never pass VerifyHooks with the built-in mock and stay unselectable.
-	Unverified VerificationStatus = "unverified"
+	Unverified = "unverified"
 )
 
-// Verification records the evidence behind a harness spec.
+// Verification records how far a harness is proven in a sandbox.
 type Verification struct {
-	Status VerificationStatus
-	// Reason says what was measured, or exactly what is missing.
-	Reason string
+	Status string
+	// Note is the evidence (verified) or the missing step and its reason
+	// (unverified).
+	Note string
 }
 
 // ProbeSpec tells the image probe how to identify the installed harness.
@@ -267,9 +268,8 @@ type Spec struct {
 	// edit, or code the user or a project adds that runs beside the hooks).
 	// It always equals the rendered artifacts' tier.
 	TamperTier string
-	// Verification is the evidence behind this spec.
-	Verification Verification
 
+	verification       Verification
 	probe              ProbeSpec
 	install            func(version string) ([]InstallStep, error)
 	launcher           string
@@ -306,6 +306,9 @@ func (s *Spec) Launcher() connector.SandboxFile {
 
 // Probe describes version and network-binary discovery.
 func (s *Spec) Probe() ProbeSpec { return s.probe }
+
+// Verification reports how far the harness is proven in a sandbox.
+func (s *Spec) Verification() Verification { return s.verification }
 
 // PreseedRefreshSteps documents what the launcher refreshes on every start
 // (placeholders are revision-scoped, so first-run state cannot be baked).

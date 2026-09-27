@@ -57,9 +57,9 @@ var Cursor = register(&Spec{
 	DefaultVersion: cursorPin.Version,
 	Provider:       connector.NewCursorConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	Verification: Verification{
+	verification: Verification{
 		Status: Unverified,
-		Reason: "the Cursor Agent CLI needs a Cursor account (CURSOR_API_KEY or `cursor-agent login`) before any agent turn: without one it stops with \"Authentication required\" and fires no hook, and it has no local or bring-your-own model endpoint a mock or Bedrock could serve. Measured on the pin: it reads /etc/cursor/hooks.json as the enterprise tier. Measured on Cursor's agent-cli-local build of the same release (authless, local model; not what the image ships): the enterprise hooks fire (sessionStart, preToolUse, beforeShellExecution, afterShellExecution, postToolUse, sessionEnd), a deny object or exit 2 blocks the shell call, a failing hook blocks only with failClosed (the image sets it), and user and project hooks.json that answer allow, plus a Claude settings disableAllHooks, change nothing. Hook firing at the ingress and blocking with the pinned build, and the Cursor endpoint set, need a Cursor key",
+		Note:   "the Cursor Agent CLI needs a Cursor account (CURSOR_API_KEY or `cursor-agent login`) before any agent turn: without one it stops with \"Authentication required\" and fires no hook, and it has no local or bring-your-own model endpoint a mock or Bedrock could serve. Measured on the pin: it reads /etc/cursor/hooks.json as the enterprise tier. Measured on Cursor's agent-cli-local build of the same release (authless, local model; not what the image ships): the enterprise hooks fire (sessionStart, preToolUse, beforeShellExecution, afterShellExecution, postToolUse, sessionEnd), a deny object or exit 2 blocks the shell call, a failing hook blocks only with failClosed (the image sets it), and user and project hooks.json that answer allow, plus a Claude settings disableAllHooks, change nothing. Hook firing at the ingress and blocking with the pinned build, and the Cursor endpoint set, need a Cursor key",
 	},
 	versionPattern: cursorVersionRE,
 	probe: ProbeSpec{
